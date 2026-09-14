@@ -129825,7 +129825,8 @@ so that destination became a running program rather than a library.
 | 1. a control verb to register, update and remove | **done** — `SetTrayIcon` 0x21, `RemoveTrayIcon` 0x22, `CONTROL_VERSION` 12 |
 | 2. a registry in the compositor, reaped per client | **done** — `Compositor::set_tray_icon` / `remove_tray_icon` / `reap_tray_icons` |
 | 3. a `TRAY` frame and a subscription | **done** — `guiremote::tray`, `SubscribeTrayIcons` 0x23, `route_tray_list` |
-| 4. drag, drop, pin, reorder (`tray_dnd.rs`) | still unconstructed, but no longer built on nothing |
+| 4. drag, drop, pin, reorder (`tray_dnd.rs`) | **reorder done** — drag the row; pin and hide have no door yet |
+| 5. a click reaching the program that owns the icon | **done** — `ClickTrayIcon` 0x24, `Event::TrayIconClicked` 0x0C, `App::tray_icon_clicked` |
 
 Plus the two ends: `oswindow::EventLoop` has `watch_tray`, `set_tray_icon`,
 `remove_tray_icon` and `tray_icons`, and the shell subscribes, folds each
@@ -129837,16 +129838,74 @@ the road already had tests and none of them proves a pixel — which is
 precisely the state `apps/systray::register_icon` is in: public, correctly
 shaped, thoroughly tested, reaching nothing.
 
-**What is left, and it is now a short list:**
+**Update, later still: the click routes too, and it needed a delivery path
+that did not exist.**
 
-- **A click does not route back to the owner.** The shell hit-tests the slot
-  (`tray_icon_rects`) and there is no verb carrying "your icon was clicked"
-  to the program that registered it.
+Every notification the compositor sends is addressed to a window, and
+`route_input` gives it to the link that `owns` that window. A program may
+have a tray icon and **no window at all** — which is exactly what
+`design.txt:716` asks for when it says a program may start in the tray. So
+there is a second queue, `pending_client_events`, addressed by pid and
+drained into the same batch.
+
+A second queue rather than a sentinel window id in the first: an id that is
+not a window would have to be recognised at every site that reads one, and
+the sites that forgot would look up a window, find nothing, and drop the
+event.
+
+**And `oswindow` would have swallowed it silently.** Its dispatch filters on
+`id != window` and returns early, so an event with window 0 would have been
+encoded, sent, decoded, delivered, and dropped one line before reaching the
+application — a program that never answers its own icon, with nothing in
+any log. `App::tray_icon_clicked` is dispatched before that filter, so
+`on_event` keeps its contract of "events for your window". Found by reading
+the strap rather than assuming it.
+
+**What the full workspace run caught that five crates' tests did not.**
+`cargo test` over the five crates that changed was green. `apps/explorer`
+and `apps/stickynotes` match `guitk::Event` exhaustively, so a new variant
+broke two crates nobody had named, and the run reported *targets passed: 0*
+with a build error rather than a test failure. That is
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING` happening to the
+person who had read it the same afternoon.
+
+**Update, later still again: the row is the user's, and it can no longer
+take the taskbar away from them.**
+
+Two things landed after the click. First the order became the shell's:
+`TrayIconArrangement` folds each list from the compositor in, so a program
+swapping its glyph no longer drags every icon back to registration order,
+and a drag moves one. The identity had to be fixed to do it — the module
+keyed an icon on a single number, and the wire keys one on `(owner, id)`,
+which `guiremote::tray` states outright and the compositor has a test for.
+Keyed on `id` alone, hiding one program's icon would have hidden another's.
+
+**Second, and this one is a defect rather than a feature.** Measured on a
+1920-wide bar with eighty icons, before the cap: `tray_width` came to 2167,
+so `tray_x` clamped to zero, the icon run covered the whole bar including
+the clock at x=1805, and `taskbar_button_rect(0).w` was *zero* — no window
+buttons at all, on a shell whose only window switcher that is. Nothing
+rationed the strip: `MAX_TRAY_ICONS` is 4096 and a program picks its own
+ids, so any process that could reach the compositor could make the desktop
+unusable, and nothing about it would look like a crash. The run now gets a
+quarter of the bar, with a chevron for the rest — see
+`design-decisions.md` §844 for why a share and not a count.
+
+**What is left:**
+
 - **`apps/systray` is still the copy**, and 842 says its unique parts — quick
   settings, the volume and network popups — move into the shell rather than
   to Settings. Nothing has moved yet.
-- **`tray_dnd.rs` is still constructed by nothing**, but it now has real
-  icons to reorder, so wiring it is a task rather than a prerequisite.
+- **Hiding and pinning have no way in.** `TrayIconSlot` carries `visible`
+  and `pinned`, the arrangement honours both, and nothing can set either:
+  right-click belongs to the program that owns the icon, so the shell's own
+  per-icon menu needs a different door. Until it has one those two fields
+  are exercised only by tests.
+- **The order does not survive a reboot**, and cannot yet: keys are
+  `(pid, id)` pairs, so an order written to disk would restore onto
+  processes that no longer exist. It needs the compositor to report a
+  *stable* name for the program behind a connection, and `ClientLink`
+  carries `client_pid` and nothing else.
 
 **A correction to how this was found, because it is the error this file keeps
 recording.** The first pass concluded "there are no tray icons anywhere" from a
@@ -142965,3 +143024,459 @@ compositor was 7x over budget (it was my scene, with every window stacked at
 the origin), that hoisting the clip would help, and that no benchmark existed.
 Every one was cheap to disprove by measuring and expensive to act on. Reading
 the inner loop has been wrong every time.
+
+
+## B-THE-RUST-HALF-OF-OUR-USERLAND-HAD-NEVER-BEEN-ON-THE-IMAGE (lane B, 2026-09-13) — **fixed**
+
+> **Renamed and corrected 2026-09-13, hours after filing.** It was first filed as
+> `B-THE-USERSPACE-THIS-PROJECT-WRITES-HAS-NEVER-BEEN-ON-THE-IMAGE`, and that
+> title was wrong: 14 utilities this project writes *were* already on the image.
+> See **Correction** below — the mistake is more instructive than the finding.
+
+**In short:** SlateOS boots an image carrying five upstream ports and 14
+small utilities compiled from our Python. It carried **none** of the 278
+command-line programs written in Rust under `userspace/` — `cp`, `awk`, `sed`,
+`tar`, `find` and 273 others were written, tested, marked done in `roadmap.md`,
+and then copied nowhere. They were being tested on the developer's
+*Windows* machine, against Windows' own filesystem, and never once compiled for
+SlateOS, let alone run on it. The cause was not a missing toolchain — the
+toolchain worked the first time it was asked — it was that no script ever
+performed the copy.
+
+### What was actually shipping
+
+Three scripts can build a bootable image, and the population of
+locally-written software each one puts on it is:
+
+| script | what it stages from `userspace/` |
+|---|---|
+| `scripts/create-ext4-rootfs.sh` | nothing |
+| `scripts/build-image.ps1` | nothing |
+| `scripts/build-usb-image.py` | nothing |
+
+The kernel embeds three programs directly (`init`, `hello`, `ticker`, all from
+`services/`, via `include_bytes!` in `kernel/src/main.rs`), and the fastpy block
+promotes 14 compiled-Python utilities into `/bin`. Those 17 were the entire set
+of software written here that had ever reached a running SlateOS.
+
+Everything `create-ext4-rootfs.sh` does stage is either a host Linux binary
+used as a fallback, or one of the five upstream ports (bash, pkgconf, make,
+CMake, CPython). Those five get long, careful staging blocks — the CMake one
+runs to 40 lines of commentary about its module tree. Our own userland got no
+line at all.
+
+### How it surfaced
+
+Not from a failing test — nothing tested it. It came out of trying to do a
+much smaller job: `logrotate` had just been written, and the roadmap's own
+pkgconf entry (*"a port called 'proven' since 2026-08-14 had never once been in
+an image"*) argued it should be put on the image before being called done. The
+search for the mechanism that stages a userspace utility found that there is no
+such mechanism, and never had been.
+
+It was not entirely unrecorded. A lane-A boot-test analysis from 2026-08-21
+contains the clause *"…from `userspace/coreutils/`, which is not staged on
+`rootfs.ext4` at all yet"* — written as a supporting detail in an argument that
+lane B's code could not be responsible for three failing tests. That is a true
+sentence doing the opposite of the work it should have done: it was used to
+establish that our binaries were *not implicated*, and nobody asked why they
+were not there. **A fact used only to excuse a subject from suspicion is a fact
+nobody is tracking.**
+
+### What it was not
+
+It was not a toolchain gap, which is the explanation that would have justified
+the delay, and it is worth being precise that it was never true:
+
+- `userspace/.cargo/config.toml` already sets `target = "../toolchain/x86_64-slateos.json"` with `build-std`.
+- `toolchain/build-sysroot.ps1` already produces the `libc.a` and `libstubs.a` they link against, and both were present.
+- Asked to build for the real target for the first time, `logrotate` produced a **795 KB statically linked SlateOS ELF in 58 seconds**, and the whole `coreutils` crate produced **86 SlateOS ELF executables in 50 seconds**. Zero errors, zero changes to any crate.
+
+So the distance between "278 utilities that have never touched the OS" and
+"71 of them on the image" was one `cargo build` and one `cp` loop. It had been
+that distance the whole time.
+
+### The fix
+
+A new staging block in `scripts/create-ext4-rootfs.sh` copies every ELF in
+`target/x86_64-slateos/release/` into `/bin`. It:
+
+- identifies binaries by **ELF magic**, not by filename — cargo owns that
+  directory and fills it with `.d` depfiles and `incremental/`;
+- **skips and announces** a name an earlier block already staged, rather than
+  clobbering it, because lane A's boot test asserts on `/bin/make`, `/bin/sh`
+  and `/bin/tcc` by name;
+- **warns** when a staged binary is older than the sysroot `libc.a`, matching
+  the existing CMake staleness check — a binary linked against a stale libc
+  proves nothing about the current one;
+- reports the count, and when the count is zero says so loudly and names the
+  command that fixes it.
+
+Ten cases were added to `scripts/test-rootfs-staging.sh`, which extracts the
+block *verbatim* from the shipped script and runs it against fake artifacts.
+Both guards were mutation-tested: deleting the ELF-magic check and disabling
+the collision guard each take the harness from 14/14 to 12/14 and exit 1.
+
+### Correction — and how the mistake was made
+
+The first version of this entry claimed that **nothing** this project writes had
+ever been on the image. That was wrong, and it was wrong in a way worth keeping.
+
+14 utilities were already there, promoted into `/bin` by the fastpy block:
+`cat`, `chmod`, `chown`, `grep`, `head`, `ls`, `mkdir`, `mv`, `rm`, `rmdir`,
+`sort`, `tail`, `uniq`, `wc`. They are compiled from our own Python, which is
+the path `CLAUDE.md` actually prefers for userspace tools, so they are very much
+software this project writes. `/bin/ls` on the image was ours all along — just
+not the Rust one.
+
+**How the error was made: I grepped for a verb.** To inventory the script I ran
+
+    grep -oE '\[rootfs\] staged [^"]{0,70}' scripts/create-ext4-rootfs.sh
+
+and read the result as the complete list of what reaches the image. The fastpy
+promotion does not use that word. It prints
+
+    [rootfs] promoted fastpy binary: /bin/ls  (fastpy-ls)
+
+so the one block that disproved the thesis was invisible to the search that
+built it. Every line I *did* find was accurate; the set was not complete, and a
+grep over one phrasing cannot tell those two apart.
+
+**What caught it:** running the script. The correction did not come from
+re-reading the source, which I did several times, but from my own collision
+guard printing `NOTE: /bin/ls is already staged by an earlier block` — a guard
+written for a different purpose (protecting lane A's `/bin/make`) and which
+turned out to be the only thing in the change capable of contradicting its own
+author. It is worth noticing that an inventory taken by reading was wrong for
+half a day and an inventory taken by executing was right immediately.
+
+### Verified end to end
+
+The image was built with the block in place (`ALLOW_STALE_FIXTURES=1`, needed
+for a pre-existing stale cmake fixture unrelated to this change):
+
+    [rootfs] staged 71 SlateOS-native utilities from userspace/ into /bin (60 MiB)
+    [rootfs]          (15 skipped, already present -- see the NOTEs above)
+    [rootfs] DONE.
+
+384 MiB image written. The 15 skips are the 14 fastpy commands above plus `sh`,
+which dash owns. 60 MiB is under the 96 MiB budget, so the tripwire correctly
+stayed silent. `/bin` went from 36 entries to 107.
+
+**One caveat on what those 71 are linked against.** `toolchain/sysroot/lib/libc.a`
+is dated 2026-09-12 08:11 and four `posix/src/*.rs` files are newer than it, so
+these binaries link a libc that is behind its own sources. The tree already
+detects this — it is why the default image build refuses and why
+`ALLOW_STALE_FIXTURES=1` was needed. The staleness check inside this block
+compares each binary against `libc.a` and correctly stays quiet, because the
+binaries are newer than the archive; it is the archive that is behind. The two
+checks compose, but neither states the transitive claim on its own.
+
+### The second defect: building a crate changed what the OS contains
+
+The first version of the staging block scanned
+`target/x86_64-slateos/release/` and staged every ELF it found. That is a
+coupling defect, and it did not stay theoretical for an hour.
+
+Wanting to know whether the *rest* of the tree cross-compiles, I built the
+remaining 190 userspace crates. It is a good result on its own — **all 190
+compiled, zero errors, 3m 08s**, so every one of the 276 binaries builds for
+SlateOS. But the next image build then did this:
+
+    [rootfs] staged 260 SlateOS-native utilities from userspace/ into /bin (204 MiB)
+    [rootfs] WARNING: that is more than a quarter of the 384M image (96 MiB).
+    mke2fs: Could not allocate block in ext2 filesystem while populating file system
+    *** rootfs.ext4 was NOT written ***
+
+So `cargo build` in a crate directory, run to answer a question, changed what
+the operating system image contains and then broke it. The tripwire did fire and
+named the exact failure that followed — but a warning is the wrong instrument
+for this. **A developer debugging one crate must not be able to alter the image
+at all.**
+
+**The fix: `scripts/rootfs-bin-manifest.txt`.** What ships is now an explicit,
+tracked list of 70 names, and a binary that is built but not listed does not
+ship. Verified with all 276 binaries present in `target/`: the image build
+staged 70 (59 MiB) and ignored the other 206. A missing manifest is an `exit 1`
+rather than a NOTE, because the file is tracked in git — its absence means a
+broken checkout, not a tree that has not built yet.
+
+The manifest deliberately omits the 13 names the promoted fastpy commands own
+(`cat`, `grep`, `ls`, `wc`, …) and `sh`, which dash owns. That is
+`design-decisions.md` **§108 part 1**: fastpy stays *"additive only… No Rust
+coreutil is touched, shadowed or retired"*, and *"a silent swap is a
+user-visible policy change and is not Claude's to make."* Which implementation a
+stock install should prefer is `deferred-questions.md` **D-Q1**, whose trigger
+— a fastpy utility with a parity suite and a performance bar — has not been
+met, so it stays deferred and this change does not touch it. The manifest and
+the collision guard are two independent things that would both have to be wrong
+before a swap could happen quietly.
+
+**Why the whole userland is not on the image.** All 276 build, and they come to
+204 MiB against a fixed 384M image that already carries ~127 MiB of fastpy test
+ELFs. They do not fit. Raising `IMG_SIZE` is available and nothing outside this
+script reads it, but "which utilities earn their bytes" is a real question and
+staging everything that happens to compile is not an answer to it.
+
+### Why absence is a NOTE and not an error, for now
+
+The neighbouring fastpy block exits 1 on an empty scan. This one does not, and
+the difference is deliberate: a missing fastpy fixture makes a ring-3 self-test
+**self-skip and still report PASS**, whereas nothing yet asserts on these
+binaries at all. Making their absence fatal would break the image build in every
+tree that has not yet built the slateos target — lane A's included — to protect
+a test that does not exist. The block's comment says to turn it into an `exit 1`
+in the same change that adds the first boot test asserting one of these runs.
+
+### What is still open
+
+**Staged is not run.** This entry fixes "never on the image"; it does not
+establish that a single one of these binaries *executes* under SlateOS. That
+needs a boot test, which is lane A's tree — filed as
+`requests/b-a-our-own-utilities-are-on-the-image-now-can-a-boot-test-run-one.md`.
+Until that rung is green, the honest claim is "71 SlateOS-native utilities are
+present on the image", and no more than that. This is the same distinction the
+pkgconf entry had to learn: cross-compiling, linking, being staged and being
+*run* are four separate claims, and passing three of them is not passing the
+fourth.
+
+**And the image will not hold all 278.** A static Rust binary here averages
+886 KiB, so the 86 that `coreutils` produces are 74 MiB — about a fifth of the
+fixed 384M image, which after CPython had roughly 150 MiB free. Building the
+remaining 193 `userspace/*` binary crates would add on the order of 167 MiB and
+would not fit. That is not a reason to stage none of them, but it does mean
+"put all 278 on the image" is not the finish line: the block now reports its own
+MiB and warns past a quarter of `IMG_SIZE`, because nothing else in
+`create-ext4-rootfs.sh` accounts for free space at all and the script's own
+header records what running out looks like — `mke2fs -d` gives up partway and
+the abort trap leaves a broken image behind. Deciding *which* utilities earn
+their bytes is a real question, and it is not answered here.
+
+
+## B-A-LONG-COMMAND-LINE-SILENTLY-BECAME-NO-COMMAND-LINE (lane B, 2026-09-13) — **fixed**
+
+**In short:** a program started with more than 64 KiB of arguments plus
+environment got **none of them**. Not a truncated list, not an error — `argc`
+was 0 and the program ran as if invoked bare. `cat` over a long file list would
+have become `cat` reading from the terminal. The kernel had always offered a way
+to fix this and libc had never taken it.
+
+### What it was
+
+`posix/src/crt.rs::retrieve_initial_args` asks the kernel for the packed
+argv/envp with `SYS_PROCESS_GET_ARGS`, into a 64 KiB static buffer. If the data
+was bigger, it did this:
+
+```rust
+// If the kernel returned more than our buffer can hold, the data
+// is still in the PCB (not consumed).  We can't use it without a
+// larger buffer.  Fall back to no args.
+if total > INIT_ARGS_BUF_SIZE || total < header_size {
+    return (0, core::ptr::null(), core::ptr::null());
+}
+```
+
+The comment is accurate about the mechanism and it names the consequence — and
+the consequence is a silent total loss. The kernel allows 256 KiB each for argv
+and envp, so the reachable gap was four to eight times the buffer.
+
+**The libc contradicted itself, which is what decides who this bug bites.**
+`sysconf(_SC_ARG_MAX)` returns `ARG_MAX`, and `posix/src/limits.rs` sets that to
+**131,072 — 128 KiB**, with a test asserting the value. So the library told every
+program it could pass 128 KiB of arguments, and then threw all of them away
+above 64 KiB. A program that consults `sysconf(_SC_ARG_MAX)` and packs up to
+the number it is given is doing the careful, correct thing; it is exactly the
+program that loses its arguments, at precisely half the advertised limit, with
+no error. The careless program that passes a handful of arguments never notices.
+
+(The remaining mismatch is in the safe direction and is left alone: libc
+advertises 128 KiB where the kernel accepts 256 KiB each for argv and envp, so
+a caller obeying `ARG_MAX` is under the kernel's limit rather than over it.)
+
+What makes it worse than a size limit is that **the kernel's side of the
+protocol was already built**. `kernel/src/syscall/handlers.rs`:
+
+> *"If the caller's buffer is too small, put the data back and return the
+> required size so they can retry."*
+
+It takes the args out of the PCB, notices the buffer is too small, puts them
+back, and returns the size needed. Every failure path there is careful to
+restore the data *specifically so a second call works*. libc never made the
+second call. One half of a two-step protocol was implemented, tested and
+commented, and the other half was a `return`.
+
+### The fix
+
+`retrieve_initial_args` now retries: when the first answer exceeds the static
+buffer it `mmap`s exactly the size the kernel asked for and asks again. A raw
+`mmap` rather than `malloc` because this runs before `init_environ()` and before
+the ELF constructors, and startup should not depend on the allocator that early;
+it is also a once-per-process call on a path almost nothing takes, so a bigger
+static buffer would have charged every process for it instead.
+
+A second answer that is still "too small", or larger than what was just
+allocated, is refused rather than parsed — the second number decides how much
+gets read, so trusting one we have already seen change would read past the
+allocation.
+
+### Tested on the host, which needed a seam
+
+`SYS_PROCESS_GET_ARGS` is a stub returning `ENOSYS` on the host triple, so with
+the syscall inline there is no way to reach the second ask at all. The kernel is
+now behind a small `InitArgSource` trait — the same move `tee` needed for
+`TeePipes` — and a fake implements the documented behaviour: keep the data,
+report the size. Five tests: fits first ask (and is not asked twice), oversized
+is retried and every argument survives, a failed allocation yields no args
+rather than a bad pointer, a retry answer bigger than the allocation is refused,
+and no-args-at-all is not an error.
+
+Mutation-tested: restoring the original `return` fails
+`oversized_args_are_retried_and_not_silently_dropped` and nothing else.
+
+**A test-quality bug found by that mutation.** The first mutation run failed
+*two* tests, the retry one and an unrelated small-args one. The second was
+mutex poisoning: these tests serialise on a `Mutex` because they write
+process-wide statics, and a panic while holding it makes every later
+`.unwrap()` panic too. One real regression reported as several failures, with
+the extra ones pointing at innocent code. The guard now ignores poisoning, and
+the same mutation fails exactly one test.
+
+### The same defect at a second limit — also fixed
+
+`MAX_INIT_PTRS` is 512, and the pointer-array loop stopped there. A program
+invoked with 600 arguments got `argc == 512`: the wrong answer, delivered with
+confidence, with no way for the program to notice. `grep pat *.c` in a large
+directory reaches this easily, and 512 is low enough that it is a normal
+command rather than an adversarial one.
+
+Fixed the same way, and the test was written first so it could be watched to
+fail — it reported `left: 512, right: 600` before the fix. The pointer arrays
+now come from the same source as the packed data when they do not fit, falling
+back to the static array if that allocation fails, so the old behaviour is the
+floor rather than the default. The test checks more than the count: that
+`argv[599]` is really `a599` and that `argv[600]` is NULL, because an array
+that is the right length but not NULL-terminated is a worse bug than the one
+being fixed.
+
+Writing the failing test first also confirmed the poisoning fix above: this
+time exactly one test failed, where the earlier mutation had failed two.
+
+### The near-miss, which is the part worth keeping
+
+I nearly filed something much louder and wrong. Reading `_start` in `crt.rs`
+shows it calling `__libc_start_main(main, 0, NULL, ...)` — argc and argv
+hardcoded to zero — above a comment reading *"the kernel jumps here with no
+arguments on the stack (argc/argv not yet supported)"*. The disassembly of a
+staged binary matches it instruction for instruction. I had a confirmed
+source-plus-binary finding that **no SlateOS program can receive arguments**,
+and it was wrong: `__libc_start_main` ignores the argc/argv it was handed and
+calls `retrieve_initial_args()`, which fetches them by syscall.
+
+That is the second time in one session that a conclusion survived two forms of
+evidence and still needed a mechanism I had not found yet — the first was
+grepping for `[rootfs] staged` and missing the fastpy block, which says
+`promoted`. The pattern is the same both times: **the evidence agreed with each
+other because it was all downstream of the same wrong assumption about where to
+look.** The comment in `_start` is genuinely stale and now says so, but the
+behaviour it appears to describe has not been true for a long time.
+
+
+## TD-B-REBUILDING-THE-LIBC-DOES-NOT-REBUILD-ANYTHING-THAT-LINKS-IT (lane B, 2026-09-13)
+
+**In short:** fix a bug in our C library, rebuild the library, rebuild the
+programs — and the programs still contain the bug. Cargo does not know that
+`toolchain/sysroot/lib/libc.a` is an input, so nothing that links it is out of
+date when it changes. The build says `Finished` and everything is stale.
+
+### Measured, not inferred
+
+After fixing `retrieve_initial_args` and rebuilding the sysroot (`libc.a` went
+from 2026-09-12 08:11 to 2026-09-13 20:57), I rebuilt the 70 binaries the image
+manifest names:
+
+| step | result |
+|---|---|
+| `rm` the 70 output binaries, then `cargo build` | **1.23 s**, 0 of 70 newer than `libc.a` |
+| `touch` the crate sources, then `cargo build` | 42 s, **70 of 70** newer |
+
+Deleting the outputs does not help, and that is the part that misleads. These
+files are **hardlinks** — `ls -la` shows a link count of 2 — into
+`target/.../release/deps/`. Removing `release/cp` removes one name for an
+inode that still exists under `deps/`, so cargo re-creates the link from its
+cache without running the linker, and the restored file keeps its **original
+mtime**. The obvious way to force a relink is therefore indistinguishable from
+having done nothing, right down to the timestamp.
+
+### Why it matters here more than in a normal Rust project
+
+Nothing else in this tree links a hand-built static archive. `libc.a` is built
+by `toolchain/build-sysroot.ps1`, **by hand**, outside cargo entirely — so the
+one artifact every userspace binary depends on is the one artifact cargo cannot
+see. A libc fix that is committed, tested and merged still ships nothing until
+someone happens to dirty each dependent crate.
+
+### What catches it
+
+The staleness check in the `create-ext4-rootfs.sh` staging block, which
+compares every staged binary against `libc.a` and warns when the binary is
+older. That check was written the same day as a matter of routine, copying the
+CMake one; this is what makes it load-bearing rather than decorative. Confirmed
+on real data: immediately after the sysroot rebuild, all 276 built binaries
+were older than `libc.a` and every one would have been reported.
+
+### The proper fix, not done here
+
+A `build.rs` in the crates that link the sysroot, emitting
+
+    cargo:rerun-if-changed=<path to sysroot>/lib/libc.a
+
+which is how cargo is told about an input it cannot infer. That is ~200 crates
+to touch, or one shared build-script crate they all depend on, and it wants
+thinking about rather than a quick loop — the archive path is set by the target
+JSON and the sysroot location is not currently exported to build scripts. Until
+then the rootfs warning is the backstop, and it only fires at image-build time,
+which is late but is at least before the bytes reach a disk.
+
+
+## TD-B-AN-ARGUMENT-LIST-TOO-LONG-REPORTS-EINVAL-WHERE-POSIX-SAYS-E2BIG (lane B, 2026-09-13)
+
+**In short:** spawn a process with more arguments than the system allows and the
+error says "invalid argument" instead of "argument list too long". A caller that
+handles the documented error — shrink the list and retry, which is what `xargs`
+exists to do — has no way to tell that is the right response.
+
+**Measured, not assumed**, following the value from one end to the other:
+
+| step | where | value |
+|---|---|---|
+| kernel refuses an oversized list | `kernel/src/proc/pcb.rs:6659` | `Err(InvalidArgument)` when `total > MAX_ARGS_BYTES` (256 KiB) |
+| libc maps the native error | `posix/src/spawn.rs` | `native_to_posix_err(ret)` |
+| the mapping | `posix/src/errno.rs:377` | `native::INVALID_ARGUMENT => EINVAL` |
+
+POSIX requires `E2BIG` for exec when the argument and environment lists exceed
+`ARG_MAX`. `E2BIG` exists in this tree and is returned in `file.rs`, `iconv.rs`
+and `linux_bpf.rs` — just never on the path that is actually about an argument
+list being too long.
+
+**Why this is recorded rather than fixed.** The obvious fix is for libc to check
+the packed length itself and return `E2BIG` before calling, which needs no
+kernel change and is testable on the host. What it needs first is a decision
+about *which* limit to enforce, and the two available answers disagree:
+
+- **`ARG_MAX` (128 KiB)** — what `sysconf(_SC_ARG_MAX)` already promises, so
+  enforcing it makes libc self-consistent. But it would start refusing spawns
+  between 128 KiB and 256 KiB that succeed today.
+- **The kernel's 256 KiB** — preserves current behaviour exactly and only
+  changes the errno. But then `sysconf` still advertises a number that is not
+  the one enforced, which is the same self-contradiction that made the argv
+  entry above bite the careful caller rather than the careless one.
+
+That is a user-visible behaviour choice with a real trade on both sides, so it
+is not one to make while passing through. The second option is the smaller
+change and the one I would take — errno correctness without a behaviour
+regression — with the `ARG_MAX` mismatch left as its own question.
+
+**Not urgent.** The current failure is a refusal with a misleading name, not a
+silent loss: the spawn does fail, and the caller does get an error. That is
+strictly better than the 64 KiB case in the entry above, which is why that one
+was fixed on the spot and this one is written down.

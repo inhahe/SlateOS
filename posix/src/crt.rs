@@ -516,32 +516,158 @@ unsafe fn retrieve_initial_fds() {
 ///
 /// Must be called exactly once, before main().  The returned pointers
 /// are valid for the entire process lifetime (they point into statics).
+/// Where the packed argv/envp bytes come from, and where a bigger buffer
+/// comes from when the static one will not hold them.
+///
+/// This exists so the **retry protocol** can be tested on the host. The
+/// interesting behaviour here is not the syscall, it is "ask, be told the
+/// buffer is too small, ask again with one that fits" -- and on the host
+/// `SYS_PROCESS_GET_ARGS` is a stub returning `ENOSYS`, so with the syscall
+/// inline there is no way to reach the second ask. Behind a seam it is
+/// ordinary code with ordinary tests, which is the same reason `tee` grew
+/// `TeePipes`.
+pub(crate) trait InitArgSource {
+    /// Ask for the packed bytes. Returns how many were written, or -- when
+    /// `cap` is too small -- how many are NEEDED, with the data left intact
+    /// for a second call. `<= 0` means there are no arguments.
+    fn fetch(&mut self, buf: *mut u8, cap: usize) -> i64;
+
+    /// Obtain `len` bytes that stay valid for the rest of the process.
+    /// Returns null on failure.
+    fn grow(&mut self, len: usize) -> *mut u8;
+}
+
+/// The real source: the kernel, plus anonymous memory for the retry.
+struct KernelArgs;
+
+impl InitArgSource for KernelArgs {
+    fn fetch(&mut self, buf: *mut u8, cap: usize) -> i64 {
+        use crate::syscall::{SYS_PROCESS_GET_ARGS, syscall2};
+        syscall2(SYS_PROCESS_GET_ARGS, buf as u64, cap as u64)
+    }
+
+    fn grow(&mut self, len: usize) -> *mut u8 {
+        use crate::syscall::{SYS_MMAP, syscall6};
+        // PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS. Deliberately a raw
+        // mmap and not malloc: this runs before `init_environ()` and before the
+        // ELF constructors, and the allocator is not something startup should
+        // depend on this early. It is also a once-per-process call on a path
+        // that almost never runs, so nothing is lost by being blunt.
+        const PROT_READ_WRITE: u64 = 0x1 | 0x2;
+        const MAP_PRIVATE_ANON: u64 = 0x02 | 0x20;
+        let r = syscall6(
+            SYS_MMAP,
+            0,
+            len as u64,
+            PROT_READ_WRITE,
+            MAP_PRIVATE_ANON,
+            u64::MAX,
+            0,
+        );
+        // mmap reports failure as a small negative value (an errno), which must
+        // not be cast into a plausible-looking pointer.
+        if r <= 0 {
+            core::ptr::null_mut()
+        } else {
+            r as *mut u8
+        }
+    }
+}
+
 // argc/argv pairing is the canonical libc startup convention; the
 // similar names (`final_argc`/`final_argv`) deliberately mirror it.
 #[allow(clippy::similar_names)]
 unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
+    let mut src = KernelArgs;
+    // SAFETY: same contract as this function's -- called once, before main.
+    unsafe { retrieve_initial_args_from(&mut src) }
+}
+
+/// Pick storage for one NUL-terminated pointer array.
+///
+/// The statics hold `MAX_INIT_PTRS` entries plus the terminator, which is
+/// plenty for ordinary commands and nothing like enough for `grep pat *.c` in
+/// a large directory. Past that we take memory from the same source the packed
+/// data came from, for the same reason: silently returning the first 512 of
+/// someone's 600 arguments is a wrong answer delivered with confidence, and
+/// the program has no way to notice. Falling back to the static on allocation
+/// failure keeps the old behaviour as the floor rather than the default.
+fn slots_for<S: InitArgSource>(
+    src: &mut S,
+    n: usize,
+    fallback: *mut *const u8,
+) -> (*mut *const u8, usize) {
+    if n <= MAX_INIT_PTRS {
+        return (fallback, MAX_INIT_PTRS);
+    }
+    let bytes = n
+        .saturating_add(1)
+        .saturating_mul(core::mem::size_of::<*const u8>());
+    let p = src.grow(bytes);
+    if p.is_null() {
+        (fallback, MAX_INIT_PTRS)
+    } else {
+        (p.cast::<*const u8>(), n)
+    }
+}
+
+/// The body of [`retrieve_initial_args`], with the kernel behind a seam.
+///
+/// # Safety
+///
+/// Must be called exactly once, before main().
+#[allow(clippy::similar_names)]
+pub(crate) unsafe fn retrieve_initial_args_from<S: InitArgSource>(
+    src: &mut S,
+) -> (i32, *const *const u8, *const *const u8) {
     use crate::spawn::SpawnArgsHeader;
-    use crate::syscall::{SYS_PROCESS_GET_ARGS, syscall2};
 
     let buf_ptr = addr_of_mut!(INIT_ARGS_BUF);
     let buf = unsafe { (*buf_ptr).0.as_mut_ptr() };
 
-    // Call SYS_PROCESS_GET_ARGS.  Returns total bytes written, or
-    // the needed size if our buffer is too small (data is preserved
-    // in the kernel for retry), or 0 if no args were set.
-    let ret = syscall2(SYS_PROCESS_GET_ARGS, buf as u64, INIT_ARGS_BUF_SIZE as u64);
+    // Ask.  Returns total bytes written, or the needed size if our buffer is
+    // too small (the kernel puts the data back, so a second call still sees
+    // it), or 0 if no args were set.
+    let ret = src.fetch(buf, INIT_ARGS_BUF_SIZE);
 
     if ret <= 0 {
         return (0, core::ptr::null(), core::ptr::null());
     }
 
-    let total = ret as usize;
+    let mut total = ret as usize;
     let header_size = core::mem::size_of::<SpawnArgsHeader>();
+    let mut data = buf;
 
-    // If the kernel returned more than our buffer can hold, the data
-    // is still in the PCB (not consumed).  We can't use it without a
-    // larger buffer.  Fall back to no args.
-    if total > INIT_ARGS_BUF_SIZE || total < header_size {
+    // TOO BIG FOR THE STATIC BUFFER -- ask again with one that fits.
+    //
+    // This used to `return (0, null, null)` here, which is a silent total
+    // loss: a process invoked with more than 64 KiB of argv+envp started with
+    // argc=0 and no indication that anything had been dropped. `cat` over a
+    // long file list would quietly become `cat` reading stdin. The kernel has
+    // always supported the second call -- `sys_process_get_args` says "if the
+    // caller's buffer is too small, put the data back and return the required
+    // size so they can retry" -- and libc simply never made it. The limit was
+    // real (the kernel allows 256 KiB each for argv and envp) and the comment
+    // above INIT_ARGS_BUF_SIZE described the consequence accurately; what was
+    // missing was the retry, not a bigger constant. A bigger constant would
+    // have cost every process the memory, on a path almost nothing takes.
+    if total > INIT_ARGS_BUF_SIZE {
+        let big = src.grow(total);
+        if big.is_null() {
+            return (0, core::ptr::null(), core::ptr::null());
+        }
+        let ret2 = src.fetch(big, total);
+        // A second answer that is still "too small", or is larger than what we
+        // just allocated, means the picture changed underneath us. Do not write
+        // past the allocation on the strength of a number we no longer trust.
+        if ret2 <= 0 || (ret2 as usize) > total {
+            return (0, core::ptr::null(), core::ptr::null());
+        }
+        total = ret2 as usize;
+        data = big;
+    }
+
+    if total < header_size {
         return (0, core::ptr::null(), core::ptr::null());
     }
 
@@ -552,7 +678,7 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
     #[allow(clippy::cast_ptr_alignment)]
     // SAFETY: buf points into the aligned `INIT_ARGS_BUF` which holds
     // at least `header_size` valid bytes (checked just above).
-    let header = unsafe { &*buf.cast::<SpawnArgsHeader>().cast_const() };
+    let header = unsafe { &*data.cast::<SpawnArgsHeader>().cast_const() };
     let argc = header.argc as usize;
     let envc = header.envc as usize;
     let argv_data_len = header.argv_data_len as usize;
@@ -572,17 +698,17 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
 
     // Build argv pointer array.
     // SAFETY: data_start is within our buffer bounds (validated above).
-    let data_start = unsafe { buf.add(header_size) };
-    let argv_ptrs = addr_of_mut!(INIT_ARGV);
+    let data_start = unsafe { data.add(header_size) };
+    let (argv_ptrs, argv_cap) = slots_for(src, argc, addr_of_mut!(INIT_ARGV).cast::<*const u8>());
 
     let mut pos = 0usize;
     let mut arg_idx = 0usize;
-    while arg_idx < argc && arg_idx < MAX_INIT_PTRS && pos < argv_data_len {
-        // SAFETY: pos < argv_data_len, which is within buffer bounds.
+    while arg_idx < argc && arg_idx < argv_cap && pos < argv_data_len {
+        // SAFETY: arg_idx < argv_cap, and the array behind `argv_ptrs` holds
+        // argv_cap entries plus the terminator; pos < argv_data_len, which is
+        // within the buffer bounds validated above.
         unsafe {
-            if let Some(slot) = (*argv_ptrs).get_mut(arg_idx) {
-                *slot = data_start.add(pos);
-            }
+            *argv_ptrs.add(arg_idx) = data_start.add(pos);
         }
 
         // Advance past this string's null terminator.
@@ -598,24 +724,23 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
     }
 
     // Null-terminate the argv array.
+    // SAFETY: the loop above stopped at arg_idx <= argv_cap, and the array has
+    // room for argv_cap entries plus this terminator.
     unsafe {
-        if let Some(slot) = (*argv_ptrs).get_mut(arg_idx) {
-            *slot = core::ptr::null();
-        }
+        *argv_ptrs.add(arg_idx) = core::ptr::null();
     }
 
     // Build envp pointer array.
     // SAFETY: envp_start is at data_start + argv_data_len, within bounds.
     let envp_start = unsafe { data_start.add(argv_data_len) };
-    let envp_ptrs = addr_of_mut!(INIT_ENVP);
+    let (envp_ptrs, envp_cap) = slots_for(src, envc, addr_of_mut!(INIT_ENVP).cast::<*const u8>());
 
     let mut pos = 0usize;
     let mut env_idx = 0usize;
-    while env_idx < envc && env_idx < MAX_INIT_PTRS && pos < envp_data_len {
+    while env_idx < envc && env_idx < envp_cap && pos < envp_data_len {
+        // SAFETY: as for argv above.
         unsafe {
-            if let Some(slot) = (*envp_ptrs).get_mut(env_idx) {
-                *slot = envp_start.add(pos);
-            }
+            *envp_ptrs.add(env_idx) = envp_start.add(pos);
         }
 
         while pos < envp_data_len {
@@ -629,10 +754,9 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
     }
 
     // Null-terminate the envp array.
+    // SAFETY: as for argv above.
     unsafe {
-        if let Some(slot) = (*envp_ptrs).get_mut(env_idx) {
-            *slot = core::ptr::null();
-        }
+        *envp_ptrs.add(env_idx) = core::ptr::null();
     }
 
     // Load environment variables into the environ store so that
@@ -645,7 +769,7 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let final_argc = arg_idx as i32;
-    let final_argv = unsafe { (*argv_ptrs).as_ptr() };
+    let final_argv: *const *const u8 = argv_ptrs.cast_const();
 
     (final_argc, final_argv, core::ptr::null())
 }
@@ -830,19 +954,28 @@ pub unsafe extern "C" fn __libc_start_main(
 // _start — the ELF entry point (crt0)
 // ---------------------------------------------------------------------------
 
-// The kernel jumps here with no arguments on the stack (argc/argv not
-// yet supported).  When the kernel adds argument passing, this stub
-// will extract them from the stack per the SysV x86_64 ABI:
+// THE ZEROS BELOW ARE NOT A MISSING FEATURE.  Read this before "fixing" them.
 //
-//   [rsp]       = argc
-//   [rsp+8]     = argv[0]
-//   ...
-//   [rsp+8*argc+8] = NULL  (argv terminator)
-//   envp follows argv
+// This stub passes argc=0 and argv=NULL to `__libc_start_main`, and
+// `__libc_start_main` ignores both: it calls `retrieve_initial_args()`, which
+// asks the kernel for them with `SYS_PROCESS_GET_ARGS`.  Arguments work.  The
+// values here are placeholders for a parameter slot, not a statement about
+// what the process was given.
 //
-// For now we call main(0, NULL, NULL) since the kernel doesn't provide
-// arguments.  The `weak` linkage lets programs provide their own _start
-// if they prefer raw entry (like the current hello/ticker programs).
+// This comment used to say the kernel did not support argc/argv yet and that
+// this stub should one day read them off the stack per the SysV ABI.  Both
+// halves went stale: the syscall path was built instead, and the kernel now
+// ALSO lays out a real System V initial stack (`kernel/src/proc/linux_stack.rs`,
+// with a self-test asserting argc lands at `[%rsp]`) for Linux-ABI binaries
+// that expect one.  Ours do not read it; they use the syscall.
+//
+// The stale version cost real time on 2026-09-13: with the disassembly of a
+// staged binary matching these instructions exactly, it reads as proof that no
+// SlateOS program can see its arguments.  It is not proof, because the
+// mechanism is one call further in.
+//
+// The `weak` linkage lets programs provide their own _start if they prefer raw
+// entry (like the current hello/ticker programs).
 
 #[cfg(target_os = "none")]
 global_asm!(
@@ -853,11 +986,8 @@ global_asm!(
     // Calls __libc_start_main(main, 0, NULL, ...) which initializes
     // the C runtime (environ, program name, etc.) and calls main.
     //
-    // When the kernel adds argument passing, this should extract
-    // argc/argv from the stack per the SysV x86_64 ABI:
-    //   [rsp]     = argc
-    //   [rsp+8]   = argv[0], ...
-    //   argv terminated by NULL, then envp follows.
+    // argc/argv are fetched by __libc_start_main via SYS_PROCESS_GET_ARGS,
+    // not read off the stack here -- see the note above the asm block.
     // ---------------------------------------------------------------
     ".weak _start",
     ".type _start, @function",
@@ -2358,5 +2488,213 @@ mod tests {
         let dev = gnu_dev_makedev(5000, 42);
         assert_eq!(gnu_dev_major(dev), 5000);
         assert_eq!(gnu_dev_minor(dev), 42);
+    }
+}
+
+#[cfg(test)]
+mod initial_args_tests {
+    use super::{INIT_ARGS_BUF_SIZE, InitArgSource, retrieve_initial_args_from};
+    use std::sync::Mutex;
+    use std::vec::Vec;
+
+    // `retrieve_initial_args_from` writes into process-wide statics
+    // (INIT_ARGS_BUF, INIT_ARGV, INIT_ENVP). Cargo runs a crate's tests on
+    // several threads, so without this they interleave and the damage shows up
+    // as a wrong argc in whichever test lost -- which reads exactly like a
+    // parser bug and is not one.
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// Take the lock, ignoring poisoning. When one of these tests fails the
+    /// panic poisons the mutex, and a plain `.unwrap()` then makes every
+    /// later test panic too -- so a single real regression reports as several
+    /// failures and hides which one actually caught it. Observed: breaking the
+    /// retry failed the retry test AND the unrelated small-args test.
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Build the packed layout the kernel sends: a 4x u32 header, then the
+    /// argv strings, then the envp strings, each NUL-terminated.
+    fn pack(argv: &[&str], envp: &[&str]) -> Vec<u8> {
+        let mut a: Vec<u8> = Vec::new();
+        for s in argv {
+            a.extend_from_slice(s.as_bytes());
+            a.push(0);
+        }
+        let mut e: Vec<u8> = Vec::new();
+        for s in envp {
+            e.extend_from_slice(s.as_bytes());
+            e.push(0);
+        }
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&u32::try_from(argv.len()).unwrap().to_ne_bytes());
+        out.extend_from_slice(&u32::try_from(envp.len()).unwrap().to_ne_bytes());
+        out.extend_from_slice(&u32::try_from(a.len()).unwrap().to_ne_bytes());
+        out.extend_from_slice(&u32::try_from(e.len()).unwrap().to_ne_bytes());
+        out.extend_from_slice(&a);
+        out.extend_from_slice(&e);
+        out
+    }
+
+    /// A kernel that behaves the way the real one documents: when the caller's
+    /// buffer is too small it keeps the data and reports the size needed.
+    struct Fake {
+        data: Vec<u8>,
+        fetches: usize,
+        grows: usize,
+        grow_fails: bool,
+        lie_on_retry: Option<i64>,
+    }
+
+    impl Fake {
+        fn new(data: Vec<u8>) -> Self {
+            Self {
+                data,
+                fetches: 0,
+                grows: 0,
+                grow_fails: false,
+                lie_on_retry: None,
+            }
+        }
+    }
+
+    impl InitArgSource for Fake {
+        fn fetch(&mut self, buf: *mut u8, cap: usize) -> i64 {
+            self.fetches += 1;
+            if self.data.is_empty() {
+                return 0;
+            }
+            if let Some(l) = self.lie_on_retry {
+                if self.fetches >= 2 {
+                    return l;
+                }
+            }
+            if self.data.len() > cap {
+                // Too small: data preserved, size needed reported.
+                return i64::try_from(self.data.len()).unwrap();
+            }
+            // SAFETY: the caller promised `buf` holds `cap` bytes and we just
+            // checked the data is no longer than that.
+            unsafe {
+                core::ptr::copy_nonoverlapping(self.data.as_ptr(), buf, self.data.len());
+            }
+            i64::try_from(self.data.len()).unwrap()
+        }
+
+        fn grow(&mut self, len: usize) -> *mut u8 {
+            self.grows += 1;
+            if self.grow_fails {
+                return core::ptr::null_mut();
+            }
+            // Leaked on purpose: the real implementation hands back an mmap
+            // that lives for the process, and the returned argv points into it.
+            let b = vec![0u8; len].into_boxed_slice();
+            Box::into_raw(b).cast::<u8>()
+        }
+    }
+
+    /// argv big enough to overflow the static buffer, as a long file list
+    /// would be. 200 x ~400 bytes is comfortably past 64 KiB and stays under
+    /// MAX_INIT_PTRS.
+    fn oversized_argv() -> Vec<String> {
+        (0..200).map(|i| format!("{}{:0>399}", i % 10, i)).collect()
+    }
+
+    #[test]
+    fn small_args_fit_on_the_first_ask() {
+        let _g = guard();
+        let mut f = Fake::new(pack(&["prog", "a", "b"], &["HOME=/root"]));
+        let (argc, argv, _) = unsafe { retrieve_initial_args_from(&mut f) };
+        assert_eq!(argc, 3, "three argv entries should survive");
+        assert!(!argv.is_null());
+        assert_eq!(f.fetches, 1, "a buffer that fits must not be asked twice");
+        assert_eq!(f.grows, 0, "nothing should be allocated for small args");
+    }
+
+    #[test]
+    fn oversized_args_are_retried_and_not_silently_dropped() {
+        // THE REGRESSION PIN. Before the retry existed this returned argc=0
+        // with no error at all: a process invoked with a long file list simply
+        // started with no arguments, and `cat` became `cat` reading stdin.
+        let _g = guard();
+        let owned = oversized_argv();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let packed = pack(&refs, &[]);
+        assert!(
+            packed.len() > INIT_ARGS_BUF_SIZE,
+            "the fixture must actually exceed the static buffer, got {}",
+            packed.len()
+        );
+        let mut f = Fake::new(packed);
+        let (argc, argv, _) = unsafe { retrieve_initial_args_from(&mut f) };
+        assert_eq!(argc, 200, "every argument should survive the retry");
+        assert!(!argv.is_null());
+        assert_eq!(f.fetches, 2, "too-small then retry is exactly two asks");
+        assert_eq!(f.grows, 1);
+    }
+
+    #[test]
+    fn a_failed_allocation_gives_no_args_rather_than_a_bad_pointer() {
+        let _g = guard();
+        let owned = oversized_argv();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let mut f = Fake::new(pack(&refs, &[]));
+        f.grow_fails = true;
+        let (argc, argv, _) = unsafe { retrieve_initial_args_from(&mut f) };
+        assert_eq!(argc, 0);
+        assert!(argv.is_null(), "a null allocation must not become an argv");
+    }
+
+    #[test]
+    fn a_retry_answer_larger_than_the_allocation_is_refused() {
+        // The second answer decides how much we parse, so a larger one would
+        // read past the buffer we just sized from the first. Refuse instead.
+        let _g = guard();
+        let owned = oversized_argv();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let mut f = Fake::new(pack(&refs, &[]));
+        f.lie_on_retry = Some(i64::try_from(INIT_ARGS_BUF_SIZE * 64).unwrap());
+        let (argc, _, _) = unsafe { retrieve_initial_args_from(&mut f) };
+        assert_eq!(argc, 0, "an answer we cannot trust must not be parsed");
+    }
+
+    #[test]
+    fn more_than_512_arguments_are_not_silently_dropped() {
+        // MAX_INIT_PTRS is 512. Short args on purpose: 600 x ~8 bytes stays
+        // well under the 64 KiB buffer, so this exercises the POINTER cap on
+        // its own rather than the retry path fixed alongside it.
+        let _g = guard();
+        let owned: Vec<String> = (0..600).map(|i| format!("a{i}")).collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let packed = pack(&refs, &[]);
+        assert!(
+            packed.len() < INIT_ARGS_BUF_SIZE,
+            "fixture must not also trip the size retry, got {}",
+            packed.len()
+        );
+        let mut f = Fake::new(packed);
+        let (argc, argv, _) = unsafe { retrieve_initial_args_from(&mut f) };
+        assert_eq!(argc, 600, "arguments past 512 must survive, not vanish");
+        assert!(!argv.is_null());
+        // The last one must really be there and really be the last one.
+        let last = unsafe { *argv.add(599) };
+        assert!(!last.is_null(), "argv[599] should be a real pointer");
+        let bytes = unsafe { core::slice::from_raw_parts(last, 4) };
+        assert_eq!(&bytes[..4], b"a599");
+        assert!(
+            unsafe { *argv.add(600) }.is_null(),
+            "argv must stay NULL-terminated"
+        );
+    }
+
+    #[test]
+    fn no_arguments_at_all_is_not_an_error() {
+        let _g = guard();
+        let mut f = Fake::new(Vec::new());
+        let (argc, argv, _) = unsafe { retrieve_initial_args_from(&mut f) };
+        assert_eq!(argc, 0);
+        assert!(argv.is_null());
+        assert_eq!(f.grows, 0, "no args must not allocate");
     }
 }

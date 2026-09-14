@@ -546,7 +546,8 @@ fn to_compositor_request(
         // an owner could put an icon in the tray on another program's behalf.
         RequestBody::SetTrayIcon { .. }
         | RequestBody::RemoveTrayIcon { .. }
-        | RequestBody::SubscribeTrayIcons { .. } => {
+        | RequestBody::SubscribeTrayIcons { .. }
+        | RequestBody::ClickTrayIcon { .. } => {
             return Err(ResponseBody::Error {
                 message: "tray requests are link-level".to_string(),
             });
@@ -829,6 +830,21 @@ impl Compositor {
                     replies.push(Response::new(req.seq, ResponseBody::Ok));
                     continue;
                 }
+                RequestBody::ClickTrayIcon { owner, id, button } => {
+                    let (owner, id, button) = (*owner, *id, *button);
+                    let body = match link.require_shell() {
+                        // `Ok` whether or not the icon was still there. A shell
+                        // clicking one the program removed a frame ago is an
+                        // ordinary race, not a mistake it could have avoided.
+                        Ok(()) => {
+                            self.click_tray_icon(owner, id, button);
+                            ResponseBody::Ok
+                        }
+                        Err(refusal) => refusal,
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
                 RequestBody::SubscribeTrayIcons { subscribe } => {
                     let on = *subscribe;
                     let body = match link.require_shell() {
@@ -1003,6 +1019,18 @@ impl Compositor {
     pub fn route_input(&mut self, link: &mut ClientLink) -> usize {
         let mut mine = Vec::new();
         let mut theirs = std::collections::VecDeque::new();
+        // The connection-addressed queue first, into the *same* batch: a tray
+        // click and a window event that arrived together reach the client in
+        // the order the user caused them, and both ride the one frame the
+        // encode below writes.
+        self.pending_client_events.retain(|(pid, event)| {
+            if *pid == link.client_pid {
+                mine.push(event.clone());
+                false
+            } else {
+                true
+            }
+        });
         for note in self.pending_notifications.drain(..) {
             if link.owns(note.window_id()) {
                 mine.push(crate::wire_event(note));
@@ -1607,6 +1635,89 @@ mod tests {
             icons[0].owner, 99,
             "the owner comes from the connection, not from the client"
         );
+    }
+
+    /// A click on a tray icon reaches the program that registered it, and the
+    /// program need not have a window.
+    ///
+    /// The half of the feature that cannot be done by addressing a window: a
+    /// program that starts in the tray has none, and `design.txt:716` asks for
+    /// exactly that. The event goes on a connection-addressed queue and rides
+    /// out with whatever else that link was owed.
+    #[test]
+    fn a_tray_click_reaches_a_program_with_no_window_at_all() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        exchange(
+            &mut comp,
+            &mut app,
+            vec![RequestBody::SetTrayIcon {
+                id: 7,
+                glyph: String::from("M"),
+                tooltip: String::from("Music"),
+            }],
+        );
+        // The negative control: this program has opened no window, so if the
+        // click were routed by window it would have nowhere to go, and the
+        // assertion below would be about an empty queue either way.
+        assert!(
+            !app.owns(WindowId::from_raw(1)),
+            "the fixture has no window"
+        );
+
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::ClickTrayIcon {
+                owner: 99,
+                id: 7,
+                button: guitk::event::MouseButton::Left,
+            }],
+        );
+        comp.route_input(&mut app);
+        let bytes = app.take_outgoing();
+        let mut found = None;
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let (frame, used) = guiremote::decode_any(&bytes[at..]).expect("decodes");
+            if let Frame::Input(events) = frame {
+                for e in events {
+                    if let guitk::event::Event::TrayIconClicked { id, button } = e.event {
+                        found = Some((id, button, e.window));
+                    }
+                }
+            }
+            at += used;
+        }
+        let (id, button, window) = found.expect("the click never reached the program");
+        assert_eq!(id, 7, "the program's own icon id, not a compositor handle");
+        assert_eq!(button, guitk::event::MouseButton::Left);
+        assert_eq!(window, 0, "a connection-addressed event names no window");
+    }
+
+    /// A click on an icon that is no longer there is not an error.
+    ///
+    /// The program deregistered between the frame the shell drew and the click
+    /// the user made. That is an ordinary race and the shell could not have
+    /// avoided it, so refusing would be blaming it for the user being fast.
+    #[test]
+    fn clicking_an_icon_that_has_gone_is_answered_not_refused() {
+        let (mut comp, mut shell) = wired();
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::ClickTrayIcon {
+                owner: 404,
+                id: 1,
+                button: guitk::event::MouseButton::Left,
+            }],
+        );
+        assert!(matches!(responses[0].body, ResponseBody::Ok));
     }
 
     /// Sending the same id again replaces rather than appends.

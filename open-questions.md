@@ -312,14 +312,6 @@ that says the tables were measured against bash);
 
 ---
 
-## C-Q9 — [C] The backup tool and the search tools read the same-looking patterns by different rules — ANSWERED 2026-09-13, moved to `design-decisions.md` §841
-
-**Resolved: the backup tool now reads character classes, like everything else.** You replied on 2026-09-07 that you had no rules using `[]` and asked two questions back: what is normal, and how likely is a user to really benefit. Both are answered with measurements in §841, and the answer to the first reversed the recommendation -- character classes turn out to be standard in the exclude-list family too (`.gitignore`, `rsync --exclude`, `tar --exclude`) and in this tree's own `posix::fnmatch`, so backup was not a second dialect but the only matcher here missing the feature.
-
-The option you floated -- taking classes *out* of search and indexing so the three agree the other way -- was rejected: it moves the OS away from both norms at once.
-
-Done rather than re-asked because the one fact that could have changed it is one you had already given: that none of your own rules use `[]`. Zero patterns in this tree use one either, so nothing that exists changed meaning. If that turns out to be wrong, this is a small and reversible change -- `apps/backup`'s `class_end` and `class_matches`, and three tests.
-
 ## C-Q11: Should something build every crate before a merge? (raised by lane C, 2026-09-06)
 
 **In short:** The lock screen — the program that asks for your password when
@@ -380,6 +372,48 @@ answer here is yes, the gate should be spelled `check`, not `build`.
 Whether the gate should also run `cargo test --workspace` is a separate and much
 more expensive question: `check` would **not** have caught this second instance,
 because a broken test compiles fine. It would have caught the first.
+
+### A fourth incident, 2026-09-13 — and the first where the tooling caught it
+
+Lane C added a variant to `guitk::Event` (a tray-icon click). The five
+crates that changed were tested and green. `apps/explorer` and
+`apps/stickynotes` match that enum *exhaustively*, so both stopped
+compiling — two crates nobody had named, in the lane's own tree.
+
+What is new is how it surfaced. `scripts/workspace-test.py` builds and runs
+every target, and it reported:
+
+```
+[workspace-test] targets passed: 0
+[workspace-test] runner exited 101 with no failing test — build or launch error.
+```
+
+Note the shape: **zero targets and no failing test**, which is what a build
+break looks like from inside a test runner. A filtered log would have looked
+identical to a clean one.
+
+**What this is and is not evidence for.**
+
+| | |
+|---|---|
+| Does a full-workspace build catch real breaks? | Yes, demonstrably, four times now |
+| Was it cross-lane this time? | **No** — both broken crates were lane C's own |
+| Did it block a merge? | No. It was run voluntarily, before pushing |
+| Would option C (grep before the claim) have caught it? | **No.** No symbol was removed; a variant was *added*, and exhaustive matches break on additions. There is nothing to grep for |
+
+That last row is the part worth weighing. Option C was the cheap answer
+that would have caught the first incident; it cannot catch this one even in
+principle, because the failure is an addition rather than a removal and the
+broken code names nothing that changed. A convention about what to grep
+before claiming "no caller changes" does not help when the claim was never
+made.
+
+It also weakens the case for A over B slightly, in an honest direction:
+the run that caught this was **voluntary**, not a gate, and it was run
+because the lane's habit is to run it before pushing. One data point is not
+a policy, and the habit is exactly the kind of thing that decays when the
+session changes — which is the objection this document already raises
+against option C.
 
 ### Why this is yours and not mine
 

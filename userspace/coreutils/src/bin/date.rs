@@ -26,7 +26,7 @@
 //!
 //! The hard part of `date` is the formatter, and the tree already has one:
 //! [`localtime::strftime`] implements the whole specifier set — `%a %A %b %B
-//! %c %C %d %D %e %F %g %G %h %H %I %j %k %l %m %M %n %N %p %P %r %R %s %S %t
+//! %c %C %d %D %e %F %g %G %h %H %I %j %k %l %m %M %n %N %p %P %q %r %R %s %S %t
 //! %T %u %U %V %w %W %x %X %y %Y %z %Z %%` — against a [`localtime::Tm`] that
 //! knows its zone. So this file decides *which instant*, *which zone* and
 //! *which format string*, and hands all three to code that already works.

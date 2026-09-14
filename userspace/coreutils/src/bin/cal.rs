@@ -500,23 +500,6 @@ fn week_to_day(ctl: &Ctl) -> i32 {
     if yday <= 0 { 1 } else { yday }
 }
 
-/// Days since 1970-01-01 for a proleptic-Gregorian civil date.
-///
-/// Howard Hinnant's `days_from_civil`, which is what the C library's `mktime`
-/// computes by a longer road. It is exact for every year in `i64` and has no
-/// table, which matters here because the calendar's *own* date arithmetic is
-/// deliberately not proleptic — this is only used to turn a parsed timestamp
-/// into an epoch second, where the C library's rules, not `cal`'s, apply.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
 /// A broken-down local time, in the shape `strptime` fills in and `mktime`
 /// reads. Fields are allowed out of range — `mktime` normalises them, which is
 /// how `cal 2024-02-31` resolves to March.
@@ -536,44 +519,25 @@ struct BrokenDown {
 
 /// `mktime` for a [`Zone`](localtime::Zone): civil local time to epoch seconds.
 ///
-/// There is no inverse of `Zone::local` in the `localtime` crate, so this is it.
-/// The offset depends on the instant and the instant depends on the offset, so
-/// it is solved by iteration from a UTC guess; three rounds converge for every
-/// real zone, since an offset change is never larger than a day and never
-/// happens twice within one.
-///
-/// A local time that a spring-forward skipped does not exist, and this resolves
-/// it to a nearby instant rather than failing — which is also what glibc does
-/// with `tm_isdst = -1`.
+/// The arithmetic moved to [`localtime::Zone::epoch`] on 2026-09-14 — this is
+/// now the adapter between it and `cal`'s own [`BrokenDown`], which carries a
+/// `wday` that `localtime::Civil` has no use for. The comment that stood here
+/// said "there is no inverse of `Zone::local` in the `localtime` crate, so this
+/// is it"; there is one now, and it is shared rather than being the fourth
+/// private copy of `days_from_civil` in this tree.
 fn mktime(zone: &localtime::Zone, tm: &mut BrokenDown) -> i64 {
-    // Normalise the month first, so that `days_from_civil` sees 1..=12 and the
-    // day-of-month overflow (31 February) is left for it to carry.
-    let mut year = tm.year;
-    let mut month = tm.month;
-    year += (month - 1).div_euclid(12);
-    month = (month - 1).rem_euclid(12) + 1;
-
-    let days = days_from_civil(year, month, tm.day);
-    let local_secs = days
-        .saturating_mul(86_400)
-        .saturating_add(tm.hour * 3_600)
-        .saturating_add(tm.minute * 60)
-        .saturating_add(tm.second);
-
-    let mut t = local_secs;
-    for _ in 0..3 {
-        let off = i64::from(zone.lookup(t).gmtoff);
-        let next = local_secs - off;
-        if next == t {
-            break;
-        }
-        t = next;
-    }
+    let (t, resolved) = zone.epoch(&localtime::Civil {
+        year: tm.year,
+        month: tm.month,
+        day: tm.day,
+        hour: tm.hour,
+        minute: tm.minute,
+        second: tm.second,
+    });
 
     // Write the normalised civil fields back, the way `mktime` does, so that the
     // weekday check in `parse_timestamp` sees the resolved date rather than the
     // one that was typed.
-    let resolved = zone.local(t, 0);
     tm.year = resolved.year;
     tm.month = i64::from(resolved.month);
     tm.day = i64::from(resolved.day);

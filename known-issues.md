@@ -143991,8 +143991,13 @@ deciding which needs the question "who would use this?" asked per module:
 * `svg` -- a renderer with no caller. `apps/imageviewer` and the icon paths are
   the candidates; 3 391 lines is worth an hour's look before either wiring or
   deleting.
-* `signal` -- 853 lines of what is probably an observer mechanism. Least
-  obviously needed; check what it is before deciding.
+* `signal` -- **deleted 2026-09-14**, design-decisions 851. It was an observer
+  mechanism, and this tree does not observe: 138 crates under `apps/` and
+  `gui/` take `handle_event(&Event) -> Response` and none connected a signal.
+  The distinction that decided it: an unreachable *widget* becomes reachable
+  when an application draws it -- which is what happened to the other five on
+  this list -- but an unreachable *architecture* becomes reachable only by
+  rewriting the architecture.
 
 **Corrected within the hour: there IS a gate, and it is better than this
 entry first said.** `scripts/scan-orphan-modules.py` asks exactly this

@@ -311,69 +311,7 @@ pub extern "C" fn io_destroy(ctx_id: u64) -> i32 {
     0
 }
 
-/// What an iocb's `aio_rw_flags` asks us to do once its bytes have landed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PostWriteSync {
-    /// Nothing extra. The caller did not ask for durability.
-    None,
-    /// `RWF_DSYNC` — file data on stable storage (`fdatasync`).
-    Data,
-    /// `RWF_SYNC` — data and metadata (`fsync`).
-    Full,
-}
-
-/// Decide what `aio_rw_flags` means for this I/O, or which errno refuses it.
-///
-/// Pure, and separated from `execute_iocb` for the same reason
-/// `completion_resfd` is: the policy is the part that can be wrong, and it is
-/// the part a host test can reach.
-///
-/// The rule behind each answer is "can we actually deliver what was asked?",
-/// because the one answer that is never acceptable is to accept a flag and not
-/// honour it:
-///
-/// * `RWF_HIPRI` is a scheduling hint. Ignoring it changes nothing a caller
-///   can observe, so it is the only flag ignored here.
-/// * `RWF_DSYNC` / `RWF_SYNC` we can deliver, with `fdatasync` / `fsync`.
-/// * `RWF_NOWAIT` says *fail rather than block*. This executor runs every I/O
-///   to completion inline, so it always blocks; the only honest answer is the
-///   failure the flag asks for, and `EAGAIN` is the one callers are written to
-///   handle.
-/// * `RWF_APPEND` redirects the write to end-of-file and makes `aio_offset`
-///   irrelevant. We issue `pwrite` at the caller's offset, so ignoring this
-///   would put the bytes somewhere the caller did not ask for — corruption
-///   rather than a missing feature. Refused.
-/// * Anything else is a flag from a newer kernel we do not implement, and
-///   Linux refuses unknown `RWF_` bits with `EINVAL` too.
-fn plan_rw_flags(flags: u32) -> Result<PostWriteSync, i32> {
-    use crate::linux_aio2_user_types::{
-        AIO_RWF_APPEND, AIO_RWF_DSYNC, AIO_RWF_HIPRI, AIO_RWF_NOWAIT, AIO_RWF_SYNC,
-    };
-
-    const KNOWN: u32 =
-        AIO_RWF_HIPRI | AIO_RWF_DSYNC | AIO_RWF_SYNC | AIO_RWF_NOWAIT | AIO_RWF_APPEND;
-
-    // Unknown bits first, so a caller that sets one alongside a flag we could
-    // have honoured is told about the bit it got wrong rather than about a
-    // consequence of it.
-    if flags & !KNOWN != 0 {
-        return Err(errno::EINVAL);
-    }
-    if flags & AIO_RWF_APPEND != 0 {
-        return Err(errno::EINVAL);
-    }
-    if flags & AIO_RWF_NOWAIT != 0 {
-        return Err(errno::EAGAIN);
-    }
-    // SYNC is the stronger promise, so it wins when both are set.
-    if flags & AIO_RWF_SYNC != 0 {
-        return Ok(PostWriteSync::Full);
-    }
-    if flags & AIO_RWF_DSYNC != 0 {
-        return Ok(PostWriteSync::Data);
-    }
-    Ok(PostWriteSync::None)
-}
+use crate::file::{PostWriteSync, plan_rw_flags};
 
 /// Whether this opcode writes, and so whether a post-write sync applies.
 fn is_write_opcode(op: u16) -> bool {
@@ -416,7 +354,21 @@ fn execute_iocb(iocb: &Iocb) -> IoEvent {
 
     // Per-I/O flags, decided BEFORE the I/O runs: a flag we cannot honour has
     // to stop the operation, not be discovered after the bytes have moved.
-    let sync_after = match plan_rw_flags(iocb.aio_rw_flags) {
+    // i32 for the shared policy; a u32 that does not fit is a bit pattern
+    // no RWF_ flag occupies, so it is refused rather than truncated.
+    let raw_flags = match i32::try_from(iocb.aio_rw_flags) {
+        Ok(f) => f,
+        Err(_) => {
+            errno::set_errno(errno::EINVAL);
+            return IoEvent {
+                data: iocb.aio_data,
+                obj: core::ptr::from_ref::<Iocb>(iocb) as u64,
+                res: -i64::from(errno::EINVAL),
+                res2: 0,
+            };
+        }
+    };
+    let sync_after = match plan_rw_flags(raw_flags, is_write_opcode(iocb.aio_lio_opcode)) {
         Ok(s) => s,
         Err(e) => {
             errno::set_errno(e);
@@ -856,77 +808,6 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(io_destroy(ctx), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    // -- io_submit: per-I/O RWF_ flags --
-
-    #[test]
-    fn no_rw_flags_asks_for_nothing() {
-        assert_eq!(plan_rw_flags(0), Ok(PostWriteSync::None));
-    }
-
-    #[test]
-    fn hipri_is_a_hint_and_is_the_only_flag_ignored() {
-        // Nothing a caller can observe depends on it, which is what makes
-        // ignoring it legitimate where ignoring the others is not.
-        use crate::linux_aio2_user_types::AIO_RWF_HIPRI;
-        assert_eq!(plan_rw_flags(AIO_RWF_HIPRI), Ok(PostWriteSync::None));
-    }
-
-    #[test]
-    fn dsync_and_sync_ask_for_the_durability_they_name() {
-        use crate::linux_aio2_user_types::{AIO_RWF_DSYNC, AIO_RWF_SYNC};
-        assert_eq!(plan_rw_flags(AIO_RWF_DSYNC), Ok(PostWriteSync::Data));
-        assert_eq!(plan_rw_flags(AIO_RWF_SYNC), Ok(PostWriteSync::Full));
-        // Both set: the stronger promise wins, never the weaker one.
-        assert_eq!(
-            plan_rw_flags(AIO_RWF_SYNC | AIO_RWF_DSYNC),
-            Ok(PostWriteSync::Full)
-        );
-    }
-
-    #[test]
-    fn nowait_is_refused_because_a_synchronous_executor_always_blocks() {
-        // THE POINT OF THE FLAG is "fail rather than block". We block, so the
-        // failure IS the honest answer; EAGAIN is what callers handle.
-        use crate::linux_aio2_user_types::{AIO_RWF_DSYNC, AIO_RWF_NOWAIT};
-        assert_eq!(plan_rw_flags(AIO_RWF_NOWAIT), Err(errno::EAGAIN));
-        // A refusal beats a flag we could otherwise have honoured.
-        assert_eq!(
-            plan_rw_flags(AIO_RWF_NOWAIT | AIO_RWF_DSYNC),
-            Err(errno::EAGAIN)
-        );
-    }
-
-    #[test]
-    fn append_is_refused_because_ignoring_it_would_misplace_the_bytes() {
-        // RWF_APPEND makes aio_offset irrelevant and writes at end-of-file.
-        // We pwrite at the caller's offset, so accepting and ignoring it
-        // would put data somewhere nobody asked for -- corruption, not a
-        // missing feature.
-        use crate::linux_aio2_user_types::AIO_RWF_APPEND;
-        assert_eq!(plan_rw_flags(AIO_RWF_APPEND), Err(errno::EINVAL));
-    }
-
-    #[test]
-    fn an_unknown_bit_is_einval_and_is_reported_before_anything_else() {
-        use crate::linux_aio2_user_types::{AIO_RWF_DSYNC, AIO_RWF_NOWAIT};
-        let unknown = 1_u32 << 20;
-        assert_eq!(plan_rw_flags(unknown), Err(errno::EINVAL));
-        assert_eq!(plan_rw_flags(unknown | AIO_RWF_DSYNC), Err(errno::EINVAL));
-        // Checked before NOWAIT so the caller hears about the bit it got
-        // wrong rather than a consequence of it.
-        assert_eq!(plan_rw_flags(unknown | AIO_RWF_NOWAIT), Err(errno::EINVAL));
-    }
-
-    #[test]
-    fn only_writes_take_a_post_write_sync() {
-        assert!(is_write_opcode(IOCB_CMD_PWRITE));
-        assert!(is_write_opcode(IOCB_CMD_PWRITEV));
-        assert!(!is_write_opcode(IOCB_CMD_PREAD));
-        assert!(!is_write_opcode(IOCB_CMD_PREADV));
-        assert!(!is_write_opcode(IOCB_CMD_FSYNC));
-        assert!(!is_write_opcode(IOCB_CMD_NOOP));
     }
 
     // -- io_submit: completion notification (IOCB_FLAG_RESFD) --

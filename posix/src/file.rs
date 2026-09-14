@@ -1442,16 +1442,92 @@ pub const RWF_NOWAIT: i32 = 0x08;
 /// If `offset == -1`, the current file position is used and updated
 /// (like `readv`).
 ///
-/// Our implementation ignores flags and delegates to `preadv` (or `readv`
-/// if offset == -1).
+
+// ---------------------------------------------------------------------------
+// RWF_* policy — shared by preadv2/pwritev2 and kernel AIO
+// ---------------------------------------------------------------------------
+
+/// What an `RWF_*` flag set asks us to do once the bytes have landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostWriteSync {
+    /// Nothing extra; no durability was requested.
+    None,
+    /// `RWF_DSYNC` — file data on stable storage (`fdatasync`).
+    Data,
+    /// `RWF_SYNC` — data and metadata (`fsync`).
+    Full,
+}
+
+/// Decide what an `RWF_*` set means, or which errno refuses it.
+///
+/// One policy, in the module that owns the constants, used by `preadv2`,
+/// `pwritev2` and `linux_aio_abi`. It lived in the AIO module first and was
+/// moved here when `pwritev2` turned out to need exactly the same answers:
+/// two copies of one rule is how the two drift, and a durability rule that
+/// drifts between the AIO path and the ordinary write path is worse than
+/// either version of it.
+///
+/// Each answer comes from asking whether we can actually deliver what was
+/// requested, because the one answer never available is to accept a flag and
+/// not honour it:
+///
+/// * `RWF_HIPRI` is a scheduling hint with nothing observable behind it, and
+///   is the only flag ignored here.
+/// * `RWF_DSYNC` / `RWF_SYNC` we can deliver, with `fdatasync` / `fsync` —
+///   **on a write**. On a read they are meaningless, and a caller that sets
+///   them has misunderstood something, so `is_write == false` refuses them
+///   rather than quietly doing nothing.
+/// * `RWF_NOWAIT` says *fail rather than block*. Nothing here can promise not
+///   to block, so the only honest answer is the failure the flag asks for;
+///   `EAGAIN` is what callers are written to handle.
+/// * `RWF_APPEND` redirects the write to end-of-file and makes the offset
+///   irrelevant. We write at the caller's offset, so ignoring it would put
+///   bytes somewhere the caller did not ask for — corruption rather than a
+///   missing feature. Refused.
+/// * Anything else is a flag from a newer kernel we do not implement, and
+///   Linux refuses unknown `RWF_` bits with `EINVAL` too.
+pub(crate) fn plan_rw_flags(flags: i32, is_write: bool) -> Result<PostWriteSync, i32> {
+    const KNOWN: i32 = RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND;
+
+    // Unknown bits first, so a caller that sets one alongside a flag we could
+    // have honoured hears about the bit it got wrong rather than a consequence.
+    if flags & !KNOWN != 0 {
+        return Err(errno::EINVAL);
+    }
+    if flags & RWF_APPEND != 0 {
+        return Err(errno::EINVAL);
+    }
+    if flags & RWF_NOWAIT != 0 {
+        return Err(errno::EAGAIN);
+    }
+    if flags & (RWF_SYNC | RWF_DSYNC) != 0 && !is_write {
+        return Err(errno::EINVAL);
+    }
+    // SYNC is the stronger promise, so it wins when both are set.
+    if flags & RWF_SYNC != 0 {
+        return Ok(PostWriteSync::Full);
+    }
+    if flags & RWF_DSYNC != 0 {
+        return Ok(PostWriteSync::Data);
+    }
+    Ok(PostWriteSync::None)
+}
+
+/// `flags` is honoured or refused, never ignored — see [`plan_rw_flags`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn preadv2(
     fd: Fd,
     iov: *const Iovec,
     iovcnt: i32,
     offset: OffT,
-    _flags: i32,
+    flags: i32,
 ) -> SsizeT {
+    // is_write = false: the durability flags are write-only, and asking for
+    // them on a read is a mistake worth reporting rather than absorbing.
+    if let Err(e) = plan_rw_flags(flags, false) {
+        errno::set_errno(e);
+        return -1;
+    }
     if offset == -1 {
         // Use current file position (like readv).
         return readv(fd, iov, iovcnt);
@@ -1467,20 +1543,44 @@ pub extern "C" fn preadv2(
 /// If `offset == -1`, the current file position is used and updated
 /// (like `writev`).
 ///
-/// Our implementation ignores flags and delegates to `pwritev` (or `writev`
-/// if offset == -1).
+/// `flags` is honoured or refused, never ignored — see [`plan_rw_flags`].
+/// `RWF_DSYNC`/`RWF_SYNC` sync the file once the bytes are written, and a
+/// failed sync replaces the byte count: the caller asked for stable storage
+/// and did not get it, so reporting how much was written would be the
+/// durability lie this exists to remove.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pwritev2(
     fd: Fd,
     iov: *const Iovec,
     iovcnt: i32,
     offset: OffT,
-    _flags: i32,
+    flags: i32,
 ) -> SsizeT {
-    if offset == -1 {
-        return writev(fd, iov, iovcnt);
+    let sync_after = match plan_rw_flags(flags, true) {
+        Ok(s) => s,
+        Err(e) => {
+            errno::set_errno(e);
+            return -1;
+        }
+    };
+    let written = if offset == -1 {
+        writev(fd, iov, iovcnt)
+    } else {
+        pwritev(fd, iov, iovcnt, offset)
+    };
+    if written < 0 {
+        return written;
     }
-    pwritev(fd, iov, iovcnt, offset)
+    let rc = match sync_after {
+        PostWriteSync::None => 0,
+        PostWriteSync::Data => fdatasync(fd),
+        PostWriteSync::Full => fsync(fd),
+    };
+    if rc < 0 {
+        // fsync/fdatasync already set errno.
+        return -1;
+    }
+    written
 }
 
 /// `fadvise64` — LP64 alias for `posix_fadvise`.
@@ -7762,6 +7862,112 @@ pub extern "C" fn statx(
 
 #[cfg(test)]
 mod tests {
+    // -- RWF_ policy (shared by preadv2/pwritev2 and kernel AIO) --
+    use super::{
+        PostWriteSync, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT, RWF_SYNC, plan_rw_flags,
+    };
+
+    #[test]
+    fn rwf_no_flags_asks_for_nothing() {
+        assert_eq!(plan_rw_flags(0, true), Ok(PostWriteSync::None));
+        assert_eq!(plan_rw_flags(0, false), Ok(PostWriteSync::None));
+    }
+
+    #[test]
+    fn rwf_hipri_is_a_hint_and_is_the_only_flag_ignored() {
+        // Nothing observable depends on it, which is what makes ignoring it
+        // legitimate where ignoring the others is not.
+        assert_eq!(plan_rw_flags(RWF_HIPRI, true), Ok(PostWriteSync::None));
+        assert_eq!(plan_rw_flags(RWF_HIPRI, false), Ok(PostWriteSync::None));
+    }
+
+    #[test]
+    fn rwf_dsync_and_sync_ask_for_the_durability_they_name() {
+        assert_eq!(plan_rw_flags(RWF_DSYNC, true), Ok(PostWriteSync::Data));
+        assert_eq!(plan_rw_flags(RWF_SYNC, true), Ok(PostWriteSync::Full));
+        // Both set: the stronger promise wins, never the weaker one.
+        assert_eq!(
+            plan_rw_flags(RWF_SYNC | RWF_DSYNC, true),
+            Ok(PostWriteSync::Full)
+        );
+    }
+
+    #[test]
+    fn rwf_durability_flags_on_a_read_are_refused_not_absorbed() {
+        // They are write-only. A caller setting them on preadv2 has
+        // misunderstood something, and saying so beats doing nothing quietly.
+        assert_eq!(plan_rw_flags(RWF_DSYNC, false), Err(super::errno::EINVAL));
+        assert_eq!(plan_rw_flags(RWF_SYNC, false), Err(super::errno::EINVAL));
+    }
+
+    #[test]
+    fn rwf_nowait_is_refused_because_nothing_here_can_promise_not_to_block() {
+        assert_eq!(plan_rw_flags(RWF_NOWAIT, true), Err(super::errno::EAGAIN));
+        assert_eq!(plan_rw_flags(RWF_NOWAIT, false), Err(super::errno::EAGAIN));
+        // A refusal beats a flag we could otherwise have honoured.
+        assert_eq!(
+            plan_rw_flags(RWF_NOWAIT | RWF_DSYNC, true),
+            Err(super::errno::EAGAIN)
+        );
+    }
+
+    #[test]
+    fn rwf_append_is_refused_because_ignoring_it_would_misplace_the_bytes() {
+        // It makes the offset irrelevant and writes at end-of-file. We write
+        // at the caller's offset, so accepting and ignoring it would put data
+        // somewhere nobody asked for -- corruption, not a missing feature.
+        assert_eq!(plan_rw_flags(RWF_APPEND, true), Err(super::errno::EINVAL));
+    }
+
+    /// The flag check must run BEFORE the I/O, so these pass a deliberately
+    /// invalid fd: getting the flag's errno rather than `EBADF` is what proves
+    /// the refusal happened first. A flag we cannot honour has to stop the
+    /// operation, not be discovered after the bytes have moved.
+    #[test]
+    fn pwritev2_refuses_a_flag_before_touching_the_descriptor() {
+        let iov = super::Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
+        let r = super::pwritev2(-1, &raw const iov, 1, 0, RWF_NOWAIT);
+        assert_eq!(r, -1);
+        assert_eq!(
+            super::errno::get_errno(),
+            super::errno::EAGAIN,
+            "EAGAIN, not EBADF -- the flag must be judged before the fd"
+        );
+
+        let r = super::pwritev2(-1, &raw const iov, 1, 0, 1 << 20);
+        assert_eq!(r, -1);
+        assert_eq!(super::errno::get_errno(), super::errno::EINVAL);
+    }
+
+    #[test]
+    fn preadv2_refuses_a_write_only_flag_before_touching_the_descriptor() {
+        let iov = super::Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
+        let r = super::preadv2(-1, &raw const iov, 1, 0, RWF_DSYNC);
+        assert_eq!(r, -1);
+        assert_eq!(super::errno::get_errno(), super::errno::EINVAL);
+    }
+
+    #[test]
+    fn rwf_unknown_bit_is_einval_and_is_reported_before_anything_else() {
+        let unknown = 1_i32 << 20;
+        assert_eq!(plan_rw_flags(unknown, true), Err(super::errno::EINVAL));
+        assert_eq!(
+            plan_rw_flags(unknown | RWF_DSYNC, true),
+            Err(super::errno::EINVAL)
+        );
+        // Checked before NOWAIT so the caller hears about the bit it got
+        // wrong rather than a consequence of it.
+        assert_eq!(
+            plan_rw_flags(unknown | RWF_NOWAIT, true),
+            Err(super::errno::EINVAL)
+        );
+    }
 
     // ---- tee(2)'s transfer loop -------------------------------------------
     //

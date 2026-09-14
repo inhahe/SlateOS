@@ -143221,6 +143221,19 @@ The comment is accurate about the mechanism and it names the consequence — and
 the consequence is a silent total loss. The kernel allows 256 KiB each for argv
 and envp, so the reachable gap was four to eight times the buffer.
 
+**The libc contradicted itself, which is what decides who this bug bites.**
+`sysconf(_SC_ARG_MAX)` returns `ARG_MAX`, and `posix/src/limits.rs` sets that to
+**131,072 — 128 KiB**, with a test asserting the value. So the library told every
+program it could pass 128 KiB of arguments, and then threw all of them away
+above 64 KiB. A program that consults `sysconf(_SC_ARG_MAX)` and packs up to
+the number it is given is doing the careful, correct thing; it is exactly the
+program that loses its arguments, at precisely half the advertised limit, with
+no error. The careless program that passes a handful of arguments never notices.
+
+(The remaining mismatch is in the safe direction and is left alone: libc
+advertises 128 KiB where the kernel accepts 256 KiB each for argv and envp, so
+a caller obeying `ARG_MAX` is under the kernel's limit rather than over it.)
+
 What makes it worse than a size limit is that **the kernel's side of the
 protocol was already built**. `kernel/src/syscall/handlers.rs`:
 

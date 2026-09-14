@@ -131699,6 +131699,70 @@ test can take it, is to ask the palette — `palette.surface_paint(Surface::Cont
 — rather than naming a shade, which is what the system tray's slider test now
 does.
 
+## TD-C-THE-NOTIFICATIONS-PAGE-HAS-NO-PROGRAMS-TO-LIST
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the Settings application's Notifications page works, and on a
+real machine it will be empty. It lists the programs the user has a rule
+for, and nothing ever creates the first rule. The desktop is the only thing
+that sees which programs send notifications, and it has no way to tell the
+Settings application — they are separate processes and there is no verb for
+it.
+
+**Where:** `apps/settings/src/main.rs` — `build_notifications_page` renders
+`self.notif.settings.apps`. `gui/desktop/src/lib.rs` — `DesktopShell::notify`
+is where a program first becomes known.
+
+### The obvious fix was tried and is wrong
+
+Have `notify` record a default rule for a program it has not seen, and save
+the file. Written, and it fails for a reason worth keeping:
+
+**It writes a configuration file from the notification path.** Every test
+in `gui/desktop` that posts a notification — and many do — would write
+`notifications.yaml` into whatever `XDG_CONFIG_HOME` is set at that moment.
+For a test not wrapped in `with_scratch_config` that is *the developer's own*
+`~/.config/slateos/notifications.yaml*. For one running while another test
+holds a scratch turn, it is that test's fixture.
+
+It was caught by the second kind: `a_rule_written_to_the_config_file_lets_
+that_program_through` passed alone and failed in the full run. A test that
+passes in isolation and fails in company is shared state, and the shared
+state here was a real file on a real disk.
+
+This is the same family as
+`TD-C-A-TEST-THAT-WRITES-TO-AN-ABSOLUTE-POSIX-PATH-WRITES-TO-THE-DEV-DRIVE-ROOT`,
+which has a whole script guarding it. The lesson generalises further than
+either: **a settings write does not belong on a path that runs in response
+to something a program did.** It belongs on a path that runs in response to
+something a *person* did.
+
+### What the fix actually needs
+
+The list of programs that notify is *live desktop state*, like the window
+list and the tray. It is not a setting, and pushing it through a settings
+file to get it into another process is using the wrong pipe — which is
+precisely why the wrong pipe leaked.
+
+The shape the tree already has for exactly this is a subscription: the
+compositor carries a list, a shell or a settings application asks for it,
+and it is pushed when it changes. `SubscribeWindowList` and
+`SubscribeTrayIcons` are both this, gated through `require_shell`. A third
+would be `SubscribeNotifiers` — the programs that have sent a notification
+this session — and the Settings page would list the union of that and the
+rules already in the file.
+
+**Blocked on nothing, and deliberately not started here.** It is a protocol
+addition with a privilege question attached (the list of programs that
+notify you is not public), and it should begin a session rather than end
+one. What is above is the whole of the preparation: the fix that looks
+obvious, the measurement that killed it, and the shape the tree already uses.
+
+**Meanwhile the page is correct and honest.** With no rules it says
+"Programs appear here once they have sent you a notification", which is
+true, and describes the feature this entry is about rather than pretending
+to be finished.
 ## TD-C-ELEVEN-SETTINGS-PAGES-SAY-COMING-SOON-AND-FIVE-OF-THEM-ARE-ALREADY-WRITTEN
 
 **Date:** 2026-09-14. **Lane:** C.

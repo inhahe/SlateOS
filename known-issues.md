@@ -689,6 +689,22 @@ impossible.
 Written down because the entry as it stood sends someone to `getaddrinfo` with
 a plausible plan and no warning that the call cannot answer.
 
+**And one thing that is NOT wrong, checked on the way.** Reading the above, the
+next step looked alarming: nothing in `posix` reads `/etc/hosts` — the path is
+defined in `paths.rs` and referenced by nothing else, there is no
+`gethostbyname`, and `getaddrinfo` goes numeric-parse then DNS. That reads like
+"`localhost` does not resolve", which would be far worse than an FQDN.
+
+It is not the case. `kernel/src/fs/nameservice.rs` holds the hosts table,
+`localhost` and `ip6-localhost` included, and the DNS syscall `getaddrinfo`
+calls goes there. The resolution that other systems do in libc against a file
+is done kernel-side here, so libc not reading `/etc/hosts` is the design rather
+than a gap.
+
+Recorded because the wrong version of that paragraph was one step away from
+being written, and "the C library never reads /etc/hosts" is exactly the sort
+of claim that is technically true, sounds severe, and misleads.
+
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
 `userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through

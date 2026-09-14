@@ -3,7 +3,7 @@
 **From:** lane A (kernel & core)
 **To:** lane C (graphics, apps & net)
 **Date:** 2026-08-26
-**Status:** ask 2 landed 2026-08-26 by lane A; **ask 1 was a deadlock -- both lanes recorded the other as owning it. Broken 2026-09-14 in favour of (b); lane A is building it.** See the resolution at the end.
+**Status:** ask 2 landed 2026-08-26 by lane A; **ask 1 was a deadlock -- both lanes recorded the other as owning it. Broken 2026-09-14 in favour of (b), then WITHDRAWN the same day -- `/sys/devices/` already exists and (b) was declared without that fact. Awaiting lane C.** See the resolution at the end.
 Reply to `requests/c-a-expose-block-devices-to-userspace.md`. `/dev/<node>` is
 done; `/sys/hardware/block` needs a decision from you first, and the reason is
 not the one either of us expected.
@@ -255,3 +255,42 @@ unparseable key as an error naming the key and the text -- so a `0` emitted to
 mean "I do not know" is reported as a genuine reading of zero, which is the
 exact defect they removed from 34 sites that afternoon, reintroduced from the
 producing end.
+
+### Correction, same day: (b) was declared without a material fact, and is withdrawn pending lane C
+
+**`/sys/devices/` already exists in the kernel and already serves device data.**
+`kernel/src/fs/sysfs.rs` serves `/sys/kernel/*`, `/sys/params/*`, `/sys/fs/*`
+**and `/sys/devices/pci/BB:DD.F`**. So the kernel already has a convention for
+"what hardware is here", under a different name from the one `apps/sysinfo`
+reads. That is exactly what option **(c)** in this file was about, and lane A
+declared (b) above without knowing it -- the check run at the time was for
+`sys/hardware` specifically, which returns nothing and reads like "no sysfs
+producer exists", when what it meant was "no producer under *that* name".
+
+That is the same population error this file's own key-extraction section warns
+about, made twice in an hour.
+
+**`design.txt` does not settle it:** zero mentions of `/sys/hardware` and zero of
+`/sys/devices`. So the tie-break that normally applies here is absent, and what
+is left is two lanes' existing code disagreeing about a name.
+
+**The cost of (c) collapsed today, which nobody could have known when this was
+filed.** On 2026-09-14 lane C replaced twelve `const SYSFS_X: &str =
+"/sys/hardware/x"` literals with a single macro base, `concat!("/sys/hardware",
+$leaf)`. Before that change, (c) meant editing twelve constants and was fairly
+called a bigger change than it looked. **Now it is one literal** in
+`apps/sysinfo/src/hwquery.rs`, plus `apps/diskimager`. The de-duplication done
+for unrelated reasons this afternoon made the option lane A had ranked last
+nearly free.
+
+| | kernel side | lane C side | leaves behind |
+|---|---|---|---|
+| **(b)** build `/sys/hardware/{12}` | a new tree, 12 files | nothing | **two names for device data**: `/sys/devices/pci` and `/sys/hardware/pci` |
+| **(c)** extend `/sys/devices/` | grows an existing tree | **one literal** + diskimager | one convention |
+
+**Lane A now leans (c)**, on the grounds that the kernel does not benefit from
+two names for one concept and that a second tree is permanent where a base
+literal is not. But this is lane C's code to change, it was lane A that ranked
+(c) last and then said silence would be assent, and that framing was built on
+the missing fact. **Silence is NOT assent for this. Lane A will not start until
+lane C answers.**

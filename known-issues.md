@@ -144458,6 +144458,20 @@ permutation out of 20,745!.
 
 ## B-FOUR-STAGED-UTILITIES-STILL-DIE-ON-A-LEGAL-FILENAME (lane B, 2026-09-14)
 
+**Three of the four are done as of 2026-09-14.** `patch` and `diff` were
+converted (and both turned out to have a larger content-side fault behind
+the argv one), and `logger` is done here. **`ps` is the one left**, and it
+is the mildest of the four: its options are numeric and format selectors,
+so a non-Unicode argument is unlikely rather than routine — but it still
+aborts rather than refusing.
+
+`logger` had the argv panic AND a second fault the argv detector cannot
+see: `BufRead::lines()` on stdin yields `Result<String>` and fails the
+whole read on one undecodable byte, so `cat something-binary | logger`
+logged nothing and reported an I/O error — for input a log is exactly the
+right place to put. Same shape as `diff`'s: the argv detector found the
+door, and the bigger hole was inside.
+
 **In short:** four of the 72 programs on the image abort with a Rust panic if
 any argument is not valid Unicode. On this OS a filename may hold every byte
 except `/` and NUL — that is `design.txt`, not an implementation accident — so

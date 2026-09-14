@@ -1976,17 +1976,6 @@ that cannot work on this system.
 **Where it bites:** `userspace/sbctl/src/main.rs`; `roadmap.md:3835`, which
 claimed this was done and now says `[~]`;
 `requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`.
-
-# Resolved
-
-**The body above holds OPEN questions only.** When the operator answers one,
-write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from the body**, and add one line here. That is the whole
-point of the file: it is scanned for what still needs a decision, so an
-answered question left in the body is pure cost — and, being older, it sorts
-*first*, right where it is most in the way. (Why this is not append-only:
-`design-decisions.md` §437.)
-
 ## B-Q18 — [B] My roadmap list is down to three huge ports. Which one, and is now the time? — Status: OPEN
 
 **In short:** The list of jobs assigned to me has run out, except for three
@@ -2054,6 +2043,17 @@ is option D, and the three ports stay unstarted. The cost of leaving it is not
 risk but direction: the project keeps getting more correct without getting
 more capable, and at some point that becomes the wrong trade. There is no
 deadline on answering.
+
+
+# Resolved
+
+**The body above holds OPEN questions only.** When the operator answers one,
+write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from the body**, and add one line here. That is the whole
+point of the file: it is scanned for what still needs a decision, so an
+answered question left in the body is pure cost — and, being older, it sorts
+*first*, right where it is most in the way. (Why this is not append-only:
+`design-decisions.md` §437.)
 
 ## Resolved — lane A
 

@@ -38,7 +38,6 @@ userspace/chroot/src/main.rs:argv-as-string
 userspace/column/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string
-userspace/coreutils/src/bin/logger.rs:argv-as-string
 userspace/coreutils/src/bin/ps.rs:argv-as-string
 userspace/cpio/src/main.rs:argv-as-string
 userspace/cpupower/src/main.rs:argv-as-string

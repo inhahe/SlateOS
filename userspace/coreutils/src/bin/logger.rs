@@ -11,10 +11,12 @@
 //!   <priority> YYYY-MM-DDTHH:MM:SS TAG: MESSAGE
 
 use coreutils::diag;
+use coreutils::quote::os_bytes;
 use coreutils::quote::quoteaf_os;
 use coreutils::stdfd;
 use std::env;
-use std::io::{self, BufRead, BufReader, Write};
+use std::ffi::OsString;
+use std::io::{self, BufReader, Read, Write};
 use std::process::ExitCode;
 use std::time::SystemTime;
 
@@ -141,16 +143,16 @@ fn is_leap(y: u64) -> bool {
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct LoggerArgs {
-    tag: String,
-    priority: String,
-    message_parts: Vec<String>,
+    tag: Vec<u8>,
+    priority: Vec<u8>,
+    message_parts: Vec<Vec<u8>>,
 }
 
 impl Default for LoggerArgs {
     fn default() -> Self {
         Self {
-            tag: "user".to_string(),
-            priority: "user.notice".to_string(),
+            tag: b"user".to_vec(),
+            priority: b"user.notice".to_vec(),
             message_parts: Vec::new(),
         }
     }
@@ -158,7 +160,16 @@ impl Default for LoggerArgs {
 
 /// Parse logger's argv into a `LoggerArgs`.  Returns an error string suitable
 /// for `eprintln!("logger: {e}")` if a `-t` / `-p` flag is missing its value.
-fn parse_args(args: &[String]) -> Result<LoggerArgs, String> {
+/// Parse `logger`'s command line.
+///
+/// Arguments arrive as `OsString` and the values stay bytes. The MESSAGE is
+/// the reason: `logger "$(cat somefile)"` is an ordinary thing to write, and
+/// `env::args()` unwraps, so a single byte that is not valid Unicode in that
+/// message aborted the process instead of logging anything.
+///
+/// Option NAMES are ASCII, so they are matched on the raw bytes directly --
+/// there is nothing to decode and so nothing to lose.
+fn parse_args(args: &[OsString]) -> Result<LoggerArgs, String> {
     let mut out = LoggerArgs::default();
     let mut i: usize = 0;
     let mut options_ended = false;
@@ -166,40 +177,44 @@ fn parse_args(args: &[String]) -> Result<LoggerArgs, String> {
         let Some(arg) = args.get(i) else { break };
         i = i.saturating_add(1);
 
+        // The raw bytes. Every option this accepts is ASCII, so the whole
+        // parse can be done on them and no value ever needs decoding.
+        let raw = os_bytes(arg.as_os_str()).into_owned();
+
         // `--` ends the options. Everything after it is message text, which is
         // the only way to log a message that begins with a dash.
-        if !options_ended && arg == "--" {
+        if !options_ended && raw == b"--" {
             options_ended = true;
             continue;
         }
         // A bare `-` is a message, not an option, and always has been.
-        if options_ended || !arg.starts_with('-') || arg == "-" {
-            out.message_parts.push(arg.clone());
+        if options_ended || !raw.starts_with(b"-") || raw == b"-" {
+            out.message_parts.push(raw);
             continue;
         }
 
         // An option's value may be glued on (`-tX`) or be the next argument
         // (`-t X`). util-linux accepts both.
-        let take_value = |letter: char, rest: &str, i: &mut usize| -> Result<String, String> {
+        let take_value = |letter: u8, rest: &[u8], i: &mut usize| -> Result<Vec<u8>, String> {
             if !rest.is_empty() {
-                return Ok(rest.to_string());
+                return Ok(rest.to_vec());
             }
             let Some(v) = args.get(*i) else {
                 return Err(format!(
                     "option requires an argument -- {}",
-                    quoteaf_os(letter.to_string())
+                    quoteaf_os(OsString::from(String::from(letter as char)))
                 ));
             };
             *i = i.saturating_add(1);
-            Ok(v.clone())
+            Ok(os_bytes(v.as_os_str()).into_owned())
         };
 
-        let body = arg.strip_prefix('-').unwrap_or(arg);
-        if let Some(long) = body.strip_prefix('-') {
+        let body = raw.strip_prefix(b"-").unwrap_or(&raw);
+        if let Some(long) = body.strip_prefix(b"-") {
             // Long options. None is implemented; refusing is still right,
             // because the alternative -- which this did until 2026-09-12 --
             // is to LOG the option text as the message.
-            let name = long.split('=').next().unwrap_or(long);
+            let name = long.split(|&b| b == b'=').next().unwrap_or(long);
             let _ = name;
             return Err(format!("unrecognized option {}", quoteaf_os(arg)));
         }
@@ -209,21 +224,22 @@ fn parse_args(args: &[String]) -> Result<LoggerArgs, String> {
         // never a second letter to read. Clippy pointed out that the `while`
         // this started as could not iterate twice; writing it as a loop would
         // have implied a clustering rule that does not exist here.
-        let mut chars = body.chars();
-        let Some(c) = chars.next() else {
+        let Some((&c, rest)) = body.split_first() else {
             // A lone `-` is handled above as a message, so an empty body here
             // cannot happen; treat it as a message rather than panicking.
-            out.message_parts.push(arg.clone());
+            out.message_parts.push(raw);
             continue;
         };
-        let rest: String = chars.collect();
         match c {
-            't' => out.tag = take_value('t', &rest, &mut i)?,
-            'p' => out.priority = take_value('p', &rest, &mut i)?,
+            b't' => out.tag = take_value(b't', rest, &mut i)?,
+            b'p' => out.priority = take_value(b'p', rest, &mut i)?,
             other => {
+                // The BYTE, rendered the way glibc renders one: a non-ASCII
+                // option is reported in octal rather than as whatever character
+                // it might begin, which is what `coreutils::getopt` does too.
                 return Err(format!(
                     "invalid option -- {}",
-                    quoteaf_os(other.to_string())
+                    coreutils::quote::quote_glibc(&[other])
                 ));
             }
         }
@@ -233,8 +249,15 @@ fn parse_args(args: &[String]) -> Result<LoggerArgs, String> {
 
 /// Render one log line in the syslog-style text format the rest of the OS
 /// expects: `<PRI> TIMESTAMP TAG: MESSAGE`.
-fn format_log_line(pri: u32, timestamp: &str, tag: &str, msg: &str) -> String {
-    format!("<{pri}> {timestamp} {tag}: {msg}")
+fn format_log_line(pri: u32, timestamp: &str, tag: &[u8], msg: &[u8]) -> Vec<u8> {
+    // Assembled as bytes. The tag and the message are the user's, and a log
+    // line that replaced a byte it could not decode would be a record of
+    // something other than what happened.
+    let mut line: Vec<u8> = format!("<{pri}> {timestamp} ").into_bytes();
+    line.extend_from_slice(tag);
+    line.extend_from_slice(b": ");
+    line.extend_from_slice(msg);
+    line
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -246,7 +269,10 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
+    // `args_os`, not `args`: the latter unwraps, so one byte of a message
+    // that is not valid Unicode aborted the process before anything was
+    // logged.
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
@@ -255,10 +281,18 @@ fn run_main() -> ExitCode {
         }
     };
 
-    let pri = match parse_priority(&parsed.priority) {
+    // A priority that is not valid UTF-8 names no facility, so it takes the
+    // `unknown priority` path rather than panicking on the way to it.
+    let pri = match std::str::from_utf8(&parsed.priority)
+        .ok()
+        .and_then(parse_priority)
+    {
         Some(p) => p,
         None => {
-            diag!("logger: unknown priority: {}", parsed.priority);
+            diag!(
+                "logger: unknown priority: {}",
+                coreutils::quote::quotef(&parsed.priority)
+            );
             return ExitCode::from(1);
         }
     };
@@ -269,29 +303,31 @@ fn run_main() -> ExitCode {
 
     if parsed.message_parts.is_empty() {
         // Read messages from stdin, one per line.
-        let reader = BufReader::new(io::stdin());
-        for line in reader.lines() {
-            match line {
-                Ok(msg) => {
-                    let _ = writeln!(
-                        out,
-                        "{}",
-                        format_log_line(pri, &timestamp, &parsed.tag, &msg)
-                    );
-                }
-                Err(e) => {
-                    diag!("logger: {e}");
-                    return ExitCode::from(1);
-                }
+        // READ AS BYTES. `BufRead::lines()` yields `Result<String>` and fails
+        // the whole read on a byte that is not valid UTF-8, so
+        // `cat something-binary | logger` logged nothing and reported an I/O
+        // error -- for input a log is exactly the right place to put.
+        let mut reader = BufReader::new(io::stdin());
+        let mut buf: Vec<u8> = Vec::new();
+        if let Err(e) = reader.read_to_end(&mut buf) {
+            diag!("logger: {e}");
+            return ExitCode::from(1);
+        }
+        for msg in buf.split(|&b| b == b'\n') {
+            // A trailing newline ends the last line rather than starting an
+            // empty one, which is what `lines()` did.
+            if msg.is_empty() && buf.ends_with(b"\n") {
+                continue;
             }
+            let mut line = format_log_line(pri, &timestamp, &parsed.tag, msg);
+            line.push(b'\n');
+            let _ = out.write_all(&line);
         }
     } else {
-        let msg = parsed.message_parts.join(" ");
-        let _ = writeln!(
-            out,
-            "{}",
-            format_log_line(pri, &timestamp, &parsed.tag, &msg)
-        );
+        let msg = parsed.message_parts.join(&b' ');
+        let mut line = format_log_line(pri, &timestamp, &parsed.tag, &msg);
+        line.push(b'\n');
+        let _ = out.write_all(&line);
     }
 
     ExitCode::SUCCESS
@@ -302,8 +338,43 @@ fn run_main() -> ExitCode {
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    /// A message holding a byte that is not valid Unicode survives to the log.
+    ///
+    /// `logger "$(cat somefile)"` is an ordinary thing to write, and
+    /// `env::args()` unwraps, so one such byte aborted the process before
+    /// anything was logged. The tag has the same problem and the same fix.
+    ///
+    /// UNIX ONLY, and not from timidity: on a Windows host an `OsString`
+    /// cannot HOLD the byte in the first place. `quoting::os_from_bytes`
+    /// documents that its round trip is exact only on the target, and the
+    /// host branch goes through `from_utf8_lossy` -- so this test run there
+    /// compares `caf` + U+FFFD against `caf\\xe9` and fails on the fixture
+    /// rather than on the code. Measured that way round before gating it.
+    /// `scripts/check-cfg-unix.py` compiles this for linux with
+    /// `--all-targets`, so it cannot rot unnoticed.
+    #[cfg(unix)]
+    #[test]
+    fn a_message_that_is_not_utf8_survives() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let arg = std::ffi::OsString::from_vec(b"caf\xe9".to_vec());
+        let got = parse_args(&[arg]).expect("a non-Unicode message is not an error");
+        assert_eq!(got.message_parts, vec![b"caf\xe9".to_vec()]);
+    }
+
+    /// The line carries the tag and the message byte for byte.
+    ///
+    /// A log that replaced a byte it could not decode would be a record of
+    /// something other than what happened.
+    #[test]
+    fn the_log_line_carries_bytes_verbatim() {
+        let line = format_log_line(13, "T", b"tag\xe9", b"msg\xff");
+        assert_eq!(line, b"<13> T tag\xe9: msg\xff");
+    }
+
+    /// argv for a test, as `parse_args` now takes it. Only the element type
+    /// moved; every call site and assertion below is the one that was there.
+    fn s(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
     }
 
     /// AN UNKNOWN OPTION USED TO BECOME THE MESSAGE.
@@ -349,35 +420,35 @@ mod tests {
     #[test]
     fn a_message_can_still_begin_with_a_dash() {
         let a = parse_args(&s(&["--", "-dashmsg"])).expect("-- ends the options");
-        assert_eq!(a.message_parts, vec!["-dashmsg".to_string()]);
+        assert_eq!(a.message_parts, vec![b"-dashmsg".to_vec()]);
         // A bare `-` was never an option and still is not.
         let bare = parse_args(&s(&["-"])).expect("a bare dash is a message");
-        assert_eq!(bare.message_parts, vec!["-".to_string()]);
+        assert_eq!(bare.message_parts, vec![b"-".to_vec()]);
         // Everything after `--` is message, including things that look like
         // options we DO implement.
         let after = parse_args(&s(&["--", "-t", "x"])).expect("all message");
-        assert_eq!(after.message_parts, vec!["-t".to_string(), "x".to_string()]);
+        assert_eq!(after.message_parts, vec![b"-t".to_vec(), b"x".to_vec()]);
     }
 
     /// An option's value may be glued on, which util-linux accepts and this
     /// did not: `logger -tX hello` tags the line `X`.
     #[test]
     fn an_option_value_may_be_glued_or_separate() {
-        assert_eq!(parse_args(&s(&["-tX", "hi"])).expect("glued").tag, "X");
+        assert_eq!(parse_args(&s(&["-tX", "hi"])).expect("glued").tag, b"X");
         assert_eq!(
             parse_args(&s(&["-t", "X", "hi"])).expect("separate").tag,
-            "X"
+            b"X"
         );
         assert_eq!(
             parse_args(&s(&["-pkern.err"])).expect("glued").priority,
-            "kern.err"
+            b"kern.err"
         );
         let both = parse_args(&s(&["-tX", "-pkern.err", "hi"])).expect("both");
         assert_eq!(
-            (both.tag.as_str(), both.priority.as_str()),
-            ("X", "kern.err")
+            (both.tag.as_slice(), both.priority.as_slice()),
+            (b"X".as_slice(), b"kern.err".as_slice())
         );
-        assert_eq!(both.message_parts, vec!["hi".to_string()]);
+        assert_eq!(both.message_parts, vec![b"hi".to_vec()]);
     }
 
     // ---------------- facility_code ----------------
@@ -521,13 +592,13 @@ mod tests {
     #[test]
     fn args_dash_t_sets_tag() {
         let a = parse_args(&s(&["-t", "myapp"])).unwrap();
-        assert_eq!(a.tag, "myapp");
+        assert_eq!(a.tag, b"myapp");
     }
 
     #[test]
     fn args_dash_p_sets_priority() {
         let a = parse_args(&s(&["-p", "kern.err"])).unwrap();
-        assert_eq!(a.priority, "kern.err");
+        assert_eq!(a.priority, b"kern.err");
     }
 
     /// These two asserted only that the message CONTAINED `-t` / `-p`, which
@@ -551,28 +622,28 @@ mod tests {
     #[test]
     fn args_collects_message_parts() {
         let a = parse_args(&s(&["hello", "world"])).unwrap();
-        assert_eq!(a.message_parts, vec!["hello", "world"]);
+        assert_eq!(a.message_parts, vec![b"hello".to_vec(), b"world".to_vec()]);
     }
 
     #[test]
     fn args_mixed_flags_and_message() {
         let a = parse_args(&s(&["-t", "tag1", "first", "-p", "user.info", "second"])).unwrap();
-        assert_eq!(a.tag, "tag1");
-        assert_eq!(a.priority, "user.info");
-        assert_eq!(a.message_parts, vec!["first", "second"]);
+        assert_eq!(a.tag, b"tag1");
+        assert_eq!(a.priority, b"user.info");
+        assert_eq!(a.message_parts, vec![b"first".to_vec(), b"second".to_vec()]);
     }
 
     // ---------------- format_log_line ----------------
 
     #[test]
     fn format_log_line_basic() {
-        let line = format_log_line(13, "2024-01-01T00:00:00", "myapp", "hello");
-        assert_eq!(line, "<13> 2024-01-01T00:00:00 myapp: hello");
+        let line = format_log_line(13, "2024-01-01T00:00:00", b"myapp", b"hello");
+        assert_eq!(line, b"<13> 2024-01-01T00:00:00 myapp: hello");
     }
 
     #[test]
     fn format_log_line_empty_message() {
-        let line = format_log_line(0, "1970-01-01T00:00:00", "kern", "");
-        assert_eq!(line, "<0> 1970-01-01T00:00:00 kern: ");
+        let line = format_log_line(0, "1970-01-01T00:00:00", b"kern", b"");
+        assert_eq!(line, b"<0> 1970-01-01T00:00:00 kern: ");
     }
 }

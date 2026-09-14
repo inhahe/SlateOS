@@ -161,6 +161,24 @@ the tree that needed two sockets alive at the same time. It failed on three
 consecutive boots. The first two explanations were wrong; the third was found by
 reading the daemon's code.
 
+**The first casualty is the GUI, not networking, and it fails silently somewhere
+else.** On SlateOS the window system's own connection is a network connection:
+`gui/remote/src/socket.rs` is built on `TcpListener`/`TcpStream`, and its doc
+says the listener "is the compositor's end". So for any windowed program, the
+display connection **is** socket number one.
+
+That means the program that opens a second socket does not see the second one
+fail. It sees its **window** die — the display connection is what the daemon
+tears down. Thirteen apps call `oswindow::app::launch` today and none opens a
+second socket, so nothing is broken right now. The first one that fetches
+anything would be reported as "the browser closes itself when it loads a page",
+and the fault would be hunted in the browser, or the compositor, or the window
+system — anywhere but the network daemon that actually did it.
+
+This is the strongest argument for fixing it before something needs it: the
+symptom appears in a different subsystem from the cause, so the day it bites it
+costs somebody a long hunt in the wrong place.
+
 **The options:**
 
 * **A. One ring shared by all sockets.** The kernel allocates a single ring at
@@ -171,8 +189,11 @@ reading the daemon's code.
 * **B. The daemon keeps several rings mapped.** It holds a table of rings instead of
   one, and serves whichever a message arrives on.
   *What changes:* two connections work and stay independent. More memory per
-  program, and a fixed ceiling on how many can be open. Work is in the daemon,
-  which is not lane A's to write.
+  program, and a fixed ceiling on how many can be open. The work is in
+  `services/netstack`, which is **lane B's** (`roadmap.md` line 156, and the
+  lane table in `CLAUDE.md`) -- named explicitly because an option addressed to
+  no particular lane is how two request files sat for ten days this month, each
+  recording the other lane as owner.
 * **C. Both, later.** Ship A now because it is one lane's work and unblocks
   everything, and revisit B if one connection starving another turns out to matter
   in practice.

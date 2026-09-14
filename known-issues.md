@@ -68805,10 +68805,19 @@ Also: `println!` panics on a write error, so `env | head -1` produced a panic
 message. Checked writes, `BrokenPipe` the one deliberate success — the same
 family as `tee`, `tar`, `dd`, `stat` and `kill`.
 
-**Not implemented:** `-S`/`--split-string`, GNU's `#!`-line helper. It is a
-quoting grammar rather than a flag, nothing in the tree uses it (verified: no
-`env -S` anywhere in `userspace/`, `services/`, `init/`, `scripts/`), and the
-proper shape for it is recorded in `todo.txt`.
+**`-S`/`--split-string`: implemented 2026-09-14**, which took `env-diff.sh` to
+59 passed / 0 differed. The grammar was measured first (58 cases,
+`scripts/probe-env-split-string.sh` plus four companion probes) rather than
+written from the documentation, and three rules would have been wrong
+otherwise: `\t` puts a tab *inside* an argument where a raw tab separates;
+only `${NAME}` expands, never re-splitting; and an unset variable contributes
+no argument where a set-but-empty one contributes an empty one. `\a`, `\b` and
+`\e` are rejected by GNU despite being standard C escapes.
+
+The `todo.txt` design for it was wrong on its central point — it held that
+`${VAR}` must expand against the environment `env` is building, and GNU
+expands against the *process* environment, ignoring `-i`, `-u` and assignments
+alike.
 
 **Eight for eight.**
 

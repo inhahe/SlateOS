@@ -148,14 +148,23 @@ echo "=== $n cases ==="
 #   * Expansion does NOT re-split: ${VAR} holding "p q" is ONE argument. (46)
 #
 # ESCAPES (outside quotes and inside double quotes, except where noted)
-#   \\  literal backslash (10)        \t  TAB *within* the argument -- it does
-#   \#  literal #        (14)             not split, unlike a raw tab (11,58)
-#   \$  literal $        (15)         \n  newline within the argument (12)
-#   \_  a SPACE: splits when unquoted (9), literal space inside "" (51)
-#   \c  ends the string; the rest is dropped (13). ERROR inside "" (53):
-#       "'\c' must not appear in double-quoted -S string"
-#   Anything else, including `\ `, is an error (16,17):
-#       "invalid sequence '\q' in -S"
+#   The accepted set is CLOSED and was enumerated by round 4
+#   (scripts/probe-env-split-escapes.sh), not sampled. It has to be: an
+#   unknown escape is an ERROR, so every escape left out of the
+#   implementation becomes a refusal GNU does not give.
+#
+#     \f \r \v \t \n   the control character, placed WITHIN the argument --
+#                      \t does not split, unlike a raw tab (11,58)
+#     \\ \" \' \# \$   that literal character
+#     \_               a SPACE: splits when unquoted (9), literal inside "" (51)
+#     \c               ends the string, rest dropped (13). ERROR inside "" (53):
+#                      "'\c' must not appear in double-quoted -S string"
+#
+#   EVERYTHING else is "invalid sequence '\q' in -S", rc 125 -- including
+#   `\ `, and including \a \b \e \0 \x, which are the ones worth naming
+#   because they are standard C escapes that GNU's -S does NOT accept.
+#   A backslash at the very end has its own message:
+#       "invalid backslash at end of string in -S"
 #
 # QUOTING
 #   * '...' is fully literal: no escapes, no expansion (25,37,49,52,54)
@@ -183,4 +192,19 @@ echo "=== $n cases ==="
 #     This is the one place the bare-$ rule hides a real difference: round 1
 #     tested unset/empty/spacey values with `$VAR` and so measured the
 #     bare-$ error three times and the expansion rules zero times.
+#
+# OPTIONS INSIDE THE STRING (round 3, scripts/probe-env-split-options.sh)
+#   * They ARE honoured: `-S'-i cmd'` clears the environment, and
+#     `-S'--unset=FOO cmd'` removes FOO. So the split words re-enter the
+#     option parser; they are not plain operands. This is what decides the
+#     implementation's shape.
+#   * An option AFTER the command in the string is an argument to it, as
+#     usual: `-S'printf [%s] -i'` prints `[-i]`.
+#   * Options may precede -S (`env -i -S'...'`), and argv after the -S word
+#     is appended to the command's arguments.
+#   * `-S` is only an option while options are still being read:
+#     `env Y=2 -S'...'` is rc 127, `-S...`: No such file or directory --
+#     because Y=2 is an operand and operands end the options.
+#   * A string that splits to nothing (empty, all spaces, only a comment)
+#     leaves no command, so env prints the environment, rc 0.
 # ===========================================================================

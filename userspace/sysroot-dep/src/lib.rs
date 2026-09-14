@@ -54,9 +54,21 @@ const LIBC_A: &str = "toolchain/sysroot/lib/libc.a";
 /// Safe to call from any crate on any target: on a non-SlateOS target it does
 /// nothing, so a host `cargo test` is unaffected.
 pub fn emit() {
-    // `TARGET` is set for every build script. Absent means something is very
-    // wrong, and doing nothing is the right answer to that too.
-    let target = std::env::var("TARGET").unwrap_or_default();
+    // ABSENT AND "NOT SLATEOS" ARE DIFFERENT ANSWERS, and the first draft of
+    // this used `unwrap_or_default()`, which made them the same one.
+    // `check-read-defaults.py` refused the push for it, correctly: cargo sets
+    // `TARGET` for every build script, so a missing one is not a host build,
+    // it is a broken environment -- and silently treating it as "not SlateOS"
+    // would mean the archive goes untracked while everything reports success.
+    // That is precisely the no-op-that-looks-correct this crate exists to
+    // stop, reintroduced one level up.
+    let Ok(target) = std::env::var("TARGET") else {
+        println!(
+            "cargo:warning=sysroot-dep: TARGET is unset, so this build cannot              tell whether it links the sysroot; libc.a is NOT being tracked and              a libc rebuild will not relink this crate"
+        );
+        return;
+    };
+    // A host build links the platform's own libc and must not depend on ours.
     if !target.contains(SLATEOS) {
         return;
     }

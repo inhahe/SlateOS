@@ -375,7 +375,15 @@ impl<T: Transport> ShellSession<T> {
         // survived to disk and never came back -- the parts either side of the
         // door were tested and the door did not exist. That is the same defect
         // `apps/fileassoc` had the same morning, which is how it was noticed.
+        //
+        // `load_shortcuts` was the *third* instance, in this same file, and it
+        // was found by machine rather than by accident:
+        // `scripts/check-tested-but-uncalled.py` looks for a `save_x` called in
+        // production whose `load_x` is called only by tests. A user who rebound
+        // a key got their binding written to `shortcuts.yaml` and thrown away
+        // at the next start.
         shell.load_pinned();
+        shell.load_shortcuts();
         shell.populate_icons();
         let bar = shell.taskbar_rect();
 

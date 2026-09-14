@@ -144437,6 +144437,15 @@ editor's File menu grows three rows that are already written. Until then the
 editor is a file *editor* and not a file *creator*, which is a fair description
 of what ships but not of what a text editor is.
 
+**A second program has the same gap, found 2026-09-14 by
+`scripts/check-tested-but-uncalled.py`.** `apps/passwordgen`'s `export_history`
+renders the generated passwords as text and is called by nothing but its own
+test. There is no clipboard in that program and no way to name a file, so the
+string it builds has nowhere to go. It is not a save/load asymmetry -- nothing
+is lost -- but it is the same root cause: a finished feature whose only missing
+part is the ability to ask the user where to put something. Wiring it is one key
+binding *after* a picker exists, and guesswork before.
+
 **Not urgent, and worth saying why:** the editor opens files perfectly well
 when something else chooses them -- the file explorer's double-click, a command
 line, a future "Open with". The missing piece is only the case where the editor

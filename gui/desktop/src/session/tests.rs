@@ -91,11 +91,36 @@ fn a_session_starts_with_what_was_saved() {
                 .expect("the scratch config directory should be writable");
             exec
         };
+        // A rebound shortcut, which was the third instance of this same defect
+        // and the one a machine found rather than an accident.
+        let chord = crate::hotkeys::Hotkey::new(Key::F12, Modifiers::ctrl());
+        let action = {
+            let shell = first.shell_mut();
+            let action = shell
+                .hotkeys
+                .all_bindings()
+                .find(|(_, a)| !a.is_conditional())
+                .map(|(_, a)| a.clone())
+                .expect("no unconditional binding to rebind");
+            shell
+                .hotkeys
+                .register(chord, action.clone())
+                .expect("the chord is free");
+            shell
+                .save_shortcuts()
+                .expect("the scratch config directory should be writable");
+            action
+        };
         drop(first);
 
         // A second desktop, reading what the first one wrote.
         let (restarted, _d2, _turn) = session();
         let shell = restarted.shell();
+        assert_eq!(
+            shell.hotkeys.conflicts_with(&chord),
+            Some(&action),
+            "the rebound shortcut did not come back. The test in lib.rs that              asserts it survives a restart calls `load_shortcuts` by hand,              which is why nothing noticed the session never did."
+        );
         assert!(
             shell.is_pinned(&exec),
             "the pin did not come back: a pin that only reaches the disk is lost"

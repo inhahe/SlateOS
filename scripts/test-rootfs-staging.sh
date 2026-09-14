@@ -336,7 +336,7 @@ if [ -f "$REAL_MANIFEST" ]; then
         || bad "the shipped manifest names only $real_n binaries -- has it lost its contents?"
     fastpy_hit=""
     for n in cat chmod chown grep head ls mkdir mv rm rmdir tail uniq wc sh; do
-        if grep -qxE "[[:space:]]*$n[[:space:]]*" "$REAL_MANIFEST"; then
+        if grep -qxE "[[:space:]]*${n}[[:space:]]*" "$REAL_MANIFEST"; then
             fastpy_hit="$fastpy_hit $n"
         fi
     done
@@ -345,6 +345,83 @@ if [ -f "$REAL_MANIFEST" ]; then
 else
     bad "scripts/rootfs-bin-manifest.txt is missing"
 fi
+
+# 19. A multi-call alias gets created. `ar` is `ranlib` and `strip` when
+# invoked under those names, and that only works if something makes the name.
+# multicall-aliases.py found 167 such names tree-wide that nothing produces.
+slate_env
+mk_manifest ar "ranlib = ar"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ar"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+[ -e "$STAGE/bin/ranlib" ] && ok || bad "the alias should exist, got: $msg"
+case "$msg" in
+    *"created 1 multi-call alias"*) ok ;;
+    *) bad "the alias count should be reported, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 20. THE REFUSAL HALF. An alias whose producer is not staged would be a link
+# to nothing. It is NAMED, because a manifest that promises a name the image
+# does not have is a manifest error and silence is how it stays one.
+slate_env
+mk_manifest ar "ranlib = nosuchtool"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ar"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+[ ! -e "$STAGE/bin/ranlib" ] && ok || bad "an alias with no producer must not be created"
+case "$msg" in
+    *"no staged producer"*) ok ;;
+    *) bad "an orphaned alias must be named, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 21. An alias that collides with a real binary does NOT overwrite it. Same
+# reasoning as the collision guard above: two things want one name and the
+# script is not the place to decide which wins.
+slate_env
+mk_manifest ar "ranlib = ar"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ar"
+printf 'a real ranlib' > "$STAGE/bin/ranlib"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+if [ "$(cat "$STAGE/bin/ranlib")" = "a real ranlib" ]; then ok
+else bad "an existing name must not be replaced by an alias"; fi
+case "$msg" in
+    *"already exists"*) ok ;;
+    *) bad "the alias collision must be announced, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 22. The alias is a LINK to the producer, not an empty file -- a caller
+# invoking it must get the same program.
+slate_env
+mk_manifest ar "ranlib = ar"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ar"
+printf 'XX' >> "$ROOT_DIR/target/x86_64-slateos/release/ar"
+eval "$SLATE_BLOCK" >/dev/null 2>&1
+if [ "$(wc -c < "$STAGE/bin/ranlib")" = "$(wc -c < "$STAGE/bin/ar")" ]; then ok
+else bad "the alias must carry the producer's bytes"; fi
+rm -rf "$T"
+
+# 23. MORE THAN ONE ALIAS. The regression pin for the bug the unit tests could
+# not see: the accumulator joined specs with `$(printf ...)`, and command
+# substitution strips trailing newlines, so the separator was the empty string
+# and all three aliases arrived as one unparseable line. Every case above used
+# a single alias, so all of them passed while the image build printed
+# "ranlib(->arstrip = arkillall = kill)". One alias is not a test of a list.
+slate_env
+mk_manifest ar kill "ranlib = ar" "strip = ar" "killall = kill"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ar"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/kill"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+{ [ -e "$STAGE/bin/ranlib" ] && [ -e "$STAGE/bin/strip" ]   && [ -e "$STAGE/bin/killall" ]; } && ok     || bad "all three aliases should exist, got: $msg"
+case "$msg" in
+    *"created 3 multi-call alias"*) ok ;;
+    *) bad "three aliases should be counted, got: $msg" ;;
+esac
+case "$msg" in
+    *"no staged producer"*) bad "no alias should be orphaned here, got: $msg" ;;
+    *) ok ;;
+esac
+rm -rf "$T"
 
 echo "test-rootfs-staging: $PASS/$((PASS + FAIL)) cases pass"
 [ "$FAIL" -eq 0 ]

@@ -70,6 +70,17 @@
 ar
 awk
 logrotate
+#
+# ALIASES. A line `name = producer` creates `name` as a second name for an
+# already-listed binary. Multi-call programs read argv[0] -- our `ar` is
+# `ranlib` and `strip` when invoked under those names -- and that only works if
+# something creates the name. `scripts/multicall-aliases.py` found 167 such
+# names across the tree that nothing produces; these are the ones whose
+# producer is actually on the image. `ranlib` in particular is not optional:
+# an autoconf build calls it straight after `ar`.
+ranlib = ar
+strip = ar
+killall = kill
 basename
 bc
 cal

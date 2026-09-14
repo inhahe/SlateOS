@@ -131936,7 +131936,7 @@ a 1920x1080 constant. Two readings of one number agree however wrong the
 number is. Each fix therefore adds a second screen size — `SMALL` in
 `menubar.rs`, an explicit 1024x768 in the others — because that, not the
 fix itself, is what stops it coming back.
-## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
+## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY -- DONE 2026-09-13
 
 **Date:** 2026-09-09. **Lane:** C.
 **Where:** `gui/desktop/src/a11y.rs` — 1,360 lines, referenced by nothing.

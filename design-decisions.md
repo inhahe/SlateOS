@@ -67346,6 +67346,28 @@ helps; only re-checking the *provenance* does, and provenance is a question you
 have to already be asking. The artifact volunteers nothing: a 40-hour-old log
 and a fresh one are the same bytes in the same place under the same name.
 
+**The documentation case, and it is the most common one.** Prose about a past
+state is indistinguishable, to a search, from a description of the present.
+Three instances on 2026-09-14, and in all three the text was **accurate when
+written**:
+
+| text | read as | actually |
+|---|---|---|
+| `main.rs`: "appregistry and startmenu **were** reachable only from `kshell`" | a current fact, and it priced a whole open question wrongly | a fixed condition, past tense |
+| five `scripts/*.py` matching `os-lane-[abc]` | four gates scanning a foreign worktree | four were a comment, a paragraph about a past bug, and a usage example |
+| `//!` dependency arrows: five modules say "-> appregistry" | a hub with five dependents | documentation; the code has one caller |
+
+This is worse than a stale artifact, because a document does not even carry an
+mtime a reader would think to check. A log at least *has* a timestamp that a
+careful reader might consult; a sentence in a module doc has nothing but tense,
+and `grep` does not read tense.
+
+**The remedy is not more careful reading.** It is to separate the two
+mechanically wherever the answer matters: filter comment lines, parse rather
+than match, and count call sites rather than name occurrences. Lane A read five
+grep hits as four gates and later read five doc arrows as five dependents, on
+the same day, having written the first lesson down in between.
+
 **The rule adopted.** Before reading an artifact as evidence about a run, assert
 it belongs to that run. In practice:
 

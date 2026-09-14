@@ -147283,5 +147283,57 @@ listener 100, and whether `OP_LISTEN` on an occupied id replaces, rejects, or
 silently succeeds -- `listen()` returned success here while `accept` found no
 listener, and exactly one of those is lying.
 
+**ROOT CAUSE, 2026-09-14, and it is not the listener id.** `net::socket`
+supports exactly **one socket at a time**. The constant id below is real but
+secondary: unique ids would be wiped just the same.
+
+The chain, each link read rather than inferred:
+
+1. `create_kind` calls `NetstackConn::open()` for **every** socket
+   (`socket.rs:356`).
+2. `NetstackConn::open()` calls `shm::create(...)` -- a **new SHM ring per
+   socket** (`netstack_client.rs:158`).
+3. The daemon holds **one** `RingSession` (`services/netstack/src/main.rs:2270`),
+   whose doc calls `handle` "the SHM handle of the **currently-mapped** ring".
+4. On seeing a different handle it resets everything (same file, 2594):
+
+        if session.handle != handle {
+            session.teardown(me);
+            session.conns = RingConns::new();
+            session.listeners = Listeners::new();
+            ...
+        }
+
+   The comment above it states the intent plainly: *"A different handle (or a
+   fresh start) opens a new session: tear down any prior mapping, map the new
+   region, and reset the connection table."*
+
+**So the witness's failure is fully explained.** `create(srv)` takes ring A;
+`listen(srv)` registers listener 100 on A and returns 0 -- genuinely, which is
+why no FAIL line printed. `create(c1)` takes ring B; the first daemon round-trip
+on B wipes A's listeners. `accept(srv)` arrives on A, the daemon switches back,
+wipes again, and answers *unknown listener*. Exactly the observed
+`InternalError`, 64 times, permanently.
+
+**Why no existing test caught it.** Every `net::socket` self-test uses one
+socket, or two that never both need daemon state alive at once. The server-socket
+test accepts from an **empty backlog** -- which needs no live peer. This witness
+is the first thing in the tree to require two sockets' daemon state
+simultaneously, and it is the first to fail.
+
+**What this means for `D-NETSOCK-SYNC`.** The head-of-line fix is about two
+accepted connections sharing a listener's session progressing independently.
+That property cannot be exercised through `net::socket` at all while a second
+socket destroys the first's session -- not because of a race or an id, but
+because the transport underneath does not hold two sockets' state. The witness
+was not wrong to be written; it was the first probe of a layer nobody had
+probed.
+
+**Ownership.** The daemon half is `services/netstack` (not lane A's). The kernel
+half -- one ring per socket, against a daemon that holds one -- is
+`net::socket`'s, and is lane A's. Neither is a small change, and the right shape
+(one shared ring for all sockets, or a daemon that maps several) is a design
+decision rather than a patch.
+
 **`D-NETSOCK-SYNC` still has ONE witness.** Three boots have now failed on this
 test and none of them said anything about the property.

@@ -3754,6 +3754,79 @@ mod tests {
 
     // --- BenchmarkApp tests ---
 
+    /// **Every colour this program draws comes from the user's palette.**
+    ///
+    /// The last of the roadmap's twelve theme-ignoring applications to get the
+    /// guard. It already drew from the palette; what it lacked was anything
+    /// that would notice if it stopped -- 47 shell modules call
+    /// `assert_drawn_from` and, when that item was written, no application did.
+    ///
+    /// Every tab, with results in hand, in both modes. An idle Overview is a
+    /// small fraction of what this program draws, and a sweep over one tab
+    /// would be a sweep over a population smaller than the app -- the failure
+    /// this file has been finding all week, in a test rather than in a gate.
+    #[test]
+    fn every_colour_the_benchmark_draws_comes_from_its_palette() {
+        let mut app = BenchmarkApp::new();
+        // Twice, so the comparison against a previous run is drawn too.
+        app.run_benchmark();
+        app.run_benchmark();
+
+        for light in [false, true] {
+            app.palette = Palette::for_mode(light);
+            // The three buttons label themselves with `appearance::readable_on`
+            // of their own fill, which answers with one of the palette's two
+            // extremes -- a colour this module computes and therefore owns,
+            // which is what `derived` is for. Declared as the inks *of these
+            // fills* rather than as the two literal values, so a fill that
+            // stops being a palette role stops being declared with it.
+            let derived: Vec<Color> = [
+                app.palette.surface0,
+                app.palette.surface1,
+                app.palette.blue,
+                app.palette.green,
+                app.palette.red,
+            ]
+            .iter()
+            .map(|fill| appearance::readable_on(*fill))
+            .collect();
+            // Hovered and not, idle and running. Each is a *different* fill
+            // on the same button, and a sweep that renders one of them checks
+            // one of them: the first version of this test rendered only the
+            // resting, idle state, and a hardcoded green pushed into the
+            // hover branch passed it untouched. That is the same defect this
+            // test exists to find, one level up, and it took a reintroduction
+            // proof to notice.
+            for hover in [false, true] {
+                app.run_button_hover = hover;
+                app.export_button_hover = hover;
+                app.clear_button_hover = hover;
+                for phase in [
+                    BenchPhase::Idle,
+                    BenchPhase::RunningCpu,
+                    BenchPhase::Complete,
+                ] {
+                    app.progress.phase = phase;
+                    for tab in Tab::all() {
+                        app.active_tab = *tab;
+                        let tree = App::render(&mut app, WINDOW_WIDTH, WINDOW_HEIGHT);
+                        assert!(
+                            tree.commands.len() > 20,
+                            "{tab:?} drew {} commands, which is not a render",
+                            tree.commands.len()
+                        );
+                        appearance::palette_check::assert_drawn_from(
+                            &app.palette,
+                            &tree.commands,
+                            &derived,
+                            &format!("benchmark {tab:?} (light={light}, hover={hover}, {phase:?})"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn app_new_starts_idle() {
         let app = BenchmarkApp::new();

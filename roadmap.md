@@ -1770,11 +1770,28 @@ Roadmap:
   crates, `SUBTEXT0` in 40, `RED`/`GREEN`/`BLUE` in 37 each. Those are copies of
   one palette, not forty considered choices.
 
-  **Do the twelve applications first** — `procexplorer` (45 constants),
-  `sysinfo` (26), `imageviewer` (25), `pdfviewer` (21), `musicplayer` (18),
-  `speedtest` (17), `explorer` (17), `devicemanager` (17), `pomodoro` (16),
-  `screenshot` (15), `benchmark` (15), `mixer` (14). A file manager and a
-  process explorer that stay dark on a light desktop are the visible failure.
+  **The twelve applications are done** (2026-09-14). `procexplorer` (was 45
+  constants), `sysinfo` (26), `imageviewer` (25), `pdfviewer` (21),
+  `musicplayer` (18), `speedtest` (17), `explorer` (17), `devicemanager` (17),
+  `pomodoro` (16), `screenshot` (15), `benchmark` (15) and `mixer` (14) all
+  draw from the palette now and all twelve carry `assert_drawn_from`, which is
+  the guard as well as the fix. `screenshot` keeps four constants and they are
+  the legitimate case the sweep has a `derived` list for: an annotation pen's
+  red and blue are a *tool* the user picked, not a theme colour.
+
+  `benchmark` was the last, and it is worth recording what the last one cost,
+  because the entry above says the count of constants is the measure and it is
+  not. `benchmark` had **zero** colour constants and 84 palette references --
+  by the measure in this entry it was already finished -- and the guard failed
+  on its first run anyway. Then the first version of the guard *passed* against
+  a hardcoded green deliberately pushed into a button's hover branch, because
+  the sweep rendered only the resting, idle state of one tab. A render is not a
+  program: this app has six tabs, three phases and a hover state, and a sweep
+  over one combination is a sweep over one combination. It renders all of them
+  now. Both facts were found by reintroduction, not by reading.
+
+  **Still open: the other ~56 crates.** 987 `const NAME: Color` declarations
+  over 68 crates was the original count; the twelve were the visible end of it.
   Thirteen more crates already have a `Palette` in scope and are nearly free.
 
   **The ~43 games are C-Q16 and are not part of this.** Their chrome follows
@@ -1783,11 +1800,11 @@ Roadmap:
   minesweeper's numbered tiles *identify* things, and recolouring them makes
   the games worse rather than different.
 
-  **Why nothing caught it:** 47 shell modules use `appearance::palette_check`
-  and **zero** apps do. `assert_drawn_from` is the function that found the
-  shell's copies; it already takes a `derived` list so an ANSI table or a
-  paint program's swatches can be declared rather than excused. Adopting it
-  per crate is both the fix and the guard.
+  **Why nothing caught it:** 47 shell modules used `appearance::palette_check`
+  and **zero** apps did. `assert_drawn_from` is the function that found the
+  shell's copies; it takes a `derived` list so an ANSI table or a paint
+  program's swatches can be declared rather than excused. Adopting it per
+  crate is both the fix and the guard, and all twelve now have.
 
 - `[C]` Speech input/output; phone camera/mic integration (lines ~5390–5391)
 

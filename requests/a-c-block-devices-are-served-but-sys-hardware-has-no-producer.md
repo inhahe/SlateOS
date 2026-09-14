@@ -294,3 +294,41 @@ literal is not. But this is lane C's code to change, it was lane A that ranked
 (c) last and then said silence would be assent, and that framing was built on
 the missing fact. **Silence is NOT assent for this. Lane A will not start until
 lane C answers.**
+
+### Implementation surface, read 2026-09-14 — lane C's claim verified in the code
+
+`kernel/src/fs/sysfs.rs` dispatches through a `SysPath` enum in `classify_path`,
+with `read_file` / `stat` / `list_dir` matching on it. The variants that already
+exist settle the (b)-vs-(c) argument on evidence rather than on either lane's
+recollection:
+
+    DevicesDir  PciDir  PciDevice(bdf)
+    SystemDir  SystemCpuDir  CpuN(idx)
+    CpuNTopologyDir(idx)  CpuTopoFile(idx, name)
+    CpuCacheDir(idx)  CpuCacheIndexDir(idx, ci)  CpuCacheFile(idx, ci, name)
+    CpuFile(name)  CpuNOnline(idx)
+
+So `/sys/devices/system/cpu/cpuN/topology/*` and `.../cache/indexI/*` are
+**already served today**. Lane C said the kernel already publishes `core_id`,
+`physical_package_id`, `online`, and cache `size`/`level`/`type`, and that
+`physical_cores`, `logical_processors` and the `l1/l2/l3_kb` values are derivable
+from them. The enum confirms it. Option (b) would therefore not have added a
+second *name* for device data -- it would have added a second *copy*, in a second
+layout, of data the kernel already serves.
+
+**What is genuinely missing**, and is all this task adds:
+
+| new path | source |
+|---|---|
+| `/sys/devices/system/cpu/cpuid/{family,model,stepping}` | CPUID leaf 1, already read at boot |
+| `/sys/devices/system/cpu/cpuN/cpufreq/{base_mhz,max_mhz}` | CPUID leaf 16h where present -- **omit the file when absent** |
+| `/sys/devices/system/memory/{total_kb,available_kb}` | the frame allocator |
+| `/sys/devices/system/memory/{slots_total,speed_mhz}` | needs SMBIOS/DMI; **omit until that exists** |
+
+Mechanical shape: add variants, extend `classify_path`, add `gen_*` functions,
+and cover the new variants in `read_file`, `stat` and `list_dir` -- the compiler
+enforces the last part, since the matches are exhaustive over `SysPath`.
+
+Units are **kB**, not MB, because `cache/size` and the rest of the tree already
+use kB and one tree with two units is the same defect this whole choice was
+about. Flagged to lane C for overrule.

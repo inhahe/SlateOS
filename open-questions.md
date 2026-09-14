@@ -114,6 +114,16 @@ memory, and the thing you actually want -- going back to an earlier state -- wor
 under both. B's advantage is only that the stored copies line up with what the
 feature stored before, which matters to nobody who has not read the code.
 
+**The two halves of your own sentence point opposite ways, which is the real
+reason this is being asked.** The A-Q10 answer describes the feature as "every
+save currently reads back *the old contents* and checksums them" -- and then says
+that read-back moves to after the write returns. Once the write has returned the
+old contents are gone, so the two halves cannot both hold. Option A keeps the
+second half and gives up the first; option B keeps the first and gives up part of
+the second, doing the copy during the save and only the checksum afterwards.
+Nothing about that was obvious when the answer was given, and it is not a
+reversal of it -- it is the one detail the answer could not have anticipated.
+
 **One honest flag against my own recommendation.** A exists in the codebase as a
 test that asserts the opposite: after writing v2, the history must contain v1.
 Under A that test's meaning changes. All session I have treated "a test whose

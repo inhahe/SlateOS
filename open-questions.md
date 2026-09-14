@@ -645,6 +645,33 @@ So `--workspace` is roughly **2,900 members**, not 160. Scoped checks 158
 things and whole checks about 2,900; the subset being cheaper is not a
 surprise once the number is in front of you. It was in front of neither of us.
 
+### A hazard in the scoped form itself
+
+Before that 8 s counts in the scoped form's favour, somebody has to answer a
+question neither measurement asked: **how was the list of 158 `-p` flags
+built?** That is the only part of this still unrecorded, and it is lane B's to
+answer.
+
+`-p` takes a *package* name, and nine directories under `apps/` and `gui/` are
+not named after their package. Three of the nine -- `backup`, `indexer`,
+`sysinfo` -- resolve to a **different crate that really exists**, in
+`userspace/`; the other six error. See
+`known-issues.md` -> `TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME`
+(filed 2026-09-10, gated as Gate 18 of the boot test). Not repeated here.
+
+So: if the 158 came from `cargo metadata`, the number stands. If from directory
+names, the run could not have completed unless the six erroring names were
+special-cased and the three silent ones were not -- in which case the 8 s
+measured three of the wrong crates and skipped three of the right ones.
+
+**Why this belongs in the decision and not only in the measurement.** A gate
+built out of `-p` flags carries that failure permanently; a `--workspace` gate
+cannot, because it names nothing. That is a point on the coverage axis, not the
+cost one. Lane C hit the live version on 2026-09-14: `cargo test -p sysinfo` on
+a crate in `apps/` ran `userspace/sysinfo`'s tests and printed "26 passed",
+which is a true sentence about tests that really ran and no answer at all to
+the question asked.
+
 ### What that means: cost is not the axis, coverage is
 
 At 8 s against 15 s, **both under contention**, cost cannot decide this. Seven

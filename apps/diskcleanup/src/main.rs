@@ -2301,8 +2301,10 @@ mod tests {
         use oswindow::app::App as _;
 
         let mut ui = CleanupUI::new();
-        let mut settings = appearance::AppearanceSettings::default();
-        settings.focus_ring_scale = 3.0;
+        let mut settings = appearance::AppearanceSettings {
+            focus_ring_scale: 3.0,
+            ..appearance::AppearanceSettings::default()
+        };
         settings.validate();
         ui.appearance_changed(&settings);
 

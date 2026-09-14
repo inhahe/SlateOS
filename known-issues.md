@@ -135980,7 +135980,7 @@ accepted. **A correct answer already in the tree does not propagate by
 existing.**
 
 
-## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10) -- three left; lane B's is fixed
+## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10) -- OPEN: three still reach another crate in silence
 
 **In short:** `cargo test -p <name>` takes a *package* name. Everyone types the
 *directory* name, because for 2944 of this workspace's 2955 crates they are the
@@ -135994,8 +135994,42 @@ result and exits 0, having tested a crate nobody touched.
 | `apps/backup` | `backup-app` | the `backup` crate | C |
 | `apps/indexer` | `indexer-app` | the `indexer` crate | C |
 | `apps/sysinfo` | `sysinfo-app` | the `sysinfo` crate | C |
-| ~~`apps/tmux`~~ | `tmux-app` | ~~the `tmux` crate~~ -- **no such crate; this errors** | C -- see correction |
+| ~~`apps/tmux`~~ | `tmux-app` | **nothing — there is no `tmux` package**, so `-p tmux` errors | C |
 | ~~`userspace/login`~~ | ~~`login-cli`~~ | ~~`init/loginmgr`~~ | B -- **fixed 2026-09-10**, see below |
+
+**Re-triaged 2026-09-14 — the marker said this was closed and it is not.**
+
+The heading used to end `-- four left; lane B's is fixed`.
+`scripts/check-known-issues-index.py` slices the slug off a heading and
+word-matches the tail against `fixed|resolved|withdrawn|closed|done`, so
+*"lane B's is fixed"* made `is_closed()` answer `True` — and every count that
+greps this file read the whole entry as done while three crates were still
+live. Reported by lane A (`requests/a-b-triage-reads-an-open-entry-as-closed.md`)
+and lane C, who between them ran the function against the real heading rather
+than reading it. One notice, two messengers, not two findings.
+
+The wording was mine, and the failure is worth naming: a marker that describes
+*part* of an entry ("lane B's is fixed") sits in the field a tool reads as the
+status of *all* of it. A per-row status belongs in the row.
+
+**Three, not four, and not five.** Verified here with `cargo metadata` rather
+than adopted from the report:
+
+* `backup`, `indexer` and `sysinfo` all exist as packages under `userspace/`,
+  so `-p <name>` from `apps/` silently builds the other crate. Live.
+* **`apps/tmux` is no longer one of them.** There is no `tmux` package anywhere
+  in the workspace, so `-p tmux` *errors* instead of building the wrong thing.
+  The row above claimed it reached "the `tmux` crate"; that stopped being true
+  and nobody noticed, which is the same class of staleness as the marker.
+* `userspace/login` is genuinely fixed — `login` now resolves to
+  `userspace/login/Cargo.toml`, checked rather than assumed, because it was my
+  own claim.
+
+**The slug still says FIVE on purpose.** Lane A left it alone after two lanes
+had already pushed references to it, on the reasoning that a stable wrong
+identifier beats a correct one that breaks citations. That is right, and it is
+why the heading now disagrees with itself: the slug is an address, the marker
+is the status.
 
 **How it was found.** Giving `userspace/login` its exec on 2026-09-10. Every
 `cargo test -p login` that tick, and a `cargo fmt -p login`, went to
@@ -136042,14 +136076,16 @@ their directory. The two numbers are not reconciled; do not treat 2955 as
 confirmed. Stated rather than harmonised, because quietly adjusting a number to
 agree with a different measurement is how the tmux row got here.
 
-**This entry classifies as CLOSED while three crates are live, and that is not
-mine to change.** `check-known-issues-index.py`'s `is_closed()` slices the slug
-off and word-matches the tail, which here reads "lane B's is fixed" -- so every
-triage count reads the whole entry as done. The heading mixes an open count with
-a closed marker. Rewording it would flip the entry's open/closed status for two
-other lanes' crates, and the words are lane B's claim about lane B's fix, so it
-is theirs or lane C's to reword rather than mine. I corrected the *count* in the
-marker (four to three), which is a fact with two witnesses, and stopped there.
+**The heading used to classify as CLOSED while three crates were live; lane B
+fixed it on 2026-09-14.** `check-known-issues-index.py`'s `is_closed()` slices
+the slug off and word-matches the tail, and the old tail read "lane B's is
+fixed" -- so every triage count read the whole entry as done. Lane A found it
+and deliberately did not reword it, because that flips the open/closed status of
+two other lanes' crates and the words were lane B's claim about lane B's own
+fix; it went out as a request plus a direct notice instead. The tail is now
+"OPEN: three still reach another crate in silence", which carries no marker
+word, and `is_closed()` returns false for it -- verified against the module's
+own function, with a positive control first to show it can still return true.
 
 **What this entry still does not cover, and it is the part that actually bit.**
 The gate refuses an *unrecorded* mismatch. It does not, and cannot, stop anyone
@@ -144072,6 +144108,85 @@ worth more than one feature:
   under-reported the viewport by two lines). Five tests were hardcoding `y =
   10.0` to mean "inside the tab strip" and broke the moment it moved, which is
   the same defect in the tests.
+
+## TD-C-SYSTEM-INFORMATION-REPORTS-CORRUPT-HARDWARE-DATA-AS-ZEROS
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the System Information program reads the kernel's hardware files
+and, when a number in one of them is malformed, quietly shows **0** instead of
+saying anything. A CPU whose `family` field is garbage is displayed as "family
+0, model 0, 0 cores" -- which looks exactly like real data and is the one thing
+a system-information tool must never do. There are 34 places this happens.
+
+**The fix is already written and has never been called.** `SyscallProvider` has
+three helpers -- `parse_u64`, `parse_u32`, `parse_f32` -- that do the parse and
+return `HwQueryError::ParseError` with the offending text. They have four tests.
+Their only callers are those tests. Meanwhile the live code, three lines below
+them, reads:
+
+```rust
+family: kv.get("family").and_then(|v| v.parse().ok()).unwrap_or(0),
+```
+
+and all **nine** enclosing functions already return
+`Result<_, HwQueryError>`. The error path exists, is typed, is tested, and is
+unreachable. This is the `apps/automator` mutation-table shape again, and the
+`apps/fileassoc` export/import shape from earlier today: work done carefully,
+with tests, on something nothing calls.
+
+**What the fix has to preserve**, and the reason it is not a blind
+search-and-replace: *absent* and *malformed* are different. A field the kernel
+did not report is ordinary and should keep defaulting; a field that is present
+and will not parse means the file is corrupt. So each site becomes "no key ->
+the default; a key that will not parse -> `?`", which is what the three helpers
+already express.
+
+| enclosing function | sites |
+|---|---|
+| `query_cpu_from_cpuid` | 11 |
+| `query_memory` | 6 |
+| `query_storage` | 4 |
+| `query_processes`, `query_pci`, `query_network` | 3 each |
+| `query_display` | 2 |
+| `query_irqs`, `query_dma` | 1 each |
+
+**A second, smaller thing in the same file.** `SYSFS_BASE` is
+`"/sys/hardware"` and is unused, while the twelve constants under it each spell
+`/sys/hardware/...` out in full. The base is declared once and then written
+again twelve times, which is why the declaration could fall out of use without
+anyone noticing. `concat!` takes literals rather than constants, so the fix is a
+small macro holding the one literal.
+
+**How this was found, which is the part worth keeping.** Not by reading the
+file. `cargo clippy -p sysinfo-app` reported the dead helpers -- and nobody had
+run that, because the habit is `-p sysinfo`, which reaches a **different crate**
+(`userspace/sysinfo`). The directory is `apps/sysinfo`; the package is
+`sysinfo-app`.
+
+**That hazard is already filed and already gated** --
+`TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME` (lane B,
+2026-09-10), with `scripts/check-crate-names.py` as Gate 18 of the boot test
+refusing any *new* mismatch. Nothing about it is new here and this entry does
+not restate it; `backup`, `indexer` and `sysinfo` are the three that resolve to
+somebody else's crate rather than erroring, confirmed twice on 2026-09-14 by
+two lanes using different methods.
+
+What *is* worth recording is the consequence for this crate: `apps/sysinfo` has
+been outside a check everyone assumed covered it, which is why dead code and
+34 swallowed parse errors sat here undisturbed. The gate stops the *set* of
+mismatches growing; it cannot make anyone type the right name, and for these
+three a wrong name does not fail -- it succeeds about something else.
+
+That is a third mode of the failure this file keeps recording, and it deserves
+its own word: **substitution**. A check blind to a population, or to a
+property, produces an *absence* -- something not looked at, an assertion too
+weak -- which a careful reader can go hunting for. Substitution produces a
+*presence*: a green line about real work that really happened, just not the
+work anyone asked about. It also defeats the usual diagnostic. "Would this go
+red if the thing were broken?" is satisfied -- it would, for the other crate.
+The question that catches it is narrower: **did the check examine the thing I
+named?**
 
 ## TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME
 

@@ -301,6 +301,26 @@ pub enum SortDir {
 /// in the same colour, and both vanished at the next click. A destructive
 /// operation that half-failed is precisely the thing a user must not miss,
 /// and the status bar is where things go to be missed.
+/// A control in the Transfers view.
+///
+/// Named rather than addressed by coordinates, like every other control in
+/// this application: the painter and the click handler ask one layout where a
+/// button is, so a button cannot be clickable somewhere other than where it is
+/// drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferControl {
+    /// Stop a running operation. It keeps its journal and can be resumed.
+    CancelRunning(usize),
+    /// Move a waiting operation one place earlier.
+    MoveQueuedUp(usize),
+    /// One place later.
+    MoveQueuedDown(usize),
+    /// Start a waiting one now, whatever drive it wants.
+    StartQueuedNow(usize),
+    /// Drop a waiting one. Free: it has written nothing.
+    CancelQueued(usize),
+}
+
 /// A file operation that has not started, because another is running.
 ///
 /// It holds the *plan*, which is the point: the scan, the conflict policy and
@@ -1227,6 +1247,52 @@ impl ExplorerState {
         true
     }
 
+    /// Move a waiting operation up or down the queue.
+    ///
+    /// Answers whether it moved, so a caller cannot report a reorder that did
+    /// not happen -- the ends of the queue are where a repeated key or a
+    /// held button spends most of its time.
+    ///
+    /// Only the *waiting* ones. The running operations are not in an order the
+    /// user can choose: they are already running, and 4.1's reordering is
+    /// about what happens next.
+    pub fn move_queued(&mut self, index: usize, delta: isize) -> bool {
+        let Some(target) = index.checked_add_signed(delta) else {
+            return false;
+        };
+        if index >= self.pending.len() || target >= self.pending.len() || target == index {
+            return false;
+        }
+        let Some(op) = self.pending.remove(index) else {
+            return false;
+        };
+        self.pending.insert(target, op);
+        self.update_operation_status();
+        true
+    }
+
+    /// Start a waiting operation now, whether or not its drives are free.
+    ///
+    /// **The per-drive rule is a default, not a prohibition** -- `roadmap.md`
+    /// 4.1 says so in as many words, and this is what it means: the user may
+    /// know something the scheduler does not. They may know the two operations
+    /// are on different partitions of one disk and they do not care, or that
+    /// one is three files and the other is four hours.
+    ///
+    /// What they cannot override is the honesty: it starts, alongside, and the
+    /// status line says how many are running. Answers whether it started, so
+    /// a caller cannot report a start that did not happen -- a plan whose
+    /// journal will not open still fails here.
+    pub fn start_queued_now(&mut self, index: usize) -> bool {
+        if index >= self.pending.len() {
+            return false;
+        }
+        let Some(next) = self.pending.remove(index) else {
+            return false;
+        };
+        self.begin_operation(next.plan, next.verb, next.keep_undo, next.drives)
+    }
+
     /// Drop a waiting operation. Free: it has written nothing.
     ///
     /// Answers whether there was one at that position, so a caller cannot
@@ -1433,6 +1499,129 @@ impl ExplorerState {
             let _ = write!(line, " ({} waiting)", self.pending.len());
         }
         self.status_message = line;
+    }
+
+    /// Where the Transfers view is, or `None` when there is nothing in it.
+    ///
+    /// Above the status bar and over the bottom of the listing rather than
+    /// pushing it up: a panel that appeared and reflowed the rows would move
+    /// the file under the pointer at the moment a copy started, which is the
+    /// moment a user is most likely to be clicking.
+    #[must_use]
+    pub fn transfers_rect(&self) -> Option<Rect> {
+        let rows = self.transfer_rows();
+        if rows == 0 {
+            return None;
+        }
+        let height = TRANSFER_ROW_H * rows as f32;
+        let w = self.window_width as f32;
+        let y = (self.window_height as f32 - STATUS_BAR_H - height).max(0.0);
+        Some(Rect::new(0.0, y, w, height))
+    }
+
+    /// How many rows the view shows: everything in flight, up to its cap.
+    fn transfer_rows(&self) -> usize {
+        self.operations
+            .len()
+            .saturating_add(self.pending.len())
+            .min(TRANSFERS_MAX_ROWS)
+    }
+
+    /// What each row says, in the order they are drawn.
+    ///
+    /// Running first, because they are what is happening; waiting after, in
+    /// the order they will happen. A waiting row says what it is waiting for
+    /// by naming the operation ahead of it, which is `roadmap.md` 4.1's
+    /// "waiting for: Copy 12 GB to D:\Backup" -- a queue position on its own
+    /// tells the user nothing they can act on.
+    #[must_use]
+    pub fn transfer_labels(&self) -> Vec<String> {
+        let mut rows: Vec<String> = self
+            .operations
+            .iter()
+            .map(|op| {
+                format!(
+                    "{} {} of {}",
+                    op.verb,
+                    op.executor.progress().completed_files,
+                    op.total_files
+                )
+            })
+            .collect();
+        let waiting_for = self.operations.first().map_or_else(
+            || "the operation ahead".to_string(),
+            |op| op.verb.to_string(),
+        );
+        rows.extend(
+            self.pending
+                .iter()
+                .map(|op| format!("Queued: {} — waiting for {waiting_for}", op.verb)),
+        );
+        rows.truncate(TRANSFERS_MAX_ROWS);
+        rows
+    }
+
+    /// Every control in the view, with where it is drawn.
+    ///
+    /// The single source of the view's geometry, asked by the painter and by
+    /// `transfers_control_at`.
+    #[must_use]
+    pub fn transfers_layout(&self) -> Vec<(TransferControl, Rect)> {
+        let Some(panel) = self.transfers_rect() else {
+            return Vec::new();
+        };
+        let mut controls = Vec::new();
+        let running = self.operations.len();
+        for row in 0..self.transfer_rows() {
+            let y = panel.y + TRANSFER_ROW_H * row as f32 + 2.0;
+            let h = TRANSFER_ROW_H - 4.0;
+            // Laid out from the right edge inwards, so a long label is what
+            // gets squeezed rather than the buttons sliding off the panel.
+            let mut x = panel.x + panel.width - TRANSFER_BTN - 4.0;
+            let mut place = |control: TransferControl, controls: &mut Vec<_>| {
+                controls.push((control, Rect::new(x, y, TRANSFER_BTN, h)));
+                x -= TRANSFER_BTN + 2.0;
+            };
+            if row < running {
+                place(TransferControl::CancelRunning(row), &mut controls);
+            } else {
+                // `saturating_sub` only because the lint asks: this arm is
+                // the `else` of `row < running`, so the subtraction cannot
+                // go below zero.
+                let queued = row.saturating_sub(running);
+                place(TransferControl::CancelQueued(queued), &mut controls);
+                place(TransferControl::StartQueuedNow(queued), &mut controls);
+                place(TransferControl::MoveQueuedDown(queued), &mut controls);
+                place(TransferControl::MoveQueuedUp(queued), &mut controls);
+            }
+        }
+        controls
+    }
+
+    /// Which control is under a point, if any.
+    #[must_use]
+    pub fn transfers_control_at(&self, x: f32, y: f32) -> Option<TransferControl> {
+        self.transfers_layout()
+            .into_iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map(|(control, _)| control)
+    }
+
+    /// Do what a Transfers control says. Answers whether anything changed.
+    fn press_transfer_control(&mut self, control: TransferControl) -> bool {
+        match control {
+            TransferControl::CancelRunning(index) => {
+                let Some(running) = self.operations.get_mut(index) else {
+                    return false;
+                };
+                running.executor.cancel();
+                true
+            }
+            TransferControl::MoveQueuedUp(index) => self.move_queued(index, -1),
+            TransferControl::MoveQueuedDown(index) => self.move_queued(index, 1),
+            TransferControl::StartQueuedNow(index) => self.start_queued_now(index),
+            TransferControl::CancelQueued(index) => self.cancel_queued(index),
+        }
     }
 
     /// The text the status bar should display.
@@ -2078,6 +2267,10 @@ impl ExplorerState {
 
         // File list
         self.render_file_list(&mut tree, &mut zones);
+
+        // The Transfers view over the bottom of the listing, before the
+        // status bar it sits above.
+        self.render_transfers(&mut tree);
 
         // Status bar (bottom)
         self.render_status_bar(&mut tree);
@@ -2845,6 +3038,67 @@ impl ExplorerState {
         tree.untranslate();
     }
 
+    /// Draw the Transfers view, if there is anything in flight.
+    ///
+    /// The labels and the button rectangles come from
+    /// [`transfer_labels`](Self::transfer_labels) and
+    /// [`transfers_layout`](Self::transfers_layout), which the click handler
+    /// also reads -- so what is painted and what can be pressed are two
+    /// readings of one layout rather than two sets of literals.
+    fn render_transfers(&self, tree: &mut RenderTree) {
+        let Some(panel) = self.transfers_rect() else {
+            return;
+        };
+        tree.fill_rect(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            self.palette.mantle,
+        );
+
+        let controls = self.transfers_layout();
+        // The leftmost button on each row is where its label has to stop.
+        // Measured from the controls rather than assumed, because a running
+        // row has one button and a waiting row has four.
+        let labels = self.transfer_labels();
+        for (row, label) in labels.iter().enumerate() {
+            let y = panel.y + TRANSFER_ROW_H * row as f32;
+            let row_band = y..y + TRANSFER_ROW_H;
+            let leftmost = controls
+                .iter()
+                .filter(|(_, r)| row_band.contains(&(r.y + r.height / 2.0)))
+                .map(|(_, r)| r.x)
+                .fold(panel.x + panel.width, f32::min);
+            let room = (leftmost - panel.x - 16.0).max(0.0);
+            tree.text_in(panel.x + 8.0, y + 4.0, room, label, self.palette.text, 11.0);
+        }
+
+        for (control, rect) in controls {
+            tree.fill_rect(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                self.palette.surface0,
+            );
+            let glyph = match control {
+                TransferControl::CancelRunning(_) | TransferControl::CancelQueued(_) => "\u{2715}",
+                TransferControl::MoveQueuedUp(_) => "\u{25B2}",
+                TransferControl::MoveQueuedDown(_) => "\u{25BC}",
+                TransferControl::StartQueuedNow(_) => "\u{25B6}",
+            };
+            tree.text_in(
+                rect.x + 4.0,
+                rect.y + 2.0,
+                rect.width - 6.0,
+                glyph,
+                self.palette.text,
+                11.0,
+            );
+        }
+    }
+
     fn render_status_bar(&self, tree: &mut RenderTree) {
         let bar_y = self.window_height as f32 - 24.0;
         let w = self.window_width as f32;
@@ -3075,6 +3329,19 @@ const OPERATION_SLICE: std::time::Duration = std::time::Duration::from_millis(8)
 
 /// How often the loop comes back while an operation is running.
 const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// How tall the status bar is.
+const STATUS_BAR_H: f32 = 24.0;
+/// How tall one row of the Transfers view is.
+const TRANSFER_ROW_H: f32 = 22.0;
+/// The side of a square Transfers button.
+const TRANSFER_BTN: f32 = 18.0;
+/// How many operations the view lists at once.
+///
+/// A cap rather than a scroll: the panel sits over the listing, and one that
+/// grew with the queue would cover the folder the user is working in. The
+/// status bar carries the totals, so nothing is hidden -- only undrawn.
+const TRANSFERS_MAX_ROWS: usize = 4;
 
 /// Where the address bar starts, directly under the toolbar.
 const ADDRESS_BAR_Y: f32 = 36.0;
@@ -3355,6 +3622,18 @@ impl ExplorerState {
         // them moves.
         if let Some(button) = Self::toolbar_button_at(x, y) {
             return self.press_toolbar_button(button);
+        }
+        // The Transfers view before the listing it covers. A press anywhere
+        // inside it is spent there even when it named no button: the rows
+        // underneath are hidden, and acting on a file the user cannot see is
+        // worse than doing nothing.
+        if let Some(panel) = self.transfers_rect()
+            && panel.contains(x, y)
+        {
+            if let Some(control) = self.transfers_control_at(x, y) {
+                self.press_transfer_control(control);
+            }
+            return true;
         }
         let address = self.address_bar_rect();
         if address.contains(x, y) {
@@ -4439,6 +4718,224 @@ mod tests {
         );
         assert!(!items[0].is_directory, "apple.txt is not a folder");
         assert!(items[1].is_directory, "apples is");
+    }
+
+    // ---- the Transfers view -------------------------------------------
+    //
+    // roadmap.md 4.1: "a queued operation appears immediately in the File
+    // Operations / Transfers view alongside the running ones, in state
+    // Queued, saying what it is waiting for […] the user can reorder the
+    // queue, cancel a queued operation before it ever starts, or override and
+    // start it now."
+
+    /// Press a named Transfers control the way a pointer does.
+    fn press_transfer(state: &mut ExplorerState, want: TransferControl) {
+        let (_, rect) = state
+            .transfers_layout()
+            .into_iter()
+            .find(|(c, _)| *c == want)
+            .unwrap_or_else(|| panic!("{want:?} is not in the layout"));
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    /// A state with one operation running and `queued` more waiting.
+    fn with_queue(root: &Path, queued: usize) -> ExplorerState {
+        let mut state = paste_of(root, 6);
+        state.paste();
+        for n in 0..queued {
+            let name = format!("q{n}.txt");
+            write(&root.join(&name), "x");
+            state.clipboard = Some(ClipboardOp::Copy(vec![root.join(&name)]));
+            state.paste();
+        }
+        assert_eq!(state.queued_count(), queued);
+        state
+    }
+
+    /// **There is nothing to see when nothing is happening.**
+    #[test]
+    fn the_transfers_view_is_absent_while_the_explorer_is_idle() {
+        let scratch = temp_dir("tr_idle");
+        let root = scratch.dir().to_path_buf();
+        let state = state_at(&root);
+        assert!(state.transfers_rect().is_none());
+        assert!(state.transfers_layout().is_empty());
+        assert!(state.transfer_labels().is_empty());
+    }
+
+    /// A queued operation appears in it, and says what it is waiting for.
+    #[test]
+    fn a_queued_operation_appears_and_says_what_it_waits_for() {
+        let scratch = temp_dir("tr_rows");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+
+        let labels = state.transfer_labels();
+        assert_eq!(labels.len(), 2, "one running and one waiting: {labels:?}");
+        assert!(labels[0].starts_with("Pasted"), "{labels:?}");
+        assert!(
+            labels[1].contains("Queued") && labels[1].contains("waiting for"),
+            "a queued row that does not say what it waits for: {labels:?}"
+        );
+        assert!(state.transfers_rect().is_some());
+
+        settle(&mut state);
+        assert!(state.transfers_rect().is_none(), "it outlived the work");
+    }
+
+    /// The queue can be reordered.
+    #[test]
+    fn a_waiting_operation_can_be_moved_down_the_queue() {
+        let scratch = temp_dir("tr_reorder");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 2);
+
+        // The first waiting one is `q0.txt`; send it behind `q1.txt`.
+        press_transfer(&mut state, TransferControl::MoveQueuedDown(0));
+        settle(&mut state);
+
+        // Both still ran -- reordering is about *when*, never about whether.
+        assert!(root.join("dst/q0.txt").exists());
+        assert!(root.join("dst/q1.txt").exists());
+    }
+
+    /// Moving past either end does nothing, and says so.
+    #[test]
+    fn a_waiting_operation_cannot_be_moved_off_either_end() {
+        let scratch = temp_dir("tr_ends");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 2);
+
+        assert!(!state.move_queued(0, -1), "the first moved up");
+        assert!(!state.move_queued(1, 1), "the last moved down");
+        assert!(!state.move_queued(9, -1), "a row that is not there moved");
+        assert!(state.move_queued(0, 1), "a real move reported nothing");
+
+        settle(&mut state);
+    }
+
+    /// **Start-now overrides the per-drive rule**, which 4.1 calls a default
+    /// rather than a prohibition.
+    #[test]
+    fn a_waiting_operation_can_be_started_alongside_the_one_ahead_of_it() {
+        let scratch = temp_dir("tr_now");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+        assert_eq!(state.running_count(), 1);
+
+        press_transfer(&mut state, TransferControl::StartQueuedNow(0));
+
+        assert_eq!(state.queued_count(), 0, "it is still waiting");
+        assert_eq!(
+            state.running_count(),
+            2,
+            "it did not start alongside the one it shares a drive with"
+        );
+        settle(&mut state);
+        assert!(root.join("dst/q0.txt").exists());
+    }
+
+    /// Cancelling a waiting one costs nothing and it never runs.
+    #[test]
+    fn a_waiting_operation_can_be_cancelled_from_the_view() {
+        let scratch = temp_dir("tr_cancel");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+
+        press_transfer(&mut state, TransferControl::CancelQueued(0));
+
+        assert_eq!(state.queued_count(), 0);
+        settle(&mut state);
+        assert!(
+            !root.join("dst/q0.txt").exists(),
+            "a cancelled operation copied something anyway"
+        );
+    }
+
+    /// And a running one can be stopped without touching the rest.
+    #[test]
+    fn a_running_operation_can_be_stopped_from_the_view() {
+        let scratch = temp_dir("tr_stop");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+
+        press_transfer(&mut state, TransferControl::CancelRunning(0));
+        settle(&mut state);
+
+        let copied = (0..6)
+            .filter(|n| root.join(format!("dst/f{n}.txt")).exists())
+            .count();
+        assert!(copied < 6, "cancelling copied everything anyway");
+        assert!(
+            root.join("dst/q0.txt").exists(),
+            "stopping one operation took the queued one with it"
+        );
+    }
+
+    /// **A press inside the panel never reaches the listing under it.**
+    ///
+    /// The rows down there are covered, and acting on a file the user cannot
+    /// see is worse than doing nothing.
+    #[test]
+    fn a_press_on_the_panels_bare_space_does_not_reach_the_listing() {
+        let scratch = temp_dir("tr_shield");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+        state.selected_indices = vec![0];
+        let panel = state.transfers_rect().expect("the view is open");
+
+        // The left end of a row, where no button is.
+        send(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: panel.x + 4.0,
+                y: panel.y + 4.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+
+        assert_eq!(
+            state.selected_indices,
+            vec![0],
+            "the press fell through and cleared the selection"
+        );
+        settle(&mut state);
+    }
+
+    /// Every control the view paints can be pressed where it is painted.
+    #[test]
+    fn every_transfers_button_is_pressable_where_it_is_drawn() {
+        let scratch = temp_dir("tr_bands");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+
+        let controls = state.transfers_layout();
+        assert_eq!(
+            controls.len(),
+            5,
+            "one running button and four waiting ones: {controls:?}"
+        );
+        let panel = state.transfers_rect().expect("the view is open");
+        for (control, rect) in controls {
+            assert!(
+                panel.contains(rect.x, rect.y),
+                "{control:?} is drawn outside the panel"
+            );
+            let (cx, cy) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+            assert_eq!(
+                state.transfers_control_at(cx, cy),
+                Some(control),
+                "{control:?} is not pressable at its own centre"
+            );
+        }
+        settle(&mut state);
     }
 
     // ---- the toolbar -------------------------------------------------

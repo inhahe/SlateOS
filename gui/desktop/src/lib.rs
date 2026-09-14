@@ -1016,6 +1016,14 @@ pub struct DesktopShell {
     /// tray whose icons move when an unrelated program registers one is a tray
     /// where the user's muscle memory is wrong.
     tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// The order the shell shows those icons in, which is the user's.
+    ///
+    /// Separate from the list above because the two answer different
+    /// questions and change at different times: the compositor says which
+    /// icons exist, and re-sends the whole list whenever any program touches
+    /// its own; the arrangement says where they sit, and changes only when
+    /// the user moves one.
+    tray_arrangement: tray_dnd::TrayIconArrangement,
     pub alt_tab_active: bool,
     /// Alt+Tab selection index.
     pub alt_tab_index: usize,
@@ -1489,6 +1497,7 @@ impl DesktopShell {
             // `load_input_settings`; this is only the list.
             input_methods: input_method::InputMethodManager::with_builtins(),
             tray_icons: Vec::new(),
+            tray_arrangement: tray_dnd::TrayIconArrangement::new(),
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -2529,7 +2538,7 @@ impl DesktopShell {
                 self.toggle_notifications();
                 ShellAction::Consumed
             }
-            Hit::TrayIcon(index) => self.tray_icons.get(index).map_or(
+            Hit::TrayIcon(index) => self.ordered_tray_icons().get(index).map_or(
                 // The icon went away between the frame that drew it and the
                 // click. Consumed rather than passed on: the user aimed at the
                 // tray, and letting the press fall through to whatever is
@@ -4154,7 +4163,7 @@ impl DesktopShell {
         // it cannot see -- the defect `Palette::ink` exists to prevent -- and
         // on a taskbar the one pair this theme guarantees legible is the bar's
         // foreground on the bar.
-        for (rect, icon) in self.tray_icon_rects().iter().zip(&self.tray_icons) {
+        for (rect, icon) in self.tray_icon_rects().iter().zip(self.ordered_tray_icons()) {
             tree.text(
                 rect.x,
                 tray_text_y,
@@ -4632,10 +4641,40 @@ impl DesktopShell {
         (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH))
     }
 
-    /// The icons other programs have put in the tray.
+    /// The icons other programs have put in the tray, as the compositor
+    /// reported them.
+    ///
+    /// **This is not the order they are drawn in** -- see
+    /// [`ordered_tray_icons`](Self::ordered_tray_icons). This is the raw
+    /// membership, which is what a caller asking "is there an icon for X"
+    /// wants; anything to do with position must use the ordered form.
     #[must_use]
     pub fn tray_icons(&self) -> &[guiremote::tray::TrayIcon] {
         &self.tray_icons
+    }
+
+    /// The tray's icons in the order the shell shows them.
+    ///
+    /// Joined on demand rather than stored joined. The compositor's list and
+    /// the arrangement change independently -- a program relabelling its icon
+    /// rewrites the first and must not touch the second -- and a joined copy
+    /// would be a third record of the same fact, which is how this tree ended
+    /// up with four models of a tray icon in the first place.
+    ///
+    /// Every key in the arrangement has an icon in the list, because
+    /// [`sync`](tray_dnd::TrayIconArrangement::sync) is fed the very list this
+    /// reads.
+    #[must_use]
+    pub fn ordered_tray_icons(&self) -> Vec<&guiremote::tray::TrayIcon> {
+        self.tray_arrangement
+            .ordered_keys()
+            .into_iter()
+            .filter_map(|wanted| {
+                self.tray_icons
+                    .iter()
+                    .find(|icon| tray_dnd::TrayIconKey::of(icon) == wanted)
+            })
+            .collect()
     }
 
     /// Adopt a tray list from the compositor.
@@ -4650,6 +4689,11 @@ impl DesktopShell {
         if self.tray_icons == icons {
             return false;
         }
+        // Fold before storing, so the arrangement sees both lists and can tell
+        // a program that relabelled its icon from one that just registered.
+        // The answer is discarded: reaching here already means the membership
+        // or a glyph changed, so the tray repaints either way.
+        self.tray_arrangement.sync(&icons);
         self.tray_icons = icons;
         true
     }
@@ -4668,7 +4712,8 @@ impl DesktopShell {
 
     /// How much width the application icons take, padding included.
     fn app_tray_width(&self) -> f32 {
-        if self.tray_icons.is_empty() {
+        let count = self.tray_arrangement.icons.len();
+        if count == 0 {
             return 0.0;
         }
         let slot = self.tray_icon_slot();
@@ -4676,7 +4721,10 @@ impl DesktopShell {
         // One padding between the block and the shell's own items, not one per
         // icon: the icons sit as a run, which is what makes them read as one
         // region rather than four unrelated glyphs.
-        slot.mul_add(self.tray_icons.len() as f32, padding)
+        //
+        // Counted from the arrangement, as the rectangles are, so that width
+        // and positions cannot disagree about how many icons there are.
+        slot.mul_add(count as f32, padding)
     }
 
     /// Where each application icon is drawn, left to right.
@@ -4696,8 +4744,8 @@ impl DesktopShell {
             + self.layout_indicator_width()
             + padding * 4.0;
         let mut x = (bar.w - shell_items - self.app_tray_width() + padding).max(0.0);
-        let mut rects = Vec::with_capacity(self.tray_icons.len());
-        for _ in &self.tray_icons {
+        let mut rects = Vec::with_capacity(self.tray_arrangement.icons.len());
+        for _ in &self.tray_arrangement.icons {
             rects.push(Rect::new(x, bar.y, slot, bar.h));
             x += slot;
         }
@@ -9087,6 +9135,67 @@ mod overview_wiring_tests {
             .filter(|c| matches!(c, RenderCommand::Text { text, .. } if text == "\u{1F50B}"))
             .count();
         assert_eq!(after, 1, "the icon the program registered was not drawn");
+    }
+
+    /// The user's order outlives a program relabelling its icon.
+    ///
+    /// The whole reason the shell keeps an arrangement instead of drawing the
+    /// compositor's list directly. The compositor re-sends every icon whenever
+    /// any program touches one of its own, so without the fold a program
+    /// swapping its glyph would drag every icon back to registration order --
+    /// silently, and only for whoever had rearranged their tray.
+    #[test]
+    fn a_relabelled_icon_does_not_disturb_the_users_order() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two")]);
+        s.tray_arrangement.reorder(0, 1);
+        assert_eq!(
+            s.ordered_tray_icons()
+                .iter()
+                .map(|i| i.glyph.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "A"]
+        );
+
+        // Program 1 changes its glyph. The compositor sends both icons again.
+        s.apply_tray_icons(vec![tray_icon(1, "!", "one"), tray_icon(2, "B", "two")]);
+
+        assert_eq!(
+            s.ordered_tray_icons()
+                .iter()
+                .map(|i| i.glyph.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "!"],
+            "the order is the user's and the glyph is the program's"
+        );
+    }
+
+    /// A click lands on the icon that was drawn there, not the one the
+    /// compositor listed there.
+    ///
+    /// The failure this catches is the worst kind the tray can have: the user
+    /// presses the icon they can see and a *different* program is told it was
+    /// clicked. It is possible the moment drawing and hit-testing read from
+    /// two different orders, which is exactly what an index into the
+    /// compositor's list would have been once the arrangement existed.
+    #[test]
+    fn a_click_addresses_the_icon_under_the_pointer_after_a_reorder() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two")]);
+        s.tray_arrangement.reorder(0, 1);
+
+        let leftmost = s.tray_icon_rects()[0];
+        let action = s.handle_mouse(&guitk::event::MouseEvent {
+            x: leftmost.x + leftmost.w / 2.0,
+            y: leftmost.y + leftmost.h / 2.0,
+            kind: guitk::event::MouseEventKind::Press(guitk::event::MouseButton::Left),
+        });
+        match action {
+            ShellAction::Control(ShellRequest::ClickTrayIcon { id, .. }) => {
+                assert_eq!(id, 2, "the leftmost slot now holds program icon 2");
+            }
+            other => panic!("expected a ClickTrayIcon request, got {other:?}"),
+        }
     }
 
     /// The icons widen the tray, so window buttons are not laid out underneath

@@ -135980,7 +135980,7 @@ accepted. **A correct answer already in the tree does not propagate by
 existing.**
 
 
-## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10) -- four left; lane B's is fixed
+## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10) -- OPEN: three still reach another crate in silence
 
 **In short:** `cargo test -p <name>` takes a *package* name. Everyone types the
 *directory* name, because for 2944 of this workspace's 2955 crates they are the
@@ -135993,8 +135993,42 @@ result and exits 0, having tested a crate nobody touched.
 | `apps/backup` | `backup-app` | the `backup` crate | C |
 | `apps/indexer` | `indexer-app` | the `indexer` crate | C |
 | `apps/sysinfo` | `sysinfo-app` | the `sysinfo` crate | C |
-| `apps/tmux` | `tmux-app` | the `tmux` crate | C |
+| ~~`apps/tmux`~~ | `tmux-app` | **nothing — there is no `tmux` package**, so `-p tmux` errors | C |
 | ~~`userspace/login`~~ | ~~`login-cli`~~ | ~~`init/loginmgr`~~ | B -- **fixed 2026-09-10**, see below |
+
+**Re-triaged 2026-09-14 — the marker said this was closed and it is not.**
+
+The heading used to end `-- four left; lane B's is fixed`.
+`scripts/check-known-issues-index.py` slices the slug off a heading and
+word-matches the tail against `fixed|resolved|withdrawn|closed|done`, so
+*"lane B's is fixed"* made `is_closed()` answer `True` — and every count that
+greps this file read the whole entry as done while three crates were still
+live. Reported by lane A (`requests/a-b-triage-reads-an-open-entry-as-closed.md`)
+and lane C, who between them ran the function against the real heading rather
+than reading it. One notice, two messengers, not two findings.
+
+The wording was mine, and the failure is worth naming: a marker that describes
+*part* of an entry ("lane B's is fixed") sits in the field a tool reads as the
+status of *all* of it. A per-row status belongs in the row.
+
+**Three, not four, and not five.** Verified here with `cargo metadata` rather
+than adopted from the report:
+
+* `backup`, `indexer` and `sysinfo` all exist as packages under `userspace/`,
+  so `-p <name>` from `apps/` silently builds the other crate. Live.
+* **`apps/tmux` is no longer one of them.** There is no `tmux` package anywhere
+  in the workspace, so `-p tmux` *errors* instead of building the wrong thing.
+  The row above claimed it reached "the `tmux` crate"; that stopped being true
+  and nobody noticed, which is the same class of staleness as the marker.
+* `userspace/login` is genuinely fixed — `login` now resolves to
+  `userspace/login/Cargo.toml`, checked rather than assumed, because it was my
+  own claim.
+
+**The slug still says FIVE on purpose.** Lane A left it alone after two lanes
+had already pushed references to it, on the reasoning that a stable wrong
+identifier beats a correct one that breaks citations. That is right, and it is
+why the heading now disagrees with itself: the slug is an address, the marker
+is the status.
 
 **How it was found.** Giving `userspace/login` its exec on 2026-09-10. Every
 `cargo test -p login` that tick, and a `cargo fmt -p login`, went to

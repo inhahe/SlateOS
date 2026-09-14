@@ -143540,3 +143540,67 @@ case the comment described a **defect** in the tone of a **design note**. The
 tell is a Limitations list whose entries are phrased as things the caller will
 not get, when what they actually describe is something the caller *asked for
 and was told it received*.
+
+
+## B-A-SURVEY-OF-FLAGS-WE-ACCEPT-AND-DO-NOT-HONOUR (lane B, 2026-09-13)
+
+**In short:** after fixing three separate bugs in one day that were all the same
+shape — the library said yes and did nothing — I went looking for the rest
+instead of waiting to trip over them. There are at least nine more, and one of
+them can corrupt a database.
+
+### How the search was done
+
+The three fixed today (argv over 64 KiB discarded, argv past 512 truncated,
+`aio_resfd` accepted and ignored) were each documented **accurately**, in a
+module's own `## Limitations` list, in the tone of a design note. So the search
+was for that tone: 24 modules under `posix/src/` carry a Limitations section,
+and their bullets were read for the tell — *accepted but*, *is ignored*,
+*no-op*, *always succeeds*, *unenforced*.
+
+This distinguishes the dangerous kind from the safe kind. "Not implemented,
+returns `EINVAL`" is fine: the caller is told. "Accepted but ignored" means the
+caller asked for something, was told it got it, and did not.
+
+### What is there, worst first
+
+| where | what is accepted and not done | what a caller loses |
+|---|---|---|
+| `fcntl_ops.rs` | `F_SETLK`/`F_SETLKW`/`F_GETLK` — advisory record locking | **two processes both hold the same exclusive lock.** Verified in the code, not just its comment: `F_GETLK` unconditionally writes `l_type = F_UNLCK` ("no conflicting lock") and `F_SETLK` returns success without taking one |
+| `sysv_shm.rs` | `SHM_RDONLY` — accepted but unenforced | a read-only shared mapping is writable; a process that attached read-only can corrupt the segment |
+| `sysv_msg.rs` | `MSG_COPY` — "treated as a normal receive" | the caller wanted to *peek*; the message is **dequeued** and nobody else will see it |
+| `sysv_sem.rs` | `SEM_UNDO` — accepted but ignored | a process that dies holding a semaphore never releases it; everyone waiting deadlocks |
+| `pthread.rs` | `pthread_cancel` — "accepted but never actually cancels" | the caller believes a thread is stopping; it runs on |
+| `sysv_shm.rs` | `SHM_REMAP`, `SHM_RND`, caller-supplied `shmaddr` | the segment lands somewhere other than where it was asked to |
+| `ioctl.rs` | `TIOCSWINSZ` on Console fds — "accepts (no-op)" | a resized terminal keeps reporting the old size |
+| `syslog.rs` | `openlog` facility ignored | entries are filed under the wrong facility |
+| `fts.rs` | `FTS_COMFOLLOW` partial; `FTS_LOGICAL` re-stat is a no-op | symlink traversal differs from what was requested |
+
+`fcntl_ops.rs` is the one that matters most and is not fixable here. SQLite —
+which CPython links — uses POSIX advisory record locks as its **entire**
+cross-process correctness mechanism. On a libc where `F_SETLK` always succeeds,
+two SQLite connections both believe they have the write lock and interleave
+writes into one file. It needs a kernel-side lock table keyed by inode, so it is
+filed as `requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`.
+
+### Why this is a survey and not nine fixes
+
+Several of these are one-line refusals and could be changed today, and that is
+exactly why they need thought rather than speed. Turning `F_SETLK` from a lie
+into `ENOLCK` is honest, and it also breaks every program that currently runs
+because the lie let it through — which on this image includes anything CPython
+does with SQLite. **"Refuse instead of lying" is the right default and is still
+a user-visible behaviour change**, so the ones with live callers want the
+operator or a boot test, not a quiet commit at the end of a session.
+
+The three fixed today were all cases where nothing could have been relying on
+the broken behaviour: no program benefits from losing its arguments. That is
+what made them safe to fix on sight, and it is the property to check before
+fixing each of the nine.
+
+### The general rule this session produced
+
+A `## Limitations` bullet is a defect report whenever it describes something the
+caller **asked for**. If the caller cannot express the request, a limitation is
+just a boundary and is fine to document. The grep that finds them is the phrase
+*accepted but*, and there are nine.

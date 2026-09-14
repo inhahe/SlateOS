@@ -52,32 +52,47 @@ impl std::fmt::Display for HwQueryError {
 // Sysfs paths for our OS
 // ============================================================================
 
-/// Base path for hardware info files exposed by the kernel.
-const SYSFS_BASE: &str = "/sys/hardware";
+/// Build a path under the kernel's hardware directory.
+///
+/// One literal for the base. There used to be a `const SYSFS_BASE` holding
+/// `/sys/hardware` that nothing referred to, standing beside twelve constants
+/// that each spelled `/sys/hardware/...` out again -- which is exactly why the
+/// declaration could fall out of use without anyone noticing: nothing was
+/// built from it. `concat!` takes literals rather than constants, so a macro
+/// is what makes the base reachable at all.
+///
+/// `/sys/services` and `/sys/proc` below are deliberately not built from it:
+/// they are not hardware, and folding them in would need a second base and put
+/// the count back where it started.
+macro_rules! sysfs {
+    ($leaf:literal) => {
+        concat!("/sys/hardware", $leaf)
+    };
+}
 /// CPU info file.
-const SYSFS_CPU: &str = "/sys/hardware/cpu";
+const SYSFS_CPU: &str = sysfs!("/cpu");
 /// Memory info file.
-const SYSFS_MEMORY: &str = "/sys/hardware/memory";
+const SYSFS_MEMORY: &str = sysfs!("/memory");
 /// Block devices directory.
-const SYSFS_BLOCK: &str = "/sys/hardware/block";
+const SYSFS_BLOCK: &str = sysfs!("/block");
 /// Network interfaces directory.
-const SYSFS_NET: &str = "/sys/hardware/net";
+const SYSFS_NET: &str = sysfs!("/net");
 /// PCI devices directory.
-const SYSFS_PCI: &str = "/sys/hardware/pci";
+const SYSFS_PCI: &str = sysfs!("/pci");
 /// USB devices directory.
-const SYSFS_USB: &str = "/sys/hardware/usb";
+const SYSFS_USB: &str = sysfs!("/usb");
 /// Display/GPU info.
-const SYSFS_DISPLAY: &str = "/sys/hardware/display";
+const SYSFS_DISPLAY: &str = sysfs!("/display");
 /// Sound devices.
-const SYSFS_SOUND: &str = "/sys/hardware/sound";
+const SYSFS_SOUND: &str = sysfs!("/sound");
 /// IRQ assignments.
-const SYSFS_IRQS: &str = "/sys/hardware/irqs";
+const SYSFS_IRQS: &str = sysfs!("/irqs");
 /// I/O port ranges.
-const SYSFS_IOPORTS: &str = "/sys/hardware/ioports";
+const SYSFS_IOPORTS: &str = sysfs!("/ioports");
 /// Memory map from firmware.
-const SYSFS_MEMMAP: &str = "/sys/hardware/memmap";
+const SYSFS_MEMMAP: &str = sysfs!("/memmap");
 /// DMA channels.
-const SYSFS_DMA: &str = "/sys/hardware/dma";
+const SYSFS_DMA: &str = sysfs!("/dma");
 /// Running services.
 const SYSFS_SERVICES: &str = "/sys/services";
 /// Process list.
@@ -203,25 +218,35 @@ impl SyscallProvider {
         map
     }
 
-    /// Parse a u64 from a string, returning a parse error on failure.
-    fn parse_u64(s: &str) -> Result<u64, HwQueryError> {
-        s.trim().parse().map_err(|_| HwQueryError::ParseError {
-            detail: format!("expected integer, got: '{s}'"),
-        })
-    }
-
-    /// Parse a u32 from a string.
-    fn parse_u32(s: &str) -> Result<u32, HwQueryError> {
-        s.trim().parse().map_err(|_| HwQueryError::ParseError {
-            detail: format!("expected u32, got: '{s}'"),
-        })
-    }
-
-    /// Parse a f32 from a string.
-    fn parse_f32(s: &str) -> Result<f32, HwQueryError> {
-        s.trim().parse().map_err(|_| HwQueryError::ParseError {
-            detail: format!("expected f32, got: '{s}'"),
-        })
+    /// One numeric field of a hardware file.
+    ///
+    /// **Absent and malformed are different, and that is the whole point.** A
+    /// field the kernel did not report is ordinary -- a machine with no L3
+    /// cache reports no `l3_kb` -- and the caller's default stands. A field
+    /// that is *present* and will not parse means the file is corrupt, and a
+    /// system-information program that shows a corrupt reading as `0` is
+    /// displaying a fact it does not have. Every one of these sites used to do
+    /// exactly that: `kv.get(k).and_then(|v| v.parse().ok()).unwrap_or(0)`.
+    ///
+    /// This replaces three near-identical `parse_u64` / `parse_u32` /
+    /// `parse_f32` helpers that did the right thing, had four tests between
+    /// them, and which nothing outside those tests ever called. One parser is
+    /// also one model of "read a number out of this map", which the three were
+    /// not.
+    fn field<T: core::str::FromStr>(
+        kv: &HashMap<String, String>,
+        key: &str,
+        default: T,
+    ) -> Result<T, HwQueryError> {
+        match kv.get(key) {
+            None => Ok(default),
+            Some(raw) => raw.trim().parse().map_err(|_| HwQueryError::ParseError {
+                detail: format!(
+                    "{key}: expected {}, got: '{raw}'",
+                    core::any::type_name::<T>()
+                ),
+            }),
+        }
     }
 
     /// Query CPU info using CPUID instruction and sysfs.
@@ -241,35 +266,17 @@ impl SyscallProvider {
                 .get("vendor")
                 .cloned()
                 .unwrap_or_else(|| "Unknown".to_string()),
-            family: kv.get("family").and_then(|v| v.parse().ok()).unwrap_or(0),
-            model: kv.get("model").and_then(|v| v.parse().ok()).unwrap_or(0),
-            stepping: kv.get("stepping").and_then(|v| v.parse().ok()).unwrap_or(0),
-            physical_cores: kv
-                .get("physical_cores")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1),
-            logical_processors: kv
-                .get("logical_processors")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1),
-            base_clock_mhz: kv
-                .get("base_clock_mhz")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            max_turbo_mhz: kv
-                .get("max_turbo_mhz")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            l1_data_kb: kv
-                .get("l1_data_kb")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            l1_inst_kb: kv
-                .get("l1_inst_kb")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            l2_kb: kv.get("l2_kb").and_then(|v| v.parse().ok()).unwrap_or(0),
-            l3_kb: kv.get("l3_kb").and_then(|v| v.parse().ok()).unwrap_or(0),
+            family: Self::field(&kv, "family", 0)?,
+            model: Self::field(&kv, "model", 0)?,
+            stepping: Self::field(&kv, "stepping", 0)?,
+            physical_cores: Self::field(&kv, "physical_cores", 1)?,
+            logical_processors: Self::field(&kv, "logical_processors", 1)?,
+            base_clock_mhz: Self::field(&kv, "base_clock_mhz", 0)?,
+            max_turbo_mhz: Self::field(&kv, "max_turbo_mhz", 0)?,
+            l1_data_kb: Self::field(&kv, "l1_data_kb", 0)?,
+            l1_inst_kb: Self::field(&kv, "l1_inst_kb", 0)?,
+            l2_kb: Self::field(&kv, "l2_kb", 0)?,
+            l3_kb: Self::field(&kv, "l3_kb", 0)?,
             features: Self::parse_cpu_features(
                 kv.get("features").map(|s| s.as_str()).unwrap_or(""),
             ),
@@ -352,18 +359,12 @@ impl HardwareProvider for SyscallProvider {
             if let Some(name) = kv.get(&format!("{prefix}name")) {
                 slots.push(MemorySlot {
                     slot_name: name.clone(),
-                    size_mb: kv
-                        .get(&format!("{prefix}size_mb"))
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0),
+                    size_mb: Self::field(&kv, &format!("{prefix}size_mb"), 0)?,
                     mem_type: kv
                         .get(&format!("{prefix}type"))
                         .cloned()
                         .unwrap_or_default(),
-                    speed_mhz: kv
-                        .get(&format!("{prefix}speed_mhz"))
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0),
+                    speed_mhz: Self::field(&kv, &format!("{prefix}speed_mhz"), 0)?,
                     manufacturer: kv
                         .get(&format!("{prefix}manufacturer"))
                         .cloned()
@@ -375,24 +376,15 @@ impl HardwareProvider for SyscallProvider {
         let slots_used = slots.iter().filter(|s| s.size_mb > 0).count() as u32;
 
         Ok(MemoryInfo {
-            total_mb: kv.get("total_mb").and_then(|v| v.parse().ok()).unwrap_or(0),
-            available_mb: kv
-                .get("available_mb")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            total_mb: Self::field(&kv, "total_mb", 0)?,
+            available_mb: Self::field(&kv, "available_mb", 0)?,
             mem_type: kv
                 .get("type")
                 .cloned()
                 .unwrap_or_else(|| "Unknown".to_string()),
-            speed_mhz: kv
-                .get("speed_mhz")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            speed_mhz: Self::field(&kv, "speed_mhz", 0)?,
             slots_used,
-            slots_total: kv
-                .get("slots_total")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(slots.len() as u32),
+            slots_total: Self::field(&kv, "slots_total", slots.len() as u32)?,
             slots,
         })
     }
@@ -420,18 +412,9 @@ impl HardwareProvider for SyscallProvider {
                         // Linux's `/sys/block/*/size` is a sector count for the
                         // same reason: a kernel interface should report the
                         // quantity, and leave scaling to whoever formats it.
-                        capacity_bytes: entry
-                            .get(&format!("{prefix}capacity_bytes"))
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0),
-                        used_bytes: entry
-                            .get(&format!("{prefix}used_bytes"))
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0),
-                        free_bytes: entry
-                            .get(&format!("{prefix}free_bytes"))
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0),
+                        capacity_bytes: Self::field(entry, &format!("{prefix}capacity_bytes"), 0)?,
+                        used_bytes: Self::field(entry, &format!("{prefix}used_bytes"), 0)?,
+                        free_bytes: Self::field(entry, &format!("{prefix}free_bytes"), 0)?,
                         mount_point: entry
                             .get(&format!("{prefix}mount"))
                             .cloned()
@@ -445,10 +428,7 @@ impl HardwareProvider for SyscallProvider {
                     .get("model")
                     .cloned()
                     .unwrap_or_else(|| "Unknown Disk".to_string()),
-                capacity_bytes: entry
-                    .get("capacity_bytes")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
+                capacity_bytes: Self::field(entry, "capacity_bytes", 0)?,
                 interface: entry.get("interface").cloned().unwrap_or_default(),
                 serial: entry.get("serial").cloned().unwrap_or_default(),
                 smart_status: entry
@@ -476,19 +456,10 @@ impl HardwareProvider for SyscallProvider {
                 subnet: entry.get("subnet").cloned().unwrap_or_default(),
                 gateway: entry.get("gateway").cloned().unwrap_or_default(),
                 dns: entry.get("dns").cloned().unwrap_or_default(),
-                speed_mbps: entry
-                    .get("speed_mbps")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
+                speed_mbps: Self::field(entry, "speed_mbps", 0)?,
                 duplex: entry.get("duplex").cloned().unwrap_or_default(),
-                bytes_sent: entry
-                    .get("bytes_sent")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
-                bytes_received: entry
-                    .get("bytes_received")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
+                bytes_sent: Self::field(entry, "bytes_sent", 0)?,
+                bytes_received: Self::field(entry, "bytes_received", 0)?,
             });
         }
 
@@ -514,12 +485,9 @@ impl HardwareProvider for SyscallProvider {
         Ok(DisplayInfo {
             gpu_name: kv.get("gpu_name").cloned().unwrap_or_default(),
             vendor: kv.get("vendor").cloned().unwrap_or_default(),
-            vram_mb: kv.get("vram_mb").and_then(|v| v.parse().ok()).unwrap_or(0),
+            vram_mb: Self::field(&kv, "vram_mb", 0)?,
             resolution: kv.get("resolution").cloned().unwrap_or_default(),
-            refresh_rate_hz: kv
-                .get("refresh_rate_hz")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            refresh_rate_hz: Self::field(&kv, "refresh_rate_hz", 0)?,
             outputs,
             driver_version: kv.get("driver_version").cloned().unwrap_or_default(),
         })
@@ -531,15 +499,9 @@ impl HardwareProvider for SyscallProvider {
 
         for entry in &entries {
             devices.push(PciDeviceInfo {
-                bus: entry.get("bus").and_then(|v| v.parse().ok()).unwrap_or(0),
-                device: entry
-                    .get("device")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
-                function: entry
-                    .get("function")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
+                bus: Self::field(entry, "bus", 0)?,
+                device: Self::field(entry, "device", 0)?,
+                function: Self::field(entry, "function", 0)?,
                 vendor_id: entry
                     .get("vendor_id")
                     .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
@@ -602,7 +564,7 @@ impl HardwareProvider for SyscallProvider {
 
         for entry in &entries {
             irqs.push(IrqInfo {
-                irq_number: entry.get("irq").and_then(|v| v.parse().ok()).unwrap_or(0),
+                irq_number: Self::field(entry, "irq", 0)?,
                 device: entry.get("device").cloned().unwrap_or_default(),
                 irq_type: entry
                     .get("type")
@@ -663,10 +625,7 @@ impl HardwareProvider for SyscallProvider {
 
         for entry in &entries {
             channels.push(DmaInfo {
-                channel: entry
-                    .get("channel")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
+                channel: Self::field(entry, "channel", 0)?,
                 device: entry.get("device").cloned().unwrap_or_default(),
                 mode: entry.get("mode").cloned().unwrap_or_default(),
             });
@@ -696,16 +655,10 @@ impl HardwareProvider for SyscallProvider {
 
         for entry in &entries {
             procs.push(ProcessEntry {
-                pid: entry.get("pid").and_then(|v| v.parse().ok()).unwrap_or(0),
+                pid: Self::field(entry, "pid", 0)?,
                 name: entry.get("name").cloned().unwrap_or_default(),
-                memory_kb: entry
-                    .get("memory_kb")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
-                cpu_percent: entry
-                    .get("cpu_percent")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0.0),
+                memory_kb: Self::field(entry, "memory_kb", 0)?,
+                cpu_percent: Self::field(entry, "cpu_percent", 0.0)?,
             });
         }
 
@@ -1970,28 +1923,52 @@ mod tests {
         assert_eq!(kv.get("key").map(|s| s.as_str()), Some("value"));
     }
 
-    // -- Parse helpers --
+    // -- Reading one field --
 
-    #[test]
-    fn test_parse_u64_valid() {
-        assert_eq!(SyscallProvider::parse_u64("42"), Ok(42));
-        assert_eq!(SyscallProvider::parse_u64(" 100 "), Ok(100));
+    /// A key/value map, as `parse_kv` produces from a hardware file.
+    fn kv(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
     }
 
     #[test]
-    fn test_parse_u64_invalid() {
-        assert!(SyscallProvider::parse_u64("abc").is_err());
+    fn a_field_that_is_there_is_read() {
+        let m = kv(&[("a", "42"), ("b", " 100 "), ("c", "12345"), ("d", "3.25")]);
+        assert_eq!(SyscallProvider::field(&m, "a", 0u64), Ok(42));
+        assert_eq!(SyscallProvider::field(&m, "b", 0u64), Ok(100));
+        assert_eq!(SyscallProvider::field(&m, "c", 0u32), Ok(12345));
+        let f: f32 = SyscallProvider::field(&m, "d", 0.0).expect("a float");
+        assert!((f - 3.25).abs() < 0.01);
     }
 
+    /// **An absent field takes the default; a malformed one is an error.**
+    ///
+    /// The whole reason this function exists. Every caller used to write
+    /// `kv.get(k).and_then(|v| v.parse().ok()).unwrap_or(0)`, which cannot
+    /// tell the two apart and answers `0` to both -- so a corrupt reading was
+    /// displayed as a real one.
     #[test]
-    fn test_parse_u32_valid() {
-        assert_eq!(SyscallProvider::parse_u32("12345"), Ok(12345));
-    }
+    fn an_absent_field_defaults_and_a_malformed_one_does_not() {
+        let m = kv(&[("present", "abc")]);
 
-    #[test]
-    fn test_parse_f32_valid() {
-        let val = SyscallProvider::parse_f32("3.25").expect("parse f32");
-        assert!((val - 3.25).abs() < 0.01);
+        assert_eq!(
+            SyscallProvider::field(&m, "missing", 7u32),
+            Ok(7),
+            "a field the kernel did not report should take the default"
+        );
+
+        let bad = SyscallProvider::field(&m, "present", 7u32);
+        assert!(
+            bad.is_err(),
+            "a malformed reading came back as {bad:?} instead of an error"
+        );
+        let detail = format!("{}", bad.unwrap_err());
+        assert!(
+            detail.contains("present") && detail.contains("abc"),
+            "the error names neither the field nor the value: {detail}"
+        );
     }
 
     // -- Multi-record parsing --

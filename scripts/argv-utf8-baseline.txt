@@ -89,7 +89,6 @@ userspace/journalctl/src/main.rs:argv-as-string
 userspace/jq/src/main.rs:argv-as-string
 userspace/kill/src/main.rs:argv-as-string
 userspace/last/src/main.rs:argv-as-string
-userspace/ldconfig/src/main.rs:argv-as-string
 userspace/ldd/src/main.rs:argv-as-string
 userspace/less/src/main.rs:argv-as-string
 userspace/lex/src/main.rs:argv-as-string

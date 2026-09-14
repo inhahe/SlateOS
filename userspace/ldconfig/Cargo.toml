@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS ldconfig utility"
 [dependencies]
+
+# A library path or soname may hold any byte but `/` and NUL, so the cache
+# is written as bytes and the names are compared as bytes. Pure formatting,
+# no I/O, so 768-exempt.
+quoting = { path = "../quoting" }

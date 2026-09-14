@@ -15,9 +15,10 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 // ============================================================================
@@ -43,9 +44,12 @@ const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 #[derive(Clone, Debug)]
 struct LibEntry {
     /// Library soname (e.g., "libfoo.so.1").
-    soname: String,
+    ///
+    /// Bytes, because it is derived from the FILE NAME and a filename on this
+    /// OS may hold every byte but `/` and NUL.
+    soname: OsString,
     /// Full path to the library file.
-    path: String,
+    path: PathBuf,
     /// Library type (ELF class).
     lib_type: LibType,
     /// OS/ABI.
@@ -74,7 +78,7 @@ struct LibCache {
 // ============================================================================
 
 /// Read minimal ELF header info from a file.
-fn read_elf_info(path: &str) -> Option<(LibType, u8)> {
+fn read_elf_info(path: &Path) -> Option<(LibType, u8)> {
     let data = fs::read(path).ok()?;
     if data.len() < 20 {
         return None;
@@ -99,37 +103,35 @@ fn read_elf_info(path: &str) -> Option<(LibType, u8)> {
 /// Extract the SONAME from an ELF shared library.
 /// This is a simplified version — in a real implementation, we'd parse
 /// the dynamic section. Here we use the filename convention.
-fn extract_soname(path: &str) -> Option<String> {
-    let filename = Path::new(path).file_name()?.to_str()?;
+fn extract_soname(path: &Path) -> Option<OsString> {
+    // On the BYTES. A library's file name may hold any byte but `/` and NUL,
+    // and the previous version began `file_name()?.to_str()?` -- so a library
+    // whose name is not valid UTF-8 got no soname, and the caller fell back to
+    // the file name, which it had also failed to decode.
+    let bytes = quoting::os_bytes(path.file_name()?).into_owned();
 
-    // Common patterns: libfoo.so.1.2.3 → soname = libfoo.so.1
-    // Or: libfoo.so → soname = libfoo.so
-    if !filename.contains(".so") {
-        return None;
-    }
-
-    // Find the soname by truncating to the first version component.
-    let parts: Vec<&str> = filename.split(".so").collect();
-    if parts.len() < 2 {
-        return Some(filename.to_string());
-    }
-
-    let prefix = parts[0];
-    let suffix = parts[1];
+    // The first `.so`, which is where the name ends and the version begins.
+    let at = bytes.windows(3).position(|w| w == b".so")?;
+    let prefix = bytes.get(..at)?;
+    let suffix = bytes.get(at.saturating_add(3)..)?;
 
     if suffix.is_empty() {
-        // Bare .so file (e.g., libfoo.so).
-        return Some(filename.to_string());
+        // A bare `.so` (e.g. libfoo.so).
+        return Some(quoting::os_from_bytes(&bytes));
     }
 
-    // suffix starts with '.' followed by version: .1.2.3
-    // SONAME is typically prefix.so.major
-    let version_parts: Vec<&str> = suffix.split('.').collect();
-    // version_parts[0] is empty (from the leading '.'), [1] is major
-    if version_parts.len() >= 2 && !version_parts[1].is_empty() {
-        Some(format!("{prefix}.so.{}", version_parts[1]))
-    } else {
-        Some(filename.to_string())
+    // `suffix` opens with `.` and then the version: `.1.2.3`. The soname keeps
+    // only the major, so `libfoo.so.1.2.3` gives `libfoo.so.1`.
+    let mut parts = suffix.split(|&c| c == b'.');
+    let _leading_empty = parts.next();
+    match parts.next() {
+        Some(major) if !major.is_empty() => {
+            let mut out = prefix.to_vec();
+            out.extend_from_slice(b".so.");
+            out.extend_from_slice(major);
+            Some(quoting::os_from_bytes(&out))
+        }
+        _ => Some(quoting::os_from_bytes(&bytes)),
     }
 }
 
@@ -137,7 +139,7 @@ fn extract_soname(path: &str) -> Option<String> {
 // Configuration parsing
 // ============================================================================
 
-fn parse_ld_so_conf() -> Vec<String> {
+fn parse_ld_so_conf() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     if let Ok(content) = fs::read_to_string(LD_SO_CONF) {
@@ -161,14 +163,14 @@ fn parse_ld_so_conf() -> Vec<String> {
                             for sub_line in sub_content.lines() {
                                 let sub_line = sub_line.trim();
                                 if !sub_line.is_empty() && !sub_line.starts_with('#') {
-                                    dirs.push(sub_line.to_string());
+                                    dirs.push(PathBuf::from(sub_line));
                                 }
                             }
                         }
                     }
                 }
             } else {
-                dirs.push(line.to_string());
+                dirs.push(PathBuf::from(line));
             }
         }
     }
@@ -184,9 +186,9 @@ fn parse_ld_so_conf() -> Vec<String> {
                     let line = line.trim();
                     if !line.is_empty()
                         && !line.starts_with('#')
-                        && !dirs.contains(&line.to_string())
+                        && !dirs.iter().any(|d| d == Path::new(line))
                     {
-                        dirs.push(line.to_string());
+                        dirs.push(PathBuf::from(line));
                     }
                 }
             }
@@ -195,8 +197,8 @@ fn parse_ld_so_conf() -> Vec<String> {
 
     // Add defaults.
     for &d in DEFAULT_DIRS {
-        if !dirs.contains(&d.to_string()) {
-            dirs.push(d.to_string());
+        if !dirs.iter().any(|x| x == Path::new(d)) {
+            dirs.push(PathBuf::from(d));
         }
     }
 
@@ -207,7 +209,7 @@ fn parse_ld_so_conf() -> Vec<String> {
 // Library scanning
 // ============================================================================
 
-fn scan_directory(dir: &str, verbose: bool) -> Vec<LibEntry> {
+fn scan_directory(dir: &Path, verbose: bool) -> Vec<LibEntry> {
     let mut entries = Vec::new();
 
     let read_dir = match fs::read_dir(dir) {
@@ -217,30 +219,37 @@ fn scan_directory(dir: &str, verbose: bool) -> Vec<LibEntry> {
 
     for entry in read_dir.flatten() {
         let path = entry.path();
-        let path_str = match path.to_str() {
-            Some(s) => s.to_string(),
-            None => continue,
+        // NO `to_str()` GUARD HERE, and that is the fix rather than a tidy-up.
+        //
+        // This used to read the path and the file name through `to_str()` and
+        // `continue` when either failed, so a shared library whose path is not
+        // valid UTF-8 was SILENTLY LEFT OUT OF THE CACHE. Nothing said so, and
+        // the consequence lands somewhere else entirely: the dynamic linker
+        // cannot find the library, and a program linked against it fails to
+        // start for a reason that points at neither.
+        let Some(filename) = path.file_name() else {
+            continue;
         };
+        let filename = filename.to_os_string();
 
-        let filename = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-
-        // Only consider files that look like shared libraries.
-        if !filename.contains(".so") {
+        // Only consider files that look like shared libraries. On the BYTES,
+        // since the name need not be text.
+        if !quoting::os_bytes(&filename).windows(3).any(|w| w == b".so") {
             continue;
         }
 
         // Read ELF info.
-        let (lib_type, os_abi) = match read_elf_info(&path_str) {
+        let (lib_type, os_abi) = match read_elf_info(&path) {
             Some(info) => info,
             None => {
                 // Might be a symlink — follow it.
                 if path.is_symlink() {
                     if let Ok(real) = fs::canonicalize(&path) {
-                        let real_str = real.to_string_lossy().to_string();
-                        match read_elf_info(&real_str) {
+                        // The path itself, not `to_string_lossy()`: a symlink
+                        // resolving to a target whose path is not UTF-8 was
+                        // opened under a name containing U+FFFD, which names
+                        // nothing, so the library was dropped from the cache.
+                        match read_elf_info(&real) {
                             Some(info) => info,
                             None => continue,
                         }
@@ -253,15 +262,20 @@ fn scan_directory(dir: &str, verbose: bool) -> Vec<LibEntry> {
             }
         };
 
-        let soname = extract_soname(&path_str).unwrap_or(filename);
+        let soname = extract_soname(&path).unwrap_or(filename);
 
         if verbose {
-            eprintln!("  {path_str} (soname: {soname})");
+            // Both are bytes; escaped for display only.
+            eprintln!(
+                "  {} (soname: {})",
+                quoting::escape_unprintable(&quoting::os_bytes(path.as_os_str())),
+                quoting::escape_unprintable(&quoting::os_bytes(&soname))
+            );
         }
 
         entries.push(LibEntry {
             soname,
-            path: path_str,
+            path,
             lib_type,
             os_abi,
         });
@@ -270,11 +284,15 @@ fn scan_directory(dir: &str, verbose: bool) -> Vec<LibEntry> {
     entries
 }
 
-fn scan_all_dirs(dirs: &[String], verbose: bool) -> Vec<LibEntry> {
+fn scan_all_dirs(dirs: &[PathBuf], verbose: bool) -> Vec<LibEntry> {
     let mut all_entries = Vec::new();
     for dir in dirs {
         if verbose {
-            eprintln!("Scanning {dir}...");
+            // Escaped for display; the bytes are what get scanned.
+            eprintln!(
+                "Scanning {}...",
+                quoting::escape_unprintable(&quoting::os_bytes(dir.as_os_str()))
+            );
         }
         let mut entries = scan_directory(dir, verbose);
         all_entries.append(&mut entries);
@@ -287,9 +305,9 @@ fn scan_all_dirs(dirs: &[String], verbose: bool) -> Vec<LibEntry> {
 // ============================================================================
 
 fn write_cache(entries: &[LibEntry]) -> io::Result<()> {
-    let mut content = String::new();
-    content.push_str("# ld.so.cache — auto-generated by ldconfig\n");
-    content.push_str(&format!("# {} entries\n", entries.len()));
+    let mut content: Vec<u8> = Vec::new();
+    content.extend_from_slice("# ld.so.cache — auto-generated by ldconfig\n".as_bytes());
+    content.extend_from_slice(format!("# {} entries\n", entries.len()).as_bytes());
 
     for entry in entries {
         let type_str = match entry.lib_type {
@@ -297,33 +315,47 @@ fn write_cache(entries: &[LibEntry]) -> io::Result<()> {
             LibType::Elf32 => "ELF32",
             LibType::Unknown => "UNKNOWN",
         };
-        content.push_str(&format!("{}\t{}\t{}\n", entry.soname, type_str, entry.path));
+        // BYTES. A soname and a path may each hold any byte but `/` and
+        // NUL, and this cache is our own tab-separated format rather than
+        // glibc's binary one, so it can carry them exactly. Writing it as
+        // text would have required a lossy decode, and the entry that came
+        // back would name a library that does not exist.
+        content.extend_from_slice(&quoting::os_bytes(&entry.soname));
+        content.push(b'\t');
+        content.extend_from_slice(type_str.as_bytes());
+        content.push(b'\t');
+        content.extend_from_slice(&quoting::os_bytes(entry.path.as_os_str()));
+        content.push(b'\n');
     }
 
     fs::write(LD_SO_CACHE, content)
 }
 
 fn read_cache() -> Vec<LibEntry> {
-    let content = match fs::read_to_string(LD_SO_CACHE) {
+    // Read as BYTES to match how `write_cache` produces it: a soname or a
+    // path in there may hold any byte but `/` and NUL, and `read_to_string`
+    // would refuse the WHOLE cache because of one such entry -- turning one
+    // awkward library into no libraries at all.
+    let content = match fs::read(LD_SO_CACHE) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
 
     let mut entries = Vec::new();
-    for line in content.lines() {
-        if line.starts_with('#') || line.is_empty() {
+    for line in content.split(|&b| b == b'\n') {
+        if line.first() == Some(&b'#') || line.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() >= 3 {
-            let lib_type = match fields[1] {
-                "ELF64" => LibType::Elf64,
-                "ELF32" => LibType::Elf32,
+        let fields: Vec<&[u8]> = line.split(|&b| b == b'\t').collect();
+        if let [soname, kind, path, ..] = fields.as_slice() {
+            let lib_type = match *kind {
+                b"ELF64" => LibType::Elf64,
+                b"ELF32" => LibType::Elf32,
                 _ => LibType::Unknown,
             };
             entries.push(LibEntry {
-                soname: fields[0].to_string(),
-                path: fields[2].to_string(),
+                soname: quoting::os_from_bytes(soname),
+                path: PathBuf::from(quoting::os_from_bytes(path)),
                 lib_type,
                 os_abi: 0,
             });
@@ -336,14 +368,17 @@ fn read_cache() -> Vec<LibEntry> {
 // Commands
 // ============================================================================
 
-fn cmd_ldconfig(args: &[String]) {
+fn cmd_ldconfig(args: &[OsString]) {
     let mut verbose = false;
     let mut print_cache = false;
     let mut no_write = false;
-    let mut extra_dirs: Vec<String> = Vec::new();
+    let mut extra_dirs: Vec<PathBuf> = Vec::new();
 
     for arg in args {
-        match arg.as_str() {
+        // `""` for a word that is not Unicode: it matches no option name and
+        // falls to the operand arm, which keeps `arg` -- and the operand here
+        // is a DIRECTORY to scan.
+        match arg.to_str().unwrap_or("") {
             "-h" | "--help" | "-?" => {
                 println!("Usage: ldconfig [options] [dir...]");
                 println!();
@@ -365,7 +400,9 @@ fn cmd_ldconfig(args: &[String]) {
             "-p" | "--print-cache" => print_cache = true,
             "-N" => no_write = true,
             s if !s.starts_with('-') => {
-                extra_dirs.push(s.to_string());
+                // `arg`, not the decoded view: this operand is a DIRECTORY
+                // to scan, and a directory name may hold any byte.
+                extra_dirs.push(PathBuf::from(arg));
             }
             _ => {} // Ignore unknown flags silently (like real ldconfig).
         }
@@ -382,7 +419,16 @@ fn cmd_ldconfig(args: &[String]) {
                 LibType::Elf32 => "(libc6)",
                 LibType::Unknown => "(unknown)",
             };
-            let _ = writeln!(out, "\t{} {} => {}", entry.soname, type_str, entry.path);
+            // `-p` lists the cache for a human, so the names are escaped
+            // for display rather than written raw -- an unprintable byte
+            // in one would otherwise be able to forge a line of output.
+            let _ = writeln!(
+                out,
+                "\t{} {} => {}",
+                quoting::escape_unprintable(&quoting::os_bytes(&entry.soname)),
+                type_str,
+                quoting::escape_unprintable(&quoting::os_bytes(entry.path.as_os_str()))
+            );
         }
         return;
     }
@@ -398,7 +444,7 @@ fn cmd_ldconfig(args: &[String]) {
     let entries = scan_all_dirs(&dirs, verbose);
 
     // Deduplicate: keep first occurrence of each soname (per arch).
-    let mut seen: HashMap<(String, String), bool> = HashMap::new();
+    let mut seen: HashMap<(OsString, String), bool> = HashMap::new();
     let deduped: Vec<LibEntry> = entries
         .into_iter()
         .filter(|e| {
@@ -437,8 +483,10 @@ fn cmd_ldconfig(args: &[String]) {
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so naming a
+    // directory whose path is not valid Unicode killed the process here.
+    let args: Vec<OsString> = env::args_os().collect();
+    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
     cmd_ldconfig(&rest);
 }
 
@@ -453,38 +501,38 @@ mod tests {
     #[test]
     fn test_extract_soname_versioned() {
         assert_eq!(
-            extract_soname("/usr/lib/libfoo.so.1.2.3"),
-            Some("libfoo.so.1".to_string())
+            extract_soname(Path::new("/usr/lib/libfoo.so.1.2.3")),
+            Some(OsString::from("libfoo.so.1"))
         );
         assert_eq!(
-            extract_soname("/usr/lib/libbar.so.2"),
-            Some("libbar.so.2".to_string())
+            extract_soname(Path::new("/usr/lib/libbar.so.2")),
+            Some(OsString::from("libbar.so.2"))
         );
         assert_eq!(
-            extract_soname("/lib/libc.so.6"),
-            Some("libc.so.6".to_string())
+            extract_soname(Path::new("/lib/libc.so.6")),
+            Some(OsString::from("libc.so.6"))
         );
     }
 
     #[test]
     fn test_extract_soname_bare() {
         assert_eq!(
-            extract_soname("/usr/lib/libfoo.so"),
-            Some("libfoo.so".to_string())
+            extract_soname(Path::new("/usr/lib/libfoo.so")),
+            Some(OsString::from("libfoo.so"))
         );
     }
 
     #[test]
     fn test_extract_soname_no_so() {
-        assert_eq!(extract_soname("/usr/lib/libfoo.a"), None);
-        assert_eq!(extract_soname("/usr/bin/program"), None);
+        assert_eq!(extract_soname(Path::new("/usr/lib/libfoo.a")), None);
+        assert_eq!(extract_soname(Path::new("/usr/bin/program")), None);
     }
 
     #[test]
     fn test_extract_soname_complex() {
         assert_eq!(
-            extract_soname("/lib/x86_64-linux-gnu/libpthread.so.0"),
-            Some("libpthread.so.0".to_string())
+            extract_soname(Path::new("/lib/x86_64-linux-gnu/libpthread.so.0")),
+            Some(OsString::from("libpthread.so.0"))
         );
     }
 
@@ -498,8 +546,8 @@ mod tests {
     #[test]
     fn test_lib_entry_clone() {
         let entry = LibEntry {
-            soname: "libfoo.so.1".to_string(),
-            path: "/usr/lib/libfoo.so.1.0.0".to_string(),
+            soname: OsString::from("libfoo.so.1"),
+            path: PathBuf::from("/usr/lib/libfoo.so.1.0.0"),
             lib_type: LibType::Elf64,
             os_abi: 0,
         };
@@ -524,12 +572,12 @@ mod tests {
 
     #[test]
     fn test_read_elf_info_nonexistent() {
-        assert!(read_elf_info("/nonexistent/file").is_none());
+        assert!(read_elf_info(Path::new("/nonexistent/file")).is_none());
     }
 
     #[test]
     fn test_scan_nonexistent_dir() {
-        let entries = scan_directory("/nonexistent/dir/that/should/not/exist", false);
+        let entries = scan_directory(Path::new("/nonexistent/dir/that/should/not/exist"), false);
         assert!(entries.is_empty());
     }
 

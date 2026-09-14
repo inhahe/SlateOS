@@ -144,29 +144,18 @@ impl FocusMode {
     }
 }
 
-/// Notification priority level for an app.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NotifPriority {
-    /// Silenced — never shown in focus mode.
-    Silent,
-    /// Normal — follows focus mode rules.
-    Normal,
-    /// Priority — shown in PriorityOnly mode.
-    Priority,
-    /// Critical — always shown (alarms, security alerts).
-    Critical,
-}
-
-impl NotifPriority {
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Silent => "Silent",
-            Self::Normal => "Normal",
-            Self::Priority => "Priority",
-            Self::Critical => "Critical",
-        }
-    }
-}
+/// How far a program's notifications get while the user is focusing.
+///
+/// **The definition moved to `notifsettings` and this is the same type**, not
+/// a copy that agrees. It had to move because the Settings application has to
+/// write the value this module reads, and two processes cannot share an enum
+/// that lives inside one of them.
+///
+/// Re-exported under the old name so that the twenty-one call sites here read
+/// as they did. The name is worth keeping locally: within this module the
+/// question really is "what priority is this app", and `Importance` is the
+/// word that makes sense to a settings page listing every program.
+pub use notifsettings::Importance as NotifPriority;
 
 /// An automatic rule that activates focus assist.
 #[derive(Clone, Debug, PartialEq)]
@@ -241,36 +230,19 @@ impl AutoRule {
 }
 
 /// Per-app notification override.
-#[derive(Clone, Debug)]
-pub struct AppNotifOverride {
-    /// Application identifier.
-    pub app_id: String,
-    /// Display name.
-    pub app_name: String,
-    /// Priority level override.
-    pub priority: NotifPriority,
-    /// Whether to show banners for this app.
-    pub show_banner: bool,
-    /// Whether to play sound for this app.
-    pub play_sound: bool,
-}
-
-impl AppNotifOverride {
-    pub fn new(app_id: &str, app_name: &str) -> Self {
-        Self {
-            app_id: app_id.to_string(),
-            app_name: app_name.to_string(),
-            priority: NotifPriority::Normal,
-            show_banner: true,
-            play_sound: true,
-        }
-    }
-
-    pub fn with_priority(mut self, priority: NotifPriority) -> Self {
-        self.priority = priority;
-        self
-    }
-}
+///
+/// **Was a local struct with both an `app_id` and an `app_name`, and the pair
+/// was a latent bug.** `app_priority` looked a rule up by `app_id`, while the
+/// shell's only caller passes a notification's `app_name`
+/// (`DesktopShell::notify`, which says in its own comment that the name is
+/// "the only app identity a `Notification` carries"). So a rule written with
+/// an id that differed from the name — which is exactly what this module's own
+/// tests did, `new("chat", "Chat")` — could never be found. Nothing in
+/// production ever wrote one, so it never bit; a settings page writing rules
+/// would have been the first thing to meet it, silently.
+///
+/// One key now, and it is the one the caller passes.
+pub use notifsettings::AppRule as AppNotifOverride;
 
 // ============================================================================
 // Focus Assist Manager
@@ -375,13 +347,16 @@ impl FocusAssistManager {
         }
     }
 
-    /// Set an app override.
+    /// Set an app override, replacing any rule already held for that program.
+    ///
+    /// Keyed on `app_name`, the same field [`app_priority`](Self::app_priority)
+    /// reads, so a rule written here is a rule that can be found. The version
+    /// this replaced matched on a separate `app_id` that no caller supplied.
     pub fn set_app_override(&mut self, override_entry: AppNotifOverride) {
-        // Replace existing or add new.
         if let Some(existing) = self
             .app_overrides
             .iter_mut()
-            .find(|o| o.app_id == override_entry.app_id)
+            .find(|o| o.app_name == override_entry.app_name)
         {
             *existing = override_entry;
         } else {
@@ -390,12 +365,16 @@ impl FocusAssistManager {
     }
 
     /// Get the notification priority for an app.
-    pub fn app_priority(&self, app_id: &str) -> NotifPriority {
+    ///
+    /// Matched on the name the caller passes, which is a notification's
+    /// `app_name`. See [`AppNotifOverride`] for the two-key version this
+    /// replaced and why it could not match.
+    #[must_use]
+    pub fn app_priority(&self, app_name: &str) -> NotifPriority {
         self.app_overrides
             .iter()
-            .find(|o| o.app_id == app_id)
-            .map(|o| o.priority)
-            .unwrap_or(NotifPriority::Normal)
+            .find(|o| o.app_name == app_name)
+            .map_or(NotifPriority::Normal, |o| o.importance)
     }
 
     /// Should a notification from this app be shown right now?
@@ -879,9 +858,9 @@ mod tests {
         let mut mgr = make_mgr();
         mgr.set_mode(FocusMode::PriorityOnly);
         mgr.set_app_override(
-            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Priority),
+            AppNotifOverride::new("Chat").with_importance(NotifPriority::Priority),
         );
-        assert!(mgr.should_show_notification("chat"));
+        assert!(mgr.should_show_notification("Chat"));
         assert!(!mgr.should_show_notification("other_app")); // Normal priority
     }
 
@@ -890,13 +869,13 @@ mod tests {
         let mut mgr = make_mgr();
         mgr.set_mode(FocusMode::AlarmsOnly);
         mgr.set_app_override(
-            AppNotifOverride::new("alarm", "Alarm").with_priority(NotifPriority::Critical),
+            AppNotifOverride::new("Alarm").with_importance(NotifPriority::Critical),
         );
         mgr.set_app_override(
-            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Priority),
+            AppNotifOverride::new("Chat").with_importance(NotifPriority::Priority),
         );
-        assert!(mgr.should_show_notification("alarm"));
-        assert!(!mgr.should_show_notification("chat"));
+        assert!(mgr.should_show_notification("Alarm"));
+        assert!(!mgr.should_show_notification("Chat"));
         assert!(!mgr.should_show_notification("other"));
     }
 
@@ -905,9 +884,9 @@ mod tests {
         let mut mgr = make_mgr();
         mgr.set_mode(FocusMode::TotalSilence);
         mgr.set_app_override(
-            AppNotifOverride::new("alarm", "Alarm").with_priority(NotifPriority::Critical),
+            AppNotifOverride::new("Alarm").with_importance(NotifPriority::Critical),
         );
-        assert!(!mgr.should_show_notification("alarm"));
+        assert!(!mgr.should_show_notification("Alarm"));
     }
 
     // ---- App overrides ----
@@ -918,16 +897,40 @@ mod tests {
         assert_eq!(mgr.app_priority("unknown"), NotifPriority::Normal);
     }
 
+    /// A rule is found under the same string the shell looks it up by.
+    ///
+    /// **The test the two-key version could not have.** `AppNotifOverride`
+    /// used to carry an `app_id` and an `app_name`; rules were written under
+    /// the id and `DesktopShell::notify` looks up by a notification's
+    /// `app_name`. This module's own tests wrote `new("chat", "Chat")` and
+    /// then queried `"chat"`, so they agreed with each other and with nothing
+    /// the shell does. Nothing in production wrote a rule, so it never bit --
+    /// a settings page would have been the first thing to meet it, and the
+    /// symptom would have been a preference that saved and did nothing.
+    #[test]
+    fn a_rule_is_found_by_the_name_a_notification_carries() {
+        let mut mgr = make_mgr();
+        mgr.set_mode(FocusMode::PriorityOnly);
+        // Exactly what the shell passes: `Notification::app_name`.
+        let as_the_shell_spells_it = "Chat";
+        mgr.set_app_override(
+            AppNotifOverride::new(as_the_shell_spells_it).with_importance(NotifPriority::Priority),
+        );
+
+        assert!(
+            mgr.should_show_notification(as_the_shell_spells_it),
+            "a rule written under the name the shell uses was not found by it"
+        );
+    }
+
     #[test]
     fn set_app_override_replaces() {
         let mut mgr = make_mgr();
+        mgr.set_app_override(AppNotifOverride::new("Chat").with_importance(NotifPriority::Silent));
         mgr.set_app_override(
-            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Silent),
+            AppNotifOverride::new("Chat").with_importance(NotifPriority::Priority),
         );
-        mgr.set_app_override(
-            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Priority),
-        );
-        assert_eq!(mgr.app_priority("chat"), NotifPriority::Priority);
+        assert_eq!(mgr.app_priority("Chat"), NotifPriority::Priority);
         assert_eq!(mgr.app_overrides.len(), 1);
     }
 

@@ -10866,7 +10866,7 @@ mod overview_wiring_tests {
         let mut s = shell();
         s.focus.set_mode(focus_assist::FocusMode::PriorityOnly);
         s.focus.set_app_override(
-            AppNotifOverride::new("Alarms", "Alarms").with_priority(NotifPriority::Critical),
+            AppNotifOverride::new("Alarms").with_importance(NotifPriority::Critical),
         );
         let _ = post_from(&mut s, "Mail", "Three new messages", None);
         let _ = post_from(&mut s, "Alarms", "Wake up", None);

@@ -756,6 +756,8 @@ pub struct OperationExecutor {
     /// under `ErrorPolicy::StopOnFirst`. Distinct from `next == len`, which is
     /// the ordinary end, because the two mean different things to a resume.
     stopped: bool,
+    /// A file copy part-way through, held between steps.
+    cursor: Option<CopyCursor>,
 }
 
 impl OperationExecutor {
@@ -773,6 +775,7 @@ impl OperationExecutor {
             actions: Vec::new(),
             next: 0,
             stopped: false,
+            cursor: None,
         }
     }
 
@@ -959,6 +962,14 @@ impl OperationExecutor {
         };
 
         match result {
+            // Not finished: step back to the same action, and do not journal
+            // it, count it, or give it an undo entry -- none of those are true
+            // of a file that is still being written. The only place `next`
+            // moves backwards, and it terminates because every visit reads at
+            // least one byte until the file ends.
+            Ok(ActionOutcome::Partial) => {
+                self.next = self.next.saturating_sub(1);
+            }
             Ok(ActionOutcome::Done) => {
                 // A journal write that fails only costs redone work on a
                 // resume, which is why it does not abort the operation.
@@ -1017,6 +1028,14 @@ impl OperationExecutor {
                                 }
                             };
                             if let Ok(outcome) = retry {
+                                // A retry that came back part-way is not a
+                                // success to record: leave the retry loop and
+                                // let the next step carry the same action on.
+                                if outcome == ActionOutcome::Partial {
+                                    self.next = self.next.saturating_sub(1);
+                                    retried = true;
+                                    break;
+                                }
                                 if matches!(outcome, ActionOutcome::Skipped) {
                                     let _ = journal.mark_skipped(action.index);
                                     self.skipped = self.skipped.saturating_add(1);
@@ -1056,6 +1075,11 @@ impl OperationExecutor {
     /// must run once, after every action has had its turn, and it must see the
     /// finished journal.
     pub fn finish(&mut self) {
+        // A copy stopped part-way -- cancelled, or failed under `StopOnFirst`
+        // -- leaves a temporary beside its destination. It is removed here
+        // rather than left for the user to find: it is a part-sized file under
+        // a name they never asked for, and nothing tells them it is ours.
+        self.discard_cursor();
         let Some(journal) = self.journal.take() else {
             return;
         };
@@ -1306,10 +1330,15 @@ impl OperationExecutor {
             }
         }
 
-        self.atomic_copy_file(&action.src, dest)?;
-        self.undo_entries
-            .push((action.src.clone(), UndoTarget::Path(dest.clone())));
-        Ok(ActionOutcome::Done)
+        // Chunked, so a large file does not hold the loop. The undo entry
+        // is pushed only when the last byte lands: an entry for a copy that is
+        // still running would offer to undo a file that is not there yet.
+        let outcome = self.copy_chunk(action, dest)?;
+        if outcome == ActionOutcome::Done {
+            self.undo_entries
+                .push((action.src.clone(), UndoTarget::Path(dest.clone())));
+        }
+        Ok(outcome)
     }
 
     fn execute_delete_action(&mut self, action: &PlannedAction) -> io::Result<ActionOutcome> {
@@ -1370,6 +1399,141 @@ impl OperationExecutor {
     }
 
     /// Copy `src` to a temporary name next to `dest`, then rename atomically.
+    /// Copy one chunk of `action`'s file, starting it if it is not started.
+    ///
+    /// **This is what stops a single large file freezing the window.** The
+    /// step-wise executor made a *file* the unit of interruption, which leaves
+    /// one enormous file holding the loop for the length of its copy; this
+    /// makes a megabyte the unit instead.
+    ///
+    /// Answers `Partial` while there is more to write. The caller steps back
+    /// to the same action, and the cursor is what makes that terminate: every
+    /// visit writes at least as much as it read, and a read of zero is the end
+    /// of the file.
+    fn copy_chunk(&mut self, action: &PlannedAction, dest: &Path) -> io::Result<ActionOutcome> {
+        use std::io::{Read as _, Write as _};
+
+        // A cursor belonging to some other action is not ours to continue.
+        // Dropping it costs one file's restart; using it would write this
+        // file's bytes into that file.
+        if self
+            .cursor
+            .as_ref()
+            .is_some_and(|c| c.action != action.index)
+        {
+            self.discard_cursor();
+        }
+        if self.cursor.is_none() {
+            self.cursor = Some(self.begin_copy(action.index, &action.src, dest)?);
+        }
+        let Some(cursor) = self.cursor.as_mut() else {
+            return Err(io::Error::other("copy cursor vanished"));
+        };
+
+        // Filled, not read once. `Read::read` may return fewer bytes than
+        // asked for at any time and for any reason, so a short *read* says
+        // nothing; a short *fill* -- reading until the buffer is full or the
+        // source gives nothing -- is the end of the file. Without this every
+        // file would need one extra step to discover its own end, which for a
+        // folder of small files is twice the steps for no bytes.
+        let mut buf = vec![0_u8; COPY_CHUNK];
+        let mut filled = 0;
+        while filled < COPY_CHUNK {
+            let Some(rest) = buf.get_mut(filled..) else {
+                break;
+            };
+            let read = cursor.src.read(rest)?;
+            if read == 0 {
+                break;
+            }
+            filled = filled.saturating_add(read);
+        }
+
+        let Some(chunk) = buf.get(..filled) else {
+            return Err(io::Error::other("filled more of the buffer than it has"));
+        };
+        cursor.tmp.write_all(chunk)?;
+        if filled == COPY_CHUNK {
+            // The buffer filled, so there may be more. One more turn.
+            return Ok(ActionOutcome::Partial);
+        }
+
+        // Short of a full buffer: that was the end of the file. Commit it.
+        let Some(cursor) = self.cursor.take() else {
+            return Err(io::Error::other("copy cursor vanished"));
+        };
+        Self::commit_copy(cursor)?;
+        Ok(ActionOutcome::Done)
+    }
+
+    /// Open the source and a fresh temporary beside the destination.
+    fn begin_copy(&self, action: u32, src: &Path, dest: &Path) -> io::Result<CopyCursor> {
+        let parent = dest.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        let tmp_path = parent.join(Self::temp_name(dest));
+        Ok(CopyCursor {
+            action,
+            src: fs::File::open(src)?,
+            tmp: fs::File::create(&tmp_path)?,
+            tmp_path,
+            dest: dest.to_path_buf(),
+            src_path: src.to_path_buf(),
+        })
+    }
+
+    /// Finish a copy: timestamp, then the rename that makes it visible.
+    fn commit_copy(cursor: CopyCursor) -> io::Result<()> {
+        let CopyCursor {
+            tmp,
+            tmp_path,
+            dest,
+            src_path,
+            ..
+        } = cursor;
+        // Dropped before the rename: a file still open for writing cannot be
+        // renamed on some platforms, and the data has to be on the disk before
+        // the name says it is there.
+        drop(tmp);
+
+        if let Ok(src_meta) = fs::metadata(&src_path)
+            && let Ok(mtime) = src_meta.modified()
+        {
+            let _ = set_file_mtime(&tmp_path, mtime);
+        }
+
+        // On failure the temporary must go: it is a full-size copy sitting in
+        // the user's destination directory under a name they never asked for,
+        // and leaving it behind meant a failed copy of a large file silently
+        // consumed its own size in disk space.
+        if let Err(e) = fs::rename(&tmp_path, &dest) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Throw away a copy in progress, and the bytes it had written.
+    ///
+    /// The temporary is removed rather than left: it is exactly the "full-size
+    /// copy under a name the user never asked for" that `commit_copy` cleans
+    /// up on its own failure path.
+    fn discard_cursor(&mut self) {
+        if let Some(cursor) = self.cursor.take() {
+            drop(cursor.tmp);
+            let _ = fs::remove_file(&cursor.tmp_path);
+        }
+    }
+
+    /// The temporary name a copy to `dest` writes through.
+    fn temp_name(dest: &Path) -> String {
+        format!(
+            ".{}.fileop-tmp",
+            dest.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "file".to_string())
+        )
+    }
+
     fn atomic_copy_file(&self, src: &Path, dest: &Path) -> io::Result<()> {
         let parent = dest.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
@@ -1416,9 +1580,46 @@ impl OperationExecutor {
 }
 
 /// Internal result of processing a single action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActionOutcome {
     Done,
     Skipped,
+    /// A file copy that has written some of its bytes and will need another
+    /// turn. The action is *not* finished: it is not journalled, it is not
+    /// counted, and the executor steps back to it.
+    Partial,
+}
+
+/// How much of one file a single step copies.
+///
+/// A byte budget rather than a time one, because you cannot know how long a
+/// write will take until it returns -- a deadline checked before the write is
+/// a deadline the write can overrun by any amount. A megabyte is a few
+/// milliseconds on a slow USB stick and well under one on anything internal,
+/// which is the frame budget this is for.
+const COPY_CHUNK: usize = 1024 * 1024;
+
+/// A file copy that has not finished, carried from one step to the next.
+///
+/// The handles stay open across steps: reopening and seeking each time would
+/// be correct and would also mean a 4 GiB file did four thousand opens. The
+/// partial data lives in the same temporary file `atomic_copy_file` has always
+/// used, so an interrupted copy leaves a `.name.fileop-tmp` beside the
+/// destination and never a half-written file under the name the user expects.
+struct CopyCursor {
+    /// Which planned action this belongs to.
+    ///
+    /// Checked before the cursor is used. An executor that somehow arrived at
+    /// a different action must not pour this file's remaining bytes into it --
+    /// the cursor is dropped instead, which costs a restart of one file.
+    action: u32,
+    src: fs::File,
+    tmp: fs::File,
+    tmp_path: PathBuf,
+    /// Where the finished file goes.
+    dest: PathBuf,
+    /// The source, kept for its modification time at the end.
+    src_path: PathBuf,
 }
 
 /// Best-effort modification time preservation.
@@ -3574,6 +3775,107 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, FileOpEvent::Complete { .. })),
             "the resumed operation never completed"
+        );
+    }
+
+    /// A file big enough to matter is copied in pieces.
+    ///
+    /// **This is the whole point of the chunk.** A step used to be a whole
+    /// file, so one four-gigabyte image held the loop -- and the window --
+    /// for the length of its copy. The bytes below are two and a half chunks,
+    /// which is the smallest size that proves a chunk is not the file.
+    #[test]
+    fn a_file_larger_than_one_chunk_is_copied_in_more_than_one_step() {
+        let src_scratch = temp_dir("chunk_big_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("chunk_big_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
+
+        // Not all one byte: a run of zeroes would survive a copy that dropped
+        // a chunk and wrote the next one in its place.
+        let size = COPY_CHUNK * 5 / 2;
+        let content: Vec<u8> = (0..size)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let src = src_dir.join("big.bin");
+        fs::write(&src, &content).unwrap();
+
+        let plan = OperationPlan::plan_copy(
+            std::slice::from_ref(&src),
+            &dst_dir,
+            ConflictPolicy::Skip,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        assert_eq!(plan.actions.len(), 1, "one file is one action");
+
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        let mut steps = 0;
+        while !executor.is_done() {
+            executor.step();
+            steps += 1;
+            assert!(
+                steps <= 16,
+                "a two-and-a-half chunk file took {steps} steps"
+            );
+        }
+        executor.finish();
+
+        assert!(steps > 1, "the whole file went in one step: {steps}");
+        assert_eq!(
+            fs::read(dst_dir.join("big.bin")).unwrap(),
+            content,
+            "the copy does not match the original"
+        );
+    }
+
+    /// **A copy stopped part-way leaves nothing under the name the user
+    /// expects.**
+    ///
+    /// The partial bytes go to a temporary, and the rename that gives them
+    /// the real name happens only when the last one lands. So a cancelled
+    /// copy is not a truncated file wearing the right name -- which would be
+    /// indistinguishable from a small file, and is how a backup becomes worse
+    /// than no backup.
+    #[test]
+    fn a_copy_stopped_part_way_writes_no_file_at_the_destination() {
+        let src_scratch = temp_dir("chunk_cancel_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("chunk_cancel_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
+        let src = src_dir.join("big.bin");
+        fs::write(&src, vec![7_u8; COPY_CHUNK * 3]).unwrap();
+
+        let plan = OperationPlan::plan_copy(
+            &[src],
+            &dst_dir,
+            ConflictPolicy::Skip,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        executor.step();
+        assert!(!executor.is_done(), "three chunks went in one step");
+
+        executor.cancel();
+        executor.step();
+        executor.finish();
+
+        assert!(
+            !dst_dir.join("big.bin").exists(),
+            "a cancelled copy left a truncated file under the real name"
+        );
+        let leftovers: Vec<String> = fs::read_dir(&dst_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("fileop-tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a cancelled copy left its scratch file behind: {leftovers:?}"
         );
     }
 

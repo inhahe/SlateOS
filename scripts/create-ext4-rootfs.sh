@@ -2047,8 +2047,22 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
     # produces are 74 MiB, and building all 193 of the remaining userspace
     # crates would add roughly 167 MiB more and not fit.  Staging a subset is a
     # legitimate answer; silently overflowing is not.
-    SLATE_BUDGET=$(( $(echo "$IMG_SIZE" | sed 's/[Mm]$//') / 4 ))
-    if [ "$SLATE_MIB" -gt "$SLATE_BUDGET" ]; then
+    # IMG_SIZE is env-overridable and carries a unit suffix, so this must not
+    # assume "M" -- and the warning below tells the reader to RAISE IMG_SIZE,
+    # which makes IMG_SIZE=1G a documented thing to do rather than an exotic
+    # one. It used to exit 1 there: `$(( 1G / 4 ))` is "value too great for
+    # base", so following this block's own advice broke the image build. A
+    # size this cannot parse skips the check instead of failing, because the
+    # budget is advice and advice must never be what breaks a build.
+    SLATE_BUDGET=""
+    case "$IMG_SIZE" in
+        *[0-9][Mm]) SLATE_BUDGET=$(( ${IMG_SIZE%?} / 4 )) ;;
+        *[0-9][Gg]) SLATE_BUDGET=$(( ${IMG_SIZE%?} * 1024 / 4 )) ;;
+        *) echo "[rootfs] NOTE: IMG_SIZE=$IMG_SIZE has no M or G suffix this can read, so the"
+           echo "[rootfs]       staged-size budget was NOT checked. The $SLATE_MIB MiB above is"
+           echo "[rootfs]       still accurate; only the comparison was skipped." ;;
+    esac
+    if [ -n "$SLATE_BUDGET" ] && [ "$SLATE_MIB" -gt "$SLATE_BUDGET" ]; then
         echo "[rootfs] WARNING: that is more than a quarter of the $IMG_SIZE image ($SLATE_BUDGET MiB)."
         echo "[rootfs]          Nothing here checks total free space, and mke2fs -d fails PARTWAY"
         echo "[rootfs]          through when it runs out, leaving a broken image. Either raise"

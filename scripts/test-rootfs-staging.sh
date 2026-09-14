@@ -218,5 +218,38 @@ case "$msg" in
 esac
 rm -rf "$T"
 
+# 12. A GIGABYTE-SUFFIXED IMG_SIZE MUST NOT BREAK THE BUILD. This is a
+# regression pin, not a hypothetical: the first version of the budget did
+# `$(echo "$IMG_SIZE" | sed s/[Mm]$//) / 4`, which leaves "1G" intact and makes
+# the arithmetic exit 1 with "value too great for base". The warning it guards
+# tells the reader to RAISE IMG_SIZE, so the one documented way to act on the
+# advice was the one way to break the script. Found by self-review; no test
+# covered it, which is why these two exist.
+slate_env
+export IMG_SIZE="1G"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/x"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+[ "$rc" -eq 0 ] && ok || bad "IMG_SIZE=1G must not fail the image build (exit $rc)"
+case "$msg" in
+    *"value too great"*) bad "the G suffix must be parsed, not fed to arithmetic" ;;
+    *) ok ;;
+esac
+rm -rf "$T"
+
+# 13. A size with no unit this can read skips the COMPARISON and says so --
+# it does not skip the report, and it does not fail. The budget is advice.
+slate_env
+export IMG_SIZE="wat"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/x"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+[ "$rc" -eq 0 ] && ok || bad "an unreadable IMG_SIZE must not fail the build (exit $rc)"
+case "$msg" in
+    *"budget was NOT checked"*) ok ;;
+    *) bad "a skipped budget check must announce itself, got: $msg" ;;
+esac
+rm -rf "$T"
+
 echo "test-rootfs-staging: $PASS/$((PASS + FAIL)) cases pass"
 [ "$FAIL" -eq 0 ]

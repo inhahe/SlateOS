@@ -129826,6 +129826,7 @@ so that destination became a running program rather than a library.
 | 2. a registry in the compositor, reaped per client | **done** — `Compositor::set_tray_icon` / `remove_tray_icon` / `reap_tray_icons` |
 | 3. a `TRAY` frame and a subscription | **done** — `guiremote::tray`, `SubscribeTrayIcons` 0x23, `route_tray_list` |
 | 4. drag, drop, pin, reorder (`tray_dnd.rs`) | still unconstructed, but no longer built on nothing |
+| 5. a click reaching the program that owns the icon | **done** — `ClickTrayIcon` 0x24, `Event::TrayIconClicked` 0x0C, `App::tray_icon_clicked` |
 
 Plus the two ends: `oswindow::EventLoop` has `watch_tray`, `set_tray_icon`,
 `remove_tray_icon` and `tray_icons`, and the shell subscribes, folds each
@@ -129837,11 +129838,39 @@ the road already had tests and none of them proves a pixel — which is
 precisely the state `apps/systray::register_icon` is in: public, correctly
 shaped, thoroughly tested, reaching nothing.
 
+**Update, later still: the click routes too, and it needed a delivery path
+that did not exist.**
+
+Every notification the compositor sends is addressed to a window, and
+`route_input` gives it to the link that `owns` that window. A program may
+have a tray icon and **no window at all** — which is exactly what
+`design.txt:716` asks for when it says a program may start in the tray. So
+there is a second queue, `pending_client_events`, addressed by pid and
+drained into the same batch.
+
+A second queue rather than a sentinel window id in the first: an id that is
+not a window would have to be recognised at every site that reads one, and
+the sites that forgot would look up a window, find nothing, and drop the
+event.
+
+**And `oswindow` would have swallowed it silently.** Its dispatch filters on
+`id != window` and returns early, so an event with window 0 would have been
+encoded, sent, decoded, delivered, and dropped one line before reaching the
+application — a program that never answers its own icon, with nothing in
+any log. `App::tray_icon_clicked` is dispatched before that filter, so
+`on_event` keeps its contract of "events for your window". Found by reading
+the strap rather than assuming it.
+
+**What the full workspace run caught that five crates' tests did not.**
+`cargo test` over the five crates that changed was green. `apps/explorer`
+and `apps/stickynotes` match `guitk::Event` exhaustively, so a new variant
+broke two crates nobody had named, and the run reported *targets passed: 0*
+with a build error rather than a test failure. That is
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING` happening to the
+person who had read it the same afternoon.
+
 **What is left, and it is now a short list:**
 
-- **A click does not route back to the owner.** The shell hit-tests the slot
-  (`tray_icon_rects`) and there is no verb carrying "your icon was clicked"
-  to the program that registered it.
 - **`apps/systray` is still the copy**, and 842 says its unique parts — quick
   settings, the volume and network popups — move into the shell rather than
   to Settings. Nothing has moved yet.

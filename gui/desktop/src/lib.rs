@@ -321,6 +321,20 @@ const TRAY_BELL_WIDTH: f32 = 24.0;
 /// changing its glyph cannot reflow the tray and move every window button
 /// sideways.
 const TRAY_ICON_SLOT: f32 = 24.0;
+
+/// A press on a tray icon, in flight.
+struct TrayDrag {
+    /// Threshold and click-versus-drag bookkeeping.
+    source: tray_dnd::TrayDragSource,
+    /// Which button went down, so the release reports the same one.
+    ///
+    /// The tray is the one place in this shell where the right button is a
+    /// first-class gesture rather than a context menu the shell itself owns:
+    /// the icon belongs to another program, and what right-clicking it means
+    /// is that program's to decide. `ClickTrayIcon` has carried a button
+    /// since it was defined, for exactly this.
+    button: MouseButton,
+}
 /// The bell the tray draws when nothing is being silenced.
 ///
 /// Not read by the renderer, which asks the focus manager for the glyph of
@@ -1016,6 +1030,21 @@ pub struct DesktopShell {
     /// tray whose icons move when an unrelated program registers one is a tray
     /// where the user's muscle memory is wrong.
     tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// A press that landed on a tray icon and has not been released.
+    ///
+    /// Held from press to release because until the release the shell does
+    /// not know which gesture this was: a click, which the owning program is
+    /// told about, or a drag, which is the shell's own and which the program
+    /// never hears about at all.
+    tray_drag: Option<TrayDrag>,
+    /// The order the shell shows those icons in, which is the user's.
+    ///
+    /// Separate from the list above because the two answer different
+    /// questions and change at different times: the compositor says which
+    /// icons exist, and re-sends the whole list whenever any program touches
+    /// its own; the arrangement says where they sit, and changes only when
+    /// the user moves one.
+    tray_arrangement: tray_dnd::TrayIconArrangement,
     pub alt_tab_active: bool,
     /// Alt+Tab selection index.
     pub alt_tab_index: usize,
@@ -1489,6 +1518,8 @@ impl DesktopShell {
             // `load_input_settings`; this is only the list.
             input_methods: input_method::InputMethodManager::with_builtins(),
             tray_icons: Vec::new(),
+            tray_arrangement: tray_dnd::TrayIconArrangement::new(),
+            tray_drag: None,
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -2236,6 +2267,22 @@ impl DesktopShell {
                 _ => return ShellAction::Consumed,
             }
         }
+        // A press on a tray icon owns the pointer until the button comes up,
+        // like the widget drag above. The difference is what the grab is for:
+        // a widget is being moved from the first pixel, whereas a tray icon
+        // does not yet know what it is -- a click belongs to the program that
+        // owns the icon, a drag belongs to the shell, and only the release
+        // can tell them apart.
+        if self.tray_drag.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.drag_tray_icon_to(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => return self.finish_tray_press(),
+                _ => return ShellAction::Consumed,
+            }
+        }
         // A left press on a widget takes hold of it. Before the right-click
         // below only in source order; the two cannot both match, since a press
         // carries one button.
@@ -2467,6 +2514,20 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
+        // A tray icon answers both buttons, so it is handled before the
+        // primary-button gate below. Right-click is the tray's own gesture --
+        // it is how every tray in existence opens an application's menu -- and
+        // the icon belongs to another program, so what it means there is that
+        // program's to decide, not this shell's to swallow.
+        if let Hit::TrayIcon(index) = hit
+            && let Some(icon) = self.ordered_tray_icons().get(index)
+        {
+            let mut source = tray_dnd::TrayDragSource::new();
+            source.on_press(tray_dnd::TrayIconKey::of(icon), x, y);
+            self.tray_drag = Some(TrayDrag { source, button });
+            return ShellAction::Consumed;
+        }
+
         // Only the primary button acts. The rest still cannot fall through to a
         // client when they land on the shell's own surfaces.
         if button != MouseButton::Left {
@@ -2529,20 +2590,13 @@ impl DesktopShell {
                 self.toggle_notifications();
                 ShellAction::Consumed
             }
-            Hit::TrayIcon(index) => self.tray_icons.get(index).map_or(
-                // The icon went away between the frame that drew it and the
-                // click. Consumed rather than passed on: the user aimed at the
-                // tray, and letting the press fall through to whatever is
-                // behind it would act on something they were not pointing at.
-                ShellAction::Consumed,
-                |icon| {
-                    ShellAction::Control(ShellRequest::ClickTrayIcon {
-                        owner: icon.owner,
-                        id: icon.id,
-                        button: guitk::event::MouseButton::Left,
-                    })
-                },
-            ),
+            // Handled above the primary-button gate, because a tray icon
+            // answers the right button too. Reaching here means the icon went
+            // away between the frame that drew it and the press; consumed
+            // rather than passed on, because the user aimed at the tray and
+            // letting the press fall through to whatever is behind it would
+            // act on something they were not pointing at.
+            Hit::TrayIcon(_) => ShellAction::Consumed,
             Hit::CalendarControl(control) => {
                 self.calendar.apply(control);
                 ShellAction::Consumed
@@ -4154,7 +4208,7 @@ impl DesktopShell {
         // it cannot see -- the defect `Palette::ink` exists to prevent -- and
         // on a taskbar the one pair this theme guarantees legible is the bar's
         // foreground on the bar.
-        for (rect, icon) in self.tray_icon_rects().iter().zip(&self.tray_icons) {
+        for (rect, icon) in self.tray_icon_rects().iter().zip(self.ordered_tray_icons()) {
             tree.text(
                 rect.x,
                 tray_text_y,
@@ -4632,10 +4686,40 @@ impl DesktopShell {
         (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH))
     }
 
-    /// The icons other programs have put in the tray.
+    /// The icons other programs have put in the tray, as the compositor
+    /// reported them.
+    ///
+    /// **This is not the order they are drawn in** -- see
+    /// [`ordered_tray_icons`](Self::ordered_tray_icons). This is the raw
+    /// membership, which is what a caller asking "is there an icon for X"
+    /// wants; anything to do with position must use the ordered form.
     #[must_use]
     pub fn tray_icons(&self) -> &[guiremote::tray::TrayIcon] {
         &self.tray_icons
+    }
+
+    /// The tray's icons in the order the shell shows them.
+    ///
+    /// Joined on demand rather than stored joined. The compositor's list and
+    /// the arrangement change independently -- a program relabelling its icon
+    /// rewrites the first and must not touch the second -- and a joined copy
+    /// would be a third record of the same fact, which is how this tree ended
+    /// up with four models of a tray icon in the first place.
+    ///
+    /// Every key in the arrangement has an icon in the list, because
+    /// [`sync`](tray_dnd::TrayIconArrangement::sync) is fed the very list this
+    /// reads.
+    #[must_use]
+    pub fn ordered_tray_icons(&self) -> Vec<&guiremote::tray::TrayIcon> {
+        self.tray_arrangement
+            .ordered_keys()
+            .into_iter()
+            .filter_map(|wanted| {
+                self.tray_icons
+                    .iter()
+                    .find(|icon| tray_dnd::TrayIconKey::of(icon) == wanted)
+            })
+            .collect()
     }
 
     /// Adopt a tray list from the compositor.
@@ -4650,8 +4734,101 @@ impl DesktopShell {
         if self.tray_icons == icons {
             return false;
         }
+        // Fold before storing, so the arrangement sees both lists and can tell
+        // a program that relabelled its icon from one that just registered.
+        // The answer is discarded: reaching here already means the membership
+        // or a glyph changed, so the tray repaints either way.
+        self.tray_arrangement.sync(&icons);
         self.tray_icons = icons;
         true
+    }
+
+    /// Carry a pressed tray icon to `(x, y)`.
+    ///
+    /// **The icons shuffle under the pointer rather than waiting for the
+    /// drop.** The row is the only feedback a 24-pixel glyph can give -- there
+    /// is no room for an insertion line and no ghosting in the render tree --
+    /// and without it a drag is invisible until it is over, which is
+    /// indistinguishable from a drag that is not working.
+    ///
+    /// Only the left button drags. A right press keeps the grab, so that
+    /// wandering off the icon before releasing does not fire a click on a
+    /// different one, but it does not rearrange anything: dragging with the
+    /// right button is a gesture nothing else in this shell has.
+    fn drag_tray_icon_to(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = self.tray_drag.as_mut() else {
+            return false;
+        };
+        if drag.button != MouseButton::Left {
+            return false;
+        }
+        drag.source.on_move(x, y);
+        if !drag.source.is_dragging() {
+            return false;
+        }
+        let Some(key) = drag.source.pressed_icon() else {
+            return false;
+        };
+        let boundary = self.tray_drop_boundary(x);
+        self.tray_arrangement.move_to_boundary(key, boundary)
+    }
+
+    /// Release a pressed tray icon: either a reorder just ended, or the
+    /// program that owns the icon is about to hear about a click.
+    fn finish_tray_press(&mut self) -> ShellAction {
+        let Some(mut drag) = self.tray_drag.take() else {
+            return ShellAction::Consumed;
+        };
+        let key = drag.source.pressed_icon();
+        // Read before `on_release`, which resets the source.
+        let was_drag = drag.source.on_release();
+        if was_drag {
+            // The row already rearranged itself on the way here.
+            return ShellAction::Consumed;
+        }
+        let Some(key) = key else {
+            return ShellAction::Consumed;
+        };
+        // Named by key rather than by slot, because the slot may have changed
+        // under the pointer -- another program registering an icon reorders
+        // nothing, but a program *departing* does, and a click that resolved a
+        // stale index would be delivered to the wrong program.
+        if !self
+            .tray_icons
+            .iter()
+            .any(|icon| tray_dnd::TrayIconKey::of(icon) == key)
+        {
+            return ShellAction::Consumed;
+        }
+        ShellAction::Control(ShellRequest::ClickTrayIcon {
+            owner: key.owner,
+            id: key.id,
+            button: drag.button,
+        })
+    }
+
+    /// Which gap between icons the pointer is nearest, `0..=len`.
+    ///
+    /// Measured through [`tray_dnd::TrayDropTarget`] rather than recomputed
+    /// here: it is the type whose job this is, and a second copy of a
+    /// rounding rule is how the drawn insertion point and the actual one come
+    /// to disagree.
+    fn tray_drop_boundary(&self, x: f32) -> usize {
+        let rects = self.tray_icon_rects();
+        let Some(first) = rects.first() else {
+            return 0;
+        };
+        let mut target = tray_dnd::TrayDropTarget::new(
+            0,
+            first.x,
+            first.y,
+            first.w * rects.len() as f32,
+            first.h,
+        );
+        target.set_icon_count(rects.len());
+        target.set_icon_cell_width(first.w);
+        target.calc_insertion_index(x);
+        target.insertion_index.unwrap_or(0)
     }
 
     /// How wide one tray icon's slot is.
@@ -4668,7 +4845,8 @@ impl DesktopShell {
 
     /// How much width the application icons take, padding included.
     fn app_tray_width(&self) -> f32 {
-        if self.tray_icons.is_empty() {
+        let count = self.tray_arrangement.icons.len();
+        if count == 0 {
             return 0.0;
         }
         let slot = self.tray_icon_slot();
@@ -4676,7 +4854,10 @@ impl DesktopShell {
         // One padding between the block and the shell's own items, not one per
         // icon: the icons sit as a run, which is what makes them read as one
         // region rather than four unrelated glyphs.
-        slot.mul_add(self.tray_icons.len() as f32, padding)
+        //
+        // Counted from the arrangement, as the rectangles are, so that width
+        // and positions cannot disagree about how many icons there are.
+        slot.mul_add(count as f32, padding)
     }
 
     /// Where each application icon is drawn, left to right.
@@ -4696,8 +4877,8 @@ impl DesktopShell {
             + self.layout_indicator_width()
             + padding * 4.0;
         let mut x = (bar.w - shell_items - self.app_tray_width() + padding).max(0.0);
-        let mut rects = Vec::with_capacity(self.tray_icons.len());
-        for _ in &self.tray_icons {
+        let mut rects = Vec::with_capacity(self.tray_arrangement.icons.len());
+        for _ in &self.tray_arrangement.icons {
             rects.push(Rect::new(x, bar.y, slot, bar.h));
             x += slot;
         }
@@ -9089,6 +9270,266 @@ mod overview_wiring_tests {
         assert_eq!(after, 1, "the icon the program registered was not drawn");
     }
 
+    /// Press and release on a point, returning what the release produced.
+    ///
+    /// A tray icon activates on the *release*, not the press, because the
+    /// press cannot yet know whether this is a click or the start of a drag.
+    fn tray_click(s: &mut DesktopShell, x: f32, y: f32, button: MouseButton) -> ShellAction {
+        let pressed = s.handle_mouse(&guitk::event::MouseEvent {
+            x,
+            y,
+            kind: guitk::event::MouseEventKind::Press(button),
+        });
+        assert!(
+            matches!(pressed, ShellAction::Consumed),
+            "the press takes the grab and produces nothing: {pressed:?}"
+        );
+        s.handle_mouse(&guitk::event::MouseEvent {
+            x,
+            y,
+            kind: guitk::event::MouseEventKind::Release(button),
+        })
+    }
+
+    /// The glyphs the tray is drawing, left to right.
+    fn tray_row(s: &DesktopShell) -> Vec<String> {
+        s.ordered_tray_icons()
+            .iter()
+            .map(|i| i.glyph.clone())
+            .collect()
+    }
+
+    /// Dragging an icon past its neighbour swaps them.
+    ///
+    /// The gesture the arrangement was built for. Until this existed the
+    /// order was the shell's in name only -- correct, folded, tested, and
+    /// impossible for a user to change, which is the state `apps/systray` has
+    /// been in for months.
+    #[test]
+    fn dragging_a_tray_icon_past_its_neighbour_reorders_the_row() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two")]);
+        assert_eq!(tray_row(&s), vec!["A", "B"]);
+
+        let rects = s.tray_icon_rects();
+        let (from, onto) = (rects[0], rects[1]);
+        s.handle_mouse(&guitk::event::MouseEvent {
+            x: from.x + from.w / 2.0,
+            y: from.y + from.h / 2.0,
+            kind: guitk::event::MouseEventKind::Press(MouseButton::Left),
+        });
+        // Well past the 5px threshold, and past the midpoint of the icon to
+        // the right -- which is the boundary a drop rounds to.
+        s.handle_mouse(&guitk::event::MouseEvent {
+            x: onto.x + onto.w * 0.9,
+            y: onto.y + onto.h / 2.0,
+            kind: guitk::event::MouseEventKind::Move,
+        });
+
+        assert_eq!(
+            tray_row(&s),
+            vec!["B", "A"],
+            "the row did not shuffle under the pointer"
+        );
+
+        let released = s.handle_mouse(&guitk::event::MouseEvent {
+            x: onto.x + onto.w * 0.9,
+            y: onto.y + onto.h / 2.0,
+            kind: guitk::event::MouseEventKind::Release(MouseButton::Left),
+        });
+        assert!(
+            matches!(released, ShellAction::Consumed),
+            "a drag must not also tell the program its icon was clicked: {released:?}"
+        );
+        assert_eq!(tray_row(&s), vec!["B", "A"], "and the drop kept it");
+    }
+
+    /// A press that does not move is still a click.
+    ///
+    /// The other half of the same decision: every click is a drag that
+    /// travelled no distance, so the threshold is the only thing separating
+    /// them and a tray whose icons could not be clicked would be a worse
+    /// regression than one whose icons could not be dragged.
+    #[test]
+    fn a_tray_press_that_does_not_move_is_a_click() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two")]);
+        let rect = s.tray_icon_rects()[0];
+
+        let action = tray_click(
+            &mut s,
+            rect.x + rect.w / 2.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+        );
+
+        match action {
+            ShellAction::Control(ShellRequest::ClickTrayIcon { id, .. }) => assert_eq!(id, 1),
+            other => panic!("expected a ClickTrayIcon request, got {other:?}"),
+        }
+        assert_eq!(tray_row(&s), vec!["A", "B"], "a click is not a reorder");
+    }
+
+    /// A jitter below the threshold is a click, not a one-pixel drag.
+    #[test]
+    fn a_tray_press_that_wobbles_is_still_a_click() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one")]);
+        let rect = s.tray_icon_rects()[0];
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+        s.handle_mouse(&guitk::event::MouseEvent {
+            x,
+            y,
+            kind: guitk::event::MouseEventKind::Press(MouseButton::Left),
+        });
+        // Two pixels: the distance a hand moves pressing a button.
+        s.handle_mouse(&guitk::event::MouseEvent {
+            x: x + 2.0,
+            y: y + 1.0,
+            kind: guitk::event::MouseEventKind::Move,
+        });
+        let action = s.handle_mouse(&guitk::event::MouseEvent {
+            x: x + 2.0,
+            y: y + 1.0,
+            kind: guitk::event::MouseEventKind::Release(MouseButton::Left),
+        });
+
+        assert!(
+            matches!(
+                action,
+                ShellAction::Control(ShellRequest::ClickTrayIcon { .. })
+            ),
+            "a two-pixel wobble swallowed the click: {action:?}"
+        );
+    }
+
+    /// The right button reaches the program that owns the icon.
+    ///
+    /// It did not before: `handle_press` returns early for anything that is
+    /// not the primary button, so a right-click on a tray icon was consumed
+    /// by the shell and the owner never heard about it -- in the one place
+    /// where right-click is the whole point, since it is how every tray in
+    /// existence opens an application's menu. `ClickTrayIcon` has carried a
+    /// button since it was defined, and nothing could ever send a second one.
+    #[test]
+    fn right_clicking_a_tray_icon_reaches_its_owner_as_a_right_click() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(7, "M", "Music")]);
+        let rect = s.tray_icon_rects()[0];
+
+        let action = tray_click(
+            &mut s,
+            rect.x + rect.w / 2.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Right,
+        );
+
+        match action {
+            ShellAction::Control(ShellRequest::ClickTrayIcon { id, button, .. }) => {
+                assert_eq!(id, 7);
+                assert_eq!(
+                    button,
+                    MouseButton::Right,
+                    "the owner was told the wrong button"
+                );
+            }
+            other => panic!("expected a ClickTrayIcon request, got {other:?}"),
+        }
+    }
+
+    /// A program that exits mid-press is not clicked.
+    ///
+    /// The press named an icon; by the release that icon is gone. Resolving
+    /// the click by slot index instead would have delivered it to whichever
+    /// program shuffled into that position.
+    #[test]
+    fn an_icon_that_departs_between_press_and_release_is_not_clicked() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two")]);
+        let rect = s.tray_icon_rects()[0];
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+        s.handle_mouse(&guitk::event::MouseEvent {
+            x,
+            y,
+            kind: guitk::event::MouseEventKind::Press(MouseButton::Left),
+        });
+        s.apply_tray_icons(vec![tray_icon(2, "B", "two")]);
+        let action = s.handle_mouse(&guitk::event::MouseEvent {
+            x,
+            y,
+            kind: guitk::event::MouseEventKind::Release(MouseButton::Left),
+        });
+
+        assert!(
+            matches!(action, ShellAction::Consumed),
+            "the departed program's icon was clicked anyway: {action:?}"
+        );
+    }
+
+    /// The user's order outlives a program relabelling its icon.
+    ///
+    /// The whole reason the shell keeps an arrangement instead of drawing the
+    /// compositor's list directly. The compositor re-sends every icon whenever
+    /// any program touches one of its own, so without the fold a program
+    /// swapping its glyph would drag every icon back to registration order --
+    /// silently, and only for whoever had rearranged their tray.
+    #[test]
+    fn a_relabelled_icon_does_not_disturb_the_users_order() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two")]);
+        s.tray_arrangement.reorder(0, 1);
+        assert_eq!(
+            s.ordered_tray_icons()
+                .iter()
+                .map(|i| i.glyph.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "A"]
+        );
+
+        // Program 1 changes its glyph. The compositor sends both icons again.
+        s.apply_tray_icons(vec![tray_icon(1, "!", "one"), tray_icon(2, "B", "two")]);
+
+        assert_eq!(
+            s.ordered_tray_icons()
+                .iter()
+                .map(|i| i.glyph.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "!"],
+            "the order is the user's and the glyph is the program's"
+        );
+    }
+
+    /// A click lands on the icon that was drawn there, not the one the
+    /// compositor listed there.
+    ///
+    /// The failure this catches is the worst kind the tray can have: the user
+    /// presses the icon they can see and a *different* program is told it was
+    /// clicked. It is possible the moment drawing and hit-testing read from
+    /// two different orders, which is exactly what an index into the
+    /// compositor's list would have been once the arrangement existed.
+    #[test]
+    fn a_click_addresses_the_icon_under_the_pointer_after_a_reorder() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two")]);
+        s.tray_arrangement.reorder(0, 1);
+
+        let leftmost = s.tray_icon_rects()[0];
+        let action = tray_click(
+            &mut s,
+            leftmost.x + leftmost.w / 2.0,
+            leftmost.y + leftmost.h / 2.0,
+            MouseButton::Left,
+        );
+        match action {
+            ShellAction::Control(ShellRequest::ClickTrayIcon { id, .. }) => {
+                assert_eq!(id, 2, "the leftmost slot now holds program icon 2");
+            }
+            other => panic!("expected a ClickTrayIcon request, got {other:?}"),
+        }
+    }
+
     /// The icons widen the tray, so window buttons are not laid out underneath
     /// them.
     ///
@@ -9147,11 +9588,12 @@ mod overview_wiring_tests {
         let mut s = DesktopShell::new(1920, 1080);
         s.apply_tray_icons(vec![tray_icon(7, "M", "Music")]);
         let rect = s.tray_icon_rects()[0];
-        let action = s.handle_mouse(&guitk::event::MouseEvent {
-            x: rect.x + rect.w / 2.0,
-            y: rect.y + rect.h / 2.0,
-            kind: guitk::event::MouseEventKind::Press(guitk::event::MouseButton::Left),
-        });
+        let action = tray_click(
+            &mut s,
+            rect.x + rect.w / 2.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+        );
         match action {
             ShellAction::Control(ShellRequest::ClickTrayIcon { owner, id, .. }) => {
                 assert_eq!(owner, 99, "the owner from the tray list");

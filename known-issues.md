@@ -145262,3 +145262,50 @@ neighbours (`-u`, `-c`, `-q` of the same pair) — it has had the fixtures all
 along, like the byte cases did. Today's work took that harness from **43 passed
 / 64 differed to 68 / 39**; this is the largest single wrong-answer left in the
 remainder.
+
+## TD-B-CP-DIFF-CANNOT-SEE-A-DIFFERENCE-MADE-OF-NUL-BYTES (lane B, 2026-09-14)
+
+**Status:** OPEN — diagnosed and the fix written, but **reverted unverified**
+
+`scripts/cp-diff.sh` compares the copied tree's file contents by capturing them
+in a command substitution:
+
+```sh
+o_body=$(contents "$o_dir" | scrub "$o_dir"); g_body=$(contents "$g_dir" | ...)
+```
+
+A command substitution **drops NUL bytes**, and bash says so, once per file:
+
+    cp-diff.sh: line 419: warning: command substitution: ignored null byte in input
+
+Both sides lose them identically, so two files differing **only** in NUL bytes
+compare EQUAL and the harness reports the copy as faithful. That is the same
+shape as the `diff` bug fixed earlier today: comparing a lossy projection of
+the thing rather than the thing.
+
+`contents()` is what feeds it, and it `cat`s each file raw — so every fixture
+holding a NUL reaches the capture. The warnings have presumably been printed on
+every run for as long as those fixtures have existed.
+
+### The fix, written and then backed out
+
+Add a per-file checksum inside `contents()`, above the body:
+
+```sh
+printf '== %s\n' "$f"
+printf 'sha %s\n' "$(sha256sum <"$f" 2>/dev/null | cut -d' ' -f1)"
+cat -- "$f"
+```
+
+The sum is over the raw bytes and is plain hex, so it survives the capture; the
+readable body stays beneath it so a failure is still diagnosable rather than a
+wall of differing hashes. Both sides get it, so no expected output changes —
+what changes is that a NUL-only difference stops being invisible.
+
+**Backed out because I could not verify it.** `all-diff.sh` was running, the
+machine was saturated, and three attempts at an isolated probe either mangled
+in the shell layers or timed out. A harness change that has not been shown to
+(a) catch the case it is for and (b) still call identical trees identical is
+exactly the kind that turns green into noise for the other two lanes. The
+diagnosis is solid and the patch is above; applying it wants a quiet machine
+and the two-way probe, not a confident-sounding commit.

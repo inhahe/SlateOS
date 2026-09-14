@@ -365,7 +365,26 @@ impl<T: Transport> ShellSession<T> {
 
     fn start_with(mut events: EventLoop<T>, users_yaml: Option<&Path>) -> Result<Self, Error<T>> {
         let display = events.display_info()?;
-        let shell = DesktopShell::new(display.width, display.height);
+        let mut shell = DesktopShell::new(display.width, display.height);
+        // Read back what the user left behind. This is the only place either
+        // happens: `DesktopShell::new` is what unit tests construct, so it
+        // must not touch the real configuration directory.
+        //
+        // `load_pinned` had **no caller at all** until 2026-09-14. The taskbar
+        // wrote `taskbar.yaml` on every pin and nothing ever read it, so a pin
+        // survived to disk and never came back -- the parts either side of the
+        // door were tested and the door did not exist. That is the same defect
+        // `apps/fileassoc` had the same morning, which is how it was noticed.
+        //
+        // `load_shortcuts` was the *third* instance, in this same file, and it
+        // was found by machine rather than by accident:
+        // `scripts/check-tested-but-uncalled.py` looks for a `save_x` called in
+        // production whose `load_x` is called only by tests. A user who rebound
+        // a key got their binding written to `shortcuts.yaml` and thrown away
+        // at the next start.
+        shell.load_pinned();
+        shell.load_shortcuts();
+        shell.populate_icons();
         let bar = shell.taskbar_rect();
 
         // Order matters: the panel is created before the popup surface, so
@@ -872,6 +891,9 @@ impl<T: Transport> ShellSession<T> {
         let mut tree = RenderTree::new();
         tree.commands
             .extend(self.wallpaper.get_render_commands(&p, width, height, day));
+        // Icons first of the two, so a widget panel is never hidden behind an
+        // icon: both sit on the wallpaper, and a widget is the larger object.
+        tree.commands.extend(self.shell.render_icons());
         // After the wallpaper, because they sit on it. This is the *background*
         // surface, so windows cover the widgets -- which is what makes them
         // desktop widgets rather than an always-on-top overlay.

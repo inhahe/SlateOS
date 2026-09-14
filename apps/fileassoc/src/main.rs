@@ -688,14 +688,43 @@ impl AssociationRegistry {
     pub fn read_from(&mut self, doc: &Document) -> Vec<AssocError> {
         let mut errors = Vec::new();
         for extension in doc.keys(&[ASSOCIATIONS_KEY]) {
-            let Some(app_id) = doc.get_str(&[ASSOCIATIONS_KEY, &extension]) else {
+            let Some(written) = doc.get_str(&[ASSOCIATIONS_KEY, &extension]) else {
                 continue;
             };
+            // A path is what `write_into` records. An id is accepted too, so a
+            // file written before 2026-09-14 still loads rather than silently
+            // losing every association in it -- the reader is where leniency
+            // belongs, and the next save rewrites it as a path.
+            let app_id = self
+                .app_id_for_exec(&written)
+                .unwrap_or_else(|| written.clone());
             if let Err(e) = self.set_default_app(&extension, &app_id) {
                 errors.push(e);
             }
         }
         errors
+    }
+
+    /// The id of the application installed at `exec_path`, if any.
+    #[must_use]
+    pub fn app_id_for_exec(&self, exec_path: &str) -> Option<String> {
+        self.apps
+            .values()
+            .find(|app| app.exec_path == exec_path)
+            .map(|app| app.id.clone())
+    }
+
+    /// What opens files with this extension, as a path a caller can run.
+    ///
+    /// The question every other program actually has -- the file manager wants
+    /// to start something, not to learn an id. Answered from the registry so
+    /// the caller needs no catalogue of its own.
+    #[must_use]
+    pub fn opener_path(&self, extension: &str) -> Option<&str> {
+        let assoc = self.associations.get(&extension.to_lowercase())?;
+        self.apps
+            .get(&assoc.app_id)
+            .map(|app| app.exec_path.as_str())
     }
 
     /// Fold the current associations into a configuration document.
@@ -711,7 +740,28 @@ impl AssociationRegistry {
             }
         }
         for (extension, assoc) in &self.associations {
-            doc.set_str(&[ASSOCIATIONS_KEY, extension], &assoc.app_id);
+            // The executable path, not the application id.
+            //
+            // An id is a name only this program can resolve -- the catalogue
+            // that maps `editor` to `/usr/bin/editor` lives in this binary, so
+            // a file saying `txt: editor` is unreadable to everyone else. The
+            // file manager needs to know what opens a `.txt` in order to open
+            // one, and a path it can hand to the kernel is an answer where an
+            // id is a question.
+            //
+            // This is the rule the taskbar's pinned apps already follow, for
+            // the same reason and in the same words: a pin is an executable
+            // path, and the name shown on it is looked up when it is drawn.
+            // Storing the name too would be a second copy of it, stale the
+            // first time the program is renamed.
+            //
+            // An association naming a program that has since been uninstalled
+            // reads back as "could not be restored", which is the case
+            // `read_from` already reports.
+            let Some(app) = self.apps.get(&assoc.app_id) else {
+                continue;
+            };
+            doc.set_str(&[ASSOCIATIONS_KEY, extension], &app.exec_path);
         }
     }
 
@@ -907,13 +957,30 @@ impl AssociationRegistry {
         }
     }
 
-    /// Populate with 10+ built-in applications.
+    /// Populate with the applications this system actually ships.
+    ///
+    /// **Every id here is a directory under `apps/`, and every path is the
+    /// binary that directory builds.** That was not true until 2026-09-14:
+    /// the table named `textedit`, `photoviewer`, `archiver`, `fileexplorer`,
+    /// `codeeditor`, `imageeditor`, `browser` and `office`, of which *none*
+    /// exist. Eight of eleven entries were fictional, so the program let a user
+    /// choose which imaginary application should open their photographs, and
+    /// as of the same morning it wrote that choice to disk and read it back.
+    ///
+    /// Two of the eight were also duplicates of a role already in the list --
+    /// `codeeditor` beside `textedit`, `imageeditor` beside `photoviewer` --
+    /// which is why the count falls: one program per role, named after the
+    /// program.
+    ///
+    /// `browser` and `office` are gone with no replacement because this tree
+    /// has neither. An association is a promise that pressing Enter opens
+    /// something, and there is nothing to open.
     fn add_default_apps(&mut self) {
         let apps: &[(&str, &str, &str, &[&str], u64)] = &[
             (
-                "textedit",
+                "editor",
                 "Text Editor",
-                "/usr/bin/textedit",
+                "/usr/bin/editor",
                 &[
                     "txt", "rs", "py", "js", "ts", "html", "css", "json", "xml", "toml", "yaml",
                     "c", "cpp", "h", "log", "ini", "csv", "rtf", "odt",
@@ -922,9 +989,9 @@ impl AssociationRegistry {
             ),
             ("pdfviewer", "PDF Viewer", "/usr/bin/pdfviewer", &["pdf"], 2),
             (
-                "photoviewer",
-                "Photo Viewer",
-                "/usr/bin/photoviewer",
+                "imageviewer",
+                "Image Viewer",
+                "/usr/bin/imageviewer",
                 &["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "ico"],
                 3,
             ),
@@ -943,49 +1010,18 @@ impl AssociationRegistry {
                 5,
             ),
             (
-                "archiver",
+                "archivemanager",
                 "Archive Manager",
-                "/usr/bin/archiver",
+                "/usr/bin/archivemanager",
                 &["zip", "tar", "gz", "7z", "rar"],
                 6,
             ),
             (
-                "browser",
-                "Web Browser",
-                "/usr/bin/browser",
-                &["html", "svg", "json", "xml", "pdf"],
-                7,
-            ),
-            (
-                "office",
-                "Office Suite",
-                "/usr/bin/office",
-                &["doc", "docx", "xls", "xlsx", "pptx", "odt", "rtf", "csv"],
-                8,
-            ),
-            (
-                "codeeditor",
-                "Code Editor",
-                "/usr/bin/codeeditor",
-                &[
-                    "txt", "rs", "py", "js", "ts", "html", "css", "json", "xml", "toml", "yaml",
-                    "c", "cpp", "h",
-                ],
-                9,
-            ),
-            (
-                "fileexplorer",
+                "explorer",
                 "File Explorer",
-                "/usr/bin/fileexplorer",
+                "/usr/bin/explorer",
                 &["iso", "bin", "zip", "tar", "gz", "7z", "rar"],
                 10,
-            ),
-            (
-                "imageeditor",
-                "Image Editor",
-                "/usr/bin/imageeditor",
-                &["png", "jpg", "jpeg", "bmp", "webp", "svg"],
-                11,
             ),
             (
                 "hexeditor",
@@ -1005,27 +1041,29 @@ impl AssociationRegistry {
     fn assign_default_associations(&mut self) {
         // Maps category to its primary default app ID.
         let category_defaults: &[(FileCategory, &str)] = &[
-            (FileCategory::Documents, "textedit"),
-            (FileCategory::Images, "photoviewer"),
+            (FileCategory::Documents, "editor"),
+            (FileCategory::Images, "imageviewer"),
             (FileCategory::Audio, "musicplayer"),
             (FileCategory::Video, "videoplayer"),
-            (FileCategory::Archives, "archiver"),
-            (FileCategory::Code, "codeeditor"),
-            (FileCategory::Other, "textedit"),
+            (FileCategory::Archives, "archivemanager"),
+            // Code opened `codeeditor`, which did not exist. The text editor
+            // does, and it has syntax highlighting for twelve languages, so
+            // this is the program that was meant rather than a downgrade.
+            (FileCategory::Code, "editor"),
+            (FileCategory::Other, "editor"),
         ];
 
         // Specific overrides that take precedence over the category default.
+        //
+        // The nine office-document overrides are gone with the `office` entry
+        // they pointed at. Those file types keep their category default, which
+        // is the text editor: opening a .docx in a text editor is a poor
+        // answer, and it is a better one than a association naming a program
+        // that was never written. When an office suite exists it gets its
+        // overrides back in one line each.
         let specific_overrides: &[(&str, &str)] = &[
             ("pdf", "pdfviewer"),
-            ("doc", "office"),
-            ("docx", "office"),
-            ("xls", "office"),
-            ("xlsx", "office"),
-            ("pptx", "office"),
-            ("odt", "office"),
-            ("rtf", "office"),
-            ("csv", "office"),
-            ("iso", "fileexplorer"),
+            ("iso", "explorer"),
             ("bin", "hexeditor"),
         ];
 
@@ -3389,7 +3427,20 @@ mod tests {
     #[test]
     fn test_registry_with_defaults_has_apps() {
         let reg = AssociationRegistry::with_defaults();
-        assert!(reg.app_count() >= 10);
+        // Eight, and the floor moved down from ten on 2026-09-14 when four
+        // entries naming programs that do not exist were removed. Lowering a
+        // threshold to match is usually how a test stops testing -- here the
+        // number it asserted was made of `browser`, `office`, `codeeditor` and
+        // `imageeditor`, none of which this tree builds, so the old ten was the
+        // fiction and the eight is the measurement.
+        assert!(reg.app_count() >= 8, "{} apps", reg.app_count());
+        for app in reg.apps.values() {
+            assert!(
+                app.exec_path.starts_with("/usr/bin/"),
+                "{} has no binary path",
+                app.id
+            );
+        }
     }
 
     #[test]
@@ -3504,8 +3555,18 @@ mod tests {
     #[test]
     fn test_apps_for_extension() {
         let reg = AssociationRegistry::with_defaults();
-        let apps = reg.apps_for_extension("html");
-        assert!(apps.len() >= 2); // textedit, codeeditor, browser
+        // `zip`, because it is a file type this system really does have two
+        // programs for. The extension used to be `html` on the strength of
+        // "textedit, codeeditor, browser" -- the test's own comment named three
+        // programs, none of which exist, so the assertion rested entirely on
+        // fiction. `html` now has exactly one handler, which is the truth about
+        // this system rather than a regression.
+        let apps = reg.apps_for_extension("zip");
+        let ids: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
+        assert!(
+            ids.contains(&"archivemanager") && ids.contains(&"explorer"),
+            "zip should be openable by both, got {ids:?}"
+        );
     }
 
     #[test]
@@ -3635,6 +3696,44 @@ mod tests {
         }
     }
 
+    /// **What opens a `.mp3`, answered as something a caller can run.**
+    ///
+    /// The question every other program has. `apps/explorer` reads the same
+    /// answer out of the saved file without linking to this program, which is
+    /// the whole reason the file records a path.
+    #[test]
+    fn the_registry_answers_with_a_runnable_path() {
+        let mut reg = registry_over(&["mp3"]);
+        assert_eq!(reg.opener_path("mp3"), None, "nothing is associated yet");
+
+        reg.set_default_app("mp3", "app0")
+            .expect("a registered pair");
+
+        assert_eq!(reg.opener_path("mp3"), Some("/bin/app0"));
+        assert_eq!(reg.opener_path("MP3"), Some("/bin/app0"), "case");
+        assert_eq!(reg.opener_path("wav"), None, "nothing claims wav");
+    }
+
+    /// A file written before the format recorded paths still loads.
+    ///
+    /// The reader is where leniency belongs: refusing an older file would lose
+    /// every association in it, and the next save rewrites it as a path.
+    #[test]
+    fn a_file_written_with_ids_still_loads() {
+        let mut reg = registry_over(&["mp3"]);
+        let errors = reg.import_config(
+            "associations:
+  mp3: app0
+",
+        );
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(reg.opener_path("mp3"), Some("/bin/app0"));
+
+        // And it is written back as a path, so the leniency is needed once.
+        assert!(reg.export_config().contains("mp3: /bin/app0"));
+    }
+
     // -- Import/Export tests -------------------------------------------------
 
     #[test]
@@ -3648,7 +3747,9 @@ mod tests {
         let _ = reg.set_default_app("txt", "myapp");
         let config = reg.export_config();
         assert!(
-            config.contains("txt: myapp"),
+            // The path, not the id: the file is written for programs that do
+            // not have this registry to look an id up in.
+            config.contains("txt: /bin/myapp"),
             "the association is not in the exported document: {config}"
         );
         assert!(
@@ -3665,18 +3766,18 @@ mod tests {
     #[test]
     fn test_import_config_valid() {
         let mut reg = AssociationRegistry::with_defaults();
-        let config = "associations:\n  txt: codeeditor\n  png: imageeditor\n";
+        let config = "associations:\n  txt: editor\n  png: imageviewer\n";
         let errors = reg.import_config(config);
         assert!(errors.is_empty());
         let app = reg.get_default_app("txt");
         assert!(app.is_some());
-        assert_eq!(app.map(|a| a.id.as_str()), Some("codeeditor"));
+        assert_eq!(app.map(|a| a.id.as_str()), Some("editor"));
     }
 
     #[test]
     fn test_import_config_with_comments() {
         let mut reg = AssociationRegistry::with_defaults();
-        let config = "# comment\n\nassociations:\n  # which editor\n  txt: codeeditor\n";
+        let config = "# comment\n\nassociations:\n  # which editor\n  txt: editor\n";
         let errors = reg.import_config(config);
         assert!(errors.is_empty());
     }
@@ -3736,10 +3837,14 @@ mod tests {
                 FileType::new(ext, "application/octet-stream", "Thing"),
                 FileCategory::Documents,
             );
+            // A distinct binary per app. They all shared `/bin/app` until
+            // 2026-09-14, which no real system does and which made two
+            // applications indistinguishable the moment the association file
+            // started recording paths rather than ids.
             reg.register_app(AppInfo::new(
                 &format!("app{i}"),
                 "App",
-                "/bin/app",
+                &format!("/bin/app{i}"),
                 &[ext],
                 1,
             ));
@@ -4069,7 +4174,13 @@ mod tests {
 
     /// An extension more than one installed app can open, which is what the
     /// "Open With" dialog and the compatible-apps list are for.
-    const SHARED_EXT: &str = "html";
+    /// A file type more than one installed program can open, which is what
+    /// the "Open with" tests need to have anything to choose between.
+    ///
+    /// Was `html` while three fictional programs claimed it. `zip` is claimed
+    /// by `archivemanager` and `explorer`, both of which are directories under
+    /// `apps/` that build the binaries named here.
+    const SHARED_EXT: &str = "zip";
 
     #[test]
     fn every_control_answers_where_the_frame_draws_it() {
@@ -4506,7 +4617,9 @@ mod tests {
         reg.write_into(&mut doc);
         assert_eq!(
             doc.get_str(&["associations", "mp3"]).as_deref(),
-            Some("app0")
+            // The path, because that is what another program can run. The id
+            // `app0` means nothing outside this registry.
+            Some("/bin/app0")
         );
 
         reg.clear_association("mp3")
@@ -4866,21 +4979,23 @@ mod tests {
     fn uninstalling_a_handler_falls_back_to_the_previous_one() {
         let mut reg = AssociationRegistry::with_defaults();
         let openers: Vec<String> = reg
-            .apps_for_extension("txt")
+            .apps_for_extension(SHARED_EXT)
             .iter()
             .map(|a| a.id.clone())
             .collect();
         assert!(
             openers.len() >= 2,
-            "this test needs two apps that open .txt; found {openers:?}"
+            "this test needs two apps that open .{SHARED_EXT}; found {openers:?}"
         );
 
-        reg.set_default_app("txt", &openers[0]).expect("assignable");
-        reg.set_default_app("txt", &openers[1]).expect("assignable");
+        reg.set_default_app(SHARED_EXT, &openers[0])
+            .expect("assignable");
+        reg.set_default_app(SHARED_EXT, &openers[1])
+            .expect("assignable");
         reg.remove_app(&openers[1]).expect("registered");
 
         assert_eq!(
-            reg.file_types["txt"].default_app_id.as_ref(),
+            reg.file_types[SHARED_EXT].default_app_id.as_ref(),
             Some(&openers[0]),
             "uninstalling the handler orphaned the file type instead of falling back to the one before it"
         );
@@ -4896,18 +5011,20 @@ mod tests {
     fn both_records_of_the_default_agree_after_a_removal() {
         let mut reg = AssociationRegistry::with_defaults();
         let openers: Vec<String> = reg
-            .apps_for_extension("txt")
+            .apps_for_extension(SHARED_EXT)
             .iter()
             .map(|a| a.id.clone())
             .collect();
-        reg.set_default_app("txt", &openers[0]).expect("assignable");
-        reg.set_default_app("txt", &openers[1]).expect("assignable");
+        reg.set_default_app(SHARED_EXT, &openers[0])
+            .expect("assignable");
+        reg.set_default_app(SHARED_EXT, &openers[1])
+            .expect("assignable");
         reg.remove_app(&openers[1]).expect("registered");
 
         assert_eq!(
-            reg.file_types["txt"].default_app_id.as_deref(),
-            reg.associations.get("txt").map(|a| a.app_id.as_str()),
-            "the registry disagrees with itself about what opens .txt"
+            reg.file_types[SHARED_EXT].default_app_id.as_deref(),
+            reg.associations.get(SHARED_EXT).map(|a| a.app_id.as_str()),
+            "the registry disagrees with itself about what opens .{SHARED_EXT}"
         );
     }
 
@@ -4932,19 +5049,19 @@ mod tests {
     fn the_handler_history_is_bounded() {
         let mut reg = AssociationRegistry::with_defaults();
         let openers: Vec<String> = reg
-            .apps_for_extension("txt")
+            .apps_for_extension(SHARED_EXT)
             .iter()
             .map(|a| a.id.clone())
             .collect();
         // Cycle through the openers enough times to overflow the bound.
         for round in 0..(MAX_HANDLER_HISTORY + 3) {
             let id = &openers[round % openers.len()];
-            reg.set_default_app("txt", id).expect("assignable");
+            reg.set_default_app(SHARED_EXT, id).expect("assignable");
         }
         assert!(
-            reg.file_types["txt"].handler_history.len() <= MAX_HANDLER_HISTORY,
+            reg.file_types[SHARED_EXT].handler_history.len() <= MAX_HANDLER_HISTORY,
             "the history grew past its bound: {:?}",
-            reg.file_types["txt"].handler_history
+            reg.file_types[SHARED_EXT].handler_history
         );
     }
 
@@ -4953,17 +5070,17 @@ mod tests {
     #[test]
     fn an_app_never_becomes_its_own_fallback() {
         let mut reg = AssociationRegistry::with_defaults();
-        let one = reg.apps_for_extension("txt")[0].id.clone();
-        reg.set_default_app("txt", &one).expect("assignable");
-        reg.set_default_app("txt", &one).expect("assignable");
+        let one = reg.apps_for_extension(SHARED_EXT)[0].id.clone();
+        reg.set_default_app(SHARED_EXT, &one).expect("assignable");
+        reg.set_default_app(SHARED_EXT, &one).expect("assignable");
         assert!(
-            !reg.file_types["txt"].handler_history.contains(&one),
+            !reg.file_types[SHARED_EXT].handler_history.contains(&one),
             "the current handler is in its own fallback history"
         );
 
         reg.remove_app(&one).expect("registered");
         assert_ne!(
-            reg.file_types["txt"].default_app_id.as_ref(),
+            reg.file_types[SHARED_EXT].default_app_id.as_ref(),
             Some(&one),
             "an uninstalled app came back as its own fallback"
         );

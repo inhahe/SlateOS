@@ -73896,3 +73896,130 @@ to set them from, and wiring a settings page for them is the
 `TD-C-ELEVEN-SETTINGS-PAGES-SAY-COMING-SOON` question, which is blocked on
 consumers existing at all.
 
+
+
+## 850. Hardware facts are served under `/sys/devices`, not a second `/sys/hardware` tree
+
+**Date:** 2026-09-14
+**Lane:** C
+**Decided by:** Claude (autonomous) — lane A proposed the option and withdrew its
+own first choice; lane C made the final call, because the code that changes is
+lane C's.
+
+**In short:** the System Information program reads hardware details from files
+the kernel is supposed to publish. Nobody had ever built the kernel half, and
+when we came to build it we found the kernel *already* publishes some of the
+same facts somewhere else, under a different name. The choice was to build the
+second name anyway — cheap for lane C, no code changes — or to use the one that
+exists and rewrite the reader. We are using the one that exists.
+
+**The two names.** `apps/sysinfo/src/hwquery.rs` reads `/sys/hardware/cpu`,
+`/sys/hardware/memory` and ten more, each a single file of `key=value` lines.
+`kernel/src/fs/sysfs.rs` serves `/sys/devices/pci/BB:DD.F` and
+`/sys/devices/system/cpu/cpuN/...` — the Linux shape, one scalar per file, a
+directory per device. `design.txt` mentions neither path, so there was no
+authority to appeal to.
+
+**Why the existing tree wins, and it is not mainly about names.** The kernel
+already publishes `core_id`, `physical_package_id`, `online`, `possible`,
+`present` and cache `size`/`level`/`type`. `hwquery`'s `physical_cores` and
+`logical_processors` are derivable from those, and its `l1_data_kb`/`l2_kb`/
+`l3_kb` from the cache indices. Building `/sys/hardware` too would have the
+kernel publish **the same facts twice, in two layouts** — a core count as a
+scalar under one tree and as a `key=value` line under the other. That is two
+models of one fact at the level of the operating system's own interface, and it
+would be permanent: a tree is much harder to withdraw than a file.
+
+Matching Linux is the secondary reason and still a real one. This project ports
+battle-tested code elsewhere for the same reason, and a sysfs that is shaped
+like Linux's is one that ported tools can read.
+
+**What it costs, stated plainly because the first version of this decision had
+it wrong.** Lane A's table put lane C's cost at "one literal", on the strength
+of the `sysfs!` macro introduced the same afternoon which collapsed twelve path
+constants into one base. That is true of the *paths* and false of the *parser*:
+the two trees differ in data model, not just name, so `hwquery.rs` needs a
+reader that walks a directory tree instead of one that splits `key=value`
+lines. Lane C confirmed this by reading `sysfs.rs` rather than accepting the
+table, and chose the option that costs lane C more.
+
+**What remains to build either way:** the CPUID-only facts (`family`, `model`,
+`stepping`, base and turbo clocks) and the memory and display facts exist in
+neither tree. They go under `/sys/devices/system/...` in the same scalar-per-file
+shape.
+
+**The contract that carries over unchanged:** the kernel emits only what it can
+honestly answer and **omits** the rest. It never writes `0` for unknown. A
+missing file is a missing fact and the reader's default stands; a file that is
+present and will not parse is an error. Scalar-per-file makes that easier to
+honour than a `key=value` blob did — an absent fact is simply an absent file.
+
+**How it was nearly decided the other way.** The question sat blocked for ten
+days between two request files, each of which recorded that it was waiting for
+the other, which in either file alone reads exactly like being correctly
+blocked. It was then nearly settled as `/sys/hardware` on the strength of a
+grep for `sys/hardware` in `kernel/src` returning zero — which meant "no
+producer under that name", not "no producer". Both failures are the same one
+this file keeps recording: a true answer to a narrower question than the one
+being asked.
+
+
+## 851. `guitk::signal` is deleted: this tree dispatches, it does not observe
+
+**Date:** 2026-09-14
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the toolkit contained a Qt-style signals-and-slots system — an
+event mechanism where a widget announces "something happened" and any number of
+listeners registered earlier are called back. It worked, it had twenty tests,
+and in the whole tree nothing had ever used it. It is being deleted rather than
+wired, because wiring it would give this project *two different ways* for a
+click to reach the code that handles it, and the other way is used by 138
+crates.
+
+**What it was.** `Signal<T>`, `SignalGroup`, `EventBus`, `Rc<RefCell<..>>`
+throughout, with a genuinely careful re-entrancy rule: a handler that emits the
+signal it is handling has its emission deferred until the current one finishes,
+so a loop cannot form. 853 lines. None of that is bad code.
+
+**What the tree does instead.** Every application and every shell surface here
+takes `fn handle_event(&mut self, event: &Event) -> Response` and returns what
+the caller should do about it. The dispatch is direct, synchronous and owned:
+there is no registry, no callback list, and no shared mutable state between a
+sender and a listener. Counted rather than assumed: **138** crates under `apps/`
+and `gui/` define a `handle_event`; **zero** connect a signal.
+
+**The three crates that do hold `Box<dyn Fn ...>`** — `automator`, `dbviewer`,
+`taskscheduler` — turned out to be render-function tables inside their own test
+modules, sweeping panels to draw them. Not event callbacks, and not a
+reinvention of this module. That check is the one that settles it: if something
+had been rebuilding signals by hand, the answer would have been to wire this
+instead.
+
+**Why not keep it as a deliberate island.** The orphan ledger's own framing is
+that a component with no consumer is either a feature the user cannot reach or
+code to delete, and this one cannot become the first: an unreachable *widget*
+becomes reachable when an application draws it, but an unreachable
+*architecture* becomes reachable only by rewriting the architecture. Adopting
+it anywhere would mean a click arriving through a callback in one program and
+through a return value in the other 137 — two models of one fact at the scale
+of the whole toolkit.
+
+**Against deletion**, and it is real: 853 working lines with a subtle
+re-entrancy guarantee are not free to write again. If this project ever grows
+something genuinely asynchronous — a device-hotplug notification, a service
+that appears mid-session — an observer mechanism is the right shape for it and
+this one was well made. The answer is that git holds it: `design-decisions.md`
+851 and the commit are enough to find it, and rewriting against a real consumer
+would be better than fitting a real consumer to a mechanism written years
+earlier with no consumer in mind.
+
+**Precedent.** `gui/desktop/src/a11y.rs` was deleted outright on 2026-09-13 as
+a dead parallel copy, and §810 removed a `Theme` of 32 widget-role colours for
+being a second colour table. This is the same judgement a third time.
+
+**What this closes.** `TD-C-SIX-TOOLKIT-WIDGETS-ARE-WRITTEN-TESTED-AND-USED-BY-NOTHING`
+listed `signal` with the note "least obviously needed; check what it is before
+deciding". It has now been checked: it is an observer mechanism, and this tree
+does not observe.

@@ -7,6 +7,12 @@ description = "SlateOS File Explorer — graphical file manager with tree view"
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
+
+# Where the user's file associations live. Only `config::load` is used -- the
+# explorer reads which program opens a kind of file and never writes it, since
+# that choice belongs to the File Associations program.
+settingsfile = { path = "../../gui/settingsfile" }
+yamldoc = { path = "../../yamldoc" }
 textfind = { path = "../../textfind" }
 # The thumbnailer reads BMP, PNG, GIF and JPEG headers at offsets the file
 # itself supplies. `byteread` is those reads stating their own bound.
@@ -28,6 +34,10 @@ oswindow = { path = "../../gui/window" }
 [dev-dependencies]
 # Test fixtures only: a private temp directory per test, removed on drop.
 scratchdir = { path = "../../userspace/scratchdir" }
+
+# `with_scratch_config`: opening a file reads the user's associations, so the
+# tests for it must read a throwaway directory rather than the developer's own.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 # `appearance::palette_check`, the sweep that proves this crate draws from the
 # user's palette rather than from colours of its own.

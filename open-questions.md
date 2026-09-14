@@ -1281,6 +1281,116 @@ arrow on the development host, which is also what makes the current state easy
 to miss. Three settings stay inert — `cursor_size`, `cursor_scheme` and the
 whole `CursorShape` vocabulary — and every accessibility question about pointer
 size stays unanswerable. Nothing degrades with time; it simply does not exist.
+## C-Q20 — [C] Four lists of "which programs are installed", and nothing can read the others. Which is the real one? — Status: OPEN
+
+**In short:** four different parts of the system each keep their own list of
+what programs exist on the machine, and the lists disagree. No program can read
+another's. The visible consequence today: the Settings app cannot offer you a
+choice of web browser, because it has no way to find out what browsers are
+installed — so that screen shows a placeholder. The question is which list
+should become the one everybody reads.
+
+**The four lists**, with what each knows:
+
+| where | holds | who can read it |
+|---|---|---|
+| `kernel/src/fs/appregistry.rs` | 9 built-in apps, categories, MIME types | `/proc/appregistry`, as a **human-readable report** -- see the correction below |
+| `gui/desktop/src/launcher.rs` | 22 apps with real binary paths, drives the start menu | the desktop shell only |
+| `apps/fileassoc` | 8 apps and which file types they open | nobody -- it is a program, not a library |
+| `gui/desktop/src/default_apps.rs` | a third app list plus per-role defaults | nobody -- 2,325 lines no menu opens |
+
+They are not copies of one list. Until 2026-09-14 the `fileassoc` one named
+eight programs that **do not exist in this tree** (`textedit`, `photoviewer`,
+`browser`, `office`…) while the shell's named the real ones; that half is fixed,
+but the disagreement was invisible for as long as the lists were.
+
+**What it blocks right now.** `design-decisions.md` 815 (the operator's answer
+to C-Q6) says screens you *open* move into the Settings app and the shell's
+copies are deleted. `default_apps.rs` is one of those screens. Porting it needs
+a list of installed programs to choose between, and the Settings app can reach
+none of the four. So a decided piece of work is stopped on this.
+
+### Options
+
+**A. The kernel's registry is the authority; give its view a form a program
+can rely on.** `/proc/appregistry` already exists and already lists every app's
+name and binary path. What it does not have is a shape anything but a person can
+depend on: it opens with "Apps: 9/4096" and groups entries under category
+headings, which a program would have to scrape.
+*What changes:* installing a program makes it appear in the start menu, the
+Settings app and the file manager at once, without any of them being told.
+*Cheaper than it first appears:* the data and the plumbing are built; this is a
+second view in a stable format, not a new subsystem.
+*Against:* A-Q8 answered the same question for desktop icons with "it leaves
+the kernel", and a list of GUI programs is a weaker claim on kernel space than
+icon coordinates were.
+
+**B. A userspace library is the authority; the kernel's registry goes.**
+One crate under `gui/`, read by the shell, the Settings app, the file manager
+and the File Associations program.
+*What changes:* the same as A from the user's side. The difference is where it
+lives and who may change it.
+*Dearer than it first appears, and this is the correction that matters:*
+`fs::appregistry` is **not** an island. `fs::startmenu` calls it at eleven
+sites, `fs::procfs` reads both, `/proc/startmenu` exists as well, and both run
+at boot. So B is "delete a module with a `/proc` surface and a live in-kernel
+consumer, and decide what becomes of `fs::startmenu` and `/proc/startmenu`" --
+a materially larger change than removing `fs::deskicons` was, and all of it in
+lane A's tree.
+
+**C. Leave them separate.**
+*What changes:* nothing today. The Settings app's "default browser" screen stays
+a placeholder, and the four lists go on disagreeing silently.
+
+### If this is never answered
+
+Nothing breaks and nothing gets worse on its own — but `default_apps.rs` and
+the Settings app's Apps section stay where they are, which means one of C-Q6's
+own consequences cannot be carried out. The lists will also drift again: the
+`fileassoc` one drifted to eight fictional programs without anyone noticing,
+because nothing compares them.
+
+**Recommendation: A or B, and the gap between them is narrower than this
+entry first claimed.** The original recommendation was B on the precedent of
+A-Q8, written while believing the kernel's registry had no `/proc` view and no
+consumers. Both were false (below). With the plumbing already built and
+`fs::startmenu` depending on it, A is the smaller change and B is the larger
+one, which is the reverse of what was written.
+
+The principle still favours B -- what a user has installed is a property of
+their userspace, and every consumer of the list is a GUI program. The cost now
+favours A. That is a genuine trade rather than an obvious answer, which is why
+it is the operator's.
+
+Whichever is chosen, the defect to fix is that the four lists are four. Any
+option that leaves two of them is option C wearing a better name.
+
+### Correction, 2026-09-14: this entry was wrong about the kernel's registry
+
+The first version said `fs::appregistry` was "reachable only from the kernel's
+own debug shell -- there is no `/proc` view and nothing in userspace names it".
+Both halves are false, and lane A caught them within the hour:
+
+* `/proc/appregistry` is registered in `procfs.rs`, generated by
+  `gen_appregistry()`, and dispatched. It prints every app's name and binary
+  path.
+* `fs::startmenu` calls `appregistry::get`, `search` and `menu_tree` at eleven
+  sites, and is itself read by `/proc/startmenu`.
+
+**Where the wrong picture came from.** A comment in `kernel/src/main.rs` reads
+"appregistry and startmenu were reachable only from `kshell`" -- past tense,
+describing a condition somebody then fixed. It was read as a statement of the
+present. That is the same failure as reading five `os-lane-[abc]` grep hits as
+five defects when four were prose, and as "only `sysinfo` collides" written
+from one sample: **documentation about a past state is indistinguishable from a
+description of the current one, to a search.**
+
+The premise "four lists, none readable by the others" is therefore too strong.
+Three of the four cannot be read by anything; the kernel's can be read by
+anyone willing to scrape a status report. The question -- which list is the one
+everybody reads -- stands, because scraping a human-readable report is not an
+interface.
+
 ## C-Q19 — [C] An event you coloured like your accent is invisible on today's date. Whose colour wins? — Status: OPEN
 
 **In short:** every calendar event can carry a colour you pick, and the month

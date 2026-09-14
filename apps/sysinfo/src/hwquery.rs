@@ -64,6 +64,21 @@ impl std::fmt::Display for HwQueryError {
 /// `/sys/services` and `/sys/proc` below are deliberately not built from it:
 /// they are not hardware, and folding them in would need a second base and put
 /// the count back where it started.
+///
+/// **The cost, paid here so it is paid once.** Building the paths means the
+/// full strings no longer appear in this file's *code*, so `grep
+/// "/sys/hardware/cpu"` finds only prose and reads exactly like "nothing
+/// refers to this". Lane A hit that on 2026-09-14 while looking for the
+/// producer and believed it for about a minute. The twelve are therefore
+/// written out once, in full, right here, so the grep lands somewhere that
+/// explains itself:
+///
+/// ```text
+/// /sys/hardware/cpu      /sys/hardware/memory   /sys/hardware/block
+/// /sys/hardware/net      /sys/hardware/pci      /sys/hardware/usb
+/// /sys/hardware/display  /sys/hardware/sound    /sys/hardware/irqs
+/// /sys/hardware/ioports  /sys/hardware/memmap   /sys/hardware/dma
+/// ```
 macro_rules! sysfs {
     ($leaf:literal) => {
         concat!("/sys/hardware", $leaf)

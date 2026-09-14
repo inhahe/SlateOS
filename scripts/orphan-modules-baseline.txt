@@ -4,7 +4,7 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
-# 39 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# 37 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs; and
@@ -38,16 +38,26 @@
 # THIRD BATCH, 2026-09-13, pruned by lane C: a11y.rs, deleted outright as a dead
 # parallel copy, and tray_dnd.rs, wired into the shell's tray.
 #
-# FOURTH BATCH, 2026-09-14, lane C, five in one day and all the same move -- find
-# the application that should already have been using the module, and use it:
-# gui/toolkit's pathbar.rs (the file explorer's address bar), disabled.rs (why a
-# greyed toolbar button is grey), svg.rs (a thumbnail of the drawing instead of a
-# coloured rectangle) and menubar.rs (the text editor's File/Edit/Search bar),
-# plus the desktop shell's taskbar.rs.  Worth noting what the wirings kept turning
-# up, since it was not the feature: menubar.rs found that `set_items` silently
-# closes an open dropdown, and the editor's TAB_BAR_HEIGHT doing duty as two
-# different facts.  An island is not only unreached code -- it is code whose
-# assumptions nobody has had to satisfy yet.
+# FOURTH BATCH, 2026-09-14, lane C, seven in one day.  Six were the same move --
+# find the application that should already have been using the module, and use
+# it: gui/toolkit's pathbar.rs (the file explorer's address bar), disabled.rs
+# (why a greyed toolbar button is grey), svg.rs (a thumbnail of the drawing
+# instead of a coloured rectangle) and menubar.rs (the text editor's
+# File/Edit/Search bar), plus the desktop shell's taskbar.rs and icons.rs.
+#
+# The seventh, signal.rs, was DELETED instead -- design-decisions 851.  It was
+# a Qt-style signals-and-slots system, and the distinction that decided it is
+# worth keeping: an unreachable *widget* becomes reachable when an application
+# draws it, which is what happened to the other six, but an unreachable
+# *architecture* becomes reachable only by rewriting the architecture.  138
+# crates here take `handle_event(&Event) -> Response`; none connected a signal.
+#
+# Worth noting what the wirings kept turning up, since it was never the feature
+# itself: menubar.rs found that `MenuBar::set_items` silently closes an open
+# dropdown, and the editor's `TAB_BAR_HEIGHT` doing duty as two different facts.
+# icons.rs found that the taskbar's pinned apps were saved and never loaded.  An
+# island is not only unreached code -- it is code whose assumptions nobody has
+# had to satisfy yet.
 #
 # The two paragraphs above were written straight into the generated file and were
 # one `--pin` away from deletion; this run is the one that would have done it.  They
@@ -88,8 +98,24 @@
 #
 # Being on this list is not absolution.  See known-issues.md ->
 # TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
-# largest entries are blocked on open-questions.md -> C-Q6, which decides
-# whether the shell's settings pages survive at all.
+# largest entries were blocked on open-questions.md -> C-Q6, which decided
+# whether the shell's settings pages survive at all.  **They are not blocked
+# any more and have not been since 2026-09-07**, when the operator answered it:
+# design-decisions 815, option C, split by kind.  A screen you *open* moves to
+# `apps/settings` and the shell's copy goes; something the desktop *shows* you
+# stays in the shell and gets wired.
+#
+# What is left is the doing.  `apps/settings` carries navigation for 26 pages
+# and builders for about thirteen; `DefaultApps`, `StartupApps`, `WiFi`,
+# `Power` and the rest fall to `_ => self.build_placeholder_page(sink)`, while
+# the shell holds the real implementations as islands on this list --
+# `default_apps.rs` alone is 2,325 lines.  So the move is a *port* and then a
+# deletion, not a deletion.
+#
+# Noted here on 2026-09-14 because the old wording had been telling every
+# reader, including the lane that wrote it, that a decided question was still
+# open.  A stale blocker is indistinguishable from a real one from the
+# outside, and this one had sat for a week.
 apps/imageviewer/src/video.rs
 apps/installer/src/grub.rs
 apps/procexplorer/src/features.rs
@@ -104,7 +130,6 @@ gui/desktop/src/context_ext.rs
 gui/desktop/src/default_apps.rs
 gui/desktop/src/device_settings.rs
 gui/desktop/src/file_drop.rs
-gui/desktop/src/icons.rs
 gui/desktop/src/language_settings.rs
 gui/desktop/src/multimon.rs
 gui/desktop/src/network_indicator.rs
@@ -124,7 +149,6 @@ gui/desktop/src/user_accounts.rs
 gui/desktop/src/window_peek.rs
 gui/remote/src/reader.rs
 gui/toolkit/src/context_ext.rs
-gui/toolkit/src/signal.rs
 gui/toolkit/src/textview.rs
 netproto/src/arp.rs
 netproto/src/dhcp.rs

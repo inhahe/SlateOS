@@ -75698,6 +75698,23 @@ the module is reached. `PowerManager`, `PowerConfig`, `ScreenSaver` and the
 config pair inside it still have no caller. A module absent from the table is
 not a clean bill of health for its contents.
 
+**C-Q6 WAS ANSWERED ON 2026-09-07** -- design-decisions 815, option C, split
+by kind -- and this paragraph went on saying otherwise for a week. A screen you
+*open* moves to `apps/settings` and the shell's copy is deleted; something the
+desktop *shows* you stays and gets wired. Nothing below is waiting on a
+decision.
+
+What it is waiting on is the work, and the shape of that work is the opposite
+of what one would guess: `apps/settings` has navigation for 26 pages and
+builders for about thirteen, with `DefaultApps`, `StartupApps`, `WiFi`, `Power`
+and others falling through to `build_placeholder_page`. The *shell* holds the
+real implementations -- `default_apps.rs` is 2,325 lines. So each one is a port
+into the Settings app followed by a deletion from the shell, and deleting first
+would replace a working panel with a placeholder.
+
+The paragraph below is kept as it was written, because the reasoning in it is
+still right about *why* one would not wire a panel that is about to move:
+
 **Do not wire these up before C-Q6 is answered.** Adding `load()`/`save()` to
 six models that may be deleted is lesson 45 at a larger size — a bigger unused
 feature, with the same round-trip tests making it look covered.
@@ -144081,8 +144098,13 @@ deciding which needs the question "who would use this?" asked per module:
 * `svg` -- a renderer with no caller. `apps/imageviewer` and the icon paths are
   the candidates; 3 391 lines is worth an hour's look before either wiring or
   deleting.
-* `signal` -- 853 lines of what is probably an observer mechanism. Least
-  obviously needed; check what it is before deciding.
+* `signal` -- **deleted 2026-09-14**, design-decisions 851. It was an observer
+  mechanism, and this tree does not observe: 138 crates under `apps/` and
+  `gui/` take `handle_event(&Event) -> Response` and none connected a signal.
+  The distinction that decided it: an unreachable *widget* becomes reachable
+  when an application draws it -- which is what happened to the other five on
+  this list -- but an unreachable *architecture* becomes reachable only by
+  rewriting the architecture.
 
 **Corrected within the hour: there IS a gate, and it is better than this
 entry first said.** `scripts/scan-orphan-modules.py` asks exactly this
@@ -144152,6 +144174,69 @@ worth more than one feature:
   under-reported the viewport by two lines). Five tests were hardcoding `y =
   10.0` to mean "inside the tab strip" and broke the moment it moved, which is
   the same defect in the tests.
+
+## TD-C-THE-DESKTOP-ICONS-ARE-DRAWN-AND-NOTHING-CAN-CLICK-THEM -- FIXED 2026-09-14
+
+**Date:** 2026-09-14. **Lane:** C. **Created and closed by this lane the same day.**
+
+**Status: FIXED.** The pointer reaches the layer: a press selects, a drag moves
+and the release writes the new position, a double-click asks the shell to launch
+what the icon points at. Four tests in `pointer_tests.rs`, all through
+`handle_mouse` rather than against the layer, because the layer's own
+interactions were never in doubt -- the route to them was what did not exist.
+Proved by reintroduction: unrouting the press fails three of the four.
+
+One thing the fix had to *not* break, which three existing tests caught: a press
+on bare desktop with nothing selected still answers `Pass`. The first version
+consumed every desktop press on the theory that a rubber-band is a gesture in
+progress. It is, but the gesture does not need the press claimed -- the release
+reaches the surface either way -- and `the_bare_desktop_is_not_the_shells_to_consume`
+was right that claiming it is a lie about what changed. The rule is now "consume
+what was acted on": the selection before and after decides.
+
+Still open, and deliberately: `ctrl_held` is passed as `false` everywhere,
+because `MouseEvent` carries a position and a kind and nothing else, so
+ctrl-click to extend a selection has nowhere to get its answer. The keyboard
+state would have to be tracked alongside, as `apps/editor` does.
+
+**In short:** the desktop now draws its icons -- This PC, Recycle Bin,
+Documents, Home -- and they are a picture. Clicking one does nothing, dragging
+one does nothing, double-clicking one opens nothing. They were not drawn at all
+before today, so this is a dead control **I introduced**, on the day I spent
+removing dead controls from the file manager, the editor and the taskbar.
+
+**Why it is filed rather than fixed on the spot.** The remaining work is a real
+change to `DesktopShell::handle_mouse`, not a line:
+
+* `Hit::Desktop => ShellAction::Pass` is the seam -- a press on bare desktop is
+  exactly where the icons now live -- but the layer needs **press, move, up and
+  double-click**, and a press that starts a `PendingDrag` with no matching
+  `handle_mouse_up` leaves the layer in a non-idle state permanently. Wiring
+  press alone would be worse than wiring none.
+* The shell collapses `Press` and `DoubleClick` into one match arm
+  (`gui/desktop/src/lib.rs`, the `MouseEventKind::Press(button) |
+  MouseEventKind::DoubleClick(button)` arm), so "activate" cannot be told from
+  "select" without separating them.
+* `DesktopIconLayer::handle_mouse_down` takes `ctrl_held`, and the shell's
+  pointer path tracks no modifier state at all. Ctrl-click to add to a
+  selection has nowhere to get its answer from today.
+
+**What works already**, so the gap is precisely this and no wider: positions
+persist and are restored (`read_positions`/`write_positions`, six tests, clamp
+proved by reintroduction), the layer is drawn between the wallpaper and the
+widgets, and every interaction is implemented and tested *inside* `icons.rs`.
+It is only the route from the compositor's pointer to that layer that is
+missing.
+
+**`IconEvent::Activate(_, IconAction::OpenPath(p))` should become
+`ShellAction::Launch(p)`** -- the shell already has that action and the session
+already queues launches from it, so the activation path is one mapping once the
+events arrive.
+
+**Do not delete `/proc/deskicons` yet.** A-Q8 orders this deliberately: lane C
+wires first, lane A deletes after. Positions reaching disk is not the same as a
+desktop the user can use, and until this entry closes the kernel tree is still
+the only path that does anything.
 
 ## TD-C-SYSTEM-INFORMATION-REPORTS-CORRUPT-HARDWARE-DATA-AS-ZEROS
 
@@ -144417,7 +144502,22 @@ that, and "we were lucky" is not a property a gate is supposed to rely on. The
 `store` spelling is now one of the self-test's ten cases, so the pattern cannot
 quietly narrow again.
 
-## TD-C-THE-TEXT-EDITOR-CANNOT-OPEN-OR-CREATE-A-FILE-FROM-INSIDE-ITSELF
+## TD-C-THE-TEXT-EDITOR-CANNOT-OPEN-OR-CREATE-A-FILE-FROM-INSIDE-ITSELF -- FIXED 2026-09-14
+
+**Status: FIXED.** Ctrl+N, Ctrl+O and Ctrl+Shift+S, with File gaining New,
+Open... and Save As.... Ctrl+S on a document with no path now asks where to put
+it instead of refusing. Four tests drive the dialog through `handle_event`, and
+the reintroduction proof fails as it should.
+
+**The fix was to call something that already existed**, which is the part worth
+keeping: `guitk::dialog::FileDialog`, already driven by `apps/archivemanager`,
+`apps/diskimager`, `apps/vpnmanager` and the desktop shell. This entry asserted
+the opposite as fact and three programs were parked behind it. See the
+correction below.
+
+One of the three faces never needed a picker at all: **New** is an empty tab and
+has no name to ask about. "One gap wearing three faces" was two faces and a
+misreading.
 
 **Date:** 2026-09-14. **Lane:** C.
 
@@ -144429,12 +144529,27 @@ editor already says so itself: pressing Ctrl+S on that page answers *"No file
 name -- Save As needs a file dialog"*.
 
 **It is one gap wearing three faces.** New, Open and Save As all need the same
-missing thing: a way to ask the user for a path. There is no file picker
-anywhere in `gui/` -- no dialog crate, no chooser, no prompt -- so all three are
-blocked on the same absent part rather than on three separate oversights. That
-is why the menu bar ships with File holding only Save and Close Tab: a greyed
-`Open...` that can never ungrey is a dead control, and this tree has been
-removing those all week, not adding them.
+thing: a way to ask the user for a path.
+
+**CORRECTION, 2026-09-14, and it inverts this entry.** The original text here
+read "There is no file picker anywhere in `gui/` -- no dialog crate, no
+chooser, no prompt". That is false. `guitk::dialog::FileDialog` is 3,436 lines
+with open, save and select-folder modes, filters, an initial path, a default
+filename, history navigation and a hidden-files toggle -- and it is **not an
+island**: `apps/archivemanager`, `apps/diskimager`, `apps/vpnmanager` and the
+desktop shell all drive it today.
+
+How the claim was made: by running `ls gui/` and looking for a *crate* called
+dialog, picker or chooser. There is no such crate. There is a *module*, inside
+the toolkit every one of these programs already depends on. The check was at
+the wrong granularity and the conclusion was stated as fact in an entry three
+other programs are blocked by.
+
+That is the same error as `-p sysinfo` earlier the same day -- a true answer to
+a narrower question than the one being asked -- and it cost more, because it
+nearly bought an afternoon building a second file picker beside the working one.
+
+So the work is wiring, not building, and the entry's blocking claim is void.
 
 **Where it lives.** `apps/editor/src/input.rs` -- `save_active` is the function
 that prints the message above. `EditorState::open_file` exists,
@@ -144442,10 +144557,10 @@ that prints the message above. `EditorState::open_file` exists,
 `open_all` at startup. `apps/editor/src/main.rs` has no `Key::O` or `Key::N`
 binding at all.
 
-**The proper fix, and it does not belong in the editor.** A file picker is
-wanted by every application that opens a document, so building one inside the
-text editor would be the first of several. It belongs in `gui/toolkit`, and
-most of it already exists there:
+**The fix is to call what is already there.** `FileDialog::open()`,
+`FileDialog::save().with_filename(..)`, and the editor's File menu grows three
+rows that are already written. The pieces below are what it is *built* from,
+listed here before anyone knew it had been built:
 
 * `guitk::pathbar` -- path editing with completion, wired into the file
   explorer on 2026-09-14, so it is known to work against a real directory.
@@ -144458,6 +144573,17 @@ So the shape is a `guitk` module that composes three existing ones, and the
 editor's File menu grows three rows that are already written. Until then the
 editor is a file *editor* and not a file *creator*, which is a fair description
 of what ships but not of what a text editor is.
+
+**A second program still has the gap and is no longer blocked**, found
+2026-09-14 by `scripts/check-tested-but-uncalled.py`. `apps/passwordgen`'s
+`export_history` renders the generated passwords as text and is called by
+nothing but its own test: the program has no clipboard and no way to name a
+file, so the string it builds has nowhere to go.
+
+The original text here said wiring it was "guesswork before a picker exists".
+There is a picker, so it is not guesswork -- it is a `FileDialog::save()`, a
+field on the app, routing in `handle_event`, and somewhere to report the result,
+which that program currently has no status line for. Small, and open.
 
 **Not urgent, and worth saying why:** the editor opens files perfectly well
 when something else chooses them -- the file explorer's double-click, a command

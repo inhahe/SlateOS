@@ -41,6 +41,7 @@
 //! still saves with the bar open.
 
 use crate::{Document, EditorState, ExternalChoice};
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::EventResult;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::menu::MenuItemId;
@@ -81,8 +82,14 @@ pub const TAB_CLOSE_WIDTH: f32 = 24.0;
 /// inventing one would be a menu written for this enum's benefit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// Start an empty document in a new tab.
+    New,
+    /// Read a file chosen from a dialog into a new tab.
+    Open,
     /// Write the active document back to its file.
     Save,
+    /// Write the active document to a path chosen from a dialog.
+    SaveAs,
     /// Close the active tab.
     CloseTab,
     /// Undo the last edit.
@@ -112,8 +119,11 @@ impl Command {
     /// undispatchable -- consistently missing rather than silently running
     /// something else, which is why [`Command::id`] is the discriminant rather
     /// than a position in this list.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 14] = [
+        Self::New,
+        Self::Open,
         Self::Save,
+        Self::SaveAs,
         Self::CloseTab,
         Self::Undo,
         Self::Redo,
@@ -142,7 +152,10 @@ impl Command {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::New => "New",
+            Self::Open => "Open...",
             Self::Save => "Save",
+            Self::SaveAs => "Save As...",
             Self::CloseTab => "Close Tab",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
@@ -167,7 +180,10 @@ impl Command {
     #[must_use]
     pub fn shortcut(self) -> &'static str {
         match self {
+            Self::New => "Ctrl+N",
+            Self::Open => "Ctrl+O",
             Self::Save => "Ctrl+S",
+            Self::SaveAs => "Ctrl+Shift+S",
             Self::CloseTab => "Ctrl+W",
             Self::Undo => "Ctrl+Z",
             Self::Redo => "Ctrl+Y",
@@ -199,6 +215,12 @@ impl EditorState {
 
     /// Apply one event and say what the caller should do about it.
     pub fn handle_event(&mut self, event: &Event) -> Response {
+        // Before anything else except a resize, which every surface needs.
+        if !matches!(event, Event::Resize { .. })
+            && let Some(response) = self.dialog_event(event)
+        {
+            return response;
+        }
         match event {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -477,7 +499,10 @@ impl EditorState {
             Command::Redo => !doc.redo_stack.is_empty(),
             Command::Cut | Command::Copy => doc.has_selection(),
             Command::Paste => !self.clipboard.is_empty(),
-            Command::Save
+            Command::New
+            | Command::Open
+            | Command::Save
+            | Command::SaveAs
             | Command::CloseTab
             | Command::SelectAll
             | Command::SelectWord
@@ -498,8 +523,26 @@ impl EditorState {
             return Response::Idle;
         }
         match command {
+            Command::New => {
+                // An empty document, which needs no dialog: the question a
+                // picker answers is "which file", and a new one has no name
+                // until it is saved. This was filed alongside Open and Save As
+                // as "one gap wearing three faces"; only two of the faces
+                // needed a picker.
+                self.tabs.open(Document::new());
+                self.after_cursor_move();
+                Response::Redraw
+            }
+            Command::Open => {
+                self.open_dialog(crate::DialogPurpose::Open);
+                Response::Redraw
+            }
             Command::Save => {
                 self.save_active();
+                Response::Redraw
+            }
+            Command::SaveAs => {
+                self.open_dialog(crate::DialogPurpose::SaveAs);
                 Response::Redraw
             }
             Command::CloseTab => {
@@ -549,6 +592,95 @@ impl EditorState {
                 Response::Redraw
             }
         }
+    }
+
+    /// Put up the open-or-save dialog.
+    ///
+    /// Starts in the active document's own directory, which is where a user
+    /// looking for a neighbouring file will look first; failing that, the home
+    /// directory. A Save As is seeded with the current name so the common case
+    /// -- same name, different folder -- is one click.
+    fn open_dialog(&mut self, purpose: crate::DialogPurpose) {
+        let doc = self.active_document();
+        let start = doc
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
+        let dialog = match purpose {
+            crate::DialogPurpose::Open => FileDialog::open().with_initial_path(start),
+            crate::DialogPurpose::SaveAs => FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(doc.name.clone()),
+        };
+        self.dialog_purpose = purpose;
+        self.dialog = Some(Self::listed(dialog));
+    }
+
+    /// Fill a dialog's listing from the directory it is showing.
+    ///
+    /// `FileDialog` does not read the filesystem -- the host answers with
+    /// `set_entries`, the same division `guitk::pathbar` uses for its
+    /// completions, so the toolkit stays testable without a disk. Forgetting
+    /// this does not fail: the dialog opens, draws its chrome, and lists
+    /// nothing at all, for ever.
+    fn listed(mut dialog: FileDialog) -> FileDialog {
+        let entries = guitk::dialog::list_directory(dialog.current_path());
+        dialog.set_entries(entries);
+        dialog
+    }
+
+    /// Act on a path the user chose, and say what to tell them.
+    fn dialog_chose(&mut self, path: &std::path::Path) -> String {
+        match self.dialog_purpose {
+            crate::DialogPurpose::Open => match self.open_file(path) {
+                Ok(()) => format!("Opened {}", path.display()),
+                Err(e) => format!("Could not open {}: {e}", path.display()),
+            },
+            crate::DialogPurpose::SaveAs => match self.active_document_mut().save_as(path) {
+                Ok(()) => format!("Saved as {}", path.display()),
+                Err(e) => format!("Could not save to {}: {e}", path.display()),
+            },
+        }
+    }
+
+    /// Give the dialog an event, `None` if there is no dialog up.
+    ///
+    /// Modal: it answers everything while it is open, because it is asking
+    /// which file and every editing key would be applied to an answer that has
+    /// not been given yet. The same rule the external-change prompt follows.
+    fn dialog_event(&mut self, event: &Event) -> Option<Response> {
+        let height = self.window_height as f32;
+        let width = self.window_width as f32;
+        let action = {
+            let dialog = self.dialog.as_mut()?;
+            match event {
+                Event::Key(key) if key.pressed => dialog.handle_event(key, height),
+                Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
+                // A resize or a focus change is not the dialog's to answer, but
+                // it must not fall through to the document either: the dialog
+                // is modal and the keystroke that dismisses it has not arrived.
+                _ => DialogAction::None,
+            }
+        };
+        match action {
+            DialogAction::Selected(path) => {
+                self.dialog = None;
+                self.status = Some(self.dialog_chose(&path));
+            }
+            DialogAction::Cancelled => {
+                self.dialog = None;
+            }
+            // The dialog has moved to another directory and is showing
+            // whatever the last one held until it is told what is here.
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+            }
+            DialogAction::None => {}
+        }
+        Some(Response::Redraw)
     }
 
     /// Open the find bar with one of its fields focused.
@@ -619,7 +751,11 @@ impl EditorState {
             MenuBarItem {
                 label: "&File".to_string(),
                 children: vec![
+                    row(Command::New),
+                    row(Command::Open),
+                    MenuBarEntry::Separator,
                     row(Command::Save),
+                    row(Command::SaveAs),
                     MenuBarEntry::Separator,
                     row(Command::CloseTab),
                 ],
@@ -709,7 +845,13 @@ impl EditorState {
     fn control_key(&mut self, key: &KeyEvent) -> Response {
         let shift = key.modifiers.shift;
         match key.key {
-            Key::S => self.run(Command::Save),
+            Key::N => self.run(Command::New),
+            Key::O => self.run(Command::Open),
+            Key::S => self.run(if shift {
+                Command::SaveAs
+            } else {
+                Command::Save
+            }),
             Key::Z => self.run(if shift { Command::Redo } else { Command::Undo }),
             Key::Y => self.run(Command::Redo),
             Key::F => self.run(Command::Find),
@@ -1042,7 +1184,11 @@ impl EditorState {
     /// back through, so a failed save must land somewhere the user is looking.
     fn save_active(&mut self) {
         if self.active_document().path.is_none() {
-            self.status = Some("No file name — Save As needs a file dialog".to_string());
+            // Was "No file name — Save As needs a file dialog", which stopped
+            // being true on 2026-09-14: there is a dialog, and this is the one
+            // moment the user certainly wants it. Asking beats refusing.
+            self.open_dialog(crate::DialogPurpose::SaveAs);
+            self.status = Some("Choose where to save it".to_string());
             return;
         }
         match self.active_document_mut().save() {
@@ -1161,6 +1307,8 @@ mod tests {
             "D" => Key::D,
             "F" => Key::F,
             "H" => Key::H,
+            "N" => Key::N,
+            "O" => Key::O,
             "S" => Key::S,
             "V" => Key::V,
             "W" => Key::W,
@@ -1189,14 +1337,54 @@ mod tests {
         for command in Command::ALL {
             let event = keystroke(command.shortcut());
             match command {
+                Command::New => {
+                    let mut editor = editor_with("ab");
+                    let before = editor.tabs.count();
+                    editor.handle_event(&event);
+                    assert_eq!(editor.tabs.count(), before + 1, "Ctrl+N did not open a tab");
+                    assert!(
+                        editor.active_document().lines.iter().all(String::is_empty),
+                        "the new tab is not empty"
+                    );
+                    assert!(editor.dialog.is_none(), "New should ask nothing");
+                }
+                Command::Open => {
+                    let mut editor = editor_with("ab");
+                    assert!(editor.dialog.is_none());
+                    editor.handle_event(&event);
+                    assert!(
+                        editor.dialog.is_some(),
+                        "Ctrl+O did not put up a file dialog"
+                    );
+                }
+                Command::SaveAs => {
+                    let mut editor = editor_with("ab");
+                    editor.handle_event(&event);
+                    assert!(
+                        editor.dialog.is_some(),
+                        "Ctrl+Shift+S did not put up a file dialog"
+                    );
+                    assert_eq!(
+                        editor.dialog_purpose,
+                        crate::DialogPurpose::SaveAs,
+                        "the dialog is up but asking the wrong question"
+                    );
+                }
                 Command::Save => {
                     let mut editor = editor_with("ab");
                     editor.handle_event(&event);
-                    let status = editor.status.clone().unwrap_or_default();
+                    // A document with no path cannot be saved without asking
+                    // where, so Ctrl+S puts up Save As. It used to answer "No
+                    // file name -- Save As needs a file dialog", which was true
+                    // until 2026-09-14. The property is unchanged and only its
+                    // evidence moved: the assertion is still "Ctrl+S reached
+                    // Save", now witnessed by the dialog rather than by a
+                    // refusal.
                     assert!(
-                        status.contains("No file name"),
-                        "{} did not reach Save: {status:?}",
-                        command.shortcut()
+                        editor.dialog.is_some(),
+                        "{} did not reach Save: {:?}",
+                        command.shortcut(),
+                        editor.status
                     );
                 }
                 Command::CloseTab => {
@@ -1294,6 +1482,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A file on disk, in a directory this test owns.
+    fn scratch_file(
+        tag: &str,
+        name: &str,
+        body: &str,
+    ) -> (scratchdir::ScratchDir, std::path::PathBuf) {
+        let dir = scratchdir::ScratchDir::new(&format!("editor_dialog_{tag}"));
+        let path = dir.dir().join(name);
+        std::fs::write(&path, body).expect("write the fixture");
+        (dir, path)
+    }
+
+    /// **Open reaches a real file and its text arrives in the editor.**
+    ///
+    /// Through `handle_event` and the dialog's own keys, not by calling the
+    /// loader: the halves were never the problem. `apps/editor` had no Open at
+    /// all, and `known-issues.md` recorded the cause as "there is no file
+    /// picker anywhere in gui/" -- a claim made by looking for a *crate* of
+    /// that name, while `guitk::dialog::FileDialog` sat in the toolkit this
+    /// program already depends on, with four other programs driving it.
+    #[test]
+    fn open_reads_the_file_the_dialog_returned() {
+        let (dir, _path) = scratch_file(
+            "open",
+            "greeting.txt",
+            "hello from disk
+",
+        );
+        // A document already in that directory, so Ctrl+O starts there and the
+        // listing comes from `open_dialog` -- the code under test. An earlier
+        // version of this test called `set_entries` itself and went on passing
+        // with that wiring deleted: a test performing the production step it
+        // was written to check.
+        let anchor = dir.dir().join("anchor.txt");
+        std::fs::write(&anchor, "x").expect("write the anchor");
+        let mut editor = editor_with("");
+        editor.open_file(&anchor).expect("open the anchor");
+        editor.handle_event(&ctrl(Key::O));
+
+        let dialog = editor.dialog.as_mut().expect("Ctrl+O put up no dialog");
+        let index = dialog
+            .entries()
+            .iter()
+            .position(|e| e.name == "greeting.txt")
+            .expect("the fixture is not in the listing");
+        dialog.select_entry(index);
+        editor.handle_event(&plain(Key::Enter));
+
+        assert!(editor.dialog.is_none(), "the dialog stayed up");
+        assert_eq!(
+            editor.active_document().lines[0],
+            "hello from disk",
+            "status: {:?}",
+            editor.status
+        );
+    }
+
+    /// **Save As writes the buffer to the chosen name.**
+    #[test]
+    fn save_as_writes_to_the_chosen_path() {
+        let dir = scratchdir::ScratchDir::new("editor_dialog_saveas");
+        // Anchored in the directory, so the dialog opens there without this
+        // test navigating it -- the same reason as the Open test above.
+        let anchor = dir.dir().join("anchor.txt");
+        std::fs::write(&anchor, "x").expect("write the anchor");
+        let mut editor = editor_with("");
+        editor.open_file(&anchor).expect("open the anchor");
+        editor.active_document_mut().lines = vec!["written by the editor".to_string()];
+        let mut mods = Modifiers::ctrl();
+        mods.shift = true;
+        editor.handle_event(&press(Key::S, mods));
+
+        let dialog = editor.dialog.as_mut().expect("no dialog");
+        dialog.set_filename("out.txt");
+        editor.handle_event(&plain(Key::Enter));
+
+        assert!(editor.dialog.is_none(), "the dialog stayed up");
+        let written = std::fs::read_to_string(dir.dir().join("out.txt"))
+            .unwrap_or_else(|e| panic!("nothing was written: {e}; status {:?}", editor.status));
+        assert!(written.contains("written by the editor"), "{written:?}");
+    }
+
+    /// Escape puts the dialog away and changes nothing.
+    #[test]
+    fn cancelling_the_dialog_leaves_the_document_alone() {
+        let mut editor = editor_with("untouched");
+        editor.handle_event(&ctrl(Key::O));
+        assert!(editor.dialog.is_some());
+
+        editor.handle_event(&plain(Key::Escape));
+
+        assert!(editor.dialog.is_none(), "Escape did not dismiss it");
+        assert_eq!(editor.active_document().lines[0], "untouched");
+    }
+
+    /// **The dialog is modal: typing does not reach the document behind it.**
+    #[test]
+    fn the_document_does_not_see_keys_while_the_dialog_is_up() {
+        let mut editor = editor_with("abc");
+        editor.handle_event(&ctrl(Key::O));
+
+        editor.handle_event(&typed('z'));
+
+        assert_eq!(
+            editor.active_document().lines[0],
+            "abc",
+            "a keystroke meant for the dialog was typed into the document"
+        );
     }
 
     /// Every command a menu row can carry maps back to the command itself.
@@ -1670,12 +1968,11 @@ mod tests {
         assert_eq!(editor.find.matches.len(), 1);
 
         // A chord the bar does not claim still reaches the document's bindings.
+        // Witnessed by the Save As dialog now rather than by the refusal that
+        // stood in for it before there was one; the claim is the same.
         editor.handle_event(&ctrl(Key::S));
         assert!(
-            editor
-                .status
-                .as_deref()
-                .is_some_and(|s| s.contains("Save As")),
+            editor.dialog.is_some(),
             "Ctrl+S while searching should still try to save: {:?}",
             editor.status
         );

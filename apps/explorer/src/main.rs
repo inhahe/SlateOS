@@ -46,6 +46,7 @@ use guitk::disabled::DisabledState;
 use guitk::filetypes::{self, FileCategory};
 use guitk::menu::{ContextMenu, MenuItem};
 use guitk::pathbar::{CompletionItem, PathBar, PathBarEvent};
+use std::process;
 
 use dropzone::{
     DragModifiers, DropOperation, DropResult, DropZone, DropZoneEvent, DropZoneManager, Rect,
@@ -818,15 +819,43 @@ impl ExplorerState {
 
     /// Open entry: navigate if directory, launch if file.
     pub fn open_entry(&mut self, index: usize) {
-        if let Some(entry) = self.entries.get(index) {
-            if entry.is_dir {
-                let path = entry.path.clone();
-                self.navigate_to(&path);
-            } else {
-                // In a real implementation, launch the associated application
-                self.status_message = format!("Opening: {}", entry.name);
-            }
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        if entry.is_dir {
+            let path = entry.path.clone();
+            self.navigate_to(&path);
+            return;
         }
+        let (path, name) = (entry.path.clone(), entry.name.clone());
+        self.status_message = match Self::opener_for(&path) {
+            Some(program) => match process::Command::new(&program).arg(&path).spawn() {
+                Ok(_) => format!("Opening {name} with {program}"),
+                // Named, because the interesting failures are all about
+                // *which* program: an association carried over from another
+                // machine names a path that is not here, and saying so is the
+                // difference between "this file cannot be opened" and "that
+                // association is wrong".
+                Err(e) => format!("Could not start {program}: {e}"),
+            },
+            None => format!("Nothing is set to open {name}"),
+        };
+    }
+
+    /// The program the user has chosen for this kind of file.
+    ///
+    /// Read from the File Associations program's own configuration, which
+    /// records an **executable path** rather than an application id -- an id is
+    /// a name only that program can resolve, and this one has no catalogue to
+    /// resolve it in. Same rule as the taskbar's pinned apps.
+    ///
+    /// Read on every open rather than cached: the user can change an
+    /// association in another window while this one is showing a folder, and a
+    /// cache would open the previous choice with no way to notice.
+    fn opener_for(path: &Path) -> Option<String> {
+        let ext = path.extension().and_then(|e| e.to_str())?.to_lowercase();
+        let doc = settingsfile::load(ASSOC_CONFIG_NAME);
+        doc.get_str(&["associations", &ext])
     }
 
     // ======================================================================
@@ -3522,6 +3551,13 @@ const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16)
 
 // Context menu row ids. Numbered rather than positional, so inserting a row
 // cannot silently reassign what the ones below it do.
+/// The File Associations program's configuration, which this one only reads.
+///
+/// Named here rather than imported because `apps/fileassoc` is a *binary*:
+/// there is nothing to link against, which is exactly why the file it writes
+/// records a runnable path instead of an id.
+const ASSOC_CONFIG_NAME: &str = "fileassoc";
+
 const MENU_OPEN: u64 = 1;
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
@@ -5032,6 +5068,87 @@ mod tests {
         );
         assert!(!items[0].is_directory, "apple.txt is not a folder");
         assert!(items[1].is_directory, "apples is");
+    }
+
+    // ---- opening a file ------------------------------------------------
+
+    /// **A double-click starts the program the user chose for that file type.**
+    ///
+    /// Until 2026-09-14 this set a status line reading "Opening: name" and did
+    /// nothing else -- the comment in its place said "in a real implementation,
+    /// launch the associated application". A file manager that cannot open a
+    /// file is most of a file manager missing.
+    ///
+    /// The association names a program that is not installed, deliberately:
+    /// the point under test is that the *choice was read and used*, and a test
+    /// that really started a program would be a test that starts programs.
+    #[test]
+    fn opening_a_file_starts_what_the_user_chose_for_it() {
+        settingsfile::testing::with_scratch_config("explorer-open-assoc", |_root| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_str(&["associations", "txt"], "/nowhere/chosen-editor");
+            settingsfile::store("fileassoc", &doc).expect("scratch config is writable");
+
+            let scratch = temp_dir("open_assoc");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("notes.txt"), "hello");
+            let mut state = state_at(&root);
+            let index = state
+                .entries
+                .iter()
+                .position(|e| e.name == "notes.txt")
+                .expect("the file is in the listing");
+
+            state.open_entry(index);
+
+            assert!(
+                state.status_message.contains("chosen-editor"),
+                "the association was not used: {:?}",
+                state.status_message
+            );
+        });
+    }
+
+    /// A type nobody has chosen a program for says so, rather than pretending.
+    #[test]
+    fn opening_a_file_with_no_association_says_so() {
+        settingsfile::testing::with_scratch_config("explorer-open-none", |_root| {
+            let scratch = temp_dir("open_none");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("mystery.zzz"), "x");
+            let mut state = state_at(&root);
+            let index = state
+                .entries
+                .iter()
+                .position(|e| e.name == "mystery.zzz")
+                .expect("the file is in the listing");
+
+            state.open_entry(index);
+
+            assert!(
+                state.status_message.contains("Nothing is set to open"),
+                "status was {:?}",
+                state.status_message
+            );
+        });
+    }
+
+    /// A directory still navigates rather than launching anything.
+    #[test]
+    fn opening_a_directory_navigates_into_it() {
+        let scratch = temp_dir("open_dir");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).expect("create dir");
+        let mut state = state_at(&root);
+        let index = state
+            .entries
+            .iter()
+            .position(|e| e.name == "sub")
+            .expect("the directory is in the listing");
+
+        state.open_entry(index);
+
+        assert_eq!(state.current_path, root.join("sub"));
     }
 
     // ---- why a button is greyed ---------------------------------------

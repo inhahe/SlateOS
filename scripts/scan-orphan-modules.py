@@ -326,6 +326,31 @@ def public_items(lines):
 
 BASELINE = pathlib.Path("scripts/orphan-modules-baseline.txt")
 
+def unknown_comments(path, header):
+    """Comment lines in `path` that `header` does not account for.
+
+    Compared as a *set* of stripped lines rather than in order, so a batch note
+    moved up or down inside the header is not reported as stray. The count line
+    differs between the two by construction -- the header carries `{remaining}`
+    and the file carries a number -- so any line holding "remain." is excluded
+    rather than special-cased on its exact text.
+    """
+    if not path.exists():
+        return []
+    known = {
+        line.strip()
+        for line in header.split("\n")
+        if line.startswith("#") and "remain." not in line
+    }
+    stray = []
+    for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
+        if not line.startswith("#") or "remain." in line:
+            continue
+        if line.strip() not in known:
+            stray.append(line)
+    return stray
+
+
 BASELINE_HEADER = """\
 # Islands pinned by scripts/scan-orphan-modules.py --check.
 #
@@ -367,6 +392,27 @@ BASELINE_HEADER = """\
 # THIRD BATCH, 2026-09-13, pruned by lane C: a11y.rs, deleted outright as a dead
 # parallel copy, and tray_dnd.rs, wired into the shell's tray.
 #
+# FOURTH BATCH, 2026-09-14, lane C, seven in one day.  Six were the same move --
+# find the application that should already have been using the module, and use
+# it: gui/toolkit's pathbar.rs (the file explorer's address bar), disabled.rs
+# (why a greyed toolbar button is grey), svg.rs (a thumbnail of the drawing
+# instead of a coloured rectangle) and menubar.rs (the text editor's
+# File/Edit/Search bar), plus the desktop shell's taskbar.rs and icons.rs.
+#
+# The seventh, signal.rs, was DELETED instead -- design-decisions 851.  It was
+# a Qt-style signals-and-slots system, and the distinction that decided it is
+# worth keeping: an unreachable *widget* becomes reachable when an application
+# draws it, which is what happened to the other six, but an unreachable
+# *architecture* becomes reachable only by rewriting the architecture.  138
+# crates here take `handle_event(&Event) -> Response`; none connected a signal.
+#
+# Worth noting what the wirings kept turning up, since it was never the feature
+# itself: menubar.rs found that `MenuBar::set_items` silently closes an open
+# dropdown, and the editor's `TAB_BAR_HEIGHT` doing duty as two different facts.
+# icons.rs found that the taskbar's pinned apps were saved and never loaded.  An
+# island is not only unreached code -- it is code whose assumptions nobody has
+# had to satisfy yet.
+#
 # The two paragraphs above were written straight into the generated file and were
 # one `--pin` away from deletion; this run is the one that would have done it.  They
 # are moved here verbatim, which is where the header four paragraphs down says all
@@ -406,8 +452,24 @@ BASELINE_HEADER = """\
 #
 # Being on this list is not absolution.  See known-issues.md ->
 # TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
-# largest entries are blocked on open-questions.md -> C-Q6, which decides
-# whether the shell's settings pages survive at all.
+# largest entries were blocked on open-questions.md -> C-Q6, which decided
+# whether the shell's settings pages survive at all.  **They are not blocked
+# any more and have not been since 2026-09-07**, when the operator answered it:
+# design-decisions 815, option C, split by kind.  A screen you *open* moves to
+# `apps/settings` and the shell's copy goes; something the desktop *shows* you
+# stays in the shell and gets wired.
+#
+# What is left is the doing.  `apps/settings` carries navigation for 26 pages
+# and builders for about thirteen; `DefaultApps`, `StartupApps`, `WiFi`,
+# `Power` and the rest fall to `_ => self.build_placeholder_page(sink)`, while
+# the shell holds the real implementations as islands on this list --
+# `default_apps.rs` alone is 2,325 lines.  So the move is a *port* and then a
+# deletion, not a deletion.
+#
+# Noted here on 2026-09-14 because the old wording had been telling every
+# reader, including the lane that wrote it, that a decided question was still
+# open.  A stale blocker is indistinguishable from a real one from the
+# outside, and this one had sat for a week.
 """
 
 
@@ -701,6 +763,42 @@ def main():
     hard_paths = {f.as_posix() for _, f, _, test_only, _ in islands if not test_only}
 
     if mode == "pin":
+        # Refuse rather than overwrite prose this script did not write.
+        #
+        # THE THIRD OCCURRENCE, and the file's own header says what to do about
+        # it: "If it happens a third time the answer is not a sterner comment --
+        # it is `--pin` preserving blocks it did not write." Three blocks were
+        # lost on 2026-09-10, a lane-A note on 2026-09-13, and a lane-C
+        # paragraph on 2026-09-14 -- each written into the *generated* file by
+        # someone who had not read as far as the line saying the header lives in
+        # this script. Every loss was silent: the gate stays green and the
+        # entries stay correct while only the reasoning goes.
+        #
+        # Refusing is chosen over merging deliberately. Merging means guessing
+        # where a stranger's paragraph belongs among these, and a merge that
+        # guesses wrong is a second way to lose it. A refusal costs one move and
+        # cannot be misread.
+        stray = unknown_comments(BASELINE, BASELINE_HEADER.format(remaining=0))
+        if stray:
+            print(
+                "refusing to pin: "
+                f"{BASELINE.as_posix()} holds {len(stray)} comment line(s) that "
+                "this script did not write, and --pin would delete them."
+            )
+            for line in stray[:12]:
+                print("    " + line)
+            if len(stray) > 12:
+                print(f"    ... and {len(stray) - 12} more")
+            print(
+                "Move the prose into BASELINE_HEADER in "
+                "scripts/scan-orphan-modules.py -- that constant is what --pin "
+                "writes from -- then delete the block from the generated file "
+                "and run this again. Both steps: the copy left in the file is "
+                "what this refusal is protecting, so it goes on refusing until "
+                "the only copy is the one in the script."
+            )
+            return 2
+
         body = "\n".join(sorted(hard_paths))
         BASELINE.parent.mkdir(parents=True, exist_ok=True)
         # `newline=""` because the default is text mode, which on Windows turns

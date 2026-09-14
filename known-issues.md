@@ -144458,12 +144458,37 @@ permutation out of 20,745!.
 
 ## B-FOUR-STAGED-UTILITIES-STILL-DIE-ON-A-LEGAL-FILENAME (lane B, 2026-09-14)
 
-**Three of the four are done as of 2026-09-14.** `patch` and `diff` were
-converted (and both turned out to have a larger content-side fault behind
-the argv one), and `logger` is done here. **`ps` is the one left**, and it
-is the mildest of the four: its options are numeric and format selectors,
-so a non-Unicode argument is unlikely rather than routine — but it still
-aborts rather than refusing.
+**FIXED 2026-09-14 — all four.** `patch` and `diff` were converted first,
+and both turned out to have a larger content-side fault sitting behind the
+argv one: `patch` refused every file that was not valid UTF-8, and `diff`
+reported two different files as identical. `logger` had the same shape —
+`BufRead::lines()` failed the whole read on one undecodable byte, so
+`cat something-binary | logger` logged nothing. **`ps` was the mildest and
+is now done too.**
+
+**That is the pattern worth keeping from all four: the argv detector found
+the door, and in three cases out of four the bigger hole was inside.** A
+checker that looks at one narrow thing will report that narrow thing; what
+it is actually telling you is *where to read*.
+
+### One deliberate divergence, in `ps`
+
+procps picks its refusal sentence by WHERE the bad byte appeared, measured:
+
+| input | procps says |
+|---|---|
+| `ps -<0xE9>` | `error: garbage option` |
+| `ps -u<0xE9>` | `error: user name does not exist` |
+| `ps -o<0xE9>` | `error: unknown user-defined format specifier "..."` |
+| `ps --sort <0xE9>` | `error: unknown sort specifier` |
+
+This build answers `garbage option` for all four. The first matches exactly
+and is pinned in `scripts/ps-diff.sh`; the other three differ in wording,
+not in outcome — all refuse, all exit 1. Reaching the three sentences would
+mean reparsing the argument as bytes throughout a file already at **60
+passed / 0 differed** against procps, to change what a program says about
+an input nobody types. Recorded here rather than pinned red, so it is a
+decision on the record instead of an omission.
 
 `logger` had the argv panic AND a second fault the argv detector cannot
 see: `BufRead::lines()` on stdin yields `Result<String>` and fails the

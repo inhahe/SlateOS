@@ -144080,37 +144080,33 @@ small macro holding the one literal.
 
 **How this was found, which is the part worth keeping.** Not by reading the
 file. `cargo clippy -p sysinfo-app` reported the dead helpers -- and nobody had
-run that, because the habit is `-p sysinfo`, which is a **different crate**
-(`userspace/sysinfo`, lane B's). The directory is `apps/sysinfo` and the package
-is `sysinfo-app`. Every `-p sysinfo` anyone has typed has silently linted and
-tested somebody else's code and reported success.
+run that, because the habit is `-p sysinfo`, which reaches a **different crate**
+(`userspace/sysinfo`). The directory is `apps/sysinfo`; the package is
+`sysinfo-app`.
 
-So this crate has been outside a check everyone assumed covered it, and the
-dead code sat there because the only thing that would have mentioned it was
-being aimed at the wrong target. Same defect as
-`TD-C-THE-SCRATCH-CONFIG-GATE-COULD-NOT-SEE-A-STORE` and the eight theme guards
-below: a check reporting success over a population it was not looking at. The
-new instance is that the *invocation* can be wrong, not just the check.
+**That hazard is already filed and already gated** --
+`TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME` (lane B,
+2026-09-10), with `scripts/check-crate-names.py` as Gate 18 of the boot test
+refusing any *new* mismatch. Nothing about it is new here and this entry does
+not restate it; `backup`, `indexer` and `sysinfo` are the three that resolve to
+somebody else's crate rather than erroring, confirmed twice on 2026-09-14 by
+two lanes using different methods.
 
-Nine directories under `apps/` and `gui/` have a package name that differs from
-the directory: `backup-app`, `indexer-app`, `sysinfo-app`, `tmux-app`,
-`osfont`, `guiremote`, `guitk`, `vkloader`, `oswindow`.
+What *is* worth recording is the consequence for this crate: `apps/sysinfo` has
+been outside a check everyone assumed covered it, which is why dead code and
+34 swallowed parse errors sat here undisturbed. The gate stops the *set* of
+mismatches growing; it cannot make anyone type the right name, and for these
+three a wrong name does not fail -- it succeeds about something else.
 
-**Three of those nine silently resolve to a different crate**, not one --
-corrected the same day, after I wrote "only `sysinfo`" without checking the
-other eight:
-
-| typed | reaches | rather than |
-|---|---|---|
-| `-p backup` | `userspace/backup` | `apps/backup` (`backup-app`) |
-| `-p indexer` | `userspace/indexer` | `apps/indexer` (`indexer-app`) |
-| `-p sysinfo` | `userspace/sysinfo` | `apps/sysinfo` (`sysinfo-app`) |
-
-The remaining six -- `tmux`, `font`, `remote`, `toolkit`, `vulkan`, `window` --
-error, which is the honest failure. Writing "only sysinfo" was the same move as
-the defect being described: a claim about a population, made from one sample.
-Checked with `cargo pkgid -p <name>` for all nine, which is the way to settle
-it in one command.
+That is a third mode of the failure this file keeps recording, and it deserves
+its own word: **substitution**. A check blind to a population, or to a
+property, produces an *absence* -- something not looked at, an assertion too
+weak -- which a careful reader can go hunting for. Substitution produces a
+*presence*: a green line about real work that really happened, just not the
+work anyone asked about. It also defeats the usual diagnostic. "Would this go
+red if the thing were broken?" is satisfied -- it would, for the other crate.
+The question that catches it is narrower: **did the check examine the thing I
+named?**
 
 ## TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME
 

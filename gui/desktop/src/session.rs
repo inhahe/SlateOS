@@ -1191,7 +1191,18 @@ impl<T: Transport> ShellSession<T> {
         // The overlays, on their own surface and on their own schedule: an OSD
         // is not a popup and neither one's visibility implies anything about
         // the other's.
-        let overlays = self.shell.render_osd();
+        // The volume overlay and a tray tooltip share this surface: both are
+        // transient, both are above the menus, and both are here to be read
+        // rather than clicked. Merged rather than given two surfaces, because
+        // a second full-screen overlay window would have to be ordered against
+        // this one and there is no case where that ordering matters.
+        let overlays = match (self.shell.render_osd(), self.shell.render_tray_tooltip()) {
+            (Some(mut osd), Some(tip)) => {
+                osd.commands.extend(tip.commands);
+                Some(osd)
+            }
+            (some, None) | (None, some) => some,
+        };
         let showing = overlays.is_some();
         if showing != self.osd_shown {
             if let Some(mut handle) = self.events.window_mut(self.osd.window) {

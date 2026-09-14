@@ -1050,6 +1050,17 @@ pub struct DesktopShell {
     /// tray whose icons move when an unrelated program registers one is a tray
     /// where the user's muscle memory is wrong.
     tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// The tray icon the pointer is resting on, and the tooltip naming it.
+    ///
+    /// A tray icon is a single glyph chosen by another program, and the
+    /// `tooltip` it registers alongside is the only words anywhere saying what
+    /// that glyph is. Until this existed the shell received that string, held
+    /// it, and never put it on screen -- so a user faced a row of symbols with
+    /// no way to learn what any of them were.
+    ///
+    /// Keyed, so that sliding along the row replaces the tooltip rather than
+    /// leaving the first icon's name under the fourth icon's glyph.
+    tray_tooltip: Option<(tray_dnd::TrayIconKey, guitk::menu::Tooltip)>,
     /// The popup listing icons the bar had no room for, and which icons
     /// those were when it opened.
     ///
@@ -1549,6 +1560,7 @@ impl DesktopShell {
             tray_arrangement: tray_dnd::TrayIconArrangement::new(),
             tray_drag: None,
             tray_overflow_menu: None,
+            tray_tooltip: None,
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -2482,9 +2494,67 @@ impl DesktopShell {
                     self.hover_zone_overlay(event.x, event.y);
                     return ShellAction::Consumed;
                 }
+                // Observed, not consumed: the pointer is only passing over the
+                // bar on its way somewhere, and a client that stopped
+                // receiving motion because the shell was showing a tooltip
+                // would lose its own hover states.
+                self.hover_tray(event.x, event.y);
                 ShellAction::Pass
             }
         }
+    }
+
+    /// Note that the pointer is over a tray icon, or is no longer.
+    ///
+    /// Resolved through [`hit_test`](Self::hit_test) rather than by walking
+    /// `tray_icon_rects` again, so that the icon a tooltip names and the icon
+    /// a click reaches are decided by one piece of geometry. Two hit tests
+    /// over the same row would be two chances to disagree, and the disagreement
+    /// would read as the wrong name on the right icon.
+    fn hover_tray(&mut self, x: f32, y: f32) {
+        let over = match self.hit_test(x, y) {
+            Hit::TrayIcon(index) => self.ordered_tray_icons().get(index).and_then(|icon| {
+                // A program that registered no tooltip has given the shell
+                // nothing to say. An empty bubble is worse than none.
+                (!icon.tooltip.is_empty())
+                    .then(|| (tray_dnd::TrayIconKey::of(icon), icon.tooltip.clone()))
+            }),
+            _ => None,
+        };
+        match over {
+            None => self.tray_tooltip = None,
+            Some((key, text)) => {
+                // Already resting on this one: leave the hover running, or the
+                // delay would restart on every motion event and the tooltip
+                // would never appear.
+                if self.tray_tooltip.as_ref().is_some_and(|(at, _)| *at == key) {
+                    return;
+                }
+                let mut tip = guitk::menu::Tooltip::new(&text);
+                tip.start_hover(x, y, self.osd_clock_ms, self.viewport());
+                self.tray_tooltip = Some((key, tip));
+            }
+        }
+    }
+
+    /// The tray tooltip's draw commands, empty unless one is showing.
+    ///
+    /// Drawn on the overlay surface beside the on-screen display, which is
+    /// full-screen, above the menus and `input_transparent`. That last is why
+    /// it belongs there rather than with the popups: `design-decisions.md`
+    /// 566 put the overlay surface beyond the reach of the mouse because it is
+    /// there to be read, and a tooltip is the same kind of thing -- a press
+    /// aimed at the icon under it must reach the icon.
+    #[must_use]
+    pub fn render_tray_tooltip(&self) -> Option<RenderTree> {
+        let (_, tip) = self.tray_tooltip.as_ref()?;
+        if !tip.is_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands
+            .extend(tip.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
     }
 
     /// Whether a click here is part of the start menu rather than outside it.
@@ -6221,6 +6291,12 @@ impl DesktopShell {
     pub fn advance_osd(&mut self, dt_ms: u64) {
         self.osd_clock_ms = self.osd_clock_ms.saturating_add(dt_ms);
         self.osd.tick(self.osd_clock_ms);
+        // The tooltip rides the same clock rather than bringing its own. Two
+        // clocks advanced from two call sites is one forgotten call away from
+        // a tooltip that never appears, or never leaves.
+        if let Some((_, tip)) = self.tray_tooltip.as_mut() {
+            tip.tick(self.osd_clock_ms);
+        }
     }
 
     /// Re-seed the overlay manager's idea of how big the display is.
@@ -9859,6 +9935,153 @@ mod overview_wiring_tests {
         }
         eprintln!("screen height 768; menu extends to y={lowest}");
         assert!(lowest <= 768.0, "menu runs {lowest} past a 768px screen");
+    }
+
+    /// Move the pointer, then let the hover delay elapse.
+    fn hover(s: &mut DesktopShell, x: f32, y: f32) {
+        s.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        });
+        // Past any plausible delay. The tooltip rides the overlay clock, so
+        // this is the same call the session makes once a frame.
+        s.advance_osd(5_000);
+    }
+
+    /// Resting on a tray icon names it.
+    ///
+    /// A tray icon is one glyph chosen by another program, and the `tooltip`
+    /// it registers is the only words anywhere saying what that glyph is. The
+    /// shell received that string and never showed it, so a user got a row of
+    /// symbols and no way to learn what any of them were.
+    #[test]
+    fn resting_on_a_tray_icon_shows_the_name_its_program_gave_it() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "B", "Battery: 84%")]);
+        assert!(s.render_tray_tooltip().is_none(), "nothing hovered yet");
+
+        let rect = s.tray_icon_rects()[0];
+        hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+        let tree = s
+            .render_tray_tooltip()
+            .expect("resting on an icon showed no tooltip");
+        assert!(
+            tree.commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Battery"))),
+            "the tooltip did not carry the program's own words"
+        );
+    }
+
+    /// Sliding along the row renames the tooltip rather than keeping the first.
+    #[test]
+    fn moving_between_tray_icons_renames_the_tooltip() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![
+            tray_icon(1, "A", "Battery"),
+            tray_icon(2, "N", "Network"),
+        ]);
+        let rects = s.tray_icon_rects();
+
+        hover(&mut s, rects[0].x + rects[0].w / 2.0, rects[0].y + 8.0);
+        let first = format!("{:?}", s.render_tray_tooltip().expect("first icon"));
+        assert!(first.contains("Battery"));
+
+        hover(&mut s, rects[1].x + rects[1].w / 2.0, rects[1].y + 8.0);
+        let second = format!("{:?}", s.render_tray_tooltip().expect("second icon"));
+
+        assert!(
+            second.contains("Network") && !second.contains("Battery"),
+            "the second icon still showed the first icon's name"
+        );
+    }
+
+    /// Leaving the row takes the tooltip with it.
+    #[test]
+    fn leaving_the_tray_hides_the_tooltip() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "Battery")]);
+        let rect = s.tray_icon_rects()[0];
+        hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        assert!(s.render_tray_tooltip().is_some());
+
+        hover(&mut s, 40.0, 40.0);
+
+        assert!(
+            s.render_tray_tooltip().is_none(),
+            "the tooltip outlived the hover"
+        );
+    }
+
+    /// A program that registered no tooltip gets no empty bubble.
+    #[test]
+    fn an_icon_with_no_tooltip_shows_nothing() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "")]);
+        let rect = s.tray_icon_rects()[0];
+
+        hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+        assert!(s.render_tray_tooltip().is_none());
+    }
+
+    /// The tooltip waits, rather than appearing the instant the pointer
+    /// crosses an icon on its way somewhere else.
+    #[test]
+    fn a_tooltip_does_not_appear_until_the_pointer_has_rested() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "Battery")]);
+        let rect = s.tray_icon_rects()[0];
+
+        s.handle_mouse(&MouseEvent {
+            x: rect.x + rect.w / 2.0,
+            y: rect.y + rect.h / 2.0,
+            kind: MouseEventKind::Move,
+        });
+        s.advance_osd(50);
+
+        assert!(
+            s.render_tray_tooltip().is_none(),
+            "the tooltip appeared after 50ms of hovering"
+        );
+    }
+
+    /// The tooltip stays on the screen it was raised on.
+    ///
+    /// The bottom-right corner is the whole difficulty: a bubble offset down
+    /// and right of the pointer there is off the display unless the flip
+    /// fires, and the flip was measuring against a hardcoded 1920x1080 until
+    /// an hour ago.
+    #[test]
+    fn a_tray_tooltip_fits_a_small_screen() {
+        let mut s = DesktopShell::new(1024, 768);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "Battery at eighty four percent")]);
+        let rect = s.tray_icon_rects()[0];
+        hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+        let tree = s.render_tray_tooltip().expect("a tooltip");
+        let mut plates = 0;
+        for c in &tree.commands {
+            if let RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } = c
+            {
+                plates += 1;
+                assert!(
+                    x + width <= 1024.5 && y + height <= 768.5,
+                    "tooltip runs to ({}, {}) on a 1024x768 screen",
+                    x + width,
+                    y + height
+                );
+            }
+        }
+        assert!(plates > 0, "the tooltip drew no panel to check");
     }
 
     /// The glyphs the tray is drawing, left to right.

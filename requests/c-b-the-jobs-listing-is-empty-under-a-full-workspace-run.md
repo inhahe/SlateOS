@@ -73,6 +73,43 @@ however long `settle_jobs` waits, and no amount of settling closes it.
 Lane C has no standing to judge which of those it is; this is a report, not a
 diagnosis.
 
+## One hypothesis ruled out, and it is lane C's own
+
+The notice lane C sent about the *first* of these two failures said:
+
+> Passes alone and fails in company is shared state or test order, not a wrong
+> assertion […] a neighbouring test declaring or unsetting the same name is
+> where I would look first.
+
+**That was wrong, or at least incomplete, and it is worth saying so before it
+sends you looking in the wrong place.** `scripts/check-test-order-
+independence.py` exists for exactly that hypothesis, and run against this
+crate it is green:
+
+```
+python scripts/check-test-order-independence.py --crate oils
+order-independence: oils seed 1789357352031162400 OK
+order-independence: oils seed 8627984354974498658 OK
+order-independence: oils seed 1542029433082146627 OK
+OK -- 1 crate(s) pass in 3 orders (1 pinned, 2 fresh)
+```
+
+Three shuffled orders of `oils` on its own, including the pinned seed that
+caught the `sysv_msg` queue-slot leak, all pass. So the dependency is **not**
+on which test ran before it within the crate.
+
+What is left is the other reading of "in company": the failure needs the
+*machine* to be busy, not the crate to be shuffled. A full workspace run has a
+couple of dozen test binaries competing for CPU and for the process table, and
+this test spawns real subshells and waits for them to be reaped. That is the
+same conclusion your own comment reached when you replaced the in-script
+`sleep 0.2` with `settle_jobs` -- so the family is right and the remedy did
+not reach far enough, rather than the diagnosis being wrong.
+
+That also means adding `oils` to `check-test-order-independence.py`'s crate
+list would not catch it, which lane C checked before proposing it and is
+therefore not proposing it.
+
 ## What lane C is doing meanwhile
 
 Merging `lane-c` to `main` regardless, having checked that this is not ours:

@@ -2811,9 +2811,27 @@ pub unsafe fn c_strlen_pub(s: *const u8) -> usize {
 /// - `W_OK` (2): check write permission.
 /// - `X_OK` (1): check execute permission.
 ///
-/// Since our OS doesn't have a permission system yet, we check only
-/// existence (via `SYS_FS_STAT`) and report all modes as accessible
-/// if the file exists.
+/// We check only existence (via `SYS_FS_STAT`) and report all modes as
+/// accessible if the file exists. That is **accurate for the traditional
+/// rwx bits and wrong for the two mechanisms that are enforced**, and the
+/// distinction is worth stating because this comment used to say "our OS
+/// doesn't have a permission system yet", which is no longer true:
+///
+/// * **Traditional mode bits are stored but never enforced.** `fchmodat`
+///   (`SYS_FS_FCHMODAT_PINNED`, 665) records them and `stat` returns them,
+///   but `S_IWUSR`/`S_IRUSR`/`S_IXUSR` appear nowhere in `kernel/src`, so no
+///   open is ever refused for them. Reporting `W_OK` from `st_mode` would
+///   therefore *introduce* a lie: it would deny access a write would get.
+/// * **POSIX ACLs and capability file-tags ARE enforced**, by
+///   `vfs::check_path_access`, which every path operation passes through. On
+///   a path either of them covers, `access()` can say yes where `open()` will
+///   return `EACCES`. That gap is real and needs a kernel query to close —
+///   nothing here can ask "would this path be readable?" — so it is recorded
+///   rather than papered over.
+///
+/// Both mechanisms are inert until configured (`check_path_access` returns
+/// immediately when both tables are empty), so on a stock system this answer
+/// is correct.
 ///
 /// Returns 0 on success, -1 on error (errno set).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -2849,7 +2867,9 @@ pub extern "C" fn access(path: *const u8, mode: i32) -> i32 {
         return errno::translate(ret) as i32;
     }
 
-    // File exists.  Since we don't have permissions, all modes succeed.
+    // File exists. Traditional rwx bits are not enforced anywhere in the
+    // kernel, so every mode is genuinely accessible as far as they go. See
+    // the doc above for the ACL/file-tag gap this does not cover.
     0
 }
 

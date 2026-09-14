@@ -4281,25 +4281,127 @@ mod tests {
     /// `thumbs.rs` paints into a pixel buffer rather than emitting
     /// `RenderCommand`s, so its file-type colours are content in the sense
     /// `apps/paint`'s swatch row is content.
+    /// The states this window can be in that draw something different.
+    ///
+    /// Named, because the failure message has to say which one. "explorer
+    /// (light=false)" tells a reader the theme is wrong *somewhere* in a
+    /// program with a toolbar, a context menu, a path bar, a transfer list and
+    /// a modal, and finding which is then most of the work.
+    /// One state the window can be in: a name for the failure message, and
+    /// the arrangement that puts the window into it.
+    type PaletteState = (&'static str, fn(&mut ExplorerState));
+
+    const PALETTE_STATES: [PaletteState; 9] = [
+        ("a plain listing", |_| {}),
+        ("one file selected", |s| s.select_single(0)),
+        ("everything selected", |s| s.select_all()),
+        ("a file's context menu", |s| {
+            let (x, y) = row_center(s, "file000.txt");
+            assert!(
+                s.dropzone.find_file_row(x, y).is_some(),
+                "the state meant to right-click a row did not land on one"
+            );
+            s.open_context_menu(x, y);
+        }),
+        ("empty space right-clicked", |s| {
+            // Past the sidebar, below the last of five rows: a right-click on
+            // no file, which opens the folder's menu rather than a file's.
+            let (x, y) = row_center(s, "file000.txt");
+            let below = y + ROW_H * 20.0;
+            assert!(
+                s.dropzone.find_file_row(x, below).is_none(),
+                "the empty-space state landed on a row after all"
+            );
+            s.open_context_menu(x, below);
+        }),
+        ("a full clipboard", |s| {
+            s.select_single(0);
+            s.cut_selected();
+        }),
+        ("hidden files shown", ExplorerState::toggle_hidden),
+        ("a copy in flight", |s| {
+            s.select_all();
+            s.copy_selected();
+            s.paste();
+        }),
+        ("a copy just finished", |s| {
+            s.select_all();
+            s.copy_selected();
+            s.paste();
+            settle(s);
+        }),
+    ];
+
     #[test]
     fn every_colour_the_file_manager_draws_comes_from_its_palette() {
+        // This rendered exactly one state until 2026-09-14: a brand-new window
+        // on an *empty* directory, which is the single moment the program has
+        // no rows, nothing selected, no menu open, no transfer running and a
+        // toolbar with nothing to grey. Everything added to this app that day
+        // -- the toolbar, the context menu, the real path bar, the transfer
+        // list, the progress track, the disabled reasons -- was outside its
+        // reach, and it reported success over all of it.
+        //
+        // The same defect, found the same week, in `check-scratch-config.py`
+        // (a gate that enumerated its subjects by how they spelled a call) and
+        // in `apps/benchmark`'s own version of this test (which rendered one
+        // tab of six, resting, idle). A sweep over part of a program is a sweep
+        // over part of a program, and its green says nothing about the rest.
         for light in [false, true] {
-            let scratch = temp_dir("palette");
-            let mut app = ExplorerState::new(&scratch.path("root"));
-            app.palette = Palette::for_mode(light);
-            let tree = app.render();
-            assert!(
-                tree.commands.len() > 20,
-                "the sweep examined {} commands, which is not a render",
-                tree.commands.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                &[],
-                &format!("explorer (light={light})"),
-            );
+            for (name, arrange) in PALETTE_STATES {
+                let scratch = temp_dir("palette");
+                let root = scratch.dir().to_path_buf();
+                dir_with_files(&root, 5);
+                let mut app = state_at(&root);
+                app.palette = Palette::for_mode(light);
+                // Once before arranging: the drop zone learns where the rows
+                // are by being drawn, so a state that right-clicks a row has
+                // nothing to hit until a frame has been produced.
+                let _ = app.render();
+                arrange(&mut app);
+
+                let tree = app.render();
+                assert!(
+                    tree.commands.len() > 20,
+                    "{name}: the sweep examined {} commands, which is not a render",
+                    tree.commands.len()
+                );
+                appearance::palette_check::assert_drawn_from(
+                    &app.palette,
+                    &tree.commands,
+                    &[],
+                    &format!("explorer, {name} (light={light})"),
+                );
+            }
         }
+    }
+
+    /// The states are not all the same picture.
+    ///
+    /// Without this, a state whose arranger quietly stopped working -- a
+    /// selection that selects nothing, a menu that does not open -- would go on
+    /// being swept as a duplicate of the plain listing, and the sweep would
+    /// keep reporting nine states while looking at one.
+    #[test]
+    fn each_palette_state_draws_something_the_others_do_not() {
+        let mut seen: Vec<(&str, usize)> = Vec::new();
+        for (name, arrange) in PALETTE_STATES {
+            let scratch = temp_dir("palette_distinct");
+            let root = scratch.dir().to_path_buf();
+            dir_with_files(&root, 5);
+            let mut app = state_at(&root);
+            let _ = app.render();
+            arrange(&mut app);
+            seen.push((name, app.render().commands.len()));
+        }
+        let plain = seen.first().map(|(_, n)| *n).unwrap_or_default();
+        let differing = seen.iter().filter(|(_, n)| *n != plain).count();
+        assert!(
+            differing >= 5,
+            "only {differing} of {} states drew a different number of commands \
+             from the plain listing: {seen:?}",
+            seen.len().saturating_sub(1)
+        );
     }
 
     /// A private scratch directory for one test, removed when the returned

@@ -144591,10 +144591,20 @@ So GNU folds ASCII case and not Unicode case, which is what a byte-wise
 conversion — it is what GNU actually does**, and our `to_lowercase()` is a
 present-day divergence that the conversion removes. Nothing blocks the fix.
 
-`is_whitespace()` in the same function needs the same treatment
-(`is_ascii_whitespace`) and almost certainly has the same answer, but it has
-not been measured and should be before it is changed — U+00A0 is the case to
-put in front of `-w`.
+`is_whitespace()` in the same function got the same treatment, with two
+controls so the probe is known to be sensitive in both directions:
+
+| input pair | GNU `diff -w` says |
+|---|---|
+| `a<U+00A0>b` vs `ab` | **DIFFERENT** — U+00A0 is not whitespace |
+| `a b` vs `ab` (control) | SAME — folded |
+| `a<TAB>b` vs `ab` (control) | SAME — folded |
+
+`is_ascii_whitespace` is therefore exactly GNU too. **Both of the conversion's
+semantic questions came back the same way**: the byte version is not a
+concession, it is closer to the reference than what is there now, and `-i` and
+`-w` each lose a divergence. Nothing about the `diff` fix is blocked on a
+judgement call.
 
 ## TD-B-TWENTY-NINE-OF-THE-SEVENTY-TWO-BINS-ON-THE-IMAGE-DECODE-LOSSILY (lane B, 2026-09-14)
 

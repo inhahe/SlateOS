@@ -705,6 +705,33 @@ assigned. Pick the top unclaimed item in your own lane.
 
 Roadmap:
 
+**Lane A backlog status, 2026-09-14: down to operator-gated items.** Measured
+two ways rather than asserted. Counting unchecked boxes inside the `### Lane A`
+sections gives **2**, and both are the bare-metal USB steps below -- one is
+explicitly "waiting on the operator being at the machine" and the other depends
+on it. Searching the whole roadmap for unchecked items in lane A's owned domains
+(scheduler, syscall, capabilities, IOMMU, ELF loader, page allocator, futex,
+io_uring) returns five, and **all five are false positives** matching the English
+word "scheduler" in userspace CLI descriptions (`cron-cli`, `zuul-scheduler`,
+`rundeck`, `avahi`, `eventbridge`) -- lane B/C items, not kernel work.
+
+What lane A actually has left:
+
+| work | state |
+|---|---|
+| head-of-line witness dispatch fix | ready; needs `kernel/src`, staged |
+| `/sys/devices` producer (A->C ask 1, option c) | ready; structure staged, lane C has agreed the layout |
+| A-Q10 half 2 (defer the read-back) | **blocked on A-Q14** — operator |
+| `scripts/` ownership | **blocked on A-Q11** — operator |
+| whether pushing should be gated | **blocked on A-Q13** — operator |
+| bare-metal USB boot, then §263's iGPU half | **blocked on the operator being physically at the machine** |
+
+So once the two staged items land, lane A is genuinely out of unblocked roadmap
+work, and the four open questions are what unblock it. Recorded here rather than
+filed as a new question because it is a status fact, not a decision -- and
+because a lane quietly running out of work while reporting progress is the thing
+worth making visible.
+
 - `[A]` **Boot SlateOS on bare metal from a USB stick** — new 2026-08-21, the
   prerequisite half of `design-decisions.md` §263. There was no roadmap item
   for this before; §263's measured finding that "no roadmap item exists for it"

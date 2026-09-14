@@ -131717,7 +131717,7 @@ the twenty-nine pages to a real builder and sends the rest to
 
 | placeholder page | finished panel | lines |
 |---|---|---|
-| Notifications | `desktop::notification_settings` | 2 525 |
+| ~~Notifications~~ | **done 2026-09-14** — `gui/notifsettings` + a real `build_notifications_page`; `desktop::notification_settings` is now a dead copy to delete | — |
 | Power | `desktop::power_settings` | 1 695 |
 | WiFi, Ethernet, VPN | `desktop::network_settings` | 4 107 |
 | Default apps | `desktop::default_apps` | 2 325 |

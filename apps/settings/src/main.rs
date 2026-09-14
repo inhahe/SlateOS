@@ -640,6 +640,12 @@ pub struct SettingsState {
     // today, and writing back only that field would erase whatever the
     // desktop's own mouse panel had set.
     pub input: InputFile,
+    /// The user's per-program notification rules, and the file they came from.
+    ///
+    /// Held as the whole file rather than the settings alone for the reason
+    /// `NotifFile` gives: a save splices into the document that was read, so
+    /// the user's comments and any key a newer desktop wrote survive.
+    pub notif: notifsettings::NotifFile,
 
     /// Set when `input.yaml` was just rewritten; drained by the event loop.
     ///
@@ -822,6 +828,8 @@ impl DropdownLayout {
 /// Identifies which dropdown is currently open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropdownId {
+    /// How far the `n`-th program's notifications get while focusing.
+    NotifImportance(usize),
     Resolution,
     RefreshRate,
     Scale,
@@ -918,6 +926,15 @@ impl SettingsState {
         self.input = InputFile::load();
     }
 
+    /// Read the user's saved notification rules.
+    ///
+    /// Split from [`new`](Self::new) for the same reason as the two above: a
+    /// constructor that read `$HOME` would make every test's result depend on
+    /// the machine it ran on.
+    pub fn load_notifications(&mut self) {
+        self.notif = notifsettings::NotifFile::load();
+    }
+
     /// The palette this application draws itself with.
     ///
     /// Bound as `pal` at every use site, not `p` as the shell names it. This
@@ -964,6 +981,23 @@ impl SettingsState {
     /// speed apply to the windows already open rather than at the next login.
     pub fn take_input_change(&mut self) -> bool {
         core::mem::take(&mut self.input_dirty)
+    }
+
+    /// Write the notification rules back to `notifications.yaml`.
+    ///
+    /// A failed write is reported and otherwise dropped, as the other two
+    /// savers do: the alternative is a settings application that refuses to
+    /// close because a disk is full.
+    ///
+    /// **There is no reload verb for this file yet**, so the desktop picks the
+    /// change up at the next login rather than immediately. That is a missing
+    /// `SettingsGroup` and control verb, not a missing write, and the shell
+    /// end is already built -- `DesktopShell::poll_notification_rules` exists
+    /// and answers correctly; nothing tells it to run.
+    fn save_notifications(&mut self) {
+        if let Err(err) = self.notif.save() {
+            eprintln!("settings: could not save notifications.yaml: {err}");
+        }
     }
 
     /// Create a new settings state with sensible defaults.
@@ -1047,6 +1081,7 @@ impl SettingsState {
             // Defaults rather than a read of `input.yaml`, on the same terms as
             // `appearance` below; `load_input()` does the I/O, from `main`.
             input: InputFile::new(),
+            notif: notifsettings::NotifFile::new(),
 
             // Personalization defaults, not a read of the configuration
             // file: a constructor that touched $HOME would make every test's
@@ -1941,6 +1976,10 @@ enum ToggleId {
     MicrophoneEnabled,
     /// The per-app switch at `index` of `kind`'s list.
     AppPermission(PermissionKind, usize),
+    /// Whether the `n`-th program in the notification list makes a sound.
+    NotifSound(usize),
+    /// Whether it shows a banner rather than only appearing in the list.
+    NotifBanner(usize),
     MonoAudio,
     VisualAlerts,
     NarratorEnabled,
@@ -2912,6 +2951,7 @@ impl SettingsState {
     fn build_page<S: PageSink>(&self, sink: &mut S) {
         match self.current_page {
             SettingsPage::Display => self.build_display_page(sink),
+            SettingsPage::Notifications => self.build_notifications_page(sink),
             SettingsPage::Sound => self.build_sound_page(sink),
             SettingsPage::Mouse => self.build_mouse_page(sink),
             SettingsPage::Themes => self.build_themes_page(sink),
@@ -4228,6 +4268,45 @@ impl SettingsState {
 
     // --- Placeholder for unimplemented pages ---
 
+    /// Which programs may interrupt the user, and how.
+    ///
+    /// One row per program that has a rule. **There is deliberately no way to
+    /// add one here**: the list of programs that send notifications is
+    /// something only the desktop sees, and a settings page that asked the
+    /// user to type a program's name would be asking them to guess a string
+    /// that has to match exactly. The shell records a program the first time
+    /// it notifies; this page edits what is there.
+    ///
+    /// The empty state says that rather than showing an empty box, because a
+    /// page with nothing on it and no explanation reads as broken.
+    fn build_notifications_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Programs");
+        if self.notif.settings.apps.is_empty() {
+            s.note(
+                "Programs appear here once they have sent you a notification. \
+                 There is nothing to adjust yet.",
+                28.0,
+            );
+            return;
+        }
+        s.note(
+            "While you are focusing, only programs set to Priority or above \
+             can interrupt you.",
+            28.0,
+        );
+        for (index, rule) in self.notif.settings.apps.iter().enumerate() {
+            s.section(&rule.app_name);
+            s.dropdown_row(
+                "Interrupts",
+                DropdownId::NotifImportance(index),
+                rule.importance.label(),
+            );
+            s.toggle_row("Sound", ToggleId::NotifSound(index), rule.sound);
+            s.toggle_row("Banner", ToggleId::NotifBanner(index), rule.banner);
+            s.gap();
+        }
+    }
+
     fn build_placeholder_page<S: PageSink>(&self, s: &mut S) {
         let pal = &self.palette();
         let page_name = self.current_page.label();
@@ -4311,6 +4390,24 @@ impl SettingsState {
                         .position(|s| *s == self.scale)
                         .unwrap_or(0),
                 )
+            }
+            DropdownId::NotifImportance(index) => {
+                let items: Vec<String> = notifsettings::Importance::ALL
+                    .iter()
+                    .map(|i| i.label().to_string())
+                    .collect();
+                let at = self
+                    .notif
+                    .settings
+                    .apps
+                    .get(index)
+                    .and_then(|rule| {
+                        notifsettings::Importance::ALL
+                            .iter()
+                            .position(|i| *i == rule.importance)
+                    })
+                    .unwrap_or(0);
+                (items, at)
             }
             DropdownId::OutputDevice => {
                 let items: Vec<String> =
@@ -4985,6 +5082,8 @@ impl SettingsState {
                 };
                 &mut list.get_mut(index)?.allowed
             }
+            ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
+            ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
             ToggleId::MonoAudio => &mut self.mono_audio,
             ToggleId::VisualAlerts => &mut self.visual_alerts,
             ToggleId::NarratorEnabled => &mut self.narrator_enabled,
@@ -5070,6 +5169,14 @@ impl SettingsState {
             DropdownId::Scale => {
                 if let Some(scale) = ScalePercent::ALL.get(index) {
                     self.scale = *scale;
+                }
+            }
+            DropdownId::NotifImportance(app) => {
+                if let Some(chosen) = notifsettings::Importance::ALL.get(index)
+                    && let Some(rule) = self.notif.settings.apps.get_mut(app)
+                {
+                    rule.importance = *chosen;
+                    self.save_notifications();
                 }
             }
             DropdownId::OutputDevice => {
@@ -5269,6 +5376,12 @@ fn main() -> ExitCode {
     // And the Mouse page on the double-click window actually in force, which is
     // the same file the compositor times two clicks against.
     state.load_input();
+    // And the Notifications page on the rules the desktop is already obeying.
+    // Without this the page would open empty on a machine that has rules, and
+    // the first edit would write a file with only that one rule in it --
+    // deleting the rest, because a save splices the model into the document it
+    // was loaded from and an unloaded model has nothing in it.
+    state.load_notifications();
 
     // `launch` rather than `launch_with`: Settings takes no file and no page
     // name, so it wants exactly the shared command line and nothing more —
@@ -5311,6 +5424,62 @@ mod tests {
     // that need it are the ones that write `input.yaml`.
     use inputsettings::config::testing::{scratch_path, with_scratch_config};
     use inputsettings::{InputSettings, MouseConfig};
+
+    /// The Notifications page is a page, not a roadworks sign.
+    ///
+    /// Eleven of the twenty-nine pages fall through `build_page`'s `_ =>` arm
+    /// to `build_placeholder_page`, which draws "This page is under
+    /// construction". Asserted by the text on screen rather than by the
+    /// dispatch arm, because an arm that rendered nothing would satisfy the
+    /// arm and not the user.
+    #[test]
+    fn the_notifications_page_is_no_longer_under_construction() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        let text = format!("{:?}", app.render_tree());
+        assert!(
+            !text.contains("under construction"),
+            "the Notifications page still draws the placeholder"
+        );
+    }
+
+    /// With rules present, each program is listed with what it may do.
+    #[test]
+    fn each_program_with_a_rule_gets_a_row() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        app.notif.settings.set_rule(
+            notifsettings::AppRule::new("Chat")
+                .with_importance(notifsettings::Importance::Critical),
+        );
+        app.notif
+            .settings
+            .set_rule(notifsettings::AppRule::new("Updates"));
+
+        let text = format!("{:?}", app.render_tree());
+
+        assert!(text.contains("Chat"), "the first program is not listed");
+        assert!(text.contains("Updates"), "the second program is not listed");
+        assert!(
+            text.contains("Critical"),
+            "the importance the rule carries is not shown"
+        );
+    }
+
+    /// With no rules, the page explains itself rather than being blank.
+    #[test]
+    fn an_empty_notifications_page_says_why_it_is_empty() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        assert!(app.notif.settings.apps.is_empty());
+
+        let text = format!("{:?}", app.render_tree());
+
+        assert!(
+            text.contains("once they have sent you"),
+            "an empty page with no explanation reads as broken"
+        );
+    }
 
     // ---- Measured widths ----
 

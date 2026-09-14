@@ -153,6 +153,25 @@ probably what the other two want as well.
 
 Lane C has no standing to choose between those; `userspace/**` is yours.
 
+## A fourth, 2026-09-14, and the new fact is the frequency
+
+`a_poll_before_the_grace_does_not_lose_the_exit_forever` again -- the same test
+as the third report, same shape, red under `cargo test --workspace` and
+`1 passed` alone with 1 499 filtered out. Nothing about the mechanism has
+changed and the analysis above stands, so this is not a new diagnosis.
+
+**What is new is the rate, and that it now has a cost outside your lane.** Four
+occurrences in two days means lane C's merge procedure has acquired a step:
+every full workspace run is a coin toss, and a red one costs a re-run of about
+six minutes before anything can be pushed. Today that has happened twice. It is
+not blocking -- the re-runs pass -- but it is the sort of tax that quietly
+teaches an agent to stop believing a red suite, which is worth more to avoid
+than the six minutes.
+
+No new request attached; the suggestion in the section above (an injected clock
+rather than a real one, or distinguishing "the window was missed" from "the bug
+is back") is still the whole of what lane C would ask for.
+
 ## What lane C is doing meanwhile
 
 Merging `lane-c` to `main` regardless, having checked that this is not ours:

@@ -252,6 +252,8 @@ ALLOWED: dict[tuple[str, bytes], str] = {
     ("journal", b'"path_hex":"'): "Key pasted as push_str(name) + push_str('_hex\":\"') -- no format string.",
     ("statusbar", b"3.0 MiB"): "A byte count scaled to MiB and formatted to one decimal.",
     ("statusbar", b"15 ms"): "The test's own `search_duration_ms`, formatted.",
+    ("fat", b"\\351"): "escape_octal renders an undecodable 8.3 byte at runtime; A-Q12 / 935.",
+    ("fat", b"\\357"): "escape_octal renders an undecodable 8.3 byte at runtime; A-Q12 / 935.",
     ("klog", b'\\"quotes\\"'): "Produced by the JSON escaper a byte at a time, not by a literal.",
     ("klog", b"\\\\backslash"): "Produced by the JSON escaper a byte at a time, not by a literal.",
     ("logpersist", b'"sev":"notice"'): "Key and value written separately; `notice` comes from the level table.",

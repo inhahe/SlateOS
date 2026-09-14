@@ -423,6 +423,18 @@ pub fn strftime(fmt: &[u8], tm: &Tm) -> Vec<u8> {
                 fs.num_width(2),
                 fs.num_pad(b'0'),
             ),
+            // Quarter of the year, 1-4. A GNU extension, not in C89's set.
+            //
+            // Default width 1 and ZERO padding when widened, which is not
+            // obvious and was measured: `%3q` gives `001`, not `  1`. `%-q`
+            // and `%_q` both give `1`, since a width of 1 leaves nothing to
+            // pad either way.
+            b'q' => pad_with(
+                &mut piece,
+                i64::from(tm.month.saturating_sub(1) / 3).saturating_add(1),
+                fs.num_width(1),
+                fs.num_pad(b'0'),
+            ),
             b'M' => pad_with(
                 &mut piece,
                 i64::from(tm.minute),
@@ -900,7 +912,10 @@ mod tests {
     #[test]
     fn strftime_still_passes_an_unknown_directive_through() {
         let tm = utc_tm(1_000_000_000);
-        assert_eq!(fmt("%q", &tm), "%q");
+        // `%Q`, not `%q`: the latter became REAL on 2026-09-14 (quarter of
+        // the year) and these two tests are what noticed. `%Q` is
+        // measured-unknown -- GNU prints it literally.
+        assert_eq!(fmt("%Q", &tm), "%Q");
         assert_eq!(fmt("%%", &tm), "%");
         assert_eq!(fmt("100%", &tm), "100%");
         assert_eq!(
@@ -962,11 +977,48 @@ mod tests {
     }
 
     #[test]
+    fn quarter_of_the_year() {
+        // Measured across all twelve months against GNU date 9.4 rather than
+        // derived, because the boundaries are the whole content of the
+        // specifier and an off-by-one would still look plausible.
+        let mut tm = utc_tm(0);
+        for (month, want) in [
+            (1, "1"),
+            (2, "1"),
+            (3, "1"),
+            (4, "2"),
+            (5, "2"),
+            (6, "2"),
+            (7, "3"),
+            (8, "3"),
+            (9, "3"),
+            (10, "4"),
+            (11, "4"),
+            (12, "4"),
+        ] {
+            tm.month = month;
+            assert_eq!(fmt("%q", &tm), want, "month {month}");
+        }
+
+        // Width and padding: the default is width 1, and widening pads with
+        // ZEROES, not spaces. `%3q` -> `001`. Both measured; the zero default
+        // is the part that is not obvious, since a one-digit field has no
+        // visible default padding to infer it from.
+        tm.month = 11;
+        assert_eq!(fmt("%3q", &tm), "004");
+        assert_eq!(fmt("%-q", &tm), "4");
+        assert_eq!(fmt("%_q", &tm), "4");
+    }
+
+    #[test]
     fn an_unknown_specifier_survives_whole() {
         // glibc emits it literally. A renderer that dropped it would silently
         // delete two characters of a format the user typed.
         let tm = utc_tm(0);
-        assert_eq!(fmt("%q", &tm), "%q");
+        // `%Q`, not `%q`: the latter became REAL on 2026-09-14 (quarter of
+        // the year) and these two tests are what noticed. `%Q` is
+        // measured-unknown -- GNU prints it literally.
+        assert_eq!(fmt("%Q", &tm), "%Q");
         assert_eq!(fmt("a%", &tm), "a%");
         assert_eq!(fmt("%%", &tm), "%");
     }

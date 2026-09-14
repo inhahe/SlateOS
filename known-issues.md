@@ -143711,6 +143711,31 @@ the broken behaviour: no program benefits from losing its arguments. That is
 what made them safe to fix on sight, and it is the property to check before
 fixing each of the nine.
 
+### Why there is no gate for this, measured
+
+The obvious follow-up is a standing check: **a flag constant that production
+code never reads**. That is the mechanical signature behind every real instance
+here — `aio_resfd`, `aio_rw_flags`, `MSG_COPY`, `SHM_RDONLY`, `SEM_UNDO` were
+all defined, referenced in tests, and read nowhere else. It reads code rather
+than prose, so it would not have made the mistakes the first pass made.
+
+It was measured before being built, and it does not work:
+
+    public integer consts in production code: 50008
+    defined but never read in production:     46736
+
+**93%.** The reason is structural and not fixable by tuning: `posix` is a
+**libc**, and a libc's job is to export constants for *callers* to use. Not
+reading `KEY_LEFTSHIFT`, `TCSANOW` or `EADDRINUSE` is the correct state for
+almost every constant in the tree. The signature that identified five real bugs
+by hand is, mechanically, the normal condition of the codebase.
+
+What actually distinguished the real ones is narrower: the constant names a
+flag **passed into a function we implement**, and that function does not branch
+on it. Detecting that needs to know which constants are inputs to which
+functions, which is not recoverable from the text. Noted so the next reader
+weighs the same idea against the same number rather than building it.
+
 ### The general rule this session produced
 
 A `## Limitations` bullet is a defect report whenever it describes something the

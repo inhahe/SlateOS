@@ -147068,5 +147068,22 @@ whole picture. Do **not** escalate `main.rs:9457` itself: that would turn every
 environmental daemon-startup failure into a red boot, which is the lenience the
 neighbours were right about.
 
+**Checked whether this is systemic, and it is not -- population of about three.**
+Searching `kernel/src` for `WARNING:` lines that report a failure without the
+`self-test failed` marker returns two, one of which (`Buffer cache flush
+failed`) is a legitimate environmental warning. So no gate is warranted: a
+checker built for a population of one is a maintenance cost with nothing to
+catch.
+
+Two limits on that measurement, stated because the number is the whole basis
+for not building a gate. The grep is single-line and **missed this very bug**,
+whose `serial_println!` spans four lines -- so the true count is about three,
+not two. And the first search tried, `if let Err(..) = ..self_test`, could
+never have found it either: the swallowing frame is `run_persistent_netstack`,
+whose name contains no `self_test`. The defect is a dataflow property -- an
+`Err` crossing into a function whose own failure is worded differently -- and
+grep matches text. Anyone revisiting this should not read "two" as a measured
+population; it is a lower bound from a search that demonstrably misses the
+shape it is looking for.
 **Until then, `D-NETSOCK-SYNC` still has ONE witness.** The entry must not be
 updated to say otherwise on the strength of this run passing.

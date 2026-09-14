@@ -356,6 +356,59 @@ def analyse(tree: gittree.Tree, rel: str) -> list[tuple[str, int, str]]:
     return analyse_text(raw)
 
 
+def mask_test_regions(lines: list[str]) -> list[str]:
+    """Blank out `#[cfg(test)]` and `#[test]` items, keeping the line count.
+
+    A `to_str().unwrap()` in a test is not this gate's business. CLAUDE.md says
+    so directly -- the defensive lints are "allow in `#[cfg(test)]` modules
+    where panicking on bad data is expected" -- and the five entries this
+    removed from the baseline were all of that shape: assertions over hardcoded
+    ASCII paths, and scratch paths the test itself created.
+
+    Leaving them in was worse than noise. A baseline that mixes shipped defects
+    with test-only ones trains its reader to skim, and this one is a ratchet
+    that somebody has to read every time it moves.
+
+    Line COUNT is preserved rather than the lines being dropped, because every
+    finding is reported by line number and a compacted list would misreport
+    every one after the first test module.
+
+    The `;` case is the one that bites: `#[cfg(test)] mod tests;` has no brace,
+    and a brace-counter that waited for one would blank the rest of the file.
+    """
+    out = list(lines)
+    n = len(lines)
+    i = 0
+    while i < n:
+        if "#[cfg(test)]" in lines[i] or "#[test]" in lines[i]:
+            j = i
+            depth = 0
+            started = False
+            done = False
+            while j < n and not done:
+                for ch in lines[j]:
+                    if ch == "{":
+                        depth += 1
+                        started = True
+                    elif ch == "}":
+                        depth -= 1
+                        if started and depth <= 0:
+                            done = True
+                            break
+                    elif ch == ";" and not started:
+                        # `#[cfg(test)] mod tests;` -- an item with no body.
+                        done = True
+                        break
+                if not done:
+                    j += 1
+            for k in range(i, min(j + 1, n)):
+                out[k] = ""
+            i = j + 1
+            continue
+        i += 1
+    return out
+
+
 def analyse_text(raw: str) -> list[tuple[str, int, str]]:
     """Return `(rule, line number, the line)` for every finding in one file.
 
@@ -376,7 +429,9 @@ def analyse_text(raw: str) -> list[tuple[str, int, str]]:
     """
     src = strip_comments_and_strings(raw)
     real = raw.splitlines()
-    stripped = src.splitlines()
+    # Test code is masked AFTER lexing, so the brace counter sees structural
+    # braces only -- a `{` inside a string literal would otherwise unbalance it.
+    stripped = mask_test_regions(src.splitlines())
 
     out: list[tuple[str, int, str]] = []
     for rule, pattern, _fix in RULES:
@@ -524,6 +579,35 @@ def selftest() -> int:
     def expect(label: str, got: object, want: object) -> None:
         if got != want:
             failures.append(f"{current}: {label}: want {want!r}, got {got!r}")
+
+    # 0. Test code is masked -- and the half that matters is that PRODUCTION
+    #    code in the same file is still reported. A mask that swallowed the
+    #    whole file would satisfy the "not reported" half on its own, which is
+    #    why every case here is a pair.
+    rule("test-masking")
+    expect(
+        "cfg(test) module/silent",
+        classify("#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { let a: Vec<String> = env::args().collect(); }\n}\n"),
+        set(),
+    )
+    expect(
+        "bare #[test] fn/silent",
+        classify("#[test]\nfn t() { let a: Vec<String> = env::args().collect(); }\n"),
+        set(),
+    )
+    expect(
+        "production BESIDE a test module/reported",
+        classify("#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { let x = 1; }\n}\nfn main() { let a: Vec<String> = env::args().collect(); }\n"),
+        {"argv-as-string"},
+    )
+    expect(
+        "production AFTER a bodyless test mod/reported",
+        # `#[cfg(test)] mod tests;` has no brace. A brace counter that waited
+        # for one would blank the rest of the file and report nothing ever
+        # again -- silently, which is the direction that matters.
+        classify("#[cfg(test)]\nmod tests;\nfn main() { let a: Vec<String> = env::args().collect(); }\n"),
+        {"argv-as-string"},
+    )
 
     # 1. The base case, in the exact shape the 50 bins are written in.
     rule("base")

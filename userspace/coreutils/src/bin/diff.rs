@@ -51,6 +51,8 @@
 //!   -i, --ignore-case           Case-insensitive comparison
 //!   -b, --ignore-space-change   Ignore changes in amount of whitespace
 //!   -w, --ignore-all-space      Ignore all whitespace
+//!   -Z, --ignore-trailing-space Ignore whitespace at line end
+//!   -a, --text                  Treat all files as text
 //!   -B, --ignore-blank-lines    Ignore blank line insertions/deletions
 //!       --color                 Force color output
 //!       --no-color              Force no color
@@ -69,7 +71,7 @@
 use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -123,6 +125,23 @@ struct Config {
     color: bool,
     recursive: bool,
     new_file: bool,
+    /// `-Z`: whitespace at the END of a line is not a difference.
+    ///
+    /// Narrower than `-b`, which collapses runs anywhere, and much narrower
+    /// than `-w`. A file that differs only in trailing spaces is the common
+    /// case an editor creates, and GNU exits 0 on it under `-Z`.
+    ignore_trailing_space: bool,
+    /// `-a`: compare even a file holding NUL bytes as text.
+    text_mode: bool,
+    /// The option words exactly as the user typed them, for the `diff -r
+    /// da/x.txt db/x.txt` line GNU prints ahead of each file in a directory
+    /// walk.
+    ///
+    /// Kept verbatim rather than reconstructed from the parsed flags,
+    /// because GNU echoes the spelling: measured, `-ru` comes back as `-ru`
+    /// and `-r -u` as `-r -u`. Rebuilding the line from `Config` would
+    /// print one canonical form for both.
+    option_words: Vec<String>,
 }
 
 /// Result of argument parsing.
@@ -218,7 +237,13 @@ fn parse_args(args: &[String]) -> ParseResult {
     let mut color: Option<bool> = None;
     let mut recursive = false;
     let mut new_file = false;
+    let mut ignore_trailing_space = false;
+    let mut text_mode = false;
     let mut positional: Vec<String> = Vec::new();
+    // Tracked by INDEX, not by value: an operand can be spelled the same as
+    // an option's value -- `diff -U 5 5 other` names a file called `5` -- and
+    // subtracting one list from the other by content would drop the wrong word.
+    let mut positional_at: Vec<usize> = Vec::new();
 
     let mut end_of_opts = false;
     let mut i = 1;
@@ -226,8 +251,13 @@ fn parse_args(args: &[String]) -> ParseResult {
     while i < args.len() {
         let arg = &args[i];
 
-        if end_of_opts || !arg.starts_with('-') {
+        // A bare `-` is stdin, and so an OPERAND. It was falling into the
+        // option branch on `starts_with('-')`, never reaching `positional`,
+        // and `diff base.txt -` answered `missing operand after '-'` --
+        // which is the most ordinary way anyone writes a diff in a pipeline.
+        if end_of_opts || !arg.starts_with('-') || arg == "-" {
             positional.push(arg.clone());
+            positional_at.push(i);
             i += 1;
             continue;
         }
@@ -293,6 +323,10 @@ fn parse_args(args: &[String]) -> ParseResult {
                 ignore_case = true;
             } else if arg == "--ignore-space-change" {
                 ignore_space_change = true;
+            } else if arg == "--ignore-trailing-space" {
+                ignore_trailing_space = true;
+            } else if arg == "--text" {
+                text_mode = true;
             } else if arg == "--ignore-all-space" {
                 ignore_all_space = true;
             } else if arg == "--ignore-blank-lines" {
@@ -421,6 +455,8 @@ fn parse_args(args: &[String]) -> ParseResult {
                 'i' => ignore_case = true,
                 'b' => ignore_space_change = true,
                 'w' => ignore_all_space = true,
+                'Z' => ignore_trailing_space = true,
+                'a' => text_mode = true,
                 'B' => ignore_blank_lines = true,
                 'r' => recursive = true,
                 'N' => new_file = true,
@@ -463,6 +499,16 @@ fn parse_args(args: &[String]) -> ParseResult {
     let use_color = color.unwrap_or(false);
     let ctx = context_lines.unwrap_or(3);
 
+    // Everything that was not an operand, in the order it was typed. `args[0]`
+    // is the program name and is not one of them.
+    let option_words: Vec<String> = args
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(at, _)| !positional_at.contains(at))
+        .map(|(_, w)| w.clone())
+        .collect();
+
     ParseResult::Run(Config {
         path1: positional[0].clone(),
         path2: positional[1].clone(),
@@ -478,6 +524,9 @@ fn parse_args(args: &[String]) -> ParseResult {
         color: use_color,
         recursive,
         new_file,
+        ignore_trailing_space,
+        text_mode,
+        option_words,
     })
 }
 
@@ -524,6 +573,16 @@ fn normalize_line(line: &[u8], config: &Config) -> Vec<u8> {
             result.pop();
         }
         s = result;
+    }
+
+    // `-Z` trims only the END of the line, and runs AFTER the collapsing
+    // options above so that `-b -Z` sees what `-b` left. `-w` has already
+    // removed every space, so `-Z` finds nothing to do there, which is
+    // correct rather than a special case.
+    if config.ignore_trailing_space {
+        while s.last().is_some_and(u8::is_ascii_whitespace) {
+            s.pop();
+        }
     }
 
     if config.ignore_case {
@@ -581,7 +640,18 @@ enum FileContent {
 
 /// Read a file into lines. Returns `Err` on I/O errors, `Ok(Binary)` if the
 /// file contains NUL bytes, or `Ok(Text(lines))` for normal text files.
-fn read_file(path: &Path) -> Result<FileContent, String> {
+fn read_file(path: &Path, text_mode: bool) -> Result<FileContent, String> {
+    // `-` is stdin, which has no metadata to size-check and no mtime. It also
+    // cannot be read twice, so `diff - -` reads it once and compares the result
+    // with an empty second side -- the same thing GNU does with a pipe.
+    if is_stdin(path) {
+        let mut data = Vec::new();
+        io::stdin()
+            .read_to_end(&mut data)
+            .map_err(|e| format!("-: {e}"))?;
+        return Ok(classify(data, text_mode));
+    }
+
     let metadata = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
 
     if metadata.len() > MAX_FILE_SIZE {
@@ -594,11 +664,34 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
     }
 
     let data = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(classify(data, text_mode))
+}
 
-    // Check for binary content in the first BINARY_DETECT_LEN bytes.
+/// Whether this operand names standard input.
+///
+/// A bare `-` only; `./-` is a file called `-`, which is what GNU does and is
+/// the reason this is a function rather than a `== "-"` at each site.
+fn is_stdin(path: &Path) -> bool {
+    path.as_os_str() == "-"
+}
+
+/// A file's bytes, as either binary or a list of lines.
+///
+/// Shared by the path that reads a file and the one that reads stdin, so that
+/// `diff base.txt -` classifies its two sides by the same rule. Before stdin
+/// was supported this was read_file's tail and there was only one caller.
+fn classify(data: Vec<u8>, text_mode: bool) -> FileContent {
+    // Binary is decided on the first BINARY_DETECT_LEN bytes -- unless `-a`
+    // says to treat everything as text, in which case the probe is SKIPPED
+    // rather than its verdict overridden later. A NUL is then just another
+    // byte in a line, which only works because lines are bytes now.
     let check_len = data.len().min(BINARY_DETECT_LEN);
-    if data[..check_len].contains(&0u8) {
-        return Ok(FileContent::Binary);
+    if !text_mode
+        && data
+            .get(..check_len)
+            .is_some_and(|head| head.contains(&0u8))
+    {
+        return FileContent::Binary;
     }
 
     // NO DECODE. The comment that used to stand here said the lossy
@@ -620,7 +713,7 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
         FinalNewline::Missing
     };
 
-    Ok(FileContent::Text(lines, final_newline))
+    FileContent::Text(lines, final_newline)
 }
 
 // ============================================================================
@@ -1668,14 +1761,19 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
         let e2 = p2.exists();
 
         if !e1 && !config.new_file {
-            eprintln!("Only in {}: {name}", path2.display());
+            // STDOUT. Measured: `diff -r da db 2>/dev/null` still shows both
+            // `Only in` lines and `2>&1 >/dev/null` shows neither, so GNU
+            // puts them on stdout. They are a RESULT -- part of the answer to
+            // "how do these trees differ" -- not a diagnostic, and on stderr
+            // they were lost by every caller that redirected the diff.
+            println!("Only in {}: {name}", path2.display());
             if worst_exit < 1 {
                 worst_exit = 1;
             }
             continue;
         }
         if !e2 && !config.new_file {
-            eprintln!("Only in {}: {name}", path1.display());
+            println!("Only in {}: {name}", path1.display());
             if worst_exit < 1 {
                 worst_exit = 1;
             }
@@ -1686,9 +1784,20 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
         let is_dir2 = e2 && p2.is_dir();
 
         if is_dir1 && is_dir2 {
-            let code = diff_dirs(&p1, &p2, config);
-            if code > worst_exit {
-                worst_exit = code;
+            if config.recursive {
+                let code = diff_dirs(&p1, &p2, config);
+                if code > worst_exit {
+                    worst_exit = code;
+                }
+            } else {
+                // Measured: this is informational and goes to STDOUT with the
+                // rest of the answer, in the same sorted pass as the file
+                // comparisons rather than collected at the end.
+                println!(
+                    "Common subdirectories: {} and {}",
+                    p1.display(),
+                    p2.display()
+                );
             }
         } else if is_dir1 || is_dir2 {
             eprintln!(
@@ -1700,7 +1809,7 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
                 worst_exit = 1;
             }
         } else {
-            let code = diff_files(&p1.to_string_lossy(), &p2.to_string_lossy(), config);
+            let code = diff_files(&p1.to_string_lossy(), &p2.to_string_lossy(), config, true);
             if code > worst_exit {
                 worst_exit = code;
             }
@@ -1729,12 +1838,16 @@ fn list_dir(path: &Path) -> Result<Vec<String>, String> {
 // ============================================================================
 
 /// Compare two files and print the diff. Returns exit code (0/1/2).
-fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
+fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bool) -> i32 {
     let p1 = Path::new(path1_str);
     let p2 = Path::new(path2_str);
 
-    let e1 = p1.exists();
-    let e2 = p2.exists();
+    // `-` is stdin, which exists without being a path -- `Path::new("-")
+    // .exists()` is false, so the two guards below turned every
+    // `cmd | diff file -` into `No such file or directory` before `read_file`
+    // was ever reached.
+    let e1 = is_stdin(p1) || p1.exists();
+    let e2 = is_stdin(p2) || p2.exists();
 
     // Handle absent files with --new-file.
     if !e1 && !config.new_file {
@@ -1748,7 +1861,7 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
 
     // Read file contents (absent files treated as empty when -N is set).
     let content1 = if e1 {
-        match read_file(p1) {
+        match read_file(p1, config.text_mode) {
             Ok(c) => c,
             Err(msg) => {
                 eprintln!("diff: {msg}");
@@ -1760,7 +1873,7 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
     };
 
     let content2 = if e2 {
-        match read_file(p2) {
+        match read_file(p2, config.text_mode) {
             Ok(c) => c,
             Err(msg) => {
                 eprintln!("diff: {msg}");
@@ -1774,10 +1887,20 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
     // Handle binary files.
     match (&content1, &content2) {
         (FileContent::Binary, _) | (_, FileContent::Binary) => {
-            // For binary files, just report whether they differ — same
-            // message regardless of --brief.
-            let _ = config.brief;
-            println!("Binary files {path1_str} and {path2_str} differ");
+            // The wording DOES depend on --brief, which the comment that
+            // stood here denied. Measured:
+            //
+            //     diff  nul.txt nul2.txt   Binary files nul.txt and nul2.txt differ
+            //     diff -q nul.txt nul2.txt Files nul.txt and nul2.txt differ
+            //
+            // `-q` asks only whether the files differ, and at that level a
+            // binary file is not a special case -- so it gets the same
+            // sentence a pair of text files gets.
+            if config.brief {
+                println!("Files {path1_str} and {path2_str} differ");
+            } else {
+                println!("Binary files {path1_str} and {path2_str} differ");
+            }
             return 1;
         }
         _ => {}
@@ -1814,6 +1937,26 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
     if config.brief {
         println!("Files {path1_str} and {path2_str} differ");
         return 1;
+    }
+
+    // THE `diff -r da/x.txt db/x.txt` LINE, printed here rather than by the
+    // directory walk, because the conditions for it are only known now.
+    // Measured, three ways round:
+    //
+    //   * it appears only for a file that DIFFERS -- an identical pair in the
+    //     same walk gets no line, and under `-s` its `are identical` line has
+    //     no header either, which is why this sits below the `!has_diff`
+    //     return rather than above it;
+    //   * `--brief` prints none at all, which is why it sits below that return
+    //     too;
+    //   * the options are echoed as TYPED.
+    if in_dir_walk {
+        let mut line = String::from("diff");
+        for word in &config.option_words {
+            line.push(' ');
+            line.push_str(word);
+        }
+        println!("{line} {path1_str} {path2_str}");
     }
 
     // Format the output.
@@ -1863,6 +2006,8 @@ fn print_help() {
     println!("  -i, --ignore-case           Case-insensitive comparison");
     println!("  -b, --ignore-space-change   Ignore changes in whitespace amount");
     println!("  -w, --ignore-all-space      Ignore all whitespace");
+    println!("  -Z, --ignore-trailing-space Ignore whitespace at line end");
+    println!("  -a, --text                  Treat all files as text");
     println!("  -B, --ignore-blank-lines    Ignore blank line changes");
     println!();
     println!("OUTPUT:");
@@ -1906,16 +2051,15 @@ fn main() {
             let is_dir1 = p1.is_dir();
             let is_dir2 = p2.is_dir();
 
+            // TWO DIRECTORIES ARE COMPARED WITH OR WITHOUT `-r`. This build
+            // refused without it -- `diff: da and db are directories (use -r to
+            // compare recursively)`, exit 2 -- where GNU compares the files
+            // they hold and reports `Common subdirectories:` for the ones it
+            // will not descend into. `-r` chooses whether to DESCEND, not
+            // whether to compare at all, and the refusal made the common
+            // `diff olddir newdir` fail outright.
             let exit_code = if is_dir1 && is_dir2 {
-                if config.recursive {
-                    diff_dirs(&p1, &p2, &config)
-                } else {
-                    eprintln!(
-                        "diff: {} and {} are directories (use -r to compare recursively)",
-                        config.path1, config.path2,
-                    );
-                    2
-                }
+                diff_dirs(&p1, &p2, &config)
             } else if is_dir1 || is_dir2 {
                 // One is a directory, one is a file -- diff the file against
                 // the same-named file in the directory.
@@ -1927,16 +2071,16 @@ fn main() {
                     let f_str = file.to_string_lossy();
 
                     if is_dir1 {
-                        diff_files(&t_str, &f_str, &config)
+                        diff_files(&t_str, &f_str, &config, false)
                     } else {
-                        diff_files(&f_str, &t_str, &config)
+                        diff_files(&f_str, &t_str, &config, false)
                     }
                 } else {
                     eprintln!("diff: cannot determine filename from path");
                     2
                 }
             } else {
-                diff_files(&config.path1, &config.path2, &config)
+                diff_files(&config.path1, &config.path2, &config, false)
             };
 
             process::exit(exit_code);
@@ -2076,6 +2220,40 @@ mod tests {
         // Context is two spaces either way -- `changed` does not reach it.
         assert_eq!(context_marker(Op::Equal, true), b"  ");
         assert_eq!(context_marker(Op::Equal, false), b"  ");
+    }
+
+    /// `-Z` ignores whitespace at the END of a line and nowhere else.
+    ///
+    /// Narrower than `-b`, which collapses runs anywhere. A file that differs
+    /// only in trailing spaces is what an editor leaves behind, and GNU exits
+    /// 0 on it under `-Z`.
+    #[test]
+    fn ignore_trailing_space_trims_only_the_end() {
+        let mut z = cfg();
+        z.ignore_trailing_space = true;
+        assert_eq!(normalize_line(b"a b   ", &z), b"a b");
+        assert_eq!(normalize_line(b"a b\t", &z), b"a b");
+        // The controls: leading and interior space are untouched.
+        assert_eq!(normalize_line(b"  a b", &z), b"  a b");
+        assert_eq!(normalize_line(b"a   b", &z), b"a   b");
+        // And without the flag nothing is trimmed at all.
+        assert_eq!(normalize_line(b"a b   ", &cfg()), b"a b   ");
+    }
+
+    /// `-a` makes a file holding NUL bytes compare as text.
+    #[test]
+    fn text_mode_stops_a_nul_meaning_binary() {
+        let data = b"a\0nul\n".to_vec();
+        assert!(
+            matches!(classify(data.clone(), false), FileContent::Binary),
+            "a NUL means binary without -a"
+        );
+        match classify(data, true) {
+            FileContent::Text(lines, _) => {
+                assert_eq!(lines, vec![b"a\0nul".to_vec()]);
+            }
+            FileContent::Binary => panic!("-a should have made this text"),
+        }
     }
 
     // ---------------- the missing final newline ----------------
@@ -2260,6 +2438,9 @@ mod tests {
             color: false,
             recursive: false,
             new_file: false,
+            ignore_trailing_space: false,
+            text_mode: false,
+            option_words: Vec::new(),
         }
     }
 
@@ -2271,6 +2452,59 @@ mod tests {
     }
 
     // ---------------- parse_args ----------------
+    /// A bare `-` is an OPERAND, not an option.
+    ///
+    /// It was falling into the option branch on `starts_with('-')`, so
+    /// `cmd | diff base.txt -` answered `missing operand after '-'` -- the
+    /// most ordinary way anyone writes a diff in a pipeline.
+    #[test]
+    fn a_bare_dash_is_an_operand() {
+        let c = run(&["diff", "base.txt", "-"]);
+        assert_eq!(c.path1, "base.txt");
+        assert_eq!(c.path2, "-");
+        assert!(c.option_words.is_empty(), "{:?}", c.option_words);
+        // ...on either side.
+        let c = run(&["diff", "-", "base.txt"]);
+        assert_eq!(c.path1, "-");
+        // A real option is still an option, and `--` still ends them.
+        let c = run(&["diff", "-u", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-u"]);
+    }
+
+    /// Only a BARE `-` is stdin. `./-` names a file called `-`.
+    #[test]
+    fn only_a_bare_dash_names_stdin() {
+        assert!(is_stdin(Path::new("-")));
+        assert!(!is_stdin(Path::new("./-")));
+        assert!(!is_stdin(Path::new("-x")));
+        assert!(!is_stdin(Path::new("a-")));
+        assert!(!is_stdin(Path::new("")));
+    }
+
+    /// The `diff -r a/x b/x` header echoes the options AS TYPED, and an
+    /// operand that looks like an option's value is still an operand.
+    ///
+    /// The words are collected by INDEX rather than by subtracting the operand
+    /// list from argv by content. `diff -U 5 5 other` names a file called `5`,
+    /// and a content-based subtraction would remove the wrong `5` -- leaving
+    /// the header reading `diff -U` and the file list intact, which is the
+    /// kind of wrong that looks right.
+    #[test]
+    fn the_option_words_are_kept_as_typed() {
+        let c = run(&["diff", "-r", "-u", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-r", "-u"]);
+        // Measured: GNU echoes `-ru` as `-ru`, not as `-r -u`.
+        let c = run(&["diff", "-ru", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-ru"]);
+        // An option's value is not an operand.
+        let c = run(&["diff", "-U", "5", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-U", "5"]);
+        // ...and an operand spelled like one is still an operand.
+        let c = run(&["diff", "-U", "5", "5", "other"]);
+        assert_eq!(c.option_words, vec!["-U", "5"]);
+        assert_eq!(c.path1, "5");
+        assert_eq!(c.path2, "other");
+    }
 
     #[test]
     fn parse_files_only() {

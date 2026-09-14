@@ -143322,9 +143322,28 @@ called, `CreateSessionParams` never built, and the inhibitor fields
 `who`, `why`, `uid` and `pid` never read. It models sessions in detail
 and never populates the model.
 
-## TD-C-A-FILE-COPY-FREEZES-THE-EXPLORER-AND-THE-PROGRESS-BAR-CANNOT-MOVE
+## TD-C-A-FILE-COPY-FREEZES-THE-EXPLORER-AND-THE-PROGRESS-BAR-CANNOT-MOVE -- FIXED 2026-09-14
 
-**Date:** 2026-09-14. **Lane:** C.
+**Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**
+
+**What was done.** `OperationExecutor` was split into `begin` / `step` /
+`finish`, with `execute` kept as a loop over them for the callers that
+genuinely want to block (the tests, and undo). The explorer holds the
+operation and works at it for eight milliseconds of each frame, so the window
+draws, answers clicks, counts the files up in the status bar, and can be
+cancelled. `tick_interval` asks for the frame interval while an operation runs
+and `None` when it stops, so a finished copy does not hold the desktop awake.
+
+The loop body and the Move source-deletion phase were **moved, not retyped** --
+four control-flow edits and nothing else, verified by reading the diff with
+indentation stripped -- because that phase deletes the user's sources and its
+guard carries a comment about an earlier version that deleted the wrong ones.
+
+**What it did not fix, which is now its own entry:** a step is a *whole file*,
+so one enormous file still holds the loop for the length of its copy. See
+`TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY`.
+
+The original entry follows.
 
 **In short:** copying or moving files in the file explorer runs the whole job
 in one go, without letting the window draw in between. So for as long as the
@@ -143399,6 +143418,52 @@ explicit that the comparison must be *"on the backing device or volume,
 resolved from the path -- not on the mount path, and not on the path prefix"*,
 so this wants one resolver in one place before anything else keys a queue on
 it. Two editors of one model is fine; two models of one fact is the defect.
+
+## TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the file explorer no longer freezes while copying *many* files --
+it does a few, draws, does a few more. But it still freezes while copying **one
+big** file, for as long as that single copy takes, because the smallest piece
+of work it knows how to stop between is a whole file. Copy a folder of ten
+thousand photos and the window stays alive throughout; copy one four-gigabyte
+disk image and it is frozen until the image is done, with the progress bar
+stuck at whatever it said when the file started.
+
+**Where:** `apps/explorer/src/fileops.rs` --
+`OperationExecutor::step_action` carries out one `PlannedAction`, and
+`execute_copy_action` copies the file with a single `fs::copy`, which does not
+return until the whole file is written. `ExplorerState::step_operation` in
+`main.rs` has an eight-millisecond budget, and the budget cannot help: it is
+checked *between* actions, so an action that takes nine seconds overruns it by
+nine seconds.
+
+**What the proper fix looks like.** Copy in chunks and make the chunk the unit
+of interruption, which means an action needs to be resumable part-way:
+
+* a `CopyCursor` on the executor -- the open source and destination handles and
+  the offset reached -- so `step_action` can copy a bounded number of bytes and
+  return with the action unfinished;
+* `is_done` and the journal stay as they are: the journal records *completed
+  actions*, and a part-copied file is not one, so an interrupted copy still
+  resumes by redoing that file from the start. Making the journal record byte
+  offsets is a separate and much larger change, and is not needed for this;
+* the progress already carries `copied_bytes`, so a part-copied file makes the
+  bar move for the first time on exactly the operation where it matters most.
+
+**Why it was not done with the stepping change.** The stepping change was a
+text-preserving carve of a path that deletes the user's sources on a Move; a
+chunked copy is new code in the same function, and mixing the two would have
+meant no diff anyone could read. The two are independent: everything above
+works today for the case that is far more common, which is many files rather
+than one enormous one.
+
+**What a user sees until then.** A folder copy is smooth. A single large file
+freezes the window for its duration and then everything catches up at once.
+That is strictly better than before -- it used to be true of *every* copy --
+and it is worth knowing that the remaining case exists rather than wondering
+why one copy behaves differently from another.
 
 ## TD-C-SYSINFO-PARSES-HARDWARE-FIELDS-BY-DEFAULTING-TO-ZERO
 

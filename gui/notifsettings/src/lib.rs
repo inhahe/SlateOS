@@ -269,6 +269,60 @@ impl QuietHours {
     }
 }
 
+/// Minutes in a day.
+const DAY_MINUTES: u32 = 24 * 60;
+
+/// Minutes in a week, which is the span [`QuietHours::minutes_until_change`]
+/// searches before giving up.
+const WEEK_MINUTES: u32 = 7 * DAY_MINUTES;
+
+impl QuietHours {
+    /// How many minutes until [`active_at`](Self::active_at) would answer
+    /// differently, or `None` if it never would.
+    ///
+    /// **This exists so the desktop can sleep.** `design-decisions.md` 812
+    /// says an idle desktop registers no wake-up at all, so a schedule cannot
+    /// be implemented by looking at the clock every minute and finding nothing
+    /// has changed 1 439 times a day. The shell asks this once, sleeps exactly
+    /// that long, and wakes when the answer is different -- one timer per
+    /// transition rather than a poll.
+    ///
+    /// `None` when the answer is the same all week: quiet hours switched off,
+    /// or no day selected. A caller with `None` should set no timer at all,
+    /// which is the idle case and by far the common one.
+    ///
+    /// Searched minute by minute over a week rather than solved in closed
+    /// form. A week is 10 080 steps of integer comparison, run once per
+    /// transition -- and the closed form has to handle a window that wraps
+    /// midnight, a day mask, and the interaction between the two, which is
+    /// the arithmetic that
+    /// [`active_at`](Self::active_at) already documents as easy to get
+    /// silently wrong. Searching cannot disagree with the predicate, because
+    /// it *asks* the predicate.
+    #[must_use]
+    pub fn minutes_until_change(&self, hour: u8, minute: u8, weekday: u8) -> Option<u32> {
+        let now = self.active_at(hour, minute, weekday);
+        // Minutes since the start of the week, so that stepping forward and
+        // wrapping is one addition and one remainder -- the day of the week
+        // falls out of the same number rather than being carried alongside it.
+        let start = u32::from(hour)
+            .saturating_mul(60)
+            .saturating_add(u32::from(minute))
+            .saturating_add(u32::from(weekday % 7).saturating_mul(DAY_MINUTES));
+        for step in 1..=WEEK_MINUTES {
+            let at = start.saturating_add(step) % WEEK_MINUTES;
+            let day = u8::try_from(at / DAY_MINUTES).unwrap_or(0);
+            let h = u8::try_from(at % DAY_MINUTES / 60).unwrap_or(0);
+            let m = u8::try_from(at % 60).unwrap_or(0);
+            let then = self.active_at(h, m, day);
+            if then != now {
+                return Some(step);
+            }
+        }
+        None
+    }
+}
+
 // ============================================================================
 // The settings
 // ============================================================================
@@ -615,6 +669,97 @@ mod tests {
             !q.active_at(3, 0, 1),
             "Monday at three in the morning is not"
         );
+    }
+
+    /// The shell is told exactly how long it may sleep.
+    #[test]
+    fn the_next_change_is_the_start_of_the_window() {
+        let q = QuietHours {
+            enabled: true,
+            ..QuietHours::default()
+        };
+        // Default window is 22:00-07:00 every day. At eight in the evening the
+        // next change is two hours away.
+        assert_eq!(q.minutes_until_change(20, 0, 3), Some(120));
+        // At eleven at night, the next change is the seven o'clock end.
+        assert_eq!(q.minutes_until_change(23, 0, 3), Some(8 * 60));
+        // One minute before the start.
+        assert_eq!(q.minutes_until_change(21, 59, 3), Some(1));
+    }
+
+    /// A schedule that never changes state asks for no timer at all.
+    ///
+    /// The idle case, and the common one: a desktop with quiet hours switched
+    /// off must not be woken to be told nothing has happened, which is what
+    /// `design-decisions.md` 812 is about.
+    #[test]
+    fn a_schedule_that_never_changes_wants_no_wake_up() {
+        let off = QuietHours::default();
+        assert!(!off.enabled);
+        assert_eq!(off.minutes_until_change(12, 0, 3), None);
+
+        let no_days = QuietHours {
+            enabled: true,
+            days: [false; 7],
+            ..QuietHours::default()
+        };
+        assert_eq!(no_days.minutes_until_change(12, 0, 3), None);
+    }
+
+    /// The answer agrees with the predicate it is derived from.
+    ///
+    /// The property that matters: sleeping for exactly this long must land on
+    /// a different answer, and one minute less must not. Checked at every
+    /// minute of a week against a schedule with an overnight window and an
+    /// awkward day mask, because that combination is where the hand-written
+    /// arithmetic would go wrong.
+    #[test]
+    fn sleeping_the_reported_time_lands_on_a_change() {
+        let q = QuietHours {
+            enabled: true,
+            window: DailyWindow::from_hm(22, 0, 7, 0).expect("real"),
+            days: [false, true, false, true, false, true, false],
+        };
+        for step in 0..7 * 24 * 60u32 {
+            let day = u8::try_from(step / (24 * 60) % 7).expect("0..7");
+            let hour = u8::try_from(step % (24 * 60) / 60).expect("0..24");
+            let minute = u8::try_from(step % 60).expect("0..60");
+            let now = q.active_at(hour, minute, day);
+            let Some(until) = q.minutes_until_change(hour, minute, day) else {
+                panic!("a schedule with days selected always changes eventually");
+            };
+
+            // At the reported minute the answer differs.
+            let at = step + until;
+            let (d2, h2, m2) = (
+                u8::try_from(at / (24 * 60) % 7).expect("0..7"),
+                u8::try_from(at % (24 * 60) / 60).expect("0..24"),
+                u8::try_from(at % 60).expect("0..60"),
+            );
+            assert_ne!(
+                q.active_at(h2, m2, d2),
+                now,
+                "no change {until} minutes after day {day} {hour}:{minute:02}"
+            );
+
+            // And at every minute before it, the answer is unchanged -- which
+            // is what makes it the *next* change rather than merely a later
+            // one.
+            for earlier in 1..until {
+                let e = step + earlier;
+                let (d3, h3, m3) = (
+                    u8::try_from(e / (24 * 60) % 7).expect("0..7"),
+                    u8::try_from(e % (24 * 60) / 60).expect("0..24"),
+                    u8::try_from(e % 60).expect("0..60"),
+                );
+                assert_eq!(
+                    q.active_at(h3, m3, d3),
+                    now,
+                    "changed {earlier} minutes after day {day} {hour}:{minute:02}, \
+                     which is before the {until} reported"
+                );
+            }
+        }
     }
 
     #[test]

@@ -147,12 +147,25 @@ impl TrayDragSource {
         was_dragging
     }
 
+    /// The icon the press landed on, whether or not it became a drag.
+    ///
+    /// A press that stays a click still needs to name its icon -- that is the
+    /// click the owning program is told about -- so this is readable before
+    /// the threshold is crossed, unlike
+    /// [`dragging_icon`](Self::dragging_icon).
+    #[must_use]
+    pub fn pressed_icon(&self) -> Option<TrayIconKey> {
+        self.press_icon
+    }
+
     /// Whether a drag is currently in progress.
+    #[must_use]
     pub fn is_dragging(&self) -> bool {
         self.drag_active && !self.cancelled
     }
 
     /// Whether the press was just a click (released without exceeding threshold).
+    #[must_use]
     pub fn was_click(&self) -> bool {
         self.press_active && !self.drag_active && !self.cancelled
     }
@@ -429,6 +442,39 @@ impl TrayIconArrangement {
         self.icons != before
     }
 
+    /// Move `key` to a drop boundary, and say whether anything moved.
+    ///
+    /// **A boundary is not a slot, and conflating them is an off-by-one that
+    /// only shows up dragging rightwards.** With three icons there are four
+    /// places a drop can land -- before the first, between each pair, after
+    /// the last -- so a boundary runs `0..=len` while a slot runs `0..len`.
+    /// Dropping at boundary `b` means "end up with `b` icons to your left",
+    /// and once the dragged icon is lifted out, every boundary to its right
+    /// has shifted one place closer. That subtraction lives here rather than
+    /// in the caller because it is the kind of thing that is right in the test
+    /// that was written for it and wrong in the second caller.
+    ///
+    /// Dropping an icon immediately either side of where it already sits is
+    /// not a move, and answers `false` -- so a drag that wanders and comes
+    /// home does not mark the tray changed.
+    pub fn move_to_boundary(&mut self, key: TrayIconKey, boundary: usize) -> bool {
+        let Some(from) = self.icons.iter().position(|slot| slot.key == key) else {
+            return false;
+        };
+        let target = if boundary > from {
+            // Lifting the icon out closes the gap it left, so every boundary
+            // beyond it names a slot one lower than it did.
+            boundary.saturating_sub(1)
+        } else {
+            boundary
+        };
+        if target == from || target >= self.icons.len() {
+            return false;
+        }
+        self.reorder(from, target);
+        true
+    }
+
     /// The icons in the shell's order, whatever their visibility.
     ///
     /// This, not the compositor's list, is what the tray draws.
@@ -437,7 +483,10 @@ impl TrayIconArrangement {
         self.icons.iter().map(|slot| slot.key).collect()
     }
 
-    /// Reorder an icon from one index to another.
+    /// Reorder an icon from one slot index to another.
+    ///
+    /// `to_idx` is where the icon ends up, not where it is inserted before --
+    /// see [`move_to_boundary`](Self::move_to_boundary), which converts.
     ///
     /// If either index is out of bounds or they are equal, this is a no-op.
     pub fn reorder(&mut self, from_idx: usize, to_idx: usize) {
@@ -1253,6 +1302,77 @@ mod tests {
             arr.visible_icons().len(),
             1,
             "the returning icon is shown, not still hidden"
+        );
+    }
+
+    // ======================================================================
+    // move_to_boundary -- where a dropped icon lands
+    // ======================================================================
+
+    /// Every boundary, for every icon, against a hand-written expectation.
+    ///
+    /// Written as a table because the interesting cases are the ones nobody
+    /// thinks to write by hand: dropping just left of yourself and just right
+    /// of yourself are both no-moves, and they are no-moves for different
+    /// reasons.
+    #[test]
+    fn a_drop_lands_where_the_boundary_says() {
+        // (icon moved, boundary dropped at, resulting order)
+        let cases: &[(u32, usize, [u32; 3])] = &[
+            (1, 0, [1, 2, 3]), // already leftmost
+            (1, 1, [1, 2, 3]), // just right of itself is not a move
+            (1, 2, [2, 1, 3]),
+            (1, 3, [2, 3, 1]),
+            (2, 0, [2, 1, 3]),
+            (2, 1, [1, 2, 3]), // just left of itself
+            (2, 2, [1, 2, 3]), // just right of itself
+            (2, 3, [1, 3, 2]),
+            (3, 0, [3, 1, 2]),
+            (3, 1, [1, 3, 2]),
+            (3, 2, [1, 2, 3]), // just left of itself
+            (3, 3, [1, 2, 3]), // already rightmost
+        ];
+        for &(moved, boundary, expected) in cases {
+            let mut arr = TrayIconArrangement::new();
+            for id in 1..=3 {
+                arr.add_icon(make_slot(id, true, false));
+            }
+            let changed = arr.move_to_boundary(key(moved), boundary);
+            let got: Vec<u32> = arr.ordered_keys().iter().map(|k| k.id).collect();
+            assert_eq!(
+                got,
+                expected.to_vec(),
+                "moving {moved} to boundary {boundary}"
+            );
+            assert_eq!(
+                changed,
+                got != vec![1, 2, 3],
+                "moving {moved} to boundary {boundary} reported the wrong answer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drop_naming_no_icon_moves_nothing() {
+        let mut arr = TrayIconArrangement::new();
+        arr.add_icon(make_slot(1, true, false));
+        // The program exited between the press and the release.
+        assert!(!arr.move_to_boundary(key(9), 0));
+        assert_eq!(arr.ordered_keys(), vec![key(1)]);
+    }
+
+    #[test]
+    fn a_drop_past_the_end_of_the_tray_lands_at_the_end() {
+        let mut arr = TrayIconArrangement::new();
+        for id in 1..=3 {
+            arr.add_icon(make_slot(id, true, false));
+        }
+        // The pointer was well right of the last icon; the caller clamps to
+        // `len`, and anything beyond must not panic or silently do nothing.
+        assert!(arr.move_to_boundary(key(1), 3));
+        assert_eq!(
+            arr.ordered_keys().iter().map(|k| k.id).collect::<Vec<_>>(),
+            vec![2, 3, 1]
         );
     }
 

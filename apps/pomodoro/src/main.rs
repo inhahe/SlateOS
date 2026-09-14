@@ -1949,9 +1949,7 @@ mod tests {
                             &app.palette,
                             &tree.commands,
                             &[],
-                            &format!(
-                                "pomodoro {screen:?}/{state:?}/{phase:?} (light={light})"
-                            ),
+                            &format!("pomodoro {screen:?}/{state:?}/{phase:?} (light={light})"),
                         );
                     }
                 }

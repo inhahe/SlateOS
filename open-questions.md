@@ -1463,141 +1463,6 @@ port needed the exact rule, and the manual's own example was not enough to
 derive it either.
 
 
-## A-Q10: Saving a file costs twice what it needs to. Do we keep the automatic undo history?
-
-**In short:** SlateOS keeps the last 16 versions of every file automatically, so a user
-can recover something they overwrote. To do that, each time a program saves a file the
-system first reads back what was there and computes a checksum of it (a short fingerprint
-used to notice when two versions are identical and store them once). That is now measured
-and it is not cheap: **it is about half the total cost of saving a small file.** Saving
-currently costs six times as much as reading the same data. The question is whether that
-is a good trade.
-
-**The measurement**, so the figure can be checked rather than taken on trust. The test
-writes 256 bytes to an ordinary file, then writes the same bytes to `/tmp`, which is
-excluded from version history; the difference is what the history costs.
-
-| | ordinary file | `/tmp` | history's share | reading 256 bytes |
-|---|---|---|---|---|
-| under hardware virtualisation (`6a0f8d89e`) | 12,584 ns | 7,087 ns | **43.7%** | 2,060 ns |
-| under emulation (`b6mifed3b`) | 95,942 ns | 47,892 ns | 50.1% | 9,223 ns |
-
-**The hardware-virtualisation row is the one to decide from** — it is the configuration a
-real machine resembles, and emulation inflates anything that touches a hardware clock by
-roughly thirtyfold, which distorts the comparison rather than merely scaling it. A second
-measurement of history's cost, taken a different way (timing the versioning step directly
-rather than subtracting two whole writes), gives 5,078 ns against the table's 5,497 — the
-two agree to 8%, so the number is not an artefact of how it was measured.
-
-*Correcting this entry's own earlier prediction:* it said the share would be **larger**
-under hardware virtualisation, because part of the versioning work was a hardware-clock
-read that is disproportionately expensive there. That read has since been removed, so the
-share came out slightly smaller instead. What remains — reading the old contents back,
-fingerprinting them, storing them — is ordinary work that no amount of tuning makes free.
-**The 44% is therefore a floor, not a starting point**, which strengthens the question
-rather than weakening it: the cheap part has already been taken out.
-
-**The options:**
-
-* **Keep it on everywhere (what happens today).**
-  *What changes:* nothing. Saving stays about twice as slow as it needs to be, and the
-  penalty grows with file size, so saving a large file is hit hardest.
-* **On only where it is asked for** — a per-directory setting, off by default.
-  *What changes:* saving gets roughly twice as fast everywhere; "restore previous version"
-  stops working except in directories someone turned it on for. A user who expected the
-  history to be there would find it missing, with no warning at the moment it mattered.
-* **Keep it on everywhere but do the work after the save returns**, in the background.
-  *What changes:* saving is fast *and* the history still works. The history entry appears a
-  moment after the save rather than during it, and a crash in that moment loses that one
-  version. More moving parts to get wrong, and the crash window is real rather than
-  theoretical.
-* **Keep it on, accept the cost, and fix the budget instead.**
-  *What changes:* nothing in behaviour; `performance-targets.md` stops comparing our
-  write speed against Linux's ext4, which does no versioning, and starts comparing like
-  with like. This is the option that admits the current target can never be met.
-
-**If this is never answered:** nothing breaks and nothing degrades over time. The standing
-cost is that two benchmarks keep missing their targets for a reason now written down, and
-an unmeetable target teaches people to ignore targets. The filesystem row in
-`performance-targets.md` already carries a note saying its comparison is unlike-for-unlike
-for this reason, so the harm is contained but it is the kind that compounds quietly.
-
-*Promoted from `deferred-questions.md` 2026-09-12: that entry's trigger was “a cost figure
-for what the undo history costs a single small write”, and this is it.*
-
-
-## A-Q12 — [A] Old USB sticks and camera cards show filenames as `????????`. Which alphabet should we assume they used?
-
-**In short:** filenames on FAT disks — USB sticks, SD cards, anything a camera or an
-older machine wrote — are stored as raw numbers, and the disk does not record which
-alphabet those numbers mean. A file called `RÉSUMÉ.TXT` is stored as bytes that mean
-`RÉSUMÉ` only if you already know which alphabet was in use. We currently guess "modern
-Unicode", that guess fails for every accented name, and we then print eight question
-marks. Worse, *every* such file prints the same eight question marks, so two different
-files look like one file and only the first can be opened. The question is what to assume
-instead.
-
-**Why we cannot just read it correctly.** There is nothing to read. The FAT format
-predates Unicode and stores short names in whatever "code page" the writing machine was
-configured for — a numbered alphabet, e.g. code page 437 for US machines, 850 for Western
-Europe, 932 for Japan. The number is not written to the disk. Newer disks usually also
-carry a long filename in Unicode and we use that when it is there; the problem is the
-short name, which is all that older or simpler devices write.
-
-**Now observed on a running kernel, not just read out of the source.** A boot
-self-test builds two FAT directory entries whose 8.3 bytes differ in the first
-byte (0xE9 vs 0xEF) and asks the kernel to render both:
-
-```
-[fat]   short-name guard: two distinct undecodable names both render "????????.TXT",
-        and neither is compared in a lookup: OK
-```
-
-So the collision is real rather than argued. A guard now stops the lookup
-*matching* on a fabricated name -- looking for one of these files can no longer
-hand you the other -- but the names themselves are still unreadable and still
-identical on screen, and no guard can fix that without knowing the alphabet.
-That is the part this question decides.
-
-**What happens today**, and it is a name collision rather than a display wart:
-`résumé.txt` and `naïve.txt` on such a disk both appear as `????????.???`, both answer to
-that name when opened, and the second is unreachable.
-
-**The options:**
-
-* **Assume code page 437** (the original IBM PC alphabet), the way Linux does by default.
-  *What changes:* accented names from US and most Western disks read correctly; names from
-  Greek, Cyrillic, Japanese or Hebrew machines read as the wrong letters — confidently and
-  silently, because 437 gives *an* answer for every byte.
-* **Assume code page 850** (Western Europe), which most European machines used.
-  *What changes:* the same, with the errors moved: better for European disks, worse for
-  US-era ones. There is no assumption that is right everywhere.
-* **Make it a setting**, defaulting to 437, changeable per mount.
-  *What changes:* nothing until someone sets it; a user who knows where their disk came
-  from can get correct names. Costs a mount option and a place to put it.
-* **Refuse to guess: show the undecodable bytes as visible escapes** (e.g. `r\xe9sum\xe9`).
-  *What changes:* no name is ever silently wrong and no two names collide, because the
-  escape is reversible. Names look ugly, and a user who knows the file is called `résumé`
-  has to recognise it in that form.
-
-**Recommendation.** Options 3 and 4 together: escapes as the default so nothing is ever
-silently wrong or collides, with a per-mount code page for someone who knows their disk.
-That ordering matters — the escape is the *correct* answer in the absence of information,
-and the code page is an optimisation for when the information exists. Doing 1 or 2 alone
-trades a visible failure for an invisible one, which is the trade this project has spent
-its effort undoing elsewhere.
-
-**If this is never answered:** nothing gets worse and nothing is corrupted — we do not
-write these names, only read them. The standing cost is that files with accented short
-names remain unopenable-by-name on affected media, and that two such files on one disk
-collide so only one is reachable. It is bounded and it does not grow.
-
-*Filed 2026-09-12 by lane A. The defect is `known-issues.md`
-`A-FAT-8-3-NAMES-DECODE-TO-QUESTION-MARKS-AND-COLLIDE-IN-LOOKUP`; the byte-clean plumbing
-it needs already exists (`DirEntry.name` since `D-VFS-PATHS-ARE-STR-NOT-BYTES`). Only the
-alphabet question is open, and it is a user-visible policy rather than an implementation
-detail, which is why it is here rather than decided in passing.*
-
 ## A-Q11: Who owns `scripts/hooks/pre-push`?  Two lanes each believed they did, and both edited it the same night
 
 **In short:** the tool that tells each agent which files it may edit does not mention
@@ -2000,6 +1865,18 @@ answered question left in the body is pure cost — and, being older, it sorts
 
 ## Resolved — lane A
 
+- A-Q10 Saving a file costs twice what it needs to: keep the automatic undo
+  history? — resolved 2026-09-13 (936): **opt-in per directory AND off the
+  save path.** History is off by default and enabled per directory; where it is
+  on, the read-back and checksum happen after the write returns. Accepts a
+  bounded cost: a crash in that window loses one version of one file, in a
+  directory that opted in.
+- A-Q12 Old FAT media show filenames as `????????`: which alphabet do we assume?
+  — resolved 2026-09-13 (935): **3 and 4 — neither, then optionally both.**
+  Undecodable 8.3 names render as visible escapes, which are reversible and so
+  cannot collide; a mount may additionally be told its code page for correct
+  names when the user knows the disk's origin. The escape is the right answer
+  without information; the code page is an optimisation for when it exists.
 - A-Q9 Networking exists twice, in the kernel and as a daemon: should the daemon
   become the default? — resolved 2026-09-12 (934): **C, then D.** Fix the
   head-of-line block first (`D-NETSOCK-SYNC`: a listener and all its accepted

@@ -67110,6 +67110,72 @@ the microkernel rule true rather than merely available.
 **Not started at decision time.** Recorded first so the sequencing survives
 even if the work is picked up by a later session that did not see this answer.
 
+## 935. An undecodable 8.3 name is escaped, not guessed; the code page is a per-mount override
+
+**Date:** 2026-09-13 · **Decided by:** Operator · **Lane:** A
+
+Answering A-Q12 with options 3 and 4 together, which is what Claude recommended.
+
+**In short:** FAT stores short filenames as raw bytes and does not record which
+alphabet they are in. We currently guess UTF-8, fail for every accented name,
+and print `????????` -- the same eight characters for *every* such file, so two
+different names become one and only the first is reachable. From now on an
+undecodable 8.3 name is shown as visible escapes (`r\\xe9sum\\xe9`), and a mount
+may be told its code page explicitly.
+
+**Why escapes are the default rather than code page 437.** An escape is
+reversible and injective: it says which byte it was, so two different names stay
+two different names. 437 gives *an* answer for every byte, so a Greek or
+Japanese disk reads as confident nonsense -- a wrong answer where there is now a
+visibly odd one. In the absence of information the correct output is the bytes,
+not a guess dressed as a name.
+
+**Why the code page is offered at all.** Someone who knows their disk came from
+a US or Western-European machine can have correct names, which escapes cannot
+give them. It is an optimisation for when the information exists, which is why
+it is a per-mount option and not a global default.
+
+**What this does not change.** The lookup guard from 2026-09-12 stays: a name
+that does not decode is still never *matched* against a fabricated string, so
+looking for one such file can never return another. Escapes make the collision
+visible; the guard is what stops it being harmful.
+
+**Observed, not predicted.** A boot self-test builds two directory entries
+differing only in the first 8.3 byte (0xE9 vs 0xEF) and shows the kernel
+rendering both as `"????????.TXT"`. That is the collision this decision ends.
+
+## 936. Version history is opt-in per directory, and never on the save path
+
+**Date:** 2026-09-13 · **Decided by:** Operator · **Lane:** A
+
+Answering A-Q10 with two of its options together: *on only where it is asked
+for*, **and** *do the work after the save returns*.
+
+**In short:** every save currently reads back the old contents and checksums
+them so the last 16 versions can be recovered. That is measured at about half
+the cost of saving a small file. From now on the history is **off by default**
+and enabled per directory, and where it *is* enabled the read-back and checksum
+happen after the write has returned to the caller.
+
+**Why both and not either.** Opt-in alone makes saving fast by removing the
+feature for almost everyone, and a user who assumed the history was there finds
+it missing exactly when it mattered. Backgrounding alone keeps the feature for
+everyone but pays its cost on every write in the system, including the vast
+majority of files nobody will ever want a previous version of. Together, the
+common path costs nothing at all, and the directories someone deliberately
+turned it on for get the history without paying for it synchronously.
+
+**The cost this accepts, stated plainly.** A crash in the window between the
+save returning and the history entry being written loses that one version. That
+window is real, not theoretical, and it is the price of the write not waiting.
+It is bounded to a single version of a single file, and only in directories that
+opted in.
+
+**Consequence for the benchmark.** `performance-targets.md`'s filesystem row
+carries a note that its comparison is unlike-for-unlike because ext4 does no
+versioning. With the default off, the ordinary write path *is* now comparable,
+so that note should be revisited rather than left standing.
+
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 
 **Lane:** B

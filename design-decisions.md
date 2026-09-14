@@ -67213,6 +67213,37 @@ miss is not: widening scope does nothing, and the only route is to ask what a
 *wrong* implementation would still satisfy. Reaching for the first remedy
 against the second is how a check gets rewritten, re-run, and still believed.
 
+**A third mode, found by lane C on 2026-09-14: substitution.** The check examined
+a real thing, asked a fair question, and answered it correctly -- about something
+else.
+
+    cargo test -p sysinfo     ->  26 passed
+
+The package in `apps/sysinfo` is named `sysinfo-app`. `sysinfo` is a *different*
+real package, `userspace/sysinfo`. So the command did not fail; it tested another
+crate and printed a true success. The new test in `apps/sysinfo` had never been
+compiled. Verified afterwards with `cargo pkgid`: **three** of the nine
+directories whose package name differs from the directory resolve to a different
+crate this way -- `backup`, `indexer`, `sysinfo` -- while the other six error,
+which is the honest failure.
+
+**Why this is worse than the first two and worth its own name.** Population and
+property blindness both produce an *absence*: a crate not compiled, a frame not
+rendered, an assertion too weak. An absence is at least the kind of thing a
+careful reader can go looking for. Substitution produces a *presence* -- a green
+line about real tests that really ran. There is nothing missing to notice.
+
+The tell existed and was read past: 26 tests in a crate the author had been
+reading all afternoon, which has 63. The number was visible; the word "ok" was
+what got read.
+
+**What it adds to the diagnostic.** "Would this go red" is not sufficient here,
+because the command *would* go red -- for the wrong crate. The question that
+catches substitution is narrower: **did the check examine the thing I named?**
+For anything `-p`-scoped, `cargo pkgid -p <name>` answers it in one command, and
+a gate assembled from `-p` flags carries this failure permanently in a way a
+`--workspace` gate cannot.
+
 **The diagnostic that separates them:** describe an implementation that is
 clearly broken and check whether the test still passes. If yes and the code is
 in scope, it is a property miss. If the broken code is never compiled, read, or

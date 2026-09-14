@@ -43,6 +43,7 @@ use guitk::wheel::Accumulator as WheelAccumulator;
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
 use drives::DriveSet;
 use guitk::filetypes::{self, FileCategory};
+use guitk::menu::{ContextMenu, MenuItem};
 use guitk::pathbar::{CompletionItem, PathBar, PathBarEvent};
 
 use dropzone::{
@@ -611,6 +612,12 @@ pub struct ExplorerState {
     /// so no paste, delete, rename or error message was ever actually seen.
     /// Empty means "nothing to report"; the status bar then shows the summary.
     pub status_message: String,
+    /// The context menu a right-click opened, if any.
+    ///
+    /// `guitk::menu::ContextMenu`, not a list drawn here: the shell already
+    /// uses that widget for the desktop menu and the tray overflow, and a
+    /// second menu implementation in the file manager would be the third.
+    menu: Option<ContextMenu>,
     /// The bulk file operations in flight.
     ///
     /// More than one, but never two that touch the same drive: that is the
@@ -721,6 +728,7 @@ impl ExplorerState {
             pathbar: PathBar::new(&start_path.to_string_lossy()),
             address_editing: false,
             status_message: String::new(),
+            menu: None,
             operations: Vec::new(),
             pending: VecDeque::new(),
             dir_summary: String::new(),
@@ -1624,6 +1632,123 @@ impl ExplorerState {
         }
     }
 
+    /// Open the context menu for whatever is at `x, y`.
+    ///
+    /// Two menus, not one: what you can do to a *file* and what you can do to
+    /// the *folder you are looking at* are different lists, and a single menu
+    /// offering both would have half its rows greyed out at any moment.
+    ///
+    /// A right-click on a row also *selects* it, which is what every file
+    /// manager does and what makes the menu's "Copy" mean the thing under the
+    /// pointer rather than whatever was selected before.
+    fn open_context_menu(&mut self, x: f32, y: f32) {
+        let on_row = self.dropzone.find_file_row(x, y);
+        if let Some(index) = on_row {
+            self.select_single(index);
+        }
+        let items = if on_row.is_some() {
+            self.file_menu_items()
+        } else {
+            self.folder_menu_items()
+        };
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
+        self.menu = Some(menu);
+    }
+
+    /// What can be done to the file under the pointer.
+    fn file_menu_items(&self) -> Vec<MenuItem> {
+        vec![
+            Self::menu_action(MENU_OPEN, "Open", true),
+            Self::menu_action(MENU_CUT, "Cut", true),
+            Self::menu_action(MENU_COPY, "Copy", true),
+            Self::menu_action(MENU_RENAME, "Rename", true),
+            Self::menu_action(MENU_DELETE, "Move to recycle bin", true),
+            Self::menu_action(MENU_DELETE_FOREVER, "Delete permanently", true),
+        ]
+    }
+
+    /// What can be done to the folder being shown.
+    fn folder_menu_items(&self) -> Vec<MenuItem> {
+        vec![
+            Self::menu_action(MENU_NEW_FOLDER, "New folder", true),
+            // Greyed rather than absent when the clipboard is empty, for the
+            // reason the toolbar's buttons are: a menu whose rows come and go
+            // moves the others under the pointer between one opening and the
+            // next.
+            Self::menu_action(MENU_PASTE, "Paste", self.clipboard.is_some()),
+            Self::menu_action(MENU_REFRESH, "Refresh", true),
+        ]
+    }
+
+    /// One row of a menu.
+    fn menu_action(id: u64, label: &str, enabled: bool) -> MenuItem {
+        MenuItem::Action {
+            id,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled,
+            checked: None,
+        }
+    }
+
+    /// A press while a context menu is open.
+    ///
+    /// Answers whether the press was spent here. It always is: a press either
+    /// chose a row or dismissed the menu, and neither should also reach what
+    /// is underneath -- acting on the thing behind a menu the user was in the
+    /// middle of using is a click they could not see coming.
+    fn click_menu(&mut self, x: f32, y: f32) -> bool {
+        let Some(menu) = self.menu.as_mut() else {
+            return false;
+        };
+        let chosen = menu.handle_click(x, y);
+        self.menu = None;
+        if let Some(id) = chosen {
+            self.activate_menu_item(id);
+        }
+        true
+    }
+
+    /// Carry out a menu row.
+    fn activate_menu_item(&mut self, id: u64) {
+        match id {
+            MENU_OPEN => {
+                if let Some(&index) = self.selected_indices.first() {
+                    self.open_entry(index);
+                }
+            }
+            MENU_CUT => self.cut_selected(),
+            MENU_COPY => self.copy_selected(),
+            MENU_RENAME => {
+                self.ask_rename();
+            }
+            MENU_DELETE => {
+                self.ask_delete(PendingAction::Recycle);
+            }
+            MENU_DELETE_FOREVER => {
+                self.ask_delete(PendingAction::DeletePermanently);
+            }
+            MENU_NEW_FOLDER => {
+                self.ask_new_folder();
+            }
+            MENU_PASTE => self.paste(),
+            MENU_REFRESH => self.load_directory(),
+            // A row id this does not know is a row this did not put there.
+            _ => {}
+        }
+    }
+
+    /// The context menu's draw commands, empty when it is closed.
+    #[must_use]
+    pub fn render_menu(&self) -> Vec<guitk::render::RenderCommand> {
+        self.menu
+            .as_ref()
+            .map(|menu| menu.render(&self.palette))
+            .unwrap_or_default()
+    }
+
     /// The text the status bar should display.
     ///
     /// An operation result takes precedence over the directory summary until
@@ -2274,6 +2399,10 @@ impl ExplorerState {
 
         // Status bar (bottom)
         self.render_status_bar(&mut tree);
+
+        // The menu over everything the window draws itself, because it is
+        // drawn last and owns the press that follows it.
+        tree.commands.extend(self.render_menu());
 
         self.dropzone = zones;
 
@@ -3330,6 +3459,18 @@ const OPERATION_SLICE: std::time::Duration = std::time::Duration::from_millis(8)
 /// How often the loop comes back while an operation is running.
 const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 
+// Context menu row ids. Numbered rather than positional, so inserting a row
+// cannot silently reassign what the ones below it do.
+const MENU_OPEN: u64 = 1;
+const MENU_CUT: u64 = 2;
+const MENU_COPY: u64 = 3;
+const MENU_RENAME: u64 = 4;
+const MENU_DELETE: u64 = 5;
+const MENU_DELETE_FOREVER: u64 = 6;
+const MENU_NEW_FOLDER: u64 = 7;
+const MENU_PASTE: u64 = 8;
+const MENU_REFRESH: u64 = 9;
+
 /// How tall the status bar is.
 const STATUS_BAR_H: f32 = 24.0;
 /// How tall one row of the Transfers view is.
@@ -3573,8 +3714,15 @@ impl ExplorerState {
         match m.kind {
             // The scrollbar first: it is drawn over the rows, so a press on it
             // is not a press on the file underneath.
+            // An open menu owns the next press, whatever button it is and
+            // wherever it lands.
+            MouseEventKind::Press(_) if self.menu.is_some() => self.click_menu(m.x, m.y),
             MouseEventKind::Press(MouseButton::Left) => {
                 self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
+            }
+            MouseEventKind::Press(MouseButton::Right) => {
+                self.open_context_menu(m.x, m.y);
+                true
             }
             MouseEventKind::Release(MouseButton::Left) => {
                 let was = self.thumb_grab.take();
@@ -4718,6 +4866,219 @@ mod tests {
         );
         assert!(!items[0].is_directory, "apple.txt is not a folder");
         assert!(items[1].is_directory, "apples is");
+    }
+
+    // ---- the context menu ---------------------------------------------
+    //
+    // The file explorer had no right-click handling at all: not a menu, not a
+    // `MouseButton::Right` arm, nothing. Every operation the menu offers
+    // already existed and was reachable only from the keyboard.
+
+    /// Right-click at a point.
+    fn right_click(state: &mut ExplorerState, x: f32, y: f32) {
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Right),
+            }),
+        );
+    }
+
+    /// A state showing one file, with the listing laid out.
+    fn one_file(root: &Path, name: &str) -> ExplorerState {
+        write(&root.join(name), "contents");
+        let mut state = state_at(root);
+        let _ = state.render();
+        state
+    }
+
+    /// A point on the row showing `name`.
+    ///
+    /// Found by asking the drop zones, which are what a click is resolved
+    /// against, rather than by recomputing the row height here -- a helper
+    /// that derived the geometry itself would agree with a renderer that had
+    /// drifted from the zones and prove nothing.
+    fn row_centre(state: &ExplorerState, name: &str) -> (f32, f32) {
+        let index = state
+            .entries
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name} is not listed"));
+        let x = state.sidebar_width + 40.0;
+        let mut y = 64.0;
+        while y < state.window_height as f32 {
+            if state.dropzone.find_file_row(x, y) == Some(index) {
+                return (x, y);
+            }
+            y += 2.0;
+        }
+        panic!("{name} has no row the drop zones know about");
+    }
+
+    #[test]
+    fn right_clicking_a_file_opens_a_menu_about_that_file() {
+        let scratch = temp_dir("menu_file");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+        let (cx, cy) = row_centre(&state, "notes.txt");
+
+        right_click(&mut state, cx, cy);
+
+        let drawn = format!("{:?}", state.render_menu());
+        for label in ["Open", "Cut", "Copy", "Rename", "Move to recycle bin"] {
+            assert!(drawn.contains(label), "the menu has no {label:?}: {drawn}");
+        }
+        assert!(
+            !drawn.contains("New folder"),
+            "a file's menu offered to make a folder"
+        );
+    }
+
+    /// **And it selects the row it was opened on**, so "Copy" means the file
+    /// under the pointer rather than whatever was selected before.
+    #[test]
+    fn right_clicking_a_file_selects_it_first() {
+        let scratch = temp_dir("menu_select");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "a");
+        write(&root.join("b.txt"), "b");
+        let mut state = state_at(&root);
+        let _ = state.render();
+        let (ax, ay) = row_centre(&state, "a.txt");
+        send(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: ax,
+                y: ay,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        let (bx, by) = row_centre(&state, "b.txt");
+
+        right_click(&mut state, bx, by);
+
+        let selected: Vec<&str> = state
+            .selected_indices
+            .iter()
+            .filter_map(|i| state.entries.get(*i))
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(selected, vec!["b.txt"], "the menu is about the wrong file");
+    }
+
+    /// Empty space gets the folder's menu instead.
+    #[test]
+    fn right_clicking_empty_space_opens_the_folders_menu() {
+        let scratch = temp_dir("menu_folder");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+        let (x, y) = empty_space(&state);
+
+        right_click(&mut state, x, y);
+
+        let drawn = format!("{:?}", state.render_menu());
+        assert!(
+            drawn.contains("New folder"),
+            "no way to make a folder: {drawn}"
+        );
+        assert!(drawn.contains("Refresh"), "no way to refresh: {drawn}");
+        assert!(!drawn.contains("Rename"), "a folder's menu offered Rename");
+    }
+
+    /// **Paste is greyed when there is nothing to paste**, not hidden.
+    ///
+    /// A menu whose rows come and go moves the others under the pointer
+    /// between one opening and the next.
+    #[test]
+    fn paste_is_offered_greyed_rather_than_withheld() {
+        let scratch = temp_dir("menu_paste");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+
+        let empty = state.folder_menu_items();
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("notes.txt")]));
+        let full = state.folder_menu_items();
+
+        assert_eq!(
+            empty.len(),
+            full.len(),
+            "the row count changed with the clipboard"
+        );
+        let enabled = |items: &[MenuItem]| {
+            items.iter().find_map(|item| match item {
+                MenuItem::Action { label, enabled, .. } if label == "Paste" => Some(*enabled),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            enabled(&empty),
+            Some(false),
+            "Paste was live with nothing to paste"
+        );
+        assert_eq!(
+            enabled(&full),
+            Some(true),
+            "Paste stayed dead with a full clipboard"
+        );
+    }
+
+    /// Choosing a row does the thing.
+    #[test]
+    fn choosing_copy_from_the_menu_fills_the_clipboard() {
+        let scratch = temp_dir("menu_copy");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+        let (cx, cy) = row_centre(&state, "notes.txt");
+        right_click(&mut state, cx, cy);
+        assert!(state.clipboard.is_none());
+
+        state.activate_menu_item(MENU_COPY);
+
+        assert!(state.clipboard.is_some(), "Copy did not fill the clipboard");
+    }
+
+    /// **A press while the menu is open never reaches what is under it.**
+    #[test]
+    fn a_press_with_the_menu_open_is_spent_on_the_menu() {
+        let scratch = temp_dir("menu_shield");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+        let (cx, cy) = row_centre(&state, "notes.txt");
+        right_click(&mut state, cx, cy);
+
+        // Far from the menu: this dismisses it and does nothing else.
+        send(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: 4.0,
+                y: 4.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+
+        assert!(
+            state.render_menu().is_empty(),
+            "the menu survived a press outside it"
+        );
+        assert_eq!(
+            state.current_path, root,
+            "the dismissing press also navigated"
+        );
+    }
+
+    /// An unknown row id does nothing rather than doing something else.
+    #[test]
+    fn a_row_id_the_menu_never_put_there_does_nothing() {
+        let scratch = temp_dir("menu_unknown");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+
+        state.activate_menu_item(9_999);
+
+        assert!(state.clipboard.is_none());
+        assert!(state.modal.is_none(), "an unknown id opened a dialog");
     }
 
     // ---- the Transfers view -------------------------------------------

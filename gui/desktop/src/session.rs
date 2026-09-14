@@ -1714,6 +1714,16 @@ impl<T: Transport> ShellSession<T> {
             // and later ones are free: `poll_appearance` re-reads, finds the
             // settings identical to what it just applied, and answers `false`.
             Event::SettingsChanged {
+                group: SettingsGroup::Notifications,
+            } => {
+                // The answer is deliberately discarded, and this arm sets no
+                // `dirty`: a notification rule decides which *future*
+                // notifications are shown, so nothing already on screen moves.
+                // Said out loud because every other arm here repaints, and one
+                // that does not looks like an omission.
+                let _ = self.shell.poll_notification_rules();
+            }
+            Event::SettingsChanged {
                 group: SettingsGroup::Appearance,
             } => {
                 if self.shell.poll_appearance() {

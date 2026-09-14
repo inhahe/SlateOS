@@ -646,6 +646,8 @@ pub struct SettingsState {
     /// `NotifFile` gives: a save splices into the document that was read, so
     /// the user's comments and any key a newer desktop wrote survive.
     pub notif: notifsettings::NotifFile,
+    /// Set when the rules have been written and the desktop has not been told.
+    notif_dirty: bool,
 
     /// Set when `input.yaml` was just rewritten; drained by the event loop.
     ///
@@ -998,6 +1000,17 @@ impl SettingsState {
         if let Err(err) = self.notif.save() {
             eprintln!("settings: could not save notifications.yaml: {err}");
         }
+        self.notif_dirty = true;
+    }
+
+    /// Whether `notifications.yaml` has been rewritten since this was last
+    /// asked, clearing the flag.
+    ///
+    /// The event loop calls this after each event and, if it is true, tells
+    /// the compositor to announce the change — which is what makes a rule
+    /// apply to the desktop now rather than at the next login.
+    pub fn take_notifications_change(&mut self) -> bool {
+        core::mem::take(&mut self.notif_dirty)
     }
 
     /// Create a new settings state with sensible defaults.
@@ -1082,6 +1095,7 @@ impl SettingsState {
             // `appearance` below; `load_input()` does the I/O, from `main`.
             input: InputFile::new(),
             notif: notifsettings::NotifFile::new(),
+            notif_dirty: false,
 
             // Personalization defaults, not a read of the configuration
             // file: a constructor that touched $HOME would make every test's
@@ -5352,6 +5366,7 @@ impl oswindow::app::App for SettingsState {
         Reloads {
             appearance: self.take_appearance_change(),
             input: self.take_input_change(),
+            notifications: self.take_notifications_change(),
         }
     }
 

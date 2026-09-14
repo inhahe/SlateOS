@@ -3123,6 +3123,12 @@ pub enum CompositorRequest {
     /// [`Compositor::reload_input`] for what it does and what it deliberately
     /// leaves alone.
     ReloadInput,
+    /// Tell every client the user's notification rules changed.
+    ///
+    /// Pure relay: unlike the two above, the compositor does not read
+    /// `notifications.yaml` and holds nothing from it. The shell is the reader.
+    /// See [`guiremote::control::RequestBody::ReloadNotifications`].
+    ReloadNotifications,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
@@ -9309,6 +9315,13 @@ impl Compositor {
                 // told the compositor has re-read the file, which is true
                 // either way, and a reply that differed would leak the state of
                 // the user's settings to anyone allowed to ask for a reload.
+                CompositorResponse::Ok
+            }
+            CompositorRequest::ReloadNotifications => {
+                // No `self.reload_*` beside it, and that is not an omission:
+                // this compositor keeps no copy of the notification rules to
+                // refresh. It is announcing, not adopting.
+                self.announce_settings_change(SettingsGroup::Notifications);
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadInput => {

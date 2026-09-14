@@ -4412,11 +4412,29 @@ touches gui/ apps/ scripts/check-scratch-config.py || skip_scratchcfg=1
 # The crates this push touches, as substrings the checker will match. Empty is
 # not "check everything": it means the push changed no crate directory, and the
 # gate is skipped above by the same `touches` test that produced this list.
+#
+# CRATES THE PUSH *DELETED* ARE FILTERED OUT -- the `while read` in the
+# pipeline below keeps only directories still on disk. `git diff --name-only`
+# lists a deleted file's path, so a push that removes a crate hands the checker
+# a directory that is no longer there; it matches nothing, exits 2 (this tree's
+# code for "I did not reach a verdict"), and this gate refuses the push. The
+# checker is behaving exactly as designed and it is still a wall in front of a
+# legitimate change: deleting a crate is not a reason to be unable to push.
+#
+# Found by deleting apps/systray on 2026-09-14 -- as far as the log shows, the
+# first push to remove a crate directory since this gate was wired.
+#
+# It is one line rather than an indented block because the pipeline is one
+# line: a `|` may not begin a line in sh, and the first attempt at this broke
+# the hook's syntax that way. `bash -n scripts/hooks/pre-push` catches it.
+#
+# If every changed crate was a deleted one, the list comes out empty and the
+# gate skips -- right, but for a different reason than the paragraph above:
+# nothing is left to check, rather than nothing having changed.
 scratchcfg_crates=""
 if [ "$skip_scratchcfg" != "1" ]; then
     # shellcheck disable=SC2086
-    scratchcfg_crates=$(git diff --name-only $pushed_shas --not --remotes="$remote_name"                             -- gui/ apps/ 2>/dev/null                         | awk -F/ 'NF>2 {print $1 "/" $2}' | sort -u | tr '
-' ' ')
+    scratchcfg_crates=$(git diff --name-only $pushed_shas --not --remotes="$remote_name"                             -- gui/ apps/ 2>/dev/null                         | awk -F/ 'NF>2 {print $1 "/" $2}' | sort -u | while read -r d; do [ -d "${repo_root:-.}/$d" ] && printf '%s|' "$d"; done | tr '|' ' ')
     [ -n "$scratchcfg_crates" ] || skip_scratchcfg=1
 fi
 note_gate scratch-config "$skip_scratchcfg"

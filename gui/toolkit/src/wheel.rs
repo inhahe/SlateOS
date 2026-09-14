@@ -282,8 +282,16 @@ pub fn pixels(dy: f32, row_h: f32) -> f32 {
 /// asymmetry in its name and its doc, rather than a comment at each call site.
 ///
 /// `col_w` is what a "column" is in this view, exactly as `row_h` is a row in
-/// [`pixels`]: a notch moves [`ROWS_PER_NOTCH`] of them, so a horizontal notch
+/// [`pixels`]: a notch moves [`rows_per_notch`] of them, so a horizontal notch
 /// travels as far across as a vertical one travels down.
+///
+/// **That last sentence is an invariant, and it was false for a day.** This
+/// function multiplied by the [`ROWS_PER_NOTCH`] *constant* while [`pixels`]
+/// went through [`rows_f`], which reads the user's setting -- so setting the
+/// step to ten lines gave ten rows down the page and still three columns
+/// across it. Nothing failed: both numbers were plausible, only their
+/// relationship was wrong, and no test compared the axes under a changed
+/// setting. `axes_travel_together_under_a_changed_step` is that test.
 ///
 /// Non-finite input gives `0.0`, for the same reason as [`pixels`].
 ///
@@ -299,12 +307,54 @@ pub fn pixels_x(dx: f32, col_w: f32) -> f32 {
     if !dx.is_finite() || !col_w.is_finite() {
         return 0.0;
     }
-    let out = dx * ROWS_PER_NOTCH * col_w;
+    let out = dx * rows_per_notch() * col_w;
     if out.is_finite() { out } else { 0.0 }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Both axes move by the user's step, not just the vertical one.
+    ///
+    /// The invariant `pixels_x` documents is that a horizontal notch travels
+    /// as far across as a vertical one travels down. It held at the default
+    /// and nowhere else: `pixels` read the setting and `pixels_x` read the
+    /// constant, so a user who asked for ten lines got ten rows down and
+    /// three columns across.
+    ///
+    /// The reason no existing test caught it is worth keeping. Every test
+    /// here checked one axis against a number, and both numbers were right
+    /// *at the default* -- the only value any of them used. A defect in the
+    /// relationship between two functions is invisible to tests that never
+    /// vary what the relationship depends on.
+    // Exact, like the siblings: these are products of small powers of two, so
+    // the two paths reach bit-identical results or they are not the same
+    // computation -- which is precisely what is being asserted.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn axes_travel_together_under_a_changed_step() {
+        let unit = 20.0;
+        assert_eq!(
+            pixels_x(1.0, unit).abs(),
+            pixels(1.0, unit).abs(),
+            "the axes disagree at the default step"
+        );
+
+        assert!(set_rows_per_notch(10.0));
+        assert_eq!(
+            pixels_x(1.0, unit).abs(),
+            pixels(1.0, unit).abs(),
+            "the axes disagree once the user changes the step"
+        );
+        assert_eq!(
+            pixels_x(1.0, unit).abs(),
+            10.0 * unit,
+            "and the horizontal axis ignored the setting outright"
+        );
+
+        // Left as the default for whatever else shares this thread.
+        assert!(set_rows_per_notch(ROWS_PER_NOTCH));
+    }
 
     /// The user's step reaches the conversion, not just the cell it is in.
     ///

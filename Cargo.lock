@@ -735,6 +735,7 @@ dependencies = [
 name = "eject"
 version = "0.1.0"
 dependencies = [
+ "optionalfile",
  "procinfo",
  "quoting",
 ]

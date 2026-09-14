@@ -160,21 +160,24 @@ def selftest():
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         os.makedirs(os.path.join(td, "only-manifest"))
-        open(os.path.join(td, "only-manifest", "Cargo.toml"), "w").close()
+        open(os.path.join(td, "only-manifest", "Cargo.toml"), "w",
+             newline="").close()
         os.makedirs(os.path.join(td, "only-config", ".cargo"))
         with open(os.path.join(td, "only-config", ".cargo",
-                               "config.toml"), "w") as fh:
+                               "config.toml"), "w", newline="") as fh:
             fh.write("[build]" + NL + 'target = "x86_64-unknown-none"' + NL)
         os.makedirs(os.path.join(td, "both", ".cargo"))
-        open(os.path.join(td, "both", "Cargo.toml"), "w").close()
-        with open(os.path.join(td, "both", ".cargo", "config.toml"), "w") as fh:
+        open(os.path.join(td, "both", "Cargo.toml"), "w", newline="").close()
+        with open(os.path.join(td, "both", ".cargo", "config.toml"), "w",
+                  newline="") as fh:
             fh.write("[build]" + NL + 'target = "x86_64-unknown-none"' + NL)
         # ...and one with a config that pins NOTHING, which does not move the
         # crate off whatever the caller asked for and is therefore not ours.
         os.makedirs(os.path.join(td, "config-no-target", ".cargo"))
-        open(os.path.join(td, "config-no-target", "Cargo.toml"), "w").close()
+        open(os.path.join(td, "config-no-target", "Cargo.toml"), "w",
+             newline="").close()
         with open(os.path.join(td, "config-no-target", ".cargo",
-                               "config.toml"), "w") as fh:
+                               "config.toml"), "w", newline="") as fh:
             fh.write("[net]" + NL + "offline = true" + NL)
         got = pinned_target_crates(roots=("",), base=td)
         ck(got == ["both"],

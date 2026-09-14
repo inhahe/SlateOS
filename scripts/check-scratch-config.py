@@ -136,6 +136,35 @@ def scan():
     return crates
 
 
+def can_address_the_config_dir(crate):
+    """Whether a crate's manifest gives it any way to name the config directory.
+
+    This exists because `SAVES` -- a pattern over *call spellings* -- is not an
+    enumeration of anything. It answers "which crates write settings?" with
+    "the ones that spell it the way I expect", and a crate is free to spell it
+    otherwise without telling anyone. Two did: `apps/fileassoc` and
+    `apps/stickynotes` both named their saving method `persist`, independently,
+    and neither matched the `.save(` the pattern looked for. fileassoc's tests
+    wrote a real `~/.config/slateos/fileassoc.yaml` while this gate
+    printed "ok: 12 save-capable crates wrote nothing to the real config" --
+    a true sentence about twelve crates and a silent one about the thirteenth.
+
+    The manifest is a sounder question, and not by degree: **the config
+    directory's location comes from `settingsfile::config_dir`, so a crate that
+    does not depend on `settingsfile` cannot name that directory at all.** It
+    is not a better heuristic; it is the actual population, and a crate joins it
+    by adding a dependency rather than by choosing a verb.
+
+    A crate that depends on `settingsfile` only to *read* is included too, and
+    that is the right side to err on: checking one costs a second, and the run
+    below is a no-op for a crate that writes nothing.
+    """
+    toml = ROOT / crate / "Cargo.toml"
+    if not toml.exists():
+        return False
+    return "settingsfile" in toml.read_text(encoding="utf-8", errors="replace")
+
+
 def package_of(crate):
     """The cargo package name for a directory, which is not always its name."""
     toml = ROOT / crate / "Cargo.toml"
@@ -162,6 +191,18 @@ SELF_TESTS = [
         "a bare settingsfile::write is a save too",
         """    fn persist(&self) {
         settingsfile::write_atomic(path, bytes);
+    }
+""",
+        {"saves": True, "test": False},
+    ),
+    (
+        # The spelling the pattern did not know, and the reason it now does.
+        # `settingsfile::store` is how a settings surface writes its file --
+        # `InputFile::save` is a one-line wrapper over it -- and a method that
+        # calls it without being called `save` was invisible here.
+        "a settingsfile::store is a save whatever the method is called",
+        """    fn persist(&mut self) {
+        settingsfile::store(CONFIG_NAME, &self.doc).ok();
     }
 """,
         {"saves": True, "test": False},
@@ -311,7 +352,15 @@ def main(argv):
         return 2
 
     found = scan()
-    crates = [c for c, v in sorted(found.items()) if v["saves"]]
+    # The union of "writes settings, as far as a pattern can tell" and "can
+    # name the config directory at all". The second is the population; the
+    # first is kept because it also reaches crates that save through a helper
+    # in another crate, and because losing it would make the rot check below
+    # meaningless.
+    crates = sorted(
+        {c for c, v in found.items() if v["saves"]}
+        | {c for c in found if can_address_the_config_dir(c)}
+    )
     wanted = [a for a in argv if not a.startswith("-")]
 
     # THREE WAYS THE LIST CAN BE EMPTY, AND ONLY TWO ARE FAILURES. They were
@@ -391,7 +440,8 @@ def main(argv):
             print("  " + f)
         print(str(len(failures)) + " problem(s): a test wrote settings outside a scratch directory.")
         return 1
-    print("ok: " + str(checked) + " save-capable crates wrote nothing to the real config")
+    print("ok: " + str(checked) + " crates that can name the config directory "
+          "wrote nothing to the real one")
     return 0
 
 

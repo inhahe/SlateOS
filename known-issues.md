@@ -144133,6 +144133,28 @@ temporary panic inside `persist` listed all eight in one run. Enumerating a
 population beats reasoning about it -- which is the same sentence as the
 paragraph above, pointed at my own method.
 
+**The proper fix, applied after the patch.** Adding `store` to the pattern
+fixed one spelling and left the design intact: a gate choosing its subjects by
+how they *spell* a call. The proof that this was not paranoia is that
+`apps/stickynotes` had **also** named its saving method `persist` -- entirely
+independently, before any of this -- and was equally invisible.
+
+So the subject list is no longer derived from spellings alone. The config
+directory's location comes from `settingsfile::config_dir`, which means a crate
+that does not depend on `settingsfile` **cannot name that directory at all**.
+That is not a better heuristic; it is the actual population, read off the
+manifests, and a crate joins it by adding a dependency rather than by choosing
+a verb. The list is the union of that with the old pattern, which is kept
+because it also reaches crates that save through a helper living somewhere
+else.
+
+The run went 12 crates -> 14 (adding `store`) -> **17** (adding the manifests):
+`stickynotes`, `appearance` and `settingsfile` itself had never been checked.
+All three are clean, which is the good outcome -- but nothing before this knew
+that, and "we were lucky" is not a property a gate is supposed to rely on. The
+`store` spelling is now one of the self-test's ten cases, so the pattern cannot
+quietly narrow again.
+
 ## TD-C-THE-TEXT-EDITOR-CANNOT-OPEN-OR-CREATE-A-FILE-FROM-INSIDE-ITSELF
 
 **Date:** 2026-09-14. **Lane:** C.

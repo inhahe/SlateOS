@@ -278,9 +278,11 @@ def main(argv):
     is a list nobody reads.
 
     The verdict is empirical instead. Point `XDG_CONFIG_HOME` at an empty
-    directory, run the tests, and look. Anything that appears was written by a
-    test with no scratch directory of its own -- which in a developer's
-    checkout would have been their own configuration.
+    directory, run the tests **one at a time**, and look. Anything that appears
+    was written by a test with no scratch directory of its own -- which in a
+    developer's checkout would have been their own configuration.
+
+    The "one at a time" is load-bearing; see the comment on the run below.
     """
     if selftestflag.wants_selftest(argv):
         return selftest()
@@ -346,7 +348,19 @@ def main(argv):
         env = dict(os.environ, XDG_CONFIG_HOME=str(probe), HOME=str(probe))
         run = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "run-timeout.py"), "900",
-             "cargo", "test", "-p", pkg, "--target", TARGET],
+             "cargo", "test", "-p", pkg, "--target", TARGET,
+             # One thread, and this gate is worthless without it. Cargo runs a
+             # binary's tests in parallel, and `with_scratch_config` swaps the
+             # *process-wide* `XDG_CONFIG_HOME` -- so a stray write from a test
+             # with no scratch directory lands in a neighbouring test's scratch
+             # directory whenever the two overlap, and that directory is deleted
+             # before this looks. The gate then reports "wrote nothing" about a
+             # write it could not see, which is the exact failure it exists to
+             # catch, one level up. Observed: `apps/settings` wrote a real
+             # `appearance.yaml` on every run for days while this said ok, and
+             # started being caught only when an unrelated new test changed the
+             # scheduling. Serial costs about a second per crate.
+             "--", "--test-threads=1"],
             cwd=ROOT, env=env, capture_output=True, text=True, check=False,
         )
         left = sorted(p for p in probe.rglob("*") if p.is_file())

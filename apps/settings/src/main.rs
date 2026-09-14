@@ -5170,9 +5170,17 @@ impl SettingsState {
         let (lo, hi) = id.range();
         let value = (hi - lo).mul_add(fraction.clamp(0.0, 1.0), lo);
         match id {
+            // No save here. `handle_event` compares this document before and
+            // after every event and writes it if it moved, and this runs inside
+            // that -- a drag is a mouse event. The save that used to be here was
+            // a second door, and it cost: `set_slider_fraction` is reachable from
+            // `handle_click`, which the slider *geometry* tests drive directly,
+            // so every one of them wrote the developer's real `appearance.yaml`
+            // and `check-scratch-config.py` caught it only once a change of
+            // timing stopped a neighbouring test's scratch directory from
+            // absorbing the write.
             SliderId::NightLightTemperature => {
                 self.appearance.settings.night_light_strength = value;
-                self.save_appearance();
             }
             SliderId::NarratorRate => self.narrator_rate = value,
             SliderId::OutputVolume => self.output_volume = round_u8(value),
@@ -5608,19 +5616,47 @@ mod tests {
     #[test]
     fn the_night_light_controls_write_the_appearance_file() {
         with_scratch_config("settings-night-light", |_root| {
-            let mut state = SettingsState::new();
-            assert!(!state.appearance.settings.night_light, "off by default");
+            // Through the doors a person uses -- a click and a drag -- rather
+            // than by assigning the fields. The first version of this test set
+            // the switch with `toggle_mut` and moved the slider with
+            // `set_slider_fraction`, and only the slider had a save of its own:
+            // the switch reached the file purely as a side effect of the
+            // slider's write. A test claiming both controls work would have
+            // passed with the switch wired to nothing at all.
+            let mut state = state_showing(RowHit::Toggle(ToggleId::NightLight))
+                .expect("no page draws the night-light switch");
+            // `state_showing` hands back a page with every switch turned on,
+            // which is the wrong starting point for a test about turning one on.
+            state.appearance.settings.night_light = false;
+            let (cx, cy) =
+                center_of(&state, RowHit::Toggle(ToggleId::NightLight)).expect("just found it");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
 
-            *state
-                .toggle_mut(ToggleId::NightLight)
-                .expect("the toggle resolves to a field") = true;
-            state.set_slider_fraction(SliderId::NightLightTemperature, 1.0);
-
-            let saved = appearance::AppearanceFile::load();
             assert!(
-                saved.settings.night_light,
+                state.appearance.settings.night_light,
+                "the switch did not move"
+            );
+            assert!(
+                appearance::AppearanceFile::load().settings.night_light,
                 "the switch did not reach the file"
             );
+
+            let (track_x, track_y) = state
+                .anchor_at(AnchorId::Slider(SliderId::NightLightTemperature))
+                .expect("a drawn slider has a track");
+            drag(
+                &mut state,
+                track_x,
+                track_y + SLIDER_HEIGHT / 2.0,
+                track_x + SLIDER_WIDTH,
+            );
+
+            let saved = appearance::AppearanceFile::load();
+            assert!(saved.settings.night_light, "the switch came back off");
             assert!(
                 (saved.settings.night_light_strength - 1.0).abs() < f32::EPSILON,
                 "the slider did not reach the file: {}",
@@ -5639,10 +5675,12 @@ mod tests {
     #[test]
     fn dragging_the_warmth_slider_right_is_warmer() {
         // Scratch-wrapped although nothing here looks like a write: moving
-        // this slider saves `appearance.yaml`, two calls further down. That is
-        // exactly the shape `check-scratch-config.py` exists for, and it
-        // refused this test's first version -- which had asserted only on an
-        // in-memory field.
+        // this slider used to save `appearance.yaml` two calls further down,
+        // and `check-scratch-config.py` refused this test's first version for
+        // it -- even though the assertions are on an in-memory field, which is
+        // exactly the shape that gate exists to catch. The save has since moved
+        // to `handle_event`, so this call writes nothing; the wrapper stays
+        // because a test has no business depending on which of the two it is.
         with_scratch_config("settings-warmth-direction", |_root| {
             let mut state = SettingsState::new();
             state.set_slider_fraction(SliderId::NightLightTemperature, 0.2);

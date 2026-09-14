@@ -250,63 +250,71 @@ fn the_shell_claims_its_shortcuts_before_it_starts_listening() {
 /// shortcut uses, which is a key no application can ever see.
 #[test]
 fn rebinding_a_shortcut_moves_the_grab_with_it() {
-    let (mut session, desktop) = session();
-    let panel = session.panel().window();
+    // A scratch configuration directory, because recording a chord saves
+    // `shortcuts.yaml` two calls down -- in `handle_hotkey`, not here. Nothing
+    // this test asserts is about a file, which is exactly the shape
+    // `scripts/check-scratch-config.py` exists to catch: without the wrapper
+    // the write lands in the developer's own configuration, or, when it
+    // overlaps a neighbouring test's scratch directory, in that.
+    settingsfile::testing::with_scratch_config("desktop-rebind-shortcut", |_root| {
+        let (mut session, desktop) = session();
+        let panel = session.panel().window();
 
-    let (old, _) = session
-        .shell()
-        .hotkeys
-        .all_bindings()
-        .find(|(h, a)| !a.is_conditional() && h.key != Key::Escape)
-        .map(|(h, a)| (*h, a.clone()))
-        .expect("an unconditional binding to move");
+        let (old, _) = session
+            .shell()
+            .hotkeys
+            .all_bindings()
+            .find(|(h, a)| !a.is_conditional() && h.key != Key::Escape)
+            .map(|(h, a)| (*h, a.clone()))
+            .expect("an unconditional binding to move");
 
-    // Open the card, land on that row, record a chord nothing else uses.
-    session.shell_mut().toggle_shortcut_card();
-    let row = session
-        .shell()
-        .hotkeys
-        .all_bindings()
-        .position(|(h, _)| *h == old)
-        .expect("the row is in the list");
-    session.shell_mut().shortcut_selected = row;
+        // Open the card, land on that row, record a chord nothing else uses.
+        session.shell_mut().toggle_shortcut_card();
+        let row = session
+            .shell()
+            .hotkeys
+            .all_bindings()
+            .position(|(h, _)| *h == old)
+            .expect("the row is in the list");
+        session.shell_mut().shortcut_selected = row;
 
-    let before = desktop.borrow().seen.len();
-    drop(session.shell_mut().handle_hotkey(&KeyEvent {
-        key: Key::Enter,
-        pressed: true,
-        modifiers: Modifiers::NONE,
-        text: String::new(),
-    }));
-    drop(session.shell_mut().handle_hotkey(&KeyEvent {
-        key: Key::F12,
-        pressed: true,
-        modifiers: Modifiers::ctrl(),
-        text: String::new(),
-    }));
-    session.pump().expect("pump");
+        let before = desktop.borrow().seen.len();
+        drop(session.shell_mut().handle_hotkey(&KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        drop(session.shell_mut().handle_hotkey(&KeyEvent {
+            key: Key::F12,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        }));
+        session.pump().expect("pump");
 
-    let seen = &desktop.borrow().seen;
-    let after = &seen[before.min(seen.len())..];
+        let seen = &desktop.borrow().seen;
+        let after = &seen[before.min(seen.len())..];
 
-    assert!(
-        after.iter().any(|r| r.body
-            == RequestBody::GrabKey {
-                window: panel,
-                key: Key::F12,
-                modifiers: Modifiers::ctrl(),
-            }),
-        "the new chord must be claimed, or the rebound shortcut is dead"
-    );
-    assert!(
-        after.iter().any(|r| r.body
-            == RequestBody::UngrabKey {
-                window: panel,
-                key: old.key,
-                modifiers: old.modifiers(),
-            }),
-        "and the old one released, or the shell holds a key nothing uses"
-    );
+        assert!(
+            after.iter().any(|r| r.body
+                == RequestBody::GrabKey {
+                    window: panel,
+                    key: Key::F12,
+                    modifiers: Modifiers::ctrl(),
+                }),
+            "the new chord must be claimed, or the rebound shortcut is dead"
+        );
+        assert!(
+            after.iter().any(|r| r.body
+                == RequestBody::UngrabKey {
+                    window: panel,
+                    key: old.key,
+                    modifiers: old.modifiers(),
+                }),
+            "and the old one released, or the shell holds a key nothing uses"
+        );
+    });
 }
 
 /// Escape is the one chord held conditionally: a permanent grab takes the key
@@ -1019,25 +1027,32 @@ fn the_shell_claims_the_layout_switching_chord_it_is_configured_for() {
 /// other: a claimed chord nothing acts on looks exactly like no chord at all.
 #[test]
 fn the_claimed_chord_cycles_the_keyboard_layout() {
-    let (mut session, desktop) = session();
-    assert!(
-        session.shell().input_methods.layouts.len() > 1,
-        "with one layout installed, cycling cannot be observed"
-    );
-    let before = session.shell().input_methods.tray_label().to_string();
-    let modifiers = session.shell().modifier_chords()[0];
+    // A scratch configuration directory: cycling the layout persists it to
+    // `input.yaml` inside `run_desktop_action`. This is the same defect as the
+    // `super_space` test that `scripts/check-scratch-config.py` was written
+    // for, in a second test the gate could not see until it was made to run
+    // the suite one thread at a time.
+    settingsfile::testing::with_scratch_config("desktop-layout-chord", |_root| {
+        let (mut session, desktop) = session();
+        assert!(
+            session.shell().input_methods.layouts.len() > 1,
+            "with one layout installed, cycling cannot be observed"
+        );
+        let before = session.shell().input_methods.tray_label().to_string();
+        let modifiers = session.shell().modifier_chords()[0];
 
-    desktop.borrow_mut().send_input(&[InputEvent::new(
-        session.panel().window(),
-        guitk::event::Event::ModifierChord { modifiers },
-    )]);
-    session.pump().expect("pump");
+        desktop.borrow_mut().send_input(&[InputEvent::new(
+            session.panel().window(),
+            guitk::event::Event::ModifierChord { modifiers },
+        )]);
+        session.pump().expect("pump");
 
-    assert_ne!(
-        session.shell().input_methods.tray_label(),
-        before,
-        "Alt+Shift was claimed and delivered but switched nothing"
-    );
+        assert_ne!(
+            session.shell().input_methods.tray_label(),
+            before,
+            "Alt+Shift was claimed and delivered but switched nothing"
+        );
+    });
 }
 
 /// A chord the shell never asked for does nothing. The compositor only

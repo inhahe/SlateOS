@@ -140,6 +140,60 @@ its saves. It does not get worse with time.
 *Filed 2026-09-14 by lane A. Bites at `kernel/src/fs/history.rs` --
 `try_auto_record`, and the Test 7 block in that file's `self_test`.*
 
+## A-Q15: A program can only have one network connection open at a time. Which way should we fix it?
+
+**In short:** a program that opens two network connections at once — a web browser
+fetching two images, a server talking to two visitors, anything ordinary — does not
+work. Opening the second one silently destroys the first. Nothing has noticed until
+now because every test we have opens one at a time. The fix is real work either
+way, and the two ways are quite different in size and in who does them.
+
+**What is actually happening.** Network traffic is handled by a separate helper
+program (the "network daemon"), and the kernel talks to it through a shared block of
+memory — a "ring". Each socket the kernel opens allocates **its own** ring. The
+daemon, however, keeps only **one** ring mapped at a time: when it sees a different
+one it throws away everything it knew about the previous one, including which
+programs were waiting for connections. Its own source comment says this is
+deliberate. So socket two wipes socket one.
+
+**How it was found.** A test written to prove an unrelated fix was the first thing in
+the tree that needed two sockets alive at the same time. It failed on three
+consecutive boots. The first two explanations were wrong; the third was found by
+reading the daemon's code.
+
+**The options:**
+
+* **A. One ring shared by all sockets.** The kernel allocates a single ring at
+  start-up and every socket uses it, tagging its messages with its own id.
+  *What changes:* two connections work. Sockets stop being independent of each
+  other — one very busy connection can make others wait, because they share one
+  queue. Work is in the kernel, lane A.
+* **B. The daemon keeps several rings mapped.** It holds a table of rings instead of
+  one, and serves whichever a message arrives on.
+  *What changes:* two connections work and stay independent. More memory per
+  program, and a fixed ceiling on how many can be open. Work is in the daemon,
+  which is not lane A's to write.
+* **C. Both, later.** Ship A now because it is one lane's work and unblocks
+  everything, and revisit B if one connection starving another turns out to matter
+  in practice.
+  *What changes:* the same as A today, with a note to look again.
+
+**Recommendation: C**, with A as the thing actually built now. A is smaller, lives in
+one lane, and can be done without coordinating two trees. The independence B buys is
+real but theoretical here: nothing in this OS yet drives enough traffic for one
+connection to starve another, and if that day comes the measurement will say so.
+
+**If this is never answered:** networking keeps working exactly as well as it does
+today, which is one connection at a time. Nothing breaks that was not already
+broken, and no data is at risk. What stays blocked is anything needing two at once —
+a server accepting while serving, or a program fetching two things in parallel — and
+the concurrency fix in `known-issues.md` `D-NETSOCK-SYNC` cannot be proven at all,
+because the test that would prove it needs two sockets.
+
+*Filed 2026-09-14 by lane A. Root cause and evidence are in `known-issues.md` under
+the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
+`services/netstack/src/main.rs:2594`.*
+
 # Resolved` index at
 the bottom under your own lane's subheading. An answered question left in the
 body is pure clutter, and because it is older it sorts *first* — directly in

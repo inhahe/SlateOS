@@ -125,6 +125,17 @@ struct HistoryInner {
     files: BTreeMap<PathBuf, FileHistory>,
     /// Total number of version entries.
     total_entries: usize,
+    /// Directories enrolled for automatic version recording (A-Q10).
+    ///
+    /// Empty means *nothing* is auto-versioned. A-Q10 was answered "on only
+    /// where it is asked for", so a write is recorded only when its path lies
+    /// under one of these prefixes.
+    ///
+    /// Deliberately here and not in `HistoryConfig`: `set_config` replaces the
+    /// whole config, so a caller adjusting `max_versions_per_file` would
+    /// silently un-enroll every directory as a side effect. Enrolment is
+    /// state, not a tunable.
+    opt_in_dirs: Vec<PathBuf>,
     /// Configuration.
     config: HistoryConfig,
     /// Statistics.
@@ -136,6 +147,7 @@ struct HistoryInner {
 static HISTORY: Mutex<HistoryInner> = Mutex::new(HistoryInner {
     files: BTreeMap::new(),
     total_entries: 0,
+    opt_in_dirs: Vec::new(),
     config: HistoryConfig {
         max_versions_per_file: 16,
         max_total_entries: 10_000,
@@ -226,17 +238,103 @@ pub fn should_auto_version(path: impl AsRef<Path>) -> bool {
     true
 }
 
+/// Whether `path` lies under an enrolled directory. Caller holds the lock.
+fn enrolled_locked(inner: &HistoryInner, path: &Path) -> bool {
+    inner
+        .opt_in_dirs
+        .iter()
+        .any(|dir| crate::fs::pathutil::path_in_subtree(path, dir))
+}
+
+/// Enrol a directory for automatic version recording (A-Q10).
+///
+/// The entry is a path *prefix*: a directory is the normal case, but an exact
+/// file path is accepted and matches only that file. Enrolling the same prefix
+/// twice is a no-op rather than an error.
+///
+/// # Errors
+///
+/// `InvalidArgument` if `dir` is empty. This is the load-bearing check, not
+/// defensive tidiness: `pathutil::path_in_subtree` returns `true` when the
+/// prefix has no components -- deliberately, so that `/` can mean the whole
+/// tree -- so one empty entry would match every path and silently turn the
+/// history on for the entire filesystem. That is the exact state A-Q10 was
+/// answered to get out of, and it would arrive with no diagnostic. Enrolling
+/// `/` is still legal; it just has to be spelled rather than defaulted.
+pub fn enable_for_dir(dir: impl AsRef<Path>) -> KernelResult<()> {
+    let dir = dir.as_ref();
+    if dir.as_bytes().is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut inner = HISTORY.lock();
+    if inner
+        .opt_in_dirs
+        .iter()
+        .any(|d| d.as_path().as_bytes() == dir.as_bytes())
+    {
+        return Ok(());
+    }
+    inner.opt_in_dirs.push(dir.to_path_buf());
+    Ok(())
+}
+
+/// Remove a directory from the enrolment list. Returns whether it was present.
+///
+/// Matches the stored prefix exactly; it does not un-enroll subtrees of it.
+pub fn disable_for_dir(dir: impl AsRef<Path>) -> bool {
+    let dir = dir.as_ref();
+    let mut inner = HISTORY.lock();
+    let before = inner.opt_in_dirs.len();
+    inner
+        .opt_in_dirs
+        .retain(|d| d.as_path().as_bytes() != dir.as_bytes());
+    inner.opt_in_dirs.len() != before
+}
+
+/// Whether a write to `path` would be auto-recorded: eligible *and* enrolled.
+///
+/// Both halves matter and they are different questions -- see
+/// `should_auto_version` for why they are kept apart.
+pub fn is_enrolled(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    let inner = HISTORY.lock();
+    enrolled_locked(&inner, path)
+}
+
+/// The enrolled prefixes, for `/proc` and the kshell.
+pub fn enrolled_dirs() -> Vec<PathBuf> {
+    HISTORY.lock().opt_in_dirs.clone()
+}
+
 /// Try to auto-record a version of a file before it is modified or deleted.
 ///
 /// Called by VFS write/remove paths.  Failures are silently ignored —
 /// version history is best-effort and must never prevent a write operation.
 pub fn try_auto_record(path: impl AsRef<Path>) {
     let path = path.as_ref();
-    if !is_auto_version_enabled() {
-        return;
-    }
+    // Pure and lock-free, so it runs first: a path on procfs, devfs, sysfs or
+    // /tmp is ineligible however it was enrolled, and an internal metadata
+    // file never gets a history.
     if !should_auto_version(path) {
         return;
+    }
+    // One acquisition answers both remaining questions, then the lock is
+    // dropped before any work -- `record_version` takes it again itself.
+    //
+    // `should_auto_version` deliberately does NOT consult the enrolment list.
+    // "Is this path eligible at all" is a property of the path; "has someone
+    // asked for history here" is configuration. Keeping them apart also keeps
+    // that function pure and testable, and matters mechanically:
+    // `crate::sync::Mutex` is not reentrant, so a registry lookup inside a
+    // function this one calls while holding the lock would deadlock.
+    {
+        let inner = HISTORY.lock();
+        if !inner.config.enabled || !inner.config.auto_version {
+            return;
+        }
+        if !enrolled_locked(&inner, path) {
+            return;
+        }
     }
     // Non-fatal: ignore errors from recording.  The file operation
     // must succeed even if history recording fails (e.g., CAS full,
@@ -766,13 +864,24 @@ pub fn self_test() -> KernelResult<()> {
         // Temporarily ensure auto-versioning is on.
         let old_auto = HISTORY.lock().config.auto_version;
         set_auto_version(true);
-
         let test_path = "/_history_autoversion_test";
         let v1 = b"Auto-versioned content v1";
         let v2 = b"Auto-versioned content v2";
 
         // Clear any prior history for this path.
         clear_file(test_path);
+
+        // A-Q10 made the history opt-in, so this test must now enrol the
+        // path it uses -- the same shape as the `set_auto_version(true)`
+        // above, and restored the same way on every exit path. The
+        // assertions below are UNCHANGED: a write to an eligible, enrolled
+        // path still records a version. Only the preconditions grew, which
+        // is different in kind from a test whose assertion inverts.
+        if enable_for_dir(test_path).is_err() {
+            serial_println!("[history]   FAIL: enrolling {} was rejected", test_path);
+            set_auto_version(old_auto);
+            return Err(KernelError::InternalError);
+        }
 
         // Whether `/` is mounted read-write is a fact the mount table holds;
         // a failed write is not that fact. The old form skipped this section
@@ -784,6 +893,7 @@ pub fn self_test() -> KernelResult<()> {
             skips.record("auto-version on write", "/ is not mounted read-write");
             serial_println!("[history]   SKIP auto-version test: / not mounted read-write");
             set_auto_version(old_auto);
+            disable_for_dir(test_path);
         } else {
             // Write v1 — first write, no prior file to version.
             if let Err(e) = Vfs::write_file(test_path, v1) {
@@ -793,6 +903,7 @@ pub fn self_test() -> KernelResult<()> {
                     e
                 );
                 set_auto_version(old_auto);
+                disable_for_dir(test_path);
                 return Err(KernelError::InternalError);
             }
             // History should be empty (no prior content to save).
@@ -808,6 +919,7 @@ pub fn self_test() -> KernelResult<()> {
                 clear_file(test_path);
                 Vfs::remove(test_path).ok();
                 set_auto_version(old_auto);
+                disable_for_dir(test_path);
                 return Err(KernelError::InternalError);
             }
 
@@ -822,6 +934,7 @@ pub fn self_test() -> KernelResult<()> {
                         clear_file(test_path);
                         Vfs::remove(test_path).ok();
                         set_auto_version(old_auto);
+                        disable_for_dir(test_path);
                         return Err(KernelError::InternalError);
                     }
                     Err(e) => {
@@ -832,6 +945,7 @@ pub fn self_test() -> KernelResult<()> {
                         clear_file(test_path);
                         Vfs::remove(test_path).ok();
                         set_auto_version(old_auto);
+                        disable_for_dir(test_path);
                         return Err(KernelError::InternalError);
                     }
                 }
@@ -840,6 +954,7 @@ pub fn self_test() -> KernelResult<()> {
             clear_file(test_path);
             Vfs::remove(test_path).ok();
             set_auto_version(old_auto);
+            disable_for_dir(test_path);
         }
     }
 
@@ -885,7 +1000,95 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[history]   path filter OK");
     }
 
+    // --- Test 9: A-Q10 opt-in enrolment ---
+    // A-Q10 was answered "on only where it is asked for", so the property that
+    // matters is a NEGATIVE: an ordinary document is not versioned. A negative
+    // from a matcher that never matches anything is worth nothing, so this
+    // establishes a positive control FIRST and asserts the negative second.
+    {
+        #[inline(never)]
+        fn case() -> KernelResult<()> {
+            let doc = "/home/user/document.txt";
+
+            // Positive control: the matcher can fire at all. Without this, the
+            // assertion further down is indistinguishable from a dead lookup.
+            enable_for_dir("/home/user")?;
+            if !is_enrolled(doc) {
+                serial_println!("[history]   FAIL: {} not enrolled under /home/user", doc);
+                return Err(KernelError::IoError);
+            }
+            // ...and it is scoped, not global.
+            if is_enrolled("/etc/config.yaml") {
+                serial_println!("[history]   FAIL: enrolling /home/user also matched /etc");
+                return Err(KernelError::IoError);
+            }
+            if !disable_for_dir("/home/user") {
+                serial_println!("[history]   FAIL: disable_for_dir removed nothing");
+                return Err(KernelError::IoError);
+            }
+            if disable_for_dir("/home/user") {
+                serial_println!("[history]   FAIL: disable_for_dir removed a prefix twice");
+                return Err(KernelError::IoError);
+            }
+
+            // The answer itself: eligible, but not recorded, because nobody
+            // asked for it here. These two being different is the whole design.
+            if !should_auto_version(doc) {
+                serial_println!("[history]   FAIL: {} should still be ELIGIBLE", doc);
+                return Err(KernelError::IoError);
+            }
+            if is_enrolled(doc) {
+                serial_println!("[history]   FAIL: {} enrolled with an empty registry", doc);
+                return Err(KernelError::IoError);
+            }
+
+            // An empty prefix must be refused: `path_in_subtree` returns true
+            // for a prefix with no components, so one empty entry would match
+            // every path and turn the history on for the entire filesystem
+            // with no diagnostic at all.
+            if enable_for_dir("").is_ok() {
+                serial_println!("[history]   FAIL: an empty prefix was accepted");
+                return Err(KernelError::IoError);
+            }
+            if is_enrolled(doc) || !enrolled_dirs().is_empty() {
+                serial_println!("[history]   FAIL: the refused empty prefix enrolled the tree");
+                return Err(KernelError::IoError);
+            }
+
+            // Eligibility and enrolment are separate gates and the denylist
+            // wins. Enrolling `/` does enrol procfs -- deliberately, `/` means
+            // the whole tree -- and the pure filter still declines it.
+            enable_for_dir("/")?;
+            if !is_enrolled("/proc/meminfo") {
+                serial_println!("[history]   FAIL: enrolling / did not cover /proc/meminfo");
+                return Err(KernelError::IoError);
+            }
+            if should_auto_version("/proc/meminfo") {
+                serial_println!("[history]   FAIL: procfs came back both enrolled and eligible");
+                return Err(KernelError::IoError);
+            }
+            Ok(())
+        }
+
+        // Whatever a caller enrolled earlier is restored on every exit path,
+        // including the failing ones -- a self-test that leaves the history
+        // switched on for `/` would be worse than the bug it looks for.
+        let saved = enrolled_dirs();
+        for dir in &saved {
+            disable_for_dir(dir.as_path());
+        }
+        let outcome = case();
+        for dir in enrolled_dirs() {
+            disable_for_dir(dir.as_path());
+        }
+        for dir in &saved {
+            enable_for_dir(dir.as_path())?;
+        }
+        outcome?;
+        serial_println!("[history]   opt-in enrolment OK (A-Q10): eligible is not enrolled");
+    }
+
     skips.report("[history]");
-    serial_println!("[history] Self-test passed (8 tests){}.", skips.suffix());
+    serial_println!("[history] Self-test passed (9 tests){}.", skips.suffix());
     Ok(())
 }

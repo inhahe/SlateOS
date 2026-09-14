@@ -1464,7 +1464,11 @@ pub(crate) enum PostWriteSync {
 ///
 /// * `RWF_HIPRI` is a scheduling hint with nothing observable behind it, and
 ///   is the only flag ignored here.
-/// * `RWF_DSYNC` / `RWF_SYNC` we can deliver, with `fdatasync` / `fsync` —
+/// * `RWF_DSYNC` / `RWF_SYNC` we can deliver, with `fdatasync` / `fsync`. Be
+///   aware of what that costs on this target: both reach `SYS_FS_SYNC` (641),
+///   which is a **global** sync, so a caller writing with `RWF_DSYNC` in a
+///   loop flushes the whole system each time. Correct, and expensive; the fix
+///   is a per-fd sync syscall, not a weaker promise here —
 ///   **on a write**. On a read they are meaningless, and a caller that sets
 ///   them has misunderstood something, so `is_write == false` refuses them
 ///   rather than quietly doing nothing.
@@ -4801,9 +4805,12 @@ pub const POSIX_FADV_DONTNEED: i32 = 4;
 /// Advise the kernel about file access patterns.
 ///
 /// Validates inputs per POSIX/Linux semantics, then accepts the
-/// advice as a no-op — our kernel doesn't act on access-pattern
-/// hints yet, but the validation surface is real so callers that
+/// advice as a no-op, but the validation surface is real so callers that
 /// pass garbage get a real error instead of silent success.
+///
+/// As with [`readahead`], the gap is the syscall rather than the machinery:
+/// the kernel's block cache and its per-device read-ahead policy both exist,
+/// and nothing exposes them.
 ///
 /// Unlike most POSIX functions, `posix_fadvise` returns the error
 /// number directly (positive) on failure — it does **not** set
@@ -6834,8 +6841,16 @@ pub extern "C" fn __readlinkat_chk(
 /// bytes starting at `offset` from the file into the page cache,
 /// anticipating future reads.
 ///
-/// Since our kernel doesn't have a page cache yet, this is a no-op
-/// that returns 0 (success).  The fd and offset are validated.
+/// A no-op returning 0 (success); the fd and offset are validated.
+///
+/// The reason is **not** that there is nothing to prefetch into: the kernel
+/// has a real write-back block cache (`kernel/src/fs/cache.rs`, LRU, sitting
+/// under ext4) and a policy layer for read-ahead settings
+/// (`kernel/src/fs/fscache.rs`). What is missing is a **syscall** — nothing in
+/// `kernel/src/syscall/number.rs` exposes prefetch to userspace, so libc has
+/// no way to ask. This comment said "our kernel doesn't have a page cache yet"
+/// until 2026-09-13, which would send the next reader to build a cache that
+/// already exists instead of adding the one call that is needed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readahead(fd: Fd, offset: i64, count: usize) -> i32 {
     if fd < 0 {
@@ -6868,8 +6883,16 @@ pub const SYNC_FILE_RANGE_VALID: u32 =
 /// Sync a file range to disk.
 ///
 /// This Linux-specific function provides fine-grained control over
-/// syncing file data to disk.  Since we don't have a writeback cache,
-/// this delegates to fsync for the full file.
+/// syncing file data to disk.  It delegates to `fsync` for the full file,
+/// which syncs **more** than the caller asked and never less — the safe
+/// direction for a durability primitive.
+///
+/// "We don't have a writeback cache" was the reason given here until
+/// 2026-09-13 and it was wrong twice over: the kernel's block cache
+/// (`kernel/src/fs/cache.rs`) *is* write-back, and `fsync` itself already
+/// reaches it. What is missing is range granularity — `SYS_FS_SYNC` (641) is
+/// a **global** sync with no fd and no offset, so there is nothing finer to
+/// delegate to.
 ///
 /// Validates inputs per Linux semantics (fs/sync.c::ksys_sync_file_range)
 /// in the same order as the upstream prologue:

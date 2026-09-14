@@ -95,6 +95,14 @@ pub enum Event {
 pub enum SettingsGroup {
     /// `appearance.yaml` — theme, accent, wallpaper, fonts, window corners.
     Appearance,
+    /// `notifications.yaml` — which programs may interrupt, and how.
+    ///
+    /// Unlike the two beside it the *compositor* does not read this file; it
+    /// only carries the announcement. The reader is the desktop shell, which
+    /// is the thing that decides whether a notification is shown. A group
+    /// still needs a verb and a code even when the relay has no use for the
+    /// contents, because the relay is the only thing connected to everyone.
+    Notifications,
     /// `input.yaml` — pointer speed, double-click window, key repeat.
     Input,
 }

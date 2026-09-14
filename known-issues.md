@@ -131234,10 +131234,61 @@ change — so the natural first reaction is that something is badly wrong, and t
 natural second is to start bisecting a change that is innocent. It cost lane C a
 detour today on the way to merging a caret-width change.
 
-**Proper fix (not done):** the kernel package could carry
-`forced-target = "x86_64-slateos"`, which would make cargo build it for its own
-target regardless of `--target` on the command line and let the plain workspace
-command work. That is lane A's file, so it is written here rather than done.
+**~~Proper fix (not done)~~: the kernel package could carry**
+**`forced-target`. Measured 2026-09-13: it cannot, on this toolchain.**
+The suggestion above was written from the cargo documentation without
+checking which channel the feature is on, and it is wrong. Kept rather than
+deleted because the wrong fix is the part that would have cost somebody an
+afternoon, and because a lane that must not edit `kernel/Cargo.toml` filing
+a request for an impossible change is worse than filing nothing.
+
+Three things were measured, in a scratch workspace outside the tree rather
+than by editing lane A's manifest:
+
+| mechanism | on stable 1.95 | verdict |
+|---|---|---|
+| `forced-target` (`cargo-features = ["per-package-target"]`) | *"requires a nightly version of Cargo, but this is the `stable` channel"* | **unavailable** |
+| the same on `+nightly` | works — the bare crate lands in `target/x86_64-unknown-none/` while the rest lands in `target/x86_64-pc-windows-gnu/` | works, but would put the whole tree on nightly |
+| `required-features` on the `[[bin]]` | cargo **silently skips** the binary. No warning, no note, `Finished` as if nothing were missing | works, and is worse |
+
+That last row is the one that settles it. `required-features` would make
+`cargo build --workspace` clean on stable today, and the price is that a
+kernel build which forgot the feature flag would exit **0 having built no
+kernel**. Trading a loud linker error for a silent omission is the opposite
+of what this file exists to prevent — it is the same shape as a test runner
+reporting PASS over zero targets, which cost this lane a real defect
+earlier the same day.
+
+**And the problem is smaller than this entry implies, because half of it is
+already solved and the entry did not say so.** `kernel/Cargo.toml` carries
+
+```toml
+[[bin]]
+name = "kernel"
+test = false   # "so `cargo test --workspace` is clean on a normal dev host"
+```
+
+so `cargo test --workspace --target x86_64-pc-windows-gnu` **works**, and is
+what `scripts/workspace-test.py` runs — 581 targets, repeatedly, all day.
+Together with the `cargo check` result already recorded above, that means:
+
+| spelling | state |
+|---|---|
+| `cargo check --workspace --target …` | works |
+| `cargo test --workspace --target …` | works (this is the pre-merge run) |
+| `cargo build --workspace --target …` | fails at the kernel's link step |
+
+Neither gate anyone has proposed uses the `build` spelling: C-Q11's option A
+is `cargo check`, and the actual pre-merge run is `cargo test`. So what is
+left is a trap in a *sentence*, not in the build — someone reading
+"`cargo build --workspace`" in `CLAUDE.md` literally, hitting a wall of
+mingw relocation errors, and bisecting an innocent change.
+
+**So the fix is not in `kernel/Cargo.toml` at all**, and no request has been
+filed against lane A. It is either a line in `CLAUDE.md` naming the
+spellings that work, which only the operator may add, or nothing — this
+entry, findable by anyone who hits the wall, may be the whole of the answer
+a once-a-month trap deserves.
 
 ## TD-C-OVERLAY0-IS-A-DISABLED-INK-AND-SOME-LIVE-TEXT-IS-DRAWN-IN-IT -- FIXED 2026-09-13
 

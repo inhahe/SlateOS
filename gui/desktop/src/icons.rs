@@ -549,6 +549,18 @@ impl DesktopIconLayer {
     }
 
     /// Get all currently selected icon IDs.
+    /// Whether a press, a drag or a rubber-band is in progress.
+    ///
+    /// The shell asks this before forwarding a move or a release: a pointer
+    /// that never pressed on the desktop has nothing to do with this layer,
+    /// and forwarding its motion would start work for a gesture that is not
+    /// happening. It is also what makes the release safe to route -- a press
+    /// leaves this layer non-idle, and only a release returns it.
+    #[must_use]
+    pub fn is_interacting(&self) -> bool {
+        !matches!(self.interaction, InteractionState::Idle)
+    }
+
     /// Every icon on the desktop, in draw order.
     ///
     /// The sibling of [`selected_ids`](Self::selected_ids), and the only way

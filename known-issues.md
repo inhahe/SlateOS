@@ -144063,9 +144063,29 @@ worth more than one feature:
   10.0` to mean "inside the tab strip" and broke the moment it moved, which is
   the same defect in the tests.
 
-## TD-C-THE-DESKTOP-ICONS-ARE-DRAWN-AND-NOTHING-CAN-CLICK-THEM
+## TD-C-THE-DESKTOP-ICONS-ARE-DRAWN-AND-NOTHING-CAN-CLICK-THEM -- FIXED 2026-09-14
 
-**Date:** 2026-09-14. **Lane:** C. **Created by this lane, the same day.**
+**Date:** 2026-09-14. **Lane:** C. **Created and closed by this lane the same day.**
+
+**Status: FIXED.** The pointer reaches the layer: a press selects, a drag moves
+and the release writes the new position, a double-click asks the shell to launch
+what the icon points at. Four tests in `pointer_tests.rs`, all through
+`handle_mouse` rather than against the layer, because the layer's own
+interactions were never in doubt -- the route to them was what did not exist.
+Proved by reintroduction: unrouting the press fails three of the four.
+
+One thing the fix had to *not* break, which three existing tests caught: a press
+on bare desktop with nothing selected still answers `Pass`. The first version
+consumed every desktop press on the theory that a rubber-band is a gesture in
+progress. It is, but the gesture does not need the press claimed -- the release
+reaches the surface either way -- and `the_bare_desktop_is_not_the_shells_to_consume`
+was right that claiming it is a lie about what changed. The rule is now "consume
+what was acted on": the selection before and after decides.
+
+Still open, and deliberately: `ctrl_held` is passed as `false` everywhere,
+because `MouseEvent` carries a position and a kind and nothing else, so
+ctrl-click to extend a selection has nowhere to get its answer. The keyboard
+state would have to be tracked alongside, as `apps/editor` does.
 
 **In short:** the desktop now draws its icons -- This PC, Recycle Bin,
 Documents, Home -- and they are a picture. Clicking one does nothing, dragging

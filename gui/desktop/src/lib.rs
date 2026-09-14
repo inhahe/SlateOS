@@ -1628,6 +1628,20 @@ fn taskbar_alpha(settings: &AppearanceSettings) -> u8 {
     }
 }
 
+/// The icon layer's button enum from the toolkit's.
+///
+/// Two enums for one concept, which is this tree's most-repeated defect -- but
+/// `icons.rs` predates the shell's dependency on `guitk::event` and converting
+/// at the one seam is smaller than changing a module's public vocabulary. The
+/// conversion lives here, once, rather than at each of the three call sites.
+const fn icon_button(button: MouseButton) -> icons::MouseButton {
+    match button {
+        MouseButton::Left => icons::MouseButton::Left,
+        MouseButton::Right => icons::MouseButton::Right,
+        _ => icons::MouseButton::Middle,
+    }
+}
+
 impl DesktopShell {
     pub fn new(screen_width: u32, screen_height: u32) -> Self {
         let mut shell = Self {
@@ -2926,19 +2940,37 @@ impl DesktopShell {
         }
 
         match event.kind {
-            // The two are the same event to this shell. Nothing it draws does
-            // anything on the second click that it did not do on the first:
-            // double-click-to-maximize is a *title bar* gesture, and the title
-            // bar belongs to the compositor, which resolves the timing itself
-            // rather than being told about it here.
-            MouseEventKind::Press(button) | MouseEventKind::DoubleClick(button) => {
-                self.handle_press(event.x, event.y, button)
+            // These were one arm until the desktop icons were drawn, on the
+            // stated grounds that "nothing it draws does anything on the second
+            // click that it did not do on the first". That was true while
+            // double-click-to-maximize was the only such gesture and belonged
+            // to the compositor's title bar. An icon ends it: one click selects
+            // it and two open it, which is the whole of what an icon is for.
+            MouseEventKind::Press(button) => self.handle_press(event.x, event.y, button),
+            MouseEventKind::DoubleClick(button) => {
+                self.handle_icon_activate(event.x, event.y, button)
             }
             MouseEventKind::Scroll { dy, .. } => self.handle_scroll(event.x, event.y, dy),
             // A release belongs to whoever took the press, so chrome swallows
             // it: a client that saw a release it had no press for would treat a
             // click on the title bar as a click on itself.
-            MouseEventKind::Release(_) => {
+            MouseEventKind::Release(button) => {
+                // The icon layer first, and only when it is mid-gesture. A
+                // press on an icon leaves it non-idle and *only* a release
+                // returns it, so a release routed anywhere else would strand
+                // the layer in `PendingDrag` for the rest of the session.
+                if self.icons.is_interacting() {
+                    self.icons
+                        .handle_mouse_up(event.x, event.y, icon_button(button));
+                    // Where the icons ended up is what the user just chose, so
+                    // it is written now rather than at some later checkpoint
+                    // that may never come. The failure is dropped *here* and
+                    // nowhere else: this is a pointer release, and a modal
+                    // complaint about a configuration file is not an answer to
+                    // one. It is visible in the next save's success or failure.
+                    let _ = self.save_icon_positions();
+                    return ShellAction::Consumed;
+                }
                 if self.hit_test(event.x, event.y).is_shell_chrome() {
                     ShellAction::Consumed
                 } else {
@@ -2949,6 +2981,15 @@ impl DesktopShell {
             // the one exception below; forwarding the rest is what keeps hover
             // states alive in clients.
             MouseEventKind::Move | MouseEventKind::Enter | MouseEventKind::Leave => {
+                // A drag or a rubber-band on the desktop owns the pointer until
+                // it is released. Gated on the layer being mid-gesture rather
+                // than on the position, because a drag that leaves the icon
+                // area still belongs to it -- that is what makes dragging an
+                // icon to the far edge of the screen work at all.
+                if self.icons.is_interacting() {
+                    self.icons.handle_mouse_move(event.x, event.y, false);
+                    return ShellAction::Consumed;
+                }
                 // The overview covers the screen, so while it is up nothing
                 // behind it is reachable — including by a motion event, which is
                 // how a client keeps its own hover states alive. Forwarding one
@@ -3257,11 +3298,35 @@ impl DesktopShell {
                     ShellControlAction::Activate
                 },
             )),
-            // Not the shell's pixel, so not the shell's press. It used to focus
-            // the window it thought was there, which was both a guess — the
-            // shell holds no window rectangles — and a change to a list the
-            // next one from the compositor would overwrite.
-            Hit::Desktop => ShellAction::Pass,
+            // The desktop is the icon layer's. A press here selects an icon,
+            // clears the selection, or starts a rubber-band, and the layer
+            // answers whether it took it.
+            //
+            // It used to focus the window it thought was there, which was both
+            // a guess — the shell holds no window rectangles — and a change to
+            // a list the next event from the compositor would overwrite.
+            Hit::Desktop => {
+                let before = self.icons.selected_ids();
+                self.icons
+                    .handle_mouse_down(x, y, icon_button(button), false);
+                if self.icons.selected_ids() == before {
+                    // Nothing the user can see changed -- a press on empty
+                    // desktop with nothing selected. Still `Pass`, which is the
+                    // property `the_bare_desktop_is_not_the_shells_to_consume`
+                    // has asserted since before there were icons: the shell
+                    // does not claim a press it did not act on, and `Consumed`
+                    // is what marks the frame dirty.
+                    //
+                    // The first version of this arm consumed unconditionally,
+                    // on the theory that a rubber-band is a gesture in
+                    // progress. It is -- but the gesture does not need the
+                    // press *claimed*: the release reaches this surface either
+                    // way. Three existing tests said so and were right.
+                    ShellAction::Pass
+                } else {
+                    ShellAction::Consumed
+                }
+            }
             // Not reachable: `hit_test` only reports these while the overlay is
             // up, and the branch at the top of this method answers every press
             // in that case. Consumed rather than `unreachable!()` because the
@@ -7046,6 +7111,33 @@ impl DesktopShell {
     /// the session, which is also what owns the event that triggers a save.
     pub fn save_icon_positions(&self) -> std::io::Result<()> {
         self.icons.save_positions()
+    }
+
+    /// A double-click, which only the desktop icons act on.
+    ///
+    /// Anything that is not the bare desktop is handed to
+    /// [`handle_press`](Self::handle_press), which is what the two used to
+    /// share unconditionally: every other surface this shell draws still treats
+    /// a second click as another first one.
+    fn handle_icon_activate(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+        if !matches!(self.hit_test(x, y), Hit::Desktop) || button != MouseButton::Left {
+            return self.handle_press(x, y, button);
+        }
+        match self.icons.handle_double_click(x, y) {
+            icons::IconEvent::Activate(_, icons::IconAction::OpenPath(path)) => {
+                ShellAction::Launch(PathBuf::from(path))
+            }
+            // `LaunchSystem` and `Custom` name a thing this shell has no way to
+            // start yet: there is no registry mapping "recycle-bin" to anything
+            // runnable. Consumed rather than passed on, because the click did
+            // land on an icon and handing it to whatever is underneath would be
+            // worse than doing nothing visible.
+            icons::IconEvent::Activate(..) => ShellAction::Consumed,
+            // A double-click on empty desktop. The first click already went
+            // through `handle_press`, so the layer's state is settled either
+            // way and there is nothing further to do.
+            _ => ShellAction::Consumed,
+        }
     }
 
     /// Whether any of the shell's own surfaces is open over the desktop.

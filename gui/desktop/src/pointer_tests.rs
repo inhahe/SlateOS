@@ -20,6 +20,7 @@
 
 use crate::calendar;
 use crate::datetime_settings::AdditionalClock;
+use crate::icons;
 use crate::launcher::{self, Category};
 use crate::snap;
 use crate::{
@@ -32,6 +33,7 @@ use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
 use guitk::wheel;
+use std::path::PathBuf;
 
 fn shell() -> DesktopShell {
     DesktopShell::new(1000, 800)
@@ -1480,6 +1482,163 @@ fn a_double_click_is_the_same_event_to_this_shell_as_a_single_one() {
     // what a double-click opened.
     shell.handle_mouse(&click(sx, sy));
     assert!(!shell.start_menu_open);
+}
+
+// ---- desktop icons --------------------------------------------------------
+//
+// These were drawn on 2026-09-14 with nothing able to click them --
+// `TD-C-THE-DESKTOP-ICONS-ARE-DRAWN-AND-NOTHING-CAN-CLICK-THEM`, filed by this
+// lane against itself. Every test below goes through `handle_mouse`, the route
+// a real pointer takes, because the interactions were all implemented and
+// tested *inside* `icons.rs` while the route to them did not exist. Testing the
+// layer again would have proved what was never in doubt.
+
+/// A shell whose desktop has icons on it.
+///
+/// `populate_icons` reads the saved positions, so the caller must be holding a
+/// scratch configuration directory -- which is why every test below is wrapped.
+fn shell_with_icons() -> DesktopShell {
+    let mut shell = shell();
+    shell.populate_icons();
+    shell
+}
+
+/// The middle of the first icon, in screen coordinates.
+fn first_icon_point(shell: &DesktopShell) -> (f32, f32) {
+    let id = *shell.icons.icon_ids().first().expect("no icons");
+    let icon = shell
+        .icons
+        .get_icon(id)
+        .expect("the id just came from here");
+    #[allow(clippy::cast_precision_loss)]
+    (icon.x as f32 + 8.0, icon.y as f32 + 8.0)
+}
+
+/// **A press on an icon selects it.**
+#[test]
+fn pressing_an_icon_selects_it() {
+    settingsfile::testing::with_scratch_config("icons-press-selects", |_root| {
+        let mut shell = shell_with_icons();
+        assert!(shell.icons.selected_ids().is_empty());
+        let (x, y) = first_icon_point(&shell);
+        assert_eq!(shell.hit_test(x, y), Hit::Desktop, "not over bare desktop");
+
+        assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
+
+        assert_eq!(
+            shell.icons.selected_ids().len(),
+            1,
+            "the press did not reach the icon layer"
+        );
+    });
+}
+
+/// **A double-click on an icon asks for the thing it names.**
+#[test]
+fn double_clicking_an_icon_launches_what_it_points_at() {
+    settingsfile::testing::with_scratch_config("icons-double-click", |_root| {
+        let mut shell = shell_with_icons();
+        // An icon whose action is a path, since those are the ones the shell
+        // can act on: `LaunchSystem` names nothing runnable yet.
+        let id = shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|id| {
+                matches!(
+                    shell.icons.get_icon(*id).map(|i| &i.action),
+                    Some(icons::IconAction::OpenPath(_))
+                )
+            })
+            .expect("no icon opens a path");
+        let (x, y, want) = {
+            let icon = shell.icons.get_icon(id).expect("just found");
+            let icons::IconAction::OpenPath(path) = &icon.action else {
+                unreachable!("filtered above")
+            };
+            #[allow(clippy::cast_precision_loss)]
+            (icon.x as f32 + 8.0, icon.y as f32 + 8.0, path.clone())
+        };
+
+        let event = MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::DoubleClick(MouseButton::Left),
+        };
+        assert_eq!(
+            shell.handle_mouse(&event),
+            ShellAction::Launch(PathBuf::from(&want)),
+            "a double-click on an icon did not ask for its path"
+        );
+    });
+}
+
+/// **Dragging an icon moves it, and a release writes where it landed.**
+#[test]
+fn dragging_an_icon_moves_it_and_the_move_is_kept() {
+    settingsfile::testing::with_scratch_config("icons-drag", |_root| {
+        let mut shell = shell_with_icons();
+        let id = *shell.icons.icon_ids().first().expect("no icons");
+        let (x, y) = first_icon_point(&shell);
+        let before = shell
+            .icons
+            .get_icon(id)
+            .map(|i| (i.x, i.y))
+            .expect("an icon");
+
+        shell.handle_mouse(&click(x, y));
+        shell.handle_mouse(&MouseEvent {
+            x: x + 240.0,
+            y: y + 160.0,
+            kind: MouseEventKind::Move,
+        });
+        shell.handle_mouse(&MouseEvent {
+            x: x + 240.0,
+            y: y + 160.0,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        });
+
+        let after = shell
+            .icons
+            .get_icon(id)
+            .map(|i| (i.x, i.y))
+            .expect("an icon");
+        assert_ne!(after, before, "the drag did not move the icon");
+        assert!(
+            !shell.icons.is_interacting(),
+            "the release did not end the gesture, so the layer is stranded"
+        );
+
+        // And it reached the file, which is the half a release is responsible
+        // for: a move that is only on screen is lost at the next restart.
+        let mut restarted = shell_with_icons();
+        assert_eq!(
+            restarted.icons.get_icon(id).map(|i| (i.x, i.y)),
+            Some(after),
+            "the dragged position did not survive"
+        );
+        restarted.icons.deselect_all();
+    });
+}
+
+/// A press on empty desktop clears a selection, and says it changed something.
+#[test]
+fn pressing_empty_desktop_clears_the_selection() {
+    settingsfile::testing::with_scratch_config("icons-clear", |_root| {
+        let mut shell = shell_with_icons();
+        shell.icons.select_all();
+        assert!(!shell.icons.selected_ids().is_empty());
+
+        // Far from any icon, but still bare desktop.
+        let (x, y) = (900.0, 700.0);
+        assert_eq!(shell.hit_test(x, y), Hit::Desktop);
+        assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
+
+        assert!(
+            shell.icons.selected_ids().is_empty(),
+            "the press did not clear the selection"
+        );
+    });
 }
 
 #[test]

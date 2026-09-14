@@ -921,22 +921,6 @@ fn when(color: bool, code: &str) -> Option<&str> {
     if color { Some(code) } else { None }
 }
 
-fn color_red(s: &str, color: bool) -> String {
-    if color {
-        format!("{RED}{s}{RESET}")
-    } else {
-        s.to_string()
-    }
-}
-
-fn color_green(s: &str, color: bool) -> String {
-    if color {
-        format!("{GREEN}{s}{RESET}")
-    } else {
-        s.to_string()
-    }
-}
-
 fn color_cyan(s: &str, color: bool) -> String {
     if color {
         format!("{CYAN}{s}{RESET}")
@@ -1041,15 +1025,107 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
 // Unified diff output
 // ============================================================================
 
+/// The `<path>TAB<mtime>` field GNU puts on a `---`, `+++` or `***` header.
+///
+/// Measured against GNU diffutils rather than reconstructed, because three
+/// details of it are not guessable:
+///
+/// ```text
+/// --- x.txt<TAB>2020-01-02 08:04:05.000000000 +0000
+/// ```
+///
+/// * the separator is a TAB, and `patch` relies on it -- everything after the
+///   tab is the timestamp, which is how a path containing spaces stays
+///   readable;
+/// * the fraction is NINE digits, always, even for a whole second;
+/// * the time is LOCAL, not UTC. `TZ=America/New_York` on the same file gives
+///   `2020-01-02 03:04:05.000000000 -0500`, so the offset moves with it.
+///
+/// A file whose mtime cannot be read -- stdin, above all -- takes the current
+/// time, which is also measured: GNU stamps `diff -u - y.txt` with now.
+fn header_field(path: &str) -> Vec<u8> {
+    let (secs, nanos) = mtime_parts(path);
+    let tm = localtime::Zone::from_env().local(secs, nanos);
+    let mut out = path.as_bytes().to_vec();
+    out.push(b'\t');
+    out.extend_from_slice(&localtime::strftime(b"%Y-%m-%d %H:%M:%S.%N %z", &tm));
+    out
+}
+
+/// `path`'s modification time as `(seconds, nanoseconds)` since the epoch,
+/// falling back to now.
+///
+/// Split out so the fallback is one decision in one place: every way of
+/// failing to learn a file's mtime -- it does not exist, it is a pipe, the
+/// platform will not say -- produces the same answer GNU produces for stdin.
+fn mtime_parts(path: &str) -> (i64, u32) {
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or((0, 0), |d| {
+                (i64::try_from(d.as_secs()).unwrap_or(0), d.subsec_nanos())
+            })
+    };
+    let Ok(meta) = fs::metadata(path) else {
+        return now();
+    };
+    let Ok(modified) = meta.modified() else {
+        return now();
+    };
+    epoch_parts(modified)
+}
+
+/// A `SystemTime` as `(seconds, nanoseconds)` since the epoch, with the
+/// nanoseconds always POSITIVE.
+///
+/// Split from [`mtime_parts`] because the pre-1970 branch is the only real
+/// arithmetic here and a path-taking function cannot be given a 1969 file to
+/// test with.
+///
+/// `duration_since` reports a pre-epoch instant as a positive gap the other
+/// way round, so a naive negation puts the instant on the wrong side of the
+/// second: 0.75 s before the epoch is `(-1, 250_000_000)`, not
+/// `(0, -750_000_000)` -- which is not even representable -- nor `(-0, 750...)`,
+/// which would name 1970-01-01T00:00:00.75, three quarters of a second in the
+/// wrong direction. `strftime` renders the two fields independently, so an
+/// error here is a timestamp that looks entirely plausible.
+fn epoch_parts(t: std::time::SystemTime) -> (i64, u32) {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => (i64::try_from(d.as_secs()).unwrap_or(0), d.subsec_nanos()),
+        Err(e) => {
+            let d = e.duration();
+            let secs = i64::try_from(d.as_secs()).unwrap_or(0);
+            if d.subsec_nanos() == 0 {
+                (-secs, 0)
+            } else {
+                (
+                    -secs.saturating_add(1),
+                    1_000_000_000_u32.saturating_sub(d.subsec_nanos()),
+                )
+            }
+        }
+    }
+}
+
 fn print_unified(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
 
-    // File headers.
-    let hdr1 = format!("--- {path1}");
-    let hdr2 = format!("+++ {path2}");
-    let _ = writeln!(w, "{}", color_red(&hdr1, config.color));
-    let _ = writeln!(w, "{}", color_green(&hdr2, config.color));
+    // File headers, carrying the mtime GNU puts there. Written as bytes for
+    // the same reason the body is: a path is bytes, and this one is read back
+    // by `patch`.
+    write_body_line(
+        &mut w,
+        b"--- ",
+        &header_field(path1),
+        when(config.color, RED),
+    );
+    write_body_line(
+        &mut w,
+        b"+++ ",
+        &header_field(path2),
+        when(config.color, GREEN),
+    );
 
     for hunk in hunks {
         // Hunk header: @@ -start,count +start,count @@
@@ -1086,8 +1162,18 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
 
-    let _ = writeln!(w, "{}", color_red(&format!("*** {path1}"), config.color));
-    let _ = writeln!(w, "{}", color_green(&format!("--- {path2}"), config.color));
+    write_body_line(
+        &mut w,
+        b"*** ",
+        &header_field(path1),
+        when(config.color, RED),
+    );
+    write_body_line(
+        &mut w,
+        b"--- ",
+        &header_field(path2),
+        when(config.color, GREEN),
+    );
 
     for hunk in hunks {
         let _ = writeln!(w, "***************");
@@ -1605,6 +1691,63 @@ fn main() {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    // ---------------- the header timestamp ----------------
+
+    /// A pre-1970 mtime keeps its nanoseconds on the right side of the second.
+    ///
+    /// `duration_since` hands a pre-epoch instant back as a POSITIVE gap the
+    /// other way round, so the obvious negation is wrong by up to a second in
+    /// the wrong direction -- and `strftime` would render the result without
+    /// complaint, because both fields are individually valid.
+    #[test]
+    fn an_mtime_before_the_epoch_keeps_positive_nanoseconds() {
+        use std::time::{Duration, UNIX_EPOCH};
+        // Exactly on the epoch.
+        assert_eq!(epoch_parts(UNIX_EPOCH), (0, 0));
+        // A whole second before: no remainder to carry.
+        assert_eq!(epoch_parts(UNIX_EPOCH - Duration::from_secs(1)), (-1, 0));
+        // 0.75 s before the epoch is one second before, plus a quarter.
+        let t = UNIX_EPOCH - Duration::from_nanos(750_000_000);
+        assert_eq!(epoch_parts(t), (-1, 250_000_000));
+        // 1.75 s before.
+        let t = UNIX_EPOCH - Duration::from_nanos(1_750_000_000);
+        assert_eq!(epoch_parts(t), (-2, 250_000_000));
+        // After the epoch is the plain case, and is the control: without it a
+        // function that negated everything would pass the cases above.
+        let t = UNIX_EPOCH + Duration::from_nanos(1_250_000_000);
+        assert_eq!(epoch_parts(t), (1, 250_000_000));
+    }
+
+    /// The header field is `<path>TAB<stamp>`, and the fraction is nine digits.
+    ///
+    /// Measured shape, from GNU:
+    ///   `--- x.txt<TAB>2020-01-02 08:04:05.000000000 +0000`
+    /// The TAB is what `patch` splits on, and a fraction printed with fewer
+    /// digits still parses -- so nothing downstream would notice the loss.
+    #[test]
+    fn the_header_field_is_a_tab_then_a_nine_digit_stamp() {
+        let field = header_field("nosuchfile.txt");
+        let at = field
+            .iter()
+            .position(|&b| b == b'\t')
+            .expect("the separator must be a TAB");
+        assert_eq!(&field[..at], b"nosuchfile.txt");
+        let stamp = &field[at + 1..];
+        // `YYYY-MM-DD HH:MM:SS.NNNNNNNNN +ZZZZ`
+        let dot = stamp
+            .iter()
+            .position(|&b| b == b'.')
+            .expect("a fractional second must be present");
+        let frac: Vec<u8> = stamp[dot + 1..]
+            .iter()
+            .copied()
+            .take_while(u8::is_ascii_digit)
+            .collect();
+        assert_eq!(frac.len(), 9, "GNU always prints nine digits");
+        let last = stamp.split(|&b| b == b' ').next_back().unwrap_or(b"");
+        assert_eq!(last.len(), 5, "a +ZZZZ offset, got {last:?}");
+    }
 
     // ---------------- bytes, not UTF-8 ----------------
 

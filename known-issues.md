@@ -144378,6 +144378,24 @@ smaller. Written down because the pattern is in *how I look*, not in any one
 subject, and because twice the correct answer was already sitting in a tool
 this repo ships.
 
+**The same failure runs the other way, and that direction is worse.** Later the
+same day I overwrote `userspace/coreutils/build.rs` — it held the bare-metal
+linker-script emission and I replaced it with nine lines — and then wrote an
+audit over all 75 of that day's commits to find any other file I had clobbered.
+It reported **none**. It was wrong: the one case I already knew about counted
+its previous size as `stdout.count("
+") + 1`, which over-counts a file ending
+in a newline, so the ratio came out 21/25 = 0.84 against a 0.85 cutoff and the
+known clobbering fell just under it.
+
+An over-report wastes time. **An under-report ends the investigation**, and it
+ends it with a number that reads like reassurance. The fix is the one habit
+that catches both: give the instrument a case whose answer you already know,
+and refuse to believe a clean result until it has found that one. Re-run with
+the count fixed and a control asserting the known case was found, the audit
+reported exactly one file — which was the truth, and is why the blast radius is
+now known to be one rather than assumed to be.
+
 | question | my ad-hoc answer | the real answer | what got it right |
 |---|---|---|---|
 | how many flags do we accept and ignore? | **9** (grep the `## Limitations` lists) | **1** | reading the code behind each row |

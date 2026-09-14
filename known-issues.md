@@ -30229,6 +30229,18 @@ it by hand — see
 `requests/b-a-boot-lock-survives-its-dead-owner.md`. The two compound: a flaky
 hang costs the 1800s timeout *plus* up to 20 minutes of the next run's time.
 
+**The stale-blocker advisory flags this entry, and it is a false positive.**
+`boot-test.sh`'s advisory gate reports entries citing a `requests/` file that
+reports itself finished, and this one cites
+`b-a-boot-lock-survives-its-dead-owner.md`, which landed 2026-08-16. But the
+citation above is a *compounding cost*, not a dependency: the lock bug is fixed
+and this entry's own defect -- an intermittent host-level QEMU/glib hang, cause
+still unidentified -- is untouched by it. Checked 2026-09-14 by lane A; written
+down so the next reader does not re-derive it. The advisory's rule is worth
+keeping as it is: it cannot tell a blocker from a mention without reading the
+prose, and flagging a few resolved-looking entries is cheaper than missing a
+real one.
+
 ## B-A-MERGE-RESURRECTED-THREE-ARCHIVED-ENTRIES, AND NOTHING WAS WATCHING FOR IT (lane A, 2026-08-16)
 
 **Status: FIXED 2026-08-16** (lane A). The three duplicated copies are removed

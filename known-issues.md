@@ -99940,6 +99940,38 @@ tooling gap is real and worth closing — it is a push-time blind spot in exactl
 the class of code this entry exists for — but it is a ratchet to install, not a
 fire.
 
+**2026-09-14: the gap stopped being latent, and cost 2004 seconds.** Lane C's
+`1db3c7cc8` put a clippy denial -- `field_reassign_with_default` -- in the test
+target of `apps/diskcleanup`. It **passed the push gate** and killed lane A's
+boot at gate 86, before QEMU, after 33 minutes of gates. Two witnesses were
+unvalidated as a result and had to be re-run.
+
+**The predicate was never the problem; the population is.** This script does run
+`cargo clippy` with `--all-targets`, so the ratchet recorded above is real and
+still installed. What it does not do is *look at the crate*:
+`crates_with_unix_code()` derives the list by scanning for `#[cfg(unix)]` blocks,
+and `apps/diskcleanup` contains **zero** of them. The failing test is unix-only
+because it pulls in `oswindow`, not because it carries a unix gate -- so the
+crate is absent from the list entirely, and `--all-targets` cannot help a crate
+that is never named.
+
+That is 937's **population blindness** in its purest form: right predicate, wrong
+scope, and widening the scope fixes it mechanically.
+
+**This was predicted, in this script's own docstring, and filed as hypothetical.**
+It names "a denial in the test target of `apps/launcher`, a crate with no
+`#[cfg(unix)]` code at all" as the concrete case. `apps/launcher` also has zero
+`cfg(unix)` blocks, so today's failure is the same shape with a different crate
+name -- the prediction was right and sat unacted-on because nothing had paid for
+it yet. It has now been paid for once, by the lane that did not write the code.
+
+**The fix is to make the push gate's population the workspace**, the way
+`boot-test.sh` already does (`--all-targets --exclude kernel`), rather than
+crates-containing-cfg(unix). Not done here for two reasons, both pending:
+`scripts/` ownership is **A-Q11**, and the cost of a heavier push gate is the
+subject of **A-Q13** -- which this incident is direct evidence for, since the
+cost of *not* gating landed on a lane that could not have caused it.
+
 **The ratchet is installed, 2026-09-12.** `check-cfg-unix.py` passes
 `--all-targets`, so the push gate now compiles the `#[cfg(unix)]` code inside
 `#[cfg(test)]` modules that it previously skipped. Measured after the change:

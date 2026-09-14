@@ -6254,11 +6254,6 @@ extern "C" fn kernel_main() -> ! {
                 fs::dedup::self_test(),
             );
             selftest::dispatch_debug(
-                "desktop-icons",
-                selftest::Severity::Diagnostic,
-                fs::deskicons::self_test(),
-            );
-            selftest::dispatch_debug(
                 "dirsync",
                 selftest::Severity::Diagnostic,
                 fs::dirsync::self_test(),

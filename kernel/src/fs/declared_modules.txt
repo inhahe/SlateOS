@@ -52,7 +52,6 @@ cursorsettings
 datausage
 dedup
 defaultapps
-deskicons
 detailcols
 devfs
 devicemgr

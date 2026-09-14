@@ -104,7 +104,6 @@ pub mod datausage;
 pub mod dedup;
 pub mod defaultapps;
 pub mod deferred_ops;
-pub mod deskicons;
 pub mod detailcols;
 pub mod devfreq;
 pub mod devfs;

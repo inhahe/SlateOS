@@ -143549,9 +143549,39 @@ a copy to a USB stick waits behind a copy to the internal disk when it did not
 have to. The user-visible *gain* over what was there before is that it is
 accepted at all.
 
-## TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY
+## TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY -- FIXED 2026-09-14
 
-**Date:** 2026-09-14. **Lane:** C.
+**Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**
+
+**What was done.** A megabyte is the unit of interruption now, not a file.
+`OperationExecutor` carries a `CopyCursor` -- the open source, the open
+temporary, and which action they belong to -- and `copy_chunk` answers a third
+outcome, `ActionOutcome::Partial`, on which the executor steps *back* to the
+same action without journalling it, counting it, or giving it an undo entry.
+None of those are true of a file still being written.
+
+Two details that are not obvious and are the reason it works:
+
+* the chunk is **filled**, not read once. `Read::read` may return fewer bytes
+  than asked for at any time, so a short read says nothing; a short *fill* is
+  the end of the file. Without that every file would spend one extra step
+  discovering its own end, which for a folder of small files is twice the steps
+  for no bytes -- and the whole existing suite passed unchanged because of it;
+* the partial bytes go to the temporary `atomic_copy_file` already used, and
+  the rename that gives them the real name happens only when the last one
+  lands. A cancelled copy therefore leaves *nothing* under the name the user
+  expects, rather than a truncated file that is indistinguishable from a small
+  one. `finish` removes the temporary as well, so a stopped copy leaves nothing
+  at all.
+
+**What it deliberately did not change:** `copied_bytes` still advances a whole
+file at a time, so the explorer's progress bar -- which is by files anyway --
+does not creep within one enormous file. Counting part-files would need the
+byte total and the file count to be reconciled at the moment a partial becomes
+a whole, and the bar and the words beside it must not disagree. The window
+staying alive was the defect; this is a refinement of the picture.
+
+The original entry follows.
 
 **In short:** the file explorer no longer freezes while copying *many* files --
 it does a few, draws, does a few more. But it still freezes while copying **one

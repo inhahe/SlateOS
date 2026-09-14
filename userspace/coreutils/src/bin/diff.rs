@@ -1668,14 +1668,19 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
         let e2 = p2.exists();
 
         if !e1 && !config.new_file {
-            eprintln!("Only in {}: {name}", path2.display());
+            // STDOUT. Measured: `diff -r da db 2>/dev/null` still shows both
+            // `Only in` lines and `2>&1 >/dev/null` shows neither, so GNU
+            // puts them on stdout. They are a RESULT -- part of the answer to
+            // "how do these trees differ" -- not a diagnostic, and on stderr
+            // they were lost by every caller that redirected the diff.
+            println!("Only in {}: {name}", path2.display());
             if worst_exit < 1 {
                 worst_exit = 1;
             }
             continue;
         }
         if !e2 && !config.new_file {
-            eprintln!("Only in {}: {name}", path1.display());
+            println!("Only in {}: {name}", path1.display());
             if worst_exit < 1 {
                 worst_exit = 1;
             }
@@ -1774,10 +1779,20 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
     // Handle binary files.
     match (&content1, &content2) {
         (FileContent::Binary, _) | (_, FileContent::Binary) => {
-            // For binary files, just report whether they differ — same
-            // message regardless of --brief.
-            let _ = config.brief;
-            println!("Binary files {path1_str} and {path2_str} differ");
+            // The wording DOES depend on --brief, which the comment that
+            // stood here denied. Measured:
+            //
+            //     diff  nul.txt nul2.txt   Binary files nul.txt and nul2.txt differ
+            //     diff -q nul.txt nul2.txt Files nul.txt and nul2.txt differ
+            //
+            // `-q` asks only whether the files differ, and at that level a
+            // binary file is not a special case -- so it gets the same
+            // sentence a pair of text files gets.
+            if config.brief {
+                println!("Files {path1_str} and {path2_str} differ");
+            } else {
+                println!("Binary files {path1_str} and {path2_str} differ");
+            }
             return 1;
         }
         _ => {}

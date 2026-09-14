@@ -48,10 +48,39 @@ use alloc::string::String;
 /// the module docs.
 pub const EX_USAGE: i32 = 64;
 
+// Every name below goes through `quoting::quote_glibc`, and that is the same
+// choice `userspace/coreutils/src/getopt.rs` makes for the same messages. It
+// used to be `quoteaf` here, which meant THE SAME ERROR CAME OUT DIFFERENTLY
+// depending on which half of the userland printed it:
+//
+//     GNU sort:      unrecognized option '--it's'
+//     our sort:      unrecognized option '--it\'s'    (getopt, quote_glibc)
+//     our blockdev:  unrecognized option "--it's"     (here, quoteaf)
+//
+// Three renderings of one error. Observed by running all three, not inferred:
+// `quoteaf` switches to double quotes when the text holds an apostrophe, and
+// `quote_glibc` keeps straight single quotes and backslash-escapes.
+//
+// This crate exists to stop exactly that. Its own header says the wording "is
+// not ours -- it is what `getopt_long` prints and what util-linux repeats
+// verbatim -- so every program here has to render it identically", and a
+// second copy of the wording in `getopt.rs` had drifted from it in the one
+// input nobody had tested.
+//
+// `quote_glibc` is the one to agree on because it is the deliberate policy of
+// the larger consumer: glibc spells straight quotes into its format strings
+// rather than asking the locale, so these stay `'--key'` where a gnulib
+// argmatch message becomes curly. We escape where glibc does not, on purpose —
+// an unescaped newline in an option name would let it forge a second
+// diagnostic line.
+//
+// For an ordinary ASCII option name the two are byte-identical, which is why
+// no test caught this and why the change moves no existing output.
+
 /// `unrecognized option '--zzq'` — a long option the program does not have.
 #[must_use]
 pub fn unrecognized_option(arg: &[u8]) -> String {
-    format!("unrecognized option {}", quoting::quoteaf(arg))
+    format!("unrecognized option {}", quoting::quote_glibc(arg))
 }
 
 /// `invalid option -- 'q'` — a short option the program does not have.
@@ -77,13 +106,13 @@ pub fn unrecognized_option(arg: &[u8]) -> String {
 /// perfectly.
 #[must_use]
 pub fn invalid_option(opt: u8) -> String {
-    format!("invalid option -- {}", quoting::quoteaf(&[opt]))
+    format!("invalid option -- {}", quoting::quote_glibc(&[opt]))
 }
 
 /// `extra operand 'x'` — a word where the program takes no more.
 #[must_use]
 pub fn extra_operand(arg: &[u8]) -> String {
-    format!("extra operand {}", quoting::quoteaf(arg))
+    format!("extra operand {}", quoting::quote_glibc(arg))
 }
 
 /// The refusal for an argument that is an option this program does not have,
@@ -134,6 +163,29 @@ pub fn with_help_pointer(name: &str, body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The renderings must not depend on WHICH half of the userland prints
+    /// them, which is the whole reason this crate exists.
+    ///
+    /// An apostrophe is the input that tells the two policies apart, and it is
+    /// the one no test had. `quoteaf` answers `"--it's"` -- double quotes --
+    /// where `quote_glibc` answers `'--it\'s'`. Pinned here so a future
+    /// tidy-up back to `quoteaf` fails loudly instead of silently splitting
+    /// the userland's diagnostics in two again.
+    #[test]
+    fn odd_names_render_the_glibc_way_not_the_shell_way() {
+        assert_eq!(
+            super::unrecognized_option(b"--it's"),
+            r"unrecognized option '--it\'s'"
+        );
+        // ...while an ordinary name is identical under either policy, which is
+        // why the split survived so long.
+        assert_eq!(
+            super::unrecognized_option(b"--zzq"),
+            "unrecognized option '--zzq'"
+        );
+        assert_eq!(super::invalid_option(b'x'), "invalid option -- 'x'");
+    }
+
     use super::*;
 
     #[test]

@@ -144345,3 +144345,77 @@ subtlety in it — the encoding boundary after `--input=` — is the kind that
 produces a silently wrong path rather than a compile error. The measurement is
 the expensive part and it is now done: four bins, named, with the mechanism
 identified and the one non-obvious case called out.
+
+## B-PATCH-REFUSES-EVERY-FILE-THAT-IS-NOT-VALID-UTF-8 (lane B, 2026-09-14)
+
+**Status:** OPEN — fix in progress · `userspace/coreutils/src/bin/patch.rs`
+
+Measured, both sides, on the same two files:
+
+    $ patch -i u.diff orig.txt          # orig.txt line 2 holds byte 0xE9
+    patch: **** Can't open patch file u.diff : stream did not contain valid UTF-8
+    exit 2                                                        # ours
+
+    $ patch -i u.diff orig.txt
+    patching file orig.txt
+    exit 0, byte 0xE9 preserved                                   # GNU patch 2.7.6
+
+`patch` cannot apply a patch to a file that is not valid UTF-8, and cannot
+even *read* a patch file that is not — the 0xE9 above is in a context line, so
+the refusal happens before any target is opened. A single Latin-1 byte
+anywhere in a source file's comments is enough. `patch` is on the image.
+
+### This is the bug the argv finding was a symptom of
+
+Yesterday's entry (`B-FOUR-STAGED-UTILITIES-STILL-DIE-ON-A-LEGAL-FILENAME`)
+scoped this as an argv problem and proposed routing the four bins through
+`coreutils::getopt`. That scoping was too small, and the reason is worth
+keeping: I found the argv panic with a detector that only looks at argv, so
+the answer it gave was shaped like its question. Reading the downstream uses
+to plan the conversion is what turned it up — `target_file` flows into a
+`String` that comes from `fs::read_to_string`, which meant the `String` was
+never really about argv at all.
+
+Both faults are the same cause and the fix is one job, not two:
+
+| | Chokepoint | Symptom |
+|---|---|---|
+| 1 | `env::args()` at line 1054 | panic on a non-Unicode *filename* |
+| 2 | `fs::read_to_string` ×3 | refusal on non-UTF-8 *content*, the above |
+
+Chokepoint 2 is the larger of the two by any measure a user would apply: a
+non-Unicode filename is rare, a Latin-1 byte in a patched file is not.
+
+### The proper fix, and why it is not a boundary patch
+
+`patch` is `String`-typed through its spine, not just at its edges:
+`HunkLine::{Context,Remove,Add}(String)`, `FilePatch { old_path: String,
+new_path: String, header_lines: Vec<String> }`, and `apply_hunk(lines:
+&[String])` / `try_hunk_at` / `strip_path` / `parse_file_path` and ~11 more
+`&str` signatures. There is no encode/decode boundary to move, because the
+line *contents* are what must stay exact and they are carried the whole way.
+So the fix is to carry lines as `Vec<u8>`/`&[u8]` and keep the ASCII
+structural parsing (`@@`, `---`, `+++`, `+`/`-`/space) on byte literals.
+
+Per CLAUDE.md §7 this is what should have been written in the first place:
+*"Never force UTF-8 on filesystem paths, environment variables, or pipe
+data."* Patch content is file data, which is the same rule.
+
+### Reproduction
+
+    python -c "
+    open('orig.txt','wb').write(b'first line\ncaf\xe9 comment\nthird line\n')
+    open('u.diff','wb').write(b'--- orig.txt\n+++ orig.txt\n@@ -1,3 +1,3 @@\n first line\n caf\xe9 comment\n-third line\n+THIRD LINE\n')
+    "
+    patch -i u.diff orig.txt
+
+GNU exits 0 and leaves `THIRD LINE` with the 0xE9 untouched. Keep this as the
+acceptance case: it fails on the *patch* file, so it also covers chokepoint 1's
+sibling — a patch whose own `---` path is not UTF-8.
+
+### One separate thing the probe turned up, not yet chased
+
+GNU `patch -Q` prints `patch: invalid option -- 'Q'` and **exits 0**; ours
+exits 2. Measured once, in passing, while probing something else, so it wants
+re-measuring deliberately before anything is changed — a one-sample exit code
+is exactly the kind of thing this file has been wrong about before.

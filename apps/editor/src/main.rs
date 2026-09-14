@@ -23,6 +23,7 @@ mod syntree;
 
 use appearance::Palette;
 use guitk::color::Color;
+use guitk::dialog::FileDialog;
 use guitk::event::Event;
 use guitk::menubar;
 use guitk::render::{FontWeightHint, RenderTree, TextSpan};
@@ -1526,6 +1527,19 @@ fn folded_match_end(haystack: &str, at: usize, needle: &str) -> Option<usize> {
     want.is_none().then_some(end)
 }
 
+/// Which question the open dialog is asking.
+///
+/// One dialog type answers both, so the editor has to remember which it asked:
+/// a path chosen for Open is read, and the same path chosen for Save As is
+/// written, and nothing in the returned `PathBuf` says which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogPurpose {
+    /// Read the chosen file into a new tab.
+    Open,
+    /// Write the active document to the chosen path.
+    SaveAs,
+}
+
 /// Height of the tab strip along the top, in pixels.
 ///
 /// A constant rather than a literal in each of the four places that used to
@@ -1615,6 +1629,22 @@ pub struct EditorState {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The open-or-save dialog, when one is up.
+    ///
+    /// `guitk::dialog::FileDialog`, which has existed all along -- 3,436 lines
+    /// with open, save and select-folder modes -- and which
+    /// `apps/archivemanager`, `apps/diskimager`, `apps/vpnmanager` and the
+    /// desktop shell already drive. The editor had no New, Open or Save As at
+    /// all, and `known-issues.md` recorded the cause as "there is no file
+    /// picker anywhere in gui/", which was a claim made by looking for a
+    /// *crate* of that name rather than a module.
+    ///
+    /// Modal while it is up, like [`external_prompt`](Self::external_prompt)
+    /// and for the same reason: it is asking which file, and every editing key
+    /// would be applied to an answer that has not been given.
+    pub dialog: Option<FileDialog>,
+    /// What the open dialog is for, since one type serves both questions.
+    dialog_purpose: DialogPurpose,
     /// The File / Edit / Search bar along the top.
     ///
     /// Holds only *which* menu is open and where the pointer is inside it. The
@@ -1676,6 +1706,8 @@ impl EditorState {
             modifiers: oswindow::Modifiers::NONE,
             clipboard: String::new(),
             find_field: FindField::Query,
+            dialog: None,
+            dialog_purpose: DialogPurpose::Open,
             menu_bar: menubar::MenuBar::new(Vec::new()),
         };
         // The opening frame is drawn before any event arrives, so the bar's
@@ -1922,6 +1954,12 @@ impl EditorState {
         // is a question that has to be answered before a menu is worth opening.
         tree.commands
             .extend(self.menu_bar.render(&self.palette, self.window_width));
+
+        // The file dialog, over everything the editor draws and under the
+        // external-change prompt, which is the one question that outranks it.
+        if let Some(dialog) = self.dialog.as_ref() {
+            tree.commands.extend(dialog.render(&self.palette, w, h));
+        }
 
         // External-change prompt / merge review (modal overlay)
         if let Some(prompt) = self.external_prompt.as_ref() {

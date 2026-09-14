@@ -144407,12 +144407,27 @@ editor already says so itself: pressing Ctrl+S on that page answers *"No file
 name -- Save As needs a file dialog"*.
 
 **It is one gap wearing three faces.** New, Open and Save As all need the same
-missing thing: a way to ask the user for a path. There is no file picker
-anywhere in `gui/` -- no dialog crate, no chooser, no prompt -- so all three are
-blocked on the same absent part rather than on three separate oversights. That
-is why the menu bar ships with File holding only Save and Close Tab: a greyed
-`Open...` that can never ungrey is a dead control, and this tree has been
-removing those all week, not adding them.
+thing: a way to ask the user for a path.
+
+**CORRECTION, 2026-09-14, and it inverts this entry.** The original text here
+read "There is no file picker anywhere in `gui/` -- no dialog crate, no
+chooser, no prompt". That is false. `guitk::dialog::FileDialog` is 3,436 lines
+with open, save and select-folder modes, filters, an initial path, a default
+filename, history navigation and a hidden-files toggle -- and it is **not an
+island**: `apps/archivemanager`, `apps/diskimager`, `apps/vpnmanager` and the
+desktop shell all drive it today.
+
+How the claim was made: by running `ls gui/` and looking for a *crate* called
+dialog, picker or chooser. There is no such crate. There is a *module*, inside
+the toolkit every one of these programs already depends on. The check was at
+the wrong granularity and the conclusion was stated as fact in an entry three
+other programs are blocked by.
+
+That is the same error as `-p sysinfo` earlier the same day -- a true answer to
+a narrower question than the one being asked -- and it cost more, because it
+nearly bought an afternoon building a second file picker beside the working one.
+
+So the work is wiring, not building, and the entry's blocking claim is void.
 
 **Where it lives.** `apps/editor/src/input.rs` -- `save_active` is the function
 that prints the message above. `EditorState::open_file` exists,
@@ -144420,10 +144435,10 @@ that prints the message above. `EditorState::open_file` exists,
 `open_all` at startup. `apps/editor/src/main.rs` has no `Key::O` or `Key::N`
 binding at all.
 
-**The proper fix, and it does not belong in the editor.** A file picker is
-wanted by every application that opens a document, so building one inside the
-text editor would be the first of several. It belongs in `gui/toolkit`, and
-most of it already exists there:
+**The fix is to call what is already there.** `FileDialog::open()`,
+`FileDialog::save().with_filename(..)`, and the editor's File menu grows three
+rows that are already written. The pieces below are what it is *built* from,
+listed here before anyone knew it had been built:
 
 * `guitk::pathbar` -- path editing with completion, wired into the file
   explorer on 2026-09-14, so it is known to work against a real directory.

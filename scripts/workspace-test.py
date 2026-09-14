@@ -24,6 +24,22 @@ hiding real failures.  Three separate traps, all of which were hit on
    So: scan the log for every `test result: FAILED` and every individual
    `… FAILED` line, and print them.
 
+AND THE SAME TRAP ONE LEVEL UP, which this script cannot defend against and
+which caught its own author on 2026-09-14.  Trap 2 is about piping *cargo*;
+piping **this script** does it again.  `workspace-test.py | tail -3` exits 0
+for a failing run, because a pipeline's status is still the last command's --
+and the verdict line is only in the last three when the run is clean.  A red
+run prints the failing test names *after* the summary, so `tail` shows a test
+name and a zero status, which reads exactly like a pass.
+
+Run it unpiped and look at `$?`:
+
+    python scripts/workspace-test.py > /tmp/wt.txt 2>&1; echo "exit: $?"
+
+That session had been piping it for hours and was never misled, because every
+run until then happened to print PASS inside the window.  Not being caught by
+a trap you are standing in is not the same as avoiding it.
+
 A deadlocked test never exits on its own, so the run goes through
 `run-timeout.py`, which holds the whole process tree in one killable unit.
 

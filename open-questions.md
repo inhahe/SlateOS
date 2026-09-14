@@ -1117,6 +1117,71 @@ arrow on the development host, which is also what makes the current state easy
 to miss. Three settings stay inert — `cursor_size`, `cursor_scheme` and the
 whole `CursorShape` vocabulary — and every accessibility question about pointer
 size stays unanswerable. Nothing degrades with time; it simply does not exist.
+## C-Q20 — [C] Four lists of "which programs are installed", and nothing can read the others. Which is the real one? — Status: OPEN
+
+**In short:** four different parts of the system each keep their own list of
+what programs exist on the machine, and the lists disagree. No program can read
+another's. The visible consequence today: the Settings app cannot offer you a
+choice of web browser, because it has no way to find out what browsers are
+installed — so that screen shows a placeholder. The question is which list
+should become the one everybody reads.
+
+**The four lists**, with what each knows:
+
+| where | holds | who can read it |
+|---|---|---|
+| `kernel/src/fs/appregistry.rs` | 9 built-in apps, categories, MIME types | only the kernel's own debug shell -- there is no `/proc` view and nothing in userspace names it |
+| `gui/desktop/src/launcher.rs` | 22 apps with real binary paths, drives the start menu | the desktop shell only |
+| `apps/fileassoc` | 8 apps and which file types they open | nobody -- it is a program, not a library |
+| `gui/desktop/src/default_apps.rs` | a third app list plus per-role defaults | nobody -- 2,325 lines no menu opens |
+
+They are not copies of one list. Until 2026-09-14 the `fileassoc` one named
+eight programs that **do not exist in this tree** (`textedit`, `photoviewer`,
+`browser`, `office`…) while the shell's named the real ones; that half is fixed,
+but the disagreement was invisible for as long as the lists were.
+
+**What it blocks right now.** `design-decisions.md` 815 (the operator's answer
+to C-Q6) says screens you *open* move into the Settings app and the shell's
+copies are deleted. `default_apps.rs` is one of those screens. Porting it needs
+a list of installed programs to choose between, and the Settings app can reach
+none of the four. So a decided piece of work is stopped on this.
+
+### Options
+
+**A. The kernel's registry is the authority; expose it.**
+`fs::appregistry` gains a `/proc` view and userspace reads it.
+*What changes:* installing a program makes it appear in the start menu, the
+Settings app and the file manager at once, without any of them being told.
+*Against:* A-Q8 answered the same question for desktop icons with "it leaves
+the kernel" — icon layout is not a kernel concern — and a list of GUI programs
+is a weaker claim on kernel space than icon coordinates were.
+
+**B. A userspace library is the authority; the kernel's registry goes.**
+One crate under `gui/`, read by the shell, the Settings app, the file manager
+and the File Associations program.
+*What changes:* the same as A from the user's side. The difference is where it
+lives and who may change it.
+*Against:* the kernel already has one, with tests, and deleting it is lane A's
+work rather than lane C's.
+
+**C. Leave them separate.**
+*What changes:* nothing today. The Settings app's "default browser" screen stays
+a placeholder, and the four lists go on disagreeing silently.
+
+### If this is never answered
+
+Nothing breaks and nothing gets worse on its own — but `default_apps.rs` and
+the Settings app's Apps section stay where they are, which means one of C-Q6's
+own consequences cannot be carried out. The lists will also drift again: the
+`fileassoc` one drifted to eight fictional programs without anyone noticing,
+because nothing compares them.
+
+**Recommendation: B**, on the precedent of A-Q8. What programs a user has
+installed is a property of their userspace, the same way icon positions were,
+and every consumer of the list is a GUI program. It is also the option that
+makes the four lists one, which is the actual defect; A does that too, and
+chooses the harder place to put it.
+
 ## C-Q19 — [C] An event you coloured like your accent is invisible on today's date. Whose colour wins? — Status: OPEN
 
 **In short:** every calendar event can carry a colour you pick, and the month

@@ -47,14 +47,14 @@ pub struct TrayDragSource {
     press_x: f32,
     /// Y coordinate of the initial press.
     press_y: f32,
-    /// Icon ID that was pressed on.
-    press_icon_id: Option<u64>,
+    /// Which icon was pressed on.
+    press_icon: Option<TrayIconKey>,
     /// Whether the drag threshold has been exceeded.
     drag_active: bool,
     /// Whether the icon should appear semi-transparent (drag in progress).
     pub show_ghost: bool,
-    /// The icon ID currently being dragged (if any).
-    pub dragging_icon_id: Option<u64>,
+    /// The icon currently being dragged, if any.
+    pub dragging_icon: Option<TrayIconKey>,
     /// Whether the drag was cancelled via Escape.
     cancelled: bool,
 }
@@ -66,24 +66,24 @@ impl TrayDragSource {
             press_active: false,
             press_x: 0.0,
             press_y: 0.0,
-            press_icon_id: None,
+            press_icon: None,
             drag_active: false,
             show_ghost: false,
-            dragging_icon_id: None,
+            dragging_icon: None,
             cancelled: false,
         }
     }
 
     /// Called when the user presses on a tray icon. Records the position
     /// for threshold checking.
-    pub fn on_press(&mut self, icon_id: u64, x: f32, y: f32) {
+    pub fn on_press(&mut self, icon: TrayIconKey, x: f32, y: f32) {
         self.press_active = true;
         self.press_x = x;
         self.press_y = y;
-        self.press_icon_id = Some(icon_id);
+        self.press_icon = Some(icon);
         self.drag_active = false;
         self.show_ghost = false;
-        self.dragging_icon_id = None;
+        self.dragging_icon = None;
         self.cancelled = false;
     }
 
@@ -102,17 +102,23 @@ impl TrayDragSource {
         if dx * dx + dy * dy >= DRAG_THRESHOLD * DRAG_THRESHOLD {
             self.drag_active = true;
             self.show_ghost = true;
-            self.dragging_icon_id = self.press_icon_id;
+            self.dragging_icon = self.press_icon;
             return true;
         }
         false
     }
 
-    /// Build a [`DataObject`] carrying the tray icon's ID and app name
-    /// for use with the toolkit's DnD manager.
-    pub fn build_drag_data(&self, icon_id: u64, app_name: &str) -> DataObject {
+    /// Build a [`DataObject`] naming the icon being dragged.
+    ///
+    /// Carries the key and nothing else. An earlier version also carried the
+    /// program's name, which is the compositor's fact and would have been a
+    /// snapshot taken at press time -- stale by the drop if the program
+    /// relabelled its icon mid-drag. The receiver has the list; it can look
+    /// the name up.
+    #[must_use]
+    pub fn build_drag_data(&self, icon: TrayIconKey) -> DataObject {
         let mut data = DataObject::new();
-        let payload = format!("{icon_id}:{app_name}");
+        let payload = format!("{}:{}", icon.owner, icon.id);
         data.set_data(
             DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
             payload.into_bytes(),
@@ -125,7 +131,7 @@ impl TrayDragSource {
         self.cancelled = true;
         self.drag_active = false;
         self.show_ghost = false;
-        self.dragging_icon_id = None;
+        self.dragging_icon = None;
         self.press_active = false;
     }
 
@@ -136,7 +142,7 @@ impl TrayDragSource {
         self.press_active = false;
         self.drag_active = false;
         self.show_ghost = false;
-        self.dragging_icon_id = None;
+        self.dragging_icon = None;
         self.cancelled = false;
         was_dragging
     }
@@ -251,15 +257,21 @@ impl TrayDropTarget {
             || data.has_format(&DataFormat::Custom(TASKBAR_APP_FORMAT.to_string()))
     }
 
-    /// Parse tray icon drag data into (icon_id, app_name).
-    pub fn parse_tray_icon_data(data: &DataObject) -> Option<(u64, String)> {
+    /// Parse tray icon drag data back into the key it names.
+    ///
+    /// Returns `None` for anything that is not exactly two numbers. The
+    /// earlier version accepted a missing second field and substituted an
+    /// empty string, so a payload carrying only half an identity parsed
+    /// successfully and named an icon that was not the one dragged.
+    #[must_use]
+    pub fn parse_tray_icon_data(data: &DataObject) -> Option<TrayIconKey> {
         let bytes = data.get_data(&DataFormat::Custom(TRAY_ICON_FORMAT.to_string()))?;
         let text = core::str::from_utf8(bytes).ok()?;
-        let mut parts = text.splitn(2, ':');
-        let id_str = parts.next()?;
-        let name = parts.next().unwrap_or("");
-        let id = id_str.parse::<u64>().ok()?;
-        Some((id, name.to_string()))
+        let (owner, id) = text.split_once(':')?;
+        Some(TrayIconKey {
+            owner: owner.parse().ok()?,
+            id: id.parse().ok()?,
+        })
     }
 
     /// Parse taskbar app drag data into an app_id string.
@@ -277,24 +289,88 @@ impl TrayDropTarget {
 // TrayIconSlot
 // ============================================================================
 
-/// A slot in the tray icon arrangement representing one icon's state.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Which icon, across the whole tray.
+///
+/// **A pair, not a number, and the pair is not optional.** `id` is the
+/// owning program's own name for its icon and is unique only within that
+/// program: `guiremote::tray` says in so many words that two programs may
+/// both use 1, and the compositor's tests prove it. So an arrangement keyed
+/// on `id` alone would treat one program's battery icon and another's volume
+/// icon as the same icon -- hiding one would hide both, and dragging one
+/// would move the other.
+///
+/// **`owner` is a process id, so this identifies an icon for as long as the
+/// program runs and no longer.** It is deliberately not a persistence key:
+/// the same program started tomorrow has a different pid, so an order saved
+/// under these keys would restore onto nothing. See the note on
+/// [`TrayIconArrangement`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TrayIconKey {
+    /// The process that registered the icon. Filled in by the compositor from
+    /// the connection, never by the program, so it cannot be spoofed.
+    pub owner: u64,
+    /// The owning program's own name for this icon.
+    pub id: u32,
+}
+
+impl TrayIconKey {
+    /// The key of an icon the compositor reported.
+    #[must_use]
+    pub fn of(icon: &guiremote::tray::TrayIcon) -> Self {
+        Self {
+            owner: icon.owner,
+            id: icon.id,
+        }
+    }
+}
+
+/// One icon's place in the tray, as the *shell* sees it.
+///
+/// Carries only what the shell decides. The glyph and the tooltip are the
+/// owning program's to change at any moment and are read from the
+/// compositor's list at draw time rather than copied here -- a copy would go
+/// stale the first time a program relabelled its icon, and two records of one
+/// fact is the defect that produced four tray models in this tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TrayIconSlot {
-    /// Unique identifier for the tray icon.
-    pub icon_id: u64,
-    /// Application name / identifier.
-    pub app_name: String,
+    /// Which icon this slot is for.
+    pub key: TrayIconKey,
     /// Whether this icon is currently visible in the tray bar.
     pub visible: bool,
     /// Whether this icon is pinned (persists across restarts).
     pub pinned: bool,
 }
 
+impl TrayIconSlot {
+    /// A newly-seen icon: shown, unpinned.
+    #[must_use]
+    pub fn showing(key: TrayIconKey) -> Self {
+        Self {
+            key,
+            visible: true,
+            pinned: false,
+        }
+    }
+}
+
 // ============================================================================
 // TrayIconArrangement
 // ============================================================================
 
-/// Manages the ordering, visibility, and pinning of tray icons.
+/// The shell's ordering, visibility and pinning of the tray's icons.
+///
+/// **Why the shell holds this and not the compositor.** The compositor owns
+/// *which* icons exist, because it is the thing that outlives both the
+/// programs and the shell. It deliberately carries no position, so that the
+/// order can be the user's -- and the user is who the shell answers to.
+///
+/// **This is session-scoped, and cannot yet be otherwise.** Keys are
+/// `(pid, id)` pairs, so an order written to disk would restore onto pids
+/// that no longer exist. Persisting it needs the compositor to report a
+/// *stable* name for the program behind a connection, which it does not have:
+/// `ClientLink` carries `client_pid` and nothing else. Until it does, saving
+/// this would produce a settings file that silently does nothing, which is
+/// worse than not saving it.
 ///
 /// Icons that don't fit in the visible area are placed into an overflow
 /// set accessible via a chevron popup.
@@ -327,6 +403,40 @@ impl TrayIconArrangement {
         self.icons.push(slot);
     }
 
+    /// Fold the compositor's list into this arrangement, and say whether the
+    /// result differs from what was there.
+    ///
+    /// **Keeping an icon's place is the whole point.** The compositor sends
+    /// the entire list on every change, so a program that merely relabelled
+    /// its icon arrives looking exactly like a program that just registered
+    /// one. Matching on key first means a relabel does not move anything;
+    /// only registering and departing do.
+    ///
+    /// New icons append in the order the compositor reported, departed icons
+    /// drop out, and every icon the user placed stays where the user put it.
+    pub fn sync(&mut self, icons: &[guiremote::tray::TrayIcon]) -> bool {
+        let before = self.icons.clone();
+        // Departed first, so that a program which exited and re-registered
+        // within one frame is treated as new rather than silently keeping a
+        // slot whose `pinned`/`visible` the user set for the old instance.
+        let live: Vec<TrayIconKey> = icons.iter().map(TrayIconKey::of).collect();
+        self.icons.retain(|slot| live.contains(&slot.key));
+        for key in live {
+            if !self.icons.iter().any(|slot| slot.key == key) {
+                self.icons.push(TrayIconSlot::showing(key));
+            }
+        }
+        self.icons != before
+    }
+
+    /// The icons in the shell's order, whatever their visibility.
+    ///
+    /// This, not the compositor's list, is what the tray draws.
+    #[must_use]
+    pub fn ordered_keys(&self) -> Vec<TrayIconKey> {
+        self.icons.iter().map(|slot| slot.key).collect()
+    }
+
     /// Reorder an icon from one index to another.
     ///
     /// If either index is out of bounds or they are equal, this is a no-op.
@@ -341,36 +451,36 @@ impl TrayIconArrangement {
     }
 
     /// Hide an icon by ID (moves it out of the visible area into overflow).
-    pub fn hide_icon(&mut self, id: u64) {
-        if let Some(slot) = self.icons.iter_mut().find(|s| s.icon_id == id) {
+    pub fn hide_icon(&mut self, key: TrayIconKey) {
+        if let Some(slot) = self.icons.iter_mut().find(|s| s.key == key) {
             slot.visible = false;
         }
     }
 
     /// Show a previously hidden icon by ID.
-    pub fn show_icon(&mut self, id: u64) {
-        if let Some(slot) = self.icons.iter_mut().find(|s| s.icon_id == id) {
+    pub fn show_icon(&mut self, key: TrayIconKey) {
+        if let Some(slot) = self.icons.iter_mut().find(|s| s.key == key) {
             slot.visible = true;
         }
     }
 
     /// Pin an icon so it persists across restarts.
-    pub fn pin_icon(&mut self, id: u64) {
-        if let Some(slot) = self.icons.iter_mut().find(|s| s.icon_id == id) {
+    pub fn pin_icon(&mut self, key: TrayIconKey) {
+        if let Some(slot) = self.icons.iter_mut().find(|s| s.key == key) {
             slot.pinned = true;
         }
     }
 
     /// Unpin an icon (it becomes transient -- disappears when its app exits).
-    pub fn unpin_icon(&mut self, id: u64) {
-        if let Some(slot) = self.icons.iter_mut().find(|s| s.icon_id == id) {
+    pub fn unpin_icon(&mut self, key: TrayIconKey) {
+        if let Some(slot) = self.icons.iter_mut().find(|s| s.key == key) {
             slot.pinned = false;
         }
     }
 
     /// Remove an icon from the arrangement entirely.
-    pub fn remove_icon(&mut self, id: u64) {
-        self.icons.retain(|s| s.icon_id != id);
+    pub fn remove_icon(&mut self, key: TrayIconKey) {
+        self.icons.retain(|s| s.key != key);
     }
 
     /// Return the visible icons that fit in the tray bar (up to `max_visible`).
@@ -401,44 +511,9 @@ impl TrayIconArrangement {
         self.icons.iter().filter(|s| s.visible).count() > self.max_visible
     }
 
-    /// Find an icon by ID.
-    pub fn find_icon(&self, id: u64) -> Option<&TrayIconSlot> {
-        self.icons.iter().find(|s| s.icon_id == id)
-    }
-
-    /// Persist the arrangement to a serializable config.
-    pub fn to_config(&self) -> TrayArrangementConfig {
-        TrayArrangementConfig {
-            slots: self
-                .icons
-                .iter()
-                .map(|s| TraySlotConfig {
-                    icon_id: s.icon_id,
-                    app_name: s.app_name.clone(),
-                    visible: s.visible,
-                    pinned: s.pinned,
-                })
-                .collect(),
-            max_visible: self.max_visible,
-        }
-    }
-
-    /// Restore the arrangement from a config.
-    pub fn from_config(config: &TrayArrangementConfig) -> Self {
-        let icons = config
-            .slots
-            .iter()
-            .map(|s| TrayIconSlot {
-                icon_id: s.icon_id,
-                app_name: s.app_name.clone(),
-                visible: s.visible,
-                pinned: s.pinned,
-            })
-            .collect();
-        Self {
-            icons,
-            max_visible: config.max_visible,
-        }
+    /// Find an icon by key.
+    pub fn find_icon(&self, key: TrayIconKey) -> Option<&TrayIconSlot> {
+        self.icons.iter().find(|s| s.key == key)
     }
 }
 
@@ -446,26 +521,6 @@ impl Default for TrayIconArrangement {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// ============================================================================
-// Config structs for persistence
-// ============================================================================
-
-/// Serializable configuration for a single tray icon slot.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TraySlotConfig {
-    pub icon_id: u64,
-    pub app_name: String,
-    pub visible: bool,
-    pub pinned: bool,
-}
-
-/// Serializable configuration for the full tray arrangement.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrayArrangementConfig {
-    pub slots: Vec<TraySlotConfig>,
-    pub max_visible: usize,
 }
 
 // ============================================================================
@@ -549,8 +604,8 @@ pub enum TrayMenuEntry {
 /// Built context menu for a tray icon, including state-dependent labels.
 #[derive(Clone, Debug)]
 pub struct TrayContextMenu {
-    /// The icon ID this menu is for.
-    pub icon_id: u64,
+    /// Which icon this menu is for.
+    pub icon: TrayIconKey,
     /// Ordered list of menu entries.
     pub entries: Vec<TrayMenuEntry>,
     /// Whether the icon is currently pinned (affects TogglePin label).
@@ -565,8 +620,9 @@ pub struct TrayContextMenu {
 
 impl TrayContextMenu {
     /// Build a context menu for the given icon state.
+    #[must_use]
     pub fn build(
-        icon_id: u64,
+        icon: TrayIconKey,
         is_pinned: bool,
         start_in_tray_enabled: bool,
         has_hidden_icons: bool,
@@ -600,7 +656,7 @@ impl TrayContextMenu {
         entries.push(TrayMenuEntry::Exit);
 
         Self {
-            icon_id,
+            icon,
             entries,
             is_pinned,
             start_in_tray_enabled,
@@ -658,13 +714,34 @@ mod tests {
     use super::*;
     use guitk::dnd::DragEvent;
 
+    /// One owner for the tests that are about order rather than ownership.
+    ///
+    /// The owner is the compositor's to fill in, and most of what is tested
+    /// here is what the shell does with a run of icons. The tests that are
+    /// specifically about two programs say so by using `OTHER`.
+    const OWNER: u64 = 900;
+    const OTHER: u64 = 901;
+
+    fn key(id: u32) -> TrayIconKey {
+        TrayIconKey { owner: OWNER, id }
+    }
+
     // Helper to create a test slot.
-    fn make_slot(id: u64, name: &str, visible: bool, pinned: bool) -> TrayIconSlot {
+    fn make_slot(id: u32, visible: bool, pinned: bool) -> TrayIconSlot {
         TrayIconSlot {
-            icon_id: id,
-            app_name: name.to_string(),
+            key: key(id),
             visible,
             pinned,
+        }
+    }
+
+    /// An icon as the compositor would report it.
+    fn reported(owner: u64, id: u32, glyph: &str) -> guiremote::tray::TrayIcon {
+        guiremote::tray::TrayIcon {
+            owner,
+            id,
+            glyph: glyph.to_string(),
+            tooltip: String::new(),
         }
     }
 
@@ -675,32 +752,32 @@ mod tests {
     #[test]
     fn drag_source_threshold_not_met_is_not_drag() {
         let mut src = TrayDragSource::new();
-        src.on_press(42, 100.0, 200.0);
+        src.on_press(key(42), 100.0, 200.0);
 
         // Move only 2 pixels (below the 5px threshold).
         let activated = src.on_move(101.0, 201.0);
         assert!(!activated);
         assert!(!src.is_dragging());
-        assert!(src.dragging_icon_id.is_none());
+        assert!(src.dragging_icon.is_none());
     }
 
     #[test]
     fn drag_source_threshold_exceeded_activates_drag() {
         let mut src = TrayDragSource::new();
-        src.on_press(42, 100.0, 200.0);
+        src.on_press(key(42), 100.0, 200.0);
 
         // Move 6 pixels horizontally (exceeds 5px threshold).
         let activated = src.on_move(106.0, 200.0);
         assert!(activated);
         assert!(src.is_dragging());
-        assert_eq!(src.dragging_icon_id, Some(42));
+        assert_eq!(src.dragging_icon, Some(key(42)));
         assert!(src.show_ghost);
     }
 
     #[test]
     fn drag_source_diagonal_threshold() {
         let mut src = TrayDragSource::new();
-        src.on_press(10, 50.0, 50.0);
+        src.on_press(key(10), 50.0, 50.0);
 
         // Move 4 pixels diag (distance = sqrt(8) ~ 2.83, below 5).
         let activated = src.on_move(52.0, 52.0);
@@ -714,20 +791,20 @@ mod tests {
     #[test]
     fn drag_source_cancel_resets_state() {
         let mut src = TrayDragSource::new();
-        src.on_press(7, 10.0, 10.0);
+        src.on_press(key(7), 10.0, 10.0);
         src.on_move(20.0, 10.0); // activate drag
 
         assert!(src.is_dragging());
         src.cancel();
         assert!(!src.is_dragging());
         assert!(!src.show_ghost);
-        assert!(src.dragging_icon_id.is_none());
+        assert!(src.dragging_icon.is_none());
     }
 
     #[test]
     fn drag_source_release_returns_was_dragging() {
         let mut src = TrayDragSource::new();
-        src.on_press(1, 0.0, 0.0);
+        src.on_press(key(1), 0.0, 0.0);
         src.on_move(10.0, 0.0); // activate
 
         let was_dragging = src.on_release();
@@ -738,7 +815,7 @@ mod tests {
     #[test]
     fn drag_source_release_without_drag_returns_false() {
         let mut src = TrayDragSource::new();
-        src.on_press(1, 0.0, 0.0);
+        src.on_press(key(1), 0.0, 0.0);
         // Don't move enough to exceed threshold.
 
         let was_dragging = src.on_release();
@@ -748,7 +825,7 @@ mod tests {
     #[test]
     fn drag_source_build_data_contains_format() {
         let src = TrayDragSource::new();
-        let data = src.build_drag_data(42, "my_app");
+        let data = src.build_drag_data(key(42));
 
         assert!(data.has_format(&DataFormat::Custom(TRAY_ICON_FORMAT.to_string())));
 
@@ -756,13 +833,13 @@ mod tests {
             .get_data(&DataFormat::Custom(TRAY_ICON_FORMAT.to_string()))
             .expect("should have tray icon data");
         let text = core::str::from_utf8(raw).expect("should be valid utf8");
-        assert_eq!(text, "42:my_app");
+        assert_eq!(text, "900:42", "both halves of the identity, owner first");
     }
 
     #[test]
     fn drag_source_on_move_after_cancel_returns_false() {
         let mut src = TrayDragSource::new();
-        src.on_press(1, 0.0, 0.0);
+        src.on_press(key(1), 0.0, 0.0);
         src.cancel();
 
         let activated = src.on_move(100.0, 100.0);
@@ -772,7 +849,7 @@ mod tests {
     #[test]
     fn drag_source_on_move_already_dragging_returns_false() {
         let mut src = TrayDragSource::new();
-        src.on_press(1, 0.0, 0.0);
+        src.on_press(key(1), 0.0, 0.0);
         let first = src.on_move(10.0, 0.0);
         assert!(first);
 
@@ -816,10 +893,30 @@ mod tests {
         let mut data = DataObject::new();
         data.set_data(
             DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
-            b"99:NetworkManager".to_vec(),
+            b"99:4".to_vec(),
         );
         let result = TrayDropTarget::parse_tray_icon_data(&data);
-        assert_eq!(result, Some((99, "NetworkManager".to_string())));
+        assert_eq!(result, Some(TrayIconKey { owner: 99, id: 4 }));
+    }
+
+    #[test]
+    fn drop_target_refuses_half_an_identity() {
+        // The shape the old parser accepted: one number, no separator. It
+        // returned Some with an empty name, so a drop carrying half an
+        // identity named an icon that was not the one dragged.
+        for payload in [&b"99"[..], b"99:", b":4", b"99:4:5", b"a:4", b"99:b"] {
+            let mut data = DataObject::new();
+            data.set_data(
+                DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
+                payload.to_vec(),
+            );
+            assert_eq!(
+                TrayDropTarget::parse_tray_icon_data(&data),
+                None,
+                "{} should not parse",
+                String::from_utf8_lossy(payload),
+            );
+        }
     }
 
     #[test]
@@ -889,83 +986,83 @@ mod tests {
     #[test]
     fn arrangement_reorder_forward() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, "a", true, false));
-        arr.add_icon(make_slot(2, "b", true, false));
-        arr.add_icon(make_slot(3, "c", true, false));
+        arr.add_icon(make_slot(1, true, false));
+        arr.add_icon(make_slot(2, true, false));
+        arr.add_icon(make_slot(3, true, false));
 
         arr.reorder(0, 2);
 
-        assert_eq!(arr.icons[0].icon_id, 2);
-        assert_eq!(arr.icons[1].icon_id, 3);
-        assert_eq!(arr.icons[2].icon_id, 1);
+        assert_eq!(arr.icons[0].key.id, 2);
+        assert_eq!(arr.icons[1].key.id, 3);
+        assert_eq!(arr.icons[2].key.id, 1);
     }
 
     #[test]
     fn arrangement_reorder_backward() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, "a", true, false));
-        arr.add_icon(make_slot(2, "b", true, false));
-        arr.add_icon(make_slot(3, "c", true, false));
+        arr.add_icon(make_slot(1, true, false));
+        arr.add_icon(make_slot(2, true, false));
+        arr.add_icon(make_slot(3, true, false));
 
         arr.reorder(2, 0);
 
-        assert_eq!(arr.icons[0].icon_id, 3);
-        assert_eq!(arr.icons[1].icon_id, 1);
-        assert_eq!(arr.icons[2].icon_id, 2);
+        assert_eq!(arr.icons[0].key.id, 3);
+        assert_eq!(arr.icons[1].key.id, 1);
+        assert_eq!(arr.icons[2].key.id, 2);
     }
 
     #[test]
     fn arrangement_reorder_same_index_noop() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, "a", true, false));
-        arr.add_icon(make_slot(2, "b", true, false));
+        arr.add_icon(make_slot(1, true, false));
+        arr.add_icon(make_slot(2, true, false));
 
         arr.reorder(1, 1);
 
-        assert_eq!(arr.icons[0].icon_id, 1);
-        assert_eq!(arr.icons[1].icon_id, 2);
+        assert_eq!(arr.icons[0].key.id, 1);
+        assert_eq!(arr.icons[1].key.id, 2);
     }
 
     #[test]
     fn arrangement_reorder_out_of_bounds_noop() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, "a", true, false));
+        arr.add_icon(make_slot(1, true, false));
 
         arr.reorder(0, 5);
-        assert_eq!(arr.icons[0].icon_id, 1);
+        assert_eq!(arr.icons[0].key.id, 1);
 
         arr.reorder(5, 0);
-        assert_eq!(arr.icons[0].icon_id, 1);
+        assert_eq!(arr.icons[0].key.id, 1);
     }
 
     #[test]
     fn arrangement_pin_unpin() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, "app", true, false));
+        arr.add_icon(make_slot(1, true, false));
 
         assert!(!arr.icons[0].pinned);
 
-        arr.pin_icon(1);
+        arr.pin_icon(key(1));
         assert!(arr.icons[0].pinned);
 
-        arr.unpin_icon(1);
+        arr.unpin_icon(key(1));
         assert!(!arr.icons[0].pinned);
     }
 
     #[test]
     fn arrangement_hide_show() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, "app", true, false));
+        arr.add_icon(make_slot(1, true, false));
 
         assert!(arr.icons[0].visible);
         assert_eq!(arr.visible_icons().len(), 1);
 
-        arr.hide_icon(1);
+        arr.hide_icon(key(1));
         assert!(!arr.icons[0].visible);
         assert_eq!(arr.visible_icons().len(), 0);
         assert_eq!(arr.hidden_icons().len(), 1);
 
-        arr.show_icon(1);
+        arr.show_icon(key(1));
         assert!(arr.icons[0].visible);
         assert_eq!(arr.visible_icons().len(), 1);
     }
@@ -974,7 +1071,7 @@ mod tests {
     fn arrangement_overflow() {
         let mut arr = TrayIconArrangement::with_max_visible(3);
         for i in 0..5 {
-            arr.add_icon(make_slot(i, &format!("app_{i}"), true, false));
+            arr.add_icon(make_slot(i, true, false));
         }
 
         assert_eq!(arr.visible_icons().len(), 3);
@@ -986,7 +1083,7 @@ mod tests {
     fn arrangement_no_overflow_when_within_limit() {
         let mut arr = TrayIconArrangement::with_max_visible(10);
         for i in 0..5 {
-            arr.add_icon(make_slot(i, &format!("app_{i}"), true, false));
+            arr.add_icon(make_slot(i, true, false));
         }
 
         assert_eq!(arr.visible_icons().len(), 5);
@@ -997,57 +1094,166 @@ mod tests {
     #[test]
     fn arrangement_hidden_icons_not_in_visible_or_overflow() {
         let mut arr = TrayIconArrangement::with_max_visible(5);
-        arr.add_icon(make_slot(1, "a", true, false));
-        arr.add_icon(make_slot(2, "b", false, false)); // hidden
-        arr.add_icon(make_slot(3, "c", true, false));
+        arr.add_icon(make_slot(1, true, false));
+        arr.add_icon(make_slot(2, false, false)); // hidden
+        arr.add_icon(make_slot(3, true, false));
 
         assert_eq!(arr.visible_icons().len(), 2);
         assert_eq!(arr.hidden_icons().len(), 1);
-        assert_eq!(arr.hidden_icons()[0].icon_id, 2);
+        assert_eq!(arr.hidden_icons()[0].key.id, 2);
     }
 
     #[test]
     fn arrangement_remove_icon() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, "a", true, false));
-        arr.add_icon(make_slot(2, "b", true, false));
+        arr.add_icon(make_slot(1, true, false));
+        arr.add_icon(make_slot(2, true, false));
 
-        arr.remove_icon(1);
+        arr.remove_icon(key(1));
         assert_eq!(arr.icons.len(), 1);
-        assert_eq!(arr.icons[0].icon_id, 2);
+        assert_eq!(arr.icons[0].key.id, 2);
     }
 
     #[test]
     fn arrangement_find_icon() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(42, "special", true, true));
+        arr.add_icon(make_slot(42, true, true));
 
-        let found = arr.find_icon(42);
+        let found = arr.find_icon(key(42));
         assert!(found.is_some());
-        assert_eq!(found.unwrap().app_name, "special");
+        assert!(found.unwrap().pinned);
 
-        assert!(arr.find_icon(999).is_none());
+        assert!(arr.find_icon(key(999)).is_none());
+
+        // The half that a single number could not express: same id, other
+        // program. An arrangement keyed on `id` alone would find this.
+        assert!(
+            arr.find_icon(TrayIconKey {
+                owner: OTHER,
+                id: 42
+            })
+            .is_none(),
+            "another program's icon 42 is not this one"
+        );
+    }
+
+    // ======================================================================
+    // sync -- folding the compositor's list into the shell's order
+    // ======================================================================
+
+    #[test]
+    fn sync_adopts_a_list_it_has_never_seen() {
+        let mut arr = TrayIconArrangement::new();
+        assert!(arr.sync(&[reported(OWNER, 1, "A"), reported(OWNER, 2, "B")]));
+        assert_eq!(arr.ordered_keys(), vec![key(1), key(2)]);
+        assert!(arr.icons.iter().all(|s| s.visible && !s.pinned));
     }
 
     #[test]
-    fn arrangement_persistence_round_trip() {
-        let mut arr = TrayIconArrangement::with_max_visible(8);
-        arr.add_icon(make_slot(1, "volume", true, true));
-        arr.add_icon(make_slot(2, "network", true, true));
-        arr.add_icon(make_slot(3, "hidden_app", false, false));
+    fn sync_of_an_unchanged_list_changes_nothing() {
+        let mut arr = TrayIconArrangement::new();
+        let list = [reported(OWNER, 1, "A"), reported(OWNER, 2, "B")];
+        assert!(arr.sync(&list));
+        assert!(!arr.sync(&list), "the same list again is not a change");
+    }
 
-        let config = arr.to_config();
-        let restored = TrayIconArrangement::from_config(&config);
+    #[test]
+    fn a_relabelled_icon_does_not_move() {
+        // The case the whole fold exists for. The compositor sends the entire
+        // list whenever any of it changes, so a program that only swapped its
+        // glyph arrives looking exactly like one that just registered.
+        let mut arr = TrayIconArrangement::new();
+        arr.sync(&[reported(OWNER, 1, "A"), reported(OWNER, 2, "B")]);
+        arr.reorder(0, 1);
+        assert_eq!(arr.ordered_keys(), vec![key(2), key(1)]);
 
-        assert_eq!(restored.icons.len(), 3);
-        assert_eq!(restored.max_visible, 8);
-        assert_eq!(restored.icons[0].icon_id, 1);
-        assert_eq!(restored.icons[0].app_name, "volume");
-        assert!(restored.icons[0].visible);
-        assert!(restored.icons[0].pinned);
-        assert_eq!(restored.icons[2].icon_id, 3);
-        assert!(!restored.icons[2].visible);
-        assert!(!restored.icons[2].pinned);
+        let moved = arr.sync(&[reported(OWNER, 1, "!"), reported(OWNER, 2, "B")]);
+
+        assert!(!moved, "a new glyph is not a change to the order");
+        assert_eq!(
+            arr.ordered_keys(),
+            vec![key(2), key(1)],
+            "the user's order survived the program relabelling its icon"
+        );
+    }
+
+    #[test]
+    fn a_new_icon_appends_rather_than_resetting_the_order() {
+        let mut arr = TrayIconArrangement::new();
+        arr.sync(&[reported(OWNER, 1, "A"), reported(OWNER, 2, "B")]);
+        arr.reorder(0, 1);
+
+        assert!(arr.sync(&[
+            reported(OWNER, 1, "A"),
+            reported(OWNER, 2, "B"),
+            reported(OTHER, 1, "C"),
+        ]));
+
+        assert_eq!(
+            arr.ordered_keys(),
+            vec![
+                key(2),
+                key(1),
+                TrayIconKey {
+                    owner: OTHER,
+                    id: 1
+                }
+            ],
+            "the new icon went to the end, and did not displace the user's order"
+        );
+    }
+
+    #[test]
+    fn a_departed_program_leaves_the_order() {
+        let mut arr = TrayIconArrangement::new();
+        arr.sync(&[reported(OWNER, 1, "A"), reported(OTHER, 1, "B")]);
+
+        assert!(arr.sync(&[reported(OTHER, 1, "B")]));
+
+        assert_eq!(
+            arr.ordered_keys(),
+            vec![TrayIconKey {
+                owner: OTHER,
+                id: 1
+            }],
+            "and the other program's icon 1 was not mistaken for the departed one"
+        );
+    }
+
+    #[test]
+    fn two_programs_using_id_one_are_two_icons() {
+        // `guiremote::tray` promises this and the compositor's tests prove it;
+        // this is the shell keeping the same promise. An arrangement keyed on
+        // `id` alone would hold one slot here, and hiding one program's icon
+        // would hide the other's.
+        let mut arr = TrayIconArrangement::new();
+        arr.sync(&[reported(OWNER, 1, "A"), reported(OTHER, 1, "B")]);
+        assert_eq!(arr.icons.len(), 2);
+
+        arr.hide_icon(key(1));
+
+        assert_eq!(arr.visible_icons().len(), 1);
+        assert_eq!(arr.visible_icons()[0].key.owner, OTHER);
+    }
+
+    #[test]
+    fn a_program_that_exits_and_returns_starts_fresh() {
+        // Same pid is not reused within a session, so a slot whose visibility
+        // the user set for the departed instance must not be inherited by
+        // whoever comes next.
+        let mut arr = TrayIconArrangement::new();
+        arr.sync(&[reported(OWNER, 1, "A")]);
+        arr.hide_icon(key(1));
+        assert_eq!(arr.visible_icons().len(), 0);
+
+        arr.sync(&[]);
+        arr.sync(&[reported(OWNER, 1, "A")]);
+
+        assert_eq!(
+            arr.visible_icons().len(),
+            1,
+            "the returning icon is shown, not still hidden"
+        );
     }
 
     // ======================================================================
@@ -1106,7 +1312,7 @@ mod tests {
 
     #[test]
     fn context_menu_basic_entries() {
-        let menu = TrayContextMenu::build(1, false, false, false, false);
+        let menu = TrayContextMenu::build(key(1), false, false, false, false);
 
         // Should have: Open, Sep, TogglePin, ToggleStartInTray, Sep, HideIcon, Sep, Exit
         assert!(menu.entries.contains(&TrayMenuEntry::Open));
@@ -1118,7 +1324,7 @@ mod tests {
 
     #[test]
     fn context_menu_with_settings() {
-        let menu = TrayContextMenu::build(1, false, false, false, true);
+        let menu = TrayContextMenu::build(key(1), false, false, false, true);
 
         assert!(menu.entries.contains(&TrayMenuEntry::Settings));
         assert!(menu.has_settings);
@@ -1126,7 +1332,7 @@ mod tests {
 
     #[test]
     fn context_menu_without_settings() {
-        let menu = TrayContextMenu::build(1, false, false, false, false);
+        let menu = TrayContextMenu::build(key(1), false, false, false, false);
 
         assert!(!menu.entries.contains(&TrayMenuEntry::Settings));
         assert!(!menu.has_settings);
@@ -1134,7 +1340,7 @@ mod tests {
 
     #[test]
     fn context_menu_with_hidden_icons() {
-        let menu = TrayContextMenu::build(1, false, false, true, false);
+        let menu = TrayContextMenu::build(key(1), false, false, true, false);
 
         assert!(menu.entries.contains(&TrayMenuEntry::ShowHiddenIcons));
         assert!(menu.has_hidden_icons);
@@ -1142,26 +1348,26 @@ mod tests {
 
     #[test]
     fn context_menu_without_hidden_icons() {
-        let menu = TrayContextMenu::build(1, false, false, false, false);
+        let menu = TrayContextMenu::build(key(1), false, false, false, false);
 
         assert!(!menu.entries.contains(&TrayMenuEntry::ShowHiddenIcons));
     }
 
     #[test]
     fn context_menu_pin_label_when_unpinned() {
-        let menu = TrayContextMenu::build(1, false, false, false, false);
+        let menu = TrayContextMenu::build(key(1), false, false, false, false);
         assert_eq!(menu.label_for(&TrayMenuEntry::TogglePin), "Pin to tray");
     }
 
     #[test]
     fn context_menu_unpin_label_when_pinned() {
-        let menu = TrayContextMenu::build(1, true, false, false, false);
+        let menu = TrayContextMenu::build(key(1), true, false, false, false);
         assert_eq!(menu.label_for(&TrayMenuEntry::TogglePin), "Unpin from tray");
     }
 
     #[test]
     fn context_menu_separator_count() {
-        let menu = TrayContextMenu::build(1, false, false, true, true);
+        let menu = TrayContextMenu::build(key(1), false, false, true, true);
         let sep_count = menu
             .entries
             .iter()
@@ -1173,11 +1379,11 @@ mod tests {
 
     #[test]
     fn context_menu_actionable_count() {
-        let menu = TrayContextMenu::build(1, false, false, false, false);
+        let menu = TrayContextMenu::build(key(1), false, false, false, false);
         // Open, TogglePin, ToggleStartInTray, HideIcon, Exit = 5
         assert_eq!(menu.actionable_count(), 5);
 
-        let menu_full = TrayContextMenu::build(1, false, false, true, true);
+        let menu_full = TrayContextMenu::build(key(1), false, false, true, true);
         // Open, Settings, TogglePin, ToggleStartInTray, HideIcon, ShowHiddenIcons, Exit = 7
         assert_eq!(menu_full.actionable_count(), 7);
     }

@@ -224,3 +224,34 @@ an error.
 a new question, so it cannot deadlock again. If you disagree with (b), say so and
 lane A will stop -- but silence is now taken as assent rather than as a block,
 which is the change that matters here.
+
+### The key spec, extracted 2026-09-14
+
+29 keys, read out of the **production** half of `apps/sysinfo/src/hwquery.rs`
+(everything before `#[cfg(test)]`). Six more -- `a`, `b`, `c`, `d`, `missing`,
+`present` -- appear only inside the test module and are fixtures, not part of
+the contract. Separating them mattered: a naive scan reports 35 and would have
+had lane A emitting a kernel key called `missing`.
+
+| file | keys |
+|---|---|
+| `cpu` | `family`, `model`, `stepping`, `physical_cores`, `logical_processors`, `base_clock_mhz`, `max_turbo_mhz`, `l1_data_kb`, `l1_inst_kb`, `l2_kb`, `l3_kb` |
+| `memory` | `total_mb`, `available_mb`, `slots_total`, `speed_mhz` |
+| `block` | `capacity_bytes` |
+| `net` | `bytes_sent`, `bytes_received`, `speed_mbps` |
+| `pci` | `bus`, `device`, `function` |
+| `display` | `vram_mb`, `refresh_rate_hz` |
+| `irqs` / `dma` | `irq`, `channel` |
+| (process rows) | `pid`, `cpu_percent`, `memory_kb` |
+
+Grouping is by the reader that consumes each key and is lane A's inference, not
+lane C's declaration -- confirm before relying on any single row. The key
+*names* are exact.
+
+**The contract, agreed with lane C 2026-09-14:** emit only what the kernel can
+honestly answer and **omit** the rest. Never emit `0` for "unknown". Their
+parser treats an absent key as "take the caller's default" and a present but
+unparseable key as an error naming the key and the text -- so a `0` emitted to
+mean "I do not know" is reported as a genuine reading of zero, which is the
+exact defect they removed from 34 sites that afternoon, reintroduced from the
+producing end.

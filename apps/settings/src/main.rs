@@ -5486,20 +5486,27 @@ mod tests {
     /// nothing, because it does the opposite of what it says.
     #[test]
     fn dragging_the_warmth_slider_right_is_warmer() {
-        let mut state = SettingsState::new();
-        state.set_slider_fraction(SliderId::NightLightTemperature, 0.2);
-        let gentle = state.appearance.settings.night_light_strength;
-        state.set_slider_fraction(SliderId::NightLightTemperature, 0.9);
-        let strong = state.appearance.settings.night_light_strength;
+        // Scratch-wrapped although nothing here looks like a write: moving
+        // this slider saves `appearance.yaml`, two calls further down. That is
+        // exactly the shape `check-scratch-config.py` exists for, and it
+        // refused this test's first version -- which had asserted only on an
+        // in-memory field.
+        with_scratch_config("settings-warmth-direction", |_root| {
+            let mut state = SettingsState::new();
+            state.set_slider_fraction(SliderId::NightLightTemperature, 0.2);
+            let gentle = state.appearance.settings.night_light_strength;
+            state.set_slider_fraction(SliderId::NightLightTemperature, 0.9);
+            let strong = state.appearance.settings.night_light_strength;
 
-        assert!(strong > gentle, "right was cooler, not warmer");
-        // And warmer means the compositor's gains cut more blue.
-        let (_, _, b_gentle) = appearance::night_light_gains(gentle);
-        let (_, _, b_strong) = appearance::night_light_gains(strong);
-        assert!(
-            b_strong < b_gentle,
-            "a warmer setting left as much blue through"
-        );
+            assert!(strong > gentle, "right was cooler, not warmer");
+            // And warmer means the compositor's gains cut more blue.
+            let (_, _, b_gentle) = appearance::night_light_gains(gentle);
+            let (_, _, b_strong) = appearance::night_light_gains(strong);
+            assert!(
+                b_strong < b_gentle,
+                "a warmer setting left as much blue through"
+            );
+        });
     }
 
     /// The Notifications page is a page, not a roadworks sign.

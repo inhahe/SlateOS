@@ -143595,6 +143595,83 @@ a copy to a USB stick waits behind a copy to the internal disk when it did not
 have to. The user-visible *gain* over what was there before is that it is
 accepted at all.
 
+## TD-C-SIX-TOOLKIT-WIDGETS-ARE-WRITTEN-TESTED-AND-USED-BY-NOTHING
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the GUI toolkit contains six finished, tested components that no
+program anywhere in the tree refers to -- about thirteen thousand lines and two
+hundred and sixty tests of working code that no user can reach. Some of them do
+a job an application is currently doing worse by hand, which is the part that
+costs something: the file explorer classifies files with its own hardcoded list
+of extensions while `guitk::filetypes` sits unused, and its own module doc says
+in as many words that this is what must not happen.
+
+**How this was found.** Not by a sweep -- by wiring `guitk::pathbar` into the
+file explorer on 2026-09-14 and noticing it had been carrying
+`#![allow(dead_code)]` and had no users. Asking the same question of every
+`pub mod` in `gui/toolkit/src/lib.rs` gave the list below.
+
+| module | lines | tests | files mentioning it |
+|---|---|---|---|
+| `menubar` | 3 490 | 61 | 0 |
+| `svg` | 3 391 | 47 | 0 |
+| `filetypes` | 2 201 | 41 | 0 |
+| `disabled` | 1 754 | 41 | 0 |
+| `context_ext` | 1 602 | 53 | 0 |
+| `signal` | 853 | 20 | 0 |
+
+(Counted as: no file outside `gui/toolkit/src/<module>.rs` names `<module>::`
+or `guitk::<module>`. `pathbar` was a seventh until this morning; `fontdb` and
+`row_strip` have a mention each and are not counted here.)
+
+**`menubar` is the one to be embarrassed about.** It was edited *this session*
+-- the viewport sweep threaded a `viewport` argument through
+`MenuBar::handle_mouse_event` and `handle_key_event` and updated its tests --
+without anyone noticing that no program opens a menu bar. Work was done to a
+component and its tests, carefully, while the component reached nothing. That
+is the same shape as `apps/automator`'s mutation table: it proved the worker
+and never knocked on the door.
+
+**`filetypes` is the one that is actively costing something.** Its module doc
+opens with
+
+> Every GUI component that needs to display, open, or classify a file should go
+> through this module rather than hard-coding extension lists.
+
+and `apps/explorer/src/main.rs` has a `FileType` enum with its own
+`from_extension` match over about fifty extensions, plus two further extension
+matches in `apps/explorer/src/columns.rs`. So the rule the module states is
+broken three times in the one application that most obviously needs it, and the
+registry with the magic-byte signatures and MIME types goes unread. A file the
+explorer calls "WEBP File" is one `filetypes` knows the category of.
+
+**What to do with each, which is not the same answer.** A component with no
+consumer is either a feature the user cannot reach or code to delete, and
+deciding which needs the question "who would use this?" asked per module:
+
+* `filetypes` -- **wire it.** The consumer exists and is doing the job worse.
+* `disabled` -- probably wire it. It carries a *reason* a control is disabled,
+  which is better than the bare `bool` the explorer's toolbar was given on
+  2026-09-14; that bool was written without checking here first, which is the
+  habit this entry is really about.
+* `menubar`, `context_ext` -- these want an application with a menu bar. The
+  shell has its own menus; whether a second implementation should exist at all
+  is a design question, not a wiring one.
+* `svg` -- a renderer with no caller. `apps/imageviewer` and the icon paths are
+  the candidates; 3 391 lines is worth an hour's look before either wiring or
+  deleting.
+* `signal` -- 853 lines of what is probably an observer mechanism. Least
+  obviously needed; check what it is before deciding.
+
+**Why this is one entry rather than six.** The individual answers differ, but
+the defect does not: nothing in this tree notices a *widget* that nobody uses.
+`scripts/scan-orphan-modules.py` asks the question for modules inside a crate,
+and `check-window-wiring.py` asks it for whole programs; neither looks at a
+library crate's public surface. A gate that did would have caught all six the
+day they landed, and would have caught `pathbar` before a file explorer was
+written with a fake address bar beside it.
+
 ## TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY -- FIXED 2026-09-14
 
 **Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**

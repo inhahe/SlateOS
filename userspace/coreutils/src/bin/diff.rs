@@ -1324,10 +1324,10 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
 ///
 /// A file whose mtime cannot be read -- stdin, above all -- takes the current
 /// time, which is also measured: GNU stamps `diff -u - y.txt` with now.
-fn header_field(path: &str) -> Vec<u8> {
+fn header_field(path: &Path) -> Vec<u8> {
     let (secs, nanos) = mtime_parts(path);
     let tm = localtime::Zone::from_env().local(secs, nanos);
-    let mut out = path.as_bytes().to_vec();
+    let mut out = pb(path);
     out.push(b'\t');
     out.extend_from_slice(&localtime::strftime(b"%Y-%m-%d %H:%M:%S.%N %z", &tm));
     out
@@ -1339,7 +1339,7 @@ fn header_field(path: &str) -> Vec<u8> {
 /// Split out so the fallback is one decision in one place: every way of
 /// failing to learn a file's mtime -- it does not exist, it is a pipe, the
 /// platform will not say -- produces the same answer GNU produces for stdin.
-fn mtime_parts(path: &str) -> (i64, u32) {
+fn mtime_parts(path: &Path) -> (i64, u32) {
     let now = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1406,7 +1406,7 @@ fn range_field(start: usize, count: usize) -> String {
     }
 }
 
-fn print_unified(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
+fn print_unified(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
 
@@ -1502,7 +1502,7 @@ fn context_marker(op: Op, changed: bool) -> &'static [u8] {
     }
 }
 
-fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
+fn print_context(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
 
@@ -1819,7 +1819,7 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
                 worst_exit = 1;
             }
         } else {
-            let code = diff_files(&p1.to_string_lossy(), &p2.to_string_lossy(), config, true);
+            let code = diff_files(&p1, &p2, config, true);
             if code > worst_exit {
                 worst_exit = code;
             }
@@ -1848,10 +1848,29 @@ fn list_dir(path: &Path) -> Result<Vec<String>, String> {
 // ============================================================================
 
 /// Compare two files and print the diff. Returns exit code (0/1/2).
-fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bool) -> i32 {
-    let p1 = Path::new(path1_str);
-    let p2 = Path::new(path2_str);
+/// A verdict line naming two paths, written as BYTES.
+///
+/// `println!("Files {p1} and {p2} differ")` cannot do this: a path may hold
+/// bytes that are not valid Unicode -- on this OS every byte but `/` and NUL
+/// is legal in a name -- and `Path::display()` replaces them, so the line
+/// would name a file nobody can open.
+fn print_path_line(parts: &[&[u8]]) {
+    let out = io::stdout();
+    let mut w = out.lock();
+    let mut line: Vec<u8> = Vec::new();
+    for p in parts {
+        line.extend_from_slice(p);
+    }
+    line.push(b'\n');
+    let _ = w.write_all(&line);
+}
 
+/// A path's bytes, for the lines above.
+fn pb(p: &Path) -> Vec<u8> {
+    quoting::os_bytes(p.as_os_str()).into_owned()
+}
+
+fn diff_files(p1: &Path, p2: &Path, config: &Config, in_dir_walk: bool) -> i32 {
     // `-` is stdin, which exists without being a path -- `Path::new("-")
     // .exists()` is false, so the two guards below turned every
     // `cmd | diff file -` into `No such file or directory` before `read_file`
@@ -1870,11 +1889,11 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bo
     if !config.new_file {
         let mut absent = false;
         if !e1 {
-            eprintln!("diff: {}: No such file or directory", quotef_os(path1_str));
+            eprintln!("diff: {}: No such file or directory", quotef_os(p1));
             absent = true;
         }
         if !e2 {
-            eprintln!("diff: {}: No such file or directory", quotef_os(path2_str));
+            eprintln!("diff: {}: No such file or directory", quotef_os(p2));
             absent = true;
         }
         if absent {
@@ -1920,9 +1939,9 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bo
             // binary file is not a special case -- so it gets the same
             // sentence a pair of text files gets.
             if config.brief {
-                println!("Files {path1_str} and {path2_str} differ");
+                print_path_line(&[b"Files ", &pb(p1), b" and ", &pb(p2), b" differ"]);
             } else {
-                println!("Binary files {path1_str} and {path2_str} differ");
+                print_path_line(&[b"Binary files ", &pb(p1), b" and ", &pb(p2), b" differ"]);
             }
             return 1;
         }
@@ -1952,13 +1971,13 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bo
 
     if !has_diff {
         if config.report_identical {
-            println!("Files {path1_str} and {path2_str} are identical");
+            print_path_line(&[b"Files ", &pb(p1), b" and ", &pb(p2), b" are identical"]);
         }
         return 0;
     }
 
     if config.brief {
-        println!("Files {path1_str} and {path2_str} differ");
+        print_path_line(&[b"Files ", &pb(p1), b" and ", &pb(p2), b" differ"]);
         return 1;
     }
 
@@ -1979,7 +1998,7 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bo
             line.push(' ');
             line.push_str(word);
         }
-        println!("{line} {path1_str} {path2_str}");
+        print_path_line(&[line.as_bytes(), b" ", &pb(p1), b" ", &pb(p2)]);
     }
 
     // Format the output.
@@ -1993,11 +2012,11 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bo
         }
         Format::Unified => {
             let hunks = build_hunks(&ops, config.context_lines);
-            print_unified(&hunks, path1_str, path2_str, config);
+            print_unified(&hunks, p1, p2, config);
         }
         Format::Context => {
             let hunks = build_hunks(&ops, config.context_lines);
-            print_context(&hunks, path1_str, path2_str, config);
+            print_context(&hunks, p1, p2, config);
         }
     }
 
@@ -2089,21 +2108,28 @@ fn main() {
                 let (dir, file) = if is_dir1 { (&p1, &p2) } else { (&p2, &p1) };
 
                 if let Some(fname) = file.file_name() {
+                    // Paths, not decoded strings. `to_string_lossy` here meant
+                    // that `diff dir file` where either name held a byte that
+                    // is not valid Unicode built a path with U+FFFD in it and
+                    // then failed to open it.
                     let target = dir.join(fname);
-                    let t_str = target.to_string_lossy();
-                    let f_str = file.to_string_lossy();
 
                     if is_dir1 {
-                        diff_files(&t_str, &f_str, &config, false)
+                        diff_files(&target, file, &config, false)
                     } else {
-                        diff_files(&f_str, &t_str, &config, false)
+                        diff_files(file, &target, &config, false)
                     }
                 } else {
                     eprintln!("diff: cannot determine filename from path");
                     2
                 }
             } else {
-                diff_files(&config.path1, &config.path2, &config, false)
+                diff_files(
+                    Path::new(&config.path1),
+                    Path::new(&config.path2),
+                    &config,
+                    false,
+                )
             };
 
             process::exit(exit_code);
@@ -2206,7 +2232,7 @@ mod tests {
     /// digits still parses -- so nothing downstream would notice the loss.
     #[test]
     fn the_header_field_is_a_tab_then_a_nine_digit_stamp() {
-        let field = header_field("nosuchfile.txt");
+        let field = header_field(Path::new("nosuchfile.txt"));
         let at = field
             .iter()
             .position(|&b| b == b'\t')

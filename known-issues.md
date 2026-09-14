@@ -144574,6 +144574,28 @@ should get the same pair of files, and the case above — two files differing
 only in a high byte — belongs in it as the regression, because it is the one
 that returns the wrong answer rather than an error.
 
+### The one question the conversion had to settle first, now measured
+
+`normalize_line` folds case with `str::to_lowercase`, which is Unicode-aware.
+Carrying lines as bytes means `to_ascii_lowercase` instead, so `-i` would stop
+folding `É`/`é`. That is a user-visible change and worth checking rather than
+assuming — so it was measured, with an ASCII pair as the control:
+
+| input pair | GNU `diff -i` says |
+|---|---|
+| `cafÉ` vs `café` (U+00C9 / U+00E9) | **DIFFERENT** — not folded |
+| `ABC` vs `abc` | SAME — folded |
+
+So GNU folds ASCII case and not Unicode case, which is what a byte-wise
+`tolower()` does. **`to_ascii_lowercase` is not a concession to the byte
+conversion — it is what GNU actually does**, and our `to_lowercase()` is a
+present-day divergence that the conversion removes. Nothing blocks the fix.
+
+`is_whitespace()` in the same function needs the same treatment
+(`is_ascii_whitespace`) and almost certainly has the same answer, but it has
+not been measured and should be before it is changed — U+00A0 is the case to
+put in front of `-w`.
+
 ## TD-B-TWENTY-NINE-OF-THE-SEVENTY-TWO-BINS-ON-THE-IMAGE-DECODE-LOSSILY (lane B, 2026-09-14)
 
 **Status:** OPEN — a candidate list, deliberately not a defect list

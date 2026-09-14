@@ -587,6 +587,16 @@ guessing at it would reintroduce this very defect in a subtler form: a date that
 is plausible and wrong), plus `-s`, `-f`, `--debug` and `--resolution`. Each
 says so. 21 of the remaining 42 are those refusals.
 
+> **Superseded 2026-09-14 — `-d` and `-f` are implemented and the harness is
+> green (117 passed / 0 differed).** The paragraph above is kept because its
+> *reasoning* was right and is what shaped the fix: the answer to "guessing
+> would produce a plausible wrong date" was to stop guessing, not to stop
+> implementing. `scripts/probe-date-d-grammar.sh` measured GNU 9.4 first, and
+> three of its results contradict a careful guess — `epoch` is not a keyword,
+> `@0 + 1 day` is an error, and `-d ''` means today at midnight. Anything the
+> probe did not confirm (`2 weeks ago`, `next Friday`) is still refused.
+> `-s`, `--debug` and `--resolution` remain refused.
+
 *`scripts/check-argv-ignored.py`'s baseline is now empty* — both bins it was
 written for are fixed, and the gate stands as a ratchet against the next one.
 

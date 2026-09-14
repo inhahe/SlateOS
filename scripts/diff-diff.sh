@@ -211,6 +211,20 @@ run_stdin() { local i="$1"; shift; compare "$i" "$@"; report "printf '$i' | diff
 # A case expected to differ, with the reason. Counted apart so that one which
 # starts agreeing is reported too: an xfail that silently becomes correct is a
 # stale note in the harness rather than a success.
+# `xfail_case` for a case that feeds stdin. Same counting, same XPASS report.
+xfail_stdin() {
+  local why="$1"; local i="$2"; shift 2
+  compare "$i" "$@"
+  if [ "$AGREED" = yes ]; then
+    xpass=$((xpass+1))
+    printf 'XPASS %s -- expected to differ (%s) and did not\n' "printf '$i' | diff $*" "$why"
+  else
+    xfail=$((xfail+1))
+    [ -n "${VERBOSE:-}" ] && printf 'xfail %s (%s)\n' "printf '$i' | diff $*" "$why"
+  fi
+  return 0
+}
+
 xfail_case() {
   local why="$1"; shift
   compare - "$@"
@@ -323,7 +337,19 @@ run_case -u bytes.txt bytes2.txt
 run_stdin 'alpha\nbravo\ncharlie\ndelta\n' base.txt -
 run_stdin 'alpha\nbravo\nCHANGED\ndelta\n' base.txt -
 run_stdin 'alpha\nbravo\ncharlie\ndelta\n' - base.txt
-run_stdin 'alpha\nbravo\nCHANGED\ndelta\n' -u - base.txt
+# STDIN HAS NO MTIME, so `-u` stamps its `--- -` header with the CURRENT
+# time -- measured, that is what GNU does too -- and the two sides of this
+# harness run milliseconds apart. The nanosecond field cannot agree, so
+# this case can never pass and is not a defect.
+#
+# WHAT IT STOPS CHECKING, stated so nobody has to work it out later: this
+# is the only case exercising UNIFIED output with stdin as an operand, so
+# a regression in that combination would hide here. The other four stdin
+# cases use the normal format, which prints no header, so the reading of
+# stdin is still checked; and every other unified case still checks the
+# header. Only the intersection is unwatched.
+xfail_stdin 'the --- header stamps stdin with the current time' \
+  'alpha\nbravo\nCHANGED\ndelta\n' -u - base.txt
 run_stdin '' - empty.txt
 
 # --- directories ---------------------------------------------------------------

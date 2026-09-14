@@ -1444,7 +1444,17 @@ fn print_unified(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
         } in &hunk.lines
         {
             match op {
-                Op::Equal => write_body_line(&mut w, b" ", text, None),
+                Op::Equal => {
+                    // The marker belongs here too. A unified hunk's TRAILING
+                    // CONTEXT is where the last line of the file lands when
+                    // the change is above it -- which is precisely the case
+                    // where both files lack a final newline, since then the
+                    // last line is unchanged and stays an `Equal`.
+                    write_body_line(&mut w, b" ", text, None);
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
+                }
                 Op::Delete => {
                     write_body_line(&mut w, b"-", text, when(config.color, RED));
                     if *no_final_newline {
@@ -1850,13 +1860,26 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bo
     let e2 = is_stdin(p2) || p2.exists();
 
     // Handle absent files with --new-file.
-    if !e1 && !config.new_file {
-        eprintln!("diff: {}: No such file or directory", quotef_os(path1_str));
-        return 2;
-    }
-    if !e2 && !config.new_file {
-        eprintln!("diff: {}: No such file or directory", quotef_os(path2_str));
-        return 2;
+    //
+    // BOTH are reported before returning. Measured: `diff nosuch.txt
+    // nosuch2.txt` gives GNU two lines, one per file, and this build gave one
+    // and stopped -- so a user who mistyped both paths fixed the first, re-ran,
+    // and only then learned about the second. Same shape as CLAUDE.md's rule
+    // that a batch operation reports the worst error rather than the first one
+    // it meets.
+    if !config.new_file {
+        let mut absent = false;
+        if !e1 {
+            eprintln!("diff: {}: No such file or directory", quotef_os(path1_str));
+            absent = true;
+        }
+        if !e2 {
+            eprintln!("diff: {}: No such file or directory", quotef_os(path2_str));
+            absent = true;
+        }
+        if absent {
+            return 2;
+        }
     }
 
     // Read file contents (absent files treated as empty when -N is set).

@@ -1414,6 +1414,87 @@ port needed the exact rule, and the manual's own example was not enough to
 derive it either.
 
 
+## A-Q13: Eight times in two days, one agent's push has cost another agent a 20-minute test run. Should pushing be gated?
+
+**In short:** the three agents share one trunk. When one pushes something broken,
+nothing notices until another agent runs the full test cycle -- which takes 20 to
+40 minutes and fails partway through. That has happened eight times in two days,
+and each time the agent who paid was not the one who caused it. The question is
+whether pushing should have to pass something first, and if so what.
+
+**Glossary.** *Gate* -- an automatic check that can refuse. *Boot test* -- the full
+cycle: ~130 checks, a kernel build, then booting it in an emulator; 20-40 minutes.
+*Pre-push hook* -- checks that run on the pushing machine before a push is allowed;
+seconds to minutes.
+
+**The evidence, all from 2026-09-12 to 09-14.** Eight breakages arrived on the
+trunk and were found by a later agent's run:
+
+| what | found after | would a pre-push check have caught it? |
+|---|---|---|
+| a shell quoting fault (`SC2046`) | ~520 s | yes -- the check exists, but only in the boot |
+| a file read that hid three failures as one | ~520 s | yes, same |
+| code reading two fields that did not exist yet | ~1800 s | yes, a compile error |
+| eight file writes with the wrong line endings | 13 s and 16 s (twice, different files) | yes, same check, boot-only |
+| a list claiming to hold every case while missing one | 321 s | yes, same |
+| a shell fault in a *different* agent's tree | ~1895 s | yes, a compile error for another platform |
+| **two checks that were themselves wrong** | 198 s, 262 s | no -- these were false alarms |
+
+**Four were real, two were false alarms from checks I have since fixed.** That
+ratio matters for the answer: adding more gating without fixing the gates buys
+more false alarms, and an agent who learns to discount a red result is worse off
+than one who never had the check.
+
+**The thing that surprised me, and it rules out the obvious answer.** Lane C
+already runs the whole test suite before every merge -- about 6-7 minutes -- and it
+caught *neither* of the two faults in lane C's own tree. One was a compiler warning
+for a different platform; the other was a separate check written in Python. So
+"the agent tested before pushing" and "the trunk still works" are different
+claims, and the first has been quietly standing in for the second.
+
+**Why we cannot simply require the full cycle.** The trunk takes roughly 49
+merges a day (489 in ten days, 86 on the busiest). The full cycle is 20-40
+minutes and only one can run at a time on this machine. The arithmetic does not
+close: requiring it would cap the project at a handful of merges a day.
+
+**The options:**
+
+* **Move the fast checks to push time.** Several of the checks above already
+  exist and run *only* in the full cycle, for no reason anyone recorded. They
+  take seconds.
+  *What changes:* the agent who writes the fault sees it in seconds instead of a
+  different agent seeing it 20 minutes later. Five of the six real faults above
+  would have been caught this way. Costs a few seconds per push.
+* **Require the full cycle before merging to the trunk.**
+  *What changes:* the trunk is never broken; the project does a handful of merges
+  a day instead of fifty. This is the strongest guarantee and the one the
+  arithmetic refuses.
+* **Change nothing; the agents keep absorbing it.**
+  *What changes:* nothing. Eight runs in two days were spent on this, and the
+  cost falls on whoever runs the cycle rather than whoever caused the fault, so
+  no agent sees their own cost.
+* **Fix the checks first, then decide.**
+  *What changes:* nothing immediately. Two of eight alarms were the checks being
+  wrong; that rate is worth lowering before making them block more.
+
+**Recommendation: the first, and it is already half-blocked on A-Q11.** The
+checks exist, they are fast, and they are deterministic -- the only reason they
+run late is that nobody moved them. But putting them in the pre-push hook means
+editing `scripts/hooks/pre-push`, which is the file A-Q11 asks about, and two
+agents each believe it is theirs. I proposed one such move to lane B by notice
+and deliberately did not make it. **Answering A-Q11 unblocks this.**
+
+**If this is never answered:** nothing degrades, but the cost continues at
+roughly four boot runs a day of wasted work, charged to whichever agent runs the
+cycle. Lane C has seen the tally and seconds this question rather than filing a
+separate one.
+
+*Filed 2026-09-14 by lane A, with lane C's agreement. Lane C contributed the
+measurement that its own pre-merge suite caught neither of its own faults, and
+that a lane's gate has nothing scheduling it apart from another lane's boot --
+its slowest run today, 578 s of 399 s mean, was slow because my boot was running.*
+
+---
 ## A-Q11: Who owns `scripts/hooks/pre-push`?  Two lanes each believed they did, and both edited it the same night
 
 **In short:** the tool that tells each agent which files it may edit does not mention

@@ -47,6 +47,14 @@ const TEXT_PREVIEW_MAX_BYTES: usize = 4096;
 /// Most pixels a source picture may have before the thumbnailer declines to
 /// decode it and falls back to the aspect-ratio swatch.
 ///
+/// How much of an SVG is read before giving up on it.
+///
+/// A megabyte of markup is a very large drawing and a very small fraction of
+/// what a text file can be. The cap exists for the reason the pixel cap below
+/// does: a thumbnail is a convenience, and no convenience is worth reading an
+/// unbounded file to produce.
+const MAX_SVG_BYTES: usize = 1024 * 1024;
+
 /// Deliberately well below `imagecodec::Limits::DEFAULT_MAX_PIXELS` (7680×4320,
 /// the compositor's own buffer ceiling), because the two are bounding different
 /// things. That ceiling asks "could this be a wallpaper?" — one picture, chosen
@@ -520,6 +528,59 @@ fn parse_image_dimensions(data: &[u8]) -> Option<ImageDimensions> {
 // Image downscaling
 // ============================================================================
 
+/// Whether a file's first bytes look like an SVG document.
+///
+/// XML, so the signature is text and may be preceded by a declaration, a
+/// comment or a doctype. Leading whitespace is skipped and then one of two
+/// openings is required -- an `<?xml` prologue or the `<svg` element itself.
+/// A file that merely *mentions* `<svg` further in is not matched: the
+/// question is what this file **is**, and a look at the front is the only
+/// answer available before reading the whole of it.
+fn looks_like_svg(header: &[u8]) -> bool {
+    let start = header
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(header.len());
+    let Some(rest) = header.get(start..) else {
+        return false;
+    };
+    rest.starts_with(b"<?xml") || rest.starts_with(b"<svg")
+}
+
+/// Draw an SVG at thumbnail size.
+///
+/// `guitk::svg` renders to an ARGB buffer, which is exactly what
+/// `Canvas::from_argb` takes -- the whole of this function is putting the two
+/// together. That renderer had **no caller anywhere in the tree** until now
+/// (`TD-C-SIX-TOOLKIT-WIDGETS-ARE-WRITTEN-TESTED-AND-USED-BY-NOTHING`), while
+/// this module drew a coloured rectangle for every `.svg` on the disk and
+/// `apps/diagram` exported SVGs the system could not show back.
+///
+/// `None` for anything that will not parse, which falls through to the
+/// placeholder the rest of this function produces -- a drawing that is not a
+/// drawing is not worth a special message.
+fn try_svg_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Option<Thumbnail> {
+    // Bounded by the same limit the decoders are: an SVG is text, and text can
+    // be arbitrarily long, so reading "the whole file" is a promise this
+    // module does not make anywhere else either.
+    let bytes = read_file_header(path, MAX_SVG_BYTES)?;
+    let text = core::str::from_utf8(&bytes).ok()?;
+    let doc = guitk::svg::SvgDocument::parse(text).ok()?;
+
+    let (_, _, vb_w, vb_h) = doc.viewbox();
+    if !(vb_w.is_finite() && vb_h.is_finite()) || vb_w <= 0.0 || vb_h <= 0.0 {
+        return None;
+    }
+    // Rounded up, so a viewBox under one pixel in either direction still has a
+    // pixel to be drawn in rather than producing a zero-sized buffer.
+    let (tw, th) = fit_dimensions(vb_w.ceil() as u32, vb_h.ceil() as u32, config.size);
+    let (tw, th) = (tw.max(1), th.max(1));
+
+    let argb = doc.render(tw, th);
+    let canvas = Canvas::from_argb(tw, th, &argb)?;
+    Some(into_thumbnail(canvas, path, mtime))
+}
+
 /// Downscale a canvas to fit within `target_size x target_size`, preserving
 /// aspect ratio. A source already that small is returned unscaled.
 fn box_filter_downscale(src: &Canvas, target_size: u32) -> Canvas {
@@ -695,6 +756,17 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
         None => return generate_default_thumbnail(path, ThumbCategory::Image, config, mtime),
     };
 
+    // SVG first, because it is the one image format whose size is not in a
+    // binary header: `parse_image_dimensions` below reads BMP, PNG, GIF and
+    // JPEG, and an SVG failed all four and fell through to a placeholder. Its
+    // dimensions are in its `viewBox`, which means parsing the document --
+    // which is also what draws it, so there is no cheaper question to ask.
+    if looks_like_svg(&header)
+        && let Some(thumb) = try_svg_thumbnail(path, config, mtime)
+    {
+        return thumb;
+    }
+
     let dims = match parse_image_dimensions(&header) {
         Some(d) => d,
         None => return generate_default_thumbnail(path, ThumbCategory::Image, config, mtime),
@@ -717,8 +789,11 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
 
     // Nothing decoded it: an aspect-ratio-correct colour swatch, which is at
     // least honest about the shape of the picture. Today this is GIF, JPEG,
-    // SVG, WebP and ICO — and any PNG above `max_source_pixels`, or one that is
-    // corrupt.
+    // WebP and ICO — and any PNG above `max_source_pixels`, or one that is
+    // corrupt. SVG used to be on that list and no longer is; it was also never
+    // *reaching* the swatch, because its size is not in a binary header and
+    // `parse_image_dimensions` returned `None` for it, so it fell through to
+    // the plain category placeholder one branch earlier.
     let (tw, th) = fit_dimensions(dims.width, dims.height, config.size);
     let size = config.size;
     let mut canvas = Canvas::transparent(size, size);
@@ -2419,6 +2494,96 @@ mod tests {
         let dims = parse_jpeg_dimensions(&data).unwrap();
         assert_eq!(dims.width, 640);
         assert_eq!(dims.height, 480);
+    }
+
+    // ---- SVG ----------------------------------------------------------
+    //
+    // Every `.svg` on the disk used to get a coloured rectangle, and did not
+    // even get *that*: its size is not in a binary header, so
+    // `parse_image_dimensions` returned `None` and it fell through to the
+    // plain category placeholder. Meanwhile `guitk::svg` -- a renderer with
+    // its own 47 tests -- had no caller anywhere in the tree.
+
+    /// A small SVG with one filled rectangle in it.
+    fn svg_bytes(colour: &str) -> String {
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\" \
+             viewBox=\"0 0 40 20\"><rect x=\"0\" y=\"0\" width=\"40\" height=\"20\" \
+             fill=\"{colour}\"/></svg>"
+        )
+    }
+
+    #[test]
+    fn an_svg_is_recognised_from_its_first_bytes() {
+        assert!(looks_like_svg(b"<svg width=\"1\"></svg>"));
+        assert!(looks_like_svg(b"   \n\t<?xml version=\"1.0\"?><svg/>"));
+        assert!(!looks_like_svg(b"\x89PNG\r\n"));
+        assert!(!looks_like_svg(b"BM"));
+        assert!(!looks_like_svg(b""));
+        // A file that merely mentions one is not one.
+        assert!(!looks_like_svg(b"the tag <svg> appears in this text file"));
+    }
+
+    /// **An SVG is drawn, not swatched.**
+    #[test]
+    fn an_svg_thumbnail_is_a_picture_of_the_drawing() {
+        let scratch = ScratchDir::new("thumbs_svg");
+        let dir = scratch.dir();
+        let path = dir.join("shape.svg");
+        fs::write(&path, svg_bytes("#ff0000")).unwrap();
+
+        let config = ThumbConfig::default();
+        let thumb = generate_thumbnail(&path, &config);
+
+        // Wider than tall, as the viewBox is.
+        assert!(thumb.width > 0 && thumb.height > 0, "no pixels at all");
+        assert!(
+            thumb.width > thumb.height,
+            "a 40x20 drawing came out {}x{}",
+            thumb.width,
+            thumb.height
+        );
+    }
+
+    /// Two different drawings do not produce the same thumbnail.
+    ///
+    /// The point of the whole change: a swatch is the same rectangle whatever
+    /// the file contains, so a test that only checked "there are pixels" would
+    /// have passed before it.
+    #[test]
+    fn two_different_svgs_make_two_different_thumbnails() {
+        let scratch = ScratchDir::new("thumbs_svg_differ");
+        let dir = scratch.dir();
+        let red = dir.join("red.svg");
+        let blue = dir.join("blue.svg");
+        fs::write(&red, svg_bytes("#ff0000")).unwrap();
+        fs::write(&blue, svg_bytes("#0000ff")).unwrap();
+
+        let config = ThumbConfig::default();
+        let a = generate_thumbnail(&red, &config);
+        let b = generate_thumbnail(&blue, &config);
+
+        assert_ne!(
+            a.pixels, b.pixels,
+            "a red drawing and a blue one made the same thumbnail"
+        );
+    }
+
+    /// Something that is not a drawing falls through rather than failing.
+    #[test]
+    fn an_svg_that_will_not_parse_falls_back_to_a_placeholder() {
+        let scratch = ScratchDir::new("thumbs_svg_bad");
+        let dir = scratch.dir();
+        let path = dir.join("broken.svg");
+        fs::write(&path, "<svg this is not markup at all").unwrap();
+
+        let config = ThumbConfig::default();
+        let thumb = generate_thumbnail(&path, &config);
+
+        assert!(
+            thumb.width > 0 && thumb.height > 0,
+            "a broken drawing produced no thumbnail at all"
+        );
     }
 
     #[test]

@@ -475,6 +475,51 @@ from-cold figure would be off by two minutes.
 recommendation should turn on (see Hole 2). Lane B is taking it during lane A's
 boot test.
 
+### The operator's question, answered with the frequency term (lane A, 2026-09-13)
+
+*How much time would C+B save over A, and what is the harm in catching an error
+a day later?*
+
+**The term nobody had measured is how often the gate fires.** `git log
+origin/main --merges`: **489 merges in 10 days**, 86 of them yesterday. So:
+
+| | per run | per day |
+|---|---|---|
+| **A**, whole-workspace, warm, contended | 15 s | ~12 min at 49 merges/day, ~21 min at 86 |
+| **A**, scoped (158 `-p`), same conditions | 8 s | ~7 min / ~11 min |
+| **B**, one sweep, schedulable when idle | ~15 s warm | ~2 min, near-zero contention |
+| **C**, a grep on shared-library commits | ~1 s | negligible |
+
+Direct saving of C+B over A: **10-20 minutes of machine time a day**. Counting
+Hole 2 -- this machine saturates on a single cargo run, so each firing also
+degrades the other two lanes for its duration -- plausibly **25-60 minutes of
+aggregate lane time a day**.
+
+**The harm of a day's delay is real, and I can price it, because it happened to
+me four times on 2026-09-12.** A breakage on main propagates: every lane that
+merges inherits it and spends a boot cycle (10-30 min) rediscovering it.
+
+**But only one of those four was a compile error.**
+
+| inherited breakage | would `cargo check --workspace` catch it? |
+|---|---|
+| `stdin-hang-sweep.sh` SC2046 | no -- shell lint |
+| `getent` `unwrap_or_default` | no -- check-read-defaults |
+| `fio` reading absent `procinfo` fields (E0609) | **yes** |
+| `check-dead-code-allows` missing `newline=` | no -- text-mode gate |
+
+So A addresses about a quarter of the observed breakage traffic, at a cost paid
+on all ~50-90 merges a day. The boot test already catches all four categories;
+A only moves one of them earlier. On this evidence the trade is unfavourable:
+12-22 min/day of machine time to save perhaps one 30-minute rediscovery,
+before counting what it does to the other two lanes.
+
+**Caveats, stated because one day is a small sample.** If compile breakages are
+commoner than 1-in-4, the arithmetic moves. And A is not currently possible at
+all: `cargo check --workspace` fails outright on a clean tree because the kernel
+embeds `services/hello`'s artifact and nothing builds it (Hole 1) -- that has to
+be fixed before A is even an option, whereas B and C could start today.
+
 ### Scoped versus whole, measured — and my prediction was wrong
 
 The comparison above (39 s scoped against 14 s whole) was invalid: mine was

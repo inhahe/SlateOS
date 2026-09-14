@@ -73,6 +73,21 @@ REFUSAL = re.compile(r"REFUSING to (?:push|build)|refusing to (?:push|build)", r
 # Openers and closers, for finding where the refusal's own block ends. `case`/`esac`
 # and `do`/`done` are included because a refusal inside a loop or a case arm is
 # still inside something that can end without refusing.
+# A `case` pattern that MATCHES refusal text does not announce one. The
+# rootfs-staging test asserts the refusal happened:
+#
+#     *"refusing to build an image from stale binaries"*) ok ;;
+#
+# Those words are what the test is looking FOR, not words it is saying, and the
+# arm is right to end in `ok`. Before this, that line read as an inert refusal
+# and the gate refused the build over a test doing its job.
+#
+# Split at the arm's `)` rather than skipping case arms wholesale: the module
+# docstring includes them on purpose, because a refusal inside an arm can still
+# fall out without refusing. So `*) echo "REFUSING to push" ;;` still counts --
+# what matters is which half of the arm the words fall in.
+CASE_ARM = re.compile(r"^(?P<pat>\s*[^()]*)\)(?P<cmd>.*)$")
+
 OPEN = re.compile(r"^\s*(if|for|while|until|case)\b|\bthen\s*$|\{\s*$")
 CLOSE = re.compile(r"^\s*(fi|done|esac|\})\s*$")
 
@@ -99,6 +114,14 @@ def findings(text: str) -> list[tuple[int, str]]:
     out: list[tuple[int, str]] = []
     for i, line in enumerate(lines):
         if not REFUSAL.search(line):
+            continue
+        # Matched, not announced: see CASE_ARM.
+        arm = CASE_ARM.match(line)
+        if (
+            arm
+            and REFUSAL.search(arm.group("pat"))
+            and not REFUSAL.search(arm.group("cmd"))
+        ):
             continue
         # One report per block: a refusal printed over several lines (a heredoc
         # paragraph) would otherwise be counted once per line mentioning it.
@@ -238,6 +261,28 @@ def self_test() -> int:
     ])
     check("an exit after the block does not count",
           [l for l, _ in findings(after)], [2])
+    # A case PATTERN matching refusal text is a test looking for the words, not
+    # a block saying them. This pair is the discriminator: the gate has to ignore
+    # the pattern half and still catch the command half, or the fix for the
+    # false positive would have quietly turned the gate off for case arms.
+    matched = NL.join([
+        'case "$msg" in',
+        '    *"refusing to build an image from stale binaries"*) ok ;;',
+        '    *) bad "should have refused" ;;',
+        'esac',
+        '',
+    ])
+    check("a case pattern matching the words is not an announcement",
+          findings(matched), [])
+    announced = NL.join([
+        'case "$x" in',
+        '    *) echo "pre-push: REFUSING to push -- inert" ;;',
+        'esac',
+        '',
+    ])
+    check("a case arm that announces one and returns success is still reported",
+          [l for l, _ in findings(announced)], [2])
+
     # A heredoc paragraph mentioning the word twice is one refusal, not two.
     twice = NL.join([
         'if [ "$x" = "1" ]; then',

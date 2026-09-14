@@ -4,7 +4,7 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
-# 36 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# 43 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs; and
@@ -82,6 +82,7 @@
 apps/imageviewer/src/video.rs
 apps/installer/src/grub.rs
 apps/procexplorer/src/features.rs
+apps/settings/src/remote.rs
 apps/sysinfo/src/hwquery.rs
 gui/compositor/src/server.rs
 gui/desktop/src/about.rs
@@ -102,16 +103,22 @@ gui/desktop/src/power_settings.rs
 gui/desktop/src/print_manager.rs
 gui/desktop/src/resmon.rs
 gui/desktop/src/screen_capture.rs
+gui/desktop/src/security_dialog.rs
+gui/desktop/src/session_mgr.rs
 gui/desktop/src/startup_settings.rs
 gui/desktop/src/storage_settings.rs
+gui/desktop/src/taskbar.rs
 gui/desktop/src/touchpad.rs
+gui/desktop/src/update_settings.rs
+gui/desktop/src/user_accounts.rs
 gui/desktop/src/window_peek.rs
 gui/remote/src/reader.rs
 gui/toolkit/src/context_ext.rs
+gui/toolkit/src/disabled.rs
 gui/toolkit/src/menubar.rs
-gui/toolkit/src/pathbar.rs
 gui/toolkit/src/signal.rs
 gui/toolkit/src/svg.rs
+gui/toolkit/src/textview.rs
 netproto/src/arp.rs
 netproto/src/dhcp.rs
 netproto/src/icmp.rs

@@ -42,6 +42,7 @@ use guitk::wheel::Accumulator as WheelAccumulator;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
 use drives::DriveSet;
+use guitk::filetypes::{self, FileCategory};
 use guitk::pathbar::{CompletionItem, PathBar, PathBarEvent};
 
 use dropzone::{
@@ -84,6 +85,18 @@ impl FileEntry {
     /// extension otherwise, so an unrecognised `.qcow2` reads "QCOW2 File"
     /// rather than a bare "File" that says nothing.
     fn type_label(&self) -> String {
+        if self.file_type == FileType::Directory {
+            return FileType::Directory.label().to_string();
+        }
+        // The registry's own words for it: "Rust Source File" rather than "RS
+        // File", "Portable Network Graphics" rather than "Image". The bucket
+        // this file falls in is the coarse answer used for thumbnails; the
+        // Type column is where the exact one belongs.
+        let ext = self.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let info = filetypes::detect_from_extension(ext);
+        if info.category != FileCategory::Unknown {
+            return info.description.to_string();
+        }
         if self.file_type != FileType::Unknown {
             return self.file_type.label().to_string();
         }
@@ -111,18 +124,48 @@ pub enum FileType {
 
 impl FileType {
     /// Determine file type from extension.
+    ///
+    /// **Asked of `guitk::filetypes`, not matched here.** That registry's own
+    /// module doc says "every GUI component that needs to display, open, or
+    /// classify a file should go through this module rather than hard-coding
+    /// extension lists", and what was here was a hard-coded extension list --
+    /// one of *three* in this application, against a registry with magic-byte
+    /// signatures and MIME types that nothing in the tree had ever read. See
+    /// `TD-C-SIX-TOOLKIT-WIDGETS-ARE-WRITTEN-TESTED-AND-USED-BY-NOTHING`.
+    ///
+    /// This enum stays, because it is a *coarser* question than the registry
+    /// answers: sixteen categories collapse to the nine buckets that pick a
+    /// thumbnail and an icon. `is_text` is what separates a `.txt` from a
+    /// `.pdf` -- both are `Document` to the registry, and only one of them is
+    /// something a text thumbnail can be made of.
     pub fn from_extension(ext: &str) -> Self {
-        match ext.to_lowercase().as_str() {
-            "txt" | "log" | "md" | "rst" => Self::Text,
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp" | "ico" => Self::Image,
-            "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" => Self::Audio,
-            "mp4" | "avi" | "mkv" | "webm" | "mov" | "flv" => Self::Video,
-            "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => Self::Archive,
-            "exe" | "bin" | "sh" | "cmd" | "bat" => Self::Executable,
-            "pdf" | "doc" | "docx" | "odt" | "xls" | "xlsx" => Self::Document,
-            "rs" | "c" | "h" | "cpp" | "py" | "js" | "ts" | "html" | "css" | "java" | "go"
-            | "toml" | "yaml" | "json" | "xml" => Self::Code,
-            _ => Self::Unknown,
+        let info = filetypes::detect_from_extension(ext);
+        match info.category {
+            FileCategory::Executable | FileCategory::Library | FileCategory::System => {
+                Self::Executable
+            }
+            FileCategory::Package | FileCategory::Archive | FileCategory::DiskImage => {
+                Self::Archive
+            }
+            FileCategory::Image => Self::Image,
+            FileCategory::Audio => Self::Audio,
+            FileCategory::Video => Self::Video,
+            FileCategory::Code => Self::Code,
+            FileCategory::Config | FileCategory::Data => {
+                if info.is_text {
+                    Self::Text
+                } else {
+                    Self::Unknown
+                }
+            }
+            FileCategory::Document | FileCategory::Spreadsheet | FileCategory::Presentation => {
+                if info.is_text {
+                    Self::Text
+                } else {
+                    Self::Document
+                }
+            }
+            FileCategory::Unknown => Self::Unknown,
         }
     }
 
@@ -5615,7 +5658,10 @@ mod tests {
             state.row_values(&entry),
             vec![
                 ColumnValue::Text("a.rs".to_string()),
-                ColumnValue::Text("Source File".to_string()),
+                // The registry's own words, not the explorer's bucket label.
+                // This said "Source File" while `guitk::filetypes` -- which
+                // knows it is Rust -- went unread.
+                ColumnValue::Text("Rust Source File".to_string()),
             ]
         );
     }

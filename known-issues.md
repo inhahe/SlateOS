@@ -143652,6 +143652,158 @@ a copy to a USB stick waits behind a copy to the internal disk when it did not
 have to. The user-visible *gain* over what was there before is that it is
 accepted at all.
 
+## TD-C-THE-ORPHAN-SCAN-CLEARS-A-MODULE-ON-A-NAME-AN-APP-HAPPENS-TO-SHARE
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the checker that finds library modules nobody uses can be fooled
+into clearing one, by an unrelated application that happens to define a type
+with the same name. It cleared a 2 201-line file-type registry that no file in
+the tree referred to, and the file explorer went on classifying files with its
+own hardcoded extension lists for three days afterwards.
+
+**Where:** `scripts/scan-orphan-modules.py`. Two rules that are each sensible
+alone:
+
+* candidates skip `main.rs` -- a binary's root is not a library module, which
+  is right;
+* a mention is any identifier token equal to one of the module's public item
+  names, and names *shared with another module* are dropped from the evidence
+  so that a common noun cannot clear anything.
+
+Together they leave a hole: a name owned by a `main.rs` is not "shared with
+another module", because a `main.rs` was never collected as an owner -- while
+that same file's tokens still count as mentions. So an application that models
+the same subject in its own binary clears the library module that models it
+properly.
+
+**Reproduced.** `apps/fileassoc/src/main.rs` declares `FileCategory` and
+`FileType`. `gui/toolkit/src/filetypes.rs` exports `FileCategory` (among
+others). Before 2026-09-14 nothing in the tree named `guitk::filetypes` or
+`crate::filetypes`, and the only other occurrence of the string was a method
+called `render_filetypes_tab` -- yet the scan did not report the module, and
+`--check` was silent. Checked by restoring the pre-change explorer and running
+the scan again.
+
+**The fix.** Collect shared-name owners from every Rust file, not only from
+candidate modules: being ineligible to *be* an island does not make a file
+ineligible to *own* a name. Expect the tightened rule to surface more islands
+-- that is the point -- and expect at least `filetypes` to reappear if its new
+caller is ever removed.
+
+**The second-order lesson, which is the one worth keeping.** The two rules were
+written at different times for different reasons and each is correct. The
+defect is in their *interaction*, and no test of either one could find it. What
+found it was using the thing the gate had cleared and discovering it had no
+users -- which is to say, the gate was checked by accident, by someone doing
+unrelated work. A gate nobody checks is a gate whose clearances nobody has
+reason to believe.
+
+## TD-C-SIX-TOOLKIT-WIDGETS-ARE-WRITTEN-TESTED-AND-USED-BY-NOTHING
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the GUI toolkit contains six finished, tested components that no
+program anywhere in the tree refers to -- about thirteen thousand lines and two
+hundred and sixty tests of working code that no user can reach. Some of them do
+a job an application is currently doing worse by hand, which is the part that
+costs something: the file explorer classifies files with its own hardcoded list
+of extensions while `guitk::filetypes` sits unused, and its own module doc says
+in as many words that this is what must not happen.
+
+**How this was found.** Not by a sweep -- by wiring `guitk::pathbar` into the
+file explorer on 2026-09-14 and noticing it had been carrying
+`#![allow(dead_code)]` and had no users. Asking the same question of every
+`pub mod` in `gui/toolkit/src/lib.rs` gave the list below.
+
+| module | lines | tests | files mentioning it |
+|---|---|---|---|
+| `menubar` | 3 490 | 61 | 0 |
+| `svg` | 3 391 | 47 | 0 |
+| `filetypes` | 2 201 | 41 | 0 |
+| `disabled` | 1 754 | 41 | 0 |
+| `context_ext` | 1 602 | 53 | 0 |
+| `signal` | 853 | 20 | 0 |
+
+(Counted as: no file outside `gui/toolkit/src/<module>.rs` names `<module>::`
+or `guitk::<module>`. `pathbar` was a seventh until this morning; `fontdb` and
+`row_strip` have a mention each and are not counted here.)
+
+**`menubar` is the one to be embarrassed about.** It was edited *this session*
+-- the viewport sweep threaded a `viewport` argument through
+`MenuBar::handle_mouse_event` and `handle_key_event` and updated its tests --
+without anyone noticing that no program opens a menu bar. Work was done to a
+component and its tests, carefully, while the component reached nothing. That
+is the same shape as `apps/automator`'s mutation table: it proved the worker
+and never knocked on the door.
+
+**`filetypes` is the one that is actively costing something.** Its module doc
+opens with
+
+> Every GUI component that needs to display, open, or classify a file should go
+> through this module rather than hard-coding extension lists.
+
+and `apps/explorer/src/main.rs` has a `FileType` enum with its own
+`from_extension` match over about fifty extensions, plus two further extension
+matches in `apps/explorer/src/columns.rs`. So the rule the module states is
+broken three times in the one application that most obviously needs it, and the
+registry with the magic-byte signatures and MIME types goes unread. A file the
+explorer calls "WEBP File" is one `filetypes` knows the category of.
+
+**What to do with each, which is not the same answer.** A component with no
+consumer is either a feature the user cannot reach or code to delete, and
+deciding which needs the question "who would use this?" asked per module:
+
+* `filetypes` -- **wire it.** The consumer exists and is doing the job worse.
+* `disabled` -- probably wire it. It carries a *reason* a control is disabled,
+  which is better than the bare `bool` the explorer's toolbar was given on
+  2026-09-14; that bool was written without checking here first, which is the
+  habit this entry is really about.
+* `menubar`, `context_ext` -- these want an application with a menu bar. The
+  shell has its own menus; whether a second implementation should exist at all
+  is a design question, not a wiring one.
+* `svg` -- a renderer with no caller. `apps/imageviewer` and the icon paths are
+  the candidates; 3 391 lines is worth an hour's look before either wiring or
+  deleting.
+* `signal` -- 853 lines of what is probably an observer mechanism. Least
+  obviously needed; check what it is before deciding.
+
+**Corrected within the hour: there IS a gate, and it is better than this
+entry first said.** `scripts/scan-orphan-modules.py` asks exactly this
+question, covers `gui/`, and reports `menubar`, `svg`, `context_ext` and
+`signal` by name. `pathbar` was in its baseline until this morning, and
+`--check` printed *"reached now, drop from the baseline"* the moment the file
+explorer used it. The first version of this paragraph said no gate looked at a
+library crate's public surface. That was written without running the gate, and
+it is the same failure the rest of this file is about.
+
+**What is actually wrong is narrower and worse.** The scan cleared
+`gui/toolkit/src/filetypes.rs` while *nothing at all* used it -- verified by
+checking out the pre-change explorer and running the scan again, which still
+did not report it. Lane A pruned it from the baseline on 2026-09-11 as
+"reached by lane C's own later work", consistently with what the gate said;
+the gate was wrong, not the prune.
+
+**Why it was wrong.** A mention is any identifier token equal to one of the
+module's public item names, anywhere in the tree. The candidate loop skips
+`main.rs`, so a type defined in an application's `main.rs` is never registered
+as *another owner* of that name -- but its every appearance still counts as a
+mention of the library module. `apps/fileassoc/src/main.rs` declares its own
+`FileCategory` and its own `FileType`, and those two names alone were enough to
+clear a 2 201-line registry that no file in the tree referred to.
+
+The docstring already anticipates this class -- *"names shared with another
+module ... are dropped from the evidence entirely"* -- and the rule does not
+reach a name whose other owner is a `main.rs`. The fix is to collect
+shared-name owners from every Rust file rather than from candidates only; a
+file that is not a candidate module can still own a name.
+
+**What it cost.** Three hard-coded extension lists in `apps/explorer` and a
+fourth model in `apps/fileassoc`, all beside an unread registry with MIME types
+and magic-byte signatures, for three days after the gate said the registry was
+fine. Filed as
+`TD-C-THE-ORPHAN-SCAN-CLEARS-A-MODULE-ON-A-NAME-AN-APP-HAPPENS-TO-SHARE`.
+
 ## TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY -- FIXED 2026-09-14
 
 **Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**

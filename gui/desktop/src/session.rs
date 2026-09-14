@@ -1150,6 +1150,9 @@ impl<T: Transport> ShellSession<T> {
                 // popup opening dismisses it -- so this position states that
                 // invariant rather than resolving a case.
                 self.shell.render_desktop_menu(),
+                // Beside the desktop menu, and for the same reason: it is a
+                // popup over the bar, and opening it dismisses every other one.
+                self.shell.render_tray_overflow(),
                 self.shell.render_shortcut_card(),
                 self.shell.render_alt_tab(),
                 // Last of all, over Alt-Tab too, and for the opposite reason to

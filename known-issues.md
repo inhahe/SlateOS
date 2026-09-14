@@ -144502,7 +144502,34 @@ by running a control rather than by reasoning about the tool.
 
 ## B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL (lane B, 2026-09-14)
 
-**Status:** OPEN · `userspace/coreutils/src/bin/diff.rs:467` · **`diff` is on the image**
+**Status:** FIXED 2026-09-14 · `userspace/coreutils/src/bin/diff.rs`
+
+**How it was closed.** Lines are `Vec<u8>` from `fs::read` to the writer:
+`FileContent::Text`, `compute_diff`/`lcs_diff`/`myers_diff`'s four slices and
+their `(Op, line)` result, `Hunk::lines`, `normalize_line`, `is_blank`. The
+renderers emit the line's own bytes through one `write_body_line` rather than
+`format!`, because GNU writes it raw and `diff -u | patch` reads it back.
+`normalize_line` folds with `to_ascii_lowercase`/`is_ascii_whitespace`, which
+the two measurements above showed is what GNU does — so `-i` and `-w` each
+shed a divergence as a side effect. `truncate_or_pad`, the only place a width
+is needed, still counts characters when the line is valid UTF-8 and falls back
+to bytes when it is not, so no line that aligned before moved.
+
+**Measured:** `scripts/diff-diff.sh` went from **43 passed / 64 differed** to
+**46 / 61** — three cases fixed, and `comm` over the two runs confirms
+**nothing newly differs**. Four unit cases were added, including a control
+asserting the *same* bad byte still compares equal; reintroducing the lossy
+decode turns the bug's case red and correctly leaves the control green.
+
+**The part worth keeping.** The three cases that went green are
+`diff bytes.txt bytes2.txt`, `diff -q bytes.txt bytes2.txt` and
+`diff base.txt bytes.txt`. **The harness already had those fixtures and was
+already failing them.** The bug was being reported on every run and was
+invisible because it sat among 64 other divergences — a harness with a large
+standing red count cannot tell anyone that something new broke. `diff` is now
+the tree's biggest such backlog at 61, which is an argument for baselining it
+the way `argv-utf8` and `raced-globals` are baselined, so the number that gets
+watched is *new* divergences rather than all of them.
 
 `diff` reports **no difference** between two files that differ, and exits 0.
 Measured, with `cmp` as the control:

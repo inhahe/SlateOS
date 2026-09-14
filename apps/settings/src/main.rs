@@ -598,9 +598,7 @@ pub struct SettingsState {
     pub resolution_index: usize,
     pub refresh_rate_index: usize,
     pub scale: ScalePercent,
-    pub night_light_enabled: bool,
     /// Warm at 0.0, cool at 1.0. Range stated by [`SliderId::range`].
-    pub night_light_temperature: f32,
     pub monitor_count: u8,
 
     // Sound settings
@@ -1029,8 +1027,6 @@ impl SettingsState {
             resolution_index: 2,   // 1920x1080
             refresh_rate_index: 1, // 60 Hz
             scale: ScalePercent::S100,
-            night_light_enabled: false,
-            night_light_temperature: 0.5,
             monitor_count: 1,
 
             // Sound defaults
@@ -3097,16 +3093,24 @@ impl SettingsState {
         s.toggle_row(
             "Night Light",
             ToggleId::NightLight,
-            self.night_light_enabled,
+            self.appearance.settings.night_light,
         );
 
-        if self.night_light_enabled {
-            self.slider(s, "Color Temperature", SliderId::NightLightTemperature);
+        if self.appearance.settings.night_light {
+            self.slider(s, "Warmth", SliderId::NightLightTemperature);
             // Range labels, sitting on the row boundary beneath the slider.
+            //
+            // Cool on the left and Warm on the right, which is the way the
+            // value runs: the setting is a *warmth* from 0 to 1, not a figure
+            // in kelvins. These used to read the other way round, from when
+            // the control was called "Color Temperature" and the field it
+            // moved was never read by anything -- a slider whose labels
+            // disagree with its value is worse than one that does nothing,
+            // because it does the opposite of what it says.
             s.draw(|tree, x, y| {
                 let cx = x + CONTROL_COLUMN_DX;
-                tree.text(cx, y, "Warm", pal.peach, 11.0);
-                tree.text(cx + SLIDER_WIDTH - 30.0, y, "Cool", pal.accent, 11.0);
+                tree.text(cx, y, "Cool", pal.accent, 11.0);
+                tree.text(cx + SLIDER_WIDTH - 34.0, y, "Warm", pal.peach, 11.0);
             });
         }
     }
@@ -5007,7 +5011,7 @@ impl SettingsState {
     /// panic.
     fn slider_raw(&self, id: SliderId) -> Option<f32> {
         Some(match id {
-            SliderId::NightLightTemperature => self.night_light_temperature,
+            SliderId::NightLightTemperature => self.appearance.settings.night_light_strength,
             SliderId::NarratorRate => self.narrator_rate,
             SliderId::OutputVolume => f32::from(self.output_volume),
             SliderId::InputVolume => f32::from(self.input_volume),
@@ -5047,7 +5051,10 @@ impl SettingsState {
         let (lo, hi) = id.range();
         let value = (hi - lo).mul_add(fraction.clamp(0.0, 1.0), lo);
         match id {
-            SliderId::NightLightTemperature => self.night_light_temperature = value,
+            SliderId::NightLightTemperature => {
+                self.appearance.settings.night_light_strength = value;
+                self.save_appearance();
+            }
             SliderId::NarratorRate => self.narrator_rate = value,
             SliderId::OutputVolume => self.output_volume = round_u8(value),
             SliderId::InputVolume => self.input_volume = round_u8(value),
@@ -5079,7 +5086,7 @@ impl SettingsState {
     /// principle, and a stale index must not panic.
     fn toggle_mut(&mut self, id: ToggleId) -> Option<&mut bool> {
         Some(match id {
-            ToggleId::NightLight => &mut self.night_light_enabled,
+            ToggleId::NightLight => &mut self.appearance.settings.night_light,
             ToggleId::OutputMuted => &mut self.output_muted,
             ToggleId::SystemSounds => &mut self.system_sounds_enabled,
             ToggleId::ProxyEnabled => &mut self.proxy_enabled,
@@ -5440,6 +5447,68 @@ mod tests {
     use inputsettings::config::testing::{scratch_path, with_scratch_config};
     use inputsettings::{InputSettings, MouseConfig};
 
+    /// The night-light controls reach the file the compositor reads.
+    ///
+    /// Both of them wrote free-standing fields on this struct until now --
+    /// present, rendered, adjustable, and read by nothing. The compositor
+    /// warms the frame from `appearance.yaml`, so that is where the switch and
+    /// the slider have to land.
+    #[test]
+    fn the_night_light_controls_write_the_appearance_file() {
+        with_scratch_config("settings-night-light", |_root| {
+            let mut state = SettingsState::new();
+            assert!(!state.appearance.settings.night_light, "off by default");
+
+            *state
+                .toggle_mut(ToggleId::NightLight)
+                .expect("the toggle resolves to a field") = true;
+            state.set_slider_fraction(SliderId::NightLightTemperature, 1.0);
+
+            let saved = appearance::AppearanceFile::load();
+            assert!(
+                saved.settings.night_light,
+                "the switch did not reach the file"
+            );
+            assert!(
+                (saved.settings.night_light_strength - 1.0).abs() < f32::EPSILON,
+                "the slider did not reach the file: {}",
+                saved.settings.night_light_strength
+            );
+        });
+    }
+
+    /// Dragging the warmth slider right makes the screen warmer.
+    ///
+    /// The labels used to read "Warm" on the left and "Cool" on the right,
+    /// from when the control was called Color Temperature and moved a field
+    /// nothing read. The value is a *warmth* now, so right is warm -- and a
+    /// slider whose labels disagree with its value is worse than one that does
+    /// nothing, because it does the opposite of what it says.
+    #[test]
+    fn dragging_the_warmth_slider_right_is_warmer() {
+        // Scratch-wrapped although nothing here looks like a write: moving
+        // this slider saves `appearance.yaml`, two calls further down. That is
+        // exactly the shape `check-scratch-config.py` exists for, and it
+        // refused this test's first version -- which had asserted only on an
+        // in-memory field.
+        with_scratch_config("settings-warmth-direction", |_root| {
+            let mut state = SettingsState::new();
+            state.set_slider_fraction(SliderId::NightLightTemperature, 0.2);
+            let gentle = state.appearance.settings.night_light_strength;
+            state.set_slider_fraction(SliderId::NightLightTemperature, 0.9);
+            let strong = state.appearance.settings.night_light_strength;
+
+            assert!(strong > gentle, "right was cooler, not warmer");
+            // And warmer means the compositor's gains cut more blue.
+            let (_, _, b_gentle) = appearance::night_light_gains(gentle);
+            let (_, _, b_strong) = appearance::night_light_gains(strong);
+            assert!(
+                b_strong < b_gentle,
+                "a warmer setting left as much blue through"
+            );
+        });
+    }
+
     /// The Notifications page is a page, not a roadworks sign.
     ///
     /// Eleven of the twenty-nine pages fall through `build_page`'s `_ =>` arm
@@ -5545,7 +5614,7 @@ mod tests {
         assert_eq!(state.current_category, SettingsCategory::System);
         assert_eq!(state.current_page, SettingsPage::Display);
         assert!(state.search_query.is_empty());
-        assert!(!state.night_light_enabled);
+        assert!(!state.appearance.settings.night_light);
         assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Dark);
     }
 
@@ -5616,8 +5685,8 @@ mod tests {
     #[test]
     fn test_toggle_night_light() {
         let mut state = SettingsState::new();
-        assert!(!state.night_light_enabled);
-        state.night_light_enabled = true;
+        assert!(!state.appearance.settings.night_light);
+        state.appearance.settings.night_light = true;
 
         // Render with night light on should show temperature slider
         let tree = state.render_tree();

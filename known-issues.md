@@ -75408,6 +75408,34 @@ modules, and which of the other fifty-odd should be on screen is still this
 entry's question. What changes is that the answer can now be observed rather
 than argued, because there is a running desktop to look at.
 
+**Update 2026-09-14 (lane C): one of the fifty is a taskbar, and it is the
+sharpest case in the pile.**
+
+`scripts/scan-orphan-modules.py` had been *clearing*
+`gui/desktop/src/taskbar.rs` -- 2 600 lines -- because it declares
+`pub struct WindowId`, a name the shell writes hundreds of times and which
+`gui/desktop/src/lib.rs` also declares. Both `lib.rs` are aggregators and were
+never collected as owners, so the taskbar module looked like the sole owner of
+the name, and every window id in the desktop vouched for it. Fixed the same
+day; the module is now pinned like the rest.
+
+**What that module is.** "Pinned application shortcuts (persisted to config),
+running application indicators with window grouping, drag-to-reorder, drag
+into/out of the pinned section to pin/unpin." The shell draws its own taskbar
+from `lib.rs` -- `taskbar_rect`, `taskbar_thickness`, `taskbar_button_width` --
+and `PinnedApp` appears nowhere in it. So **pinning an application to the
+taskbar is a finished, tested feature that no user can reach**, and the
+taskbar they do see cannot pin anything.
+
+**And it has been polished twice while unreachable.** The palette sweep
+converted this module's fourteen hard-coded colours to roles -- its own comment
+records the work -- and `gui/toolkit/src/menubar.rs`, also unused, was threaded
+with a `viewport` argument by the viewport sweep on 2026-09-14, tests and all.
+Neither sweep had any way to know. That is the cost of this entry stated
+precisely: not just that fifty modules are unreachable, but that careful work
+keeps being spent on them, because nothing in the toolchain says which of the
+fifty-seven are alive.
+
 **Where:** `gui/desktop/src/session.rs`, `ShellSession::paint_background`
 (`:334`) and `ShellSession::paint_chrome` (`:353`), are the only two functions
 that hand render commands to a compositor. Between them they call:

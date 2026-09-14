@@ -132145,7 +132145,7 @@ talks to before wiring it:
 | Power | **nobody.** And there are *two* dead models: `power_settings.rs` has a `PowerConfig`, and so does `power.rs` | building it produces controls that change nothing |
 | Default apps | **nobody.** The only mention of associations outside the panel is a line in `apps/explorer`'s module doc | same |
 | Startup apps | **nobody** in the session's launch path | same |
-| WiFi / Ethernet / VPN | not checked yet | unknown |
+| WiFi / Ethernet / VPN | **nobody** (checked 2026-09-14) | same |
 | Notifications | the shell's pane holds `app_settings` in memory — a real reader, but not a persisted one | the closest to ready, and still a three-part job |
 
 **So the blocker is not the port.** It is that these settings have nowhere
@@ -132172,6 +132172,30 @@ reader today, and because doing it builds the settings-crate-plus-reload-verb
 chain that the other four will each need. The rest wait on that chain, or on
 a consumer existing at all — and for Power that means a power manager, which
 is not lane C's.
+
+**The last unknown is closed, and it closes the entry: none of the four have
+a reader.** The network row was the one row that had not been checked, on the
+grounds that `net*/**` is lane C's own glob and a consumer might therefore be
+lane C's to write. Checked 2026-09-14: the only `NetworkConfig` outside
+`gui/desktop/src/network_settings.rs` is `apps/installer`'s, which is
+*install-time* answers to a questionnaire and not a running machine's
+configuration. Nothing under `net/`, `net80211/`, `netipc/`, `netproto/` or
+`netring/` reads a network setting, and nothing could: those crates are
+protocol and transport, with no daemon above them to own an interface.
+
+So the chain the Notifications port built is available and unused, and all
+four remaining pages are blocked on the same missing thing -- a service that
+owns the hardware and re-reads its settings on a verb. Power needs a power
+manager, network needs a network daemon, default apps and startup apps each
+need something in the session's launch path. **None of those are lane C's**
+(`services/**` and `init/**` are lane B's), so this entry is blocked rather
+than deferred, and the honest state of the Settings app is eleven roadworks
+signs of which ten are telling the truth.
+
+**Do not "just build the page" for any of them.** The entry above already
+says why and it is worth repeating at the bottom where the next reader will
+be: a page of live-looking controls that change nothing is strictly worse
+than the roadworks sign it replaces, because the sign is honest.
 ## TD-C-A-SWEEP-FOR-CODE-THAT-ASSUMES-THE-SCREEN-IS-1920-BY-1080 -- DONE 2026-09-13
 
 **Date:** 2026-09-13. **Lane:** C.

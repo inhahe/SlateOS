@@ -1944,6 +1944,7 @@ dependencies = [
 name = "notifsettings"
 version = "0.1.0"
 dependencies = [
+ "daywindow",
  "settingsfile",
  "yamldoc",
 ]

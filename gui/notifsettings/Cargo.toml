@@ -16,6 +16,12 @@ yamldoc = { path = "../../yamldoc" }
 # that never names a `Color`.
 settingsfile = { path = "../settingsfile" }
 
+# A recurring window of the day, validated. Its own crate precisely so that
+# this one can name an hour without compiling a widget toolkit, and so that
+# quiet hours are not the fourth hand-rolled copy of the same four u8s --
+# see gui/daywindow/src/lib.rs, which lists the three that already were.
+daywindow = { path = "../daywindow" }
+
 [dev-dependencies]
 # `settingsfile::testing` for the tests that run against a scratch
 # configuration directory instead of the developer's own.

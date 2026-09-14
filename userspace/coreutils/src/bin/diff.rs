@@ -51,6 +51,8 @@
 //!   -i, --ignore-case           Case-insensitive comparison
 //!   -b, --ignore-space-change   Ignore changes in amount of whitespace
 //!   -w, --ignore-all-space      Ignore all whitespace
+//!   -Z, --ignore-trailing-space Ignore whitespace at line end
+//!   -a, --text                  Treat all files as text
 //!   -B, --ignore-blank-lines    Ignore blank line insertions/deletions
 //!       --color                 Force color output
 //!       --no-color              Force no color
@@ -123,6 +125,14 @@ struct Config {
     color: bool,
     recursive: bool,
     new_file: bool,
+    /// `-Z`: whitespace at the END of a line is not a difference.
+    ///
+    /// Narrower than `-b`, which collapses runs anywhere, and much narrower
+    /// than `-w`. A file that differs only in trailing spaces is the common
+    /// case an editor creates, and GNU exits 0 on it under `-Z`.
+    ignore_trailing_space: bool,
+    /// `-a`: compare even a file holding NUL bytes as text.
+    text_mode: bool,
     /// The option words exactly as the user typed them, for the `diff -r
     /// da/x.txt db/x.txt` line GNU prints ahead of each file in a directory
     /// walk.
@@ -227,6 +237,8 @@ fn parse_args(args: &[String]) -> ParseResult {
     let mut color: Option<bool> = None;
     let mut recursive = false;
     let mut new_file = false;
+    let mut ignore_trailing_space = false;
+    let mut text_mode = false;
     let mut positional: Vec<String> = Vec::new();
     // Tracked by INDEX, not by value: an operand can be spelled the same as
     // an option's value -- `diff -U 5 5 other` names a file called `5` -- and
@@ -311,6 +323,10 @@ fn parse_args(args: &[String]) -> ParseResult {
                 ignore_case = true;
             } else if arg == "--ignore-space-change" {
                 ignore_space_change = true;
+            } else if arg == "--ignore-trailing-space" {
+                ignore_trailing_space = true;
+            } else if arg == "--text" {
+                text_mode = true;
             } else if arg == "--ignore-all-space" {
                 ignore_all_space = true;
             } else if arg == "--ignore-blank-lines" {
@@ -439,6 +455,8 @@ fn parse_args(args: &[String]) -> ParseResult {
                 'i' => ignore_case = true,
                 'b' => ignore_space_change = true,
                 'w' => ignore_all_space = true,
+                'Z' => ignore_trailing_space = true,
+                'a' => text_mode = true,
                 'B' => ignore_blank_lines = true,
                 'r' => recursive = true,
                 'N' => new_file = true,
@@ -506,6 +524,8 @@ fn parse_args(args: &[String]) -> ParseResult {
         color: use_color,
         recursive,
         new_file,
+        ignore_trailing_space,
+        text_mode,
         option_words,
     })
 }
@@ -553,6 +573,16 @@ fn normalize_line(line: &[u8], config: &Config) -> Vec<u8> {
             result.pop();
         }
         s = result;
+    }
+
+    // `-Z` trims only the END of the line, and runs AFTER the collapsing
+    // options above so that `-b -Z` sees what `-b` left. `-w` has already
+    // removed every space, so `-Z` finds nothing to do there, which is
+    // correct rather than a special case.
+    if config.ignore_trailing_space {
+        while s.last().is_some_and(u8::is_ascii_whitespace) {
+            s.pop();
+        }
     }
 
     if config.ignore_case {
@@ -610,7 +640,7 @@ enum FileContent {
 
 /// Read a file into lines. Returns `Err` on I/O errors, `Ok(Binary)` if the
 /// file contains NUL bytes, or `Ok(Text(lines))` for normal text files.
-fn read_file(path: &Path) -> Result<FileContent, String> {
+fn read_file(path: &Path, text_mode: bool) -> Result<FileContent, String> {
     // `-` is stdin, which has no metadata to size-check and no mtime. It also
     // cannot be read twice, so `diff - -` reads it once and compares the result
     // with an empty second side -- the same thing GNU does with a pipe.
@@ -619,7 +649,7 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
         io::stdin()
             .read_to_end(&mut data)
             .map_err(|e| format!("-: {e}"))?;
-        return Ok(classify(data));
+        return Ok(classify(data, text_mode));
     }
 
     let metadata = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -634,7 +664,7 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
     }
 
     let data = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(classify(data))
+    Ok(classify(data, text_mode))
 }
 
 /// Whether this operand names standard input.
@@ -650,12 +680,16 @@ fn is_stdin(path: &Path) -> bool {
 /// Shared by the path that reads a file and the one that reads stdin, so that
 /// `diff base.txt -` classifies its two sides by the same rule. Before stdin
 /// was supported this was read_file's tail and there was only one caller.
-fn classify(data: Vec<u8>) -> FileContent {
-    // Binary is decided on the first BINARY_DETECT_LEN bytes.
+fn classify(data: Vec<u8>, text_mode: bool) -> FileContent {
+    // Binary is decided on the first BINARY_DETECT_LEN bytes -- unless `-a`
+    // says to treat everything as text, in which case the probe is SKIPPED
+    // rather than its verdict overridden later. A NUL is then just another
+    // byte in a line, which only works because lines are bytes now.
     let check_len = data.len().min(BINARY_DETECT_LEN);
-    if data
-        .get(..check_len)
-        .is_some_and(|head| head.contains(&0u8))
+    if !text_mode
+        && data
+            .get(..check_len)
+            .is_some_and(|head| head.contains(&0u8))
     {
         return FileContent::Binary;
     }
@@ -1827,7 +1861,7 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bo
 
     // Read file contents (absent files treated as empty when -N is set).
     let content1 = if e1 {
-        match read_file(p1) {
+        match read_file(p1, config.text_mode) {
             Ok(c) => c,
             Err(msg) => {
                 eprintln!("diff: {msg}");
@@ -1839,7 +1873,7 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bo
     };
 
     let content2 = if e2 {
-        match read_file(p2) {
+        match read_file(p2, config.text_mode) {
             Ok(c) => c,
             Err(msg) => {
                 eprintln!("diff: {msg}");
@@ -1972,6 +2006,8 @@ fn print_help() {
     println!("  -i, --ignore-case           Case-insensitive comparison");
     println!("  -b, --ignore-space-change   Ignore changes in whitespace amount");
     println!("  -w, --ignore-all-space      Ignore all whitespace");
+    println!("  -Z, --ignore-trailing-space Ignore whitespace at line end");
+    println!("  -a, --text                  Treat all files as text");
     println!("  -B, --ignore-blank-lines    Ignore blank line changes");
     println!();
     println!("OUTPUT:");
@@ -2186,6 +2222,40 @@ mod tests {
         assert_eq!(context_marker(Op::Equal, false), b"  ");
     }
 
+    /// `-Z` ignores whitespace at the END of a line and nowhere else.
+    ///
+    /// Narrower than `-b`, which collapses runs anywhere. A file that differs
+    /// only in trailing spaces is what an editor leaves behind, and GNU exits
+    /// 0 on it under `-Z`.
+    #[test]
+    fn ignore_trailing_space_trims_only_the_end() {
+        let mut z = cfg();
+        z.ignore_trailing_space = true;
+        assert_eq!(normalize_line(b"a b   ", &z), b"a b");
+        assert_eq!(normalize_line(b"a b\t", &z), b"a b");
+        // The controls: leading and interior space are untouched.
+        assert_eq!(normalize_line(b"  a b", &z), b"  a b");
+        assert_eq!(normalize_line(b"a   b", &z), b"a   b");
+        // And without the flag nothing is trimmed at all.
+        assert_eq!(normalize_line(b"a b   ", &cfg()), b"a b   ");
+    }
+
+    /// `-a` makes a file holding NUL bytes compare as text.
+    #[test]
+    fn text_mode_stops_a_nul_meaning_binary() {
+        let data = b"a\0nul\n".to_vec();
+        assert!(
+            matches!(classify(data.clone(), false), FileContent::Binary),
+            "a NUL means binary without -a"
+        );
+        match classify(data, true) {
+            FileContent::Text(lines, _) => {
+                assert_eq!(lines, vec![b"a\0nul".to_vec()]);
+            }
+            FileContent::Binary => panic!("-a should have made this text"),
+        }
+    }
+
     // ---------------- the missing final newline ----------------
 
     /// The same four lines, one file terminated and one not, are DIFFERENT.
@@ -2368,6 +2438,8 @@ mod tests {
             color: false,
             recursive: false,
             new_file: false,
+            ignore_trailing_space: false,
+            text_mode: false,
             option_words: Vec::new(),
         }
     }

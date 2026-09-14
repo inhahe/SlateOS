@@ -588,6 +588,14 @@ pub extern "C" fn pthread_create(
     // TCB_SIZE) inside that range, and no thread uses it yet.
     unsafe {
         crate::tls::init_block(tp, &tls_img);
+        // The SAME value as every other thread, deliberately: glibc copies the
+        // parent's guard into the child TCB, and a thread that used a
+        // different one would abort a process that was never smashed the
+        // moment a frame outlived the change. The parent's TLS is live here,
+        // so the lookup is safe.
+        // SAFETY (covered by the enclosing block): `init_block` above
+        // established `[tp, tp + TCB_SIZE)`, and the child is not running yet.
+        crate::tls::set_stack_guard(tp, crate::crt::process_stack_guard());
     }
 
     // Push arg, start_routine and the thread pointer onto the new stack for

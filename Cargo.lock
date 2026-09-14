@@ -552,6 +552,7 @@ dependencies = [
  "inputsettings",
  "keylayout",
  "loginusers",
+ "notifsettings",
  "oswindow",
  "posix",
  "scratchdir",
@@ -2510,6 +2511,7 @@ dependencies = [
  "compositor",
  "guitk",
  "inputsettings",
+ "notifsettings",
  "oswindow",
  "settingsfile",
 ]

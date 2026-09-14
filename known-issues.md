@@ -142965,3 +142965,111 @@ compositor was 7x over budget (it was my scene, with every window stacked at
 the origin), that hoisting the clip would help, and that no benchmark existed.
 Every one was cheap to disprove by measuring and expensive to act on. Reading
 the inner loop has been wrong every time.
+
+
+## B-THE-USERSPACE-THIS-PROJECT-WRITES-HAS-NEVER-BEEN-ON-THE-IMAGE (lane B, 2026-09-13) — **fixed**
+
+**In short:** SlateOS boots an image that contains a shell, a C compiler, GNU
+make, CMake and Python — all of them ported from other people's source — and
+not one of the 278 command-line programs this project wrote itself. `ls`,
+`cat`, `cp`, `chmod`, `awk` and 273 others were written, tested, marked done in
+`roadmap.md`, and then copied nowhere. They were being tested on the developer's
+*Windows* machine, against Windows' own filesystem, and never once compiled for
+SlateOS, let alone run on it. The cause was not a missing toolchain — the
+toolchain worked the first time it was asked — it was that no script ever
+performed the copy.
+
+### What was actually shipping
+
+Three scripts can build a bootable image, and the population of
+locally-written software each one puts on it is:
+
+| script | what it stages from `userspace/` |
+|---|---|
+| `scripts/create-ext4-rootfs.sh` | nothing |
+| `scripts/build-image.ps1` | nothing |
+| `scripts/build-usb-image.py` | nothing |
+
+The kernel embeds three programs directly (`init`, `hello`, `ticker`, all from
+`services/`, via `include_bytes!` in `kernel/src/main.rs`). Those three were the
+entire set of software written here that had ever executed under SlateOS.
+
+Everything `create-ext4-rootfs.sh` does stage is either a host Linux binary
+used as a fallback, or one of the five upstream ports (bash, pkgconf, make,
+CMake, CPython). Those five get long, careful staging blocks — the CMake one
+runs to 40 lines of commentary about its module tree. Our own userland got no
+line at all.
+
+### How it surfaced
+
+Not from a failing test — nothing tested it. It came out of trying to do a
+much smaller job: `logrotate` had just been written, and the roadmap's own
+pkgconf entry (*"a port called 'proven' since 2026-08-14 had never once been in
+an image"*) argued it should be put on the image before being called done. The
+search for the mechanism that stages a userspace utility found that there is no
+such mechanism, and never had been.
+
+It was not entirely unrecorded. A lane-A boot-test analysis from 2026-08-21
+contains the clause *"…from `userspace/coreutils/`, which is not staged on
+`rootfs.ext4` at all yet"* — written as a supporting detail in an argument that
+lane B's code could not be responsible for three failing tests. That is a true
+sentence doing the opposite of the work it should have done: it was used to
+establish that our binaries were *not implicated*, and nobody asked why they
+were not there. **A fact used only to excuse a subject from suspicion is a fact
+nobody is tracking.**
+
+### What it was not
+
+It was not a toolchain gap, which is the explanation that would have justified
+the delay, and it is worth being precise that it was never true:
+
+- `userspace/.cargo/config.toml` already sets `target = "../toolchain/x86_64-slateos.json"` with `build-std`.
+- `toolchain/build-sysroot.ps1` already produces the `libc.a` and `libstubs.a` they link against, and both were present.
+- Asked to build for the real target for the first time, `logrotate` produced a **795 KB statically linked SlateOS ELF in 58 seconds**, and the whole `coreutils` crate produced **86 SlateOS ELF executables in 50 seconds**. Zero errors, zero changes to any crate.
+
+So the distance between "278 utilities that have never touched the OS" and
+"86 of them on the image" was one `cargo build` and one `cp` loop. It had been
+that distance the whole time.
+
+### The fix
+
+A new staging block in `scripts/create-ext4-rootfs.sh` copies every ELF in
+`target/x86_64-slateos/release/` into `/bin`. It:
+
+- identifies binaries by **ELF magic**, not by filename — cargo owns that
+  directory and fills it with `.d` depfiles and `incremental/`;
+- **skips and announces** a name an earlier block already staged, rather than
+  clobbering it, because lane A's boot test asserts on `/bin/make`, `/bin/sh`
+  and `/bin/tcc` by name;
+- **warns** when a staged binary is older than the sysroot `libc.a`, matching
+  the existing CMake staleness check — a binary linked against a stale libc
+  proves nothing about the current one;
+- reports the count, and when the count is zero says so loudly and names the
+  command that fixes it.
+
+Ten cases were added to `scripts/test-rootfs-staging.sh`, which extracts the
+block *verbatim* from the shipped script and runs it against fake artifacts.
+Both guards were mutation-tested: deleting the ELF-magic check and disabling
+the collision guard each take the harness from 14/14 to 12/14 and exit 1.
+
+### Why absence is a NOTE and not an error, for now
+
+The neighbouring fastpy block exits 1 on an empty scan. This one does not, and
+the difference is deliberate: a missing fastpy fixture makes a ring-3 self-test
+**self-skip and still report PASS**, whereas nothing yet asserts on these
+binaries at all. Making their absence fatal would break the image build in every
+tree that has not yet built the slateos target — lane A's included — to protect
+a test that does not exist. The block's comment says to turn it into an `exit 1`
+in the same change that adds the first boot test asserting one of these runs.
+
+### What is still open
+
+**Staged is not run.** This entry fixes "never on the image"; it does not
+establish that a single one of these binaries *executes* under SlateOS. That
+needs a boot test, which is lane A's tree — filed as
+`requests/b-a-our-own-utilities-are-on-the-image-now-can-a-boot-test-run-one.md`.
+Until that rung is green, the honest claim is "86 SlateOS-native utilities are
+present on the image", and no more than that. This is the same distinction the
+pkgconf entry had to learn: cross-compiling, linking, being staged and being
+*run* are four separate claims, and passing three of them is not passing the
+fourth.

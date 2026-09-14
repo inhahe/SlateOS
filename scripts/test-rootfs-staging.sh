@@ -1,6 +1,7 @@
 #!/bin/bash
-# Exercise create-ext4-rootfs.sh's CMake staging block against fake artifacts,
-# without building an image.
+# Exercise create-ext4-rootfs.sh's staging blocks against fake artifacts,
+# without building an image: the CMake pair, and the SlateOS-native
+# utilities built out of userspace/.
 #
 # In scripts/ and not build/ because it is a STANDING CHECK and not a one-off
 # measurement -- lane A's rule, learned when `build/survey_reach.py` was cited
@@ -75,6 +76,104 @@ esac
 case "$msg" in
     *"--version"*) ok ;;
     *) bad "the message should name the failure it prevents" ;;
+esac
+rm -rf "$T"
+
+# --- the SlateOS-native userspace block ---------------------------------------
+#
+# Extracted the same way, and for the same reason: this tests the shipped text
+# rather than a copy of it that can drift. The awk range cannot end at /^fi$/
+# the way the cmake one does, because this block closes TWO top-level ifs and
+# would be cut in half; it ends at the comment that follows it instead.
+SLATE_BLOCK="$(awk '/^SLATE_BIN_DIR=/{f=1} /^# --- Completeness/{f=0} f' "$SRC")"
+if [ -z "$SLATE_BLOCK" ]; then
+    echo "FAIL could not extract the SLATE_BIN_DIR block from $SRC"
+    exit 1
+fi
+
+# A file whose first four bytes are real ELF magic, which is what the block
+# tests. Note that the cmake fixture above -- printf 'ELF' -- is NOT one: it is
+# three bytes and lacks the leading 0x7f, so it would be skipped here. That is
+# the distinction this block relies on to tell a binary from a depfile.
+mk_elf() { printf '\177ELF' > "$1"; }
+
+slate_env() {
+    T="$(mktemp -d)"
+    export ROOT_DIR="$T/repo" STAGE="$T/stage"
+    mkdir -p "$ROOT_DIR/target/x86_64-slateos/release" "$STAGE/bin" \
+             "$ROOT_DIR/toolchain/sysroot/lib"
+    export SYSROOT_LIBC="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
+    : > "$SYSROOT_LIBC"
+}
+
+# 5. Real ELFs reach /bin, and the count is reported.
+slate_env
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ls"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/cat"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+{ [ -e "$STAGE/bin/ls" ] && [ -e "$STAGE/bin/cat" ]; } && ok \
+    || bad "two ELFs should both be staged, got: $msg"
+case "$msg" in
+    *"staged 2 SlateOS-native"*) ok ;;
+    *) bad "the count should be reported, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 6. THE REFUSAL PROBE. cargo owns that directory and fills it with depfiles,
+# incremental state and bookkeeping. Anything that is not an ELF must not
+# reach /bin -- a gate that only ever says yes has not been shown to work.
+slate_env
+printf 'ls: src/bin/ls.rs\n' > "$ROOT_DIR/target/x86_64-slateos/release/ls.d"
+printf 'not an elf\n' > "$ROOT_DIR/target/x86_64-slateos/release/README"
+mkdir -p "$ROOT_DIR/target/x86_64-slateos/release/incremental"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+{ [ ! -e "$STAGE/bin/ls.d" ] && [ ! -e "$STAGE/bin/README" ] \
+  && [ ! -e "$STAGE/bin/incremental" ]; } && ok \
+    || bad "non-ELF entries must not be staged, got: $msg"
+case "$msg" in
+    *"no binaries found"*) ok ;;
+    *) bad "a directory holding no ELF must say so, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 7. A name an earlier block already staged is KEPT, not clobbered. lane A's
+# boot test asserts on /bin/make, /bin/sh and /bin/tcc by name.
+slate_env
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/make"
+printf 'the host glibc make' > "$STAGE/bin/make"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+if [ "$(cat "$STAGE/bin/make")" = "the host glibc make" ]; then ok
+else bad "an already-staged name must not be overwritten"; fi
+case "$msg" in
+    *"already staged by an earlier block"*) ok ;;
+    *) bad "the collision must be announced, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 8. A binary older than the libc it links against proves nothing about the
+# current libc -- the same reasoning as the cmake staleness check above.
+slate_env
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ls"
+touch -d "2020-01-01" "$ROOT_DIR/target/x86_64-slateos/release/ls"
+touch "$SYSROOT_LIBC"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+case "$msg" in
+    *"OLDER than the sysroot libc.a"*) ok ;;
+    *) bad "a binary older than libc.a must be reported, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 9. No target directory at all -- the state every tree is in before its first
+# slateos build -- is a NOTE naming the build command, and must NOT fail the
+# image build. See the block's own comment for why this is not an exit 1 yet.
+slate_env
+rm -rf "$ROOT_DIR/target"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+[ "$rc" -eq 0 ] && ok || bad "an absent target dir must not fail the image build"
+case "$msg" in
+    *"cargo +nightly build --release"*) ok ;;
+    *) bad "the NOTE must name the command that fixes it, got: $msg" ;;
 esac
 rm -rf "$T"
 

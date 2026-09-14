@@ -147249,5 +147249,39 @@ rather than from reading. The next step is to read the daemon's listener table
 and confirm or kill the hypothesis before changing anything -- not to try a third
 fix and see whether the boot goes green.
 
+**Fourth pass, and this one is evidenced rather than hypothesised.** The
+constant-id idea was right for the wrong reason; here is the structure.
+
+| fact | where |
+|---|---|
+| the daemon holds **one** `RingSession`, not a table of them | `services/netstack/src/main.rs:2270` |
+| listeners live **inside** that session, keyed by the `OP_LISTEN` `conn_id` | same file, 3167 and 3328 |
+| there are **4** listener slots | `MAX_LISTENERS`, 3069 |
+| `net::socket::listen` issues `OP_LISTEN` with a **constant** id, 100, for *every* listening socket | `socket.rs:65`, `socket.rs:1327` |
+| the boot self-test uses 100 for its own listener, earlier in the same boot | `netstack_client.rs:1971` |
+
+So "keyed per session" and "keyed globally" are **the same thing here**, because
+there is only ever one session. My previous note killed the collision hypothesis
+on the grounds that the table is per-session; that was reading the type and not
+the instance.
+
+**What this makes suspect, in lane A's own code.** `socket.rs:64` documents the
+id as "unique within that session". That is literally true and practically
+misleading: with one session for the whole machine, a *constant* id means **two
+listening sockets cannot coexist**, and any listener the boot self-tests leave
+behind occupies the same slot. A second `listen()` is not a second listener.
+
+**Still not fixed tonight, and the reason has changed.** Earlier it was "stop
+guessing"; now it is ownership. The daemon half is `services/netstack`, which
+lane A must not write. The kernel half -- a constant where a per-socket id
+belongs -- is lane A's and is a real defect independent of this witness: it is
+why the witness cannot get a listener, and it would equally stop any two
+programs listening at once.
+
+**Next step, concretely:** confirm whether the earlier self-test releases
+listener 100, and whether `OP_LISTEN` on an occupied id replaces, rejects, or
+silently succeeds -- `listen()` returned success here while `accept` found no
+listener, and exactly one of those is lying.
+
 **`D-NETSOCK-SYNC` still has ONE witness.** Three boots have now failed on this
 test and none of them said anything about the property.

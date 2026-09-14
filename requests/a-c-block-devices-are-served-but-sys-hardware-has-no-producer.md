@@ -347,3 +347,45 @@ built now -- nothing consumes it and the enumeration would be guesswork -- but
 the flat form is the one that has to change if it happens.
 
 Recorded by lane C as `design-decisions.md` **§850**.
+
+### Data sources verified 2026-09-14 — and one trap avoided
+
+Checked before promising the files, since an interface that cannot be honestly
+filled is worse than an absent one.
+
+| file | source | status |
+|---|---|---|
+| `cpu/cpuid/{family,model,stepping}` | `crate::cpu::cpu_family_model_stepping() -> (u32,u32,u32)` | exists, extended family/model already applied |
+| `memory/{total_kb,available_kb}` | `crate::mm::memory_info()` -> `total_bytes`/`free_bytes` | exists |
+| `cpuN/cpufreq/{base_mhz,max_mhz}` | CPUID leaf 16h | **omit the file where the leaf is absent** |
+| `memory/{slots_total,speed_mhz}` | SMBIOS/DMI | **omit -- no producer** |
+
+**The trap, and it is the same one this decision was about.** The obvious source
+for memory is `mm::frame::stats()`, which returns `total_frames` and
+`free_frames`. Its own doc says `total_frames` is *"Total frames in the managed
+range (including non-usable holes)"* -- so `total_frames * FRAME_SIZE` is **not
+installed RAM** and would have been a quietly wrong number in a brand-new
+interface.
+
+Worse, it would have *disagreed with `/proc/meminfo`*, which computes `MemTotal`
+from `crate::mm::memory_info().total_bytes`. Two kernel-published answers to
+"how much memory is there", differing by the size of the memory holes. That is
+precisely the two-models-of-one-fact defect that made us choose (c) over (b),
+and it was waiting one function call inside the option we chose.
+
+So: **use `mm::memory_info()`, the same source procfs uses.** Not a second
+computation that happens to agree today.
+
+`FRAME_SIZE` is `16 * 1024`, matching `design.txt`'s 16 KiB pages, so any
+frames-to-kB conversion is `* 16` -- but per the above, none is needed.
+
+**Where the new arms go**, from reading `classify_path`:
+
+- `/sys/devices/system/` currently accepts only `third == "cpu"`; `memory`
+  needs a new arm beside it.
+- `cpuid` is a sibling of `cpuN` inside `classify_cpu_tail`.
+- `cpufreq` is a per-CPU subdirectory, beside the existing `online`,
+  `topology` and `cache` handling.
+
+`read_file`, `stat` and `list_dir` all match exhaustively on `SysPath`, so the
+compiler enforces that every new variant is handled in all three.

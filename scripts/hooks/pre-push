@@ -1259,25 +1259,25 @@ EOF
 fi
 
 if [ "$lossy_failed" = "1" ]; then
-    cat >&2 <<EOF
+    cat >&2 <<'EOF'
 
 pre-push: REFUSING to push — a byte sequence is being decoded into text and
 then used.
 
 The line is named above. `String::from_utf8_lossy` and `to_string_lossy`
 replace every byte they cannot decode with U+FFFD, so what comes out is not
-the thing that went in. On this OS a file name may hold every byte except \`/\`
+the thing that went in. On this OS a file name may hold every byte except `/`
 and NUL, which makes a decoded name one nobody can open.
 
-This has happened here. `diff_dirs` passed \`p1.to_string_lossy()\` to
-\`diff_files\`, and \`diff -r\` then answered \`No such file or directory\` for a
+This has happened here. `diff_dirs` passed `p1.to_string_lossy()` to
+`diff_files`, and `diff -r` then answered `No such file or directory` for a
 file it had itself just listed.
 
 What to do instead, in the order they usually apply:
 
-  * carry the bytes. \`&[u8]\` / \`OsString\` / \`&Path\` all the way to the
-    syscall; \`quoting::os_bytes\` and \`os_from_bytes\` are the boundary pair;
-  * if it is only being PRINTED, use \`quoting::quotef\`, which renders an
+  * carry the bytes. `&[u8]` / `OsString` / `&Path` all the way to the
+    syscall; `quoting::os_bytes` and `os_from_bytes` are the boundary pair;
+  * if it is only being PRINTED, use `quoting::quotef`, which renders an
     undecodable byte as an octal escape instead of destroying it;
   * if it is genuinely safe — an ASCII constant, or a decode behind a guard
     that admits only ASCII — add it to the IGNORE table in

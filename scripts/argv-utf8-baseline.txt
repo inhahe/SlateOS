@@ -22,7 +22,6 @@
 userspace/acl/src/main.rs:argv-as-string
 userspace/acpi/src/main.rs:argv-as-string
 userspace/apparmor/src/main.rs:argv-as-string
-userspace/ar/src/main.rs:argv-as-string
 userspace/arp/src/main.rs:argv-as-string
 userspace/at/src/main.rs:argv-as-string
 userspace/audit/src/main.rs:argv-as-string

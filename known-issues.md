@@ -147126,7 +147126,7 @@ comments and docstrings counts documentation as defect.
 is real and is theirs to repair with
 `python scripts/check-collapsed-messages.py --apply`. It was never lane A's.
 
-## TD-A-THE-HEAD-OF-LINE-WITNESS-MAY-BE-TESTING-A-DEAD-DATAPATH (lane A, 2026-09-14)
+## TD-A-THE-HEAD-OF-LINE-WITNESS-MAY-BE-TESTING-A-DEAD-DATAPATH (lane A, 2026-09-14) -- SEE CORRECTION
 
 **In short:** the witness written for `D-NETSOCK-SYNC` fails at its first
 `accept`, 64 retries, `InternalError` every time. That is not a race and the
@@ -147174,6 +147174,44 @@ about `with_stream_conn` directly rather than end-to-end through sockets.
 **Do not "fix" this by moving the witness to `NetstackConn`** without settling
 that: it would produce a green line about a lock the test never takes, which is
 937 substitution and strictly worse than the current honest red.
+
+**CORRECTION, same day, before anyone acts on the above.** The premise of this
+entry -- that the daemon owning the NIC leaves `net::socket` without a datapath
+-- is **wrong**, and I published it twenty minutes after forming it.
+
+`net::socket` is not an in-kernel stack competing with the daemon. Its own module
+doc says it is built on `NetstackConn`, "one SHM ring + one daemon TCP
+connection", and that socket creation is **only offered when `net.userspace` is
+set**. It is the daemon client. The switch being on is the condition that makes
+that layer live, not the thing that kills it.
+
+So the datapath is not dead and the earlier reasoning was backwards: I saw
+"daemon claimed the NIC" and "net::socket fails" and supplied a mechanism
+connecting them without reading what `net::socket` is.
+
+**What the evidence actually supports, stated narrowly this time.**
+
+* `netstack_client`'s own test completes listen/accept/data over loopback using
+  the raw `NetstackConn` API with explicit ids -- so the daemon's accept works.
+* `net::socket::accept` is a different wrapper over that, carrying the
+  `SOCKET_TABLE` and per-socket `Arc<Mutex<SocketInner>>` discipline this
+  witness exists to exercise.
+* Every `net::socket` self-test that passes covers a state machine, port
+  reporting, or an **empty-backlog** accept. None completes a real accept.
+
+So the narrow claim that survives is: **`net::socket::accept` has never been
+shown to complete a real connection, while `NetstackConn::accept` has.** That is
+a much smaller statement than the one above and it points at the wrapper rather
+than at the transport.
+
+**What this does NOT change.** Moving the witness to `NetstackConn` is still
+wrong, and now for a sharper reason: `NetstackConn::accept` demonstrably works,
+so a witness there would pass -- while taking none of the locks the head-of-line
+fix is about. It would be a green line about the one layer known to be fine.
+
+**Method note, since this is the second wrong diagnosis in one evening.** Both
+came from reasoning about a subsystem I had not read the first page of. The
+module doc that settles it is sixteen lines long and was three minutes away.
 
 **`D-NETSOCK-SYNC` still has ONE witness.** Three boots have now failed on this
 test and none of them said anything about the property.

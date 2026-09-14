@@ -22,10 +22,12 @@
 //!
 //! # What is deliberately not here
 //!
-//! **Do Not Disturb.** That is `desktop::focus_assist`, it is already wired,
-//! and it is a *mode the user is in* rather than a rule about a program. A
-//! second copy of it here would be a second answer to "may this interrupt
-//! me?", which is the shape of defect this crate is meant to remove.
+//! **Do Not Disturb itself.** The *mode* the user is in is
+//! `desktop::focus_assist`'s, along with the rule that compares a program's
+//! [`Importance`] against it. This crate carries what the user chose, not
+//! what the desktop does with it -- the same division `inputsettings` keeps
+//! with the compositor, and the reason it can be read by a settings
+//! application that has no business knowing what focus mode is on.
 //!
 //! **The notifications themselves.** A message is not a setting. They live and
 //! die within one session and belong to whoever is holding them.
@@ -38,8 +40,7 @@
 //! ```yaml
 //! apps:
 //!   Mail:
-//!     enabled: true
-//!     priority: high
+//!     importance: priority
 //!     sound: false
 //!     banner: true
 //! ```
@@ -56,52 +57,59 @@ use yamldoc::Document;
 // Priority
 // ============================================================================
 
-/// How much of the user's attention a notification asks for.
+/// How far a program's notifications get when the user is trying to focus.
 ///
-/// Shared with the message type in the shell rather than duplicated there: a
-/// rule that says "only High and above from this program" has to be comparing
-/// the same four values the message carries, and two enums with the same four
-/// names are two enums.
+/// **This is the scale `desktop::focus_assist` already uses**, variant for
+/// variant, because that is the code with a consumer:
+/// `should_show_notification` compares an app's level against the current
+/// focus mode, and the shell's `notify` calls it on every message. A settings
+/// crate that invented its own scale would be a fourth model of a thing this
+/// tree is trying to get down to one of.
+///
+/// It is deliberately **not** the same scale as a notification's own urgency,
+/// which is a property of one *message* (`notif_pane::NotifPriority`, the
+/// coloured badge). How loud a message is and how much a program is trusted
+/// to interrupt are different questions, and giving them one enum is how the
+/// answer to one silently becomes the answer to the other.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Priority {
-    /// Worth recording, not worth a banner.
-    Low,
+pub enum Importance {
+    /// Never shown while any focus mode is on.
+    Silent,
+    /// Follows the focus mode's ordinary rules.
     #[default]
     Normal,
-    High,
-    /// Interrupts even a focused full-screen program.
-    Urgent,
+    /// Still shown in "priority only".
+    Priority,
+    /// Always shown: alarms, security alerts.
+    Critical,
 }
 
-impl Priority {
+impl Importance {
     /// The name shown to the user.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Low => "Low",
+            Self::Silent => "Silent",
             Self::Normal => "Normal",
-            Self::High => "High",
-            Self::Urgent => "Urgent",
+            Self::Priority => "Priority",
+            Self::Critical => "Critical",
         }
     }
 
-    /// Every level, lowest first, in the order a chooser should offer them.
-    pub const ALL: [Self; 4] = [Self::Low, Self::Normal, Self::High, Self::Urgent];
+    /// Every level, quietest first, in the order a chooser should offer them.
+    pub const ALL: [Self; 4] = [Self::Silent, Self::Normal, Self::Priority, Self::Critical];
 
-    // `Priority::default()` is `Normal` and `AppRule::new`'s floor is `Low`,
-    // which reads like a contradiction and is not: the two answer different
-    // questions. A *message* with no stated priority is an ordinary one, so
-    // `Normal`. A *rule* with no stated floor should admit everything, so
-    // `Low`. Giving both the same value would break one of them -- a default
-    // floor of `Normal` would silently drop every `Low` notification from a
-    // program the user had never configured.
+    // `Normal` is the default at both ends, deliberately: it is what
+    // `focus_assist::app_priority` already answers for a program with no
+    // override, so a program the user has never configured behaves the same
+    // whether or not this file exists.
 }
 
-yaml_enum!(Priority {
-    Low => "low",
+yaml_enum!(Importance {
+    Silent => "silent",
     Normal => "normal",
-    High => "high",
-    Urgent => "urgent",
+    Priority => "priority",
+    Critical => "critical",
 });
 
 // ============================================================================
@@ -123,10 +131,14 @@ pub struct AppRule {
     /// to the user in this list and fixable by them. A rule keyed on something
     /// they cannot see would fail invisibly instead.
     pub app_name: String,
-    /// Whether this program may notify at all.
-    pub enabled: bool,
-    /// The lowest priority from this program that is still shown.
-    pub priority: Priority,
+    /// How far this program's notifications get while the user is focusing.
+    ///
+    /// `Silent` is how a program is switched off entirely, which is why there
+    /// is no separate `enabled` flag: `desktop::focus_assist` already reads
+    /// exactly this one value to make exactly this decision, and a second
+    /// boolean beside it would be a second way to say "no" that the consumer
+    /// does not read.
+    pub importance: Importance,
     /// Whether its notifications make a sound.
     pub sound: bool,
     /// Whether they appear as a banner, rather than only in the list.
@@ -134,26 +146,21 @@ pub struct AppRule {
 }
 
 impl AppRule {
-    /// The rule a program with no entry gets: everything on.
+    /// The rule a program with no entry gets.
     ///
-    /// Permissive by default because the alternative is a desktop where a
-    /// newly installed program is silently muted and the user has no reason
-    /// to suspect it. A notification nobody asked to suppress should arrive.
+    /// Matches what `focus_assist::app_priority` answers today for an
+    /// unconfigured program, so that adding this file changes nothing for
+    /// anyone who has not opened the settings page. Permissive, because the
+    /// alternative is a desktop where a newly installed program is silently
+    /// muted and the user has no reason to suspect it.
     #[must_use]
     pub fn new(app_name: &str) -> Self {
         Self {
             app_name: app_name.to_string(),
-            enabled: true,
-            priority: Priority::Low,
+            importance: Importance::Normal,
             sound: true,
             banner: true,
         }
-    }
-
-    /// Whether a notification of `priority` from this program should be shown.
-    #[must_use]
-    pub fn allows(&self, priority: Priority) -> bool {
-        self.enabled && priority >= self.priority
     }
 }
 
@@ -188,12 +195,6 @@ impl NotifSettings {
             .unwrap_or_else(|| AppRule::new(app_name))
     }
 
-    /// Whether a notification from `app_name` at `priority` should be shown.
-    #[must_use]
-    pub fn allows(&self, app_name: &str, priority: Priority) -> bool {
-        self.rule_for(app_name).allows(priority)
-    }
-
     /// Add or replace the rule for `rule.app_name`, keeping list order.
     ///
     /// Replacing in place rather than removing and pushing, so that editing a
@@ -216,14 +217,11 @@ impl NotifSettings {
         let mut apps = Vec::new();
         for name in doc.keys(&["apps"]) {
             let mut rule = AppRule::new(&name);
-            if let Some(v) = doc.get_bool(&["apps", &name, "enabled"]) {
-                rule.enabled = v;
-            }
             if let Some(v) = doc
-                .get_str(&["apps", &name, "priority"])
-                .and_then(|s| Priority::from_yaml_name(&s))
+                .get_str(&["apps", &name, "importance"])
+                .and_then(|s| Importance::from_yaml_name(&s))
             {
-                rule.priority = v;
+                rule.importance = v;
             }
             if let Some(v) = doc.get_bool(&["apps", &name, "sound"]) {
                 rule.sound = v;
@@ -250,8 +248,7 @@ impl NotifSettings {
         }
         for rule in &self.apps {
             let name = rule.app_name.as_str();
-            doc.set_bool(&["apps", name, "enabled"], rule.enabled);
-            doc.set_str(&["apps", name, "priority"], rule.priority.yaml_name());
+            doc.set_str(&["apps", name, "importance"], rule.importance.yaml_name());
             doc.set_bool(&["apps", name, "sound"], rule.sound);
             doc.set_bool(&["apps", name, "banner"], rule.banner);
         }
@@ -360,44 +357,47 @@ mod tests {
 
     use super::*;
 
+    /// A program the user has never configured behaves as it did before this
+    /// file existed.
+    ///
+    /// The point of matching `focus_assist::app_priority`'s own default:
+    /// adding a settings file must not change anyone's desktop until they
+    /// open the page and change something.
     #[test]
-    fn a_program_with_no_rule_may_notify() {
+    fn an_unconfigured_program_gets_the_same_answer_focus_assist_already_gave() {
         let s = NotifSettings::default();
-        assert!(s.allows("Mail", Priority::Low));
-        assert!(s.allows("Mail", Priority::Urgent));
-    }
-
-    #[test]
-    fn a_disabled_program_is_silenced_at_every_priority() {
-        let mut s = NotifSettings::default();
-        let mut rule = AppRule::new("Mail");
-        rule.enabled = false;
-        s.set_rule(rule);
-        for p in Priority::ALL {
-            assert!(!s.allows("Mail", p), "{p:?} got through a disabled program");
-        }
-    }
-
-    #[test]
-    fn a_priority_floor_admits_that_level_and_above() {
-        let mut s = NotifSettings::default();
-        let mut rule = AppRule::new("Mail");
-        rule.priority = Priority::High;
-        s.set_rule(rule);
-        assert!(!s.allows("Mail", Priority::Low));
-        assert!(!s.allows("Mail", Priority::Normal));
-        assert!(s.allows("Mail", Priority::High), "the floor itself is in");
-        assert!(s.allows("Mail", Priority::Urgent));
+        assert_eq!(s.rule_for("Mail").importance, Importance::Normal);
+        assert!(s.rule_for("Mail").sound);
+        assert!(s.rule_for("Mail").banner);
     }
 
     #[test]
     fn a_rule_names_one_program_and_not_its_neighbours() {
         let mut s = NotifSettings::default();
         let mut rule = AppRule::new("Mail");
-        rule.enabled = false;
+        rule.importance = Importance::Silent;
         s.set_rule(rule);
-        assert!(!s.allows("Mail", Priority::Urgent));
-        assert!(s.allows("Chat", Priority::Low), "Chat took Mail's rule");
+        assert_eq!(s.rule_for("Mail").importance, Importance::Silent);
+        assert_eq!(
+            s.rule_for("Chat").importance,
+            Importance::Normal,
+            "Chat took Mail's rule"
+        );
+    }
+
+    /// The scale is ordered, because the consumer compares with it.
+    ///
+    /// `focus_assist::should_show_notification` asks `priority >= Priority`
+    /// and `>= Critical`. If these variants were declared in another order
+    /// those comparisons would silently mean something else, so the ordering
+    /// is asserted here rather than left to the order somebody typed them in.
+    #[test]
+    fn importance_is_ordered_quietest_first() {
+        assert!(Importance::Silent < Importance::Normal);
+        assert!(Importance::Normal < Importance::Priority);
+        assert!(Importance::Priority < Importance::Critical);
+        assert_eq!(Importance::ALL[0], Importance::Silent);
+        assert_eq!(Importance::ALL[3], Importance::Critical);
     }
 
     #[test]
@@ -419,8 +419,7 @@ mod tests {
     fn settings_survive_a_round_trip_through_the_file() {
         let mut before = NotifSettings::default();
         let mut mail = AppRule::new("Mail");
-        mail.enabled = false;
-        mail.priority = Priority::Urgent;
+        mail.importance = Importance::Critical;
         mail.sound = false;
         before.set_rule(mail);
         before.set_rule(AppRule::new("Chat"));
@@ -439,9 +438,12 @@ mod tests {
     /// does not carry.
     #[test]
     fn a_users_comment_survives_a_save() {
-        let original = "# my rules\napps:\n  Mail:\n    enabled: false\n";
+        let original = "# my rules\napps:\n  Mail:\n    importance: silent\n";
         let mut file = NotifFile::from_document(Document::parse(original));
-        assert!(!file.settings.rule_for("Mail").enabled);
+        assert_eq!(
+            file.settings.rule_for("Mail").importance,
+            Importance::Silent
+        );
 
         file.settings.set_rule(AppRule::new("Chat"));
         let text = file.to_text();
@@ -456,7 +458,7 @@ mod tests {
     /// A setting this build does not know is not deleted by saving.
     #[test]
     fn a_key_from_a_newer_desktop_survives_a_save() {
-        let original = "apps:\n  Mail:\n    enabled: true\n    loudness: 11\n";
+        let original = "apps:\n  Mail:\n    importance: normal\n    loudness: 11\n";
         let mut file = NotifFile::from_document(Document::parse(original));
         file.settings.set_rule(AppRule::new("Chat"));
 
@@ -471,7 +473,7 @@ mod tests {
     /// A rule the user removed leaves the file.
     #[test]
     fn a_removed_rule_does_not_come_back() {
-        let original = "apps:\n  Mail:\n    enabled: false\n  Chat:\n    enabled: false\n";
+        let original = "apps:\n  Mail:\n    importance: silent\n  Chat:\n    importance: silent\n";
         let mut file = NotifFile::from_document(Document::parse(original));
         assert_eq!(file.settings.apps.len(), 2);
 
@@ -487,17 +489,20 @@ mod tests {
 
     /// An unreadable spelling degrades to the default rather than failing.
     #[test]
-    fn an_unknown_priority_falls_back_rather_than_refusing_the_file() {
-        let doc = Document::parse("apps:\n  Mail:\n    priority: deafening\n");
+    fn an_unknown_importance_falls_back_rather_than_refusing_the_file() {
+        let doc = Document::parse("apps:\n  Mail:\n    importance: deafening\n");
         let s = NotifSettings::read_from(&doc);
         assert_eq!(s.apps.len(), 1, "the file was refused");
-        assert_eq!(s.rule_for("Mail").priority, AppRule::new("Mail").priority);
+        assert_eq!(
+            s.rule_for("Mail").importance,
+            AppRule::new("Mail").importance
+        );
     }
 
     #[test]
-    fn every_priority_has_a_spelling_that_round_trips() {
-        for p in Priority::ALL {
-            assert_eq!(Priority::from_yaml_name(p.yaml_name()), Some(p));
+    fn every_importance_has_a_spelling_that_round_trips() {
+        for p in Importance::ALL {
+            assert_eq!(Importance::from_yaml_name(p.yaml_name()), Some(p));
             assert!(!p.label().is_empty());
         }
     }

@@ -1414,6 +1414,12 @@ impl<T: Transport> ShellSession<T> {
         // to act on: the caller is adopting the saved state wholesale and is
         // about to repaint regardless.
         let _ = self.shell.load_input_settings();
+        // And the notification rules, by the same argument. These are the
+        // strongest case for the one-door rule: a program the user silenced
+        // that starts interrupting them again after a reboot is a setting
+        // that looks like it was never saved, and the user's only recourse is
+        // to set it a second time and distrust it.
+        self.shell.load_notification_rules();
     }
 
     /// Persist the widget layout, reporting a failure rather than hiding it.

@@ -102,7 +102,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// Alt+Shift shape that cycles keyboard layouts. Incompatible on exactly the
 /// terms 2 set out: no existing message moves a byte, but an unknown tag stops
 /// the decoder, so a version-10 compositor handed one fails the whole frame.
-pub const CONTROL_VERSION: u8 = 12;
+pub const CONTROL_VERSION: u8 = 13;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -999,6 +999,21 @@ pub enum RequestBody {
     /// every program that has an icon, which is a different fact from the one
     /// a program is entitled to about itself.
     SubscribeTrayIcons { subscribe: bool },
+    /// Tell the compositor that the user clicked a tray icon.
+    ///
+    /// Sent by the shell, which is the only thing that knows where the icons
+    /// are drawn -- it owns the strip and did the hit test. The compositor
+    /// turns it into an `Event::TrayIconClicked` for the program that
+    /// registered the icon.
+    ///
+    /// `owner` is the pid from the tray list. The shell is trusted with it for
+    /// the same reason it is trusted with `ShellControl`: it is the thing
+    /// drawing the desktop, and `require_shell` is the seam.
+    ClickTrayIcon {
+        owner: u64,
+        id: u32,
+        button: guitk::event::MouseButton,
+    },
     /// Tell the compositor its copy of the user's appearance settings is out
     /// of date, so that it re-reads `appearance.yaml` and redraws.
     ///
@@ -1322,6 +1337,7 @@ enum RequestTag {
     SetTrayIcon = 0x21,
     RemoveTrayIcon = 0x22,
     SubscribeTrayIcons = 0x23,
+    ClickTrayIcon = 0x24,
     ReloadAppearance = 0x0F,
     ShellControl = 0x10,
     ReserveEdge = 0x11,
@@ -1362,6 +1378,7 @@ impl RequestTag {
             0x21 => Self::SetTrayIcon,
             0x22 => Self::RemoveTrayIcon,
             0x23 => Self::SubscribeTrayIcons,
+            0x24 => Self::ClickTrayIcon,
             0x0F => Self::ReloadAppearance,
             0x10 => Self::ShellControl,
             0x11 => Self::ReserveEdge,
@@ -1682,6 +1699,12 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::SubscribeTrayIcons as u8);
             out.push(u8::from(*subscribe));
         }
+        RequestBody::ClickTrayIcon { owner, id, button } => {
+            out.push(RequestTag::ClickTrayIcon as u8);
+            write_u64(out, *owner);
+            write_u32(out, *id);
+            out.push(crate::input::button_code(*button));
+        }
         RequestBody::ReloadAppearance => out.push(RequestTag::ReloadAppearance as u8),
         RequestBody::ReloadInput => out.push(RequestTag::ReloadInput as u8),
         RequestBody::ShellControl { window, action } => {
@@ -1945,6 +1968,11 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::RemoveTrayIcon => RequestBody::RemoveTrayIcon { id: r.read_u32()? },
         RequestTag::SubscribeTrayIcons => RequestBody::SubscribeTrayIcons {
             subscribe: r.read_u8()? != 0,
+        },
+        RequestTag::ClickTrayIcon => RequestBody::ClickTrayIcon {
+            owner: r.read_u64()?,
+            id: r.read_u32()?,
+            button: crate::input::button_from_code(r.read_u8()?).ok_or(DecodeError::BadTag(0))?,
         },
         RequestTag::SetTitle => {
             let window = r.read_u64()?;
@@ -2554,8 +2582,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x24),
+            Some(RequestTag::ClickTrayIcon),
+            "0x24 was taken by ClickTrayIcon in control version 13"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x25),
             None,
-            "0x24 is the next free tag"
+            "0x25 is the next free tag"
         );
     }
 

@@ -3505,6 +3505,12 @@ impl StickyNotesApp {
             // would also silently swallow the next event added to the
             // vocabulary, which may well be one a note should act on.
             Event::ModifierChord { .. } => Action::None,
+            // Cannot arrive here either, and for a sharper reason than the
+            // others: a tray click is addressed to the *connection*, not to a
+            // window, and `oswindow` hands it to `App::tray_icon_clicked`
+            // before the window dispatch this feeds. Listed rather than
+            // wildcarded for the reason given just above.
+            Event::TrayIconClicked { .. } => Action::None,
             Event::CloseRequested => {
                 self.commit_focus();
                 self.persist();

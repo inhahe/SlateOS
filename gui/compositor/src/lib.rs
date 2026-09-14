@@ -4999,6 +4999,18 @@ pub struct Compositor {
     tray_icons: Vec<guiremote::tray::TrayIcon>,
     /// The buffer `route_tray_list` encodes into, reused across ticks.
     tray_list_scratch: Vec<u8>,
+    /// Events addressed to a *connection* rather than to a window.
+    ///
+    /// The window-addressed queue cannot carry these: `route_input` delivers a
+    /// notification to the link that `owns` its window, and a program with a
+    /// tray icon may have no window at all -- which is exactly what
+    /// `design.txt:716` asks for when it says a program may start in the tray.
+    ///
+    /// A second queue rather than a sentinel window id inside the first: a
+    /// window id that is not a window would have to be recognised at every site
+    /// that reads one, and the sites that forgot would look up a window, find
+    /// nothing, and drop the event silently.
+    pending_client_events: Vec<(u64, guiremote::InputEvent)>,
     /// Which modifier keys are held, and whether Caps Lock is latched.
     ///
     /// Kept here rather than derived per event because a modifier is a *state*
@@ -5218,6 +5230,7 @@ impl Compositor {
             window_list_scratch: Vec::new(),
             tray_icons: Vec::new(),
             tray_list_scratch: Vec::new(),
+            pending_client_events: Vec::new(),
             modifiers: ModifierState::new(),
             dead_keys: deadkey::DeadKeys::new(),
             a11y_keys: a11ykeys::AccessibilityKeys::default(),
@@ -5268,6 +5281,35 @@ impl Compositor {
         self.palette = appearance::Palette::from_settings(&self.appearance);
         self.theme = DecorationTheme::from_settings_with(&self.appearance, &self.palette);
         self.full_recomposite = true;
+    }
+
+    /// Tell a program that its tray icon was clicked.
+    ///
+    /// Answers whether there was such an icon to click. A shell asking about
+    /// one that has just been removed is an ordinary race -- the program
+    /// deregistered between the frame the shell drew and the click -- so it is
+    /// `false` rather than an error.
+    pub fn click_tray_icon(
+        &mut self,
+        owner: u64,
+        id: u32,
+        button: guitk::event::MouseButton,
+    ) -> bool {
+        if !self
+            .tray_icons
+            .iter()
+            .any(|i| i.owner == owner && i.id == id)
+        {
+            return false;
+        }
+        // Window zero, and it is not a window. See `pending_client_events`:
+        // this event is for the connection, and `oswindow` hands it to
+        // `App::tray_icon_clicked` rather than through the window dispatch.
+        self.pending_client_events.push((
+            owner,
+            guiremote::InputEvent::new(0, guitk::event::Event::TrayIconClicked { id, button }),
+        ));
+        true
     }
 
     /// Everything currently in the tray.

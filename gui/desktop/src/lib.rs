@@ -576,6 +576,14 @@ pub enum Hit {
     Clock,
     /// The tray's notification bell, which opens the notification pane.
     NotificationBell,
+    /// An application's tray icon, by its index in
+    /// [`DesktopShell::tray_icons`].
+    ///
+    /// An index rather than an id, for the reason `TaskbarButton` gives about
+    /// window slots: the list that produced the rectangle is in hand at the
+    /// moment of the hit, and resolving later would resolve against a list
+    /// that may have changed.
+    TrayIcon(usize),
     /// A control of the open calendar popup — including
     /// [`calendar::CalendarHit::Panel`], which is the popup's own inert space
     /// and must **not** dismiss it. A point off the popup is not this variant
@@ -720,6 +728,20 @@ pub enum ShellRequest {
     /// recomposite, with no intermediate state in which half the desktop has
     /// changed. It picks the new focus itself, which is why nothing here says
     /// who should get it.
+    /// Tell the compositor that the user clicked a tray icon, so it can tell
+    /// the program that registered it.
+    ///
+    /// The shell is the only thing that can raise this: it owns the strip the
+    /// icons are drawn in and did the hit test. `owner` and `id` are copied
+    /// from the tray list, not invented.
+    ClickTrayIcon {
+        /// The process that registered the icon.
+        owner: u64,
+        /// That program's own id for it.
+        id: u32,
+        /// Which button.
+        button: guitk::event::MouseButton,
+    },
     SwitchDesktop {
         /// The desktop to show, counting from zero.
         desktop: u32,
@@ -2105,6 +2127,16 @@ impl DesktopShell {
             if self.bell_rect().contains(x, y) {
                 return Hit::NotificationBell;
             }
+            // The application icons, left of the shell's own tray items and
+            // tested before the window buttons: `tray_width` already reserved
+            // this space, so a button cannot be here, but testing in the same
+            // order the tray is laid out keeps the two from disagreeing if it
+            // ever is.
+            for (index, rect) in self.tray_icon_rects().iter().enumerate() {
+                if rect.contains(x, y) {
+                    return Hit::TrayIcon(index);
+                }
+            }
             // The slot is resolved to a window *here*, while the list that
             // produced the rectangle is still in hand — see
             // [`Hit::TaskbarButton`].
@@ -2497,6 +2529,20 @@ impl DesktopShell {
                 self.toggle_notifications();
                 ShellAction::Consumed
             }
+            Hit::TrayIcon(index) => self.tray_icons.get(index).map_or(
+                // The icon went away between the frame that drew it and the
+                // click. Consumed rather than passed on: the user aimed at the
+                // tray, and letting the press fall through to whatever is
+                // behind it would act on something they were not pointing at.
+                ShellAction::Consumed,
+                |icon| {
+                    ShellAction::Control(ShellRequest::ClickTrayIcon {
+                        owner: icon.owner,
+                        id: icon.id,
+                        button: guitk::event::MouseButton::Left,
+                    })
+                },
+            ),
             Hit::CalendarControl(control) => {
                 self.calendar.apply(control);
                 ShellAction::Consumed
@@ -9085,6 +9131,35 @@ mod overview_wiring_tests {
         }
     }
 
+    /// Clicking an icon asks the compositor to tell the program that owns it.
+    ///
+    /// The shell is the only thing that can: it owns the strip and did the hit
+    /// test. What it must not do is act on the click itself -- the icon belongs
+    /// to another program, and the shell has no idea what clicking it means.
+    ///
+    /// The vanished-icon branch beside this one (the icon was removed between
+    /// the frame that drew it and the click) is not tested here: reaching it
+    /// needs a `Hit` built by hand, and `Hit` is private. It consumes rather
+    /// than falling through, because the user aimed at the tray and acting on
+    /// whatever is behind it would be worse than doing nothing.
+    #[test]
+    fn clicking_a_tray_icon_asks_the_compositor_to_tell_its_owner() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(7, "M", "Music")]);
+        let rect = s.tray_icon_rects()[0];
+        let action = s.handle_mouse(&guitk::event::MouseEvent {
+            x: rect.x + rect.w / 2.0,
+            y: rect.y + rect.h / 2.0,
+            kind: guitk::event::MouseEventKind::Press(guitk::event::MouseButton::Left),
+        });
+        match action {
+            ShellAction::Control(ShellRequest::ClickTrayIcon { owner, id, .. }) => {
+                assert_eq!(owner, 99, "the owner from the tray list");
+                assert_eq!(id, 7, "the program's own icon id");
+            }
+            other => panic!("expected a ClickTrayIcon request, got {other:?}"),
+        }
+    }
     /// Re-applying the same list is not a change.
     ///
     /// The shell repaints on `true`, so answering it for a list identical to

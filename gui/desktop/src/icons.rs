@@ -549,6 +549,17 @@ impl DesktopIconLayer {
     }
 
     /// Get all currently selected icon IDs.
+    /// Every icon on the desktop, in draw order.
+    ///
+    /// The sibling of [`selected_ids`](Self::selected_ids), and the only way
+    /// out of this layer for a caller that wants to walk the icons: the `Vec`
+    /// itself stays private so nothing outside can reorder or drop one behind
+    /// the layer's back.
+    #[must_use]
+    pub fn icon_ids(&self) -> Vec<IconId> {
+        self.icons.iter().map(|icon| icon.id).collect()
+    }
+
     pub fn selected_ids(&self) -> Vec<IconId> {
         self.icons
             .iter()

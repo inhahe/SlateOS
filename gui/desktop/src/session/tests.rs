@@ -40,10 +40,74 @@ type Desktop = Rc<RefCell<TestDesktop>>;
 /// `TestDesktop` hands out ids from 100, so the four surfaces are 100
 /// (background), 101 (panel), 102 (popups) and 103 (osd), in the order `start`
 /// creates them.
-fn session() -> (Session, Desktop) {
+fn session() -> (Session, Desktop, settingsfile::testing::ConfigTurn) {
+    // The turn is the third member and every caller binds it, because
+    // `ShellSession::start` *reads* the configuration directory now -- it loads
+    // the pinned apps and the icon positions the user left. `XDG_CONFIG_HOME`
+    // is process-global and `cargo test` runs a binary's tests as threads, so
+    // without this a session built here reads whatever scratch directory a
+    // neighbouring test happens to have installed, and fails once in every
+    // several runs. Reentrant, so the tests that also call
+    // `with_scratch_config` nest rather than deadlock.
+    let turn = settingsfile::testing::config_turn();
     let (events, desktop) = wired();
     let session = ShellSession::start(events).expect("the harness refused a surface");
-    (session, desktop)
+    (session, desktop, turn)
+}
+
+/// **What the user left behind comes back when the shell starts.**
+///
+/// Both halves go through `ShellSession::start`, because the bug this is about
+/// was never in either half: the taskbar wrote `taskbar.yaml` correctly and
+/// `load_pinned` read it correctly, and from 2026-09-14 until the same evening
+/// **nothing called `load_pinned` outside its own test**. A pin survived to
+/// disk and never came back. The parts either side of the door were tested and
+/// the door did not exist, which is why this test starts a whole session
+/// rather than calling the loader.
+///
+/// `apps/fileassoc` had the identical shape the same morning -- a complete,
+/// tested save format with no caller -- which is how this one was noticed.
+#[test]
+fn a_session_starts_with_what_was_saved() {
+    settingsfile::testing::with_scratch_config("session-loads-saved-state", |_root| {
+        // A first desktop: pin something, move an icon, let both reach disk.
+        let (first, _d1, _turn) = session();
+        let mut first = first;
+        let exec = {
+            let shell = first.shell_mut();
+            let exec = shell
+                .apps
+                .first()
+                .map(|a| a.executable_path.clone())
+                .expect("the builtin app database is empty");
+            shell.pin_app(&exec, "Pinned");
+            let id = shell.icons.icon_ids().first().copied().expect("no icons");
+            if let Some(icon) = shell.icons.get_icon_mut(id) {
+                icon.x = 512;
+                icon.y = 384;
+            }
+            shell
+                .save_icon_positions()
+                .expect("the scratch config directory should be writable");
+            exec
+        };
+        drop(first);
+
+        // A second desktop, reading what the first one wrote.
+        let (restarted, _d2, _turn) = session();
+        let shell = restarted.shell();
+        assert!(
+            shell.is_pinned(&exec),
+            "the pin did not come back: a pin that only reaches the disk is lost"
+        );
+        let moved = shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .filter_map(|id| shell.icons.get_icon(id))
+            .any(|i| (i.x, i.y) == (512, 384));
+        assert!(moved, "no icon came back where it was left");
+    });
 }
 
 /// Deliver a press at a point in *screen* coordinates, through the surface that
@@ -131,7 +195,7 @@ fn centre(r: Rect) -> (f32, f32) {
 
 #[test]
 fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
-    let (session, desktop) = session();
+    let (session, desktop, _turn) = session();
     let specs = created(&desktop);
     assert_eq!(specs.len(), 5, "a shell is five surfaces, not one");
 
@@ -186,7 +250,7 @@ fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
 /// `design-decisions.md` 566.
 #[test]
 fn only_the_overlay_surface_refuses_the_mouse() {
-    let (_session, desktop) = session();
+    let (_session, desktop, _turn) = session();
     let specs = created(&desktop);
     let click_through: Vec<&str> = specs
         .iter()
@@ -201,7 +265,7 @@ fn only_the_overlay_surface_refuses_the_mouse() {
 
 #[test]
 fn the_shell_asks_to_be_told_about_windows_it_does_not_own() {
-    let (_session, desktop) = session();
+    let (_session, desktop, _turn) = session();
     assert!(
         desktop
             .borrow()
@@ -219,7 +283,7 @@ fn the_shell_asks_to_be_told_about_windows_it_does_not_own() {
 /// for it, on a surface that stays mapped.
 #[test]
 fn the_shell_claims_its_shortcuts_before_it_starts_listening() {
-    let (session, desktop) = session();
+    let (session, desktop, _turn) = session();
     let panel = session.panel().window();
     let seen = &desktop.borrow().seen;
     for (key, modifiers) in session.shell().global_chords() {
@@ -257,7 +321,7 @@ fn rebinding_a_shortcut_moves_the_grab_with_it() {
     // the write lands in the developer's own configuration, or, when it
     // overlaps a neighbouring test's scratch directory, in that.
     settingsfile::testing::with_scratch_config("desktop-rebind-shortcut", |_root| {
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         let panel = session.panel().window();
 
         let (old, _) = session
@@ -322,7 +386,7 @@ fn rebinding_a_shortcut_moves_the_grab_with_it() {
 /// mouse cannot be closed with the keyboard.
 #[test]
 fn escape_is_claimed_while_a_menu_is_open_and_given_back_after() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let chords = session.shell().conditional_chords();
     assert!(
@@ -376,7 +440,7 @@ fn escape_is_claimed_while_a_menu_is_open_and_given_back_after() {
 
 #[test]
 fn the_menu_surface_is_unmapped_while_no_menu_is_open() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let popups = session.popups().window();
 
     // Mapped at creation, so the session's first paint has to take it away
@@ -407,7 +471,7 @@ fn the_menu_surface_is_unmapped_while_no_menu_is_open() {
 
 #[test]
 fn closing_the_last_menu_takes_the_surface_away_again() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let popups = session.popups().window();
     let start = centre(session.shell().start_button_rect());
 
@@ -554,7 +618,7 @@ fn a_surface_at_the_screens_origin_is_translated_the_same_way_as_any_other() {
 fn a_press_on_the_panel_is_understood_where_the_user_pressed() {
     // The end-to-end form of the round trip above: the point goes over the wire
     // in the compositor's space and has to come out in the shell's.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let clock = centre(session.shell().clock_rect());
     press_at(&desktop, session.panel(), clock.0, clock.1);
     session.pump().expect("pump");
@@ -568,7 +632,7 @@ fn a_press_on_the_panel_is_understood_where_the_user_pressed() {
 
 #[test]
 fn the_compositors_window_list_is_what_the_taskbar_is_drawn_from() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     assert!(session.shell().taskbar_windows().is_empty());
 
     desktop
@@ -587,7 +651,7 @@ fn the_compositors_window_list_is_what_the_taskbar_is_drawn_from() {
 
 #[test]
 fn a_taskbar_button_asks_the_compositor_rather_than_changing_anything() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     desktop
         .borrow_mut()
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
@@ -612,7 +676,7 @@ fn a_taskbar_button_asks_the_compositor_rather_than_changing_anything() {
 
 #[test]
 fn a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let mut focused = app(2, "notes.txt");
     focused.focused = true;
     desktop
@@ -644,7 +708,7 @@ fn a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised() {
 /// dropped the answer on the floor would look exactly the same from either end.
 #[test]
 fn a_window_rule_about_an_arriving_window_reaches_the_compositor() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let mut rule = crate::window_rules::WindowRule::new(
         0,
         "editors start maximised",
@@ -682,7 +746,7 @@ fn a_window_rule_about_an_arriving_window_reaches_the_compositor() {
 /// something per window would recomposite the desktop on every launch.
 #[test]
 fn an_arriving_window_no_rule_matches_asks_for_nothing() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     desktop
         .borrow_mut()
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
@@ -698,7 +762,7 @@ fn an_arriving_window_no_rule_matches_asks_for_nothing() {
 /// leave the session as a request like any other.
 #[test]
 fn alt_f4_asks_the_compositor_to_close_the_focused_window() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let mut focused = app(2, "notes.txt");
     focused.focused = true;
     desktop
@@ -726,7 +790,7 @@ fn alt_f4_asks_the_compositor_to_close_the_focused_window() {
 /// outcome carries a list rather than one request.
 #[test]
 fn super_d_asks_for_every_window_to_be_minimised() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     desktop.borrow_mut().send_window_list(&[
         app(1, "Terminal"),
         app(2, "notes.txt"),
@@ -761,7 +825,7 @@ fn super_d_asks_for_every_window_to_be_minimised() {
 /// click is, and — for Super+D — must not stop the rest of the batch.
 #[test]
 fn a_refused_shortcut_does_not_swallow_the_rest_of_the_batch() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     desktop
         .borrow_mut()
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
@@ -794,7 +858,7 @@ fn a_refused_shortcut_does_not_swallow_the_rest_of_the_batch() {
 /// guessed would disagree with it the moment a monitor changed.
 #[test]
 fn super_right_asks_for_a_tile_and_computes_no_geometry() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let mut focused = app(1, "Terminal");
     focused.focused = true;
     desktop.borrow_mut().send_window_list(&[focused]);
@@ -823,7 +887,7 @@ fn super_right_asks_for_a_tile_and_computes_no_geometry() {
 fn a_refused_control_request_is_a_race_and_not_a_failure() {
     // The window closed between the list the button was drawn from and the
     // click. A shell that treated that as fatal would exit the desktop.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     desktop.borrow_mut().send_window_list(&[app(1, "Terminal")]);
     session.pump().expect("pump");
 
@@ -841,7 +905,7 @@ fn a_window_list_arriving_with_a_click_is_folded_in_after_it() {
     // sitting in the connection by the time the click is handled. The click was
     // aimed at the picture the *old* list produced, and answering it against
     // the new one would minimise whichever window had inherited the slot.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     desktop
         .borrow_mut()
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
@@ -883,7 +947,7 @@ fn a_window_list_arriving_with_a_click_is_folded_in_after_it() {
 
 #[test]
 fn a_start_menu_row_comes_out_as_a_program_to_start() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let start = centre(session.shell().start_button_rect());
     press_at(&desktop, session.panel(), start.0, start.1);
     session.pump().expect("pump");
@@ -907,7 +971,7 @@ fn a_start_menu_row_comes_out_as_a_program_to_start() {
 
 #[test]
 fn an_ordinary_press_produces_no_launch() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     press_at(&desktop, session.background(), 40.0, 40.0);
     session.pump().expect("pump");
     assert!(session.take_launches().is_empty());
@@ -919,7 +983,7 @@ fn an_ordinary_press_produces_no_launch() {
 fn run_returns_when_the_compositor_hangs_up() {
     // `TestDesktop::turn` closes the pipe once neither side has anything left,
     // which is how a test that would otherwise block forever ends.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     desktop.borrow_mut().send_window_list(&[app(1, "Terminal")]);
     session.run().expect("run");
     assert!(!session.is_running());
@@ -928,7 +992,7 @@ fn run_returns_when_the_compositor_hangs_up() {
 
 #[test]
 fn the_background_is_painted_once_and_the_chrome_on_every_change() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let (background, panel) = (session.background().window(), session.panel().window());
     let after_start = desktop.borrow_mut().drawn();
     assert_eq!(
@@ -958,7 +1022,7 @@ fn an_open_menu_is_actually_drawn_on_the_surface_that_was_mapped_for_it() {
     // Mapping the surface and drawing on it are two separate steps, and a shell
     // that did only the first would show the user a blank rectangle over the
     // desktop with no way to tell what had gone wrong.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let popups = session.popups().window();
     assert!(
         !desktop
@@ -987,7 +1051,7 @@ fn an_open_menu_is_actually_drawn_on_the_surface_that_was_mapped_for_it() {
 
 #[test]
 fn a_press_the_shell_does_not_want_repaints_nothing() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let before = desktop.borrow_mut().drawn().len();
     // Bare desktop, with no menu open: nothing the shell drew has changed.
     press_at(&desktop, session.background(), 400.0, 400.0);
@@ -1003,7 +1067,7 @@ fn a_press_the_shell_does_not_want_repaints_nothing() {
 /// nothing, and only Super+Space actually switched a layout.
 #[test]
 fn the_shell_claims_the_layout_switching_chord_it_is_configured_for() {
-    let (session, desktop) = session();
+    let (session, desktop, _turn) = session();
     let panel = session.panel().window();
     let chords = session.shell().modifier_chords();
     assert!(
@@ -1033,7 +1097,7 @@ fn the_claimed_chord_cycles_the_keyboard_layout() {
     // for, in a second test the gate could not see until it was made to run
     // the suite one thread at a time.
     settingsfile::testing::with_scratch_config("desktop-layout-chord", |_root| {
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         assert!(
             session.shell().input_methods.layouts.len() > 1,
             "with one layout installed, cycling cannot be observed"
@@ -1061,7 +1125,7 @@ fn the_claimed_chord_cycles_the_keyboard_layout() {
 /// the one thing we ask for" is true today and quietly wrong tomorrow.
 #[test]
 fn a_chord_that_is_not_the_configured_one_switches_nothing() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let before = session.shell().input_methods.tray_label().to_string();
 
     desktop.borrow_mut().send_input(&[InputEvent::new(
@@ -1085,7 +1149,7 @@ fn a_chord_that_is_not_the_configured_one_switches_nothing() {
 /// layouts after the user chose a different one.
 #[test]
 fn changing_the_layout_shortcut_moves_the_grab() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let old = session.shell().modifier_chords()[0];
 
@@ -1121,7 +1185,7 @@ fn changing_the_layout_shortcut_moves_the_grab() {
 /// would take Alt+Shift from every application for nothing.
 #[test]
 fn choosing_the_key_shortcut_releases_the_chord() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let old = session.shell().modifier_chords()[0];
 
@@ -1163,7 +1227,7 @@ fn an_announced_appearance_change_repaints_the_chrome() {
     // and announces; the shell re-reads and repaints. `apps/settings` proves
     // the first link and `wire.rs` the second. This is the third.
     settingsfile::testing::with_scratch_config("session-announce", |_root| {
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         session.shell_mut().load_appearance();
         let before_accent = session.shell().appearance.accent_color;
         let before_drawn = desktop.borrow_mut().drawn().len();
@@ -1200,7 +1264,7 @@ fn an_announcement_with_nothing_behind_it_repaints_nothing() {
     // compares the settings it read against the ones it holds rather than
     // trusting that an announcement means a difference.
     settingsfile::testing::with_scratch_config("session-announce-twice", |_root| {
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         session.shell_mut().load_appearance();
 
         let mut file = appearance::AppearanceFile::load();
@@ -1235,7 +1299,7 @@ fn an_input_settings_announcement_does_not_touch_the_shell() {
     // handler adopts a change it was never told about, and the correct one
     // waits to be told.
     settingsfile::testing::with_scratch_config("session-announce-input", |_root| {
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         session.shell_mut().load_appearance();
         let before_accent = session.shell().appearance.accent_color;
         let before_drawn = desktop.borrow_mut().drawn().len();
@@ -1273,7 +1337,7 @@ fn the_saved_animation_speed_reaches_the_animation_manager() {
         file.settings.animation_speed = AnimationSpeed::Slow;
         file.save().expect("save");
 
-        let (mut session, _desktop) = session();
+        let (mut session, _desktop, _turn) = session();
         session.load_appearance();
 
         assert!(
@@ -1289,7 +1353,7 @@ fn changing_the_animation_speed_takes_effect_without_a_restart() {
     // Through the announcement path, so this covers the join between the
     // settings watcher and the manager rather than either alone.
     settingsfile::testing::with_scratch_config("session-anim-live", |_root| {
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         session.load_appearance();
         let before = session.animations().duration_scale();
 
@@ -1323,7 +1387,7 @@ fn an_animation_speed_of_off_stops_the_shell_animating() {
         file.settings.animation_speed = AnimationSpeed::Off;
         file.save().expect("save");
 
-        let (mut session, _desktop) = session();
+        let (mut session, _desktop, _turn) = session();
         session.load_appearance();
 
         session.animate_desktop_switch(1.0);
@@ -1341,7 +1405,7 @@ fn session_with_autohide() -> (Session, Desktop) {
     let mut file = appearance::AppearanceFile::load();
     file.settings.taskbar_autohide = true;
     file.save().expect("save");
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     session.load_appearance();
     (session, desktop)
 }
@@ -1370,7 +1434,7 @@ fn auto_hide_is_off_unless_the_user_asked_for_it() {
     // surprising change, so the shell must not inherit that default. See
     // design-decisions 813.
     settingsfile::testing::with_scratch_config("session-autohide-default", |_root| {
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         session.load_appearance();
         let before = session.panel().origin;
 
@@ -1501,7 +1565,7 @@ fn right_click_at(desktop: &Desktop, surface: Surface, x: f32, y: f32) {
 
 #[test]
 fn a_right_click_on_bare_desktop_opens_a_menu() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     assert!(!session.shell().desktop_menu.is_visible());
 
     right_click_at(&desktop, session.background(), 400.0, 300.0);
@@ -1525,7 +1589,7 @@ fn a_right_click_on_the_taskbar_does_not_open_the_desktop_menu() {
     // The menu is the *desktop's*. The taskbar will grow its own; opening this
     // one over it would take that press away, and the failure would be silent,
     // because a menu appears and it looks like it worked.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let bar = session.shell().taskbar_rect();
 
     right_click_at(&desktop, session.panel(), bar.x + 20.0, bar.y + 8.0);
@@ -1539,7 +1603,7 @@ fn escape_closes_the_desktop_menu() {
     // Without the keyboard path the menu could be opened and then only
     // dismissed with the mouse, which is a trap on a surface that covers what
     // the user was aiming at.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     right_click_at(&desktop, session.background(), 400.0, 300.0);
     session.pump().expect("pump");
     assert!(session.shell().desktop_menu.is_visible());
@@ -1565,7 +1629,7 @@ fn adding_a_widget_from_the_menu_puts_it_on_the_desktop() {
         // The whole chain. Both halves were islands with no caller until now --
         // `guitk::menu`'s `ContextMenu` and `widgets::DesktopWidgetManager` -- so
         // this is the test that says they are joined and that the result is drawn.
-        let (mut session, _desktop) = session();
+        let (mut session, _desktop, _turn) = session();
         assert_eq!(session.shell().widgets.count(), 0, "starts empty");
         let before = session.shell().render_widgets().len();
 
@@ -1589,7 +1653,7 @@ fn remove_all_widgets_empties_the_desktop() {
     // without it the write lands in whatever `XDG_CONFIG_HOME` happens
     // to be, which is another test's sandbox or the real home.
     settingsfile::testing::with_scratch_config("remove_all_widgets_empties_t", |_root| {
-        let (mut session, _desktop) = session();
+        let (mut session, _desktop, _turn) = session();
         let shell = session.shell_mut();
         shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
         shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
@@ -1614,7 +1678,7 @@ fn two_added_widgets_do_not_land_on_top_of_each_other() {
     settingsfile::testing::with_scratch_config("two_added_widgets_do_not_lan", |_root| {
         // `find_free_position` is why the click point is not used as the position:
         // a widget dropped where the pointer was would overlap whatever is there.
-        let (mut session, _desktop) = session();
+        let (mut session, _desktop, _turn) = session();
         let shell = session.shell_mut();
         shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
         shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
@@ -1635,7 +1699,7 @@ fn a_desktop_with_no_widgets_still_parks() {
     // Widgets tick, so a desktop that had them would keep asking for frames.
     // One with none must not: adding the widget layer cannot cost an untouched
     // desktop its unbounded park (design-decisions 812).
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     run_frames(&mut session, &desktop, 2_000);
     assert_eq!(session.shell().widgets.count(), 0);
     assert!(
@@ -1681,7 +1745,7 @@ fn a_widget_can_be_dragged_to_another_cell() {
     // without it the write lands in whatever `XDG_CONFIG_HOME` happens
     // to be, which is another test's sandbox or the real home.
     settingsfile::testing::with_scratch_config("a_widget_can_be_dragged_to_a", |_root| {
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         session
             .shell_mut()
             .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
@@ -1724,7 +1788,7 @@ fn the_grab_offset_is_kept_so_a_widget_does_not_jump_on_the_first_pixel() {
         // point inside it is in the same cell, so ignoring the offset gives the
         // same answer and the test passes either way. That is what a first version
         // of this test did -- it used a Clock, and the mutation survived it.
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         session
             .shell_mut()
             .activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
@@ -1761,7 +1825,7 @@ fn right_clicking_a_widget_offers_to_remove_that_widget() {
         // desktop it is about the desktop. Asserted through the *effect* -- one
         // widget gone and the other still there -- rather than by reading the item
         // list, because the list is only interesting if choosing from it works.
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         let shell = session.shell_mut();
         shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
         shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
@@ -1798,7 +1862,7 @@ fn remove_this_widget_does_nothing_when_the_menu_was_not_about_one() {
         // Opening over bare desktop leaves no target, so the item -- which is not
         // even in that menu -- must not remove somebody else's widget if it is
         // somehow activated.
-        let (mut session, desktop) = session();
+        let (mut session, desktop, _turn) = session();
         session
             .shell_mut()
             .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
@@ -1821,7 +1885,7 @@ fn a_widget_layout_survives_a_restart() {
     // The point of the whole persistence half: arrange the desktop, close it,
     // open it again, and find it as you left it.
     settingsfile::testing::with_scratch_config("first-widgets-persist", |_root| {
-        let (mut first, desktop) = session();
+        let (mut first, desktop, _turn) = session();
         first.load_appearance();
         first
             .shell_mut()
@@ -1845,7 +1909,7 @@ fn a_widget_layout_survives_a_restart() {
         drop(first);
 
         // A second first over the same configuration directory.
-        let (mut next, _desktop) = session();
+        let (mut next, _desktop, _turn) = session();
         next.load_appearance();
         let after: Vec<_> = next
             .shell()
@@ -1861,7 +1925,7 @@ fn a_widget_layout_survives_a_restart() {
 #[test]
 fn a_moved_widget_is_saved_where_it_was_dropped() {
     settingsfile::testing::with_scratch_config("first-widgets-move", |_root| {
-        let (mut first, desktop) = session();
+        let (mut first, desktop, _turn) = session();
         first.load_appearance();
         first
             .shell_mut()
@@ -1883,7 +1947,7 @@ fn a_moved_widget_is_saved_where_it_was_dropped() {
 
         drop(desktop);
         drop(first);
-        let (mut next, _d) = session();
+        let (mut next, _d, _turn) = session();
         next.load_appearance();
         assert_eq!(next.shell().widgets.count(), 1);
         assert_eq!(
@@ -1897,7 +1961,7 @@ fn a_moved_widget_is_saved_where_it_was_dropped() {
 #[test]
 fn a_removed_widget_stays_removed() {
     settingsfile::testing::with_scratch_config("first-widgets-remove", |_root| {
-        let (mut first, _desktop) = session();
+        let (mut first, _desktop, _turn) = session();
         first.load_appearance();
         first
             .shell_mut()
@@ -1909,7 +1973,7 @@ fn a_removed_widget_stays_removed() {
         first.pump().expect("pump");
         drop(first);
 
-        let (mut next, _d) = session();
+        let (mut next, _d, _turn) = session();
         next.load_appearance();
         assert_eq!(
             next.shell().widgets.count(),
@@ -1929,7 +1993,7 @@ fn a_clock_widget_shows_the_time_the_taskbar_shows() {
     // on one screen disagreeing about the hour is worse than one wrong clock,
     // and they would the moment either grew its own formatter.
     settingsfile::testing::with_scratch_config("session-clock-widget", |_root| {
-        let (mut first, _desktop) = session();
+        let (mut first, _desktop, _turn) = session();
         first.load_appearance();
         first
             .shell_mut()
@@ -1972,7 +2036,7 @@ fn a_desktop_with_a_clock_widget_asks_to_be_woken() {
     // clock that shows the minute it was created. It must keep the loop alive
     // -- and an empty desktop must not, which the neighbouring test asserts.
     settingsfile::testing::with_scratch_config("session-clock-wake", |_root| {
-        let (mut first, desktop) = session();
+        let (mut first, desktop, _turn) = session();
         first.load_appearance();
         first
             .shell_mut()
@@ -2015,7 +2079,7 @@ fn a_clock_widget_is_woken_at_its_due_time_and_not_every_frame() {
     // the clock would show the minute it was created for ever. Waking at the
     // frame interval instead would redraw a minute hand sixty times a second.
     settingsfile::testing::with_scratch_config("session-clock-due", |_root| {
-        let (mut first, _desktop) = session();
+        let (mut first, _desktop, _turn) = session();
         first.load_appearance();
         first
             .shell_mut()
@@ -2037,7 +2101,7 @@ fn a_clock_widget_is_woken_at_its_due_time_and_not_every_frame() {
 
 #[test]
 fn a_display_that_changes_size_moves_the_panel_with_it() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let background = session.background().window();
     let panel = session.panel().window();
 
@@ -2068,7 +2132,7 @@ fn a_display_that_changes_size_moves_the_panel_with_it() {
 
 #[test]
 fn a_release_over_the_taskbar_is_not_mistaken_for_a_press() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let (ox, oy) = session.panel().origin();
     let start = centre(session.shell().start_button_rect());
     desktop.borrow_mut().send_input(&[InputEvent::new(
@@ -2096,7 +2160,7 @@ fn a_release_over_the_taskbar_is_not_mistaken_for_a_press() {
 /// never in doubt, rather than that the schedule did.
 #[test]
 fn quiet_hours_alone_give_the_loop_something_to_park_within() {
-    let (mut session, _desktop) = session();
+    let (mut session, _desktop, _turn) = session();
     assert!(
         session.shell().widgets.next_due_in(0).is_none(),
         "a widget is due, so this would be bounded with or without a schedule"
@@ -2125,7 +2189,7 @@ fn quiet_hours_alone_give_the_loop_something_to_park_within() {
 /// test above mean something.
 #[test]
 fn an_unscheduled_desktop_parks_with_no_bound_at_all() {
-    let (mut session, _desktop) = session();
+    let (mut session, _desktop, _turn) = session();
     assert!(!session.shell().notif.settings.quiet_hours.enabled);
     session.arm_next_frame();
 
@@ -2146,7 +2210,7 @@ fn the_shell_s_park_is_bounded_by_a_wake_up_it_registered() {
     // there sleeps straight through every deadline it set, and the only symptom
     // is an animation that stops. The recorded bound is what says the park went
     // through `EventLoop::wait` instead.
-    let (mut session, _desktop) = session();
+    let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
     session
         .events_mut()
@@ -2199,7 +2263,7 @@ fn an_idle_desktop_asks_for_no_frames() {
     // wake-up unconditionally would work exactly as well and cost a wake-up
     // every 16 ms for ever, on a desktop where nothing is moving — invisible in
     // every test that only checks what is drawn.
-    let (mut session, _desktop) = session();
+    let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
     assert!(!session.events_mut().is_waking(panel));
     assert_eq!(session.events_mut().next_wakeup(), None);
@@ -2207,7 +2271,7 @@ fn an_idle_desktop_asks_for_no_frames() {
 
 #[test]
 fn opening_the_overview_asks_for_a_frame() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     desktop
         .borrow_mut()
@@ -2232,7 +2296,7 @@ fn an_overview_whose_fade_never_runs_is_still_drawn_and_still_clickable() {
     // every draw path on progress, so an overlay whose clock never ran was
     // blank *and* took every click. Nothing here may depend on a frame having
     // arrived — the fade is begun below and deliberately never advanced.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let popups = session.popups().window();
     desktop
@@ -2285,7 +2349,7 @@ fn an_overview_whose_fade_never_runs_is_still_drawn_and_still_clickable() {
 
 #[test]
 fn a_frame_advances_the_fade_and_the_last_one_stops_asking_for_more() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let fade_ms = session.shell().overview_config.fade_ms;
     assert!(fade_ms > 0, "the default overview has no fade to advance");
@@ -2328,7 +2392,7 @@ fn the_frame_that_finishes_the_fade_is_still_painted() {
     // last animation, so a shell that decided whether to repaint by asking
     // afterwards would drop precisely the frame that puts the overlay at its
     // final opacity, and the fade would visibly stop one frame short.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let fade_ms = session.shell().overview_config.fade_ms;
     desktop
@@ -2359,7 +2423,7 @@ fn the_frame_that_finishes_the_fade_is_still_painted() {
 
 #[test]
 fn a_frame_with_nothing_moving_asks_for_no_more_frames() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     // A tick can arrive with nothing to advance — the last frame of one
     // animation and a stray wake-up can race. It must not re-arm.
@@ -2372,7 +2436,7 @@ fn reduced_motion_opens_the_overview_without_a_fade_and_without_a_clock() {
     // Reduced motion is not "the same animation, faster". An animation that
     // still runs but is invisible costs the same wake-ups and is the same
     // motion sickness; the setting has to reach the clock, not just the paint.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     session.set_reduced_motion(true);
     desktop
@@ -2395,7 +2459,7 @@ fn reduced_motion_opens_the_overview_without_a_fade_and_without_a_clock() {
 
 #[test]
 fn turning_reduced_motion_on_mid_fade_lands_on_fully_open() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     desktop
         .borrow_mut()
@@ -2413,7 +2477,7 @@ fn closing_the_overview_takes_its_fade_with_it() {
     // Otherwise the next `show` inherits a part-finished fade, and — worse —
     // the shell keeps asking for frames to advance an overlay that is not on
     // screen.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     desktop
         .borrow_mut()
@@ -2444,7 +2508,7 @@ fn a_window_animation_runs_off_the_same_clock() {
     // manager — and a shell that armed the clock for one but not the other
     // would work until they were used apart.
     use crate::animations::WindowAnimation;
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     assert!(!session.events_mut().is_waking(panel));
 
@@ -2572,7 +2636,7 @@ fn order(desktop: &Desktop) -> Vec<&'static str> {
 
 #[test]
 fn a_wallpaper_file_is_uploaded_under_the_id_the_render_tree_names() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let background = session.background().window();
     session
         .wallpaper_mut()
@@ -2595,7 +2659,7 @@ fn the_picture_goes_up_before_the_frame_that_draws_it() {
     // Order, not just presence. The compositor draws nothing — silently — for
     // an id it has no bytes for, so a frame that overtook its upload would be
     // one blank repaint with no error anywhere to explain it.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     session
         .wallpaper_mut()
         .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
@@ -2634,7 +2698,7 @@ fn painting_the_background_twice_uploads_the_picture_once() {
     // `paint_background` runs on every repaint, and a repaint happens on every
     // click that changes anything. Re-reading and re-inflating a 4K wallpaper
     // per click would be a stutter with no visible cause.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     session
         .wallpaper_mut()
         .set_image(&fixture("rgba8"), crate::wallpaper::ImageFit::Fill);
@@ -2656,7 +2720,7 @@ fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
     // and dropped afterwards would charge the compositor's per-link image
     // budget for two full-screen pictures at once, so a budget that fits one
     // wallpaper would refuse every slide after the first.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let background = session.background().window();
     session.wallpaper_mut().set_slideshow("/pics", 60, false);
     session
@@ -2708,7 +2772,7 @@ fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
     // this process's own, so removing a file in it cannot disturb a concurrent
     // run of the same test in another process.
     let _ = std::fs::remove_file(&missing);
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     session
         .wallpaper_mut()
         .set_image(&missing, crate::wallpaper::ImageFit::Fill);
@@ -2733,7 +2797,7 @@ fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
 
 #[test]
 fn a_corrupt_wallpaper_is_attempted_once_and_not_on_every_repaint() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let path = scratch("corrupt.png", b"\x89PNG\r\n\x1a\nand then nonsense");
     session
         .wallpaper_mut()
@@ -2776,7 +2840,7 @@ fn going_back_to_a_solid_colour_gives_the_picture_back() {
     // An id of zero means the render tree emits no `Image` command at all, so
     // anything still uploaded is unreachable — and unreachable bytes still
     // count against the link's budget.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let background = session.background().window();
     session
         .wallpaper_mut()
@@ -2800,7 +2864,7 @@ fn a_compositor_that_refuses_the_picture_still_gets_a_painted_desktop() {
     // over this link's image budget. Survivable on exactly the same terms as a
     // corrupt file — the colour underlay paints either way — and distinctly
     // *not* on the same terms as a dead connection, which propagates.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     session
         .wallpaper_mut()
         .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
@@ -2841,7 +2905,7 @@ fn posted(session: &Session) -> Vec<(String, String)> {
 
 #[test]
 fn a_wallpaper_that_will_not_decode_says_so_where_the_user_can_read_it() {
-    let (mut session, _desktop) = session();
+    let (mut session, _desktop, _turn) = session();
     let path = scratch("says-so.png", b"\x89PNG\r\n\x1a\nand then nonsense");
     session
         .wallpaper_mut()
@@ -2874,7 +2938,7 @@ fn a_failure_is_reported_once_and_not_once_per_repaint() {
     // `paint_background` runs on every repaint, so an unconditional post would
     // put one notification per mouse click into the history for as long as a
     // corrupt file stayed selected.
-    let (mut session, _desktop) = session();
+    let (mut session, _desktop, _turn) = session();
     let path = scratch("once-only.png", b"\x89PNG\r\n\x1a\nand then nonsense");
     session
         .wallpaper_mut()
@@ -2896,7 +2960,7 @@ fn reporting_a_failure_does_not_shove_the_pane_over_the_screen() {
     // A wallpaper that did not load is a thing to explain, not an emergency to
     // interrupt with. The desktop is fully usable; a panel that opened itself
     // at login over a missing file would be worse than the missing file.
-    let (mut session, _desktop) = session();
+    let (mut session, _desktop, _turn) = session();
     session.wallpaper_mut().set_image(
         &scratch("quiet.png", b"\x89PNG\r\n\x1a\nnonsense"),
         crate::wallpaper::ImageFit::Fill,
@@ -2913,7 +2977,7 @@ fn reporting_a_failure_does_not_shove_the_pane_over_the_screen() {
 
 #[test]
 fn a_wallpaper_that_loads_reports_nothing() {
-    let (mut session, _desktop) = session();
+    let (mut session, _desktop, _turn) = session();
     session
         .wallpaper_mut()
         .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
@@ -2932,7 +2996,7 @@ fn a_second_broken_wallpaper_gets_its_own_notification() {
     // Deduplicating on "is there already an error" rather than on "is it this
     // error" would silence every failure after the first, so a user who fixed
     // one path and mistyped the next would get no word about the second.
-    let (mut session, _desktop) = session();
+    let (mut session, _desktop, _turn) = session();
     session.wallpaper_mut().set_image(
         &scratch("first-bad.png", b"\x89PNG\r\n\x1a\nnonsense"),
         crate::wallpaper::ImageFit::Fill,
@@ -2968,7 +3032,7 @@ fn opening_the_pane_from_a_key_rewinds_it_into_a_slide() {
     // The session is the caller that owns a clock, so it puts the pane back
     // where it started and lets the frame clock carry it. Every other caller
     // gets the pane fully open. See design-decisions.md 520 and 562.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     desktop
         .borrow_mut()
@@ -2991,7 +3055,7 @@ fn the_slide_finishes_and_then_the_desktop_goes_quiet() {
     // The condition that keeps an idle desktop idle: once nothing is moving,
     // no wake-up is registered and the loop parks with no bound at all. A pane
     // missing from `anything_moving` is a pane that stops mid-slide.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     desktop
         .borrow_mut()
@@ -3013,7 +3077,7 @@ fn the_slide_finishes_and_then_the_desktop_goes_quiet() {
 
 #[test]
 fn closing_the_pane_slides_it_out_and_it_stays_out() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     desktop
         .borrow_mut()
@@ -3048,7 +3112,7 @@ fn a_frame_tick_does_not_restart_the_slide_it_just_finished() {
     // The slide *ends* by changing the same open flag the session watches to
     // decide a gesture happened. Watching a tick as well would read the end of
     // the slide as a fresh gesture and start it over, for ever.
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     desktop
         .borrow_mut()
@@ -3088,7 +3152,7 @@ fn media(k: Key) -> guitk::event::Event {
 
 #[test]
 fn the_overlay_surface_is_unmapped_until_something_asks_to_be_shown() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let osd = session.osd().window();
 
     // Mapped at creation, like the popup surface, so the first paint has to
@@ -3132,7 +3196,7 @@ fn the_overlay_surface_is_unmapped_until_something_asks_to_be_shown() {
 
 #[test]
 fn the_volume_keys_move_the_volume_and_say_so() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let start = session.shell().notifications.volume();
 
@@ -3167,7 +3231,7 @@ fn the_volume_keys_move_the_volume_and_say_so() {
 /// else. The §520 failure in its second form.
 #[test]
 fn showing_an_overlay_asks_for_a_frame_and_the_last_one_stops_asking() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     assert!(
         !session.events_mut().is_waking(panel),
@@ -3223,7 +3287,7 @@ fn showing_an_overlay_asks_for_a_frame_and_the_last_one_stops_asking() {
 /// surface was taken away when the volume faded, would both be this failing.
 #[test]
 fn an_overlay_and_a_menu_do_not_disturb_each_other() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let popups = session.popups().window();
 
@@ -3262,7 +3326,7 @@ fn an_overlay_and_a_menu_do_not_disturb_each_other() {
 
 #[test]
 fn the_mute_key_silences_without_forgetting_the_level() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let level = session.shell().notifications.volume();
     assert!(
@@ -3298,7 +3362,7 @@ fn the_mute_key_silences_without_forgetting_the_level() {
 /// clips it away entirely.
 #[test]
 fn the_overlay_surface_follows_the_display() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let background = session.background().window();
     let osd = session.osd().window();
     let before = desktop.borrow().seen.len();
@@ -3352,7 +3416,7 @@ fn typed(k: Key, ch: char) -> guitk::event::Event {
 /// show, so Super+R would appear to do nothing at all.
 #[test]
 fn opening_the_run_box_maps_the_surface_it_is_drawn_on() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let popups = session.popups().window();
     let before = desktop.borrow().seen.len();
@@ -3390,7 +3454,7 @@ fn opening_the_run_box_maps_the_surface_it_is_drawn_on() {
 /// command was resolved and dropped.
 #[test]
 fn a_command_confirmed_with_enter_reaches_the_launcher() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
 
     desktop
@@ -3443,7 +3507,7 @@ fn a_command_confirmed_with_enter_reaches_the_launcher() {
 /// gets a look at it.
 #[test]
 fn a_press_beside_the_box_closes_it_without_starting_anything() {
-    let (mut session, desktop) = session();
+    let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
 
     desktop

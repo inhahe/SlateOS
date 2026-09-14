@@ -1175,6 +1175,15 @@ pub struct DesktopShell {
     pub desktop_menu: ContextMenu,
     /// Widget panels drawn on the desktop background.
     ///
+    /// The icons on the desktop, and where the user left them.
+    ///
+    /// `design-decisions.md` 933 (open-questions A-Q8) makes this layer the
+    /// layout authority: icon positions are not a kernel concern, and
+    /// `fs::deskicons` / `/proc/deskicons` are deleted once this reads and
+    /// writes them. It is populated and its saved positions applied in
+    /// [`new`](Self::new), so the first frame draws them where they were left
+    /// rather than where the defaults put them and then jumping.
+    pub icons: icons::DesktopIconLayer,
     /// Empty until the user adds one from [`desktop_menu`](Self::desktop_menu),
     /// which is what keeps an untouched desktop identical to how it was before
     /// widgets existed -- and keeps it idle, since a desktop with no widgets
@@ -1656,6 +1665,9 @@ impl DesktopShell {
             appearance: AppearanceSettings::default(),
             appearance_dirty: false,
             desktop_menu: ContextMenu::new(Self::desktop_menu_items()),
+            // 40 is the `taskbar_height` two lines below; both are the
+            // literal because this is the initialiser that establishes it.
+            icons: icons::DesktopIconLayer::new(screen_width, screen_height, 40),
             widgets: DesktopWidgetManager::new(),
             menu_widget: None,
             widget_drag: None,
@@ -7000,6 +7012,40 @@ impl DesktopShell {
             &Palette::from_settings(&self.appearance),
             &self.live_readings(),
         )
+    }
+
+    /// The icon layer's draw commands.
+    ///
+    /// Palette built here rather than held, the same reason
+    /// [`render_widgets`](Self::render_widgets) gives: `appearance` is the one
+    /// source of truth and a cached palette is a second one that goes stale
+    /// the moment the user switches mode.
+    pub fn render_icons(&self) -> Vec<guitk::render::RenderCommand> {
+        self.icons.render(&Palette::from_settings(&self.appearance))
+    }
+
+    /// Put the default icons on the desktop and move them to where they were
+    /// last left.
+    ///
+    /// The order is load-bearing: positions are filed against the icons that
+    /// exist, so nothing can be restored before the icons are there to restore.
+    pub fn populate_icons(&mut self) {
+        self.icons.populate_defaults();
+        self.icons.load_positions();
+    }
+
+    /// Write the icon positions back.
+    ///
+    /// To be called when a drag or an auto-arrange finishes rather than on
+    /// every frame: positions only change when the user moves something, and a
+    /// save per frame would rewrite the file sixty times a second to record
+    /// that nothing happened.
+    ///
+    /// The failure is handed back rather than swallowed here, because this
+    /// object has nowhere to say it -- the surface that can tell the user is
+    /// the session, which is also what owns the event that triggers a save.
+    pub fn save_icon_positions(&self) -> std::io::Result<()> {
+        self.icons.save_positions()
     }
 
     /// Whether any of the shell's own surfaces is open over the desktop.

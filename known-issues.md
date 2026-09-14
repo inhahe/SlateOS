@@ -143992,3 +143992,43 @@ kind that rots silently — the subsystem gains the capability and nothing tells
 the file that assumed otherwise. A comment saying *we do not* is a claim about
 this file, and stays true until this file changes. Where the distinction is
 available, prefer the second.
+
+
+## TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE (lane B, 2026-09-13)
+
+**In short:** three times in one day I estimated how big a problem was with a
+grep, and three times the real number was between five and twenty times
+smaller. Written down because the pattern is in *how I look*, not in any one
+subject, and because twice the correct answer was already sitting in a tool
+this repo ships.
+
+| question | my ad-hoc answer | the real answer | what got it right |
+|---|---|---|---|
+| how many flags do we accept and ignore? | **9** (grep the `## Limitations` lists) | **1** | reading the code behind each row |
+| which flag constants are never honoured? | **46,736** (constants unread in production) | ~13 worth looking at, 1 real | narrowing to *parameters* we were handed, in functions that return success |
+| how many gates are unwired? | **45** (grep `scripts/hooks/pre-push` for each name) | **2, both pinned with reasons** | `scripts/check-gates-are-wired.py`, which exists for this |
+
+### The shape
+
+Each ad-hoc search answered a question *adjacent* to the one I asked. Grepping
+the pre-push hook answers "which gates does **pre-push** name", not "which gates
+are unwired" — `boot-test.sh` runs 62 of them, and my search could not see that.
+Grepping Limitations lists answers "which bullets sound like a defect", not
+"which are". Counting unread constants answers "what does a libc export", which
+is nearly everything.
+
+**The tell is that the ad-hoc number is implausibly large.** 45 unwired gates in
+a tree that gates obsessively, or 46,736 unhonoured flags, should both have read
+as "my query is wrong" before they read as "the codebase is broken". A finding
+that indicts the whole tree is usually indicting the method.
+
+### What to do instead
+
+1. **Look for an existing instrument first.** `check-gates-are-wired.py` was in
+   the very list my grep called unwired. It took ten seconds and was right.
+2. **If there is none, sanity-check the magnitude before reporting it** — and
+   before building anything on it. Both surveys I published had to be walked
+   back in public afterwards.
+3. **Narrow until the survivors are individually checkable**, then check them
+   individually. The one sweep that worked ended at 13 candidates precisely
+   because that is a number you can read.

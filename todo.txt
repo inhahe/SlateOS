@@ -57591,3 +57591,75 @@ returning `Run`/`Usage`/`Error` instead of calling `process::exit` from
 seven places, so the destructive case is reachable from a test: there is
 one asserting that `--dry-runn docs` is refused and never becomes a path.
 13 tests where there were none.
+
+## Judgment Calls (A-Q10 file-history opt-in, lane A, 2026-09-14):
+
+A-Q10 is answered ("on only where it is asked for", and "do the work after the
+save returns"). These are the implementation calls made while preparing it, all
+reversible, none of them putting a new question to the operator.
+
+1. KEEP `should_auto_version` PURE; ADD THE OPT-IN AS A SEPARATE GATE.
+   The obvious reading is to make `should_auto_version` consult the opt-in
+   registry, which needs the HISTORY lock. Three reasons not to:
+
+   - `try_auto_record` already takes the lock via `is_auto_version_enabled()`
+     and then calls `should_auto_version`. Putting a lock inside the second
+     one makes two acquisitions per write, and deadlocks outright if any
+     future caller holds the lock across it. `crate::sync::Mutex` is not
+     reentrant.
+   - It conflates two different questions. "Is this path eligible at all"
+     (never /proc, /dev, /sys, /tmp, never _TRASH/_INDEX or _JOURNAL) is a
+     property of the path. "Has someone asked for history here" is a property
+     of configuration. Different lifetimes, different reasons to change.
+   - It preserves history.rs Test 8. I had recorded that the change inverts
+     one assertion; it is actually two -- lines 876 and 880 assert
+     `/home/user/document.txt` and `/etc/config.yaml` are versionable. Under
+     the conflated design both flip to false and the test has to be rewritten
+     to assert the opposite of what it was written to protect. Under this
+     design both stay TRUE and stay correct: those paths remain *eligible*,
+     they are simply not *enrolled*. A test that inverts is a test whose
+     invariant you have quietly redefined, and it stops being evidence about
+     the denylist at all.
+
+   So: `should_auto_version` keeps its current body and meaning. A new
+   `is_enrolled(path)` does the registry lookup, and `try_auto_record`
+   acquires the lock ONCE and evaluates enabled + enrolled under it, then
+   drops it before doing any work.
+
+2. THE REGISTRY IS `Vec<PathBuf>`, NOT `Vec<String>`.
+   CLAUDE.md item 7: paths are bytes. `kernel/src/fs/path.rs` already has
+   `PathBuf(Vec<u8>)` and history.rs already imports it, and
+   `path_in_subtree<P: AsRef<Path>, D: AsRef<Path>>` is generic over both
+   sides, so matching a stored directory against a candidate path needs no
+   conversion and no UTF-8 assumption.
+
+3. REGISTRATION MUST REJECT AN EMPTY PATH, AND THIS IS THE LOAD-BEARING ONE.
+   `path_in_subtree` returns `true` when the prefix has no components --
+   deliberately, so that "/" means the whole tree. An opt-in registry built on
+   it therefore has a fail-DANGEROUS degenerate case: a single empty entry
+   matches every path and silently turns the history on for the entire
+   filesystem, which is precisely the state A-Q10 was answered to get out of.
+   One bad `enable_for_dir(b"")` and the feature is globally on with no
+   diagnostic. So `enable_for_dir` rejects an empty path with
+   `KernelError::InvalidArgument`, and the self-test asserts that rejection
+   rather than assuming it.
+   Registering "/" explicitly stays legal -- it is a coherent thing to ask for
+   and restores the old behaviour -- but it has to be spelled, not defaulted.
+
+4. `auto_version` DEFAULT FLIPS true -> false.
+   It stays as the master switch, per the answer's wording that the history is
+   "off by default and enabled per directory": the registry says where, this
+   says whether at all. Both must be satisfied.
+
+5. THE DEFERRED HALF NEEDS A WORKER WRITTEN FROM SCRATCH.
+   See TD-A-FOUR-MODULES-NAMED-AFTER-DEFERRED-WORK-PRIMITIVES-DEFER-NOTHING.
+   `softirq`, `timerq`, `wqstat` and `kthread` are /proc counters with zero
+   `sched::spawn`/loop/yield between them, so there is no enqueue-a-closure
+   facility to reuse. A single worker task spawned at init, owning a queue of
+   enrolled paths and parking on an event when empty, is the smallest honest
+   implementation. Do NOT call `wqstat::enqueue` and read the rising /proc
+   counter as evidence work was scheduled -- that counter moves either way.
+
+Blocked only on the running boot: all of this is in `kernel/src`, and
+`boot-test.sh` digests `kernel/src/**/*.rs` mid-run to set BT_SRC_CHANGED, so
+editing now would invalidate a 20-minute run's verdict about the committed tree.

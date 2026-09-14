@@ -144760,10 +144760,38 @@ records this exact instrument being wrong by 5–20× three times in one day
 28 other files worth reading**, and a prior expectation that well under half
 survive.
 
-`sed` at 20 and `realpath` at 9 are the two worth opening first — not because
-the count is high, but because both are fundamentally about transforming text
-and paths rather than printing them, so their lossy calls are the most likely
-to sit on a value path rather than a message path.
+**CORRECTED 2026-09-14, and both of the priorities below were wrong.** The
+paragraph that stood here read: *"`sed` at 20 and `realpath` at 9 are the two
+worth opening first — not because the count is high, but because both are
+fundamentally about transforming text and paths rather than printing them, so
+their lossy calls are the most likely to sit on a value path rather than a
+message path."* That is reasoning about what a program is *for*, not a
+measurement of what its code does, and it picked the two worst candidates on
+the list.
+
+Re-measured with the test modules cut off at `#[cfg(test)]` and the remaining
+uses classified by whether a diagnostic macro appears within two lines:
+
+| | occurrences |
+|---|---|
+| raw, as the count above was taken | 131 |
+| outside test modules | **46** |
+| not feeding a diagnostic | **36** |
+
+* **`realpath` has ZERO outside its tests** — all nine were assertion messages.
+* **`sed` has one**, and it formats `can't find label for jump to ...`. Five
+  probes confirm `sed` passes byte 0xE9 through `s///`, `y///`, `d`, an anchored
+  insert and a wildcard match untouched.
+* The actual head of the list was **`diff`** — the file being edited all day —
+  with three, two of which were a real defect: a directory walk decoded the
+  names it had just listed and then could not open them. Fixed; see the commit
+  *"diff: carry paths as paths"*.
+
+Two things this adds to `TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE`:
+a grep that does not exclude test code over-reports by roughly **3×** on top of
+everything else, and ranking candidates by subject-matter intuition is worse
+than not ranking them at all, because it moves the genuinely broken one down
+the list.
 
 ### The instrument this actually wants
 

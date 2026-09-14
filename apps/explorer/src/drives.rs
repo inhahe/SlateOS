@@ -31,6 +31,7 @@
 //! direction. Each caller states its own reading at the call site, where the
 //! consequence is visible, rather than inheriting one from here.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 /// The identity of the device backing a path.
@@ -90,6 +91,79 @@ pub fn drive_of(path: &Path) -> DriveId {
 pub fn same_drive(a: &Path, b: &Path) -> Option<bool> {
     let (a, b) = (drive_of(a), drive_of(b));
     (a.is_known() && b.is_known()).then(|| a == b)
+}
+
+/// Every drive one operation will touch.
+///
+/// Both ends count. A copy from `D:` to `E:` loads *both*, so it collides with
+/// anything already using either; a copy whose source and destination are the
+/// same drive loads that drive twice over, which is the case the whole rule
+/// most wants to protect.
+#[derive(Clone, Debug, Default)]
+pub struct DriveSet {
+    known: HashSet<DriveId>,
+    /// Whether any path in the set could not be resolved to a device.
+    ///
+    /// **An unresolved path is treated as "might be any drive".** This is the
+    /// scheduler's reading of the `None` that [`same_drive`] answers, and it is
+    /// the opposite of the drag's: a queue that guesses wrong here runs two
+    /// operations on one disk, which is the thing it exists to prevent, while
+    /// the cost of guessing the other way is that one operation waits when it
+    /// did not have to.
+    unknown: bool,
+}
+
+impl DriveSet {
+    /// The drives backing `paths`, resolved once per directory.
+    ///
+    /// Per *directory* rather than per path: a copy of ten thousand photos
+    /// touches two drives and one `stat` each would be ten thousand of them
+    /// for an answer that cannot change within a folder.
+    #[must_use]
+    pub fn of<'a, I: IntoIterator<Item = &'a Path>>(paths: I) -> Self {
+        let mut set = Self::default();
+        let mut asked: HashSet<&Path> = HashSet::new();
+        for path in paths {
+            // The *parent*, because a destination that does not exist yet is
+            // on the drive of the directory it is about to appear in.
+            let dir = path.parent().unwrap_or(path);
+            if asked.insert(dir) {
+                set.add(drive_of(dir));
+            }
+        }
+        set
+    }
+
+    /// Note one more drive.
+    pub fn add(&mut self, id: DriveId) {
+        if id.is_known() {
+            self.known.insert(id);
+        } else {
+            self.unknown = true;
+        }
+    }
+
+    /// Whether this set has nothing in it at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.known.is_empty() && !self.unknown
+    }
+
+    /// Whether running these two at once would load one drive twice.
+    ///
+    /// An empty set shares with nothing -- an operation that touches no drive
+    /// cannot be in anything's way. Anything *unresolved* on either side
+    /// shares with everything, for the reason on [`DriveSet::unknown`].
+    #[must_use]
+    pub fn shares_with(&self, other: &Self) -> bool {
+        if self.is_empty() || other.is_empty() {
+            return false;
+        }
+        if self.unknown || other.unknown {
+            return true;
+        }
+        !self.known.is_disjoint(&other.known)
+    }
 }
 
 /// The platform's device number for a path that exists, if it has one.
@@ -188,6 +262,55 @@ mod tests {
         assert!(!drive_of(b).is_known());
         assert_eq!(same_drive(a, b), None, "two shrugs are not an agreement");
         assert_eq!(same_drive(a, a), None, "not even with itself");
+    }
+
+    // ---- sets ---------------------------------------------------------
+
+    #[test]
+    fn two_operations_under_one_directory_share_its_drive() {
+        let scratch = ScratchDir::new("driveset_share");
+        let root = scratch.dir();
+        fs::write(root.join("a.txt"), "a").unwrap();
+        fs::write(root.join("b.txt"), "b").unwrap();
+
+        let one = DriveSet::of([root.join("a.txt").as_path()]);
+        let two = DriveSet::of([root.join("b.txt").as_path()]);
+        assert!(one.shares_with(&two));
+        assert!(two.shares_with(&one), "sharing is not one-way");
+    }
+
+    /// An operation that touches nothing is in nothing's way.
+    #[test]
+    fn an_empty_set_shares_with_nothing() {
+        let scratch = ScratchDir::new("driveset_empty");
+        let root = scratch.dir();
+        fs::write(root.join("a.txt"), "a").unwrap();
+
+        let empty = DriveSet::default();
+        let real = DriveSet::of([root.join("a.txt").as_path()]);
+        assert!(empty.is_empty());
+        assert!(!empty.shares_with(&real));
+        assert!(!real.shares_with(&empty));
+        assert!(!empty.shares_with(&empty));
+    }
+
+    /// **A drive we cannot name is treated as every drive.**
+    ///
+    /// The scheduler's reading of "don't know", and the opposite of the
+    /// drag's: waiting needlessly costs time, and running two operations on
+    /// one disk is what the rule exists to prevent.
+    #[test]
+    fn an_unresolved_path_collides_with_everything() {
+        let scratch = ScratchDir::new("driveset_unknown");
+        let root = scratch.dir();
+        fs::write(root.join("a.txt"), "a").unwrap();
+
+        let real = DriveSet::of([root.join("a.txt").as_path()]);
+        let vague = DriveSet::of([Path::new("no-such-dir-xyzzy/f.txt")]);
+        assert!(!vague.is_empty(), "an unresolved path is still a path");
+        assert!(vague.shares_with(&real));
+        assert!(real.shares_with(&vague));
+        assert!(vague.shares_with(&vague));
     }
 
     /// And one known side is not enough either.

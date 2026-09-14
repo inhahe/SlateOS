@@ -143498,9 +143498,55 @@ resolved from the path -- not on the mount path, and not on the path prefix"*,
 so this wants one resolver in one place before anything else keys a queue on
 it. Two editors of one model is fine; two models of one fact is the defect.
 
-## TD-C-THE-FILE-OPERATION-QUEUE-CANNOT-BE-PER-DRIVE-UNTIL-COPIES-CAN-OVERLAP
+## TD-C-THE-FILE-OPERATION-QUEUE-CANNOT-BE-PER-DRIVE-UNTIL-COPIES-CAN-OVERLAP -- **WITHDRAWN: it could, and it now is**
 
-**Date:** 2026-09-14. **Lane:** C.
+**Date:** 2026-09-14. **Lane:** C. **Corrected the same day.**
+
+**The correction, and it is the useful part.** This entry said the per-drive
+rule "would change nothing a user could measure" because `fs::copy` blocks and
+the explorer runs on one thread, so two operations admitted at once would
+merely interleave. That skipped a step. **Writes go to a page cache** --
+`design.txt` discusses swappiness against it -- so a write returns before the
+device has the data, and two interleaved copies on one thread *can* keep two
+devices busy. Whether they do on this system is a **measurement nobody has
+made**. "Inert" was a confident claim resting on an unchecked assumption, which
+is the failure this file has more entries about than any other.
+
+**Done 2026-09-14.** The queue is keyed on drives: `OperationPlan::drives`
+resolves every path a plan touches to a `DriveSet`, `start_operation` admits an
+operation whose set shares nothing with anything in flight and queues one that
+does, `admit_pending` scans *past* a blocked operation so one on a free drive
+does not wait behind it, and the frame's budget is split between however many
+are running. No threads were needed.
+
+**What remains unmeasured, and is now the only open part:** whether two
+operations interleaved on one thread actually keep two devices busy. It rests
+on writes returning before the device has the data. The *correctness* half --
+never two operations on one drive -- does not depend on the answer and is what
+the rule delivers today.
+
+**What that changes.** The blocker named in the title does not exist. Multiple
+operations in flight need a `Vec<RunningOperation>` and a round-robin of the
+eight-millisecond budget the explorer already has -- no threads, no `Send`
+audit of the executor, no channels, none of the work listed below. The
+threading plan stays recorded because it is the right answer *if* a
+measurement later shows the interleave buys nothing; it is not a prerequisite.
+
+**And the half that never depended on any of this:** not running two operations
+on one drive is implementable today, is the rule roadmap 4.1 actually asks for,
+and is the half with the rationale that does not rest on throughput at all --
+two operations on one disk interleave two access patterns into one device
+queue, and fewer in flight on a drive is fewer left half-done when it is
+yanked.
+
+**How to settle the throughput question when a machine with two drives is
+available:** copy two large files, once one after the other and once
+interleaved a chunk at a time, on (a) one drive and (b) two. The same-drive
+case should show the interleave *slower*, which is 4.1's first claim; the
+two-drive case is the one this entry guessed at.
+
+The original entry follows, and its reasoning about threads is still right
+about threads -- it is only wrong that threads are required first.
 
 **In short:** start a second copy in the file explorer while one is running and
 it now waits its turn instead of being refused. What `roadmap.md` 4.1 actually

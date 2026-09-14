@@ -41,6 +41,7 @@ use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
+use drives::DriveSet;
 use dropzone::{
     DragModifiers, DropOperation, DropResult, DropZone, DropZoneEvent, DropZoneManager, Rect,
 };
@@ -266,6 +267,12 @@ struct PendingOperation {
     plan: OperationPlan,
     verb: &'static str,
     keep_undo: bool,
+    /// Which drives it will touch, resolved when the user asked rather than
+    /// when its turn comes. A queued operation whose source has since
+    /// vanished should fail at *start*, which is the only moment the check
+    /// can be honest -- not be quietly re-scheduled onto a drive that is no
+    /// longer the one it named.
+    drives: DriveSet,
 }
 
 /// A bulk file operation the explorer is carrying out a slice at a time.
@@ -275,6 +282,8 @@ struct PendingOperation {
 /// these would be a second executor writing the same journal.
 struct RunningOperation {
     executor: OperationExecutor,
+    /// The drives it is loading, which is what everything else waits on.
+    drives: DriveSet,
     /// The past-tense verb for the status line: "Pasted", "Moved", "Deleted".
     verb: &'static str,
     /// How many files the plan covers, for "12 of 400".
@@ -470,8 +479,13 @@ pub struct ExplorerState {
     /// so no paste, delete, rename or error message was ever actually seen.
     /// Empty means "nothing to report"; the status bar then shows the summary.
     pub status_message: String,
-    /// The bulk file operation in progress, if any.
-    operation: Option<RunningOperation>,
+    /// The bulk file operations in flight.
+    ///
+    /// More than one, but never two that touch the same drive: that is the
+    /// whole of `roadmap.md` 4.1. Two operations on one disk interleave two
+    /// access patterns into a single device queue, so neither stream gets a
+    /// contiguous run and both finish later than they would in turn.
+    operations: Vec<RunningOperation>,
     /// Operations waiting for the one in front of them to finish.
     ///
     /// A queue rather than a refusal: a user who starts a second copy meant to
@@ -575,7 +589,7 @@ impl ExplorerState {
             address_text: start_path.to_string_lossy().to_string(),
             address_editing: false,
             status_message: String::new(),
-            operation: None,
+            operations: Vec::new(),
             pending: VecDeque::new(),
             dir_summary: String::new(),
             tree_expanded: vec![PathBuf::from("/")],
@@ -965,38 +979,47 @@ impl ExplorerState {
     /// froze for its duration and the progress this reports could not be
     /// drawn until it was already over.
     ///
-    /// **A second operation waits rather than being refused.** Only one runs
-    /// at a time -- the journal and the undo entries belong to one executor --
-    /// but "no" is the wrong answer to a user who meant to start it: it makes
-    /// them watch for a moment nothing announces, and a copy that quietly did
-    /// nothing would simply be started again. So it is queued, and the status
-    /// line says what it is waiting for. Cancelling it before it starts costs
-    /// nothing, because nothing has been written.
+    /// **An operation whose drives are free starts; one whose are not waits.**
     ///
-    /// **Not yet keyed on the drive**, which is what `roadmap.md` 4.1 asks
-    /// for: an operation on one drive should start immediately while two queue
-    /// on another. That needs operations that genuinely overlap, and these do
-    /// not -- `fs::copy` blocks, the explorer has one thread, so two
-    /// "concurrent" operations would interleave their steps and finish no
-    /// sooner than one after the other. Keying the queue on drives before the
-    /// parallelism exists would be a rule with no effect. See
-    /// `TD-C-THE-FILE-OPERATION-QUEUE-CANNOT-BE-PER-DRIVE-UNTIL-COPIES-CAN-OVERLAP`.
+    /// `roadmap.md` 4.1. Two operations on one drive are slower than the same
+    /// work done in turn -- they interleave two access patterns into a single
+    /// device queue, so neither gets a contiguous run and each one's readahead
+    /// is repeatedly thrown away by the other -- and fewer in flight on a
+    /// drive is fewer left half-done when it is unplugged. Operations on
+    /// *different* drives do not have that problem and do not wait for each
+    /// other, which is why this is keyed on the drive rather than being one
+    /// lock.
+    ///
+    /// Waiting rather than being refused, because "no" is the wrong answer to
+    /// a user who meant to start it: it makes them watch for a moment nothing
+    /// announces, and a copy that quietly did nothing would simply be started
+    /// again. Cancelling one before it starts costs nothing, since nothing has
+    /// been written.
     fn start_operation(
         &mut self,
         plan: OperationPlan,
         verb: &'static str,
         keep_undo: bool,
     ) -> bool {
-        if self.operation.is_some() {
+        let drives = plan.drives();
+        if self.drives_busy(&drives) {
             self.pending.push_back(PendingOperation {
                 plan,
                 verb,
                 keep_undo,
+                drives,
             });
             self.update_operation_status();
             return true;
         }
-        self.begin_operation(plan, verb, keep_undo)
+        self.begin_operation(plan, verb, keep_undo, drives)
+    }
+
+    /// Whether anything in flight is already loading one of these drives.
+    fn drives_busy(&self, drives: &DriveSet) -> bool {
+        self.operations
+            .iter()
+            .any(|op| op.drives.shares_with(drives))
     }
 
     /// Put an operation into flight. Answers whether it started.
@@ -1005,6 +1028,7 @@ impl ExplorerState {
         plan: OperationPlan,
         verb: &'static str,
         keep_undo: bool,
+        drives: DriveSet,
     ) -> bool {
         let total_files = plan.total_files;
         let mut executor = OperationExecutor::new(plan);
@@ -1012,8 +1036,9 @@ impl ExplorerState {
             self.report(Self::describe_outcome(&executor.take_events(), verb));
             return false;
         }
-        self.operation = Some(RunningOperation {
+        self.operations.push(RunningOperation {
             executor,
+            drives,
             verb,
             total_files,
             events: Vec::new(),
@@ -1021,6 +1046,33 @@ impl ExplorerState {
         });
         self.update_operation_status();
         true
+    }
+
+    /// Start every waiting operation whose drives have come free.
+    ///
+    /// Scans past a blocked one rather than stopping at it: an operation on a
+    /// drive nothing is using has no reason to wait behind one that cannot
+    /// start yet, and 4.1 says so in as many words -- "an operation on `F:`
+    /// starts immediately while two are queued on `D:`".
+    fn admit_pending(&mut self) {
+        let mut index = 0;
+        while index < self.pending.len() {
+            let Some(next) = self.pending.get(index) else {
+                break;
+            };
+            if self.drives_busy(&next.drives) {
+                index = index.saturating_add(1);
+                continue;
+            }
+            let Some(next) = self.pending.remove(index) else {
+                break;
+            };
+            // Not advanced on a start: `remove` shifted the rest down, so the
+            // same index is now the next candidate. Not advanced on a failure
+            // either, for the same reason -- and a failure is reported by
+            // `begin_operation` rather than swallowed here.
+            self.begin_operation(next.plan, next.verb, next.keep_undo, next.drives);
+        }
     }
 
     /// How many operations are waiting to start.
@@ -1047,6 +1099,9 @@ impl ExplorerState {
         let waiting = self.pending.len();
         self.pending.clear();
         let stopped = self.cancel_operation();
+        // Stated here rather than in `cancel_operation`: `stopped` is now
+        // "at least one was running", and the message below already says
+        // "Stopping…" rather than naming one.
         if !stopped && waiting == 0 {
             return false;
         }
@@ -1087,52 +1142,65 @@ impl ExplorerState {
     /// takes. Interrupting *within* a file needs chunked copying inside the
     /// engine and is recorded as its own entry.
     fn step_operation(&mut self) -> bool {
-        let Some(running) = &mut self.operation else {
+        if self.operations.is_empty() {
             return false;
-        };
-        // `checked_add`, not `+`: a deadline past the end of the monotonic
-        // clock is not a real moment, and saturating to *now* is the safe
-        // reading -- one action this frame rather than an unbounded slice.
-        let now = std::time::Instant::now();
-        let deadline = now.checked_add(OPERATION_SLICE).unwrap_or(now);
-        while !running.executor.is_done() && std::time::Instant::now() < deadline {
-            running.executor.step();
         }
-        running.events.append(&mut running.executor.take_events());
-        if !running.executor.is_done() {
-            self.update_operation_status();
-            return true;
+        // The frame's budget split between them, not given to each: two
+        // operations must not cost twice the frame. An uneven split would let
+        // whichever is first starve the rest.
+        let share = OPERATION_SLICE
+            .checked_div(u32::try_from(self.operations.len()).unwrap_or(1))
+            .unwrap_or(OPERATION_SLICE);
+        for running in &mut self.operations {
+            // `checked_add`, not `+`: a deadline past the end of the monotonic
+            // clock is not a real moment, and saturating to *now* is the safe
+            // reading -- one action this frame rather than an unbounded slice.
+            let now = std::time::Instant::now();
+            let deadline = now.checked_add(share).unwrap_or(now);
+            while !running.executor.is_done() && std::time::Instant::now() < deadline {
+                running.executor.step();
+            }
+            running.events.append(&mut running.executor.take_events());
         }
-        self.finish_operation();
+        self.retire_finished();
+        self.update_operation_status();
         true
     }
 
-    /// Retire the finished operation: summary, undo entries, fresh listing.
-    fn finish_operation(&mut self) {
-        let Some(mut running) = self.operation.take() else {
-            return;
-        };
-        running.executor.finish();
-        running.events.append(&mut running.executor.take_events());
-        self.report(Self::describe_outcome(&running.events, running.verb));
-
-        if running.keep_undo {
-            let (undo_op, entries) = running.executor.into_undo_entries();
-            if !entries.is_empty() {
-                self.undo.push(undo_op, entries);
+    /// Retire every finished operation: summary, undo entries, fresh listing.
+    ///
+    /// Then admit whatever was waiting on the drives they have just let go of.
+    fn retire_finished(&mut self) {
+        let mut done: Vec<RunningOperation> = Vec::new();
+        // Partitioned rather than removed in place: retiring one calls
+        // `self.report` and `self.load_directory`, which cannot borrow `self`
+        // while the list is being walked.
+        let mut still_running = Vec::with_capacity(self.operations.len());
+        for op in self.operations.drain(..) {
+            if op.executor.is_done() {
+                done.push(op);
+            } else {
+                still_running.push(op);
             }
         }
-        self.load_directory();
+        self.operations = still_running;
 
-        // And the next one takes its turn. A loop, not an `if`: an operation
-        // whose journal will not open reports itself and is gone, and the one
-        // behind it is still entitled to start. Without the loop a single
-        // unopenable journal would strand the whole queue with nothing to
-        // restart it.
-        while let Some(next) = self.pending.pop_front() {
-            if self.begin_operation(next.plan, next.verb, next.keep_undo) {
-                break;
+        let retired = !done.is_empty();
+        for mut running in done {
+            running.executor.finish();
+            running.events.append(&mut running.executor.take_events());
+            self.report(Self::describe_outcome(&running.events, running.verb));
+
+            if running.keep_undo {
+                let (undo_op, entries) = running.executor.into_undo_entries();
+                if !entries.is_empty() {
+                    self.undo.push(undo_op, entries);
+                }
             }
+        }
+        if retired {
+            self.load_directory();
+            self.admit_pending();
         }
     }
 
@@ -1142,19 +1210,38 @@ impl ExplorerState {
     /// is `OperationExecutor::cancel`'s business: every file wholly done or
     /// wholly not, and the journal kept so it can be resumed.
     pub fn cancel_operation(&mut self) -> bool {
-        let Some(running) = &mut self.operation else {
+        if self.operations.is_empty() {
             return false;
-        };
-        running.executor.cancel();
+        }
+        for running in &mut self.operations {
+            running.executor.cancel();
+        }
         true
     }
 
     /// Progress of the operation in flight, for a caller that draws it.
     #[must_use]
     pub fn operation_progress(&self) -> Option<OperationProgress> {
-        self.operation
-            .as_ref()
+        self.operations
+            .first()
             .map(|r| r.executor.progress().clone())
+    }
+
+    /// Whether any file operation is running or waiting to.
+    ///
+    /// The question a caller asks to know whether to keep the clock going, and
+    /// the one a test asks to know whether to keep ticking. Separate from
+    /// [`operation_progress`](Self::operation_progress), which answers about
+    /// *one* operation and would say "nothing here" while three waited.
+    #[must_use]
+    pub fn work_in_flight(&self) -> bool {
+        !self.operations.is_empty() || !self.pending.is_empty()
+    }
+
+    /// How many operations are running at once.
+    #[must_use]
+    pub fn running_count(&self) -> usize {
+        self.operations.len()
     }
 
     /// How far the operation in flight has got, from 0.0 to 1.0.
@@ -1172,15 +1259,26 @@ impl ExplorerState {
                   against a track 140 pixels wide"
     )]
     pub fn operation_fraction(&self) -> Option<f32> {
-        let running = self.operation.as_ref()?;
-        if running.total_files == 0 {
-            // A plan of no files is over the moment it starts. A full bar is
+        if self.operations.is_empty() {
+            return None;
+        }
+        // Summed across everything in flight, because there is one bar. Two
+        // bars for two operations would need two places to put them, and the
+        // status bar has one; a bar that showed only the first would stall at
+        // its end while the second was still going.
+        let mut done = 0_u64;
+        let mut total = 0_u64;
+        for running in &self.operations {
+            done = done.saturating_add(u64::from(running.executor.progress().completed_files));
+            total = total.saturating_add(u64::from(running.total_files));
+        }
+        if total == 0 {
+            // Plans of no files are over the moment they start. A full bar is
             // the honest picture of that, and it is also why this is not a
             // division.
             return Some(1.0);
         }
-        let done = running.executor.progress().completed_files as f32;
-        Some((done / running.total_files as f32).clamp(0.0, 1.0))
+        Some((done as f32 / total as f32).clamp(0.0, 1.0))
     }
 
     /// Put the operation's progress where the status bar will find it.
@@ -1189,7 +1287,9 @@ impl ExplorerState {
     /// only one status bar: an operation the user started and cannot see is
     /// one they will start again.
     fn update_operation_status(&mut self) {
-        let Some(running) = &self.operation else {
+        use std::fmt::Write as _;
+
+        let Some(running) = self.operations.first() else {
             return;
         };
         let progress = running.executor.progress();
@@ -1205,16 +1305,20 @@ impl ExplorerState {
             line.push_str(" — ");
             line.push_str(&current);
         }
-        match self.pending.len() {
-            0 => {}
-            1 => line.push_str(" (1 waiting)"),
-            n => {
-                use std::fmt::Write as _;
-                // The result is deliberately discarded: writing into a
-                // `String` cannot fail, and `?` here would mean this function
-                // returns a `Result` nobody has anything to do with.
-                let _ = write!(line, " ({n} waiting)");
+        // The others are counted rather than named. One line cannot carry
+        // three operations' filenames, and the count is what a user needs to
+        // know they did not lose one. Every `write!` result here is discarded
+        // deliberately: writing into a `String` cannot fail, and `?` would
+        // mean this returns a `Result` nobody has anything to do with.
+        let others = self.operations.len().saturating_sub(1);
+        if others > 0 {
+            let _ = write!(line, " (+{others} running");
+            if !self.pending.is_empty() {
+                let _ = write!(line, ", {} waiting", self.pending.len());
             }
+            line.push(')');
+        } else if !self.pending.is_empty() {
+            let _ = write!(line, " ({} waiting)", self.pending.len());
         }
         self.status_message = line;
     }
@@ -2757,7 +2861,7 @@ impl oswindow::app::App for ExplorerState {
         // should move as smoothly as anything else on screen. Named first
         // because it is the shorter of the two and this returns the one it
         // finds.
-        if self.operation.is_some() {
+        if self.work_in_flight() {
             return Some(OPERATION_TICK);
         }
         let working = self.thumb_gen.pending_count() > 0 || self.thumb_gen.completed_count() > 0;
@@ -3043,7 +3147,7 @@ impl ExplorerState {
             // anywhere. It does not do both at once, either -- one key with
             // two effects is how someone loses a selection they wanted while
             // trying to stop a copy.
-            Key::Escape if self.operation.is_some() || !self.pending.is_empty() => {
+            Key::Escape if self.work_in_flight() => {
                 self.cancel_all_operations();
                 true
             }
@@ -3410,7 +3514,7 @@ mod tests {
     /// never finishes is a bug this should report, not hang on.
     fn settle(state: &mut ExplorerState) {
         for _ in 0..100_000 {
-            if state.operation_progress().is_none() {
+            if !state.work_in_flight() {
                 return;
             }
             let _ = state.handle_event(&Event::Tick { elapsed_ms: 16 });
@@ -4000,6 +4104,74 @@ mod tests {
             root.join("dst/extra.txt").exists(),
             "the queued operation never ran"
         );
+    }
+
+    /// **An operation that collides with nothing does not wait.**
+    ///
+    /// The other half of the rule, and the half that is hard to observe: two
+    /// *different* drives cannot be arranged portably -- a machine with one
+    /// disk would make the test vacuous, and a machine with two would make it
+    /// pass for a reason the code does not control. An operation touching **no**
+    /// drive is the case that can be arranged anywhere, and it exercises the
+    /// same line: `drives_busy` answers false, so it starts alongside rather
+    /// than behind. `DriveSet::shares_with` carries the rest, with its own
+    /// tests in `crate::drives`.
+    #[test]
+    fn an_operation_that_shares_no_drive_starts_alongside_rather_than_waiting() {
+        let scratch = temp_dir("admit_free");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        assert_eq!(state.running_count(), 1);
+
+        // A plan over no sources touches no drive at all.
+        let empty = OperationPlan::plan_copy(
+            &[],
+            &root.join("dst"),
+            ConflictPolicy::Skip,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .expect("a plan over nothing is still a plan");
+        assert!(
+            empty.drives().is_empty(),
+            "a plan over no paths touched a drive"
+        );
+        assert!(state.start_operation(empty, "Pasted", false));
+
+        assert_eq!(
+            state.queued_count(),
+            0,
+            "an operation sharing no drive was made to wait"
+        );
+        assert_eq!(state.running_count(), 2, "it did not start");
+
+        settle(&mut state);
+        assert!(!state.work_in_flight());
+    }
+
+    /// And the status line names the others rather than hiding them.
+    #[test]
+    fn the_status_line_counts_the_other_operations_in_flight() {
+        let scratch = temp_dir("admit_status");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+
+        let empty = OperationPlan::plan_copy(
+            &[],
+            &root.join("dst"),
+            ConflictPolicy::Skip,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .expect("a plan over nothing is still a plan");
+        state.start_operation(empty, "Pasted", false);
+
+        let line = state.status_bar_text().to_string();
+        assert!(
+            line.contains("(+1 running)"),
+            "the second operation is invisible: {line:?}"
+        );
+        settle(&mut state);
     }
 
     /// Three deep, and the count is right at every depth.

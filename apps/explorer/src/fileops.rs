@@ -233,6 +233,28 @@ pub struct OperationPlan {
 }
 
 impl OperationPlan {
+    /// Every drive this plan will touch, source ends and destination ends.
+    ///
+    /// The scheduler's question: two operations that share a drive should not
+    /// run at once. It is asked of the *plan* rather than of the paths the
+    /// user selected, because the plan is what knows the whole expansion of a
+    /// directory tree -- a selection of one folder can reach a mounted
+    /// subvolume that the selection itself does not name.
+    #[must_use]
+    pub fn drives(&self) -> crate::drives::DriveSet {
+        // Two per action at most -- a source and a destination. `saturating`
+        // rather than `*`: this is only a hint to the allocator, and a plan
+        // large enough to overflow it would be a plan of nine quintillion
+        // files.
+        let mut paths: Vec<&Path> = Vec::with_capacity(self.actions.len().saturating_mul(2));
+        for action in &self.actions {
+            paths.push(action.src.as_path());
+            if let Some(dest) = action.dest.as_deref() {
+                paths.push(dest);
+            }
+        }
+        crate::drives::DriveSet::of(paths)
+    }
     /// A fingerprint of this plan, used to tell whether a journal found in the
     /// destination directory belongs to it.
     ///

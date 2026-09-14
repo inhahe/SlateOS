@@ -143221,3 +143221,232 @@ MiB and warns past a quarter of `IMG_SIZE`, because nothing else in
 header records what running out looks like — `mke2fs -d` gives up partway and
 the abort trap leaves a broken image behind. Deciding *which* utilities earn
 their bytes is a real question, and it is not answered here.
+
+
+## B-A-LONG-COMMAND-LINE-SILENTLY-BECAME-NO-COMMAND-LINE (lane B, 2026-09-13) — **fixed**
+
+**In short:** a program started with more than 64 KiB of arguments plus
+environment got **none of them**. Not a truncated list, not an error — `argc`
+was 0 and the program ran as if invoked bare. `cat` over a long file list would
+have become `cat` reading from the terminal. The kernel had always offered a way
+to fix this and libc had never taken it.
+
+### What it was
+
+`posix/src/crt.rs::retrieve_initial_args` asks the kernel for the packed
+argv/envp with `SYS_PROCESS_GET_ARGS`, into a 64 KiB static buffer. If the data
+was bigger, it did this:
+
+```rust
+// If the kernel returned more than our buffer can hold, the data
+// is still in the PCB (not consumed).  We can't use it without a
+// larger buffer.  Fall back to no args.
+if total > INIT_ARGS_BUF_SIZE || total < header_size {
+    return (0, core::ptr::null(), core::ptr::null());
+}
+```
+
+The comment is accurate about the mechanism and it names the consequence — and
+the consequence is a silent total loss. The kernel allows 256 KiB each for argv
+and envp, so the reachable gap was four to eight times the buffer.
+
+**The libc contradicted itself, which is what decides who this bug bites.**
+`sysconf(_SC_ARG_MAX)` returns `ARG_MAX`, and `posix/src/limits.rs` sets that to
+**131,072 — 128 KiB**, with a test asserting the value. So the library told every
+program it could pass 128 KiB of arguments, and then threw all of them away
+above 64 KiB. A program that consults `sysconf(_SC_ARG_MAX)` and packs up to
+the number it is given is doing the careful, correct thing; it is exactly the
+program that loses its arguments, at precisely half the advertised limit, with
+no error. The careless program that passes a handful of arguments never notices.
+
+(The remaining mismatch is in the safe direction and is left alone: libc
+advertises 128 KiB where the kernel accepts 256 KiB each for argv and envp, so
+a caller obeying `ARG_MAX` is under the kernel's limit rather than over it.)
+
+What makes it worse than a size limit is that **the kernel's side of the
+protocol was already built**. `kernel/src/syscall/handlers.rs`:
+
+> *"If the caller's buffer is too small, put the data back and return the
+> required size so they can retry."*
+
+It takes the args out of the PCB, notices the buffer is too small, puts them
+back, and returns the size needed. Every failure path there is careful to
+restore the data *specifically so a second call works*. libc never made the
+second call. One half of a two-step protocol was implemented, tested and
+commented, and the other half was a `return`.
+
+### The fix
+
+`retrieve_initial_args` now retries: when the first answer exceeds the static
+buffer it `mmap`s exactly the size the kernel asked for and asks again. A raw
+`mmap` rather than `malloc` because this runs before `init_environ()` and before
+the ELF constructors, and startup should not depend on the allocator that early;
+it is also a once-per-process call on a path almost nothing takes, so a bigger
+static buffer would have charged every process for it instead.
+
+A second answer that is still "too small", or larger than what was just
+allocated, is refused rather than parsed — the second number decides how much
+gets read, so trusting one we have already seen change would read past the
+allocation.
+
+### Tested on the host, which needed a seam
+
+`SYS_PROCESS_GET_ARGS` is a stub returning `ENOSYS` on the host triple, so with
+the syscall inline there is no way to reach the second ask at all. The kernel is
+now behind a small `InitArgSource` trait — the same move `tee` needed for
+`TeePipes` — and a fake implements the documented behaviour: keep the data,
+report the size. Five tests: fits first ask (and is not asked twice), oversized
+is retried and every argument survives, a failed allocation yields no args
+rather than a bad pointer, a retry answer bigger than the allocation is refused,
+and no-args-at-all is not an error.
+
+Mutation-tested: restoring the original `return` fails
+`oversized_args_are_retried_and_not_silently_dropped` and nothing else.
+
+**A test-quality bug found by that mutation.** The first mutation run failed
+*two* tests, the retry one and an unrelated small-args one. The second was
+mutex poisoning: these tests serialise on a `Mutex` because they write
+process-wide statics, and a panic while holding it makes every later
+`.unwrap()` panic too. One real regression reported as several failures, with
+the extra ones pointing at innocent code. The guard now ignores poisoning, and
+the same mutation fails exactly one test.
+
+### The same defect at a second limit — also fixed
+
+`MAX_INIT_PTRS` is 512, and the pointer-array loop stopped there. A program
+invoked with 600 arguments got `argc == 512`: the wrong answer, delivered with
+confidence, with no way for the program to notice. `grep pat *.c` in a large
+directory reaches this easily, and 512 is low enough that it is a normal
+command rather than an adversarial one.
+
+Fixed the same way, and the test was written first so it could be watched to
+fail — it reported `left: 512, right: 600` before the fix. The pointer arrays
+now come from the same source as the packed data when they do not fit, falling
+back to the static array if that allocation fails, so the old behaviour is the
+floor rather than the default. The test checks more than the count: that
+`argv[599]` is really `a599` and that `argv[600]` is NULL, because an array
+that is the right length but not NULL-terminated is a worse bug than the one
+being fixed.
+
+Writing the failing test first also confirmed the poisoning fix above: this
+time exactly one test failed, where the earlier mutation had failed two.
+
+### The near-miss, which is the part worth keeping
+
+I nearly filed something much louder and wrong. Reading `_start` in `crt.rs`
+shows it calling `__libc_start_main(main, 0, NULL, ...)` — argc and argv
+hardcoded to zero — above a comment reading *"the kernel jumps here with no
+arguments on the stack (argc/argv not yet supported)"*. The disassembly of a
+staged binary matches it instruction for instruction. I had a confirmed
+source-plus-binary finding that **no SlateOS program can receive arguments**,
+and it was wrong: `__libc_start_main` ignores the argc/argv it was handed and
+calls `retrieve_initial_args()`, which fetches them by syscall.
+
+That is the second time in one session that a conclusion survived two forms of
+evidence and still needed a mechanism I had not found yet — the first was
+grepping for `[rootfs] staged` and missing the fastpy block, which says
+`promoted`. The pattern is the same both times: **the evidence agreed with each
+other because it was all downstream of the same wrong assumption about where to
+look.** The comment in `_start` is genuinely stale and now says so, but the
+behaviour it appears to describe has not been true for a long time.
+
+
+## TD-B-REBUILDING-THE-LIBC-DOES-NOT-REBUILD-ANYTHING-THAT-LINKS-IT (lane B, 2026-09-13)
+
+**In short:** fix a bug in our C library, rebuild the library, rebuild the
+programs — and the programs still contain the bug. Cargo does not know that
+`toolchain/sysroot/lib/libc.a` is an input, so nothing that links it is out of
+date when it changes. The build says `Finished` and everything is stale.
+
+### Measured, not inferred
+
+After fixing `retrieve_initial_args` and rebuilding the sysroot (`libc.a` went
+from 2026-09-12 08:11 to 2026-09-13 20:57), I rebuilt the 70 binaries the image
+manifest names:
+
+| step | result |
+|---|---|
+| `rm` the 70 output binaries, then `cargo build` | **1.23 s**, 0 of 70 newer than `libc.a` |
+| `touch` the crate sources, then `cargo build` | 42 s, **70 of 70** newer |
+
+Deleting the outputs does not help, and that is the part that misleads. These
+files are **hardlinks** — `ls -la` shows a link count of 2 — into
+`target/.../release/deps/`. Removing `release/cp` removes one name for an
+inode that still exists under `deps/`, so cargo re-creates the link from its
+cache without running the linker, and the restored file keeps its **original
+mtime**. The obvious way to force a relink is therefore indistinguishable from
+having done nothing, right down to the timestamp.
+
+### Why it matters here more than in a normal Rust project
+
+Nothing else in this tree links a hand-built static archive. `libc.a` is built
+by `toolchain/build-sysroot.ps1`, **by hand**, outside cargo entirely — so the
+one artifact every userspace binary depends on is the one artifact cargo cannot
+see. A libc fix that is committed, tested and merged still ships nothing until
+someone happens to dirty each dependent crate.
+
+### What catches it
+
+The staleness check in the `create-ext4-rootfs.sh` staging block, which
+compares every staged binary against `libc.a` and warns when the binary is
+older. That check was written the same day as a matter of routine, copying the
+CMake one; this is what makes it load-bearing rather than decorative. Confirmed
+on real data: immediately after the sysroot rebuild, all 276 built binaries
+were older than `libc.a` and every one would have been reported.
+
+### The proper fix, not done here
+
+A `build.rs` in the crates that link the sysroot, emitting
+
+    cargo:rerun-if-changed=<path to sysroot>/lib/libc.a
+
+which is how cargo is told about an input it cannot infer. That is ~200 crates
+to touch, or one shared build-script crate they all depend on, and it wants
+thinking about rather than a quick loop — the archive path is set by the target
+JSON and the sysroot location is not currently exported to build scripts. Until
+then the rootfs warning is the backstop, and it only fires at image-build time,
+which is late but is at least before the bytes reach a disk.
+
+
+## TD-B-AN-ARGUMENT-LIST-TOO-LONG-REPORTS-EINVAL-WHERE-POSIX-SAYS-E2BIG (lane B, 2026-09-13)
+
+**In short:** spawn a process with more arguments than the system allows and the
+error says "invalid argument" instead of "argument list too long". A caller that
+handles the documented error — shrink the list and retry, which is what `xargs`
+exists to do — has no way to tell that is the right response.
+
+**Measured, not assumed**, following the value from one end to the other:
+
+| step | where | value |
+|---|---|---|
+| kernel refuses an oversized list | `kernel/src/proc/pcb.rs:6659` | `Err(InvalidArgument)` when `total > MAX_ARGS_BYTES` (256 KiB) |
+| libc maps the native error | `posix/src/spawn.rs` | `native_to_posix_err(ret)` |
+| the mapping | `posix/src/errno.rs:377` | `native::INVALID_ARGUMENT => EINVAL` |
+
+POSIX requires `E2BIG` for exec when the argument and environment lists exceed
+`ARG_MAX`. `E2BIG` exists in this tree and is returned in `file.rs`, `iconv.rs`
+and `linux_bpf.rs` — just never on the path that is actually about an argument
+list being too long.
+
+**Why this is recorded rather than fixed.** The obvious fix is for libc to check
+the packed length itself and return `E2BIG` before calling, which needs no
+kernel change and is testable on the host. What it needs first is a decision
+about *which* limit to enforce, and the two available answers disagree:
+
+- **`ARG_MAX` (128 KiB)** — what `sysconf(_SC_ARG_MAX)` already promises, so
+  enforcing it makes libc self-consistent. But it would start refusing spawns
+  between 128 KiB and 256 KiB that succeed today.
+- **The kernel's 256 KiB** — preserves current behaviour exactly and only
+  changes the errno. But then `sysconf` still advertises a number that is not
+  the one enforced, which is the same self-contradiction that made the argv
+  entry above bite the careful caller rather than the careless one.
+
+That is a user-visible behaviour choice with a real trade on both sides, so it
+is not one to make while passing through. The second option is the smaller
+change and the one I would take — errno correctness without a behaviour
+regression — with the `ARG_MAX` mismatch left as its own question.
+
+**Not urgent.** The current failure is a refusal with a misleading name, not a
+silent loss: the spawn does fail, and the caller does get an error. That is
+strictly better than the 64 KiB case in the entry above, which is why that one
+was fixed on the spot and this one is written down.

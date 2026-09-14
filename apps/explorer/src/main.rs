@@ -330,6 +330,57 @@ impl Outcome {
 /// up at a time -- that is what modal means -- and separate fields would make
 /// "a delete confirmation and a rename box, both open" a representable state
 /// that every reader has to rule out by hand.
+/// A button on the toolbar.
+///
+/// Named rather than addressed by position, for the reason every `*_rect`
+/// accessor in this tree exists: the painter and the click handler ask one
+/// function where a button is, so a button cannot be clickable somewhere other
+/// than where it is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolbarButton {
+    Back,
+    Forward,
+    Up,
+    NewFolder,
+    Cut,
+    Paste,
+}
+
+impl ToolbarButton {
+    /// Every button, in the order they are drawn.
+    ///
+    /// Walked by a test that checks each one is reachable. Seven controls were
+    /// painted here with nothing that could open them -- `click_at` knew about
+    /// file rows and the sidebar and nothing else -- and iterating the list
+    /// rather than trusting whoever adds the seventh is what catches the next
+    /// one.
+    pub const ALL: [Self; 6] = [
+        Self::Back,
+        Self::Forward,
+        Self::Up,
+        Self::NewFolder,
+        Self::Cut,
+        Self::Paste,
+    ];
+
+    /// The glyph on its face.
+    const fn glyph(self) -> &'static str {
+        match self {
+            Self::Back => "\u{2190}",
+            Self::Forward => "\u{2192}",
+            Self::Up => "\u{2191}",
+            Self::NewFolder => "\u{1F4C1}+",
+            Self::Cut => "\u{2702}",
+            Self::Paste => "\u{1F4CB}",
+        }
+    }
+
+    /// Whether a separator is drawn before it.
+    const fn starts_a_group(self) -> bool {
+        matches!(self, Self::NewFolder)
+    }
+}
+
 enum Modal {
     /// A destructive action the user has been asked to confirm.
     Confirm {
@@ -339,6 +390,12 @@ enum Modal {
     /// Something went wrong, and the user is being told so they cannot miss
     /// it. Its only answer is "OK" and nothing acts on it.
     Notice { dialog: AlertDialog },
+    /// A new folder awaiting its name.
+    ///
+    /// Its own variant rather than a `Rename` with an empty target: the two
+    /// answer the same dialog and do opposite things with it, and a target
+    /// that means "no file" is a `None` somebody will forget to check.
+    NewFolder { dialog: InputDialog },
     /// A rename in progress, awaiting the new name.
     Rename {
         dialog: InputDialog,
@@ -1984,7 +2041,9 @@ impl ExplorerState {
             Some(Modal::Confirm { dialog, .. } | Modal::Notice { dialog }) => {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
-            Some(Modal::Rename { dialog, .. }) => dialog.render(&self.palette, w, h, &mut tree),
+            Some(Modal::Rename { dialog, .. } | Modal::NewFolder { dialog }) => {
+                dialog.render(&self.palette, w, h, &mut tree);
+            }
             None => {}
         }
 
@@ -2018,6 +2077,85 @@ impl ExplorerState {
         }
     }
 
+    /// Where every toolbar button is drawn.
+    ///
+    /// The single source of the toolbar's geometry. The painter and
+    /// [`toolbar_button_at`](Self::toolbar_button_at) both walk it, so a
+    /// button's face and its click band are two readings of one layout rather
+    /// than two literals that drift.
+    fn toolbar_layout() -> Vec<(ToolbarButton, Rect)> {
+        let mut placed = Vec::with_capacity(ToolbarButton::ALL.len());
+        let mut x = TOOLBAR_PAD;
+        for button in ToolbarButton::ALL {
+            if button.starts_a_group() {
+                x += TOOLBAR_GROUP_GAP;
+            }
+            placed.push((button, Rect::new(x, 4.0, TOOLBAR_BTN, TOOLBAR_BTN)));
+            x += TOOLBAR_BTN + 4.0;
+        }
+        placed
+    }
+
+    /// Which button is under a point, if any.
+    #[must_use]
+    pub fn toolbar_button_at(x: f32, y: f32) -> Option<ToolbarButton> {
+        Self::toolbar_layout()
+            .into_iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map(|(button, _)| button)
+    }
+
+    /// Whether a button has anything to do right now.
+    ///
+    /// A disabled button is drawn grey and refuses the click, rather than
+    /// being hidden: a toolbar whose buttons come and go moves the others
+    /// under the pointer between one glance and the next.
+    #[must_use]
+    pub fn toolbar_button_enabled(&self, button: ToolbarButton) -> bool {
+        match button {
+            ToolbarButton::Back => !self.history_back.is_empty(),
+            ToolbarButton::Forward => !self.history_forward.is_empty(),
+            ToolbarButton::Up => self.current_path.parent().is_some(),
+            ToolbarButton::NewFolder => true,
+            ToolbarButton::Cut => !self.selected_indices.is_empty(),
+            ToolbarButton::Paste => self.clipboard.is_some(),
+        }
+    }
+
+    /// Do what a toolbar button says. Answers whether anything changed.
+    fn press_toolbar_button(&mut self, button: ToolbarButton) -> bool {
+        if !self.toolbar_button_enabled(button) {
+            // Deliberately `true`: the press was *on* the button and is not
+            // the file list's to interpret. Returning false here would send
+            // the click through to the rows underneath and clear the
+            // selection -- which is how pressing a greyed-out Cut would
+            // deselect the thing you were about to cut.
+            return true;
+        }
+        match button {
+            ToolbarButton::Back => self.go_back_if_possible(),
+            ToolbarButton::Forward => self.go_forward_if_possible(),
+            ToolbarButton::Up => self.go_up_if_possible(),
+            ToolbarButton::NewFolder => self.ask_new_folder(),
+            ToolbarButton::Cut => {
+                self.cut_selected();
+                true
+            }
+            ToolbarButton::Paste => {
+                self.paste();
+                true
+            }
+        }
+    }
+
+    /// Ask for a name and make a folder with it.
+    fn ask_new_folder(&mut self) -> bool {
+        let mut dialog = InputDialog::prompt("New folder", "Name:", "");
+        dialog.show();
+        self.modal = Some(Modal::NewFolder { dialog });
+        true
+    }
+
     fn render_toolbar(&self, tree: &mut RenderTree) {
         let toolbar_h = 36.0;
         tree.fill_rect(
@@ -2028,27 +2166,38 @@ impl ExplorerState {
             self.palette.crust,
         );
 
-        // Navigation buttons
-        let buttons = [
-            "\u{2190}",
-            "\u{2192}",
-            "\u{2191}",
-            "|",
-            "\u{1F4C1}+",
-            "\u{2702}",
-            "\u{1F4CB}",
-        ];
-        let mut x = 8.0;
-        for btn_text in &buttons {
-            if *btn_text == "|" {
-                // Separator
-                tree.fill_rect(x, 4.0, 1.0, toolbar_h - 8.0, self.palette.surface1);
-                x += 12.0;
-            } else {
-                tree.fill_rect(x, 4.0, 28.0, 28.0, self.palette.surface0);
-                tree.text(x + 6.0, 10.0, btn_text, self.palette.text, 14.0);
-                x += 32.0;
+        for (button, rect) in Self::toolbar_layout() {
+            if button.starts_a_group() {
+                tree.fill_rect(
+                    rect.x - TOOLBAR_GROUP_GAP / 2.0,
+                    4.0,
+                    1.0,
+                    toolbar_h - 8.0,
+                    self.palette.surface1,
+                );
             }
+            tree.fill_rect(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                self.palette.surface0,
+            );
+            let ink = if self.toolbar_button_enabled(button) {
+                self.palette.text
+            } else {
+                // The palette's disabled grey, and this is what it is for:
+                // off should look off. See `scripts/check-overlay0-ink.py`.
+                self.palette.overlay0
+            };
+            tree.text_in(
+                rect.x + 6.0,
+                rect.y + 6.0,
+                rect.width - 8.0,
+                button.glyph(),
+                ink,
+                14.0,
+            );
         }
     }
 
@@ -2804,6 +2953,13 @@ const OPERATION_SLICE: std::time::Duration = std::time::Duration::from_millis(8)
 /// How often the loop comes back while an operation is running.
 const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// The toolbar's left margin, and the size and spacing of its buttons.
+const TOOLBAR_PAD: f32 = 8.0;
+/// The side of a square toolbar button.
+const TOOLBAR_BTN: f32 = 28.0;
+/// The gap that separates the navigation group from the editing group.
+const TOOLBAR_GROUP_GAP: f32 = 12.0;
+
 /// How wide the status bar's progress track is, at most.
 const PROGRESS_TRACK_W: f32 = 140.0;
 
@@ -3066,6 +3222,12 @@ impl ExplorerState {
     /// A single left click: select the row under the pointer, follow the
     /// sidebar place under it, or clear the selection.
     fn click_at(&mut self, x: f32, y: f32) -> bool {
+        // The toolbar first. It is drawn above the list and does not overlap
+        // it, but asking in draw order is what keeps that true when one of
+        // them moves.
+        if let Some(button) = Self::toolbar_button_at(x, y) {
+            return self.press_toolbar_button(button);
+        }
         if let Some(index) = self.dropzone.find_file_row(x, y) {
             self.select_single(index);
             return true;
@@ -3277,12 +3439,14 @@ impl ExplorerState {
 
         let consumed = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.handle_event(event),
-            Modal::Rename { dialog, .. } => dialog.handle_event(event),
+            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => {
+                dialog.handle_event(event)
+            }
         } == EventResult::Consumed;
 
         let answer = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.result().cloned(),
-            Modal::Rename { dialog, .. } => dialog.result().cloned(),
+            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => dialog.result().cloned(),
         };
 
         let Some(answer) = answer else {
@@ -3312,6 +3476,15 @@ impl ExplorerState {
             Some(Modal::Rename { target, .. }) => match answer {
                 DialogResult::Text(name) => self.rename_path(&target, &name),
                 _ => self.status_message = "Rename cancelled".to_string(),
+            },
+            Some(Modal::NewFolder { .. }) => match answer {
+                // An empty name is a dismissal that happens to have been
+                // typed: `create_folder("")` would report a filesystem error
+                // for something the user plainly meant as "never mind".
+                DialogResult::Text(name) if !name.trim().is_empty() => {
+                    self.create_folder(name.trim());
+                }
+                _ => self.status_message = "New folder cancelled".to_string(),
             },
             // Dismissing a notice is the whole of what a notice does. It
             // has already been reported; there is nothing left to carry out.
@@ -3953,6 +4126,211 @@ mod tests {
             state.clipboard.is_some(),
             "a paste that changed nothing should leave the clipboard usable"
         );
+    }
+
+    // ---- the toolbar -------------------------------------------------
+    //
+    // Seven buttons were painted here with nothing that could press them:
+    // `click_at` knew about file rows and the sidebar and stopped there. Back,
+    // forward, up, new folder, cut and paste all did nothing, and every one of
+    // them looked exactly as it does now.
+
+    /// Press the middle of a toolbar button, the way a pointer does.
+    fn press_toolbar(state: &mut ExplorerState, button: ToolbarButton) {
+        let (_, rect) = ExplorerState::toolbar_layout()
+            .into_iter()
+            .find(|(b, _)| *b == button)
+            .unwrap_or_else(|| panic!("{button:?} is not in the layout"));
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    /// **Every painted button is clickable, at the rectangle it was painted
+    /// at.**
+    ///
+    /// The two halves come from two independent places: the faces out of the
+    /// render tree, the clickability out of the hit test. Neither can move the
+    /// other with it, which is the whole point -- a band that drifted a row
+    /// away from its own face would satisfy a test that measured both from the
+    /// layout.
+    #[test]
+    fn every_painted_toolbar_button_can_be_pressed_where_it_is_drawn() {
+        let scratch = temp_dir("toolbar_bands");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        let faces: Vec<(f32, f32)> = state
+            .render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*width - TOOLBAR_BTN).abs() < 0.01
+                    && (*height - TOOLBAR_BTN).abs() < 0.01 =>
+                {
+                    Some((*x, *y))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            faces.len(),
+            ToolbarButton::ALL.len(),
+            "the toolbar painted {} faces for {} buttons",
+            faces.len(),
+            ToolbarButton::ALL.len()
+        );
+
+        let mut reached = Vec::new();
+        for (x, y) in faces {
+            let centre = (x + TOOLBAR_BTN / 2.0, y + TOOLBAR_BTN / 2.0);
+            let button = ExplorerState::toolbar_button_at(centre.0, centre.1)
+                .unwrap_or_else(|| panic!("a button painted at {x},{y} has no click band"));
+            reached.push(button);
+        }
+        for button in ToolbarButton::ALL {
+            assert!(
+                reached.contains(&button),
+                "{button:?} was not reachable at any painted face"
+            );
+        }
+    }
+
+    #[test]
+    fn the_back_button_goes_back() {
+        let scratch = temp_dir("toolbar_back");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root);
+        state.navigate_to(&root.join("sub"));
+        assert_eq!(state.current_path, root.join("sub"));
+        assert!(state.toolbar_button_enabled(ToolbarButton::Back));
+
+        press_toolbar(&mut state, ToolbarButton::Back);
+
+        assert_eq!(state.current_path, root, "Back did not go back");
+    }
+
+    #[test]
+    fn the_up_button_goes_up() {
+        let scratch = temp_dir("toolbar_up");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root.join("sub"));
+
+        press_toolbar(&mut state, ToolbarButton::Up);
+
+        assert_eq!(state.current_path, root, "Up did not go up");
+    }
+
+    /// **A greyed-out button refuses the click rather than passing it on.**
+    ///
+    /// Returning "not handled" would send the press through to the rows
+    /// underneath and clear the selection -- so pressing a disabled Cut would
+    /// deselect the thing you were about to cut.
+    #[test]
+    fn a_disabled_toolbar_button_does_nothing_and_keeps_the_selection() {
+        let scratch = temp_dir("toolbar_disabled");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "a");
+        let mut state = state_at(&root);
+        state.selected_indices = vec![0];
+        assert!(
+            !state.toolbar_button_enabled(ToolbarButton::Back),
+            "there is history, so this proves nothing"
+        );
+
+        press_toolbar(&mut state, ToolbarButton::Back);
+
+        assert_eq!(state.current_path, root, "a disabled Back navigated");
+        assert_eq!(
+            state.selected_indices,
+            vec![0],
+            "a disabled button let the click through and cleared the selection"
+        );
+    }
+
+    /// New folder asks for a name, and the name is what gets made.
+    #[test]
+    fn the_new_folder_button_asks_and_then_makes_it() {
+        let scratch = temp_dir("toolbar_mkdir");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        press_toolbar(&mut state, ToolbarButton::NewFolder);
+        assert!(
+            matches!(state.modal, Some(Modal::NewFolder { .. })),
+            "New folder did not ask for a name"
+        );
+
+        let asked = state.modal.take();
+        state.apply_modal_answer(asked, DialogResult::Text("Photos".to_string()));
+        assert!(root.join("Photos").is_dir(), "the folder was not created");
+    }
+
+    /// An empty name is a dismissal, not a filesystem error.
+    #[test]
+    fn a_new_folder_with_no_name_is_cancelled_rather_than_failed() {
+        let scratch = temp_dir("toolbar_mkdir_blank");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        press_toolbar(&mut state, ToolbarButton::NewFolder);
+        let asked = state.modal.take();
+        state.apply_modal_answer(asked, DialogResult::Text("   ".to_string()));
+
+        assert!(
+            state.status_bar_text().contains("cancelled"),
+            "a blank name was treated as an attempt: {:?}",
+            state.status_bar_text()
+        );
+    }
+
+    /// Cut fills the clipboard, and then Paste is no longer greyed out.
+    #[test]
+    fn cut_then_paste_works_from_the_toolbar() {
+        let scratch = temp_dir("toolbar_cutpaste");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("note.txt"), "keep me");
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root);
+        select_named(&mut state, "note.txt");
+        state.selected_indices = vec![
+            state
+                .entries
+                .iter()
+                .position(|e| e.name == "note.txt")
+                .expect("the file is listed"),
+        ];
+
+        assert!(
+            !state.toolbar_button_enabled(ToolbarButton::Paste),
+            "empty clipboard"
+        );
+        press_toolbar(&mut state, ToolbarButton::Cut);
+        assert!(
+            state.toolbar_button_enabled(ToolbarButton::Paste),
+            "Cut did not fill the clipboard"
+        );
+
+        state.navigate_to(&root.join("sub"));
+        press_toolbar(&mut state, ToolbarButton::Paste);
+        settle(&mut state);
+
+        assert!(root.join("sub/note.txt").exists(), "Paste did not paste");
+        assert!(!root.join("note.txt").exists(), "a cut left the original");
     }
 
     // ---- a copy that does not freeze the window ----------------------

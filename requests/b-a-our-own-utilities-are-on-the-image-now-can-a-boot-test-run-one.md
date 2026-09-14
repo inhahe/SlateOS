@@ -38,11 +38,19 @@ than as a gap. Filed on my side as
 
 ## What I did (my side, complete)
 
-`scripts/create-ext4-rootfs.sh` now stages every ELF in
-`target/x86_64-slateos/release/` into `/bin`. Specifically:
+`scripts/create-ext4-rootfs.sh` now stages the binaries named in a new tracked
+list, `scripts/rootfs-bin-manifest.txt` (70 names). Specifically:
 
-* binaries are identified by **ELF magic**, not filename — cargo owns that
-  directory and fills it with `.d` depfiles and `incremental/`;
+* **what ships is the manifest, not whatever is built.** The first version
+  scanned `target/x86_64-slateos/release/`, and that coupling broke the image
+  within the hour: I built the remaining 190 userspace crates purely to find out
+  whether they cross-compile (they all do — 276 binaries, zero errors, 3m 08s),
+  and the next image build staged 204 MiB and died with `mke2fs: Could not
+  allocate block in ext2 filesystem`. Building a crate to debug it must not
+  change what the OS contains. **This matters to you**: it means a stray
+  `cargo build` in my tree can no longer alter the image your boot test runs;
+* binaries are still identified by **ELF magic**, not filename — a manifest says
+  what should ship, not that the file is a program;
 * **a name already staged by an earlier block is kept, not clobbered**, and the
   collision is announced. This is the part that concerns you directly: your
   boot test asserts on `/bin/make`, `/bin/sh` and `/bin/tcc` by name, and I did
@@ -70,20 +78,25 @@ Build them with:
 in place (needing `ALLOW_STALE_FIXTURES=1` for a stale cmake fixture that
 predates this change):
 
-    [rootfs] staged 71 SlateOS-native utilities from userspace/ into /bin (60 MiB)
-    [rootfs]          (15 skipped, already present -- see the NOTEs above)
+    [rootfs] staged 70 SlateOS-native utilities from userspace/ into /bin (59 MiB)
     [rootfs] DONE.
 
-384 MiB image written, `/bin` up from 36 entries to 107. The 15 skips are your
-14 fastpy commands plus `sh`, which dash owns — so the collision guard is not
-hypothetical, it fired 15 times on the first real run.
+384 MiB image written, `/bin` up from 36 entries to ~106. That run had **all
+276** binaries sitting in `target/` and staged only the 70 listed, which is the
+coupling fix demonstrated rather than asserted.
+
+The manifest omits the 13 names your promoted fastpy commands own, and `sh`.
+That is §108 part 1 — "additive only... No Rust coreutil is touched, shadowed
+or retired", and a silent swap is not mine to make. D-Q1 stays deferred; its
+trigger has not been met. The collision guard is a second, independent check on
+the same thing, so both would have to fail before a swap could happen quietly.
 
 ## What I am asking for
 
 **A boot test that runs one of them**, because staged is not run and I cannot
 write that test — `scripts/boot-test.sh` is yours.
 
-Right now the honest claim is "71 SlateOS-native utilities are *present* on the
+Right now the honest claim is "70 SlateOS-native utilities are *present* on the
 image", and nothing more. Whether any of them executes — whether our `ls` can
 open a directory through our own libc on our own kernel — is unmeasured. Given
 how this one turned out, I would rather not assume.
@@ -97,7 +110,7 @@ names is unambiguously the Rust build:
 
 The smallest thing that would settle it: run one and check the exit status, then
 one that touches the filesystem. A single rung is enough to convert the claim;
-I am not asking for coverage of 71 binaries. If a whole rung is more than you want to spend, even telling me
+I am not asking for coverage of 70 binaries. If a whole rung is more than you want to spend, even telling me
 the marker convention you would accept would let me propose the block for you
 to review.
 
@@ -105,7 +118,7 @@ to review.
 
 These binaries are the first real, non-trivial consumers of our libc written in
 *Rust against `std`* — the five ports are upstream C, and the 14 fastpy
-utilities go through fastpy's own runtime. 71 static Rust ELFs exercising
+utilities go through fastpy's own runtime. 70 static Rust ELFs exercising
 `posix` through `std` is a different and much wider surface, and the pkgconf and CMake
 ports each surfaced real libc gaps the moment they were first linked. I would
 expect the first `ls` to find something, and I would rather find it now than

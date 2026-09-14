@@ -2001,59 +2001,91 @@ fi
 # included.  Turn this into an exit 1 in the same change that adds the first
 # boot test asserting one of these actually runs.
 SLATE_BIN_DIR="$ROOT_DIR/target/x86_64-slateos/release"
+SLATE_MANIFEST="$ROOT_DIR/scripts/rootfs-bin-manifest.txt"
 SLATE_COUNT=0
 SLATE_SKIPPED=0
 SLATE_STALE=0
 SLATE_BYTES=0
-if [ -d "$SLATE_BIN_DIR" ]; then
-    for f in "$SLATE_BIN_DIR"/*; do
-        [ -f "$f" ] || continue
-        name="$(basename "$f")"
-        # Only real executables.  That directory also holds *.d depfiles and
-        # cargo's own bookkeeping, and an ELF magic test is cheaper to trust
-        # than a filename pattern -- it is what makes this loop safe to point
-        # at a directory cargo owns and rewrites.
-        [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' ')" = "7f454c46" ] || continue
-        # A name already under $STAGE/bin was put there by a block above: the
-        # host glibc fallbacks (/bin/make, /bin/sh, /bin/tcc) or one of the
-        # five ports.  Report and skip rather than clobber -- lane A's boot
-        # test asserts on those exact files, and silently replacing one of
-        # them from here would plant a failure in a script that never names it.
-        if [ -e "$STAGE/bin/$name" ]; then
-            echo "[rootfs] NOTE: /bin/$name is already staged by an earlier block; keeping that"
-            echo "[rootfs]       one and NOT the slateos build. Resolve the duplicate before"
-            echo "[rootfs]       trusting either of them."
-            SLATE_SKIPPED=$((SLATE_SKIPPED + 1))
-            continue
-        fi
-        cp -L "$f" "$STAGE/bin/$name"
-        SLATE_COUNT=$((SLATE_COUNT + 1))
-        SLATE_BYTES=$((SLATE_BYTES + $(wc -c < "$f")))
-        if [ -e "$SYSROOT_LIBC" ] && [ "$SYSROOT_LIBC" -nt "$f" ]; then
-            SLATE_STALE=$((SLATE_STALE + 1))
-        fi
-    done
+SLATE_MISSING=0
+SLATE_MISSING_NAMES=""
+if [ ! -f "$SLATE_MANIFEST" ]; then
+    echo "[rootfs] ERROR: $SLATE_MANIFEST does not exist, so NO SlateOS-native utility"
+    echo "[rootfs]        can be staged. This is an error and not a NOTE because the"
+    echo "[rootfs]        manifest is tracked in git: its absence means a broken"
+    echo "[rootfs]        checkout, not a tree that has simply not built them yet."
+    exit 1
 fi
+# Process substitution, NOT a pipe. `... | while read` runs the loop in a
+# subshell and every counter below would be discarded at the `done`, leaving a
+# block that stages files and then reports zero of them.
+while IFS= read -r name; do
+    name="${name%%#*}"
+    # Trailing whitespace and a stray CR both produce a filename that does not
+    # exist, which would be reported as "built it yet?" rather than as the typo
+    # it is.
+    name="$(printf '%s' "$name" | tr -d '\r' | sed 's/[[:space:]]*$//')"
+    [ -n "$name" ] || continue
+    f="$SLATE_BIN_DIR/$name"
+    if [ ! -f "$f" ]; then
+        SLATE_MISSING=$((SLATE_MISSING + 1))
+        SLATE_MISSING_NAMES="$SLATE_MISSING_NAMES $name"
+        continue
+    fi
+    # An ELF test even though the name came from the manifest: the manifest
+    # says what SHOULD ship, and this says the file is a program. cargo owns
+    # that directory and a name can collide with a depfile or a stale artifact.
+    if [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' ')" != "7f454c46" ]; then
+        echo "[rootfs] NOTE: $f is named in the manifest but is not an ELF binary;"
+        echo "[rootfs]       not staging it."
+        continue
+    fi
+    # A name already under $STAGE/bin was put there by a block above: the host
+    # glibc fallbacks (/bin/make, /bin/sh, /bin/tcc), one of the five ports, or
+    # a promoted fastpy command. Report and skip rather than clobber. For the
+    # fastpy names this is design-decisions.md §108 part 1 -- fastpy stays
+    # "additive only... No Rust coreutil is touched, shadowed or retired", and
+    # a silent swap is explicitly not Claude's to make. The manifest already
+    # omits those 13 names; this is the second of the two independent guards.
+    if [ -e "$STAGE/bin/$name" ]; then
+        echo "[rootfs] NOTE: /bin/$name is already staged by an earlier block; keeping that"
+        echo "[rootfs]       one and NOT the slateos build. Resolve the duplicate before"
+        echo "[rootfs]       trusting either of them."
+        SLATE_SKIPPED=$((SLATE_SKIPPED + 1))
+        continue
+    fi
+    cp -L "$f" "$STAGE/bin/$name"
+    SLATE_COUNT=$((SLATE_COUNT + 1))
+    SLATE_BYTES=$((SLATE_BYTES + $(wc -c < "$f")))
+    if [ -e "$SYSROOT_LIBC" ] && [ "$SYSROOT_LIBC" -nt "$f" ]; then
+        SLATE_STALE=$((SLATE_STALE + 1))
+    fi
+done < "$SLATE_MANIFEST"
 if [ "$SLATE_COUNT" -gt 0 ]; then
     SLATE_MIB=$((SLATE_BYTES / 1048576))
     echo "[rootfs] staged $SLATE_COUNT SlateOS-native utilities from userspace/ into /bin ($SLATE_MIB MiB)"
-    # A SIZE TRIPWIRE, because this block is now the largest single consumer of
-    # image bytes and nothing else in this script accounts for free space at
-    # all.  The image is a fixed $IMG_SIZE and running it close to full is a
-    # failure this script has already had: the header at the top records that
-    # at 256M "mke2fs -d gives up partway and this script's abort trap then
-    # leaves" a broken image behind.  A static Rust binary here averages ~886
-    # KiB, so this total grows fast -- the 86 binaries the coreutils crate
-    # produces are 74 MiB, and building all 193 of the remaining userspace
-    # crates would add roughly 167 MiB more and not fit.  Staging a subset is a
-    # legitimate answer; silently overflowing is not.
+    if [ "$SLATE_SKIPPED" -gt 0 ]; then
+        echo "[rootfs]          ($SLATE_SKIPPED skipped, already present -- see the NOTEs above)"
+    fi
+    if [ "$SLATE_STALE" -gt 0 ]; then
+        echo "[rootfs] WARNING: $SLATE_STALE of them are OLDER than the sysroot libc.a, so they link"
+        echo "[rootfs]          a stale libc and prove nothing about the current one. Rebuild:"
+        echo "[rootfs]            cd userspace/coreutils"
+        echo "[rootfs]            CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
+    fi
+    # A SIZE TRIPWIRE. This block is the largest single consumer of image bytes
+    # and nothing else in this script accounts for free space at all. Running
+    # the image close to full is a failure this script has already had twice:
+    # the header records it at 256M, and on 2026-09-13 staging 204 MiB of
+    # binaries produced "mke2fs: Could not allocate block in ext2 filesystem
+    # while populating file system" and no image. The manifest is what keeps
+    # the total bounded; this is what says so out loud when it stops being.
+    #
     # IMG_SIZE is env-overridable and carries a unit suffix, so this must not
-    # assume "M" -- and the warning below tells the reader to RAISE IMG_SIZE,
-    # which makes IMG_SIZE=1G a documented thing to do rather than an exotic
-    # one. It used to exit 1 there: `$(( 1G / 4 ))` is "value too great for
-    # base", so following this block's own advice broke the image build. A
-    # size this cannot parse skips the check instead of failing, because the
-    # budget is advice and advice must never be what breaks a build.
+    # assume "M" -- and the warning tells the reader to RAISE IMG_SIZE, which
+    # makes IMG_SIZE=1G a documented thing to do. It used to exit 1 there:
+    # `$(( 1G / 4 ))` is "value too great for base". A size this cannot parse
+    # skips the check rather than failing, because the budget is advice and
+    # advice must never be what breaks a build.
     SLATE_BUDGET=""
     case "$IMG_SIZE" in
         *[0-9][Mm]) SLATE_BUDGET=$(( ${IMG_SIZE%?} / 4 )) ;;
@@ -2065,24 +2097,21 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
     if [ -n "$SLATE_BUDGET" ] && [ "$SLATE_MIB" -gt "$SLATE_BUDGET" ]; then
         echo "[rootfs] WARNING: that is more than a quarter of the $IMG_SIZE image ($SLATE_BUDGET MiB)."
         echo "[rootfs]          Nothing here checks total free space, and mke2fs -d fails PARTWAY"
-        echo "[rootfs]          through when it runs out, leaving a broken image. Either raise"
-        echo "[rootfs]          IMG_SIZE or stage fewer binaries."
-    fi
-    if [ "$SLATE_SKIPPED" -gt 0 ]; then
-        echo "[rootfs]          ($SLATE_SKIPPED skipped, already present -- see the NOTEs above)"
-    fi
-    if [ "$SLATE_STALE" -gt 0 ]; then
-        echo "[rootfs] WARNING: $SLATE_STALE of them are OLDER than the sysroot libc.a, so they link"
-        echo "[rootfs]          a stale libc and prove nothing about the current one. Rebuild:"
-        echo "[rootfs]            cd userspace/coreutils"
-        echo "[rootfs]            CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
+        echo "[rootfs]          through when it runs out, leaving no image. Either raise"
+        echo "[rootfs]          IMG_SIZE or name fewer binaries in $SLATE_MANIFEST."
     fi
 else
-    echo "[rootfs] NOTE: no binaries found in $SLATE_BIN_DIR, so /bin gets none of this"
-    echo "[rootfs]       project's own utilities. They build for the HOST by default; the"
-    echo "[rootfs]       slateos target is a separate build:"
+    echo "[rootfs] NOTE: none of the binaries named in $SLATE_MANIFEST have been"
+    echo "[rootfs]       built, so /bin gets none of this project's own utilities. They"
+    echo "[rootfs]       build for the HOST by default; the slateos target is separate:"
     echo "[rootfs]         cd userspace/coreutils"
     echo "[rootfs]         CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
+fi
+if [ "$SLATE_MISSING" -gt 0 ]; then
+    echo "[rootfs] NOTE: $SLATE_MISSING name(s) in the manifest have no built binary and were"
+    echo "[rootfs]       skipped:$SLATE_MISSING_NAMES"
+    echo "[rootfs]       A name here that is never built is either an unbuilt crate or a"
+    echo "[rootfs]       typo, and the two look identical from this side."
 fi
 
 # --- Completeness: the check that replaces the retired content stamps ---------

@@ -143113,6 +143113,52 @@ compares each binary against `libc.a` and correctly stays quiet, because the
 binaries are newer than the archive; it is the archive that is behind. The two
 checks compose, but neither states the transitive claim on its own.
 
+### The second defect: building a crate changed what the OS contains
+
+The first version of the staging block scanned
+`target/x86_64-slateos/release/` and staged every ELF it found. That is a
+coupling defect, and it did not stay theoretical for an hour.
+
+Wanting to know whether the *rest* of the tree cross-compiles, I built the
+remaining 190 userspace crates. It is a good result on its own — **all 190
+compiled, zero errors, 3m 08s**, so every one of the 276 binaries builds for
+SlateOS. But the next image build then did this:
+
+    [rootfs] staged 260 SlateOS-native utilities from userspace/ into /bin (204 MiB)
+    [rootfs] WARNING: that is more than a quarter of the 384M image (96 MiB).
+    mke2fs: Could not allocate block in ext2 filesystem while populating file system
+    *** rootfs.ext4 was NOT written ***
+
+So `cargo build` in a crate directory, run to answer a question, changed what
+the operating system image contains and then broke it. The tripwire did fire and
+named the exact failure that followed — but a warning is the wrong instrument
+for this. **A developer debugging one crate must not be able to alter the image
+at all.**
+
+**The fix: `scripts/rootfs-bin-manifest.txt`.** What ships is now an explicit,
+tracked list of 70 names, and a binary that is built but not listed does not
+ship. Verified with all 276 binaries present in `target/`: the image build
+staged 70 (59 MiB) and ignored the other 206. A missing manifest is an `exit 1`
+rather than a NOTE, because the file is tracked in git — its absence means a
+broken checkout, not a tree that has not built yet.
+
+The manifest deliberately omits the 13 names the promoted fastpy commands own
+(`cat`, `grep`, `ls`, `wc`, …) and `sh`, which dash owns. That is
+`design-decisions.md` **§108 part 1**: fastpy stays *"additive only… No Rust
+coreutil is touched, shadowed or retired"*, and *"a silent swap is a
+user-visible policy change and is not Claude's to make."* Which implementation a
+stock install should prefer is `deferred-questions.md` **D-Q1**, whose trigger
+— a fastpy utility with a parity suite and a performance bar — has not been
+met, so it stays deferred and this change does not touch it. The manifest and
+the collision guard are two independent things that would both have to be wrong
+before a swap could happen quietly.
+
+**Why the whole userland is not on the image.** All 276 build, and they come to
+204 MiB against a fixed 384M image that already carries ~127 MiB of fastpy test
+ELFs. They do not fit. Raising `IMG_SIZE` is available and nothing outside this
+script reads it, but "which utilities earn their bytes" is a real question and
+staging everything that happens to compile is not an answer to it.
+
 ### Why absence is a NOTE and not an error, for now
 
 The neighbouring fastpy block exits 1 on an empty scan. This one does not, and

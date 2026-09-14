@@ -27,6 +27,7 @@ use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use yamldoc::Document;
 
 // ============================================================================
 // Colour
@@ -150,6 +151,12 @@ pub enum IconAction {
     /// Custom action string.
     Custom(String),
 }
+
+/// The file desktop icon positions live in, under the user's config directory.
+pub const CONFIG_NAME: &str = "deskicons";
+
+/// The mapping inside that file: icon key -> `{x, y}`.
+const POSITIONS_KEY: &str = "positions";
 
 /// A single desktop icon.
 #[derive(Clone, Debug)]
@@ -1086,6 +1093,117 @@ impl DesktopIconLayer {
         self.screen_width = width;
         self.screen_height = height;
     }
+
+    // ======================================================================
+    // Where the icons were left
+    //
+    // `design-decisions.md` 933 (open-questions A-Q8): desktop icon layout is
+    // not a kernel concern. `fs::deskicons` and `/proc/deskicons` go, and this
+    // layer becomes the authority, persisting positions in userspace. Lane C
+    // wires first and lane A deletes after, so no reboot loses positions in
+    // between -- which is why this half exists before that half.
+    // ======================================================================
+
+    /// The key an icon's position is filed under.
+    ///
+    /// The *action*, not the label. A label is what the icon is called and can
+    /// be renamed; the action is what it does. This is the rule the taskbar's
+    /// pinned apps already follow -- a pin is an executable path, and the name
+    /// on it is looked up when it is drawn -- and for the same reason: storing
+    /// the label too would be a second copy of it, stale the first time the
+    /// thing is renamed.
+    fn storage_key(action: &IconAction) -> String {
+        match action {
+            IconAction::OpenPath(path) => format!("path:{path}"),
+            IconAction::LaunchSystem(name) => format!("system:{name}"),
+            IconAction::Custom(name) => format!("custom:{name}"),
+        }
+    }
+
+    /// Fold the current positions into a configuration document.
+    ///
+    /// Entries for icons that are no longer on the desktop are **removed**,
+    /// not merely left unwritten: an icon deleted and later recreated would
+    /// otherwise jump back to where its ghost had been.
+    pub fn write_positions(&self, doc: &mut Document) {
+        let live: Vec<String> = self
+            .icons
+            .iter()
+            .map(|icon| Self::storage_key(&icon.action))
+            .collect();
+        for key in doc.keys(&[POSITIONS_KEY]) {
+            if !live.contains(&key) {
+                doc.remove(&[POSITIONS_KEY, &key]);
+            }
+        }
+        for icon in &self.icons {
+            let key = Self::storage_key(&icon.action);
+            doc.set_i64(&[POSITIONS_KEY, &key, "x"], i64::from(icon.x));
+            doc.set_i64(&[POSITIONS_KEY, &key, "y"], i64::from(icon.y));
+        }
+    }
+
+    /// Move the icons to where a document says they were left.
+    ///
+    /// Icons the document says nothing about keep the position they have,
+    /// which is what makes a newly-added default icon land on a free cell
+    /// rather than at the origin.
+    ///
+    /// **Restored positions are clamped onto the visible desktop.** A saved
+    /// layout outlives the screen it was made on: the same file is read after
+    /// the resolution drops, or with a taller taskbar, and an icon restored at
+    /// its old coordinates would sit outside the desktop with nothing able to
+    /// click it. `set_screen_size` records a new size without moving anything,
+    /// so nothing else in this module would catch it.
+    pub fn read_positions(&mut self, doc: &Document) {
+        let (max_x, max_y) = self.last_cell_origin();
+        for icon in &mut self.icons {
+            let key = Self::storage_key(&icon.action);
+            let (Some(x), Some(y)) = (
+                doc.get_i64(&[POSITIONS_KEY, &key, "x"]),
+                doc.get_i64(&[POSITIONS_KEY, &key, "y"]),
+            ) else {
+                continue;
+            };
+            // A value too large for the screen is clamped; one too large for
+            // an `i32` is a corrupt file and the icon keeps where it is.
+            let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
+                continue;
+            };
+            icon.x = x.clamp(0, max_x);
+            icon.y = y.clamp(0, max_y);
+        }
+    }
+
+    /// The top-left of the furthest cell that is still wholly on screen.
+    fn last_cell_origin(&self) -> (i32, i32) {
+        let cols = self.grid.columns_in(self.screen_width).max(1);
+        let rows = self
+            .grid
+            .rows_in(self.screen_height.saturating_sub(self.taskbar_height))
+            .max(1);
+        let (x, y) = self.grid.from_cell(
+            i32::try_from(cols.saturating_sub(1)).unwrap_or(0),
+            i32::try_from(rows.saturating_sub(1)).unwrap_or(0),
+        );
+        (x.max(0), y.max(0))
+    }
+
+    /// Read the saved positions from the user's configuration.
+    pub fn load_positions(&mut self) {
+        let doc = appearance::config::load(CONFIG_NAME);
+        self.read_positions(&doc);
+    }
+
+    /// Write the positions back, answering whether it reached the disk.
+    ///
+    /// The document is loaded and edited rather than rebuilt, so a comment the
+    /// user put in the file survives being saved over.
+    pub fn save_positions(&self) -> std::io::Result<()> {
+        let mut doc = appearance::config::load(CONFIG_NAME);
+        self.write_positions(&mut doc);
+        appearance::config::store(CONFIG_NAME, &doc)
+    }
 }
 
 // ============================================================================
@@ -1194,6 +1312,150 @@ mod tests {
 
     use super::*;
     use appearance::palette_check;
+
+    // ------------------------------------------------------------------
+    // Where the icons were left
+    // ------------------------------------------------------------------
+
+    /// A layer with the default icons on a 1920x1080 screen.
+    fn populated() -> DesktopIconLayer {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.populate_defaults();
+        layer
+    }
+
+    /// The position of the icon whose action is `key`.
+    fn position_of(layer: &DesktopIconLayer, key: &str) -> Option<(i32, i32)> {
+        layer
+            .icons
+            .iter()
+            .find(|i| DesktopIconLayer::storage_key(&i.action) == key)
+            .map(|i| (i.x, i.y))
+    }
+
+    /// **An icon dragged somewhere is still there after a restart.**
+    ///
+    /// The whole point of `design-decisions.md` 933: the layout leaves the
+    /// kernel and this layer becomes the authority, so it has to be able to
+    /// answer where things were. Goes through a `Document` rather than a file,
+    /// which is the same split `InputFile` and the taskbar's pinned apps use --
+    /// the format is exercised without a filesystem.
+    #[test]
+    fn an_icon_stays_where_it_was_dragged() {
+        let mut layer = populated();
+        let key = DesktopIconLayer::storage_key(&layer.icons[0].action);
+        layer.icons[0].x = 400;
+        layer.icons[0].y = 300;
+
+        let mut doc = Document::new();
+        layer.write_positions(&mut doc);
+
+        // A second desktop, built from defaults, reading what the first wrote.
+        let mut restarted = populated();
+        assert_ne!(
+            position_of(&restarted, &key),
+            Some((400, 300)),
+            "the default layout already had it there, so this proves nothing"
+        );
+        restarted.read_positions(&doc);
+        assert_eq!(position_of(&restarted, &key), Some((400, 300)));
+    }
+
+    /// The key is the action, so renaming an icon does not lose its place.
+    #[test]
+    fn renaming_an_icon_does_not_move_it() {
+        let mut layer = populated();
+        layer.icons[0].x = 640;
+        layer.icons[0].y = 480;
+        let mut doc = Document::new();
+        layer.write_positions(&mut doc);
+
+        let mut restarted = populated();
+        restarted.icons[0].label = "Something Else Entirely".to_string();
+        let key = DesktopIconLayer::storage_key(&restarted.icons[0].action);
+        restarted.read_positions(&doc);
+
+        assert_eq!(position_of(&restarted, &key), Some((640, 480)));
+    }
+
+    /// **A position saved on a bigger screen is brought back onto this one.**
+    ///
+    /// A saved layout outlives the screen it was made on. `set_screen_size`
+    /// records a new size without moving anything, so without this an icon
+    /// restored at its old coordinates would sit off the desktop with nothing
+    /// able to click it.
+    #[test]
+    fn a_position_off_this_screen_is_clamped_onto_it() {
+        let mut wide = DesktopIconLayer::new(3840, 2160, 40);
+        wide.populate_defaults();
+        wide.icons[0].x = 3600;
+        wide.icons[0].y = 2000;
+        let key = DesktopIconLayer::storage_key(&wide.icons[0].action);
+        let mut doc = Document::new();
+        wide.write_positions(&mut doc);
+
+        let mut small = DesktopIconLayer::new(1024, 768, 40);
+        small.populate_defaults();
+        small.read_positions(&doc);
+
+        let (x, y) = position_of(&small, &key).expect("the icon is still there");
+        assert!(
+            x < 1024 && y < 768 - 40,
+            "restored at ({x}, {y}), which is off a 1024x768 desktop"
+        );
+    }
+
+    /// A corrupt coordinate leaves the icon where it is rather than moving it
+    /// somewhere meaningless.
+    #[test]
+    fn a_coordinate_too_large_for_the_screen_type_is_ignored() {
+        let mut layer = populated();
+        let key = DesktopIconLayer::storage_key(&layer.icons[0].action);
+        let before = position_of(&layer, &key).expect("an icon");
+
+        let mut doc = Document::new();
+        doc.set_i64(&[POSITIONS_KEY, &key, "x"], i64::from(i32::MAX) + 1);
+        doc.set_i64(&[POSITIONS_KEY, &key, "y"], 10);
+        layer.read_positions(&doc);
+
+        assert_eq!(position_of(&layer, &key), Some(before));
+    }
+
+    /// An icon that is gone is taken out of the file, not left behind.
+    ///
+    /// The half that is easy to miss in a writer: writing only what is present
+    /// leaves the old entry in place, and an icon deleted and later recreated
+    /// jumps back to where its ghost had been.
+    #[test]
+    fn a_removed_icon_is_taken_out_of_the_file() {
+        let mut layer = populated();
+        let key = DesktopIconLayer::storage_key(&layer.icons[0].action);
+        let mut doc = Document::new();
+        layer.write_positions(&mut doc);
+        assert!(doc.get_i64(&[POSITIONS_KEY, &key, "x"]).is_some());
+
+        let id = layer.icons[0].id;
+        layer.remove_icon(id);
+        layer.write_positions(&mut doc);
+
+        assert!(
+            doc.get_i64(&[POSITIONS_KEY, &key, "x"]).is_none(),
+            "the removed icon is still in the file: {}",
+            doc.to_text()
+        );
+    }
+
+    /// An icon the file says nothing about keeps the place it was given.
+    #[test]
+    fn an_icon_the_file_does_not_mention_is_left_alone() {
+        let mut layer = populated();
+        let key = DesktopIconLayer::storage_key(&layer.icons[0].action);
+        let before = position_of(&layer, &key).expect("an icon");
+
+        layer.read_positions(&Document::new());
+
+        assert_eq!(position_of(&layer, &key), Some(before));
+    }
 
     // ------------------------------------------------------------------
     // Grid snapping tests

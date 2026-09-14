@@ -75686,6 +75686,23 @@ the module is reached. `PowerManager`, `PowerConfig`, `ScreenSaver` and the
 config pair inside it still have no caller. A module absent from the table is
 not a clean bill of health for its contents.
 
+**C-Q6 WAS ANSWERED ON 2026-09-07** -- design-decisions 815, option C, split
+by kind -- and this paragraph went on saying otherwise for a week. A screen you
+*open* moves to `apps/settings` and the shell's copy is deleted; something the
+desktop *shows* you stays and gets wired. Nothing below is waiting on a
+decision.
+
+What it is waiting on is the work, and the shape of that work is the opposite
+of what one would guess: `apps/settings` has navigation for 26 pages and
+builders for about thirteen, with `DefaultApps`, `StartupApps`, `WiFi`, `Power`
+and others falling through to `build_placeholder_page`. The *shell* holds the
+real implementations -- `default_apps.rs` is 2,325 lines. So each one is a port
+into the Settings app followed by a deletion from the shell, and deleting first
+would replace a working panel with a placeholder.
+
+The paragraph below is kept as it was written, because the reasoning in it is
+still right about *why* one would not wire a panel that is about to move:
+
 **Do not wire these up before C-Q6 is answered.** Adding `load()`/`save()` to
 six models that may be deleted is lesson 45 at a larger size — a bigger unused
 feature, with the same round-trip tests making it look covered.

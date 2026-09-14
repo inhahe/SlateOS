@@ -70,6 +70,51 @@ const PT_TLS: u32 = 7;
 /// and keeps TP 64-byte-friendly.
 pub const TCB_SIZE: u64 = 0x40;
 
+/// Byte offset of the stack-protector canary within the TCB.
+///
+/// GCC and Clang emit `mov %fs:0x28, %reg` in the prologue of every function
+/// they protect, and compare against it in the epilogue. This is the value
+/// that actually guards a stack frame on x86-64 — **not** the
+/// `__stack_chk_guard` global, which is the fallback other architectures use.
+pub const STACK_GUARD_OFFSET: u64 = 0x28;
+
+/// Write the process's stack-protector canary into the TCB at `tp`.
+///
+/// Until 2026-09-13 nothing wrote this slot, and [`init_block`]'s own doc said
+/// so: the TCB "is left at whatever the mapping already holds, which for a
+/// fresh anonymous mapping is zero". **A zero canary is worse than a fixed
+/// one.** Zero is the single likeliest value for an overflow to deposit — a
+/// string terminator, a zeroed buffer, a short `memset` — so the check the
+/// compiler emits passes for exactly the overflows it exists to catch.
+///
+/// Deliberately NOT done inside `init_block`: the canary value comes from
+/// `AT_RANDOM`, whose fill path sets `errno` on failure, and `errno` lives in
+/// TLS. Seeding from inside the routine that is *establishing* TLS would
+/// touch `%fs` before `%fs` is valid. This is called by the caller, once TLS
+/// is up.
+///
+/// Every thread in a process gets the **same** value, as glibc does by copying
+/// the parent's guard into the child TCB. Re-rolling per thread would be worse
+/// than useless: a thread that changed the value after another had already
+/// loaded it into a live frame would abort a process that was never smashed.
+///
+/// # Safety
+///
+/// `[tp, tp + TCB_SIZE)` must be mapped and writable, and `tp` must be this
+/// thread's thread pointer or a child's not-yet-running one.
+#[cfg(target_os = "none")]
+pub unsafe fn set_stack_guard(tp: u64, guard: u64) {
+    // SAFETY: the caller guarantees the TCB is mapped and writable, and
+    // STACK_GUARD_OFFSET (0x28) is inside TCB_SIZE (0x40).
+    unsafe {
+        (tp.wrapping_add(STACK_GUARD_OFFSET) as *mut u64).write(guard);
+    }
+}
+
+/// Host build: there is no `%fs`-based TCB to write.
+#[cfg(not(target_os = "none"))]
+pub unsafe fn set_stack_guard(_tp: u64, _guard: u64) {}
+
 /// Round `v` up to a multiple of `a`, which must be a power of two.
 const fn round_up(v: u64, a: u64) -> u64 {
     let mask = a.wrapping_sub(1);
@@ -414,7 +459,20 @@ pub unsafe fn setup_main_thread() -> bool {
     unsafe {
         init_block(tp, &img);
     }
-    install(tp)
+    let installed = install(tp);
+    if installed {
+        // AFTER `install`, never before: the canary comes from `AT_RANDOM`,
+        // whose fill path sets `errno` on failure, and `errno` lives in TLS.
+        // Asking for it before `%fs` is valid would fault in the routine whose
+        // whole job is making `%fs` valid.
+        let guard = crate::crt::process_stack_guard();
+        // SAFETY: the mapping above covers `[tp, tp + TCB_SIZE)` and this is
+        // the only thread in the process at this point.
+        unsafe {
+            set_stack_guard(tp, guard);
+        }
+    }
+    installed
 }
 
 #[cfg(test)]

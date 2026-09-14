@@ -25,6 +25,7 @@
 #![allow(clippy::duration_suboptimal_units)]
 
 mod columns;
+mod drives;
 mod dropzone;
 mod fileops;
 mod thumbs;
@@ -40,12 +41,18 @@ use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
+use drives::DriveSet;
+use guitk::disabled::DisabledState;
+use guitk::filetypes::{self, FileCategory};
+use guitk::menu::{ContextMenu, MenuItem};
+use guitk::pathbar::{CompletionItem, PathBar, PathBarEvent};
+
 use dropzone::{
     DragModifiers, DropOperation, DropResult, DropZone, DropZoneEvent, DropZoneManager, Rect,
 };
 use fileops::{
     ConflictPolicy, ErrorPolicy, FileOpEvent, FileOperation, OperationExecutor, OperationPlan,
-    OperationSummary, RecycleBin, UndoStack, UndoTarget,
+    OperationProgress, OperationSummary, RecycleBin, UndoStack, UndoTarget,
 };
 use thumbs::{
     ThumbCategory, ThumbConfig, Thumbnail, ThumbnailCache, ThumbnailGenerator, ThumbnailRequest,
@@ -80,6 +87,18 @@ impl FileEntry {
     /// extension otherwise, so an unrecognised `.qcow2` reads "QCOW2 File"
     /// rather than a bare "File" that says nothing.
     fn type_label(&self) -> String {
+        if self.file_type == FileType::Directory {
+            return FileType::Directory.label().to_string();
+        }
+        // The registry's own words for it: "Rust Source File" rather than "RS
+        // File", "Portable Network Graphics" rather than "Image". The bucket
+        // this file falls in is the coarse answer used for thumbnails; the
+        // Type column is where the exact one belongs.
+        let ext = self.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let info = filetypes::detect_from_extension(ext);
+        if info.category != FileCategory::Unknown {
+            return info.description.to_string();
+        }
         if self.file_type != FileType::Unknown {
             return self.file_type.label().to_string();
         }
@@ -107,18 +126,48 @@ pub enum FileType {
 
 impl FileType {
     /// Determine file type from extension.
+    ///
+    /// **Asked of `guitk::filetypes`, not matched here.** That registry's own
+    /// module doc says "every GUI component that needs to display, open, or
+    /// classify a file should go through this module rather than hard-coding
+    /// extension lists", and what was here was a hard-coded extension list --
+    /// one of *three* in this application, against a registry with magic-byte
+    /// signatures and MIME types that nothing in the tree had ever read. See
+    /// `TD-C-SIX-TOOLKIT-WIDGETS-ARE-WRITTEN-TESTED-AND-USED-BY-NOTHING`.
+    ///
+    /// This enum stays, because it is a *coarser* question than the registry
+    /// answers: sixteen categories collapse to the nine buckets that pick a
+    /// thumbnail and an icon. `is_text` is what separates a `.txt` from a
+    /// `.pdf` -- both are `Document` to the registry, and only one of them is
+    /// something a text thumbnail can be made of.
     pub fn from_extension(ext: &str) -> Self {
-        match ext.to_lowercase().as_str() {
-            "txt" | "log" | "md" | "rst" => Self::Text,
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp" | "ico" => Self::Image,
-            "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" => Self::Audio,
-            "mp4" | "avi" | "mkv" | "webm" | "mov" | "flv" => Self::Video,
-            "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => Self::Archive,
-            "exe" | "bin" | "sh" | "cmd" | "bat" => Self::Executable,
-            "pdf" | "doc" | "docx" | "odt" | "xls" | "xlsx" => Self::Document,
-            "rs" | "c" | "h" | "cpp" | "py" | "js" | "ts" | "html" | "css" | "java" | "go"
-            | "toml" | "yaml" | "json" | "xml" => Self::Code,
-            _ => Self::Unknown,
+        let info = filetypes::detect_from_extension(ext);
+        match info.category {
+            FileCategory::Executable | FileCategory::Library | FileCategory::System => {
+                Self::Executable
+            }
+            FileCategory::Package | FileCategory::Archive | FileCategory::DiskImage => {
+                Self::Archive
+            }
+            FileCategory::Image => Self::Image,
+            FileCategory::Audio => Self::Audio,
+            FileCategory::Video => Self::Video,
+            FileCategory::Code => Self::Code,
+            FileCategory::Config | FileCategory::Data => {
+                if info.is_text {
+                    Self::Text
+                } else {
+                    Self::Unknown
+                }
+            }
+            FileCategory::Document | FileCategory::Spreadsheet | FileCategory::Presentation => {
+                if info.is_text {
+                    Self::Text
+                } else {
+                    Self::Document
+                }
+            }
+            FileCategory::Unknown => Self::Unknown,
         }
     }
 
@@ -254,6 +303,66 @@ pub enum SortDir {
 /// in the same colour, and both vanished at the next click. A destructive
 /// operation that half-failed is precisely the thing a user must not miss,
 /// and the status bar is where things go to be missed.
+/// A control in the Transfers view.
+///
+/// Named rather than addressed by coordinates, like every other control in
+/// this application: the painter and the click handler ask one layout where a
+/// button is, so a button cannot be clickable somewhere other than where it is
+/// drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferControl {
+    /// Stop a running operation. It keeps its journal and can be resumed.
+    CancelRunning(usize),
+    /// Move a waiting operation one place earlier.
+    MoveQueuedUp(usize),
+    /// One place later.
+    MoveQueuedDown(usize),
+    /// Start a waiting one now, whatever drive it wants.
+    StartQueuedNow(usize),
+    /// Drop a waiting one. Free: it has written nothing.
+    CancelQueued(usize),
+}
+
+/// A file operation that has not started, because another is running.
+///
+/// It holds the *plan*, which is the point: the scan, the conflict policy and
+/// the error policy are all settled at the moment the user asked, so a queued
+/// operation cannot quietly acquire different answers by the time its turn
+/// comes. What it does not hold is a journal -- nothing has been written, and
+/// nothing will be until it starts.
+struct PendingOperation {
+    plan: OperationPlan,
+    verb: &'static str,
+    keep_undo: bool,
+    /// Which drives it will touch, resolved when the user asked rather than
+    /// when its turn comes. A queued operation whose source has since
+    /// vanished should fail at *start*, which is the only moment the check
+    /// can be honest -- not be quietly re-scheduled onto a drive that is no
+    /// longer the one it named.
+    drives: DriveSet,
+}
+
+/// A bulk file operation the explorer is carrying out a slice at a time.
+///
+/// Deliberately not `Clone` or `PartialEq`: it owns a journal file handle and
+/// a half-finished operation, and there is exactly one of it. A copy of one of
+/// these would be a second executor writing the same journal.
+struct RunningOperation {
+    executor: OperationExecutor,
+    /// The drives it is loading, which is what everything else waits on.
+    drives: DriveSet,
+    /// The past-tense verb for the status line: "Pasted", "Moved", "Deleted".
+    verb: &'static str,
+    /// How many files the plan covers, for "12 of 400".
+    total_files: u32,
+    /// Events gathered across every slice, so the summary at the end sees the
+    /// whole operation. `execute` used to return these in one go.
+    events: Vec<FileOpEvent>,
+    /// Whether the executor's undo entries are worth keeping. A permanent
+    /// delete has none to offer.
+    keep_undo: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Outcome {
     /// The status-bar line. Always present, success or failure.
@@ -288,6 +397,57 @@ impl Outcome {
 /// up at a time -- that is what modal means -- and separate fields would make
 /// "a delete confirmation and a rename box, both open" a representable state
 /// that every reader has to rule out by hand.
+/// A button on the toolbar.
+///
+/// Named rather than addressed by position, for the reason every `*_rect`
+/// accessor in this tree exists: the painter and the click handler ask one
+/// function where a button is, so a button cannot be clickable somewhere other
+/// than where it is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolbarButton {
+    Back,
+    Forward,
+    Up,
+    NewFolder,
+    Cut,
+    Paste,
+}
+
+impl ToolbarButton {
+    /// Every button, in the order they are drawn.
+    ///
+    /// Walked by a test that checks each one is reachable. Seven controls were
+    /// painted here with nothing that could open them -- `click_at` knew about
+    /// file rows and the sidebar and nothing else -- and iterating the list
+    /// rather than trusting whoever adds the seventh is what catches the next
+    /// one.
+    pub const ALL: [Self; 6] = [
+        Self::Back,
+        Self::Forward,
+        Self::Up,
+        Self::NewFolder,
+        Self::Cut,
+        Self::Paste,
+    ];
+
+    /// The glyph on its face.
+    const fn glyph(self) -> &'static str {
+        match self {
+            Self::Back => "\u{2190}",
+            Self::Forward => "\u{2192}",
+            Self::Up => "\u{2191}",
+            Self::NewFolder => "\u{1F4C1}+",
+            Self::Cut => "\u{2702}",
+            Self::Paste => "\u{1F4CB}",
+        }
+    }
+
+    /// Whether a separator is drawn before it.
+    const fn starts_a_group(self) -> bool {
+        matches!(self, Self::NewFolder)
+    }
+}
+
 enum Modal {
     /// A destructive action the user has been asked to confirm.
     Confirm {
@@ -297,6 +457,12 @@ enum Modal {
     /// Something went wrong, and the user is being told so they cannot miss
     /// it. Its only answer is "OK" and nothing acts on it.
     Notice { dialog: AlertDialog },
+    /// A new folder awaiting its name.
+    ///
+    /// Its own variant rather than a `Rename` with an empty target: the two
+    /// answer the same dialog and do opposite things with it, and a target
+    /// that means "no file" is a `None` somebody will forget to check.
+    NewFolder { dialog: InputDialog },
     /// A rename in progress, awaiting the new name.
     Rename {
         dialog: InputDialog,
@@ -426,7 +592,17 @@ pub struct ExplorerState {
     /// Selected entry indices.
     pub selected_indices: Vec<usize>,
     /// Address bar text (for editing).
-    pub address_text: String,
+    /// The address bar: breadcrumbs you can click, and a path you can type.
+    ///
+    /// `guitk::pathbar`, not a label. What was here was a `String` assigned
+    /// from `current_path` and never read from input, drawn inside a stroked
+    /// box that looks exactly like a text field -- so it promised editing and
+    /// could not do it, which is worse than a dead button because the
+    /// affordance itself is the claim. Meanwhile the toolkit's path bar, 1,945
+    /// lines and 44 tests with breadcrumbs, edit mode and autocomplete, had no
+    /// users at all. Same defect as the taskbar drawing its own clock beside
+    /// an unused `calendar::ClockDisplay`; see design-decisions 469.
+    pub pathbar: PathBar,
     /// Whether address bar is being edited.
     pub address_editing: bool,
     /// Transient result of the last user-initiated operation.
@@ -437,6 +613,33 @@ pub struct ExplorerState {
     /// so no paste, delete, rename or error message was ever actually seen.
     /// Empty means "nothing to report"; the status bar then shows the summary.
     pub status_message: String,
+    /// What the pointer is resting on, when that is worth saying.
+    ///
+    /// Kept apart from `status_message` rather than written into it: a hover
+    /// is transient and a status message is a *result*, and letting the
+    /// pointer overwrite "Deleted 5 items, 2 failed" on its way past a button
+    /// would lose the one line the user needed to read.
+    hover_hint: String,
+    /// The context menu a right-click opened, if any.
+    ///
+    /// `guitk::menu::ContextMenu`, not a list drawn here: the shell already
+    /// uses that widget for the desktop menu and the tray overflow, and a
+    /// second menu implementation in the file manager would be the third.
+    menu: Option<ContextMenu>,
+    /// The bulk file operations in flight.
+    ///
+    /// More than one, but never two that touch the same drive: that is the
+    /// whole of `roadmap.md` 4.1. Two operations on one disk interleave two
+    /// access patterns into a single device queue, so neither stream gets a
+    /// contiguous run and both finish later than they would in turn.
+    operations: Vec<RunningOperation>,
+    /// Operations waiting for the one in front of them to finish.
+    ///
+    /// A queue rather than a refusal: a user who starts a second copy meant to
+    /// start it, and telling them "no, try again later" makes them sit and
+    /// watch for a moment that nothing announces. Nothing has been written for
+    /// a waiting operation, so cancelling one is free.
+    pending: VecDeque<PendingOperation>,
     /// Derived one-line description of the current directory's contents.
     pub dir_summary: String,
     /// Tree sidebar expanded paths.
@@ -530,9 +733,13 @@ impl ExplorerState {
             show_hidden: false,
             clipboard: None,
             selected_indices: Vec::new(),
-            address_text: start_path.to_string_lossy().to_string(),
+            pathbar: PathBar::new(&start_path.to_string_lossy()),
             address_editing: false,
             status_message: String::new(),
+            hover_hint: String::new(),
+            menu: None,
+            operations: Vec::new(),
+            pending: VecDeque::new(),
             dir_summary: String::new(),
             tree_expanded: vec![PathBuf::from("/")],
             window_width: 900,
@@ -570,7 +777,7 @@ impl ExplorerState {
         }
         self.history_forward.clear();
         self.current_path = path.to_path_buf();
-        self.address_text = self.current_path.to_string_lossy().to_string();
+        self.pathbar.set_path(&self.current_path.to_string_lossy());
         self.selected_indices.clear();
         // The previous directory's operation result no longer applies here.
         self.status_message.clear();
@@ -582,7 +789,7 @@ impl ExplorerState {
         if let Some(prev) = self.history_back.pop_back() {
             self.history_forward.push_back(self.current_path.clone());
             self.current_path = prev;
-            self.address_text = self.current_path.to_string_lossy().to_string();
+            self.pathbar.set_path(&self.current_path.to_string_lossy());
             self.selected_indices.clear();
             self.status_message.clear();
             self.load_directory();
@@ -594,7 +801,7 @@ impl ExplorerState {
         if let Some(next) = self.history_forward.pop_back() {
             self.history_back.push_back(self.current_path.clone());
             self.current_path = next;
-            self.address_text = self.current_path.to_string_lossy().to_string();
+            self.pathbar.set_path(&self.current_path.to_string_lossy());
             self.selected_indices.clear();
             self.status_message.clear();
             self.load_directory();
@@ -910,11 +1117,682 @@ impl ExplorerState {
         );
     }
 
+    // ======================================================================
+    // Bulk operations, a slice at a time
+    // ======================================================================
+
+    /// Begin a bulk operation, to be carried out a slice at a time.
+    ///
+    /// Replaces the `executor.execute()` that used to run here. That call did
+    /// the whole job before returning, inside an event handler, so the window
+    /// froze for its duration and the progress this reports could not be
+    /// drawn until it was already over.
+    ///
+    /// **An operation whose drives are free starts; one whose are not waits.**
+    ///
+    /// `roadmap.md` 4.1. Two operations on one drive are slower than the same
+    /// work done in turn -- they interleave two access patterns into a single
+    /// device queue, so neither gets a contiguous run and each one's readahead
+    /// is repeatedly thrown away by the other -- and fewer in flight on a
+    /// drive is fewer left half-done when it is unplugged. Operations on
+    /// *different* drives do not have that problem and do not wait for each
+    /// other, which is why this is keyed on the drive rather than being one
+    /// lock.
+    ///
+    /// Waiting rather than being refused, because "no" is the wrong answer to
+    /// a user who meant to start it: it makes them watch for a moment nothing
+    /// announces, and a copy that quietly did nothing would simply be started
+    /// again. Cancelling one before it starts costs nothing, since nothing has
+    /// been written.
+    fn start_operation(
+        &mut self,
+        plan: OperationPlan,
+        verb: &'static str,
+        keep_undo: bool,
+    ) -> bool {
+        let drives = plan.drives();
+        if self.drives_busy(&drives) {
+            self.pending.push_back(PendingOperation {
+                plan,
+                verb,
+                keep_undo,
+                drives,
+            });
+            self.update_operation_status();
+            return true;
+        }
+        self.begin_operation(plan, verb, keep_undo, drives)
+    }
+
+    /// Whether anything in flight is already loading one of these drives.
+    fn drives_busy(&self, drives: &DriveSet) -> bool {
+        self.operations
+            .iter()
+            .any(|op| op.drives.shares_with(drives))
+    }
+
+    /// Put an operation into flight. Answers whether it started.
+    fn begin_operation(
+        &mut self,
+        plan: OperationPlan,
+        verb: &'static str,
+        keep_undo: bool,
+        drives: DriveSet,
+    ) -> bool {
+        let total_files = plan.total_files;
+        let mut executor = OperationExecutor::new(plan);
+        if !executor.begin() {
+            self.report(Self::describe_outcome(&executor.take_events(), verb));
+            return false;
+        }
+        self.operations.push(RunningOperation {
+            executor,
+            drives,
+            verb,
+            total_files,
+            events: Vec::new(),
+            keep_undo,
+        });
+        self.update_operation_status();
+        true
+    }
+
+    /// Start every waiting operation whose drives have come free.
+    ///
+    /// Scans past a blocked one rather than stopping at it: an operation on a
+    /// drive nothing is using has no reason to wait behind one that cannot
+    /// start yet, and 4.1 says so in as many words -- "an operation on `F:`
+    /// starts immediately while two are queued on `D:`".
+    fn admit_pending(&mut self) {
+        let mut index = 0;
+        while index < self.pending.len() {
+            let Some(next) = self.pending.get(index) else {
+                break;
+            };
+            if self.drives_busy(&next.drives) {
+                index = index.saturating_add(1);
+                continue;
+            }
+            let Some(next) = self.pending.remove(index) else {
+                break;
+            };
+            // Not advanced on a start: `remove` shifted the rest down, so the
+            // same index is now the next candidate. Not advanced on a failure
+            // either, for the same reason -- and a failure is reported by
+            // `begin_operation` rather than swallowed here.
+            self.begin_operation(next.plan, next.verb, next.keep_undo, next.drives);
+        }
+    }
+
+    /// How many operations are waiting to start.
+    #[must_use]
+    pub fn queued_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Stop the running operation and drop everything waiting behind it.
+    ///
+    /// One action rather than two, because it is one intent: a user pressing
+    /// Escape during a bulk copy means "stop", not "stop this one and then
+    /// watch the next of my own operations start by itself", which is what
+    /// cancelling only the running one would do.
+    ///
+    /// The two halves cost differently and the message says so. Cancelling the
+    /// *running* one leaves every file wholly moved or wholly not and keeps its
+    /// journal, so it can be resumed; dropping the *waiting* ones is free,
+    /// because nothing has been written for them at all.
+    ///
+    /// Answers whether there was anything to stop, so a caller cannot report a
+    /// cancellation that did not happen.
+    pub fn cancel_all_operations(&mut self) -> bool {
+        let waiting = self.pending.len();
+        self.pending.clear();
+        let stopped = self.cancel_operation();
+        // Stated here rather than in `cancel_operation`: `stopped` is now
+        // "at least one was running", and the message below already says
+        // "Stopping…" rather than naming one.
+        if !stopped && waiting == 0 {
+            return false;
+        }
+        self.status_message = match (stopped, waiting) {
+            (true, 0) => "Stopping…".to_string(),
+            (true, 1) => "Stopping… — 1 waiting operation dropped".to_string(),
+            (true, n) => format!("Stopping… — {n} waiting operations dropped"),
+            (false, 1) => "1 waiting operation dropped".to_string(),
+            (false, n) => format!("{n} waiting operations dropped"),
+        };
+        true
+    }
+
+    /// Move a waiting operation up or down the queue.
+    ///
+    /// Answers whether it moved, so a caller cannot report a reorder that did
+    /// not happen -- the ends of the queue are where a repeated key or a
+    /// held button spends most of its time.
+    ///
+    /// Only the *waiting* ones. The running operations are not in an order the
+    /// user can choose: they are already running, and 4.1's reordering is
+    /// about what happens next.
+    pub fn move_queued(&mut self, index: usize, delta: isize) -> bool {
+        let Some(target) = index.checked_add_signed(delta) else {
+            return false;
+        };
+        if index >= self.pending.len() || target >= self.pending.len() || target == index {
+            return false;
+        }
+        let Some(op) = self.pending.remove(index) else {
+            return false;
+        };
+        self.pending.insert(target, op);
+        self.update_operation_status();
+        true
+    }
+
+    /// Start a waiting operation now, whether or not its drives are free.
+    ///
+    /// **The per-drive rule is a default, not a prohibition** -- `roadmap.md`
+    /// 4.1 says so in as many words, and this is what it means: the user may
+    /// know something the scheduler does not. They may know the two operations
+    /// are on different partitions of one disk and they do not care, or that
+    /// one is three files and the other is four hours.
+    ///
+    /// What they cannot override is the honesty: it starts, alongside, and the
+    /// status line says how many are running. Answers whether it started, so
+    /// a caller cannot report a start that did not happen -- a plan whose
+    /// journal will not open still fails here.
+    pub fn start_queued_now(&mut self, index: usize) -> bool {
+        if index >= self.pending.len() {
+            return false;
+        }
+        let Some(next) = self.pending.remove(index) else {
+            return false;
+        };
+        self.begin_operation(next.plan, next.verb, next.keep_undo, next.drives)
+    }
+
+    /// Drop a waiting operation. Free: it has written nothing.
+    ///
+    /// Answers whether there was one at that position, so a caller cannot
+    /// quietly cancel nothing -- the failure mode the whole status line is
+    /// written against.
+    pub fn cancel_queued(&mut self, index: usize) -> bool {
+        let removed = self.pending.remove(index).is_some();
+        if removed {
+            self.update_operation_status();
+        }
+        removed
+    }
+
+    /// Work at the operation for a slice of a frame. Answers whether anything
+    /// changed on screen.
+    ///
+    /// **A time budget, not a fixed number of actions.** A step is one *file*,
+    /// and files are not one size: a folder of thumbnails would crawl at one
+    /// per frame, while a fixed batch of twenty would block for seconds on
+    /// twenty videos. What the window cares about is how long until it can
+    /// draw again, so that is what is measured.
+    ///
+    /// The honest limit, which the budget cannot fix: a step is a whole file,
+    /// so a single enormous one still holds the loop for as long as its copy
+    /// takes. Interrupting *within* a file needs chunked copying inside the
+    /// engine and is recorded as its own entry.
+    fn step_operation(&mut self) -> bool {
+        if self.operations.is_empty() {
+            return false;
+        }
+        // The frame's budget split between them, not given to each: two
+        // operations must not cost twice the frame. An uneven split would let
+        // whichever is first starve the rest.
+        let share = OPERATION_SLICE
+            .checked_div(u32::try_from(self.operations.len()).unwrap_or(1))
+            .unwrap_or(OPERATION_SLICE);
+        for running in &mut self.operations {
+            // `checked_add`, not `+`: a deadline past the end of the monotonic
+            // clock is not a real moment, and saturating to *now* is the safe
+            // reading -- one action this frame rather than an unbounded slice.
+            let now = std::time::Instant::now();
+            let deadline = now.checked_add(share).unwrap_or(now);
+            while !running.executor.is_done() && std::time::Instant::now() < deadline {
+                running.executor.step();
+            }
+            running.events.append(&mut running.executor.take_events());
+        }
+        self.retire_finished();
+        self.update_operation_status();
+        true
+    }
+
+    /// Retire every finished operation: summary, undo entries, fresh listing.
+    ///
+    /// Then admit whatever was waiting on the drives they have just let go of.
+    fn retire_finished(&mut self) {
+        let mut done: Vec<RunningOperation> = Vec::new();
+        // Partitioned rather than removed in place: retiring one calls
+        // `self.report` and `self.load_directory`, which cannot borrow `self`
+        // while the list is being walked.
+        let mut still_running = Vec::with_capacity(self.operations.len());
+        for op in self.operations.drain(..) {
+            if op.executor.is_done() {
+                done.push(op);
+            } else {
+                still_running.push(op);
+            }
+        }
+        self.operations = still_running;
+
+        let retired = !done.is_empty();
+        for mut running in done {
+            running.executor.finish();
+            running.events.append(&mut running.executor.take_events());
+            self.report(Self::describe_outcome(&running.events, running.verb));
+
+            if running.keep_undo {
+                let (undo_op, entries) = running.executor.into_undo_entries();
+                if !entries.is_empty() {
+                    self.undo.push(undo_op, entries);
+                }
+            }
+        }
+        if retired {
+            self.load_directory();
+            self.admit_pending();
+        }
+    }
+
+    /// Ask the operation in progress to stop.
+    ///
+    /// Only reachable because the operation is stepped. What it leaves behind
+    /// is `OperationExecutor::cancel`'s business: every file wholly done or
+    /// wholly not, and the journal kept so it can be resumed.
+    pub fn cancel_operation(&mut self) -> bool {
+        if self.operations.is_empty() {
+            return false;
+        }
+        for running in &mut self.operations {
+            running.executor.cancel();
+        }
+        true
+    }
+
+    /// Progress of the operation in flight, for a caller that draws it.
+    #[must_use]
+    pub fn operation_progress(&self) -> Option<OperationProgress> {
+        self.operations
+            .first()
+            .map(|r| r.executor.progress().clone())
+    }
+
+    /// Whether any file operation is running or waiting to.
+    ///
+    /// The question a caller asks to know whether to keep the clock going, and
+    /// the one a test asks to know whether to keep ticking. Separate from
+    /// [`operation_progress`](Self::operation_progress), which answers about
+    /// *one* operation and would say "nothing here" while three waited.
+    #[must_use]
+    pub fn work_in_flight(&self) -> bool {
+        !self.operations.is_empty() || !self.pending.is_empty()
+    }
+
+    /// How many operations are running at once.
+    #[must_use]
+    pub fn running_count(&self) -> usize {
+        self.operations.len()
+    }
+
+    /// How far the operation in flight has got, from 0.0 to 1.0.
+    ///
+    /// **By files, not by bytes**, because that is what the status line beside
+    /// it counts. The two numbers are the same claim in two forms, and a bar
+    /// nine tenths full next to the words "3 of 10" is worse than either on
+    /// its own: the reader has to decide which to believe, and nothing on
+    /// screen helps them. Bytes would make a smoother bar and is the right
+    /// answer once the line quotes bytes too.
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a file count large enough to lose f32 precision is 16 million, \
+                  against a track 140 pixels wide"
+    )]
+    pub fn operation_fraction(&self) -> Option<f32> {
+        if self.operations.is_empty() {
+            return None;
+        }
+        // Summed across everything in flight, because there is one bar. Two
+        // bars for two operations would need two places to put them, and the
+        // status bar has one; a bar that showed only the first would stall at
+        // its end while the second was still going.
+        let mut done = 0_u64;
+        let mut total = 0_u64;
+        for running in &self.operations {
+            done = done.saturating_add(u64::from(running.executor.progress().completed_files));
+            total = total.saturating_add(u64::from(running.total_files));
+        }
+        if total == 0 {
+            // Plans of no files are over the moment they start. A full bar is
+            // the honest picture of that, and it is also why this is not a
+            // division.
+            return Some(1.0);
+        }
+        Some((done as f32 / total as f32).clamp(0.0, 1.0))
+    }
+
+    /// Put the operation's progress where the status bar will find it.
+    ///
+    /// The waiting count is part of it and not a second line, because there is
+    /// only one status bar: an operation the user started and cannot see is
+    /// one they will start again.
+    fn update_operation_status(&mut self) {
+        use std::fmt::Write as _;
+
+        let Some(running) = self.operations.first() else {
+            return;
+        };
+        let progress = running.executor.progress();
+        let current = Path::new(&progress.current_file)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut line = format!(
+            "{} {} of {}",
+            running.verb, progress.completed_files, running.total_files
+        );
+        if !current.is_empty() {
+            line.push_str(" — ");
+            line.push_str(&current);
+        }
+        // The others are counted rather than named. One line cannot carry
+        // three operations' filenames, and the count is what a user needs to
+        // know they did not lose one. Every `write!` result here is discarded
+        // deliberately: writing into a `String` cannot fail, and `?` would
+        // mean this returns a `Result` nobody has anything to do with.
+        let others = self.operations.len().saturating_sub(1);
+        if others > 0 {
+            let _ = write!(line, " (+{others} running");
+            if !self.pending.is_empty() {
+                let _ = write!(line, ", {} waiting", self.pending.len());
+            }
+            line.push(')');
+        } else if !self.pending.is_empty() {
+            let _ = write!(line, " ({} waiting)", self.pending.len());
+        }
+        self.status_message = line;
+    }
+
+    /// Where the Transfers view is, or `None` when there is nothing in it.
+    ///
+    /// Above the status bar and over the bottom of the listing rather than
+    /// pushing it up: a panel that appeared and reflowed the rows would move
+    /// the file under the pointer at the moment a copy started, which is the
+    /// moment a user is most likely to be clicking.
+    #[must_use]
+    pub fn transfers_rect(&self) -> Option<Rect> {
+        let rows = self.transfer_rows();
+        if rows == 0 {
+            return None;
+        }
+        let height = TRANSFER_ROW_H * rows as f32;
+        let w = self.window_width as f32;
+        let y = (self.window_height as f32 - STATUS_BAR_H - height).max(0.0);
+        Some(Rect::new(0.0, y, w, height))
+    }
+
+    /// How many rows the view shows: everything in flight, up to its cap.
+    fn transfer_rows(&self) -> usize {
+        self.operations
+            .len()
+            .saturating_add(self.pending.len())
+            .min(TRANSFERS_MAX_ROWS)
+    }
+
+    /// What each row says, in the order they are drawn.
+    ///
+    /// Running first, because they are what is happening; waiting after, in
+    /// the order they will happen. A waiting row says what it is waiting for
+    /// by naming the operation ahead of it, which is `roadmap.md` 4.1's
+    /// "waiting for: Copy 12 GB to D:\Backup" -- a queue position on its own
+    /// tells the user nothing they can act on.
+    #[must_use]
+    pub fn transfer_labels(&self) -> Vec<String> {
+        let mut rows: Vec<String> = self
+            .operations
+            .iter()
+            .map(|op| {
+                format!(
+                    "{} {} of {}",
+                    op.verb,
+                    op.executor.progress().completed_files,
+                    op.total_files
+                )
+            })
+            .collect();
+        let waiting_for = self.operations.first().map_or_else(
+            || "the operation ahead".to_string(),
+            |op| op.verb.to_string(),
+        );
+        rows.extend(
+            self.pending
+                .iter()
+                .map(|op| format!("Queued: {} — waiting for {waiting_for}", op.verb)),
+        );
+        rows.truncate(TRANSFERS_MAX_ROWS);
+        rows
+    }
+
+    /// Every control in the view, with where it is drawn.
+    ///
+    /// The single source of the view's geometry, asked by the painter and by
+    /// `transfers_control_at`.
+    #[must_use]
+    pub fn transfers_layout(&self) -> Vec<(TransferControl, Rect)> {
+        let Some(panel) = self.transfers_rect() else {
+            return Vec::new();
+        };
+        let mut controls = Vec::new();
+        let running = self.operations.len();
+        for row in 0..self.transfer_rows() {
+            let y = panel.y + TRANSFER_ROW_H * row as f32 + 2.0;
+            let h = TRANSFER_ROW_H - 4.0;
+            // Laid out from the right edge inwards, so a long label is what
+            // gets squeezed rather than the buttons sliding off the panel.
+            let mut x = panel.x + panel.width - TRANSFER_BTN - 4.0;
+            let mut place = |control: TransferControl, controls: &mut Vec<_>| {
+                controls.push((control, Rect::new(x, y, TRANSFER_BTN, h)));
+                x -= TRANSFER_BTN + 2.0;
+            };
+            if row < running {
+                place(TransferControl::CancelRunning(row), &mut controls);
+            } else {
+                // `saturating_sub` only because the lint asks: this arm is
+                // the `else` of `row < running`, so the subtraction cannot
+                // go below zero.
+                let queued = row.saturating_sub(running);
+                place(TransferControl::CancelQueued(queued), &mut controls);
+                place(TransferControl::StartQueuedNow(queued), &mut controls);
+                place(TransferControl::MoveQueuedDown(queued), &mut controls);
+                place(TransferControl::MoveQueuedUp(queued), &mut controls);
+            }
+        }
+        controls
+    }
+
+    /// Which control is under a point, if any.
+    #[must_use]
+    pub fn transfers_control_at(&self, x: f32, y: f32) -> Option<TransferControl> {
+        self.transfers_layout()
+            .into_iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map(|(control, _)| control)
+    }
+
+    /// Do what a Transfers control says. Answers whether anything changed.
+    fn press_transfer_control(&mut self, control: TransferControl) -> bool {
+        match control {
+            TransferControl::CancelRunning(index) => {
+                let Some(running) = self.operations.get_mut(index) else {
+                    return false;
+                };
+                running.executor.cancel();
+                true
+            }
+            TransferControl::MoveQueuedUp(index) => self.move_queued(index, -1),
+            TransferControl::MoveQueuedDown(index) => self.move_queued(index, 1),
+            TransferControl::StartQueuedNow(index) => self.start_queued_now(index),
+            TransferControl::CancelQueued(index) => self.cancel_queued(index),
+        }
+    }
+
+    /// Open the context menu for whatever is at `x, y`.
+    ///
+    /// Two menus, not one: what you can do to a *file* and what you can do to
+    /// the *folder you are looking at* are different lists, and a single menu
+    /// offering both would have half its rows greyed out at any moment.
+    ///
+    /// A right-click on a row also *selects* it, which is what every file
+    /// manager does and what makes the menu's "Copy" mean the thing under the
+    /// pointer rather than whatever was selected before.
+    fn open_context_menu(&mut self, x: f32, y: f32) {
+        let on_row = self.dropzone.find_file_row(x, y);
+        if let Some(index) = on_row {
+            self.select_single(index);
+        }
+        let items = if on_row.is_some() {
+            self.file_menu_items()
+        } else {
+            self.folder_menu_items()
+        };
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
+        self.menu = Some(menu);
+    }
+
+    /// What can be done to the file under the pointer.
+    fn file_menu_items(&self) -> Vec<MenuItem> {
+        vec![
+            Self::menu_action(MENU_OPEN, "Open", true),
+            Self::menu_action(MENU_CUT, "Cut", true),
+            Self::menu_action(MENU_COPY, "Copy", true),
+            Self::menu_action(MENU_RENAME, "Rename", true),
+            Self::menu_action(MENU_DELETE, "Move to recycle bin", true),
+            Self::menu_action(MENU_DELETE_FOREVER, "Delete permanently", true),
+        ]
+    }
+
+    /// What can be done to the folder being shown.
+    fn folder_menu_items(&self) -> Vec<MenuItem> {
+        vec![
+            Self::menu_action(MENU_NEW_FOLDER, "New folder", true),
+            // Greyed rather than absent when the clipboard is empty, for the
+            // reason the toolbar's buttons are: a menu whose rows come and go
+            // moves the others under the pointer between one opening and the
+            // next.
+            Self::menu_action(MENU_PASTE, "Paste", self.clipboard.is_some()),
+            Self::menu_action(MENU_REFRESH, "Refresh", true),
+        ]
+    }
+
+    /// One row of a menu.
+    fn menu_action(id: u64, label: &str, enabled: bool) -> MenuItem {
+        MenuItem::Action {
+            id,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled,
+            checked: None,
+        }
+    }
+
+    /// A press while a context menu is open.
+    ///
+    /// Answers whether the press was spent here. It always is: a press either
+    /// chose a row or dismissed the menu, and neither should also reach what
+    /// is underneath -- acting on the thing behind a menu the user was in the
+    /// middle of using is a click they could not see coming.
+    fn click_menu(&mut self, x: f32, y: f32) -> bool {
+        let Some(menu) = self.menu.as_mut() else {
+            return false;
+        };
+        let chosen = menu.handle_click(x, y);
+        self.menu = None;
+        if let Some(id) = chosen {
+            self.activate_menu_item(id);
+        }
+        true
+    }
+
+    /// Carry out a menu row.
+    fn activate_menu_item(&mut self, id: u64) {
+        match id {
+            MENU_OPEN => {
+                if let Some(&index) = self.selected_indices.first() {
+                    self.open_entry(index);
+                }
+            }
+            MENU_CUT => self.cut_selected(),
+            MENU_COPY => self.copy_selected(),
+            MENU_RENAME => {
+                self.ask_rename();
+            }
+            MENU_DELETE => {
+                self.ask_delete(PendingAction::Recycle);
+            }
+            MENU_DELETE_FOREVER => {
+                self.ask_delete(PendingAction::DeletePermanently);
+            }
+            MENU_NEW_FOLDER => {
+                self.ask_new_folder();
+            }
+            MENU_PASTE => self.paste(),
+            MENU_REFRESH => self.load_directory(),
+            // A row id this does not know is a row this did not put there.
+            _ => {}
+        }
+    }
+
+    /// The context menu's draw commands, empty when it is closed.
+    #[must_use]
+    pub fn render_menu(&self) -> Vec<guitk::render::RenderCommand> {
+        self.menu
+            .as_ref()
+            .map(|menu| menu.render(&self.palette))
+            .unwrap_or_default()
+    }
+
+    /// Say why the button under the pointer cannot be pressed, if it cannot.
+    ///
+    /// Answers whether the hint changed, which is what a caller repaints on.
+    fn update_hover_hint(&mut self, x: f32, y: f32) -> bool {
+        let hint = Self::toolbar_button_at(x, y)
+            .map(|button| self.toolbar_button_state(button))
+            .filter(DisabledState::is_disabled)
+            .and_then(|state| state.reason().map(str::to_string))
+            .unwrap_or_default();
+        if hint == self.hover_hint {
+            return false;
+        }
+        self.hover_hint = hint;
+        true
+    }
+
     /// The text the status bar should display.
     ///
     /// An operation result takes precedence over the directory summary until
     /// the user navigates away.
+    ///
+    /// **Live progress outranks a hover hint, and a hover hint outranks a
+    /// finished operation's summary.** A copy running now is the most
+    /// important thing on the bar; with nothing running, what the pointer is
+    /// resting on is more useful than a result the user has already read, and
+    /// it goes away again the moment the pointer does -- which a summary must
+    /// not, since a half-failed delete is exactly what they need to still be
+    /// there.
     pub fn status_bar_text(&self) -> &str {
+        if self.work_in_flight() {
+            return &self.status_message;
+        }
+        if !self.hover_hint.is_empty() {
+            return &self.hover_hint;
+        }
         if self.status_message.is_empty() {
             &self.dir_summary
         } else {
@@ -1046,22 +1924,16 @@ impl ExplorerState {
             }
         };
 
-        let mut executor = OperationExecutor::new(plan);
-        let events = executor.execute();
-        self.report(Self::describe_outcome(&events, "Pasted"));
-
-        let (undo_op, entries) = executor.into_undo_entries();
-        if !entries.is_empty() {
-            self.undo.push(undo_op, entries);
-        }
-
         // A copy leaves the sources in place, so the clipboard stays usable for
-        // a second paste. A cut consumed them, so it must not.
-        if matches!(op, ClipboardOp::Copy(_)) {
+        // a second paste. A cut consumed them, so it must not. Decided here
+        // rather than when the operation finishes, because it does not depend
+        // on the outcome and the user may well want to paste again before this
+        // one is done.
+        let was_copy = matches!(op, ClipboardOp::Copy(_));
+        if was_copy {
             self.clipboard = Some(op);
         }
-
-        self.load_directory();
+        self.start_operation(plan, "Pasted", true);
     }
 
     /// Delete selected files (move to recycle bin or permanent delete).
@@ -1086,15 +1958,18 @@ impl ExplorerState {
         }
 
         if permanent {
-            let outcome = match OperationPlan::plan_delete(&paths, ErrorPolicy::SkipAndContinue) {
+            match OperationPlan::plan_delete(&paths, ErrorPolicy::SkipAndContinue) {
+                // No undo entries: a permanent delete has nothing to put back.
                 Ok(plan) => {
-                    let mut executor = OperationExecutor::new(plan);
-                    let events = executor.execute();
-                    Self::describe_outcome(&events, "Deleted")
+                    self.start_operation(plan, "Deleted", false);
                 }
-                Err(e) => Outcome::failed(format!("Delete failed: {e}"), e.to_string()),
-            };
-            self.report(outcome);
+                Err(e) => {
+                    self.report(Outcome::failed(
+                        format!("Delete failed: {e}"),
+                        e.to_string(),
+                    ));
+                }
+            }
         } else {
             let mut recycled = Vec::new();
             let mut first_error = None;
@@ -1502,16 +2377,7 @@ impl ExplorerState {
             }
         };
 
-        let mut executor = OperationExecutor::new(plan);
-        let events = executor.execute();
-        self.report(Self::describe_outcome(&events, verb));
-
-        let (undo_op, entries) = executor.into_undo_entries();
-        if !entries.is_empty() {
-            self.undo.push(undo_op, entries);
-        }
-
-        self.load_directory();
+        self.start_operation(plan, verb, true);
     }
 
     // ======================================================================
@@ -1566,8 +2432,16 @@ impl ExplorerState {
         // File list
         self.render_file_list(&mut tree, &mut zones);
 
+        // The Transfers view over the bottom of the listing, before the
+        // status bar it sits above.
+        self.render_transfers(&mut tree);
+
         // Status bar (bottom)
         self.render_status_bar(&mut tree);
+
+        // The menu over everything the window draws itself, because it is
+        // drawn last and owns the press that follows it.
+        tree.commands.extend(self.render_menu());
 
         self.dropzone = zones;
 
@@ -1583,7 +2457,9 @@ impl ExplorerState {
             Some(Modal::Confirm { dialog, .. } | Modal::Notice { dialog }) => {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
-            Some(Modal::Rename { dialog, .. }) => dialog.render(&self.palette, w, h, &mut tree),
+            Some(Modal::Rename { dialog, .. } | Modal::NewFolder { dialog }) => {
+                dialog.render(&self.palette, w, h, &mut tree);
+            }
             None => {}
         }
 
@@ -1617,6 +2493,107 @@ impl ExplorerState {
         }
     }
 
+    /// Where every toolbar button is drawn.
+    ///
+    /// The single source of the toolbar's geometry. The painter and
+    /// [`toolbar_button_at`](Self::toolbar_button_at) both walk it, so a
+    /// button's face and its click band are two readings of one layout rather
+    /// than two literals that drift.
+    fn toolbar_layout() -> Vec<(ToolbarButton, Rect)> {
+        let mut placed = Vec::with_capacity(ToolbarButton::ALL.len());
+        let mut x = TOOLBAR_PAD;
+        for button in ToolbarButton::ALL {
+            if button.starts_a_group() {
+                x += TOOLBAR_GROUP_GAP;
+            }
+            placed.push((button, Rect::new(x, 4.0, TOOLBAR_BTN, TOOLBAR_BTN)));
+            x += TOOLBAR_BTN + 4.0;
+        }
+        placed
+    }
+
+    /// Which button is under a point, if any.
+    #[must_use]
+    pub fn toolbar_button_at(x: f32, y: f32) -> Option<ToolbarButton> {
+        Self::toolbar_layout()
+            .into_iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map(|(button, _)| button)
+    }
+
+    /// Whether a button has anything to do right now, and if not, why not.
+    ///
+    /// `guitk::disabled::DisabledState`, which carries the reason -- that is
+    /// what the type is for, and its own module doc says "shows reason on
+    /// hover". This was a bare `bool` when the toolbar was first wired, which
+    /// left a greyed button with nothing to say for itself; the toolkit had
+    /// the better answer sitting unused. See
+    /// `TD-C-SIX-TOOLKIT-WIDGETS-ARE-WRITTEN-TESTED-AND-USED-BY-NOTHING`.
+    ///
+    /// A disabled button is drawn grey and refuses the click, rather than
+    /// being hidden: a toolbar whose buttons come and go moves the others
+    /// under the pointer between one glance and the next.
+    #[must_use]
+    pub fn toolbar_button_state(&self, button: ToolbarButton) -> DisabledState {
+        let reason = match button {
+            ToolbarButton::Back if self.history_back.is_empty() => Some("Nothing to go back to"),
+            ToolbarButton::Forward if self.history_forward.is_empty() => {
+                Some("Nothing to go forward to")
+            }
+            ToolbarButton::Up if self.current_path.parent().is_none() => {
+                Some("This is the top of the drive")
+            }
+            ToolbarButton::Cut if self.selected_indices.is_empty() => {
+                Some("Select something to cut")
+            }
+            ToolbarButton::Paste if self.clipboard.is_none() => Some("The clipboard is empty"),
+            _ => None,
+        };
+        reason.map_or(DisabledState::Enabled, |reason| DisabledState::Disabled {
+            reason: Some(reason.to_string()),
+        })
+    }
+
+    /// Whether a button has anything to do right now.
+    #[must_use]
+    pub fn toolbar_button_enabled(&self, button: ToolbarButton) -> bool {
+        self.toolbar_button_state(button).is_enabled()
+    }
+
+    /// Do what a toolbar button says. Answers whether anything changed.
+    fn press_toolbar_button(&mut self, button: ToolbarButton) -> bool {
+        if !self.toolbar_button_enabled(button) {
+            // Deliberately `true`: the press was *on* the button and is not
+            // the file list's to interpret. Returning false here would send
+            // the click through to the rows underneath and clear the
+            // selection -- which is how pressing a greyed-out Cut would
+            // deselect the thing you were about to cut.
+            return true;
+        }
+        match button {
+            ToolbarButton::Back => self.go_back_if_possible(),
+            ToolbarButton::Forward => self.go_forward_if_possible(),
+            ToolbarButton::Up => self.go_up_if_possible(),
+            ToolbarButton::NewFolder => self.ask_new_folder(),
+            ToolbarButton::Cut => {
+                self.cut_selected();
+                true
+            }
+            ToolbarButton::Paste => {
+                self.paste();
+                true
+            }
+        }
+    }
+
+    /// Ask for a name and make a folder with it.
+    fn ask_new_folder(&mut self) -> bool {
+        let mut dialog = InputDialog::prompt("New folder", "Name:", "");
+        dialog.show();
+        self.modal = Some(Modal::NewFolder { dialog });
+        true
+    }
+
     fn render_toolbar(&self, tree: &mut RenderTree) {
         let toolbar_h = 36.0;
         tree.fill_rect(
@@ -1627,51 +2604,130 @@ impl ExplorerState {
             self.palette.crust,
         );
 
-        // Navigation buttons
-        let buttons = [
-            "\u{2190}",
-            "\u{2192}",
-            "\u{2191}",
-            "|",
-            "\u{1F4C1}+",
-            "\u{2702}",
-            "\u{1F4CB}",
-        ];
-        let mut x = 8.0;
-        for btn_text in &buttons {
-            if *btn_text == "|" {
-                // Separator
-                tree.fill_rect(x, 4.0, 1.0, toolbar_h - 8.0, self.palette.surface1);
-                x += 12.0;
-            } else {
-                tree.fill_rect(x, 4.0, 28.0, 28.0, self.palette.surface0);
-                tree.text(x + 6.0, 10.0, btn_text, self.palette.text, 14.0);
-                x += 32.0;
+        for (button, rect) in Self::toolbar_layout() {
+            if button.starts_a_group() {
+                tree.fill_rect(
+                    rect.x - TOOLBAR_GROUP_GAP / 2.0,
+                    4.0,
+                    1.0,
+                    toolbar_h - 8.0,
+                    self.palette.surface1,
+                );
             }
+            tree.fill_rect(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                self.palette.surface0,
+            );
+            let ink = if self.toolbar_button_state(button).is_enabled() {
+                self.palette.text
+            } else {
+                // The palette's disabled grey, and this is what it is for:
+                // off should look off. See `scripts/check-overlay0-ink.py`.
+                self.palette.overlay0
+            };
+            tree.text_in(
+                rect.x + 6.0,
+                rect.y + 6.0,
+                rect.width - 8.0,
+                button.glyph(),
+                ink,
+                14.0,
+            );
         }
     }
 
-    fn render_address_bar(&self, tree: &mut RenderTree) {
-        let bar_y = 36.0;
-        let bar_h = 28.0;
-        let w = self.window_width as f32;
+    /// Where the address bar is drawn.
+    ///
+    /// One function, asked by the painter and by the click handler, for the
+    /// reason `toolbar_layout` is: a widget that receives clicks somewhere
+    /// other than where it is painted is a widget that ignores them.
+    fn address_bar_rect(&self) -> Rect {
+        Rect::new(0.0, ADDRESS_BAR_Y, self.window_width as f32, ADDRESS_BAR_H)
+    }
 
-        tree.fill_rect(0.0, bar_y, w, bar_h, self.palette.base);
-        tree.stroke_rect(
-            4.0,
-            bar_y + 2.0,
-            w - 8.0,
-            bar_h - 4.0,
-            self.palette.surface1,
-            1.0,
+    fn render_address_bar(&mut self, tree: &mut RenderTree) {
+        let rect = self.address_bar_rect();
+        // Copied out before the widget borrows `self` mutably: `Palette` is
+        // `Copy`, so this costs nothing and keeps the two borrows apart.
+        let palette = self.palette;
+        // The widget draws in its own space, from (0, 0) to its own size, and
+        // knows nothing about where it lives. `PushTranslate` is what the
+        // renderer honours, so extending the command list inside one places
+        // the whole widget without it having to be told.
+        tree.translate(rect.x, rect.y);
+        let commands = self.pathbar.render(
+            &palette,
+            rect.width.max(0.0) as u32,
+            rect.height.max(0.0) as u32,
         );
-        tree.text(
-            12.0,
-            bar_y + 7.0,
-            &self.address_text,
-            self.palette.text,
-            13.0,
-        );
+        tree.commands.extend(commands);
+        tree.untranslate();
+    }
+
+    /// Hand an event to the address bar and act on what it says.
+    ///
+    /// Answers whether the widget took it.
+    fn route_to_pathbar(&mut self, taken: EventResult) -> bool {
+        let events = self.pathbar.drain_events();
+        for event in events {
+            match event {
+                PathBarEvent::Navigate(path) => {
+                    let target = PathBuf::from(&path);
+                    if target.is_dir() {
+                        self.navigate_to(&target);
+                    } else {
+                        // Marked rather than navigated-to-and-failed: the
+                        // widget stays in edit mode with what was typed still
+                        // there, so a mistyped path can be corrected instead
+                        // of retyped.
+                        self.pathbar.set_path_valid(false);
+                        self.status_message = format!("No such folder: {path}");
+                    }
+                }
+                PathBarEvent::RequestAutoComplete { prefix } => {
+                    let items = Self::completions_for(&prefix);
+                    self.pathbar.set_completions(items);
+                }
+                // Nothing outside the widget depends on which mode it is in.
+                PathBarEvent::EditModeEntered | PathBarEvent::EditModeExited => {}
+            }
+        }
+        taken == EventResult::Consumed
+    }
+
+    /// What could complete `prefix`, read from the filesystem.
+    ///
+    /// The widget deliberately does no I/O of its own -- it asks, and the host
+    /// answers -- so that it can be tested without a disk.
+    fn completions_for(prefix: &str) -> Vec<CompletionItem> {
+        let (dir, partial) = match prefix.rsplit_once('/') {
+            Some((dir, partial)) => (if dir.is_empty() { "/" } else { dir }, partial),
+            None => (".", prefix),
+        };
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut items: Vec<CompletionItem> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.starts_with(partial) {
+                    return None;
+                }
+                Some(CompletionItem {
+                    is_directory: entry.file_type().is_ok_and(|t| t.is_dir()),
+                    name,
+                })
+            })
+            .collect();
+        // Sorted, because `read_dir` is in whatever order the filesystem
+        // keeps and a list that reorders itself between two keystrokes is a
+        // list you cannot aim at.
+        items.sort_by(|a, b| a.name.cmp(&b.name));
+        items
     }
 
     fn render_sidebar(&self, tree: &mut RenderTree, zones: &mut DropZoneManager) {
@@ -2172,14 +3228,104 @@ impl ExplorerState {
         tree.untranslate();
     }
 
+    /// Draw the Transfers view, if there is anything in flight.
+    ///
+    /// The labels and the button rectangles come from
+    /// [`transfer_labels`](Self::transfer_labels) and
+    /// [`transfers_layout`](Self::transfers_layout), which the click handler
+    /// also reads -- so what is painted and what can be pressed are two
+    /// readings of one layout rather than two sets of literals.
+    fn render_transfers(&self, tree: &mut RenderTree) {
+        let Some(panel) = self.transfers_rect() else {
+            return;
+        };
+        tree.fill_rect(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            self.palette.mantle,
+        );
+
+        let controls = self.transfers_layout();
+        // The leftmost button on each row is where its label has to stop.
+        // Measured from the controls rather than assumed, because a running
+        // row has one button and a waiting row has four.
+        let labels = self.transfer_labels();
+        for (row, label) in labels.iter().enumerate() {
+            let y = panel.y + TRANSFER_ROW_H * row as f32;
+            let row_band = y..y + TRANSFER_ROW_H;
+            let leftmost = controls
+                .iter()
+                .filter(|(_, r)| row_band.contains(&(r.y + r.height / 2.0)))
+                .map(|(_, r)| r.x)
+                .fold(panel.x + panel.width, f32::min);
+            let room = (leftmost - panel.x - 16.0).max(0.0);
+            tree.text_in(panel.x + 8.0, y + 4.0, room, label, self.palette.text, 11.0);
+        }
+
+        for (control, rect) in controls {
+            tree.fill_rect(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                self.palette.surface0,
+            );
+            let glyph = match control {
+                TransferControl::CancelRunning(_) | TransferControl::CancelQueued(_) => "\u{2715}",
+                TransferControl::MoveQueuedUp(_) => "\u{25B2}",
+                TransferControl::MoveQueuedDown(_) => "\u{25BC}",
+                TransferControl::StartQueuedNow(_) => "\u{25B6}",
+            };
+            tree.text_in(
+                rect.x + 4.0,
+                rect.y + 2.0,
+                rect.width - 6.0,
+                glyph,
+                self.palette.text,
+                11.0,
+            );
+        }
+    }
+
     fn render_status_bar(&self, tree: &mut RenderTree) {
         let bar_y = self.window_height as f32 - 24.0;
         let w = self.window_width as f32;
 
         tree.fill_rect(0.0, bar_y, w, 24.0, self.palette.crust);
-        tree.text(
+
+        // The track takes its room out of the *text's*, and the text is
+        // measured against what is left. `tree.text` sets no `max_width` at
+        // all, so the line this replaces ran off the end of the window on any
+        // path long enough -- and a silently clipped status line reads as a
+        // short one, which is how a truncated path gets taken for the whole
+        // thing. `text_in` elides and marks the cut.
+        let mut text_width = (w - 16.0).max(0.0);
+        if let Some(fraction) = self.operation_fraction() {
+            // A third of the bar at most: on a narrow window the words matter
+            // more than the picture, and below the floor there is no picture
+            // worth having -- so the track is dropped rather than drawn as a
+            // sliver the text then has to squeeze past.
+            let track_w = PROGRESS_TRACK_W.min(w / 3.0);
+            if track_w >= PROGRESS_TRACK_MIN_W {
+                let track_x = w - 8.0 - track_w;
+                text_width = (track_x - 16.0).max(0.0);
+                tree.fill_rect(track_x, bar_y + 8.0, track_w, 8.0, self.palette.surface1);
+                tree.fill_rect(
+                    track_x,
+                    bar_y + 8.0,
+                    track_w * fraction,
+                    8.0,
+                    self.palette.blue,
+                );
+            }
+        }
+
+        tree.text_in(
             8.0,
             bar_y + 5.0,
+            text_width,
             self.status_bar_text(),
             self.palette.subtext0,
             11.0,
@@ -2363,6 +3509,64 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
 /// it, slow enough that each batch has the frame to itself.
 const THUMB_TICK_MS: u64 = 60;
 
+/// How long a file operation may hold the loop before letting it draw.
+///
+/// Eight milliseconds of a sixteen-millisecond frame: enough that the copy is
+/// not paying a frame's latency per file, little enough that the window still
+/// answers. See `ExplorerState::step_operation` for why this is a time budget
+/// rather than a count of files.
+const OPERATION_SLICE: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// How often the loop comes back while an operation is running.
+const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
+// Context menu row ids. Numbered rather than positional, so inserting a row
+// cannot silently reassign what the ones below it do.
+const MENU_OPEN: u64 = 1;
+const MENU_CUT: u64 = 2;
+const MENU_COPY: u64 = 3;
+const MENU_RENAME: u64 = 4;
+const MENU_DELETE: u64 = 5;
+const MENU_DELETE_FOREVER: u64 = 6;
+const MENU_NEW_FOLDER: u64 = 7;
+const MENU_PASTE: u64 = 8;
+const MENU_REFRESH: u64 = 9;
+
+/// How tall the status bar is.
+const STATUS_BAR_H: f32 = 24.0;
+/// How tall one row of the Transfers view is.
+const TRANSFER_ROW_H: f32 = 22.0;
+/// The side of a square Transfers button.
+const TRANSFER_BTN: f32 = 18.0;
+/// How many operations the view lists at once.
+///
+/// A cap rather than a scroll: the panel sits over the listing, and one that
+/// grew with the queue would cover the folder the user is working in. The
+/// status bar carries the totals, so nothing is hidden -- only undrawn.
+const TRANSFERS_MAX_ROWS: usize = 4;
+
+/// Where the address bar starts, directly under the toolbar.
+const ADDRESS_BAR_Y: f32 = 36.0;
+/// And how tall it is.
+const ADDRESS_BAR_H: f32 = 28.0;
+
+/// The toolbar's left margin, and the size and spacing of its buttons.
+const TOOLBAR_PAD: f32 = 8.0;
+/// The side of a square toolbar button.
+const TOOLBAR_BTN: f32 = 28.0;
+/// The gap that separates the navigation group from the editing group.
+const TOOLBAR_GROUP_GAP: f32 = 12.0;
+
+/// How wide the status bar's progress track is, at most.
+const PROGRESS_TRACK_W: f32 = 140.0;
+
+/// And the width below which it is not drawn at all.
+///
+/// A track narrower than this cannot show the difference between a tenth and a
+/// fifth, so it is a decoration that costs the status line room it needs for
+/// words. Dropping it is the better answer on a narrow window.
+const PROGRESS_TRACK_MIN_W: f32 = 40.0;
+
 impl oswindow::app::App for ExplorerState {
     /// Adopt the user's colours (§822).
     ///
@@ -2405,6 +3609,14 @@ impl oswindow::app::App for ExplorerState {
     /// the cache or queued for upload — that happens in
     /// [`ExplorerState::pump_thumbnails`], which needs one more tick to run.
     fn tick_interval(&self) -> Option<std::time::Duration> {
+        // A file operation asks for the frame interval, not the thumbnail
+        // one: it is the thing the user is watching, and its progress line
+        // should move as smoothly as anything else on screen. Named first
+        // because it is the shorter of the two and this returns the one it
+        // finds.
+        if self.work_in_flight() {
+            return Some(OPERATION_TICK);
+        }
         let working = self.thumb_gen.pending_count() > 0 || self.thumb_gen.completed_count() > 0;
         working.then(|| std::time::Duration::from_millis(THUMB_TICK_MS))
     }
@@ -2520,7 +3732,14 @@ impl ExplorerState {
             // Each tick retires a batch. A tick that retires nothing has
             // nothing new to draw, and saying so is what stops the loop
             // repainting the whole window sixty times a second for no reason.
-            Event::Tick { .. } => self.pump_thumbnails_default() > 0,
+            Event::Tick { .. } => {
+                // Both, not either: a copy running while thumbnails generate
+                // must not stop the thumbnails, and `||` would short-circuit
+                // past the second call rather than merely past its answer.
+                let stepped = self.step_operation();
+                let thumbed = self.pump_thumbnails_default() > 0;
+                stepped || thumbed
+            }
             // `SettingsChanged` is a different kind of "no" from its
             // neighbours here, and is grouped with them only because the
             // answer happens to coincide. The others are events this window
@@ -2556,14 +3775,24 @@ impl ExplorerState {
         match m.kind {
             // The scrollbar first: it is drawn over the rows, so a press on it
             // is not a press on the file underneath.
+            // An open menu owns the next press, whatever button it is and
+            // wherever it lands.
+            MouseEventKind::Press(_) if self.menu.is_some() => self.click_menu(m.x, m.y),
             MouseEventKind::Press(MouseButton::Left) => {
                 self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
+            }
+            MouseEventKind::Press(MouseButton::Right) => {
+                self.open_context_menu(m.x, m.y);
+                true
             }
             MouseEventKind::Release(MouseButton::Left) => {
                 let was = self.thumb_grab.take();
                 was.is_some()
             }
             MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
+            // Motion with nothing grabbed: the only thing the explorer does
+            // with it is say why the button under the pointer is greyed.
+            MouseEventKind::Move => self.update_hover_hint(m.x, m.y),
             MouseEventKind::DoubleClick(MouseButton::Left) => self.open_at(m.x, m.y),
             // A file manager's back/forward thumb buttons are the one mouse
             // gesture users expect to work without a toolbar.
@@ -2600,6 +3829,36 @@ impl ExplorerState {
     /// A single left click: select the row under the pointer, follow the
     /// sidebar place under it, or clear the selection.
     fn click_at(&mut self, x: f32, y: f32) -> bool {
+        // The toolbar first. It is drawn above the list and does not overlap
+        // it, but asking in draw order is what keeps that true when one of
+        // them moves.
+        if let Some(button) = Self::toolbar_button_at(x, y) {
+            return self.press_toolbar_button(button);
+        }
+        // The Transfers view before the listing it covers. A press anywhere
+        // inside it is spent there even when it named no button: the rows
+        // underneath are hidden, and acting on a file the user cannot see is
+        // worse than doing nothing.
+        if let Some(panel) = self.transfers_rect()
+            && panel.contains(x, y)
+        {
+            if let Some(control) = self.transfers_control_at(x, y) {
+                self.press_transfer_control(control);
+            }
+            return true;
+        }
+        let address = self.address_bar_rect();
+        if address.contains(x, y) {
+            // Translated into the widget's own space, the way the drop zones
+            // convert a screen point: the widget's hit tests are in the
+            // coordinates it drew in.
+            let taken = self.pathbar.handle_mouse_event(&MouseEvent {
+                x: x - address.x,
+                y: y - address.y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            return self.route_to_pathbar(taken);
+        }
         if let Some(index) = self.dropzone.find_file_row(x, y) {
             self.select_single(index);
             return true;
@@ -2651,6 +3910,21 @@ impl ExplorerState {
     /// would be worse than one that does nothing. See
     /// `TD-C-EXPLORER-HAS-NO-EDITING-KEYS`.
     fn handle_key(&mut self, k: &KeyEvent) -> bool {
+        // The address bar first, while it is being edited -- and for the one
+        // chord that *starts* editing. Routing only on `is_editing` would have
+        // made `Ctrl+L` unreachable: the widget documents it as working
+        // "regardless of current mode", and the only way into that mode from
+        // the keyboard is the chord the guard would have withheld.
+        //
+        // Not unconditional: a widget that swallowed keys whenever it was
+        // merely *visible* would take the arrow keys the file list needs.
+        let starts_editing = k.modifiers.ctrl && k.key == Key::L;
+        if self.pathbar.is_editing() || starts_editing {
+            let taken = self.pathbar.handle_key_event(k);
+            if self.route_to_pathbar(taken) {
+                return true;
+            }
+        }
         let ctrl = k.modifiers.ctrl;
         match k.key {
             Key::A if ctrl => {
@@ -2674,6 +3948,17 @@ impl ExplorerState {
                 }
                 None => false,
             },
+            // Escape stops file work before it clears a selection. A user
+            // watching a copy they did not mean to start reaches for Escape,
+            // and there is nothing else on the keyboard that means "stop
+            // that"; a selection, by contrast, is cleared by clicking
+            // anywhere. It does not do both at once, either -- one key with
+            // two effects is how someone loses a selection they wanted while
+            // trying to stop a copy.
+            Key::Escape if self.work_in_flight() => {
+                self.cancel_all_operations();
+                true
+            }
             Key::Escape => {
                 if self.selected_indices.is_empty() {
                     return false;
@@ -2800,12 +4085,14 @@ impl ExplorerState {
 
         let consumed = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.handle_event(event),
-            Modal::Rename { dialog, .. } => dialog.handle_event(event),
+            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => {
+                dialog.handle_event(event)
+            }
         } == EventResult::Consumed;
 
         let answer = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.result().cloned(),
-            Modal::Rename { dialog, .. } => dialog.result().cloned(),
+            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => dialog.result().cloned(),
         };
 
         let Some(answer) = answer else {
@@ -2835,6 +4122,15 @@ impl ExplorerState {
             Some(Modal::Rename { target, .. }) => match answer {
                 DialogResult::Text(name) => self.rename_path(&target, &name),
                 _ => self.status_message = "Rename cancelled".to_string(),
+            },
+            Some(Modal::NewFolder { .. }) => match answer {
+                // An empty name is a dismissal that happens to have been
+                // typed: `create_folder("")` would report a filesystem error
+                // for something the user plainly meant as "never mind".
+                DialogResult::Text(name) if !name.trim().is_empty() => {
+                    self.create_folder(name.trim());
+                }
+                _ => self.status_message = "New folder cancelled".to_string(),
             },
             // Dismissing a notice is the whole of what a notice does. It
             // has already been reported; there is nothing left to carry out.
@@ -2985,25 +4281,127 @@ mod tests {
     /// `thumbs.rs` paints into a pixel buffer rather than emitting
     /// `RenderCommand`s, so its file-type colours are content in the sense
     /// `apps/paint`'s swatch row is content.
+    /// The states this window can be in that draw something different.
+    ///
+    /// Named, because the failure message has to say which one. "explorer
+    /// (light=false)" tells a reader the theme is wrong *somewhere* in a
+    /// program with a toolbar, a context menu, a path bar, a transfer list and
+    /// a modal, and finding which is then most of the work.
+    /// One state the window can be in: a name for the failure message, and
+    /// the arrangement that puts the window into it.
+    type PaletteState = (&'static str, fn(&mut ExplorerState));
+
+    const PALETTE_STATES: [PaletteState; 9] = [
+        ("a plain listing", |_| {}),
+        ("one file selected", |s| s.select_single(0)),
+        ("everything selected", |s| s.select_all()),
+        ("a file's context menu", |s| {
+            let (x, y) = row_center(s, "file000.txt");
+            assert!(
+                s.dropzone.find_file_row(x, y).is_some(),
+                "the state meant to right-click a row did not land on one"
+            );
+            s.open_context_menu(x, y);
+        }),
+        ("empty space right-clicked", |s| {
+            // Past the sidebar, below the last of five rows: a right-click on
+            // no file, which opens the folder's menu rather than a file's.
+            let (x, y) = row_center(s, "file000.txt");
+            let below = y + ROW_H * 20.0;
+            assert!(
+                s.dropzone.find_file_row(x, below).is_none(),
+                "the empty-space state landed on a row after all"
+            );
+            s.open_context_menu(x, below);
+        }),
+        ("a full clipboard", |s| {
+            s.select_single(0);
+            s.cut_selected();
+        }),
+        ("hidden files shown", ExplorerState::toggle_hidden),
+        ("a copy in flight", |s| {
+            s.select_all();
+            s.copy_selected();
+            s.paste();
+        }),
+        ("a copy just finished", |s| {
+            s.select_all();
+            s.copy_selected();
+            s.paste();
+            settle(s);
+        }),
+    ];
+
     #[test]
     fn every_colour_the_file_manager_draws_comes_from_its_palette() {
+        // This rendered exactly one state until 2026-09-14: a brand-new window
+        // on an *empty* directory, which is the single moment the program has
+        // no rows, nothing selected, no menu open, no transfer running and a
+        // toolbar with nothing to grey. Everything added to this app that day
+        // -- the toolbar, the context menu, the real path bar, the transfer
+        // list, the progress track, the disabled reasons -- was outside its
+        // reach, and it reported success over all of it.
+        //
+        // The same defect, found the same week, in `check-scratch-config.py`
+        // (a gate that enumerated its subjects by how they spelled a call) and
+        // in `apps/benchmark`'s own version of this test (which rendered one
+        // tab of six, resting, idle). A sweep over part of a program is a sweep
+        // over part of a program, and its green says nothing about the rest.
         for light in [false, true] {
-            let scratch = temp_dir("palette");
-            let mut app = ExplorerState::new(&scratch.path("root"));
-            app.palette = Palette::for_mode(light);
-            let tree = app.render();
-            assert!(
-                tree.commands.len() > 20,
-                "the sweep examined {} commands, which is not a render",
-                tree.commands.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                &[],
-                &format!("explorer (light={light})"),
-            );
+            for (name, arrange) in PALETTE_STATES {
+                let scratch = temp_dir("palette");
+                let root = scratch.dir().to_path_buf();
+                dir_with_files(&root, 5);
+                let mut app = state_at(&root);
+                app.palette = Palette::for_mode(light);
+                // Once before arranging: the drop zone learns where the rows
+                // are by being drawn, so a state that right-clicks a row has
+                // nothing to hit until a frame has been produced.
+                let _ = app.render();
+                arrange(&mut app);
+
+                let tree = app.render();
+                assert!(
+                    tree.commands.len() > 20,
+                    "{name}: the sweep examined {} commands, which is not a render",
+                    tree.commands.len()
+                );
+                appearance::palette_check::assert_drawn_from(
+                    &app.palette,
+                    &tree.commands,
+                    &[],
+                    &format!("explorer, {name} (light={light})"),
+                );
+            }
         }
+    }
+
+    /// The states are not all the same picture.
+    ///
+    /// Without this, a state whose arranger quietly stopped working -- a
+    /// selection that selects nothing, a menu that does not open -- would go on
+    /// being swept as a duplicate of the plain listing, and the sweep would
+    /// keep reporting nine states while looking at one.
+    #[test]
+    fn each_palette_state_draws_something_the_others_do_not() {
+        let mut seen: Vec<(&str, usize)> = Vec::new();
+        for (name, arrange) in PALETTE_STATES {
+            let scratch = temp_dir("palette_distinct");
+            let root = scratch.dir().to_path_buf();
+            dir_with_files(&root, 5);
+            let mut app = state_at(&root);
+            let _ = app.render();
+            arrange(&mut app);
+            seen.push((name, app.render().commands.len()));
+        }
+        let plain = seen.first().map(|(_, n)| *n).unwrap_or_default();
+        let differing = seen.iter().filter(|(_, n)| *n != plain).count();
+        assert!(
+            differing >= 5,
+            "only {differing} of {} states drew a different number of commands \
+             from the plain listing: {seen:?}",
+            seen.len().saturating_sub(1)
+        );
     }
 
     /// A private scratch directory for one test, removed when the returned
@@ -3019,6 +4417,32 @@ mod tests {
     ///
     /// Bind the guard to a named local, never to `_`: `_` drops it immediately
     /// and the directory is gone before the test's first line.
+    /// Run the file operation in flight to completion, as the event loop does.
+    ///
+    /// A bulk copy is no longer finished by the call that starts it -- it is
+    /// carried out a slice at a time by the frame clock, so that the window can
+    /// draw and answer a click while it runs. A test that starts one and then
+    /// looks at the filesystem has to let the clock run first.
+    ///
+    /// Ticks rather than reaching for the executor: the path under test is the
+    /// one a user takes, and a user's copy is finished by the clock. A helper
+    /// that stepped the operation directly would keep passing if the tick
+    /// wiring were deleted, which is precisely the fault
+    /// `scripts/check-tick-wiring.py` exists for -- and the fault that left
+    /// `apps/automator` unable to play back a macro for five days.
+    ///
+    /// Bounded, and it panics rather than looping for ever: an operation that
+    /// never finishes is a bug this should report, not hang on.
+    fn settle(state: &mut ExplorerState) {
+        for _ in 0..100_000 {
+            if !state.work_in_flight() {
+                return;
+            }
+            let _ = state.handle_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        panic!("the file operation never finished");
+    }
+
     fn temp_dir(label: &str) -> ScratchDir {
         ScratchDir::new(&format!("explorer_test_{label}"))
     }
@@ -3452,6 +4876,1447 @@ mod tests {
         );
     }
 
+    // ---- the address bar ---------------------------------------------
+    //
+    // It was a `String` assigned from `current_path` and never read from
+    // input, drawn inside a stroked box that looks exactly like a text field.
+    // `guitk::pathbar` -- 1,945 lines and 44 tests, with breadcrumbs, edit
+    // mode and autocomplete -- had no users at all.
+
+    /// Click the middle of the address bar.
+    fn press_address_bar(state: &mut ExplorerState) {
+        let rect = state.address_bar_rect();
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    /// Type one character into whatever has the keyboard.
+    fn type_char(state: &mut ExplorerState, ch: char) {
+        send(
+            state,
+            &Event::Key(KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: ch.to_string(),
+            }),
+        );
+    }
+
+    #[test]
+    fn clicking_the_address_bar_starts_editing_it() {
+        let scratch = temp_dir("addr_click");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        assert!(!state.pathbar.is_editing());
+
+        press_address_bar(&mut state);
+
+        assert!(
+            state.pathbar.is_editing(),
+            "the address bar ignored a click on itself"
+        );
+    }
+
+    /// **`Ctrl+L` reaches the widget that documents it.**
+    ///
+    /// The first version of the routing only fed the path bar keys while it
+    /// was *already* editing -- which made `Ctrl+L` unreachable, since the
+    /// only way into that mode from the keyboard is the chord the guard
+    /// withheld. A shortcut a widget documents and nothing can press is the
+    /// same defect as a button with no click band.
+    #[test]
+    fn ctrl_l_puts_the_caret_in_the_address_bar() {
+        let scratch = temp_dir("addr_ctrl_l");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        send(&mut state, &ctrl_key(Key::L));
+
+        assert!(
+            state.pathbar.is_editing(),
+            "Ctrl+L did not reach the path bar"
+        );
+    }
+
+    /// Typing a folder and pressing Enter goes there.
+    #[test]
+    fn typing_a_path_navigates_to_it() {
+        let scratch = temp_dir("addr_type");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root);
+
+        press_address_bar(&mut state);
+        // Edit mode starts with the current path and the caret at its end, so
+        // this appends. A forward slash rather than the host's separator: it
+        // is what the widget's own path model uses, and every platform this
+        // runs on accepts it.
+        for ch in "/sub".chars() {
+            type_char(&mut state, ch);
+        }
+        send(&mut state, &key(Key::Enter));
+
+        assert_eq!(
+            state.current_path.canonicalize().ok(),
+            root.join("sub").canonicalize().ok(),
+            "Enter in the address bar did not navigate"
+        );
+    }
+
+    /// **A folder that is not there is said so, not navigated to.**
+    ///
+    /// And the typed text stays, so a mistyped path can be corrected rather
+    /// than retyped.
+    #[test]
+    fn a_path_that_does_not_exist_is_reported_rather_than_opened() {
+        let scratch = temp_dir("addr_bad");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        press_address_bar(&mut state);
+        for ch in "/no-such-folder".chars() {
+            type_char(&mut state, ch);
+        }
+        send(&mut state, &key(Key::Enter));
+
+        assert_eq!(state.current_path, root, "it navigated into thin air");
+        assert!(
+            state.status_bar_text().contains("No such folder"),
+            "nothing was said about it: {:?}",
+            state.status_bar_text()
+        );
+    }
+
+    /// Navigating any other way keeps the address bar in step.
+    #[test]
+    fn the_address_bar_follows_the_listing() {
+        let scratch = temp_dir("addr_follow");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root);
+
+        state.navigate_to(&root.join("sub"));
+
+        assert!(
+            state.pathbar.current_path().contains("sub"),
+            "the address bar still shows the old folder: {:?}",
+            state.pathbar.current_path()
+        );
+    }
+
+    /// Completions are read off the disk, sorted, and filtered by the prefix.
+    #[test]
+    fn completions_come_from_the_filesystem_in_a_stable_order() {
+        let scratch = temp_dir("addr_complete");
+        let root = scratch.dir().to_path_buf();
+        for name in ["apples", "apricots", "bananas"] {
+            fs::create_dir(root.join(name)).expect("mkdir");
+        }
+        write(&root.join("apple.txt"), "x");
+
+        let prefix = format!("{}/ap", root.to_string_lossy().replace('\\', "/"));
+        let items = ExplorerState::completions_for(&prefix);
+
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["apple.txt", "apples", "apricots"],
+            "the completions are wrong or out of order"
+        );
+        assert!(!items[0].is_directory, "apple.txt is not a folder");
+        assert!(items[1].is_directory, "apples is");
+    }
+
+    // ---- why a button is greyed ---------------------------------------
+
+    /// Move the pointer to a point.
+    fn hover(state: &mut ExplorerState, x: f32, y: f32) {
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+    }
+
+    /// The middle of a toolbar button.
+    fn toolbar_centre(button: ToolbarButton) -> (f32, f32) {
+        let (_, rect) = ExplorerState::toolbar_layout()
+            .into_iter()
+            .find(|(b, _)| *b == button)
+            .unwrap_or_else(|| panic!("{button:?} is not in the layout"));
+        (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0)
+    }
+
+    /// **A greyed button says why**, which a bare `bool` could not.
+    #[test]
+    fn a_disabled_button_carries_its_reason() {
+        let scratch = temp_dir("why_reason");
+        let root = scratch.dir().to_path_buf();
+        let state = state_at(&root);
+
+        let back = state.toolbar_button_state(ToolbarButton::Back);
+        assert!(back.is_disabled(), "there is history to go back to");
+        assert_eq!(back.reason(), Some("Nothing to go back to"));
+
+        let paste = state.toolbar_button_state(ToolbarButton::Paste);
+        assert_eq!(paste.reason(), Some("The clipboard is empty"));
+
+        // And a live one carries none, rather than a reason nobody should see.
+        let new_folder = state.toolbar_button_state(ToolbarButton::NewFolder);
+        assert!(new_folder.is_enabled());
+        assert_eq!(new_folder.reason(), None);
+    }
+
+    /// Resting the pointer on it puts the reason in the status bar.
+    #[test]
+    fn hovering_a_greyed_button_says_why_in_the_status_bar() {
+        let scratch = temp_dir("why_hover");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        let (cx, cy) = toolbar_centre(ToolbarButton::Back);
+
+        hover(&mut state, cx, cy);
+        assert_eq!(state.status_bar_text(), "Nothing to go back to");
+
+        // And it goes away again when the pointer does.
+        hover(&mut state, cx, cy + 200.0);
+        assert_ne!(state.status_bar_text(), "Nothing to go back to");
+    }
+
+    /// A live button says nothing on hover.
+    #[test]
+    fn hovering_a_live_button_says_nothing() {
+        let scratch = temp_dir("why_live");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        let before = state.status_bar_text().to_string();
+        let (cx, cy) = toolbar_centre(ToolbarButton::NewFolder);
+
+        hover(&mut state, cx, cy);
+
+        assert_eq!(
+            state.status_bar_text(),
+            before,
+            "a live button explained itself"
+        );
+    }
+
+    /// **A hover never covers a running copy.**
+    ///
+    /// The progress line is the most important thing on the bar while it is
+    /// there, and a pointer wandering past a greyed button must not take it
+    /// away.
+    #[test]
+    fn a_hover_does_not_cover_a_running_operation() {
+        let scratch = temp_dir("why_busy");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        let (cx, cy) = toolbar_centre(ToolbarButton::Back);
+
+        hover(&mut state, cx, cy);
+
+        assert!(
+            state.status_bar_text().starts_with("Pasted"),
+            "the hover covered the progress: {:?}",
+            state.status_bar_text()
+        );
+        settle(&mut state);
+    }
+
+    /// **And a hover does outrank a finished operation's summary**, which the
+    /// user has already read, while the summary still outlives the pointer.
+    #[test]
+    fn a_hover_outranks_a_summary_but_does_not_erase_it() {
+        let scratch = temp_dir("why_after");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 2);
+        state.paste();
+        settle(&mut state);
+        let summary = state.status_bar_text().to_string();
+        assert!(!summary.is_empty());
+
+        let (cx, cy) = toolbar_centre(ToolbarButton::Back);
+        hover(&mut state, cx, cy);
+        assert_eq!(state.status_bar_text(), "Nothing to go back to");
+
+        // Off the button again: the summary is still there.
+        hover(&mut state, cx, cy + 200.0);
+        assert_eq!(
+            state.status_bar_text(),
+            summary,
+            "the hover ate the summary"
+        );
+    }
+
+    // ---- the context menu ---------------------------------------------
+    //
+    // The file explorer had no right-click handling at all: not a menu, not a
+    // `MouseButton::Right` arm, nothing. Every operation the menu offers
+    // already existed and was reachable only from the keyboard.
+
+    /// Right-click at a point.
+    fn right_click(state: &mut ExplorerState, x: f32, y: f32) {
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Right),
+            }),
+        );
+    }
+
+    /// A state showing one file, with the listing laid out.
+    fn one_file(root: &Path, name: &str) -> ExplorerState {
+        write(&root.join(name), "contents");
+        let mut state = state_at(root);
+        let _ = state.render();
+        state
+    }
+
+    /// A point on the row showing `name`.
+    ///
+    /// Found by asking the drop zones, which are what a click is resolved
+    /// against, rather than by recomputing the row height here -- a helper
+    /// that derived the geometry itself would agree with a renderer that had
+    /// drifted from the zones and prove nothing.
+    fn row_centre(state: &ExplorerState, name: &str) -> (f32, f32) {
+        let index = state
+            .entries
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name} is not listed"));
+        let x = state.sidebar_width + 40.0;
+        let mut y = 64.0;
+        while y < state.window_height as f32 {
+            if state.dropzone.find_file_row(x, y) == Some(index) {
+                return (x, y);
+            }
+            y += 2.0;
+        }
+        panic!("{name} has no row the drop zones know about");
+    }
+
+    #[test]
+    fn right_clicking_a_file_opens_a_menu_about_that_file() {
+        let scratch = temp_dir("menu_file");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+        let (cx, cy) = row_centre(&state, "notes.txt");
+
+        right_click(&mut state, cx, cy);
+
+        let drawn = format!("{:?}", state.render_menu());
+        for label in ["Open", "Cut", "Copy", "Rename", "Move to recycle bin"] {
+            assert!(drawn.contains(label), "the menu has no {label:?}: {drawn}");
+        }
+        assert!(
+            !drawn.contains("New folder"),
+            "a file's menu offered to make a folder"
+        );
+    }
+
+    /// **And it selects the row it was opened on**, so "Copy" means the file
+    /// under the pointer rather than whatever was selected before.
+    #[test]
+    fn right_clicking_a_file_selects_it_first() {
+        let scratch = temp_dir("menu_select");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "a");
+        write(&root.join("b.txt"), "b");
+        let mut state = state_at(&root);
+        let _ = state.render();
+        let (ax, ay) = row_centre(&state, "a.txt");
+        send(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: ax,
+                y: ay,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        let (bx, by) = row_centre(&state, "b.txt");
+
+        right_click(&mut state, bx, by);
+
+        let selected: Vec<&str> = state
+            .selected_indices
+            .iter()
+            .filter_map(|i| state.entries.get(*i))
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(selected, vec!["b.txt"], "the menu is about the wrong file");
+    }
+
+    /// Empty space gets the folder's menu instead.
+    #[test]
+    fn right_clicking_empty_space_opens_the_folders_menu() {
+        let scratch = temp_dir("menu_folder");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+        let (x, y) = empty_space(&state);
+
+        right_click(&mut state, x, y);
+
+        let drawn = format!("{:?}", state.render_menu());
+        assert!(
+            drawn.contains("New folder"),
+            "no way to make a folder: {drawn}"
+        );
+        assert!(drawn.contains("Refresh"), "no way to refresh: {drawn}");
+        assert!(!drawn.contains("Rename"), "a folder's menu offered Rename");
+    }
+
+    /// **Paste is greyed when there is nothing to paste**, not hidden.
+    ///
+    /// A menu whose rows come and go moves the others under the pointer
+    /// between one opening and the next.
+    #[test]
+    fn paste_is_offered_greyed_rather_than_withheld() {
+        let scratch = temp_dir("menu_paste");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+
+        let empty = state.folder_menu_items();
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("notes.txt")]));
+        let full = state.folder_menu_items();
+
+        assert_eq!(
+            empty.len(),
+            full.len(),
+            "the row count changed with the clipboard"
+        );
+        let enabled = |items: &[MenuItem]| {
+            items.iter().find_map(|item| match item {
+                MenuItem::Action { label, enabled, .. } if label == "Paste" => Some(*enabled),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            enabled(&empty),
+            Some(false),
+            "Paste was live with nothing to paste"
+        );
+        assert_eq!(
+            enabled(&full),
+            Some(true),
+            "Paste stayed dead with a full clipboard"
+        );
+    }
+
+    /// Choosing a row does the thing.
+    #[test]
+    fn choosing_copy_from_the_menu_fills_the_clipboard() {
+        let scratch = temp_dir("menu_copy");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+        let (cx, cy) = row_centre(&state, "notes.txt");
+        right_click(&mut state, cx, cy);
+        assert!(state.clipboard.is_none());
+
+        state.activate_menu_item(MENU_COPY);
+
+        assert!(state.clipboard.is_some(), "Copy did not fill the clipboard");
+    }
+
+    /// **A press while the menu is open never reaches what is under it.**
+    #[test]
+    fn a_press_with_the_menu_open_is_spent_on_the_menu() {
+        let scratch = temp_dir("menu_shield");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+        let (cx, cy) = row_centre(&state, "notes.txt");
+        right_click(&mut state, cx, cy);
+
+        // Far from the menu: this dismisses it and does nothing else.
+        send(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: 4.0,
+                y: 4.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+
+        assert!(
+            state.render_menu().is_empty(),
+            "the menu survived a press outside it"
+        );
+        assert_eq!(
+            state.current_path, root,
+            "the dismissing press also navigated"
+        );
+    }
+
+    /// An unknown row id does nothing rather than doing something else.
+    #[test]
+    fn a_row_id_the_menu_never_put_there_does_nothing() {
+        let scratch = temp_dir("menu_unknown");
+        let root = scratch.dir().to_path_buf();
+        let mut state = one_file(&root, "notes.txt");
+
+        state.activate_menu_item(9_999);
+
+        assert!(state.clipboard.is_none());
+        assert!(state.modal.is_none(), "an unknown id opened a dialog");
+    }
+
+    // ---- the Transfers view -------------------------------------------
+    //
+    // roadmap.md 4.1: "a queued operation appears immediately in the File
+    // Operations / Transfers view alongside the running ones, in state
+    // Queued, saying what it is waiting for […] the user can reorder the
+    // queue, cancel a queued operation before it ever starts, or override and
+    // start it now."
+
+    /// Press a named Transfers control the way a pointer does.
+    fn press_transfer(state: &mut ExplorerState, want: TransferControl) {
+        let (_, rect) = state
+            .transfers_layout()
+            .into_iter()
+            .find(|(c, _)| *c == want)
+            .unwrap_or_else(|| panic!("{want:?} is not in the layout"));
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    /// A state with one operation running and `queued` more waiting.
+    fn with_queue(root: &Path, queued: usize) -> ExplorerState {
+        let mut state = paste_of(root, 6);
+        state.paste();
+        for n in 0..queued {
+            let name = format!("q{n}.txt");
+            write(&root.join(&name), "x");
+            state.clipboard = Some(ClipboardOp::Copy(vec![root.join(&name)]));
+            state.paste();
+        }
+        assert_eq!(state.queued_count(), queued);
+        state
+    }
+
+    /// **There is nothing to see when nothing is happening.**
+    #[test]
+    fn the_transfers_view_is_absent_while_the_explorer_is_idle() {
+        let scratch = temp_dir("tr_idle");
+        let root = scratch.dir().to_path_buf();
+        let state = state_at(&root);
+        assert!(state.transfers_rect().is_none());
+        assert!(state.transfers_layout().is_empty());
+        assert!(state.transfer_labels().is_empty());
+    }
+
+    /// A queued operation appears in it, and says what it is waiting for.
+    #[test]
+    fn a_queued_operation_appears_and_says_what_it_waits_for() {
+        let scratch = temp_dir("tr_rows");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+
+        let labels = state.transfer_labels();
+        assert_eq!(labels.len(), 2, "one running and one waiting: {labels:?}");
+        assert!(labels[0].starts_with("Pasted"), "{labels:?}");
+        assert!(
+            labels[1].contains("Queued") && labels[1].contains("waiting for"),
+            "a queued row that does not say what it waits for: {labels:?}"
+        );
+        assert!(state.transfers_rect().is_some());
+
+        settle(&mut state);
+        assert!(state.transfers_rect().is_none(), "it outlived the work");
+    }
+
+    /// The queue can be reordered.
+    #[test]
+    fn a_waiting_operation_can_be_moved_down_the_queue() {
+        let scratch = temp_dir("tr_reorder");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 2);
+
+        // The first waiting one is `q0.txt`; send it behind `q1.txt`.
+        press_transfer(&mut state, TransferControl::MoveQueuedDown(0));
+        settle(&mut state);
+
+        // Both still ran -- reordering is about *when*, never about whether.
+        assert!(root.join("dst/q0.txt").exists());
+        assert!(root.join("dst/q1.txt").exists());
+    }
+
+    /// Moving past either end does nothing, and says so.
+    #[test]
+    fn a_waiting_operation_cannot_be_moved_off_either_end() {
+        let scratch = temp_dir("tr_ends");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 2);
+
+        assert!(!state.move_queued(0, -1), "the first moved up");
+        assert!(!state.move_queued(1, 1), "the last moved down");
+        assert!(!state.move_queued(9, -1), "a row that is not there moved");
+        assert!(state.move_queued(0, 1), "a real move reported nothing");
+
+        settle(&mut state);
+    }
+
+    /// **Start-now overrides the per-drive rule**, which 4.1 calls a default
+    /// rather than a prohibition.
+    #[test]
+    fn a_waiting_operation_can_be_started_alongside_the_one_ahead_of_it() {
+        let scratch = temp_dir("tr_now");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+        assert_eq!(state.running_count(), 1);
+
+        press_transfer(&mut state, TransferControl::StartQueuedNow(0));
+
+        assert_eq!(state.queued_count(), 0, "it is still waiting");
+        assert_eq!(
+            state.running_count(),
+            2,
+            "it did not start alongside the one it shares a drive with"
+        );
+        settle(&mut state);
+        assert!(root.join("dst/q0.txt").exists());
+    }
+
+    /// Cancelling a waiting one costs nothing and it never runs.
+    #[test]
+    fn a_waiting_operation_can_be_cancelled_from_the_view() {
+        let scratch = temp_dir("tr_cancel");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+
+        press_transfer(&mut state, TransferControl::CancelQueued(0));
+
+        assert_eq!(state.queued_count(), 0);
+        settle(&mut state);
+        assert!(
+            !root.join("dst/q0.txt").exists(),
+            "a cancelled operation copied something anyway"
+        );
+    }
+
+    /// And a running one can be stopped without touching the rest.
+    #[test]
+    fn a_running_operation_can_be_stopped_from_the_view() {
+        let scratch = temp_dir("tr_stop");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+
+        press_transfer(&mut state, TransferControl::CancelRunning(0));
+        settle(&mut state);
+
+        let copied = (0..6)
+            .filter(|n| root.join(format!("dst/f{n}.txt")).exists())
+            .count();
+        assert!(copied < 6, "cancelling copied everything anyway");
+        assert!(
+            root.join("dst/q0.txt").exists(),
+            "stopping one operation took the queued one with it"
+        );
+    }
+
+    /// **A press inside the panel never reaches the listing under it.**
+    ///
+    /// The rows down there are covered, and acting on a file the user cannot
+    /// see is worse than doing nothing.
+    #[test]
+    fn a_press_on_the_panels_bare_space_does_not_reach_the_listing() {
+        let scratch = temp_dir("tr_shield");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+        state.selected_indices = vec![0];
+        let panel = state.transfers_rect().expect("the view is open");
+
+        // The left end of a row, where no button is.
+        send(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: panel.x + 4.0,
+                y: panel.y + 4.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+
+        assert_eq!(
+            state.selected_indices,
+            vec![0],
+            "the press fell through and cleared the selection"
+        );
+        settle(&mut state);
+    }
+
+    /// Every control the view paints can be pressed where it is painted.
+    #[test]
+    fn every_transfers_button_is_pressable_where_it_is_drawn() {
+        let scratch = temp_dir("tr_bands");
+        let root = scratch.dir().to_path_buf();
+        let mut state = with_queue(&root, 1);
+
+        let controls = state.transfers_layout();
+        assert_eq!(
+            controls.len(),
+            5,
+            "one running button and four waiting ones: {controls:?}"
+        );
+        let panel = state.transfers_rect().expect("the view is open");
+        for (control, rect) in controls {
+            assert!(
+                panel.contains(rect.x, rect.y),
+                "{control:?} is drawn outside the panel"
+            );
+            let (cx, cy) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+            assert_eq!(
+                state.transfers_control_at(cx, cy),
+                Some(control),
+                "{control:?} is not pressable at its own centre"
+            );
+        }
+        settle(&mut state);
+    }
+
+    // ---- the toolbar -------------------------------------------------
+    //
+    // Seven buttons were painted here with nothing that could press them:
+    // `click_at` knew about file rows and the sidebar and stopped there. Back,
+    // forward, up, new folder, cut and paste all did nothing, and every one of
+    // them looked exactly as it does now.
+
+    /// Press the middle of a toolbar button, the way a pointer does.
+    fn press_toolbar(state: &mut ExplorerState, button: ToolbarButton) {
+        let (_, rect) = ExplorerState::toolbar_layout()
+            .into_iter()
+            .find(|(b, _)| *b == button)
+            .unwrap_or_else(|| panic!("{button:?} is not in the layout"));
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    /// **Every painted button is clickable, at the rectangle it was painted
+    /// at.**
+    ///
+    /// The two halves come from two independent places: the faces out of the
+    /// render tree, the clickability out of the hit test. Neither can move the
+    /// other with it, which is the whole point -- a band that drifted a row
+    /// away from its own face would satisfy a test that measured both from the
+    /// layout.
+    #[test]
+    fn every_painted_toolbar_button_can_be_pressed_where_it_is_drawn() {
+        let scratch = temp_dir("toolbar_bands");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        let faces: Vec<(f32, f32)> = state
+            .render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*width - TOOLBAR_BTN).abs() < 0.01
+                    && (*height - TOOLBAR_BTN).abs() < 0.01 =>
+                {
+                    Some((*x, *y))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            faces.len(),
+            ToolbarButton::ALL.len(),
+            "the toolbar painted {} faces for {} buttons",
+            faces.len(),
+            ToolbarButton::ALL.len()
+        );
+
+        let mut reached = Vec::new();
+        for (x, y) in faces {
+            let centre = (x + TOOLBAR_BTN / 2.0, y + TOOLBAR_BTN / 2.0);
+            let button = ExplorerState::toolbar_button_at(centre.0, centre.1)
+                .unwrap_or_else(|| panic!("a button painted at {x},{y} has no click band"));
+            reached.push(button);
+        }
+        for button in ToolbarButton::ALL {
+            assert!(
+                reached.contains(&button),
+                "{button:?} was not reachable at any painted face"
+            );
+        }
+    }
+
+    #[test]
+    fn the_back_button_goes_back() {
+        let scratch = temp_dir("toolbar_back");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root);
+        state.navigate_to(&root.join("sub"));
+        assert_eq!(state.current_path, root.join("sub"));
+        assert!(state.toolbar_button_enabled(ToolbarButton::Back));
+
+        press_toolbar(&mut state, ToolbarButton::Back);
+
+        assert_eq!(state.current_path, root, "Back did not go back");
+    }
+
+    #[test]
+    fn the_up_button_goes_up() {
+        let scratch = temp_dir("toolbar_up");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root.join("sub"));
+
+        press_toolbar(&mut state, ToolbarButton::Up);
+
+        assert_eq!(state.current_path, root, "Up did not go up");
+    }
+
+    /// **A greyed-out button refuses the click rather than passing it on.**
+    ///
+    /// Returning "not handled" would send the press through to the rows
+    /// underneath and clear the selection -- so pressing a disabled Cut would
+    /// deselect the thing you were about to cut.
+    #[test]
+    fn a_disabled_toolbar_button_does_nothing_and_keeps_the_selection() {
+        let scratch = temp_dir("toolbar_disabled");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "a");
+        let mut state = state_at(&root);
+        state.selected_indices = vec![0];
+        assert!(
+            !state.toolbar_button_enabled(ToolbarButton::Back),
+            "there is history, so this proves nothing"
+        );
+
+        press_toolbar(&mut state, ToolbarButton::Back);
+
+        assert_eq!(state.current_path, root, "a disabled Back navigated");
+        assert_eq!(
+            state.selected_indices,
+            vec![0],
+            "a disabled button let the click through and cleared the selection"
+        );
+    }
+
+    /// New folder asks for a name, and the name is what gets made.
+    #[test]
+    fn the_new_folder_button_asks_and_then_makes_it() {
+        let scratch = temp_dir("toolbar_mkdir");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        press_toolbar(&mut state, ToolbarButton::NewFolder);
+        assert!(
+            matches!(state.modal, Some(Modal::NewFolder { .. })),
+            "New folder did not ask for a name"
+        );
+
+        let asked = state.modal.take();
+        state.apply_modal_answer(asked, DialogResult::Text("Photos".to_string()));
+        assert!(root.join("Photos").is_dir(), "the folder was not created");
+    }
+
+    /// An empty name is a dismissal, not a filesystem error.
+    #[test]
+    fn a_new_folder_with_no_name_is_cancelled_rather_than_failed() {
+        let scratch = temp_dir("toolbar_mkdir_blank");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        press_toolbar(&mut state, ToolbarButton::NewFolder);
+        let asked = state.modal.take();
+        state.apply_modal_answer(asked, DialogResult::Text("   ".to_string()));
+
+        assert!(
+            state.status_bar_text().contains("cancelled"),
+            "a blank name was treated as an attempt: {:?}",
+            state.status_bar_text()
+        );
+    }
+
+    /// Cut fills the clipboard, and then Paste is no longer greyed out.
+    #[test]
+    fn cut_then_paste_works_from_the_toolbar() {
+        let scratch = temp_dir("toolbar_cutpaste");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("note.txt"), "keep me");
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root);
+        select_named(&mut state, "note.txt");
+        state.selected_indices = vec![
+            state
+                .entries
+                .iter()
+                .position(|e| e.name == "note.txt")
+                .expect("the file is listed"),
+        ];
+
+        assert!(
+            !state.toolbar_button_enabled(ToolbarButton::Paste),
+            "empty clipboard"
+        );
+        press_toolbar(&mut state, ToolbarButton::Cut);
+        assert!(
+            state.toolbar_button_enabled(ToolbarButton::Paste),
+            "Cut did not fill the clipboard"
+        );
+
+        state.navigate_to(&root.join("sub"));
+        press_toolbar(&mut state, ToolbarButton::Paste);
+        settle(&mut state);
+
+        assert!(root.join("sub/note.txt").exists(), "Paste did not paste");
+        assert!(!root.join("note.txt").exists(), "a cut left the original");
+    }
+
+    // ---- a copy that does not freeze the window ----------------------
+    //
+    // The engine used to run every action inside the call that started it, so
+    // for the length of a copy the explorer did not repaint, did not answer a
+    // click, and could not move the progress it was already computing. These
+    // are about the part a user can see; `fileops`'s own tests cover the
+    // stepping underneath.
+
+    /// A folder of files to copy, and a state showing the destination.
+    fn paste_of(scratch: &Path, count: usize) -> ExplorerState {
+        let src = scratch.join("src");
+        let dst = scratch.join("dst");
+        fs::create_dir_all(&src).expect("src");
+        fs::create_dir_all(&dst).expect("dst");
+        let mut sources = Vec::new();
+        for n in 0..count {
+            let path = src.join(format!("f{n}.txt"));
+            write(&path, "some content");
+            sources.push(path);
+        }
+        let mut state = state_at(&dst);
+        state.clipboard = Some(ClipboardOp::Copy(sources));
+        state
+    }
+
+    /// **The operation outlives the call that started it.**
+    ///
+    /// Checked before any tick, which is what makes it deterministic: `paste`
+    /// opens the journal and returns, so nothing has been copied yet however
+    /// small the files are.
+    #[test]
+    fn a_paste_starts_the_copy_and_hands_the_window_back() {
+        let scratch = temp_dir("live_paste");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+
+        state.paste();
+
+        let progress = state
+            .operation_progress()
+            .expect("the copy is not in flight after paste returned");
+        assert_eq!(
+            progress.completed_files, 0,
+            "paste copied files before returning, which is the freeze"
+        );
+        assert!(
+            state.tick_interval().is_some(),
+            "nothing will ever finish this copy: the loop was given no reason to come back"
+        );
+
+        settle(&mut state);
+        assert!(state.operation_progress().is_none(), "it never finished");
+        assert!(
+            state.tick_interval().is_none(),
+            "a finished copy must not hold the desktop awake"
+        );
+        for n in 0..6 {
+            assert!(
+                root.join(format!("dst/f{n}.txt")).exists(),
+                "f{n} is missing"
+            );
+        }
+    }
+
+    /// The window still answers while the copy runs.
+    #[test]
+    fn a_click_still_works_while_a_copy_is_running() {
+        let scratch = temp_dir("live_click");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        assert!(state.operation_progress().is_some(), "nothing to run");
+
+        // An ordinary event, handled as usual: this is the whole claim.
+        state.navigate_to(&root.join("src"));
+        assert!(
+            state.entries.iter().any(|e| e.name == "f0.txt"),
+            "the explorer did not respond while a copy was in flight"
+        );
+
+        settle(&mut state);
+    }
+
+    /// The status bar says how far it has got, while it is getting there.
+    #[test]
+    fn the_status_bar_counts_the_copy_up_as_it_goes() {
+        let scratch = temp_dir("live_status");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 5);
+        state.paste();
+
+        let started = state.status_bar_text().to_string();
+        assert!(
+            started.contains("Pasted 0 of 5"),
+            "the status bar says nothing about the copy: {started:?}"
+        );
+
+        settle(&mut state);
+        let finished = state.status_bar_text().to_string();
+        assert!(
+            !finished.contains("0 of 5"),
+            "the status bar is still showing the start: {finished:?}"
+        );
+    }
+
+    /// **A second operation waits its turn, and says that it is waiting.**
+    ///
+    /// It used to be refused. "No, try again later" makes the user watch for a
+    /// moment nothing announces, and a paste that quietly did nothing would
+    /// simply be started again -- which is what `roadmap.md` 4.1 means by a
+    /// copy that is queued rather than started having to say so.
+    #[test]
+    fn a_second_operation_waits_its_turn_and_says_so() {
+        let scratch = temp_dir("queue_second");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        assert_eq!(
+            state.queued_count(),
+            0,
+            "the first one runs, it does not wait"
+        );
+
+        fs::create_dir(root.join("other")).expect("other");
+        write(&root.join("other/extra.txt"), "extra");
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("other/extra.txt")]));
+        state.paste();
+
+        assert_eq!(state.queued_count(), 1, "the second one was not queued");
+        let message = state.status_bar_text().to_string();
+        assert!(
+            message.contains("(1 waiting)"),
+            "the status bar does not say anything is waiting: {message:?}"
+        );
+
+        settle(&mut state);
+
+        // Both finished, and in order.
+        assert_eq!(state.queued_count(), 0, "something is still waiting");
+        for n in 0..6 {
+            assert!(
+                root.join(format!("dst/f{n}.txt")).exists(),
+                "f{n} is missing"
+            );
+        }
+        assert!(
+            root.join("dst/extra.txt").exists(),
+            "the queued operation never ran"
+        );
+    }
+
+    /// **An operation that collides with nothing does not wait.**
+    ///
+    /// The other half of the rule, and the half that is hard to observe: two
+    /// *different* drives cannot be arranged portably -- a machine with one
+    /// disk would make the test vacuous, and a machine with two would make it
+    /// pass for a reason the code does not control. An operation touching **no**
+    /// drive is the case that can be arranged anywhere, and it exercises the
+    /// same line: `drives_busy` answers false, so it starts alongside rather
+    /// than behind. `DriveSet::shares_with` carries the rest, with its own
+    /// tests in `crate::drives`.
+    #[test]
+    fn an_operation_that_shares_no_drive_starts_alongside_rather_than_waiting() {
+        let scratch = temp_dir("admit_free");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        assert_eq!(state.running_count(), 1);
+
+        // A plan over no sources touches no drive at all.
+        let empty = OperationPlan::plan_copy(
+            &[],
+            &root.join("dst"),
+            ConflictPolicy::Skip,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .expect("a plan over nothing is still a plan");
+        assert!(
+            empty.drives().is_empty(),
+            "a plan over no paths touched a drive"
+        );
+        assert!(state.start_operation(empty, "Pasted", false));
+
+        assert_eq!(
+            state.queued_count(),
+            0,
+            "an operation sharing no drive was made to wait"
+        );
+        assert_eq!(state.running_count(), 2, "it did not start");
+
+        settle(&mut state);
+        assert!(!state.work_in_flight());
+    }
+
+    /// And the status line names the others rather than hiding them.
+    #[test]
+    fn the_status_line_counts_the_other_operations_in_flight() {
+        let scratch = temp_dir("admit_status");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+
+        let empty = OperationPlan::plan_copy(
+            &[],
+            &root.join("dst"),
+            ConflictPolicy::Skip,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .expect("a plan over nothing is still a plan");
+        state.start_operation(empty, "Pasted", false);
+
+        let line = state.status_bar_text().to_string();
+        assert!(
+            line.contains("(+1 running)"),
+            "the second operation is invisible: {line:?}"
+        );
+        settle(&mut state);
+    }
+
+    /// Three deep, and the count is right at every depth.
+    #[test]
+    fn the_waiting_count_is_what_is_waiting() {
+        let scratch = temp_dir("queue_depth");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+
+        for n in 0..3 {
+            let name = format!("extra{n}.txt");
+            write(&root.join(&name), "x");
+            state.clipboard = Some(ClipboardOp::Copy(vec![root.join(&name)]));
+            state.paste();
+            assert_eq!(state.queued_count(), n + 1);
+        }
+        assert!(state.status_bar_text().contains("(3 waiting)"));
+
+        settle(&mut state);
+        assert_eq!(state.queued_count(), 0);
+        for n in 0..3 {
+            assert!(
+                root.join(format!("dst/extra{n}.txt")).exists(),
+                "queued operation {n} never ran"
+            );
+        }
+    }
+
+    /// Cancelling something that has not started is free, and says whether it
+    /// cancelled anything.
+    #[test]
+    fn a_waiting_operation_can_be_dropped_before_it_writes_anything() {
+        let scratch = temp_dir("queue_cancel");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+
+        write(&root.join("never.txt"), "x");
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("never.txt")]));
+        state.paste();
+        assert_eq!(state.queued_count(), 1);
+
+        assert!(state.cancel_queued(0), "there was one to cancel");
+        assert!(!state.cancel_queued(0), "and now there is not");
+        assert_eq!(state.queued_count(), 0);
+        assert!(
+            !state.status_bar_text().contains("waiting"),
+            "the status bar still claims something is waiting: {:?}",
+            state.status_bar_text()
+        );
+
+        settle(&mut state);
+        assert!(
+            !root.join("dst/never.txt").exists(),
+            "a cancelled operation copied something anyway"
+        );
+    }
+
+    /// Cancelling stops it, which is only possible because it is stepped.
+    #[test]
+    fn a_running_copy_can_be_cancelled() {
+        let scratch = temp_dir("live_cancel");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        assert!(state.cancel_operation(), "there was nothing to cancel");
+
+        settle(&mut state);
+        assert!(state.operation_progress().is_none());
+        let copied = (0..6)
+            .filter(|n| root.join(format!("dst/f{n}.txt")).exists())
+            .count();
+        assert!(copied < 6, "cancelling copied everything anyway");
+    }
+
+    /// **Escape reaches the cancel.**
+    ///
+    /// `cancel_operation` and `cancel_queued` were written with no way to
+    /// press them: the ability to stop a copy existed in the model and
+    /// nothing on screen reached it, which is a dead control and the same
+    /// defect as a settings page for a setting nothing reads.
+    #[test]
+    fn escape_stops_a_running_copy() {
+        let scratch = temp_dir("esc_running");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+
+        assert!(
+            state.handle_event(&key(Key::Escape)),
+            "Escape was ignored while a copy was running"
+        );
+        assert!(
+            state.status_bar_text().starts_with("Stopping"),
+            "Escape said nothing: {:?}",
+            state.status_bar_text()
+        );
+
+        settle(&mut state);
+        let copied = (0..6)
+            .filter(|n| root.join(format!("dst/f{n}.txt")).exists())
+            .count();
+        assert!(copied < 6, "Escape copied everything anyway");
+    }
+
+    /// And it drops what was waiting behind it, which costs nothing.
+    #[test]
+    fn escape_drops_the_waiting_operations_too() {
+        let scratch = temp_dir("esc_waiting");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        write(&root.join("never.txt"), "x");
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("never.txt")]));
+        state.paste();
+        assert_eq!(state.queued_count(), 1);
+
+        send(&mut state, &key(Key::Escape));
+
+        assert_eq!(state.queued_count(), 0, "the queue survived Escape");
+        assert!(
+            state.status_bar_text().contains("dropped"),
+            "the dropped operations were not mentioned: {:?}",
+            state.status_bar_text()
+        );
+        settle(&mut state);
+        assert!(!root.join("dst/never.txt").exists());
+    }
+
+    /// **Escape does not also clear the selection.**
+    ///
+    /// One key with two effects is how a user loses a selection they wanted
+    /// while trying to stop a copy.
+    #[test]
+    fn escape_stopping_a_copy_leaves_the_selection_alone() {
+        let scratch = temp_dir("esc_selection");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.load_directory();
+        state.selected_indices = vec![0];
+        let selected_before = state.selected_indices.clone();
+        assert!(!selected_before.is_empty(), "nothing was selected to keep");
+
+        state.paste();
+        send(&mut state, &key(Key::Escape));
+
+        assert_eq!(
+            state.selected_indices, selected_before,
+            "stopping a copy also cleared the selection"
+        );
+        settle(&mut state);
+    }
+
+    /// With no file work in flight, Escape means what it always meant.
+    #[test]
+    fn escape_still_clears_the_selection_when_nothing_is_copying() {
+        let scratch = temp_dir("esc_plain");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "a");
+        let mut state = state_at(&root);
+        state.selected_indices = vec![0];
+
+        assert!(state.handle_event(&key(Key::Escape)));
+        assert!(
+            state.selected_indices.is_empty(),
+            "Escape stopped clearing the selection"
+        );
+        assert!(
+            !state.handle_event(&key(Key::Escape)),
+            "Escape with nothing to do must not claim the key"
+        );
+    }
+
+    // ---- the progress track -------------------------------------------
+
+    /// The fraction agrees with the words beside it.
+    ///
+    /// Both are the same claim in two forms. A bar nine tenths full next to
+    /// "3 of 10" is worse than either alone: the reader has to pick one to
+    /// believe and nothing on screen helps them.
+    #[test]
+    fn the_track_and_the_count_tell_the_same_story() {
+        let scratch = temp_dir("bar_fraction");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 4);
+        assert_eq!(state.operation_fraction(), None, "nothing is running");
+
+        state.paste();
+        assert_eq!(state.operation_fraction(), Some(0.0), "nothing copied yet");
+
+        let mut seen = Vec::new();
+        while state.operation_progress().is_some() {
+            let _ = state.handle_event(&Event::Tick { elapsed_ms: 16 });
+            if let Some(f) = state.operation_fraction() {
+                seen.push(f);
+            }
+        }
+        assert_eq!(state.operation_fraction(), None, "it never finished");
+        for f in &seen {
+            assert!((0.0..=1.0).contains(f), "the track ran off its end: {f}");
+        }
+        assert!(
+            seen.windows(2).all(|w| w[1] >= w[0]),
+            "the track went backwards: {seen:?}"
+        );
+    }
+
+    /// A plan of no files is over the moment it starts, and says so.
+    #[test]
+    fn an_empty_operation_shows_a_full_track_rather_than_dividing_by_zero() {
+        let scratch = temp_dir("bar_empty");
+        let root = scratch.dir().to_path_buf();
+        let dst = root.join("dst");
+        fs::create_dir_all(&dst).expect("dst");
+        fs::create_dir(root.join("empty")).expect("empty");
+
+        let mut state = state_at(&dst);
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("empty")]));
+        state.paste();
+
+        if let Some(fraction) = state.operation_fraction() {
+            assert!(
+                (0.0..=1.0).contains(&fraction),
+                "an empty plan produced {fraction}"
+            );
+        }
+        settle(&mut state);
+    }
+
+    /// Every fill drawn in the status bar's row, by width.
+    ///
+    /// Counted by *where it is* rather than by how many fills the whole frame
+    /// has: copying files changes the listing above the bar, so a frame-wide
+    /// count compares two different directories and proves nothing about the
+    /// track.
+    fn status_bar_fills(state: &mut ExplorerState) -> Vec<f32> {
+        let track_y = f32::from(u16::try_from(state.window_height).unwrap_or(u16::MAX)) - 16.0;
+        state
+            .render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::FillRect {
+                    y, width, height, ..
+                } if (*y - track_y).abs() < 0.01 && (*height - 8.0).abs() < 0.01 => Some(*width),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The track is drawn while a copy runs, and not otherwise.
+    #[test]
+    fn the_status_bar_grows_a_track_only_while_something_is_copying() {
+        let scratch = temp_dir("bar_drawn");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 4);
+
+        assert!(
+            status_bar_fills(&mut state).is_empty(),
+            "an idle status bar has a progress track in it"
+        );
+
+        state.paste();
+        let busy = status_bar_fills(&mut state);
+        assert_eq!(busy.len(), 2, "a track is a groove and a fill: {busy:?}");
+        assert!(busy[1] <= busy[0], "the fill is wider than its groove");
+
+        settle(&mut state);
+        assert!(
+            status_bar_fills(&mut state).is_empty(),
+            "the track outlived the copy"
+        );
+    }
+
+    /// **A status line too long for the window is cut and marked, not run off
+    /// the edge.**
+    ///
+    /// It used to be drawn with no `max_width` at all. A silently clipped line
+    /// reads as a short one, which is how a truncated path gets taken for the
+    /// whole thing.
+    #[test]
+    fn a_long_status_line_is_kept_inside_the_window() {
+        let scratch = temp_dir("bar_long");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        state.window_width = 320;
+        state.status_message = "x".repeat(400);
+
+        let drawn = format!("{:?}", state.render());
+        assert!(
+            drawn.contains("max_width: Some("),
+            "the status line was drawn with no width to stay inside"
+        );
+    }
+
+    /// And with nothing running, cancelling is a no-op that says so.
+    #[test]
+    fn cancelling_nothing_reports_that_there_was_nothing() {
+        let scratch = temp_dir("live_cancel_none");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        assert!(!state.cancel_operation());
+    }
+
     #[test]
     fn a_cut_clears_the_clipboard_but_a_copy_does_not() {
         let root_scratch = temp_dir("paste_clipboard");
@@ -3466,6 +6331,7 @@ mod tests {
         let mut state = state_at(&dst_dir);
         state.clipboard = Some(ClipboardOp::Copy(vec![src_dir.join("a.txt")]));
         state.paste();
+        settle(&mut state);
         assert!(
             state.clipboard.is_some(),
             "the sources of a copy are still there, so a second paste is meaningful"
@@ -3473,6 +6339,7 @@ mod tests {
 
         state.clipboard = Some(ClipboardOp::Cut(vec![src_dir.join("b.txt")]));
         state.paste();
+        settle(&mut state);
         assert!(
             state.clipboard.is_none(),
             "a cut consumed its sources; pasting again would find nothing"
@@ -3940,7 +6807,10 @@ mod tests {
             state.row_values(&entry),
             vec![
                 ColumnValue::Text("a.rs".to_string()),
-                ColumnValue::Text("Source File".to_string()),
+                // The registry's own words, not the explorer's bucket label.
+                // This said "Source File" while `guitk::filetypes` -- which
+                // knows it is Rust -- went unread.
+                ColumnValue::Text("Rust Source File".to_string()),
             ]
         );
     }
@@ -4412,6 +7282,7 @@ mod tests {
         state.drag_enter(vec![root.join("note.txt")]);
         state.drag_over(x, y, DragModifiers::default());
         let result = state.drop_at(x, y, DragModifiers::default()).expect("drop");
+        settle(&mut state);
 
         assert!(result.valid, "{:?}", result.invalid_reason);
         assert_eq!(result.operation, DropOperation::Move);
@@ -4443,6 +7314,7 @@ mod tests {
         state.drag_enter(vec![outside.join("note.txt")]);
         state.drag_over(x, y, DragModifiers::default());
         let result = state.drop_at(x, y, DragModifiers::default()).expect("drop");
+        settle(&mut state);
 
         assert!(result.valid, "{:?}", result.invalid_reason);
         assert_eq!(result.target_dir, root.join("here"));
@@ -4526,6 +7398,7 @@ mod tests {
         state.drag_enter(vec![root.join("note.txt")]);
         state.drag_over(x, y, ctrl);
         let result = state.drop_at(x, y, ctrl).expect("drop");
+        settle(&mut state);
 
         assert!(result.valid, "{:?}", result.invalid_reason);
         assert_eq!(result.operation, DropOperation::Copy);
@@ -5258,6 +8131,7 @@ mod tests {
         );
 
         confirm_modal(&mut state);
+        settle(&mut state);
         assert!(!root.join("notes.txt").exists());
         assert_eq!(
             state.recycle.list().expect("bin").len(),
@@ -5434,6 +8308,7 @@ mod tests {
         select_named(&mut state, "notes.txt");
         send(&mut state, &shift_key(Key::Delete));
         confirm_modal(&mut state);
+        settle(&mut state);
 
         send(&mut state, &ctrl_key(Key::Z));
 
@@ -5459,6 +8334,7 @@ mod tests {
 
         state.navigate_to(&root.join("sub"));
         send(&mut state, &ctrl_key(Key::V));
+        settle(&mut state);
 
         assert_eq!(
             fs::read_to_string(root.join("sub/notes.txt")).expect("pasted"),

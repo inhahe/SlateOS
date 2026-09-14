@@ -1062,12 +1062,66 @@ pub extern "C" fn __cxa_finalize(_dso_handle: *mut u8) {
 // Stack canary support
 // ---------------------------------------------------------------------------
 
+/// Derive the process's stack canary from 16 bytes of `AT_RANDOM`.
+///
+/// glibc and musl both take the leading pointer-sized bytes of `AT_RANDOM`,
+/// and so do we. Split out from the seeding so the derivation is testable on
+/// the host, where there is no TCB to write and no kernel to ask.
+// Off-target this is reached only from the tests below: `process_stack_guard`,
+// its one production caller, needs a kernel to ask for `AT_RANDOM`. The
+// derivation is the part worth testing and the part that has no target
+// dependency, which is exactly why it is split out.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+pub(crate) fn guard_from_at_random(bytes: &[u8; 16]) -> u64 {
+    let mut v = [0u8; 8];
+    // Index-free: `copy_from_slice` on a fixed-size split cannot panic, and
+    // `get` would force an unwrap this function has no way to handle.
+    let (head, _) = bytes.split_at(8);
+    v.copy_from_slice(head);
+    u64::from_ne_bytes(v)
+}
+
+/// The process's stack canary, derived once and shared by every thread.
+///
+/// Cached because all threads must agree: a thread that re-derived a different
+/// value after another had loaded the old one into a live frame would abort a
+/// process that was never smashed. `AT_RANDOM` is already latched for the same
+/// reason — see `AT_RANDOM_STATE`.
+#[cfg(target_os = "none")]
+pub(crate) fn process_stack_guard() -> u64 {
+    ensure_at_random_initialized();
+    // SAFETY: `ensure_at_random_initialized` either filled the buffer and
+    // published it, or aborted the process; on this path the 16 bytes are
+    // initialised and are only read from here on.
+    let bytes = unsafe { core::ptr::addr_of!(AT_RANDOM_BYTES).read() };
+    guard_from_at_random(&bytes)
+}
+
+/// Host build: there is no TCB and `tls::set_stack_guard` is a no-op, so the
+/// value is never read. Returns the fallback constant rather than pretending
+/// to have entropy.
+#[cfg(not(target_os = "none"))]
+pub(crate) fn process_stack_guard() -> u64 {
+    0x0000_DEAD_BEEF_CAFE
+}
+
 /// Stack canary value for -fstack-protector.
 ///
-/// The compiler inserts this value at the base of stack frames and checks
-/// it on return.  A mismatch means stack corruption.  We use a fixed
-/// value since we don't have /dev/urandom yet; a real implementation
-/// would initialize this from a random source at process startup.
+/// The fallback location for the canary, used by architectures whose
+/// compilers do not read it out of the TCB.
+///
+/// **On x86-64 this symbol is not what guards a frame.** GCC and Clang emit
+/// `mov %fs:0x28, %reg`, so the value that matters is the one
+/// `tls::set_stack_guard` writes into the TCB; this exists so that C objects
+/// referencing the symbol still link.
+///
+/// It keeps a fixed value, and that is now a deliberate, narrow choice rather
+/// than the old "we don't have /dev/urandom yet" — we do: `SYS_GETRANDOM` is
+/// wired and the kernel supplies `AT_RANDOM`. Making this `static mut` to
+/// randomise it would put a writable, `no_mangle` global in every binary for
+/// a value nothing on this target reads. If a non-x86-64 target ever ships,
+/// seed it from [`process_stack_guard`] at startup and this comment is the
+/// note saying how.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static __stack_chk_guard: u64 = 0x0000_DEAD_BEEF_CAFE;
 
@@ -1717,6 +1771,25 @@ pub extern "C" fn gnu_dev_makedev(major: u32, minor: u32) -> u64 {
 #[cfg(test)]
 mod tests {
 
+    /// Serialises the tests that register `atexit`/`on_exit` handlers.
+    ///
+    /// `ON_EXIT_FUNCS` and `ON_EXIT_COUNT` are a fixed 32-entry table and a
+    /// count, and `on_exit` appends to them without a lock -- correct for a
+    /// libc, where registration happens on one thread during startup. Two
+    /// `#[test]`s calling it concurrently are not that: they can interleave
+    /// read-modify-write on the count and lose a registration or overrun the
+    /// table. Unlike the other crt.rs entries the detector reports, this pair
+    /// genuinely writes.
+    static ON_EXIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Poison-tolerant, so one failing test does not make its sibling panic in
+    /// `.unwrap()` and report two failures for one defect.
+    fn on_exit_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        ON_EXIT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     // -- the standard-descriptor fallback table --
 
     /// Descriptor 0 read-only, 1 and 2 write-only.
@@ -1772,6 +1845,46 @@ mod tests {
     fn test_max_atexit() {
         // POSIX minimum is 32 for atexit handlers.
         assert!(MAX_ATEXIT >= 32);
+    }
+
+    #[test]
+    fn guard_takes_the_leading_eight_bytes_of_at_random() {
+        // glibc and musl both take the leading pointer-sized bytes; matching
+        // them is the whole specification of this function.
+        let mut bytes = [0u8; 16];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = u8::try_from(i + 1).unwrap();
+        }
+        let want = u64::from_ne_bytes([1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(super::guard_from_at_random(&bytes), want);
+    }
+
+    #[test]
+    fn guard_changes_when_at_random_changes() {
+        // The property that makes a canary worth having. If this ever held
+        // equal for differing input the canary would be predictable, which is
+        // the defect this replaced (the slot was left zero).
+        let a = [0xAAu8; 16];
+        let mut b = [0xAAu8; 16];
+        b[0] = 0xAB;
+        assert_ne!(
+            super::guard_from_at_random(&a),
+            super::guard_from_at_random(&b)
+        );
+    }
+
+    #[test]
+    fn guard_ignores_the_trailing_eight_bytes() {
+        // Not a wish, a consequence: only 8 of the 16 bytes fit a u64, and
+        // pinning which 8 keeps this agreeing with glibc if anyone rewrites it.
+        let mut a = [7u8; 16];
+        let mut b = [7u8; 16];
+        a[8] = 0;
+        b[8] = 0xFF;
+        assert_eq!(
+            super::guard_from_at_random(&a),
+            super::guard_from_at_random(&b)
+        );
     }
 
     #[test]
@@ -2436,12 +2549,14 @@ mod tests {
 
     #[test]
     fn test_on_exit_registers() {
+        let _g = on_exit_test_guard();
         let ret = on_exit(dummy_on_exit, core::ptr::null_mut());
         assert_eq!(ret, 0, "on_exit should succeed");
     }
 
     #[test]
     fn test_on_exit_with_arg() {
+        let _g = on_exit_test_guard();
         let mut data: i32 = 42;
         let ret = on_exit(dummy_on_exit, (&raw mut data) as *mut u8);
         assert_eq!(ret, 0);

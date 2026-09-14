@@ -9,8 +9,10 @@
 #![deny(clippy::all)]
 
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use quoting::quoteaf_os;
 use std::process;
@@ -23,7 +25,7 @@ const VERSION: &str = "0.1.0";
 
 #[derive(Clone, Debug)]
 struct BlockDevInfo {
-    _path: String,
+    _path: OsString,
     size_bytes: u64,
     _size_sectors: u64,
     sector_size: u32,
@@ -35,14 +37,65 @@ struct BlockDevInfo {
     _model: String,
 }
 
-fn read_sysfs_value(device: &str, attr: &str) -> Option<String> {
-    // Extract device name from path.
-    let dev_name = device.rsplit('/').next().unwrap_or(device);
-    let path = format!("/sys/block/{dev_name}/{attr}");
+/// Write a diagnostic whose pieces include raw bytes.
+///
+/// A device name comes from the command line and may hold any byte but `/`
+/// and NUL, so it cannot go through `eprintln!` -- `OsString` has no `Display`
+/// for exactly that reason, and the `to_string_lossy` that would make it
+/// compile replaces the offending bytes with U+FFFD and reports a name the
+/// user never typed.
+///
+/// util-linux prints these names UNQUOTED, so this writes the bytes through
+/// rather than quoting them: the wording is not ours to change.
+fn ediag(parts: &[&[u8]]) {
+    let mut line: Vec<u8> = Vec::new();
+    for p in parts {
+        line.extend_from_slice(p);
+    }
+    line.push(b'\n');
+    // A closed or full stderr is not worth a panic in a diagnostic path.
+    let _ = io::stderr().write_all(&line);
+}
+
+/// Read one sysfs attribute of `device`.
+///
+/// `device` is an `OsStr` because it came from the command line and names a
+/// file: on this OS that is any byte but `/` and NUL. `attr` stays `&str`
+/// because every caller passes an ASCII literal.
+///
+/// The basename is taken by splitting the BYTES on `/` rather than by
+/// `str::rsplit`, and the path is built with `Path::join` rather than
+/// `format!`, so a device name that is not valid Unicode reaches sysfs as the
+/// bytes it was given instead of failing to be typed at all.
+fn read_sysfs_value(device: &OsStr, attr: &str) -> Option<String> {
+    let path = sysfs_path(device, attr);
     fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
 }
 
-fn read_block_dev_info(device: &str) -> BlockDevInfo {
+/// Where `attr` lives in sysfs for `device`.
+///
+/// Split out from [`read_sysfs_value`] so the part that can be wrong is
+/// testable without a filesystem: everything here is name handling, and the
+/// only thing the caller adds is a read.
+///
+/// The basename is found by splitting the BYTES on `/` rather than with
+/// `str::rsplit`, and the result is assembled with `Path::join` rather than
+/// `format!`, so a device name that is not valid Unicode reaches sysfs as the
+/// bytes it was given instead of being untypeable.
+fn sysfs_path(device: &OsStr, attr: &str) -> PathBuf {
+    let bytes = quoting::os_bytes(device);
+    let dev_name = match bytes.iter().rposition(|&b| b == b'/') {
+        // `get` rather than indexing: a name ending in `/` puts the separator
+        // last, and the slice after it is empty rather than out of range.
+        Some(i) => bytes.get(i.saturating_add(1)..).unwrap_or(&[]),
+        None => bytes.as_ref(),
+    };
+    Path::new("/sys/block")
+        .join(quoting::os_from_bytes(dev_name))
+        .join(attr)
+}
+
+fn read_block_dev_info(device: &OsStr) -> BlockDevInfo {
     let size_bytes = read_sysfs_value(device, "size")
         .and_then(|s| s.parse::<u64>().ok())
         .map(|sectors| sectors * 512)
@@ -68,7 +121,7 @@ fn read_block_dev_info(device: &str) -> BlockDevInfo {
     let _model = read_sysfs_value(device, "device/model").unwrap_or_else(|| "Unknown".to_string());
 
     BlockDevInfo {
-        _path: device.to_string(),
+        _path: device.to_os_string(),
         size_bytes,
         _size_sectors: size_bytes / (sector_size as u64),
         sector_size,
@@ -150,19 +203,25 @@ fn refuse_unknown_option(prog: &str, arg: &str) -> ! {
     process::exit(1);
 }
 
-fn cmd_blockdev(args: &[String]) {
+fn cmd_blockdev(args: &[OsString]) {
     if args.is_empty() {
         print_blockdev_help();
         process::exit(0);
     }
 
     let mut operations: Vec<String> = Vec::new();
-    let mut devices: Vec<String> = Vec::new();
+    let mut devices: Vec<OsString> = Vec::new();
     let mut set_value: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        let arg = &args[i];
+        // `""` for a word that is not Unicode: it matches no option name and
+        // falls through to the operand arm, which keeps `arg` itself. Every
+        // option here is ASCII, and the only option VALUE is a number, so
+        // decoding for the match cannot lose a path.
+        let s_decoded: &str = arg.to_str().unwrap_or("");
+        match s_decoded {
             "-h" | "--help" => {
                 print_blockdev_help();
                 process::exit(0);
@@ -193,12 +252,17 @@ fn cmd_blockdev(args: &[String]) {
                 } else if s.starts_with("--set") {
                     i += 1;
                     if i < args.len() {
-                        set_value = Some(args[i].clone());
+                        // Decoded: this value is a NUMBER (a block size or a
+                        // read-ahead), so a word that is not Unicode is simply
+                        // not one, and the parse below rejects it.
+                        set_value = Some(args[i].to_str().unwrap_or("").to_string());
                     }
                 }
             }
             s if !s.starts_with('-') => {
-                devices.push(s.to_string());
+                // `arg`, not `s`: `s` is the decoded view used for matching,
+                // and a device path is exactly the thing that may not decode.
+                devices.push(arg.clone());
             }
             // Everything reaching here begins with a dash and matched no
             // option above, so it is one this build does not have. A lone
@@ -212,7 +276,7 @@ fn cmd_blockdev(args: &[String]) {
     }
 
     if devices.is_empty() {
-        devices.push("/dev/sda".to_string());
+        devices.push(OsString::from("/dev/sda"));
     }
 
     let stdout = io::stdout();
@@ -267,18 +331,26 @@ fn cmd_blockdev(args: &[String]) {
                 }
                 "--setro" => {
                     info.read_only = true;
-                    eprintln!("blockdev: set {device} read-only");
+                    ediag(&[b"blockdev: set ", &quoting::os_bytes(device), b" read-only"]);
                 }
                 "--setrw" => {
                     info.read_only = false;
-                    eprintln!("blockdev: set {device} read-write");
+                    ediag(&[
+                        b"blockdev: set ",
+                        &quoting::os_bytes(device),
+                        b" read-write",
+                    ]);
                 }
                 "--setra" => {
                     if let Some(ref val) = set_value
                         && let Ok(ra) = val.parse::<u32>()
                     {
                         info.read_ahead = ra;
-                        eprintln!("blockdev: set {device} read-ahead to {ra}");
+                        ediag(&[
+                            b"blockdev: set ",
+                            &quoting::os_bytes(device),
+                            format!(" read-ahead to {ra}").as_bytes(),
+                        ]);
                     }
                 }
                 "--setbsz" => {
@@ -286,27 +358,43 @@ fn cmd_blockdev(args: &[String]) {
                         && let Ok(bs) = val.parse::<u32>()
                     {
                         info.block_size = bs;
-                        eprintln!("blockdev: set {device} block size to {bs}");
+                        ediag(&[
+                            b"blockdev: set ",
+                            &quoting::os_bytes(device),
+                            format!(" block size to {bs}").as_bytes(),
+                        ]);
                     }
                 }
                 "--flushbufs" => {
-                    eprintln!("blockdev: flushed buffers for {device}");
+                    ediag(&[
+                        b"blockdev: flushed buffers for ",
+                        &quoting::os_bytes(device),
+                    ]);
                 }
                 "--rereadpt" => {
-                    eprintln!("blockdev: re-read partition table for {device}");
+                    ediag(&[
+                        b"blockdev: re-read partition table for ",
+                        &quoting::os_bytes(device),
+                    ]);
                 }
                 "--report" => {
                     let _ = writeln!(out, "RO    RA   SSZ   BSZ        SIZE   DEVICE");
-                    let _ = writeln!(
+                    // The device is the LAST column, so the row is written
+                    // as text up to it and the name appended as bytes. It is
+                    // a path and may hold any byte; `{}` on an `OsString`
+                    // does not compile, and the `to_string_lossy` that would
+                    // make it compile prints a name the user never typed.
+                    let _ = write!(
                         out,
-                        "{:>2} {:>5} {:>5} {:>5} {:>11}   {}",
+                        "{:>2} {:>5} {:>5} {:>5} {:>11}   ",
                         if info.read_only { "ro" } else { "rw" },
                         info.read_ahead,
                         info.sector_size,
                         info.block_size,
                         info.size_bytes,
-                        device
                     );
+                    let _ = out.write_all(&quoting::os_bytes(device));
+                    let _ = out.write_all(b"\n");
                 }
                 _ => {
                     let _ = writeln!(out, "blockdev: unknown operation: {op}");
@@ -317,16 +405,18 @@ fn cmd_blockdev(args: &[String]) {
         if operations.is_empty() {
             // Default: show report.
             let _ = writeln!(out, "RO    RA   SSZ   BSZ        SIZE   DEVICE");
-            let _ = writeln!(
+            let _ = write!(
                 out,
-                "{:>2} {:>5} {:>5} {:>5} {:>11}   {}",
+                "{:>2} {:>5} {:>5} {:>5} {:>11}   ",
                 if info.read_only { "ro" } else { "rw" },
                 info.read_ahead,
                 info.sector_size,
                 info.block_size,
                 info.size_bytes,
-                device
             );
+            // Same reason as the --report row above: the name is bytes.
+            let _ = out.write_all(&quoting::os_bytes(device));
+            let _ = out.write_all(b"\n");
         }
     }
 
@@ -372,8 +462,10 @@ fn print_blockdev_help() {
 fn main() {
     // One personality, so no argv[0] dispatch: the `blkzone` arm and the
     // program-name derivation that existed only to select it are both gone.
-    let args: Vec<String> = env::args().collect();
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so a device path
+    // holding a byte that is not valid Unicode killed the process here.
+    let args: Vec<OsString> = env::args_os().collect();
+    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
     cmd_blockdev(&rest);
 }
 
@@ -383,6 +475,58 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// The sysfs path is built from the device's BYTES.
+    ///
+    /// `blockdev` used to read argv as `Vec<String>`, so `env::args()` --
+    /// whose iterator is a literal `unwrap` -- killed the process before the
+    /// program ran, for a device path holding a byte that is not valid
+    /// Unicode. On this OS a filename may hold every byte but `/` and NUL, so
+    /// that is a legal name, not a malformed one.
+    #[test]
+    fn sysfs_path_takes_the_basename_by_bytes() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            super::sysfs_path(OsStr::new("/dev/sda"), "size"),
+            std::path::Path::new("/sys/block/sda/size")
+        );
+        // No slash at all: the whole word is the name.
+        assert_eq!(
+            super::sysfs_path(OsStr::new("sda"), "ro"),
+            std::path::Path::new("/sys/block/sda/ro")
+        );
+        // A nested attribute keeps its own separator.
+        assert_eq!(
+            super::sysfs_path(OsStr::new("/dev/sdb"), "queue/read_ahead_kb"),
+            std::path::Path::new("/sys/block/sdb/queue/read_ahead_kb")
+        );
+        // A trailing slash leaves an empty basename rather than panicking,
+        // which is why the slice is taken with `get`.
+        let _ = super::sysfs_path(OsStr::new("/dev/"), "size");
+    }
+
+    /// The same, for a name that is not valid UTF-8 -- the case the whole
+    /// conversion exists for.
+    ///
+    /// `#[cfg(unix)]` because only there can an `OsStr` hold arbitrary bytes;
+    /// the development host is Windows, where `OsString` is WTF-16 and this
+    /// name cannot be built. The target is the one that matters, and this is
+    /// the assertion that would catch a regression on it.
+    #[cfg(unix)]
+    #[test]
+    fn sysfs_path_keeps_a_non_utf8_device_name() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = OsStr::from_bytes(b"/dev/sd\xe9a");
+        let got = super::sysfs_path(name, "size");
+        assert_eq!(
+            got.as_os_str().as_bytes(),
+            b"/sys/block/sd\xe9a/size",
+            "the byte must survive, not become U+FFFD"
+        );
+    }
+
     use super::*;
 
     /// The parser and the executor must agree on the operation set, since
@@ -415,7 +559,7 @@ mod tests {
     /// is the one honest use it had, so it lives here.
     fn fixture_info(device: &str) -> BlockDevInfo {
         BlockDevInfo {
-            _path: device.to_string(),
+            _path: OsString::from(device),
             size_bytes: 256 * 1024 * 1024 * 1024,
             _size_sectors: 256 * 1024 * 1024 * 1024 / 512,
             sector_size: 512,
@@ -469,12 +613,12 @@ mod tests {
 
     #[test]
     fn test_read_sysfs_value_missing() {
-        assert!(read_sysfs_value("/dev/nonexistent", "size").is_none());
+        assert!(read_sysfs_value(OsStr::new("/dev/nonexistent"), "size").is_none());
     }
 
     #[test]
     fn test_read_block_dev_info_missing() {
-        let info = read_block_dev_info("/dev/nonexistent");
+        let info = read_block_dev_info(OsStr::new("/dev/nonexistent"));
         assert_eq!(info.size_bytes, 0);
     }
 

@@ -76,6 +76,15 @@ appearance = { path = "../appearance" }
 # panel in `mouse_settings` renders them, so none of the three can own them.
 inputsettings = { path = "../inputsettings" }
 
+# Which programs may interrupt the user. Shared with the Settings
+# application, which writes what this crate reads.
+notifsettings = { path = "../notifsettings" }
+
+# A recurring window of the day. Its own crate rather than a module of the
+# toolkit, so that the settings model can name one without compiling a widget
+# library -- see gui/daywindow/Cargo.toml.
+daywindow = { path = "../daywindow" }
+
 # The picture decoder. `WallpaperManager` names an image id and the compositor
 # draws whatever bytes are stored under it — but nothing was ever putting bytes
 # there, so a wallpaper set to a `.png` painted the colour underlay and nothing

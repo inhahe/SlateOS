@@ -43,7 +43,12 @@ const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 160);
 // ─── Layout constants ──────────────────────────────────────────────────────
 
 /// Height of the top menu bar.
-const BAR_HEIGHT: f32 = 28.0;
+///
+/// Public because a window that puts a bar at its top has to reserve exactly
+/// this much room above its own content, and a caller that cannot read the
+/// number has to repeat it -- at which point the bar's height is recorded in
+/// two places and a change to one of them is a silent overlap or a silent gap.
+pub const BAR_HEIGHT: f32 = 28.0;
 /// Horizontal padding inside each top-level label.
 const LABEL_HPAD: f32 = 12.0;
 /// Height of a single dropdown item row.
@@ -72,14 +77,22 @@ const SHADOW_OFFSET: f32 = 4.0;
 const SUBMENU_ARROW_WIDTH: f32 = 20.0;
 /// Minimum dropdown panel width.
 const MIN_DROPDOWN_WIDTH: f32 = 160.0;
-/// Screen height a dropdown is allowed to occupy. Matches `menu.rs`; a panel
-/// taller than this scrolls instead of being drawn off the bottom edge.
-const DEFAULT_VIEWPORT_HEIGHT: f32 = 1080.0;
-/// Screen width a dropdown is allowed to occupy, the companion to
-/// [`DEFAULT_VIEWPORT_HEIGHT`]. A submenu that would hang off the right edge
-/// flips to the left of its parent instead — see
-/// [`DropdownPanel::child_origin`].
-const DEFAULT_VIEWPORT_WIDTH: f32 = 1920.0;
+/// The screen a menu bar assumes when its caller does not say.
+///
+/// **Nothing is placed against this.** Both placement rules take the viewport
+/// from the event that triggered them, because a caller building a mouse
+/// event already knows how big its window is and a stored copy would be one
+/// forgotten resize away from stale. This exists so that
+/// [`MenuBar::handle_mouse_event_on`] has something to default to.
+///
+/// The two constants this replaces said "Matches `menu.rs`" -- and they did,
+/// including the defect. `menu.rs` capped and flipped against a hard
+/// 1920x1080, so on a 1024x768 display the shell's tray overflow menu was
+/// drawn to y=1080, three hundred and twelve pixels past the bottom, with
+/// every row below 768 unreachable. This module had the same rule and no
+/// consumer to notice; it is corrected here before it gets one, rather than
+/// after.
+const FALLBACK_VIEWPORT: (f32, f32) = (1920.0, 1080.0);
 /// Width of the scroll indicator down the right edge of a capped panel.
 const SCROLLBAR_WIDTH: f32 = 4.0;
 /// Gap between that indicator and the panel's border.
@@ -272,7 +285,7 @@ struct DropdownPanel {
 
 impl DropdownPanel {
     /// Place a panel of `entries` whose preferred top-left is
-    /// `(x, preferred_y)`, kept inside `min_y..DEFAULT_VIEWPORT_HEIGHT`.
+    /// `(x, preferred_y)`, kept inside `min_y..viewport.1`.
     ///
     /// `min_y` is [`BAR_HEIGHT`] for every panel here: a dropdown that slid up
     /// over the menu bar would be drawn under labels that still take the click,
@@ -285,13 +298,14 @@ impl DropdownPanel {
         width: f32,
         entries: &[MenuBarEntry],
         scroll: f32,
+        viewport: (f32, f32),
     ) -> Self {
         let content_height = dropdown_content_height(entries) + DROPDOWN_VPAD * 2.0;
-        let available = (DEFAULT_VIEWPORT_HEIGHT - min_y).max(0.0);
+        let available = (viewport.1 - min_y).max(0.0);
         let panel_height = content_height.min(available);
-        // `min_y <= DEFAULT_VIEWPORT_HEIGHT - panel_height` holds because
+        // `min_y <= viewport.1 - panel_height` holds because
         // `panel_height <= available`, so the clamp range is never inverted.
-        let y = preferred_y.clamp(min_y, DEFAULT_VIEWPORT_HEIGHT - panel_height);
+        let y = preferred_y.clamp(min_y, viewport.1 - panel_height);
         let mut panel = Self {
             x,
             y,
@@ -312,7 +326,7 @@ impl DropdownPanel {
     /// panel.
     ///
     /// Normally at [`Self::right`], so the child sits against its parent. When
-    /// that would push the child past [`DEFAULT_VIEWPORT_WIDTH`] it flips to
+    /// that would push the child past the right edge of `viewport` it flips to
     /// the other side instead, ending flush with this panel's left edge — the
     /// same rule every desktop menu uses, and the reason a `File > Recent >`
     /// chain opened from a menu bar near the right of the screen does not walk
@@ -326,9 +340,9 @@ impl DropdownPanel {
     /// click, hover and the primary-level constructor — must agree; when they
     /// each said `panel.right()` they agreed only because none of them had a
     /// rule at all.
-    fn child_origin(&self, child_width: f32) -> f32 {
+    fn child_origin(&self, child_width: f32, viewport: (f32, f32)) -> f32 {
         let at_right = self.right();
-        if at_right + child_width > DEFAULT_VIEWPORT_WIDTH {
+        if at_right + child_width > viewport.0 {
             (self.x - child_width).max(0.0)
         } else {
             at_right
@@ -453,8 +467,14 @@ struct OpenSubmenu {
 }
 
 /// The panel an [`OpenSubmenu`] node occupies.
-fn submenu_panel(entries: &[MenuBarEntry], sub: &OpenSubmenu) -> DropdownPanel {
-    DropdownPanel::place(sub.x, sub.y, BAR_HEIGHT, sub.width, entries, sub.scroll)
+fn submenu_panel(
+    entries: &[MenuBarEntry],
+    sub: &OpenSubmenu,
+    viewport: (f32, f32),
+) -> DropdownPanel {
+    DropdownPanel::place(
+        sub.x, sub.y, BAR_HEIGHT, sub.width, entries, sub.scroll, viewport,
+    )
 }
 
 // ─── Result type for submenu click/hover resolution (avoids borrow issues) ─
@@ -505,6 +525,16 @@ pub struct MenuBar {
     events: Vec<MenuBarEvent>,
     /// Cached per-label metrics: `(x_offset, width, parsed_label)`.
     label_metrics: Vec<(f32, f32, ParsedLabel)>,
+    /// The display the last event arrived from.
+    ///
+    /// Refreshed by [`handle_mouse_event`](Self::handle_mouse_event) and
+    /// [`handle_key_event`](Self::handle_key_event) rather than set once,
+    /// because those are the only things that open a panel and a caller
+    /// building an event necessarily knows how big its window is. A viewport
+    /// set once at construction would be one forgotten resize away from
+    /// placing a dropdown against a screen that no longer exists -- which is
+    /// the failure this whole change is about, one level up.
+    viewport: (f32, f32),
     /// Cached panel width of each top-level menu's dropdown.
     ///
     /// Widening a dropdown to fit its widest label means measuring every label
@@ -526,6 +556,8 @@ impl MenuBar {
         let dropdown_widths = Self::compute_dropdown_widths(&items);
         Self {
             items,
+            // Replaced by the first event that arrives; see the field.
+            viewport: FALLBACK_VIEWPORT,
             open_index: None,
             dropdown_hover: None,
             dropdown_scroll: 0.0,
@@ -537,6 +569,13 @@ impl MenuBar {
     }
 
     /// Replace the entire menu structure.
+    ///
+    /// **This closes any open dropdown**, which is not obvious from the name
+    /// and is the only safe thing to do: the open index and the hovered row are
+    /// positions *into the old rows*, and keeping them would point them at
+    /// whatever now happens to sit at those offsets. A caller that rebuilds its
+    /// rows to keep them current must therefore do it while the bar is shut, or
+    /// the menu closes under the pointer on the first keystroke after it opens.
     pub fn set_items(&mut self, items: Vec<MenuBarItem>) {
         self.label_metrics = Self::compute_label_metrics(&items);
         self.dropdown_widths = Self::compute_dropdown_widths(&items);
@@ -575,7 +614,8 @@ impl MenuBar {
 
     /// Handle a mouse event. Coordinates are relative to the bar's origin
     /// (top-left of the window, typically `(0, 0)`).
-    pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> EventResult {
+    pub fn handle_mouse_event(&mut self, event: &MouseEvent, viewport: (f32, f32)) -> EventResult {
+        self.viewport = viewport;
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => self.on_mouse_press(event.x, event.y),
             MouseEventKind::Move => self.on_mouse_move(event.x, event.y),
@@ -600,8 +640,14 @@ impl MenuBar {
 
         // The submenu chain is drawn on top of the dropdown, so it goes first.
         if let Some(mut sub) = self.open_submenu.take() {
-            let took =
-                scroll_in_submenu_chain(children_of(&self.items, top_idx), &mut sub, mx, my, dy);
+            let took = scroll_in_submenu_chain(
+                children_of(&self.items, top_idx),
+                &mut sub,
+                mx,
+                my,
+                dy,
+                self.viewport,
+            );
             self.open_submenu = Some(sub);
             if took {
                 return EventResult::Consumed;
@@ -636,8 +682,13 @@ impl MenuBar {
         if let Some(top_idx) = self.open_index {
             // Try submenu chain first (take it out to avoid borrow conflict).
             if let Some(mut sub) = self.open_submenu.take() {
-                let result =
-                    click_in_submenu_chain(children_of(&self.items, top_idx), &mut sub, mx, my);
+                let result = click_in_submenu_chain(
+                    children_of(&self.items, top_idx),
+                    &mut sub,
+                    mx,
+                    my,
+                    self.viewport,
+                );
                 match result {
                     SubmenuClickResult::Activated(act) => {
                         self.apply_activation(act);
@@ -711,8 +762,13 @@ impl MenuBar {
         if let Some(top_idx) = self.open_index {
             // Check submenu chain first (take to avoid borrow conflict).
             if let Some(mut sub) = self.open_submenu.take() {
-                let in_sub =
-                    hover_in_submenu_chain(children_of(&self.items, top_idx), &mut sub, mx, my);
+                let in_sub = hover_in_submenu_chain(
+                    children_of(&self.items, top_idx),
+                    &mut sub,
+                    mx,
+                    my,
+                    self.viewport,
+                );
                 self.open_submenu = Some(sub);
                 if in_sub {
                     self.dropdown_hover = None;
@@ -748,7 +804,8 @@ impl MenuBar {
     // ── Keyboard handling ───────────────────────────────────────────────
 
     /// Handle a keyboard event.
-    pub fn handle_key_event(&mut self, event: &KeyEvent) -> EventResult {
+    pub fn handle_key_event(&mut self, event: &KeyEvent, viewport: (f32, f32)) -> EventResult {
+        self.viewport = viewport;
         if !event.pressed {
             return EventResult::Ignored;
         }
@@ -973,7 +1030,7 @@ impl MenuBar {
 
         // Submenu chain.
         if let Some(ref sub) = self.open_submenu {
-            render_submenu_chain(palette, cmds, children, sub);
+            render_submenu_chain(palette, cmds, children, sub, self.viewport);
         }
     }
 
@@ -1019,6 +1076,7 @@ impl MenuBar {
             width,
             children,
             self.dropdown_scroll,
+            self.viewport,
         )
     }
 
@@ -1069,7 +1127,7 @@ impl MenuBar {
         let width = calculate_dropdown_width(nested);
         Some(OpenSubmenu {
             parent_index: item_idx,
-            x: panel.child_origin(width),
+            x: panel.child_origin(width, self.viewport),
             // Hangs off where the row *is*, which is where the panel says it is
             // — including the scroll offset. Recomputing the row's place from
             // the entry list here is how a submenu ends up beside the wrong row
@@ -1153,7 +1211,7 @@ impl MenuBar {
         let (deepest, entries) = deepest_with_entries(root_children, sub);
         deepest.hover_index = pick(&entries, deepest.hover_index);
         if let Some(idx) = deepest.hover_index {
-            let panel = submenu_panel(&entries, deepest);
+            let panel = submenu_panel(&entries, deepest, self.viewport);
             deepest.scroll = panel.scroll_showing(&entries, idx);
         }
     }
@@ -1204,6 +1262,7 @@ fn click_in_submenu_chain(
     sub: &mut OpenSubmenu,
     mx: f32,
     my: f32,
+    viewport: (f32, f32),
 ) -> SubmenuClickResult {
     // Resolved before descending, not after: the child's `parent_index` indexes
     // into *these* entries, so the recursion cannot be handed what we were.
@@ -1211,14 +1270,14 @@ fn click_in_submenu_chain(
 
     // Recurse into child first (deepest wins).
     if let Some(ref mut child) = sub.child {
-        let r = click_in_submenu_chain(&entries, child, mx, my);
+        let r = click_in_submenu_chain(&entries, child, mx, my, viewport);
         match r {
             SubmenuClickResult::Miss => {} // Fall through to check this level.
             other => return other,
         }
     }
 
-    let panel = submenu_panel(&entries, sub);
+    let panel = submenu_panel(&entries, sub, viewport);
 
     if panel.contains(mx, my) {
         if let Some(idx) = panel.index_at(&entries, my) {
@@ -1231,7 +1290,7 @@ fn click_in_submenu_chain(
                 let child_width = calculate_dropdown_width(sc);
                 return SubmenuClickResult::OpenChild {
                     idx,
-                    child_x: panel.child_origin(child_width),
+                    child_x: panel.child_origin(child_width, viewport),
                     child_y: panel
                         .row_top(&entries, idx)
                         .unwrap_or_else(|| panel.viewport_top()),
@@ -1253,18 +1312,19 @@ fn hover_in_submenu_chain(
     sub: &mut OpenSubmenu,
     mx: f32,
     my: f32,
+    viewport: (f32, f32),
 ) -> bool {
     let entries = resolve_submenu_entries(parent_entries, sub);
 
     // Recurse into child first.
     if let Some(ref mut child) = sub.child
-        && hover_in_submenu_chain(&entries, child, mx, my)
+        && hover_in_submenu_chain(&entries, child, mx, my, viewport)
     {
         sub.hover_index = None;
         return true;
     }
 
-    let panel = submenu_panel(&entries, sub);
+    let panel = submenu_panel(&entries, sub, viewport);
 
     if panel.contains(mx, my) {
         let new_hover = panel.index_at(&entries, my);
@@ -1279,7 +1339,7 @@ fn hover_in_submenu_chain(
                         let width = calculate_dropdown_width(sc);
                         sub.child = Some(Box::new(OpenSubmenu {
                             parent_index: hi,
-                            x: panel.child_origin(width),
+                            x: panel.child_origin(width, viewport),
                             y: panel
                                 .row_top(&entries, hi)
                                 .unwrap_or_else(|| panel.viewport_top()),
@@ -1310,17 +1370,18 @@ fn scroll_in_submenu_chain(
     mx: f32,
     my: f32,
     dy: f32,
+    viewport: (f32, f32),
 ) -> bool {
     let entries = resolve_submenu_entries(parent_entries, sub);
 
     // Deepest panel is drawn on top, so it gets the wheel first.
     if let Some(ref mut child) = sub.child
-        && scroll_in_submenu_chain(&entries, child, mx, my, dy)
+        && scroll_in_submenu_chain(&entries, child, mx, my, dy, viewport)
     {
         return true;
     }
 
-    let panel = submenu_panel(&entries, sub);
+    let panel = submenu_panel(&entries, sub, viewport);
     if !panel.contains(mx, my) {
         return false;
     }
@@ -1343,15 +1404,16 @@ fn render_submenu_chain(
     cmds: &mut Vec<RenderCommand>,
     parent_entries: &[MenuBarEntry],
     sub: &OpenSubmenu,
+    viewport: (f32, f32),
 ) {
     let entries = resolve_submenu_entries(parent_entries, sub);
-    let panel = submenu_panel(&entries, sub);
+    let panel = submenu_panel(&entries, sub, viewport);
 
     render_panel(palette, cmds, &panel);
     render_entries(palette, cmds, &entries, &panel, sub.hover_index);
 
     if let Some(ref child) = sub.child {
-        render_submenu_chain(palette, cmds, &entries, child);
+        render_submenu_chain(palette, cmds, &entries, child, viewport);
     }
 }
 
@@ -1845,6 +1907,23 @@ mod tests {
     use super::*;
     use crate::event::Modifiers;
 
+    /// A second display, so nothing here can be right by coincidence.
+    ///
+    /// Every other test in this module runs at [`SCREEN`], and until this
+    /// commit the placement code compared against a private constant of the
+    /// same value. Two readings of one number agree however wrong the number
+    /// is; this is the one that does not.
+    const SMALL: (f32, f32) = (1024.0, 768.0);
+
+    /// The display these tests place dropdowns on.
+    ///
+    /// Named, not implied. Until this commit the placement code compared
+    /// against a private 1920x1080 constant and every test used a window of
+    /// that size, so the assertions and the code under test were reading the
+    /// same number -- and agreed with each other on the one display neither
+    /// had been told about.
+    const SCREEN: (f32, f32) = (1920.0, 1080.0);
+
     // ── Test helpers ────────────────────────────────────────────────────
 
     fn make_bar() -> MenuBar {
@@ -2003,7 +2082,7 @@ mod tests {
 
     /// Open the first dropdown and report its panel.
     fn open_first_dropdown(bar: &mut MenuBar) -> DropdownPanel {
-        bar.handle_mouse_event(&click(10.0, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(10.0, BAR_HEIGHT / 2.0), SCREEN);
         assert!(bar.is_open(), "the bar should have opened a dropdown");
         bar.dropdown_panel(0)
     }
@@ -2013,7 +2092,7 @@ mod tests {
     fn highlight_after_pointer_at(bar: &mut MenuBar, py: f32) -> Option<(f32, f32)> {
         let palette = Palette::for_mode(false);
         let panel = bar.dropdown_panel(0);
-        bar.handle_mouse_event(&mouse_move(panel.x + 10.0, py));
+        bar.handle_mouse_event(&mouse_move(panel.x + 10.0, py), SCREEN);
         let (x, w) = (panel.x + 4.0, panel.width - 8.0);
         bar.render(&palette, 800)
             .into_iter()
@@ -2057,6 +2136,43 @@ mod tests {
         // tests compare against the hit test, so a disagreement still shows.
         let probe = panel.row_top(children_of(&bar.items, 0), idx)? + 1.0;
         highlight_after_pointer_at(bar, probe)
+    }
+
+    /// A dropdown fits a screen smaller than the one the tests use.
+    ///
+    /// `menu.rs` had exactly this bug and the shell's tray overflow menu hit
+    /// it for real: capped to a 1080px panel on a 768px display, placed at
+    /// y=0, drawn 312 pixels past the bottom with every row below 768
+    /// unreachable. This module's constants said "Matches `menu.rs`" and they
+    /// did, including that. It has no consumers yet, so this is the defect
+    /// being removed before anyone meets it rather than after.
+    #[test]
+    fn a_dropdown_fits_a_screen_that_is_not_the_one_the_tests_use() {
+        let mut bar = MenuBar::new(vec![MenuBarItem {
+            label: "&File".to_string(),
+            children: (0..60)
+                .map(|i| MenuBarEntry::Action {
+                    label: format!("Item {i}"),
+                    shortcut: None,
+                    enabled: true,
+                    id: i,
+                })
+                .collect(),
+        }]);
+        bar.handle_mouse_event(&click(10.0, BAR_HEIGHT / 2.0), SMALL);
+        assert!(bar.is_open(), "the dropdown did not open");
+
+        let panel = bar.dropdown_panel(0);
+        assert!(
+            panel.bottom() <= SMALL.1,
+            "dropdown runs to {} on a {}px screen",
+            panel.bottom(),
+            SMALL.1
+        );
+        assert!(
+            panel.panel_height > 0.0,
+            "no panel was placed, so this test proves nothing"
+        );
     }
 
     #[test]
@@ -2278,11 +2394,11 @@ mod tests {
         let mut bar = tall_bar(200);
         let panel = open_first_dropdown(&mut bar);
         assert!(
-            panel.content_height > DEFAULT_VIEWPORT_HEIGHT,
+            panel.content_height > SCREEN.1,
             "the fixture must actually overflow the screen to test anything"
         );
         assert_eq!(panel.y, BAR_HEIGHT, "a capped panel starts under the bar");
-        assert_eq!(panel.bottom(), DEFAULT_VIEWPORT_HEIGHT);
+        assert_eq!(panel.bottom(), SCREEN.1);
         assert!(panel.max_scroll() > 0.0);
     }
 
@@ -2400,7 +2516,7 @@ mod tests {
             // 400 probes down the whole screen: outside the painted region,
             // nothing answers.
             for step in 0..400 {
-                let probe = (step as f32) * DEFAULT_VIEWPORT_HEIGHT / 400.0;
+                let probe = (step as f32) * SCREEN.1 / 400.0;
                 if probe < clip_y || probe >= clip_y + clip_h {
                     assert_eq!(
                         panel.index_at(children, probe),
@@ -2422,11 +2538,11 @@ mod tests {
         assert!(max > 0.0);
         let (px, py) = (panel.x + 10.0, panel.y + 40.0);
         for _ in 0..500 {
-            bar.handle_mouse_event(&wheel(px, py, -1.0));
+            bar.handle_mouse_event(&wheel(px, py, -1.0), SCREEN);
         }
         assert_eq!(bar.dropdown_scroll, max, "the wheel must reach the end");
         for _ in 0..500 {
-            bar.handle_mouse_event(&wheel(px, py, 1.0));
+            bar.handle_mouse_event(&wheel(px, py, 1.0), SCREEN);
         }
         assert_eq!(bar.dropdown_scroll, 0.0, "and come back to the start");
     }
@@ -2438,11 +2554,12 @@ mod tests {
         let mut bar = geometry_bar();
         let panel = open_first_dropdown(&mut bar);
         assert_eq!(panel.max_scroll(), 0.0);
-        let result = bar.handle_mouse_event(&wheel(panel.x + 10.0, panel.y + 10.0, -1.0));
+        let result = bar.handle_mouse_event(&wheel(panel.x + 10.0, panel.y + 10.0, -1.0), SCREEN);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(bar.dropdown_scroll, 0.0);
         // Off the panel it is not ours to take.
-        let result = bar.handle_mouse_event(&wheel(panel.right() + 50.0, panel.y + 10.0, -1.0));
+        let result =
+            bar.handle_mouse_event(&wheel(panel.right() + 50.0, panel.y + 10.0, -1.0), SCREEN);
         assert_eq!(result, EventResult::Ignored);
     }
 
@@ -2474,7 +2591,7 @@ mod tests {
         let mut bar = tall_bar(200);
         open_first_dropdown(&mut bar);
         for _ in 0..200 {
-            bar.handle_key_event(&press(Key::Down));
+            bar.handle_key_event(&press(Key::Down), SCREEN);
             let hover = bar.dropdown_hover.expect("arrowing always selects a row");
             let panel = bar.dropdown_panel(0);
             let children = children_of(&bar.items, 0);
@@ -2488,7 +2605,7 @@ mod tests {
         }
         // And back up again, which exercises the other branch of the scroll.
         for _ in 0..200 {
-            bar.handle_key_event(&press(Key::Up));
+            bar.handle_key_event(&press(Key::Up), SCREEN);
             let hover = bar.dropdown_hover.unwrap();
             let panel = bar.dropdown_panel(0);
             let top = panel.row_top(children_of(&bar.items, 0), hover).unwrap();
@@ -2581,9 +2698,12 @@ mod tests {
         let row_top = panel
             .row_top(children_of(&bar.items, 0), sub_idx)
             .expect("the submenu row exists");
-        bar.handle_mouse_event(&mouse_move(panel.x + 10.0, row_top + ITEM_HEIGHT / 2.0));
+        bar.handle_mouse_event(
+            &mouse_move(panel.x + 10.0, row_top + ITEM_HEIGHT / 2.0),
+            SCREEN,
+        );
         assert_eq!(bar.dropdown_hover, Some(sub_idx));
-        bar.handle_mouse_event(&click(panel.x + 10.0, row_top + ITEM_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(panel.x + 10.0, row_top + ITEM_HEIGHT / 2.0), SCREEN);
         let sub = bar.open_submenu.as_ref().expect("the submenu opened");
         assert_eq!(sub.y, row_top, "the child must hang off the scrolled row");
         assert_eq!(sub.x, panel.right());
@@ -2614,14 +2734,14 @@ mod tests {
         let mut bar = nested_bar();
         let panel = open_first_dropdown(&mut bar);
         let row_top = panel.row_top(children_of(&bar.items, 0), 0).unwrap();
-        bar.handle_mouse_event(&click(panel.x + 10.0, row_top + ITEM_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(panel.x + 10.0, row_top + ITEM_HEIGHT / 2.0), SCREEN);
         let (sub_x, sub_y) = {
             let sub = bar.open_submenu.as_ref().expect("the submenu opened");
             (sub.x, sub.y)
         };
         let before = bar.dropdown_scroll;
         for _ in 0..5 {
-            bar.handle_mouse_event(&wheel(sub_x + 10.0, sub_y + 40.0, -1.0));
+            bar.handle_mouse_event(&wheel(sub_x + 10.0, sub_y + 40.0, -1.0), SCREEN);
         }
         let sub = bar.open_submenu.as_ref().unwrap();
         assert!(sub.scroll > 0.0, "the wheel scrolled the panel under it");
@@ -2653,11 +2773,11 @@ mod tests {
             scroll: 0.0,
             child: None,
         };
-        let max = submenu_panel(&entries, &sub).max_scroll();
+        let max = submenu_panel(&entries, &sub, SCREEN).max_scroll();
         assert!(max > 0.0, "the fixture must overflow to test anything");
         for fraction in [0.0_f32, 0.37, 1.0] {
             sub.scroll = max * fraction;
-            let panel = submenu_panel(&entries, &sub);
+            let panel = submenu_panel(&entries, &sub, SCREEN);
             let (view_top, view_bottom) = (panel.viewport_top(), panel.viewport_bottom());
             for idx in 0..entries.len() {
                 let top = panel.row_top(&entries, idx).unwrap();
@@ -2746,12 +2866,12 @@ mod tests {
         let panel = open_first_dropdown(bar);
         // Row 1 of the dropdown is "Level One".
         let row = panel.row_top(children_of(&bar.items, 0), 1).unwrap();
-        bar.handle_mouse_event(&mouse_move(panel.x + 10.0, row + ITEM_HEIGHT / 2.0));
-        bar.handle_mouse_event(&click(panel.x + 10.0, row + ITEM_HEIGHT / 2.0));
+        bar.handle_mouse_event(&mouse_move(panel.x + 10.0, row + ITEM_HEIGHT / 2.0), SCREEN);
+        bar.handle_mouse_event(&click(panel.x + 10.0, row + ITEM_HEIGHT / 2.0), SCREEN);
 
         // Row 0 of that submenu is "Level Two"; hovering it opens the child.
         let (px, py) = first_row_probe(bar.open_submenu.as_ref().expect("Level One opened"));
-        bar.handle_mouse_event(&mouse_move(px, py));
+        bar.handle_mouse_event(&mouse_move(px, py), SCREEN);
 
         let child = bar
             .open_submenu
@@ -2790,7 +2910,7 @@ mod tests {
     fn clicking_a_third_level_row_activates_the_entry_that_was_drawn_there() {
         let mut bar = nested_decoy_bar();
         let (px, py) = open_depth_two(&mut bar);
-        bar.handle_mouse_event(&click(px, py));
+        bar.handle_mouse_event(&click(px, py), SCREEN);
         assert_eq!(
             bar.drain_events(),
             vec![MenuBarEvent::ItemClicked(900)],
@@ -2806,8 +2926,8 @@ mod tests {
         let mut bar = nested_decoy_bar();
         let _ = open_depth_two(&mut bar);
 
-        bar.handle_key_event(&press(Key::Down));
-        bar.handle_key_event(&press(Key::Down));
+        bar.handle_key_event(&press(Key::Down), SCREEN);
+        bar.handle_key_event(&press(Key::Down), SCREEN);
         {
             let deepest = bar
                 .open_submenu
@@ -2821,7 +2941,7 @@ mod tests {
                  has only one, so a wrong resolve stops at 0"
             );
         }
-        bar.handle_key_event(&press(Key::Enter));
+        bar.handle_key_event(&press(Key::Enter), SCREEN);
         assert_eq!(bar.drain_events(), vec![MenuBarEvent::ItemClicked(901)]);
     }
 
@@ -2862,7 +2982,7 @@ mod tests {
         }]);
         let (px, py) = open_depth_two(&mut bar);
         for _ in 0..5 {
-            bar.handle_mouse_event(&wheel(px, py, -1.0));
+            bar.handle_mouse_event(&wheel(px, py, -1.0), SCREEN);
         }
         let child = bar
             .open_submenu
@@ -2888,14 +3008,14 @@ mod tests {
             scroll: 0.0,
         };
         // Room to the right: the child goes there.
-        assert_eq!(panel(100.0, 200.0).child_origin(180.0), 300.0);
+        assert_eq!(panel(100.0, 200.0).child_origin(180.0, SCREEN), 300.0);
         // Exactly filling the screen still counts as fitting.
-        assert_eq!(panel(1500.0, 240.0).child_origin(180.0), 1740.0);
+        assert_eq!(panel(1500.0, 240.0).child_origin(180.0, SCREEN), 1740.0);
         // One pixel too wide, and it flips to end where its parent starts.
-        assert_eq!(panel(1500.0, 240.0).child_origin(181.0), 1319.0);
+        assert_eq!(panel(1500.0, 240.0).child_origin(181.0, SCREEN), 1319.0);
         // Nowhere to go on either side: the left edge beats a negative x,
         // because a panel at x < 0 is neither visible nor clickable.
-        assert_eq!(panel(50.0, 100.0).child_origin(1900.0), 0.0);
+        assert_eq!(panel(50.0, 100.0).child_origin(1900.0, SCREEN), 0.0);
     }
 
     #[test]
@@ -2917,7 +3037,7 @@ mod tests {
             parent_index: 0,
             // Far enough right that anything hung off its right edge is off
             // the screen.
-            x: DEFAULT_VIEWPORT_WIDTH - 200.0,
+            x: SCREEN.0 - 200.0,
             y: BAR_HEIGHT,
             width: 180.0,
             hover_index: None,
@@ -2925,22 +3045,24 @@ mod tests {
             child: None,
         };
         let entries = resolve_submenu_entries(&parent_entries, &sub);
-        let panel = submenu_panel(&entries, &sub);
+        let panel = submenu_panel(&entries, &sub, SCREEN);
         assert!(
             hover_in_submenu_chain(
                 &parent_entries,
                 &mut sub,
                 panel.x + 10.0,
                 panel.viewport_top() + ITEM_HEIGHT / 2.0,
+                SCREEN,
             ),
             "the pointer is over the panel"
         );
         let child = sub.child.as_ref().expect("hovering a submenu row opens it");
         assert!(
-            child.x + child.width <= DEFAULT_VIEWPORT_WIDTH,
-            "child spans {}..{} of a {DEFAULT_VIEWPORT_WIDTH}-wide screen",
+            child.x + child.width <= SCREEN.0,
+            "child spans {}..{} of a {}-wide screen",
             child.x,
-            child.x + child.width
+            child.x + child.width,
+            SCREEN.0
         );
         assert_eq!(
             child.x + child.width,
@@ -3006,7 +3128,7 @@ mod tests {
     fn click_label_opens_dropdown() {
         let mut bar = make_bar();
         let x = bar.label_metrics[0].0 + 5.0;
-        bar.handle_mouse_event(&click(x, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(x, BAR_HEIGHT / 2.0), SCREEN);
         assert!(bar.is_open());
         assert_eq!(bar.open_index, Some(0));
     }
@@ -3015,10 +3137,10 @@ mod tests {
     fn click_open_label_toggles_off() {
         let mut bar = make_bar();
         let x = bar.label_metrics[0].0 + 5.0;
-        bar.handle_mouse_event(&click(x, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(x, BAR_HEIGHT / 2.0), SCREEN);
         assert!(bar.is_open());
 
-        bar.handle_mouse_event(&click(x, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(x, BAR_HEIGHT / 2.0), SCREEN);
         assert!(!bar.is_open());
     }
 
@@ -3026,10 +3148,10 @@ mod tests {
     fn click_outside_closes() {
         let mut bar = make_bar();
         let x = bar.label_metrics[0].0 + 5.0;
-        bar.handle_mouse_event(&click(x, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(x, BAR_HEIGHT / 2.0), SCREEN);
         assert!(bar.is_open());
 
-        bar.handle_mouse_event(&click(9999.0, 9999.0));
+        bar.handle_mouse_event(&click(9999.0, 9999.0), SCREEN);
         assert!(!bar.is_open());
     }
 
@@ -3039,11 +3161,11 @@ mod tests {
     fn hot_tracking_switches_menu() {
         let mut bar = make_bar();
         let x0 = bar.label_metrics[0].0 + 5.0;
-        bar.handle_mouse_event(&click(x0, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(x0, BAR_HEIGHT / 2.0), SCREEN);
         assert_eq!(bar.open_index, Some(0));
 
         let x1 = bar.label_metrics[1].0 + 5.0;
-        bar.handle_mouse_event(&mouse_move(x1, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&mouse_move(x1, BAR_HEIGHT / 2.0), SCREEN);
         assert_eq!(bar.open_index, Some(1));
     }
 
@@ -3053,11 +3175,11 @@ mod tests {
     fn click_action_item_emits_event() {
         let mut bar = make_bar();
         let lbl_x = bar.label_metrics[0].0 + 5.0;
-        bar.handle_mouse_event(&click(lbl_x, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(lbl_x, BAR_HEIGHT / 2.0), SCREEN);
 
         let dd = bar.dropdown_panel(0);
         let item_y = dd.viewport_top() + ITEM_HEIGHT / 2.0;
-        bar.handle_mouse_event(&click(dd.x + 40.0, item_y));
+        bar.handle_mouse_event(&click(dd.x + 40.0, item_y), SCREEN);
 
         let events = bar.drain_events();
         assert_eq!(events.len(), 1);
@@ -3069,11 +3191,11 @@ mod tests {
     fn click_check_item_toggles() {
         let mut bar = make_bar();
         let lbl_x = bar.label_metrics[1].0 + 5.0;
-        bar.handle_mouse_event(&click(lbl_x, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(lbl_x, BAR_HEIGHT / 2.0), SCREEN);
 
         let dd = bar.dropdown_panel(1);
         let item_y = dd.viewport_top() + ITEM_HEIGHT + SEPARATOR_HEIGHT + ITEM_HEIGHT / 2.0;
-        bar.handle_mouse_event(&click(dd.x + 40.0, item_y));
+        bar.handle_mouse_event(&click(dd.x + 40.0, item_y), SCREEN);
 
         let events = bar.drain_events();
         assert_eq!(events.len(), 1);
@@ -3085,7 +3207,7 @@ mod tests {
     #[test]
     fn alt_mnemonic_opens_menu() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
         assert!(bar.is_open());
         assert_eq!(bar.open_index, Some(0));
     }
@@ -3093,7 +3215,7 @@ mod tests {
     #[test]
     fn alt_mnemonic_second_menu() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::E));
+        bar.handle_key_event(&alt_press(Key::E), SCREEN);
         assert_eq!(bar.open_index, Some(1));
     }
 
@@ -3102,65 +3224,65 @@ mod tests {
     #[test]
     fn arrow_down_moves_hover() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
-        bar.handle_key_event(&press(Key::Down));
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
+        bar.handle_key_event(&press(Key::Down), SCREEN);
         assert_eq!(bar.dropdown_hover, Some(0));
 
-        bar.handle_key_event(&press(Key::Down));
+        bar.handle_key_event(&press(Key::Down), SCREEN);
         assert_eq!(bar.dropdown_hover, Some(1));
 
         // Skip separator (2) and disabled Save As (4) -> Save (3)
-        bar.handle_key_event(&press(Key::Down));
+        bar.handle_key_event(&press(Key::Down), SCREEN);
         assert_eq!(bar.dropdown_hover, Some(3));
     }
 
     #[test]
     fn arrow_down_skips_disabled() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
-        bar.handle_key_event(&press(Key::Down)); // 0 = New
-        bar.handle_key_event(&press(Key::Down)); // 1 = Open
-        bar.handle_key_event(&press(Key::Down)); // 3 = Save (skips sep + disabled)
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
+        bar.handle_key_event(&press(Key::Down), SCREEN); // 0 = New
+        bar.handle_key_event(&press(Key::Down), SCREEN); // 1 = Open
+        bar.handle_key_event(&press(Key::Down), SCREEN); // 3 = Save (skips sep + disabled)
         assert_eq!(bar.dropdown_hover, Some(3));
 
         // Down again: Save As (4) is disabled, wraps to New (0).
-        bar.handle_key_event(&press(Key::Down));
+        bar.handle_key_event(&press(Key::Down), SCREEN);
         assert_eq!(bar.dropdown_hover, Some(0));
     }
 
     #[test]
     fn arrow_up_wraps() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
-        bar.handle_key_event(&press(Key::Up)); // wrap to last selectable = Save (3)
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
+        bar.handle_key_event(&press(Key::Up), SCREEN); // wrap to last selectable = Save (3)
         assert_eq!(bar.dropdown_hover, Some(3));
     }
 
     #[test]
     fn left_right_switch_menus() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F)); // File (0)
+        bar.handle_key_event(&alt_press(Key::F), SCREEN); // File (0)
         assert_eq!(bar.open_index, Some(0));
 
-        bar.handle_key_event(&press(Key::Right)); // Edit (1)
+        bar.handle_key_event(&press(Key::Right), SCREEN); // Edit (1)
         assert_eq!(bar.open_index, Some(1));
 
-        bar.handle_key_event(&press(Key::Right)); // View (2)
+        bar.handle_key_event(&press(Key::Right), SCREEN); // View (2)
         assert_eq!(bar.open_index, Some(2));
 
-        bar.handle_key_event(&press(Key::Right)); // wrap to File (0)
+        bar.handle_key_event(&press(Key::Right), SCREEN); // wrap to File (0)
         assert_eq!(bar.open_index, Some(0));
 
-        bar.handle_key_event(&press(Key::Left)); // wrap to View (2)
+        bar.handle_key_event(&press(Key::Left), SCREEN); // wrap to View (2)
         assert_eq!(bar.open_index, Some(2));
     }
 
     #[test]
     fn enter_selects_hovered_item() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
-        bar.handle_key_event(&press(Key::Down)); // hover on New
-        bar.handle_key_event(&press(Key::Enter));
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
+        bar.handle_key_event(&press(Key::Down), SCREEN); // hover on New
+        bar.handle_key_event(&press(Key::Enter), SCREEN);
 
         let events = bar.drain_events();
         assert_eq!(events.len(), 1);
@@ -3171,10 +3293,10 @@ mod tests {
     #[test]
     fn escape_closes_menu() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
         assert!(bar.is_open());
 
-        bar.handle_key_event(&press(Key::Escape));
+        bar.handle_key_event(&press(Key::Escape), SCREEN);
         assert!(!bar.is_open());
     }
 
@@ -3183,8 +3305,8 @@ mod tests {
     #[test]
     fn type_letter_jumps_to_item() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
-        bar.handle_key_event(&press(Key::S)); // jump to "Save"
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
+        bar.handle_key_event(&press(Key::S), SCREEN); // jump to "Save"
         assert_eq!(bar.dropdown_hover, Some(3));
     }
 
@@ -3193,11 +3315,11 @@ mod tests {
     #[test]
     fn right_opens_submenu() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::V)); // open View
-        bar.handle_key_event(&press(Key::Down)); // hover Zoom (submenu)
+        bar.handle_key_event(&alt_press(Key::V), SCREEN); // open View
+        bar.handle_key_event(&press(Key::Down), SCREEN); // hover Zoom (submenu)
         assert_eq!(bar.dropdown_hover, Some(0));
 
-        bar.handle_key_event(&press(Key::Right)); // open Zoom submenu
+        bar.handle_key_event(&press(Key::Right), SCREEN); // open Zoom submenu
         assert!(bar.open_submenu.is_some());
     }
 
@@ -3221,7 +3343,7 @@ mod tests {
     fn render_open_produces_dropdown() {
         let palette = Palette::for_mode(false);
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
         let cmds = bar.render(&palette, 800);
         assert!(
             cmds.iter()
@@ -3234,7 +3356,7 @@ mod tests {
     #[test]
     fn set_items_replaces_and_closes() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
         assert!(bar.is_open());
 
         bar.set_items(vec![MenuBarItem {
@@ -3277,11 +3399,11 @@ mod tests {
     #[test]
     fn disabled_action_not_activated_by_keyboard() {
         let mut bar = make_bar();
-        bar.handle_key_event(&alt_press(Key::F));
+        bar.handle_key_event(&alt_press(Key::F), SCREEN);
         // Directly set hover to the disabled "Save As..." (index 4).
         bar.dropdown_hover = Some(4);
 
-        bar.handle_key_event(&press(Key::Enter));
+        bar.handle_key_event(&press(Key::Enter), SCREEN);
         let events = bar.drain_events();
         assert!(events.is_empty());
     }
@@ -3292,11 +3414,11 @@ mod tests {
     fn mouse_move_in_dropdown_updates_hover() {
         let mut bar = make_bar();
         let lbl_x = bar.label_metrics[0].0 + 5.0;
-        bar.handle_mouse_event(&click(lbl_x, BAR_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(lbl_x, BAR_HEIGHT / 2.0), SCREEN);
 
         let dd = bar.dropdown_panel(0);
         let item_y = dd.viewport_top() + ITEM_HEIGHT + ITEM_HEIGHT / 2.0;
-        bar.handle_mouse_event(&mouse_move(dd.x + 40.0, item_y));
+        bar.handle_mouse_event(&mouse_move(dd.x + 40.0, item_y), SCREEN);
         assert_eq!(bar.dropdown_hover, Some(1)); // "Open"
     }
 
@@ -3318,20 +3440,20 @@ mod tests {
         let by_click = {
             let mut bar = make_bar();
             bar.open_menu(2);
-            bar.handle_mouse_event(&click(row_x, row_y));
+            bar.handle_mouse_event(&click(row_x, row_y), SCREEN);
             geometry(&bar)
         };
         let by_arrow = {
             let mut bar = make_bar();
             bar.open_menu(2);
-            bar.handle_key_event(&press(Key::Down)); // hover lands on entry 0
-            bar.handle_key_event(&press(Key::Right));
+            bar.handle_key_event(&press(Key::Down), SCREEN); // hover lands on entry 0
+            bar.handle_key_event(&press(Key::Right), SCREEN);
             geometry(&bar)
         };
         let by_hover = {
             let mut bar = make_bar();
             bar.open_menu(2);
-            bar.handle_mouse_event(&mouse_move(row_x, row_y));
+            bar.handle_mouse_event(&mouse_move(row_x, row_y), SCREEN);
             geometry(&bar)
         };
 
@@ -3372,9 +3494,9 @@ mod tests {
     fn left_from_the_first_menu_opens_the_last() {
         let mut bar = make_bar();
         bar.open_menu(0);
-        bar.handle_key_event(&press(Key::Left));
+        bar.handle_key_event(&press(Key::Left), SCREEN);
         assert_eq!(bar.open_index, Some(2));
-        bar.handle_key_event(&press(Key::Right));
+        bar.handle_key_event(&press(Key::Right), SCREEN);
         assert_eq!(bar.open_index, Some(0), "and Right comes back round");
     }
 }

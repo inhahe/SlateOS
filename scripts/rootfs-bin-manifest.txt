@@ -41,7 +41,46 @@
 # reason: /bin/sh is dash, staged far earlier, and lane A's boot test asserts on
 # it by name. Replacing the system shell from a block at the bottom of the
 # script is not a staging decision.
+#
+# ON awk AND ar, ADDED 2026-09-13 AND THE ONLY TWO NON-COREUTILS NAMES HERE.
+# The image already carries a build chain -- /bin/make, /bin/cmake, /bin/tcc,
+# /bin/bash, /bin/python3 -- and these are the two pieces of it that were
+# missing rather than two utilities that seemed nice to have:
+#
+#   awk   an autoconf `configure` script is mostly sh, sed and awk. sed and the
+#         rest of that set are here via coreutils; awk is a separate crate and
+#         was not, so a configure run would die on the one tool nobody lists.
+#   ar    building a static library is `ar rcs`. A toolchain that can compile
+#         and link but cannot make an archive cannot build most C projects.
+#
+# awk is in fact a coreutils binary, and it was missing here by accident
+# rather than by decision: this list was generated with `ls src/bin/*.rs`,
+# and cargo also accepts the directory form `src/bin/<name>/main.rs`, which
+# that glob cannot see. coreutils has 85 binaries -- 83 files plus `awk` and
+# `sort` as directories -- not the 83 the glob counted. `sort` stays out for
+# the ordinary reason (fastpy owns /bin/sort); `awk` had no reason at all.
+#
+# Deliberately NOT a bulk import of the other 204 built binaries. They fit --
+# 59 MiB of a 96 MiB budget is used -- but "it compiles and there is room" is
+# not a reason for a thing to be on an operating system. vi, curl, dmesg and
+# top are the strongest of the rest and are left out until something needs
+# them; the argument for these two is that the tools beside them are already
+# here and do not work without them.
+
+ar
+awk
 logrotate
+#
+# ALIASES. A line `name = producer` creates `name` as a second name for an
+# already-listed binary. Multi-call programs read argv[0] -- our `ar` is
+# `ranlib` and `strip` when invoked under those names -- and that only works if
+# something creates the name. `scripts/multicall-aliases.py` found 167 such
+# names across the tree that nothing produces; these are the ones whose
+# producer is actually on the image. `ranlib` in particular is not optional:
+# an autoconf build calls it straight after `ar`.
+ranlib = ar
+strip = ar
+killall = kill
 basename
 bc
 cal

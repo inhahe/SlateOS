@@ -76,7 +76,6 @@
     )
 )]
 
-pub mod a11y;
 pub mod about;
 pub mod animations;
 pub mod backup_settings;
@@ -189,11 +188,14 @@ use tzrules::Tz;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Geometry
 // ============================================================================
+
+/// The file the pinned applications live in.
+const TASKBAR_CONFIG_NAME: &str = "taskbar";
 
 /// An axis-aligned rectangle in screen pixels.
 ///
@@ -473,6 +475,37 @@ pub struct WindowId(pub u64);
 /// compositor already answers — and was, until the fields were deleted. What
 /// the shell draws about a window is a taskbar button and a switcher row,
 /// neither of which is anywhere near the window itself.
+/// What a pin menu was opened on.
+///
+/// The two places pinning can be reached from name the same program in
+/// different ways, and neither can be converted to the other: the start menu
+/// knows a row of its own list, the taskbar knows a slot of the pinned list,
+/// and the pinned list is a filtered, reordered thing. Carrying *which kind*
+/// is what stops a row index being read as a pin index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PinTarget {
+    /// A row of the start menu, which may or may not already be pinned.
+    StartMenuRow(usize),
+    /// An application already pinned, by index into the pinned list.
+    Pinned(usize),
+}
+
+/// What one taskbar button stands for.
+///
+/// The taskbar used to show one button per window and nothing else, so an
+/// index into it was an index into [`taskbar_windows`](DesktopShell::taskbar_windows).
+/// Pinned applications share the same run of buttons, so the index is now into
+/// *this* -- and it is a named enum rather than a bare `usize` for the reason
+/// `Hit` is: a number that means "the third button" is read as "the third
+/// window" by whoever forgets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskbarSlot {
+    /// An open window.
+    Window(WindowId),
+    /// An application pinned to the taskbar, by index into the pinned list.
+    Pinned(usize),
+}
+
 #[derive(Clone, Debug)]
 pub struct ManagedWindow {
     pub id: WindowId,
@@ -602,6 +635,12 @@ pub enum Hit {
     /// something — "the button drawn third belongs to the third window" rather
     /// than "the third button is the third button".
     TaskbarButton(WindowId),
+    /// A pinned application's button, by index into the pinned list.
+    ///
+    /// An index and not an executable path, because the path is the pinned
+    /// list's business and a `Hit` that carried one would be a second place
+    /// holding it.
+    TaskbarPinned(usize),
     /// The taskbar panel, but not one of its controls.
     TaskbarPanel,
     /// The tray clock, which opens the calendar popup.
@@ -1051,6 +1090,17 @@ pub struct DesktopShell {
     /// tray whose icons move when an unrelated program registers one is a tray
     /// where the user's muscle memory is wrong.
     tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// The tray icon the pointer is resting on, and the tooltip naming it.
+    ///
+    /// A tray icon is a single glyph chosen by another program, and the
+    /// `tooltip` it registers alongside is the only words anywhere saying what
+    /// that glyph is. Until this existed the shell received that string, held
+    /// it, and never put it on screen -- so a user faced a row of symbols with
+    /// no way to learn what any of them were.
+    ///
+    /// Keyed, so that sliding along the row replaces the tooltip rather than
+    /// leaving the first icon's name under the fourth icon's glyph.
+    tray_tooltip: Option<(tray_dnd::TrayIconKey, guitk::menu::Tooltip)>,
     /// The popup listing icons the bar had no room for, and which icons
     /// those were when it opened.
     ///
@@ -1059,6 +1109,20 @@ pub struct DesktopShell {
     /// exit, and re-deriving the list would hand row 3 to whoever moved up
     /// into position 3.
     tray_overflow_menu: Option<(guitk::menu::ContextMenu, Vec<tray_dnd::TrayIconKey>)>,
+    /// The pin menu a right-click on a start-menu row opens, and which row it
+    /// was opened on.
+    ///
+    /// The row is remembered rather than the executable path, for the reason
+    /// [`Hit::TaskbarPinned`] carries an index: the list is the authority, and
+    /// a copy of a path here would be a second one to keep in step.
+    pin_menu: Option<(guitk::menu::ContextMenu, PinTarget)>,
+    /// A pinned button being dragged along the bar.
+    ///
+    /// Keyed on the executable path rather than the slot, for the reason the
+    /// tray's drag is keyed on an icon's name: the row rearranges itself under
+    /// the pointer as the drag proceeds, so an index taken at press time
+    /// stops meaning the thing that was pressed.
+    pin_drag: Option<tray_dnd::DragSource<String>>,
     /// A press that landed on a tray icon and has not been released.
     ///
     /// Held from press to release because until the release the shell does
@@ -1100,6 +1164,9 @@ pub struct DesktopShell {
     /// and corner radius all live here, and each is read by a different part
     /// of the shell.
     pub appearance: AppearanceSettings,
+    /// Set when the shell itself has written `appearance.yaml` and the
+    /// compositor has not been told.
+    appearance_dirty: bool,
     /// The menu that opens on a right-click over bare desktop.
     ///
     /// Built once and reused rather than rebuilt per click: its item list is
@@ -1139,6 +1206,35 @@ pub struct DesktopShell {
     /// between "read once at startup" and "start watching" for a save to fall
     /// into. See [`poll_appearance`](Self::poll_appearance).
     appearance_watch: config::Watcher,
+    /// `notifications.yaml`, which says which programs may interrupt.
+    ///
+    /// A watcher rather than a one-off read, for the reason the appearance
+    /// one is: the Settings application writes this file from another
+    /// process, so "has it changed" is a question the shell has to be able to
+    /// ask again, not something it learns once at login.
+    notif_watch: config::Watcher,
+    /// The applications pinned to the taskbar.
+    ///
+    /// `taskbar::Taskbar` is used for its *model* only -- `add_pinned`,
+    /// `remove_pinned`, `pinned_apps` -- and never for its renderer, which is
+    /// design-decisions 849. That module had no caller at all until this; see
+    /// `TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
+    taskbar: taskbar::TaskbarState,
+    /// When an automatic schedule may take effect again, if the user has just
+    /// switched it off from inside one.
+    ///
+    /// A wall-clock instant rather than a countdown: the desktop parks for
+    /// hours at a time, and a countdown would have to be decremented by
+    /// something, which is the per-minute wake-up this whole path exists to
+    /// avoid. See `snooze_schedule_if_it_would_resume`.
+    schedule_snooze: Option<u64>,
+    /// The rules with the document they came from.
+    ///
+    /// Needed because a save splices into the document that was read, so that
+    /// a user's comments and any key a newer desktop wrote survive being
+    /// edited from here. `focus_assist::app_overrides` is the copy the
+    /// decision is made against; this is the copy that can be written back.
+    notif: notifsettings::NotifFile,
     /// Theme configuration, derived from [`appearance`](Self::appearance).
     ///
     /// Never assign to this directly: it would disagree with `appearance` at
@@ -1550,17 +1646,25 @@ impl DesktopShell {
             tray_arrangement: tray_dnd::TrayIconArrangement::new(),
             tray_drag: None,
             tray_overflow_menu: None,
+            pin_menu: None,
+            pin_drag: None,
+            tray_tooltip: None,
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
             overview_config: overview::OverviewConfig::default(),
             appearance: AppearanceSettings::default(),
+            appearance_dirty: false,
             desktop_menu: ContextMenu::new(Self::desktop_menu_items()),
             widgets: DesktopWidgetManager::new(),
             menu_widget: None,
             widget_drag: None,
             widgets_dirty: false,
             appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
+            notif_watch: config::Watcher::new(notifsettings::CONFIG_NAME),
+            taskbar: taskbar::TaskbarState::new(taskbar::TaskbarConfig::default()),
+            schedule_snooze: None,
+            notif: notifsettings::NotifFile::new(),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
@@ -1679,6 +1783,204 @@ impl DesktopShell {
             None => self.appearance.clone(),
         };
         self.set_appearance(settings);
+    }
+
+    /// Read the user's saved notification rules and adopt them.
+    ///
+    /// The rules go to [`focus_assist`](focus_assist::FocusAssistManager),
+    /// which is what already reads them: `should_show_notification` asks an
+    /// app's importance on every notification the shell is handed. Until this
+    /// existed that list was only ever empty, so every program got the
+    /// default and a rule was something no user could set.
+    pub fn load_notification_rules(&mut self) {
+        if let Some(doc) = self.notif_watch.poll() {
+            self.notif = notifsettings::NotifFile::from_document(doc);
+            self.focus.app_overrides = self.notif.settings.apps.clone();
+            self.focus.set_quiet_hours(&self.notif.settings.quiet_hours);
+            self.notifications
+                .adopt_app_rules(&self.notif.settings.apps);
+        }
+    }
+
+    /// Re-read the rules if the file changed, and say whether they differ.
+    ///
+    /// Answers on the *settings*, not on the file, for the reason
+    /// [`poll_appearance`](Self::poll_appearance) does: a comment added to the
+    /// file, or a key written by a newer desktop, changes the document and
+    /// changes nothing a caller should act on.
+    ///
+    /// Like `poll_appearance` it does not merge. The file is the authority,
+    /// and the shell has no notification-rules editor of its own whose unsaved
+    /// work could be lost — the Settings application owns that page.
+    pub fn poll_notification_rules(&mut self) -> bool {
+        let Some(doc) = self.notif_watch.poll() else {
+            return false;
+        };
+        let file = notifsettings::NotifFile::from_document(doc);
+        let apps_changed = file.settings.apps != self.focus.app_overrides;
+        // Compared against the settings the shell holds rather than against
+        // the rule built out of them: `set_quiet_hours` drops a schedule that
+        // runs on no day, so a rule list that is equal either way would report
+        // "unchanged" for a real edit the user made.
+        let quiet_changed = file.settings.quiet_hours != self.notif.settings.quiet_hours;
+        if apps_changed {
+            self.focus.app_overrides = file.settings.apps.clone();
+            // The pane draws a card per program; without this a rule changed
+            // in the Settings application would show as its old value here,
+            // and a toggle made against that stale card would write it back.
+            self.notifications.adopt_app_rules(&file.settings.apps);
+        }
+        if quiet_changed {
+            self.focus.set_quiet_hours(&file.settings.quiet_hours);
+        }
+        let changed = apps_changed || quiet_changed;
+        // Adopted either way: the document is what a later save splices into,
+        // so keeping the old one would write back a file stripped of whatever
+        // comment or unknown key this read just brought in.
+        self.notif = file;
+        changed
+    }
+
+    /// The local clock reading the schedules are compared against.
+    ///
+    /// Takes the instant rather than reading the clock itself, so that a test
+    /// can ask what the desktop does at half past two on a Saturday morning
+    /// without waiting until then.
+    #[must_use]
+    pub fn clock_reading_at(&self, utc_secs: u64) -> (u8, u8, u8) {
+        calendar::local_clock_reading(utc_secs, &self.local_zone())
+    }
+
+    /// Put the user's quiet hours into force for this instant.
+    ///
+    /// Answers whether the effective focus mode changed, which is what a
+    /// caller repaints on: the taskbar shows whether focus assist is on.
+    pub fn evaluate_schedules(&mut self, utc_secs: u64) -> bool {
+        let before = self.focus.effective_mode();
+        // A snooze ends at the schedule's own next boundary, which is the
+        // instant the loop is already awake for -- see `next_schedule_change`.
+        if self.schedule_snooze.is_some_and(|until| utc_secs >= until) {
+            self.schedule_snooze = None;
+        }
+        self.focus.auto_suppressed = self.schedule_snooze.is_some();
+        // With no rules at all the answer cannot depend on the time, so the
+        // zone lookup and the civil-date arithmetic below are skipped -- this
+        // runs on every tick and quiet hours ship switched off, so the
+        // no-rules case is the one that has to be free. The call itself still
+        // happens: a rule removed a moment ago may have left focus assist on,
+        // and returning early without asking would strand it there.
+        let (hour, minute, weekday) = if self.focus.auto_rules.is_empty() {
+            (0, 0, 0)
+        } else {
+            self.clock_reading_at(utc_secs)
+        };
+        self.focus.evaluate_auto_rules(hour, minute, weekday);
+        self.focus.effective_mode() != before
+    }
+
+    /// How long until quiet hours next start or stop, if they ever do.
+    ///
+    /// **The shell sleeps exactly this long rather than watching the clock.**
+    /// `design-decisions.md` 812 has an idle desktop registering no wake-up at
+    /// all, which rules out checking the time every minute and finding that
+    /// nothing has changed 1 439 times a day. `None` -- the common answer,
+    /// since quiet hours ship switched off -- means arm no timer.
+    ///
+    /// The seconds already spent in the current minute are taken off, because
+    /// [`minutes_until_change`](notifsettings::QuietHours::minutes_until_change)
+    /// counts whole minutes from the *start* of this one. Without that the
+    /// timer lands up to 59 seconds late and the desktop is briefly noisy
+    /// inside the hours the user asked to be left alone -- a lateness nobody
+    /// would ever catch, because the only symptom is one notification that
+    /// should have been held.
+    #[must_use]
+    pub fn next_schedule_change(&self, utc_secs: u64) -> Option<Duration> {
+        let (hour, minute, weekday) = self.clock_reading_at(utc_secs);
+        let quiet = &self.notif.settings.quiet_hours;
+        let minutes = quiet.minutes_until_change(hour, minute, weekday)?;
+        let into_minute = utc_secs % 60;
+        // Never zero: a timer of no length would fire before the boundary it
+        // is waiting for and re-arm for zero again, which is a poll as fast as
+        // the loop can run.
+        Some(Duration::from_secs(
+            u64::from(minutes)
+                .saturating_mul(60)
+                .saturating_sub(into_minute)
+                .max(1),
+        ))
+    }
+
+    /// Apply one per-app change the user made in the notification pane.
+    ///
+    /// Writes `notifications.yaml`, which is safe here and was not safe on the
+    /// path that *receives* a notification -- this runs because a person
+    /// clicked a switch. See
+    /// `TD-C-THE-NOTIFICATIONS-PAGE-HAS-NO-PROGRAMS-TO-LIST` for the version
+    /// that ran on the wrong path and what it cost.
+    ///
+    /// A failed write is reported and the change still applies to this
+    /// session: refusing a toggle because a disk is full would leave someone
+    /// unable to silence a program that is interrupting them, which is the one
+    /// moment they can least tolerate it.
+    fn apply_app_notification_setting(
+        &mut self,
+        app: &str,
+        setting: notif_pane::AppSettingKind,
+        value: notif_pane::SettingValue,
+    ) {
+        let mut rule = self
+            .notif
+            .settings
+            .apps
+            .iter()
+            .find(|r| r.app_name == app)
+            .cloned()
+            .unwrap_or_else(|| notifsettings::AppRule::new(app));
+        match (setting, value) {
+            // `Enabled` is the pane's word and `Silent` is the file's. One
+            // switch, two vocabularies, and the translation belongs here:
+            // `notifsettings` has no opinion about a pane and the pane has
+            // none about a focus mode.
+            //
+            // Switching back on restores `Normal` rather than whatever was
+            // there before, because the pane's switch carries no memory of it
+            // and inventing one here would be a third place storing a value.
+            (notif_pane::AppSettingKind::Enabled, notif_pane::SettingValue::Bool(on)) => {
+                rule.importance = if on {
+                    notifsettings::Importance::Normal
+                } else {
+                    notifsettings::Importance::Silent
+                };
+            }
+            (notif_pane::AppSettingKind::Sound, notif_pane::SettingValue::Bool(on)) => {
+                rule.sound = on;
+            }
+            (notif_pane::AppSettingKind::Banner, notif_pane::SettingValue::Bool(on)) => {
+                rule.banner = on;
+            }
+            // Not applied, and not an oversight. The pane's `Priority`
+            // carries `notif_pane::NotifPriority` -- Low/Normal/High/Urgent,
+            // the scale a *message* is drawn with -- and a rule's importance
+            // is Silent/Normal/Priority/Critical, the scale a *program* is
+            // trusted with. There is no honest mapping between them: "this
+            // notification is Urgent" and "this program may interrupt a focus
+            // mode" are different claims. The pane does not emit this today;
+            // if it grows a control that does, the control should speak
+            // `Importance` and this arm should go, rather than a conversion
+            // being invented here.
+            (notif_pane::AppSettingKind::Priority, _) => return,
+            // A kind paired with a value of the wrong shape. Ignored rather
+            // than guessed at: there is no reading of "the sound switch was
+            // set to Critical", and acting on half of it would write a rule
+            // nobody asked for.
+            _ => return,
+        }
+        self.notif.settings.set_rule(rule.clone());
+        self.focus.set_app_override(rule.clone());
+        self.notifications.adopt_app_rules(&[rule]);
+        if let Err(err) = self.notif.save() {
+            eprintln!("desktop: could not save notifications.yaml: {err}");
+        }
     }
 
     /// Read the user's saved *input* settings and adopt the parts the shell
@@ -1856,7 +2158,7 @@ impl DesktopShell {
             - self.tray_width()
             - self.scale(TRAY_RESERVE_GAP))
         .max(0.0);
-        let count = self.taskbar_windows().len().max(1) as f32;
+        let count = self.taskbar_slots().len().max(1) as f32;
         self.scale(TASKBAR_BUTTON_MAX_WIDTH).min(available / count)
     }
 
@@ -1871,6 +2173,143 @@ impl DesktopShell {
             + self.scale(TASKBAR_BUTTON_START_GAP)
             + index as f32 * (w + self.scale(TASKBAR_BUTTON_GAP));
         Rect::new(x, bar.y + inset, w, bar.h - inset * 2.0)
+    }
+
+    /// Every button the taskbar shows, pinned applications first.
+    ///
+    /// Pinned first and always shown, rather than merged with a window of the
+    /// same program. Merging needs a name both ends agree on, and there is
+    /// none: a window carries the `app_id` its program declares, while a
+    /// pinned entry carries the executable path the launcher knows it by, and
+    /// nothing in the tree maps one to the other. Showing both is honest --
+    /// the pinned button is a *launcher*, and it keeps meaning that while the
+    /// program runs -- and it is what a quick-launch strip has always done.
+    /// Merging is a refinement for the day an application identity exists.
+    #[must_use]
+    pub fn taskbar_slots(&self) -> Vec<TaskbarSlot> {
+        let mut slots: Vec<TaskbarSlot> = (0..self.taskbar.pinned_apps().len())
+            .map(TaskbarSlot::Pinned)
+            .collect();
+        slots.extend(
+            self.taskbar_windows()
+                .iter()
+                .map(|window| TaskbarSlot::Window(window.id)),
+        );
+        slots
+    }
+
+    /// The applications pinned to the taskbar, in the order they are shown.
+    #[must_use]
+    pub fn pinned_apps(&self) -> &[taskbar::PinnedApp] {
+        self.taskbar.pinned_apps()
+    }
+
+    /// Whether `exec` is already pinned.
+    #[must_use]
+    pub fn is_pinned(&self, exec: &str) -> bool {
+        self.taskbar
+            .pinned_apps()
+            .iter()
+            .any(|a| a.exec_path == exec)
+    }
+
+    /// Pin an application to the taskbar, and remember it.
+    ///
+    /// Keyed on the executable path, which is what the launcher knows an
+    /// application by and what a click has to hand to
+    /// [`ShellAction::Launch`]. `app_id` is set to the same string so that
+    /// `Taskbar::add_pinned`'s duplicate check -- which is on `app_id` -- means
+    /// "already pinned" rather than "has the same empty name".
+    pub fn pin_app(&mut self, exec: &str, name: &str) {
+        if exec.is_empty() || self.is_pinned(exec) {
+            return;
+        }
+        let position = u32::try_from(self.taskbar.pinned_apps().len()).unwrap_or(u32::MAX);
+        self.taskbar.add_pinned(taskbar::PinnedApp {
+            app_id: exec.to_string(),
+            display_name: name.to_string(),
+            icon_type: taskbar::IconType::Generic,
+            exec_path: exec.to_string(),
+            position,
+        });
+        self.save_pinned();
+    }
+
+    /// Unpin an application, and forget it.
+    pub fn unpin_app(&mut self, exec: &str) {
+        if !self.is_pinned(exec) {
+            return;
+        }
+        self.taskbar.remove_pinned(exec);
+        self.save_pinned();
+    }
+
+    /// Read the pinned applications back from `taskbar.yaml`.
+    ///
+    /// Names are *not* stored: a pin is an executable path, and the name shown
+    /// on it comes from the launcher's entry for that path at the moment it is
+    /// drawn. Storing the name too would be a second copy of it, stale the
+    /// first time an application is renamed.
+    pub fn load_pinned(&mut self) {
+        let doc = config::load(TASKBAR_CONFIG_NAME);
+        let Some(execs) = doc.get_seq(&["pinned"]) else {
+            return;
+        };
+        for exec in execs {
+            let name = self.app_name_for(&exec);
+            self.pin_app_without_saving(&exec, &name);
+        }
+    }
+
+    /// The launcher's name for an executable, or its file name.
+    ///
+    /// The fallback is the file name rather than the whole path: a button is
+    /// narrow, and a pinned program the launcher has never heard of is still
+    /// better labelled "editor" than "/usr/local/bin/editor".
+    fn app_name_for(&self, exec: &str) -> String {
+        if let Some(entry) = self.apps.iter().find(|a| a.executable_path == exec) {
+            return entry.name.clone();
+        }
+        Path::new(exec)
+            .file_name()
+            .map_or_else(|| exec.to_string(), |n| n.to_string_lossy().into_owned())
+    }
+
+    /// `pin_app` without the write, for the load path.
+    ///
+    /// Loading is not a change the user made, and writing the file back while
+    /// reading it is how a partial read becomes a truncated file.
+    fn pin_app_without_saving(&mut self, exec: &str, name: &str) {
+        if exec.is_empty() || self.is_pinned(exec) {
+            return;
+        }
+        let position = u32::try_from(self.taskbar.pinned_apps().len()).unwrap_or(u32::MAX);
+        self.taskbar.add_pinned(taskbar::PinnedApp {
+            app_id: exec.to_string(),
+            display_name: name.to_string(),
+            icon_type: taskbar::IconType::Generic,
+            exec_path: exec.to_string(),
+            position,
+        });
+    }
+
+    /// Write the pinned applications to `taskbar.yaml`.
+    ///
+    /// A failed write is reported and the pin still applies to this session:
+    /// refusing to pin because a disk is full helps nobody, and the user can
+    /// see whether the button is there.
+    fn save_pinned(&mut self) {
+        let mut doc = config::load(TASKBAR_CONFIG_NAME);
+        let execs: Vec<&str> = self
+            .taskbar
+            .pinned_apps()
+            .iter()
+            .map(|a| a.exec_path.as_str())
+            .collect();
+        doc.set_seq(&["pinned"], &execs);
+        if let Err(err) = config::store(TASKBAR_CONFIG_NAME, &doc) {
+            eprintln!("desktop: could not save taskbar.yaml: {err}");
+        }
     }
 
     /// The start menu panel, anchored to the start button's corner.
@@ -2208,9 +2647,12 @@ impl DesktopShell {
             // The slot is resolved to a window *here*, while the list that
             // produced the rectangle is still in hand — see
             // [`Hit::TaskbarButton`].
-            for (index, window) in self.taskbar_windows().iter().enumerate() {
+            for (index, slot) in self.taskbar_slots().iter().enumerate() {
                 if self.taskbar_button_rect(index).contains(x, y) {
-                    return Hit::TaskbarButton(window.id);
+                    return match *slot {
+                        TaskbarSlot::Window(id) => Hit::TaskbarButton(id),
+                        TaskbarSlot::Pinned(pin) => Hit::TaskbarPinned(pin),
+                    };
                 }
             }
             return Hit::TaskbarPanel;
@@ -2304,6 +2746,21 @@ impl DesktopShell {
                 _ => return ShellAction::Consumed,
             }
         }
+        // The pin menu, for the same reason as the overflow list below it: it
+        // is drawn over everything, so a press either landed on it or
+        // dismissed it, and nothing underneath should see the same press.
+        if self.pin_menu.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some((menu, _)) = self.pin_menu.as_mut() {
+                        menu.handle_mouse_move(event.x, event.y);
+                    }
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => return self.click_pin_menu(event.x, event.y),
+                _ => return ShellAction::Consumed,
+            }
+        }
         // The overflow list, ahead of everything below it for the same reason
         // the desktop menu is: it is drawn over the bar, so a press either
         // landed on it or dismissed it.
@@ -2325,6 +2782,19 @@ impl DesktopShell {
         // does not yet know what it is -- a click belongs to the program that
         // owns the icon, a drag belongs to the shell, and only the release
         // can tell them apart.
+        // A pinned button owns the pointer until the button comes up, the
+        // way a tray icon does and for the same reason: the press does not yet
+        // know whether it is a click or a drag.
+        if self.pin_drag.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.drag_pinned_to(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => return self.finish_pinned_press(),
+                _ => {}
+            }
+        }
         if self.tray_drag.is_some() {
             match event.kind {
                 MouseEventKind::Move => {
@@ -2483,9 +2953,67 @@ impl DesktopShell {
                     self.hover_zone_overlay(event.x, event.y);
                     return ShellAction::Consumed;
                 }
+                // Observed, not consumed: the pointer is only passing over the
+                // bar on its way somewhere, and a client that stopped
+                // receiving motion because the shell was showing a tooltip
+                // would lose its own hover states.
+                self.hover_tray(event.x, event.y);
                 ShellAction::Pass
             }
         }
+    }
+
+    /// Note that the pointer is over a tray icon, or is no longer.
+    ///
+    /// Resolved through [`hit_test`](Self::hit_test) rather than by walking
+    /// `tray_icon_rects` again, so that the icon a tooltip names and the icon
+    /// a click reaches are decided by one piece of geometry. Two hit tests
+    /// over the same row would be two chances to disagree, and the disagreement
+    /// would read as the wrong name on the right icon.
+    fn hover_tray(&mut self, x: f32, y: f32) {
+        let over = match self.hit_test(x, y) {
+            Hit::TrayIcon(index) => self.ordered_tray_icons().get(index).and_then(|icon| {
+                // A program that registered no tooltip has given the shell
+                // nothing to say. An empty bubble is worse than none.
+                (!icon.tooltip.is_empty())
+                    .then(|| (tray_dnd::TrayIconKey::of(icon), icon.tooltip.clone()))
+            }),
+            _ => None,
+        };
+        match over {
+            None => self.tray_tooltip = None,
+            Some((key, text)) => {
+                // Already resting on this one: leave the hover running, or the
+                // delay would restart on every motion event and the tooltip
+                // would never appear.
+                if self.tray_tooltip.as_ref().is_some_and(|(at, _)| *at == key) {
+                    return;
+                }
+                let mut tip = guitk::menu::Tooltip::new(&text);
+                tip.start_hover(x, y, self.osd_clock_ms, self.viewport());
+                self.tray_tooltip = Some((key, tip));
+            }
+        }
+    }
+
+    /// The tray tooltip's draw commands, empty unless one is showing.
+    ///
+    /// Drawn on the overlay surface beside the on-screen display, which is
+    /// full-screen, above the menus and `input_transparent`. That last is why
+    /// it belongs there rather than with the popups: `design-decisions.md`
+    /// 566 put the overlay surface beyond the reach of the mouse because it is
+    /// there to be read, and a tooltip is the same kind of thing -- a press
+    /// aimed at the icon under it must reach the icon.
+    #[must_use]
+    pub fn render_tray_tooltip(&self) -> Option<RenderTree> {
+        let (_, tip) = self.tray_tooltip.as_ref()?;
+        if !tip.is_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands
+            .extend(tip.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
     }
 
     /// Whether a click here is part of the start menu rather than outside it.
@@ -2588,6 +3116,31 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
+        // A right-click on a start-menu row offers to pin it. This is the one
+        // place pinning can be offered from: pinning needs an executable path,
+        // a window carries only the `app_id` its program declares, and nothing
+        // in the tree maps one to the other -- so the taskbar itself cannot
+        // say "pin this", however much that is where the button ends up.
+        if button == MouseButton::Right {
+            match hit {
+                Hit::StartMenuEntry(index) => {
+                    self.open_pin_menu(PinTarget::StartMenuRow(index), x, y);
+                    return ShellAction::Consumed;
+                }
+                // And off it again from the button itself, which is where a
+                // user looks for it. Only *unpinning* is offered here: a
+                // taskbar button for a window cannot be pinned, because
+                // pinning needs an executable path and a window does not
+                // carry one. See
+                // `TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS`.
+                Hit::TaskbarPinned(index) => {
+                    self.open_pin_menu(PinTarget::Pinned(index), x, y);
+                    return ShellAction::Consumed;
+                }
+                _ => {}
+            }
+        }
+
         // Only the primary button acts. The rest still cannot fall through to a
         // client when they land on the shell's own surfaces.
         if button != MouseButton::Left {
@@ -2608,6 +3161,18 @@ impl DesktopShell {
             // UTF-8, so nothing is lost turning it back into a path here. It is
             // the *browsed* paths — see `RunDialog` — that cannot survive a
             // round trip through `String`, and those never pass through here.
+            Hit::TaskbarPinned(index) => {
+                // The press only takes hold; the *release* decides whether it
+                // was a click or a drag. Launching here would start the
+                // program every time the user began to rearrange the bar,
+                // which is the same reason the tray waits for the release.
+                if let Some(app) = self.taskbar.pinned_apps().get(index) {
+                    let mut source = tray_dnd::DragSource::default();
+                    source.on_press(app.exec_path.clone(), x, y);
+                    self.pin_drag = Some(source);
+                }
+                ShellAction::Consumed
+            }
             Hit::StartMenuEntry(index) => {
                 let path = self
                     .start_menu_entries()
@@ -3478,6 +4043,30 @@ impl DesktopShell {
             return outcome;
         }
 
+        // The pin menu, on the same terms as the two below it: a popup that
+        // owns the keyboard while it is up. Without this it could be opened
+        // and then only used with the mouse, and Escape would do whatever the
+        // global table says rather than closing the thing in front of you.
+        if self.pin_menu.is_some() {
+            let chosen = self.pin_menu.as_mut().map(|(menu, _)| menu.handle_key(key));
+            match chosen {
+                Some(Some(MenuAction::Selected(id))) => {
+                    let target = self.pin_menu.as_ref().map(|(_, target)| *target);
+                    self.pin_menu = None;
+                    if id == Self::MENU_PIN_TOGGLE
+                        && let Some(target) = target
+                    {
+                        self.toggle_pin(target);
+                    }
+                }
+                Some(Some(MenuAction::Closed)) => self.pin_menu = None,
+                // It moved its highlight, or ignored the key. Either way it
+                // stays open and the press goes no further.
+                _ => {}
+            }
+            return HotkeyOutcome::consumed();
+        }
+
         // The overflow list, on the same terms as the desktop menu below and
         // ahead of it only because the two cannot both be open. Without this
         // the list could be opened and then only used with the mouse, which
@@ -3563,6 +4152,16 @@ impl DesktopShell {
             if self.bound_action(key) == Some(HotkeyAction::ToggleNotifications) {
                 return self.run_desktop_action(&HotkeyAction::ToggleNotifications);
             }
+            // Pull-on-use, like `sync_osd_screen` and `sync_snap_area` and for
+            // the same reason: `screen_height` is a public field anything may
+            // assign, so a push-on-resize scheme is one forgotten call site
+            // away from being wrong. The pane learns the height from every
+            // *mouse* event by itself; the keyboard path carries no geometry,
+            // and without this the arrow keys clamped against the pane's
+            // pre-first-render default of 1080 -- so on a shorter display the
+            // last notifications could not be reached by keyboard at all, and
+            // on a taller one the list scrolled past its own end.
+            self.sync_notification_screen();
             // Result deliberately discarded: consumed even when the pane had no
             // meaning for the key, because a press the overlay did not use is
             // not therefore the desktop's.
@@ -3686,6 +4285,44 @@ impl DesktopShell {
     /// model and the indicator will show it, so a read-only configuration
     /// directory costs the user persistence, not the feature. Refusing the
     /// keystroke because a file could not be written would be worse.
+    /// Flip night light, and leave the file and the compositor agreeing.
+    ///
+    /// Load, modify, save -- the shape
+    /// [`persist_input_layout`](Self::persist_input_layout) uses, and for the
+    /// same reason: the file is the authority and this process holds no
+    /// unsaved edits of it, so re-reading first means a setting the Settings
+    /// application changed a moment ago is not overwritten by a stale copy.
+    ///
+    /// Writing a settings file from here is safe because a person clicked a
+    /// switch. The rule and the counter-example are in
+    /// `TD-C-THE-NOTIFICATIONS-PAGE-HAS-NO-PROGRAMS-TO-LIST`.
+    ///
+    /// A failed write is reported and the session still gets the new state:
+    /// refusing to warm the screen because a disk is full helps nobody, and
+    /// the switch can be flipped again.
+    fn toggle_night_light(&mut self) {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.night_light = !file.settings.night_light;
+        self.appearance.night_light = file.settings.night_light;
+        if let Err(err) = file.save() {
+            eprintln!("desktop: could not save appearance.yaml: {err}");
+        }
+        // The compositor warms the frame, and it reads the file rather than
+        // being handed a value. Saying "go and read it again" is the session's
+        // job because only it holds the connection.
+        self.appearance_dirty = true;
+    }
+
+    /// Whether the shell has rewritten `appearance.yaml` since this was last
+    /// asked, clearing the flag.
+    ///
+    /// The session calls this after handling events and, if it is true, tells
+    /// the compositor to re-read -- which is what makes a quick toggle warm
+    /// the screen now rather than at the next login.
+    pub fn take_appearance_change(&mut self) -> bool {
+        core::mem::take(&mut self.appearance_dirty)
+    }
+
     fn persist_input_layout(&mut self) {
         let Some(id) = self.input_methods.active_layout_id() else {
             return;
@@ -4216,13 +4853,33 @@ impl DesktopShell {
         // Window buttons. Rounded like the windows they stand for — the corner
         // style is a property of the desktop, not of one surface in it.
         let radii = self.corner_radii();
-        for (index, window) in self.taskbar_windows().iter().enumerate() {
+        // Over *slots*, not windows: a pinned application has a button whether
+        // or not it is running, and it stands to the left of the windows.
+        let windows = self.taskbar_windows();
+        for (index, slot) in self.taskbar_slots().iter().enumerate() {
             let button = self.taskbar_button_rect(index);
 
-            let bg = if Some(window.id) == self.focused_window {
-                self.theme.taskbar_active_bg
-            } else {
-                self.theme.taskbar_bg
+            let (label, bg) = match *slot {
+                TaskbarSlot::Pinned(pin) => {
+                    let Some(app) = self.taskbar.pinned_apps().get(pin) else {
+                        continue;
+                    };
+                    // Never the focused colour: a pinned button is a way to
+                    // *start* the program, so drawing it as though it were the
+                    // window in front would say something untrue about it.
+                    (app.display_name.as_str(), self.theme.taskbar_bg)
+                }
+                TaskbarSlot::Window(id) => {
+                    let Some(window) = windows.iter().find(|w| w.id == id) else {
+                        continue;
+                    };
+                    let bg = if Some(id) == self.focused_window {
+                        self.theme.taskbar_active_bg
+                    } else {
+                        self.theme.taskbar_bg
+                    };
+                    (window.title.as_str(), bg)
+                }
             };
 
             fill_round(&mut tree, button, bg, radii);
@@ -4248,7 +4905,7 @@ impl DesktopShell {
                 button.x + inset,
                 button.y + inset,
                 (button.w - inset - inset).max(0.0),
-                &window.title,
+                label,
                 self.theme.taskbar_fg,
                 title_size,
             );
@@ -4895,8 +5552,118 @@ impl DesktopShell {
             return;
         };
         let mut menu = guitk::menu::ContextMenu::new(items);
-        menu.show(rect.x, rect.y);
+        // The real screen, not the toolkit's assumed one: this menu opens
+        // from the taskbar at the bottom edge, which is exactly where a wrong
+        // viewport puts the rows off the display.
+        menu.show(rect.x, rect.y, self.viewport());
         self.tray_overflow_menu = Some((menu, keys));
+    }
+
+    /// Offer to pin or unpin the start-menu row at `index`.
+    ///
+    /// One item, and its label is the *action*, not the state: "Pin to
+    /// taskbar" when it is not pinned and "Unpin from taskbar" when it is. A
+    /// menu that said "Pinned" with a tick would be a second way of saying
+    /// what the taskbar already shows, and would leave the user to work out
+    /// that clicking it reverses the thing.
+    fn open_pin_menu(&mut self, target: PinTarget, x: f32, y: f32) {
+        let Some(exec) = self.exec_of(target) else {
+            return;
+        };
+        let label = if self.is_pinned(&exec) {
+            "Unpin from taskbar"
+        } else {
+            "Pin to taskbar"
+        };
+        let items = vec![guitk::menu::MenuItem::Action {
+            id: Self::MENU_PIN_TOGGLE,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        }];
+        let mut menu = guitk::menu::ContextMenu::new(items);
+        // The real screen, not the toolkit's assumed one -- the same reason
+        // the overflow list passes it: this opens from wherever the start menu
+        // is, which is near the bottom edge.
+        menu.show(x, y, self.viewport());
+        self.pin_menu = Some((menu, target));
+    }
+
+    /// A press while the pin menu is open.
+    fn click_pin_menu(&mut self, x: f32, y: f32) -> ShellAction {
+        let Some((menu, target)) = self.pin_menu.as_mut() else {
+            return ShellAction::Consumed;
+        };
+        let target = *target;
+        // A press that named no row -- on the panel's padding, or outside it.
+        // Either way the menu closes, as the desktop menu does.
+        let Some(id) = menu.handle_click(x, y) else {
+            self.pin_menu = None;
+            return ShellAction::Consumed;
+        };
+        self.pin_menu = None;
+        if id == Self::MENU_PIN_TOGGLE {
+            self.toggle_pin(target);
+        }
+        ShellAction::Consumed
+    }
+
+    /// The executable a pin menu target names, if it still names one.
+    ///
+    /// Cloned out of the borrow in both arms: `start_menu_entries` builds its
+    /// list on demand, so an entry does not outlive the call that produced it,
+    /// and the pinned list is behind `&self` for the same reason.
+    fn exec_of(&self, target: PinTarget) -> Option<String> {
+        match target {
+            PinTarget::StartMenuRow(index) => self
+                .start_menu_entries()
+                .get(index)
+                .map(|entry| entry.executable_path.clone()),
+            PinTarget::Pinned(index) => self
+                .taskbar
+                .pinned_apps()
+                .get(index)
+                .map(|app| app.exec_path.clone()),
+        }
+    }
+
+    /// Pin what `target` names, or unpin it if it is already pinned.
+    ///
+    /// A target that no longer names anything does nothing. The lists are
+    /// rebuilt between the menu opening and the row being taken -- a program
+    /// can be unpinned from elsewhere in between -- and acting on a stale
+    /// index would unpin whichever program had moved into that slot.
+    fn toggle_pin(&mut self, target: PinTarget) {
+        let Some(exec) = self.exec_of(target) else {
+            return;
+        };
+        if self.is_pinned(&exec) {
+            self.unpin_app(&exec);
+            return;
+        }
+        let name = match target {
+            PinTarget::StartMenuRow(index) => self
+                .start_menu_entries()
+                .get(index)
+                .map(|entry| entry.name.clone()),
+            // Already pinned by construction, so this arm is unreachable in
+            // practice; the name it would use is the launcher's.
+            PinTarget::Pinned(_) => None,
+        }
+        .unwrap_or_else(|| self.app_name_for(&exec));
+        self.pin_app(&exec, &name);
+    }
+
+    /// The pin menu's draw commands, empty when it is closed.
+    #[must_use]
+    pub fn render_pin_menu(&self) -> Option<RenderTree> {
+        let (menu, _) = self.pin_menu.as_ref()?;
+        let mut tree = RenderTree::new();
+        tree.commands
+            .extend(menu.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
     }
 
     /// A press while the overflow list is open.
@@ -4975,7 +5742,7 @@ impl DesktopShell {
         if !drag.source.is_dragging() {
             return false;
         }
-        let Some(key) = drag.source.pressed_icon() else {
+        let Some(key) = drag.source.pressed_key() else {
             return false;
         };
         // The boundary is measured over the icons *on the bar*, which are a
@@ -4994,13 +5761,84 @@ impl DesktopShell {
         self.tray_arrangement.move_before(key, anchor)
     }
 
+    /// Move a pinned button along the bar. Answers whether anything moved.
+    fn drag_pinned_to(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = self.pin_drag.as_mut() else {
+            return false;
+        };
+        drag.on_move(x, y);
+        if !drag.is_dragging() {
+            return false;
+        }
+        let Some(exec) = drag.pressed_key() else {
+            return false;
+        };
+        let Some(from) = self.pinned_index_of(&exec) else {
+            // Unpinned from elsewhere while the drag was in flight. There is
+            // nothing left to move, and inventing a position for it would put
+            // a program back on the bar the user had just taken off.
+            return false;
+        };
+        let to = self.pinned_drop_boundary(x);
+        if to == from {
+            return false;
+        }
+        self.taskbar.reorder_pinned(from, to);
+        self.save_pinned();
+        true
+    }
+
+    /// Where in the pinned run a drop at `x` belongs.
+    ///
+    /// Measured against each button's *midpoint*, so a button dropped on the
+    /// left half of its neighbour goes before it and on the right half after
+    /// it. Clamped to the run: a drag past the last pinned button lands at the
+    /// end rather than among the window buttons, which are not the pinned
+    /// list's to rearrange.
+    fn pinned_drop_boundary(&self, x: f32) -> usize {
+        let count = self.taskbar.pinned_apps().len();
+        for index in 0..count {
+            let button = self.taskbar_button_rect(index);
+            if x < button.x + button.w / 2.0 {
+                return index;
+            }
+        }
+        count.saturating_sub(1)
+    }
+
+    /// Which pinned slot holds `exec`, if any.
+    fn pinned_index_of(&self, exec: &str) -> Option<usize> {
+        self.taskbar
+            .pinned_apps()
+            .iter()
+            .position(|app| app.exec_path == exec)
+    }
+
+    /// Release a pressed pinned button: a reorder just ended, or the program
+    /// is about to be started.
+    fn finish_pinned_press(&mut self) -> ShellAction {
+        let Some(mut drag) = self.pin_drag.take() else {
+            return ShellAction::Consumed;
+        };
+        let exec = drag.pressed_key();
+        // Read before `on_release`, which resets the source.
+        let was_drag = drag.on_release();
+        if was_drag {
+            // The row already rearranged itself on the way here.
+            return ShellAction::Consumed;
+        }
+        exec.map_or(ShellAction::Consumed, |exec| {
+            ShellAction::Launch(PathBuf::from(exec))
+        })
+    }
+
     /// Release a pressed tray icon: either a reorder just ended, or the
     /// program that owns the icon is about to hear about a click.
     fn finish_tray_press(&mut self) -> ShellAction {
         let Some(mut drag) = self.tray_drag.take() else {
             return ShellAction::Consumed;
         };
-        let key = drag.source.pressed_icon();
+        let key = drag.source.pressed_key();
         // Read before `on_release`, which resets the source.
         let was_drag = drag.source.on_release();
         if was_drag {
@@ -5179,6 +6017,21 @@ impl DesktopShell {
             x += slot;
         }
         rects
+    }
+
+    /// The display, as the toolkit's placement code wants it.
+    ///
+    /// One conversion in one place. `screen_width`/`screen_height` are `u32`
+    /// public fields and every other reader spells the cast itself; a popup
+    /// placed against a *differently* rounded screen than the one the taskbar
+    /// is laid out on would be off by a fraction at the edge, which is the
+    /// edge that matters.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a display dimension is exact in f32 for every size hardware produces"
+    )]
+    fn viewport(&self) -> (f32, f32) {
+        (self.screen_width as f32, self.screen_height as f32)
     }
 
     /// Where the overflow chevron is drawn, if there is one.
@@ -5621,16 +6474,21 @@ impl DesktopShell {
                     QuickSetting::DoNotDisturb | QuickSetting::FocusMode => {
                         self.apply_focus_toggle(qs);
                     }
-                    // Wi-Fi, Bluetooth and Night Light have no service in this
-                    // process to talk to: the first two are the network and
-                    // bluetooth daemons' state and the third is the
-                    // compositor's gamma ramp, all of which are reached over
-                    // IPC the shell does not hold yet. The switches move and
-                    // are remembered by the pane, and that is all they do —
-                    // recorded in known-issues.md rather than left to be
-                    // rediscovered by someone wondering why the radio stayed
-                    // on.
-                    QuickSetting::WiFi | QuickSetting::Bluetooth | QuickSetting::NightLight => {}
+                    QuickSetting::NightLight => self.toggle_night_light(),
+                    // Wi-Fi and Bluetooth have no service in this process to
+                    // talk to: they are the network and bluetooth daemons'
+                    // state, reached over IPC the shell does not hold yet. The
+                    // switches move and are remembered by the pane, and that
+                    // is all they do — recorded in known-issues.md rather than
+                    // left to be rediscovered by someone wondering why the
+                    // radio stayed on.
+                    //
+                    // Night Light used to be in this list, described as "the
+                    // compositor's gamma ramp". It is an appearance setting
+                    // now, which the compositor reads from the same file
+                    // everything else does, so the switch above is the whole
+                    // of the work.
+                    QuickSetting::WiFi | QuickSetting::Bluetooth => {}
                 },
                 // The pane marks the card read before reporting the click, so
                 // the only thing left is the part it cannot do: start the
@@ -5649,14 +6507,22 @@ impl DesktopShell {
                         .and_then(|n| n.action.clone())
                         .or(launch);
                 }
-                // All four are already done by the time they are reported: the
-                // card is gone, the list is empty, the per-app setting is
-                // stored, the pane is closing. They are drained so the buffer
-                // stays bounded, and matched by name so that adding a variant
-                // is a compile error here rather than a silent no-op.
+                // The pane records the change in its own list and reports
+                // it. Until this arm existed the report went nowhere, so a
+                // user switching a program off in the notification pane was
+                // switching off a copy nothing consulted.
+                NotifPaneEvent::SettingChanged {
+                    app,
+                    setting,
+                    value,
+                } => self.apply_app_notification_setting(&app, setting, value),
+                // The other three are already done by the time they are
+                // reported: the card is gone, the list is empty, the pane is
+                // closing. They are drained so the buffer stays bounded, and
+                // matched by name so that adding a variant is a compile error
+                // here rather than a silent no-op.
                 NotifPaneEvent::NotificationDismissed(_)
                 | NotifPaneEvent::ClearAll
-                | NotifPaneEvent::SettingChanged { .. }
                 | NotifPaneEvent::Closed => {}
             }
         }
@@ -5688,12 +6554,77 @@ impl DesktopShell {
             // the switch was showing that mode, so it is the one it turns off.
             _ => FocusMode::Off,
         };
-        self.focus.set_mode(mode);
+        self.set_focus_mode_by_hand(mode);
         self.sync_quick_settings();
+    }
+
+    /// Set the focus mode *as a user action*.
+    ///
+    /// Not the same as assigning [`FocusAssistManager::manual_mode`], and the
+    /// difference is the whole of `snooze_schedule_if_it_would_resume` below:
+    /// a person turning this off means "leave me alone about this until it
+    /// would have changed anyway", which the manager cannot express because it
+    /// has no clock. Every door a *person* comes through -- the quick
+    /// settings switches today, a hotkey or a menu item tomorrow -- belongs
+    /// here rather than on the field, so that a later one cannot quietly get
+    /// the lesser behaviour.
+    pub fn set_focus_mode_by_hand(&mut self, mode: focus_assist::FocusMode) {
+        self.focus.set_mode(mode);
+        if mode == focus_assist::FocusMode::Off {
+            self.snooze_schedule_if_it_would_resume(Self::unix_now());
+        }
+    }
+
+    /// Hold a schedule off for the rest of its period, if one is why focus
+    /// assist is on.
+    ///
+    /// The user has just pressed a switch labelled "off". Turning off a
+    /// *manual* mode is enough on its own; turning off a *scheduled* one is
+    /// not, because clearing the manual override hands the decision straight
+    /// back to the schedule, which is still inside its window and switches
+    /// everything on again before the next frame. See
+    /// [`FocusAssistManager::auto_suppressed`].
+    ///
+    /// Asks the rules whether one is in force rather than inferring it from
+    /// the mode: "focus assist is on and there is a schedule" is not the same
+    /// claim as "the schedule is why", and the difference is a manual mode set
+    /// at noon that would otherwise arm a snooze against a schedule that was
+    /// not going to fire for ten hours.
+    fn snooze_schedule_if_it_would_resume(&mut self, utc_secs: u64) {
+        let (hour, minute, weekday) = self.clock_reading_at(utc_secs);
+        let in_force = self
+            .focus
+            .auto_rules
+            .iter()
+            .any(|rule| rule.is_schedule_active(hour, minute, weekday));
+        if !in_force {
+            return;
+        }
+        self.schedule_snooze = self
+            .next_schedule_change(utc_secs)
+            .map(|d| utc_secs.saturating_add(d.as_secs()));
+        // Applied now rather than at the next tick. `auto_active` still holds
+        // the last evaluation's answer and `effective_mode` reads it, so
+        // without this the switch the user has just pressed redraws as on and
+        // the desktop stays quiet until something else happens to tick the
+        // loop -- which on an idle desktop at two in the morning is nothing.
+        self.evaluate_schedules(utc_secs);
+    }
+
+    /// Seconds since the epoch, or 0 on a clock set before it.
+    fn unix_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 
     /// Menu item ids. Stable numbers rather than positions, so inserting an
     /// item cannot silently reassign what the ones below it do.
+    /// The pin menu's only row. Numbered well clear of the desktop menu's
+    /// ids, which are a different menu with a different handler.
+    const MENU_PIN_TOGGLE: u64 = 900;
+
     const MENU_ADD_CLOCK: u64 = 1;
     const MENU_ADD_CALENDAR: u64 = 2;
     const MENU_ADD_SYSTEM_MONITOR: u64 = 3;
@@ -5941,7 +6872,7 @@ impl DesktopShell {
             Self::desktop_menu_items()
         };
         self.desktop_menu = ContextMenu::new(items);
-        self.desktop_menu.show(x, y);
+        self.desktop_menu.show(x, y, self.viewport());
     }
 
     /// Begin dragging the widget under `(x, y)`, if there is one.
@@ -6204,6 +7135,12 @@ impl DesktopShell {
     pub fn advance_osd(&mut self, dt_ms: u64) {
         self.osd_clock_ms = self.osd_clock_ms.saturating_add(dt_ms);
         self.osd.tick(self.osd_clock_ms);
+        // The tooltip rides the same clock rather than bringing its own. Two
+        // clocks advanced from two call sites is one forgotten call away from
+        // a tooltip that never appears, or never leaves.
+        if let Some((_, tip)) = self.tray_tooltip.as_mut() {
+            tip.tick(self.osd_clock_ms);
+        }
     }
 
     /// Re-seed the overlay manager's idea of how big the display is.
@@ -6220,6 +7157,21 @@ impl DesktopShell {
     fn sync_osd_screen(&mut self) {
         self.osd.screen_width = self.screen_width as f32;
         self.osd.screen_height = self.screen_height as f32;
+    }
+
+    /// Tell the notification pane how tall the screen is.
+    ///
+    /// The pane's own scroll bound is `content - viewport`, so a wrong
+    /// viewport is a wrong bound in both directions: too small a screen and
+    /// the rows past the fold are unreachable, too large and the list scrolls
+    /// into blank space past its own end.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a display dimension is exact in f32 for every size hardware produces"
+    )]
+    fn sync_notification_screen(&mut self) {
+        self.notifications
+            .set_screen_height(self.screen_height as f32);
     }
 
     /// Render the heads-up overlays, if any are showing.
@@ -9809,6 +10761,499 @@ mod overview_wiring_tests {
         assert!(narrow.tray_width() < narrow.taskbar_rect().w);
     }
 
+    /// The overflow list fits a screen smaller than the tests' usual one.
+    ///
+    /// **This is the test that catches a whole family, and it is here because
+    /// the family caught me.** The overflow menu shipped this morning, tested
+    /// only at 1920x1080 -- and `guitk::menu` placed every popup against a
+    /// hardcoded 1920x1080 of its own. The assertions and the code under test
+    /// were reading the same number, so they agreed with each other and with
+    /// no display but one. Measured at 1024x768 before the fix, this menu was
+    /// capped to a 1080px panel, placed at y=0, and drawn to y=1080: 312
+    /// pixels past the bottom, with every row below 768 unreachable.
+    ///
+    /// The taskbar is the worst place for it, because a popup opening from
+    /// the bottom edge is the case the flip exists for.
+    #[test]
+    fn the_overflow_list_fits_a_screen_shorter_than_the_default() {
+        let mut s = DesktopShell::new(1024, 768);
+        let flood: Vec<_> = (1..=80).map(|i| tray_icon(i, "X", "x")).collect();
+        s.apply_tray_icons(flood);
+        let chevron = s.tray_overflow_rect().expect("overflowing");
+        s.handle_mouse(&MouseEvent {
+            x: chevron.x + chevron.w / 2.0,
+            y: chevron.y + chevron.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        let tree = s.render_tray_overflow().expect("menu is up");
+        let mut lowest: f32 = 0.0;
+        for c in &tree.commands {
+            if let RenderCommand::FillRect { y, height, .. } = c {
+                lowest = lowest.max(y + height);
+            }
+        }
+        eprintln!("screen height 768; menu extends to y={lowest}");
+        assert!(lowest <= 768.0, "menu runs {lowest} past a 768px screen");
+    }
+
+    /// Move the pointer, then let the hover delay elapse.
+    fn hover(s: &mut DesktopShell, x: f32, y: f32) {
+        s.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        });
+        // Past any plausible delay. The tooltip rides the overlay clock, so
+        // this is the same call the session makes once a frame.
+        s.advance_osd(5_000);
+    }
+
+    /// Resting on a tray icon names it.
+    ///
+    /// A tray icon is one glyph chosen by another program, and the `tooltip`
+    /// it registers is the only words anywhere saying what that glyph is. The
+    /// shell received that string and never showed it, so a user got a row of
+    /// symbols and no way to learn what any of them were.
+    #[test]
+    fn resting_on_a_tray_icon_shows_the_name_its_program_gave_it() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "B", "Battery: 84%")]);
+        assert!(s.render_tray_tooltip().is_none(), "nothing hovered yet");
+
+        let rect = s.tray_icon_rects()[0];
+        hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+        let tree = s
+            .render_tray_tooltip()
+            .expect("resting on an icon showed no tooltip");
+        assert!(
+            tree.commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Battery"))),
+            "the tooltip did not carry the program's own words"
+        );
+    }
+
+    /// Sliding along the row renames the tooltip rather than keeping the first.
+    #[test]
+    fn moving_between_tray_icons_renames_the_tooltip() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![
+            tray_icon(1, "A", "Battery"),
+            tray_icon(2, "N", "Network"),
+        ]);
+        let rects = s.tray_icon_rects();
+
+        hover(&mut s, rects[0].x + rects[0].w / 2.0, rects[0].y + 8.0);
+        let first = format!("{:?}", s.render_tray_tooltip().expect("first icon"));
+        assert!(first.contains("Battery"));
+
+        hover(&mut s, rects[1].x + rects[1].w / 2.0, rects[1].y + 8.0);
+        let second = format!("{:?}", s.render_tray_tooltip().expect("second icon"));
+
+        assert!(
+            second.contains("Network") && !second.contains("Battery"),
+            "the second icon still showed the first icon's name"
+        );
+    }
+
+    /// Leaving the row takes the tooltip with it.
+    #[test]
+    fn leaving_the_tray_hides_the_tooltip() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "Battery")]);
+        let rect = s.tray_icon_rects()[0];
+        hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        assert!(s.render_tray_tooltip().is_some());
+
+        hover(&mut s, 40.0, 40.0);
+
+        assert!(
+            s.render_tray_tooltip().is_none(),
+            "the tooltip outlived the hover"
+        );
+    }
+
+    /// A program that registered no tooltip gets no empty bubble.
+    #[test]
+    fn an_icon_with_no_tooltip_shows_nothing() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "")]);
+        let rect = s.tray_icon_rects()[0];
+
+        hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+        assert!(s.render_tray_tooltip().is_none());
+    }
+
+    /// The tooltip waits, rather than appearing the instant the pointer
+    /// crosses an icon on its way somewhere else.
+    #[test]
+    fn a_tooltip_does_not_appear_until_the_pointer_has_rested() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "Battery")]);
+        let rect = s.tray_icon_rects()[0];
+
+        s.handle_mouse(&MouseEvent {
+            x: rect.x + rect.w / 2.0,
+            y: rect.y + rect.h / 2.0,
+            kind: MouseEventKind::Move,
+        });
+        s.advance_osd(50);
+
+        assert!(
+            s.render_tray_tooltip().is_none(),
+            "the tooltip appeared after 50ms of hovering"
+        );
+    }
+
+    /// The tooltip stays on the screen it was raised on.
+    ///
+    /// The bottom-right corner is the whole difficulty: a bubble offset down
+    /// and right of the pointer there is off the display unless the flip
+    /// fires, and the flip was measuring against a hardcoded 1920x1080 until
+    /// an hour ago.
+    #[test]
+    fn a_tray_tooltip_fits_a_small_screen() {
+        let mut s = DesktopShell::new(1024, 768);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "Battery at eighty four percent")]);
+        let rect = s.tray_icon_rects()[0];
+        hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+        let tree = s.render_tray_tooltip().expect("a tooltip");
+        let mut plates = 0;
+        for c in &tree.commands {
+            if let RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } = c
+            {
+                plates += 1;
+                assert!(
+                    x + width <= 1024.5 && y + height <= 768.5,
+                    "tooltip runs to ({}, {}) on a 1024x768 screen",
+                    x + width,
+                    y + height
+                );
+            }
+        }
+        assert!(plates > 0, "the tooltip drew no panel to check");
+    }
+
+    /// The keyboard can reach the last notification on a screen that is not
+    /// 1080 tall.
+    ///
+    /// The pane's scroll bound is `content - viewport`, and it learns the
+    /// viewport from every *mouse* event it receives. The keyboard path
+    /// carries no geometry, so until the shell started telling it, the arrows
+    /// clamped against the pane's pre-first-render default of 1080 -- and on
+    /// a 768px display that bound is 312 pixels short, which is the last few
+    /// notifications being unreachable without a mouse.
+    ///
+    /// The pane's own documentation predicted this exactly: *"a shell that
+    /// drives the pane from the keyboard alone should call it on resize"*.
+    /// Nothing called it.
+    ///
+    /// Asserted by reading the render tree rather than a scroll offset,
+    /// because "the last card is on screen" is the thing that was untrue and
+    /// a number would need its own interpretation.
+    #[test]
+    fn the_keyboard_reaches_the_last_notification_on_a_short_screen() {
+        let mut s = DesktopShell::new(1024, 768);
+        for i in 0..40u64 {
+            let _ = s.notify(notif_pane::Notification {
+                id: i,
+                app_name: "Desktop".to_owned(),
+                title: format!("Notice {i}"),
+                body: "body".to_owned(),
+                timestamp: 0,
+                priority: notif_pane::NotifPriority::Normal,
+                read: false,
+                action: None,
+                silent: false,
+            });
+        }
+        s.notifications.show();
+
+        let drawn = |s: &DesktopShell, want: &str| {
+            s.render_notifications().is_some_and(|t| {
+                t.commands
+                    .iter()
+                    .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == want))
+            })
+        };
+        // The newest is at the top, so the *oldest* is the one past the fold.
+        assert!(!drawn(&s, "Notice 0"), "the last card is already on screen");
+
+        // Keyboard only: no mouse event ever tells the pane the screen size.
+        for _ in 0..400 {
+            let _ = s.handle_hotkey(&key(Key::Down, Modifiers::default(), None));
+        }
+
+        assert!(
+            drawn(&s, "Notice 0"),
+            "the keyboard could not reach the last notification"
+        );
+    }
+
+    /// A rule saved on disk reaches the decision that suppresses a
+    /// notification.
+    ///
+    /// The whole chain in one test, because every link of it was built
+    /// separately and each looked finished on its own: `notifications.yaml`
+    /// holds the rule, `poll_notification_rules` adopts it,
+    /// `focus_assist::app_priority` finds it by the name the notification
+    /// carries, and `notify` acts on the answer. Before this, `app_overrides`
+    /// was only ever the empty vector, so the last three links were exercised
+    /// exclusively by tests that filled it in by hand.
+    ///
+    /// Asserted through `notify` rather than through `app_priority`, because
+    /// the thing that was broken is the *chain*, and testing the far end
+    /// against a hand-placed rule is how it came to be broken in the first
+    /// place.
+    #[test]
+    fn a_rule_written_to_the_config_file_lets_that_program_through() {
+        appearance::config::testing::with_scratch_config("shell-notif-rules", |_root| {
+            // Written through the settings crate's own save path, so the test
+            // exercises the format both ends will actually use rather than a
+            // hand-typed approximation of it.
+            let mut file = notifsettings::NotifFile::load();
+            file.settings.set_rule(
+                notifsettings::AppRule::new("Chat")
+                    .with_importance(notifsettings::Importance::Critical),
+            );
+            file.save().expect("save the rule");
+
+            let mut s = shell();
+            s.focus.set_mode(focus_assist::FocusMode::PriorityOnly);
+            assert!(
+                s.poll_notification_rules(),
+                "the saved rule was not picked up"
+            );
+
+            // Chat is Critical by the file, so it survives a focus mode that
+            // holds back everything ordinary.
+            let _ = s.notify(notif(1, "Chat"));
+            assert_eq!(
+                s.focus.suppressed_count, 0,
+                "the rule the user saved did not let Chat through"
+            );
+
+            // Alarms has no rule, so it is Normal and PriorityOnly holds it
+            // back. Without this the test would pass on a shell that
+            // suppressed nothing at all.
+            let _ = s.notify(notif(2, "Alarms"));
+            assert_eq!(
+                s.focus.suppressed_count, 1,
+                "an unconfigured program was not held back, so Chat getting \
+                 through proves nothing"
+            );
+        });
+    }
+
+    /// The same file, read by a shell that never polls, changes nothing.
+    ///
+    /// The negative control for the one above: it is the *adoption* that makes
+    /// a saved rule take effect, and a chain that worked by accident — because
+    /// `focus_assist` defaulted the way the rule happened to say — would pass
+    /// the first test and fail this one.
+    #[test]
+    fn a_rule_no_one_read_has_no_effect() {
+        appearance::config::testing::with_scratch_config("shell-notif-unread", |_root| {
+            let mut file = notifsettings::NotifFile::load();
+            file.settings.set_rule(
+                notifsettings::AppRule::new("Chat")
+                    .with_importance(notifsettings::Importance::Critical),
+            );
+            file.save().expect("save the rule");
+
+            let mut s = shell();
+            s.focus.set_mode(focus_assist::FocusMode::PriorityOnly);
+            // Deliberately no `poll_notification_rules`.
+            let _ = s.notify(notif(1, "Chat"));
+
+            assert_eq!(
+                s.focus.suppressed_count, 1,
+                "Chat got through without the rule being read, so the first \
+                 test is not testing the file"
+            );
+        });
+    }
+
+    /// A notification from `app`, with nothing else interesting about it.
+    fn notif(id: u64, app: &str) -> notif_pane::Notification {
+        notif_pane::Notification {
+            id,
+            app_name: app.to_owned(),
+            title: "hello".to_owned(),
+            body: String::new(),
+            timestamp: 0,
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            silent: false,
+        }
+    }
+
+    /// Switching a program off in the notification pane silences it.
+    ///
+    /// The pane has had this switch all along and it wrote to a list of its
+    /// own that nothing consulted: the decision is `focus_assist`'s and the
+    /// file is `notifications.yaml`. So the control worked, looked like it
+    /// worked, and did nothing -- the most expensive kind of broken, because
+    /// there is nothing for a user to report.
+    ///
+    /// **What this covers and what it does not.** It exercises the shell's
+    /// half, from the event the pane reports to the decision and the file.
+    /// That the pane *emits* the event on a click is covered in `notif_pane`'s
+    /// own tests, which can reach the coordinates; the pane's layout constants
+    /// are private and recomputing them here would be asserting against a
+    /// second copy of them. The routing between the two is a match on the
+    /// event enum with no wildcard arm, so a new variant is a compile error
+    /// rather than a silent drop.
+    #[test]
+    fn switching_a_program_off_in_the_pane_actually_silences_it() {
+        appearance::config::testing::with_scratch_config("shell-pane-toggle", |_root| {
+            let mut s = shell();
+            assert!(
+                s.focus.should_show_notification("Chat"),
+                "Chat starts out able to notify"
+            );
+
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Enabled,
+                notif_pane::SettingValue::Bool(false),
+            );
+
+            assert!(
+                !s.focus.should_show_notification("Chat"),
+                "the switch did not reach the decision that suppresses"
+            );
+            assert!(
+                s.focus.should_show_notification("Mail"),
+                "switching Chat off silenced everything"
+            );
+
+            // And it reached the file, so the next login keeps it.
+            let saved = notifsettings::NotifFile::load();
+            assert_eq!(
+                saved.settings.rule_for("Chat").importance,
+                notifsettings::Importance::Silent,
+                "the choice was applied in memory and never written"
+            );
+        });
+    }
+
+    /// The pane's priority control is refused rather than mistranslated.
+    ///
+    /// `SettingValue::Priority` carries Low/Normal/High/Urgent -- how loud one
+    /// *message* is -- while a rule's importance is Silent/Normal/Priority/
+    /// Critical, how far a *program* gets. There is no honest mapping, so the
+    /// applier declines it. Asserted because "declines" and "has a bug" look
+    /// identical from outside, and the next person to add a priority control
+    /// should find this rather than a conversion someone invented.
+    #[test]
+    fn a_pane_priority_change_does_not_rewrite_a_rule() {
+        appearance::config::testing::with_scratch_config("shell-pane-prio", |_root| {
+            let mut s = shell();
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Enabled,
+                notif_pane::SettingValue::Bool(false),
+            );
+
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Priority,
+                notif_pane::SettingValue::Priority(notif_pane::NotifPriority::Urgent),
+            );
+
+            assert_eq!(
+                s.notif.settings.rule_for("Chat").importance,
+                notifsettings::Importance::Silent,
+                "a priority change overwrote the rule the user had set"
+            );
+        });
+    }
+
+    /// A rule changed elsewhere shows as changed in the notification pane.
+    ///
+    /// The pane draws a card per program, and it used to draw them from a
+    /// record of its own. So a program silenced in the Settings application
+    /// still showed as enabled here -- and because the pane's switch reports
+    /// the value it *thinks* it is flipping from, toggling that stale card
+    /// wrote "enabled" back over the user's choice. A duplicate model that is
+    /// merely stale is a display bug; one the user can act on is a data loss.
+    #[test]
+    fn a_rule_changed_elsewhere_is_shown_in_the_pane() {
+        appearance::config::testing::with_scratch_config("shell-pane-adopt", |_root| {
+            let mut s = shell();
+            // The pane learns about Chat the way it always does.
+            let _ = s.notify(notif(1, "Chat"));
+            assert_eq!(
+                s.notifications.app_settings()[0].importance,
+                notifsettings::Importance::Normal
+            );
+
+            // Somebody else silences it: the Settings application writing the
+            // file, arriving as a reload.
+            let mut file = notifsettings::NotifFile::load();
+            file.settings.set_rule(
+                notifsettings::AppRule::new("Chat")
+                    .with_importance(notifsettings::Importance::Silent),
+            );
+            file.save().expect("save");
+            assert!(s.poll_notification_rules(), "the change was not picked up");
+
+            assert_eq!(
+                s.notifications.app_settings()[0].importance,
+                notifsettings::Importance::Silent,
+                "the pane still shows the value it had before"
+            );
+        });
+    }
+
+    /// The pane's Night Light switch warms the screen.
+    ///
+    /// It used to be one of three switches the shell explicitly did nothing
+    /// with, described in the code as "the compositor's gamma ramp, reached
+    /// over IPC the shell does not hold yet". Night light is an appearance
+    /// setting now, so the switch writes the file the compositor already
+    /// reads, and the honest comment that documented a gap became a comment
+    /// documenting a gap that had closed.
+    ///
+    /// Exercises the shell's half. The pane emits the event from a click whose
+    /// coordinates need its private layout constants, and its own tests cover
+    /// that; the routing between them is a match on the quick-setting enum
+    /// with no wildcard, so a variant that stopped being handled is a compile
+    /// error.
+    #[test]
+    fn the_panes_night_light_switch_reaches_the_file_the_compositor_reads() {
+        appearance::config::testing::with_scratch_config("shell-quick-night", |_root| {
+            let mut s = shell();
+            assert!(!appearance::AppearanceFile::load().settings.night_light);
+
+            s.toggle_night_light();
+
+            assert!(
+                appearance::AppearanceFile::load().settings.night_light,
+                "the switch did not reach appearance.yaml"
+            );
+            assert!(
+                s.take_appearance_change(),
+                "the compositor was never told to re-read"
+            );
+            assert!(
+                !s.take_appearance_change(),
+                "the flag must clear, or every later pump re-notifies"
+            );
+        });
+    }
+
     /// The glyphs the tray is drawing, left to right.
     fn tray_row(s: &DesktopShell) -> Vec<String> {
         s.ordered_tray_icons()
@@ -10510,7 +11955,7 @@ mod overview_wiring_tests {
         let mut s = shell();
         s.focus.set_mode(focus_assist::FocusMode::PriorityOnly);
         s.focus.set_app_override(
-            AppNotifOverride::new("Alarms", "Alarms").with_priority(NotifPriority::Critical),
+            AppNotifOverride::new("Alarms").with_importance(NotifPriority::Critical),
         );
         let _ = post_from(&mut s, "Mail", "Three new messages", None);
         let _ = post_from(&mut s, "Alarms", "Wake up", None);
@@ -10547,16 +11992,25 @@ mod overview_wiring_tests {
         // claim: a `hide()` called behind the shell's back would report a
         // `Closed` the shell never had the chance to drain, and the test would
         // be about the pane rather than about the wiring.
-        let mut s = shell();
-        for _ in 0..5 {
-            let _ = toggle_quick_setting(&mut s, "Night Light");
-            let (bx, by) = bell_centre(&s);
-            let _ = press(&mut s, bx, by);
-        }
-        assert!(
-            s.notifications.drain_events().is_empty(),
-            "the shell left events in the pane"
-        );
+        //
+        // Scratch-wrapped since the Night Light switch became real: flipping
+        // it writes `appearance.yaml`, so a test that presses it five times
+        // now edits the developer's own settings. The switch it drives was
+        // inert when this test was written, which is the general shape --
+        // wiring a dead control makes tests that had been pressing it start
+        // having effects.
+        appearance::config::testing::with_scratch_config("shell-pane-buffer", |_root| {
+            let mut s = shell();
+            for _ in 0..5 {
+                let _ = toggle_quick_setting(&mut s, "Night Light");
+                let (bx, by) = bell_centre(&s);
+                let _ = press(&mut s, bx, by);
+            }
+            assert!(
+                s.notifications.drain_events().is_empty(),
+                "the shell left events in the pane"
+            );
+        });
     }
 
     #[test]
@@ -11890,5 +13344,740 @@ mod run_box_wiring_tests {
             tray_strings(&shell).contains(&after),
             "the taskbar still names the old layout after a switch"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod quiet_hours_wiring_tests {
+    //! Quiet hours, from the file the user edits to the timer the loop sleeps
+    //! on.
+    //!
+    //! Every test here fixes the zone to UTC and names an instant, because the
+    //! thing under test is "what does the desktop do at two in the morning" and
+    //! waiting until two in the morning is not a test strategy. The default
+    //! shipped zone is `America/New_York`, so a test that did not set one would
+    //! pass or fail depending on which side of a date line the chosen instant
+    //! fell -- and would keep passing for months before it did.
+
+    use super::{DesktopShell, focus_assist};
+    use focus_assist::FocusMode;
+    use notifsettings::QuietHours;
+    use std::time::Duration;
+
+    /// A shell reading in UTC, so that an instant means one clock reading.
+    fn shell() -> DesktopShell {
+        let mut shell = DesktopShell::new(1920, 1080);
+        assert!(
+            shell.datetime.set_timezone("UTC"),
+            "UTC is not in the shipped zone table"
+        );
+        shell
+    }
+
+    /// 2026-09-17 is a Thursday. Weekday 4, in the 0=Sunday numbering.
+    const THURSDAY: u64 = 1_789_603_200;
+
+    /// `THURSDAY` plus `hours:minutes`, still on Thursday for hours under 24.
+    fn at(hour: u64, minute: u64) -> u64 {
+        THURSDAY + hour * 3600 + minute * 60
+    }
+
+    #[test]
+    fn the_clock_reading_is_local_and_names_the_weekday() {
+        let shell = shell();
+        assert_eq!(
+            shell.clock_reading_at(THURSDAY),
+            (0, 0, 4),
+            "Thursday 00:00"
+        );
+        assert_eq!(shell.clock_reading_at(at(22, 30)), (22, 30, 4));
+        assert_eq!(shell.clock_reading_at(at(25, 0)), (1, 0, 5), "into Friday");
+    }
+
+    /// The whole point: hours the user set silence the desktop, and stop.
+    #[test]
+    fn quiet_hours_put_focus_assist_into_force_and_take_it_out_again() {
+        let mut shell = shell();
+        let mut quiet = QuietHours::default();
+        quiet.enabled = true; // 22:00-07:00, every day
+        shell.focus.set_quiet_hours(&quiet);
+
+        assert!(
+            shell.evaluate_schedules(at(23, 0)),
+            "eleven at night changed it"
+        );
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+
+        // Still inside, so nothing changed -- but it is still in force.
+        assert!(!shell.evaluate_schedules(at(26, 0)), "two in the morning");
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+
+        assert!(
+            shell.evaluate_schedules(at(31, 0)),
+            "seven o'clock ended it"
+        );
+        assert_eq!(shell.focus.effective_mode(), FocusMode::Off);
+    }
+
+    /// Quiet hours hold back the ordinary, not the important.
+    ///
+    /// Priority-only rather than total silence, because a rule set months ago
+    /// must not be the reason a user misses the one notification that mattered.
+    #[test]
+    fn quiet_hours_still_let_a_priority_notification_through() {
+        let mut shell = shell();
+        let mut quiet = QuietHours::default();
+        quiet.enabled = true;
+        shell.focus.set_quiet_hours(&quiet);
+        shell.evaluate_schedules(at(23, 0));
+
+        shell.focus.set_app_override(
+            focus_assist::AppNotifOverride::new("Alarm")
+                .with_importance(focus_assist::NotifPriority::Priority),
+        );
+        assert!(
+            shell.focus.should_show_notification("Alarm"),
+            "a priority notification was held back"
+        );
+        assert!(
+            !shell.focus.should_show_notification("Chat"),
+            "an ordinary notification got through"
+        );
+    }
+
+    /// **A schedule that runs on no day must install nothing.**
+    ///
+    /// `AutoRule::Schedule` reads an empty day list as *every* day, so passing
+    /// a no-days quiet-hours setting straight through would turn "never" into
+    /// "always" -- a computer that silenced itself every night because the user
+    /// deselected every day.
+    #[test]
+    fn a_schedule_with_no_days_is_not_a_schedule_every_day() {
+        let mut shell = shell();
+        let quiet = QuietHours {
+            enabled: true,
+            days: [false; 7],
+            ..QuietHours::default()
+        };
+        shell.focus.set_quiet_hours(&quiet);
+
+        assert!(shell.focus.auto_rules.is_empty(), "a rule was installed");
+        assert!(!shell.evaluate_schedules(at(23, 0)));
+        assert_eq!(shell.focus.effective_mode(), FocusMode::Off);
+    }
+
+    /// Editing the hours replaces them. It does not add a second set.
+    #[test]
+    fn changing_the_hours_does_not_leave_the_old_ones_running() {
+        let mut shell = shell();
+        let mut quiet = QuietHours::default();
+        quiet.enabled = true;
+        shell.focus.set_quiet_hours(&quiet);
+        assert_eq!(shell.focus.auto_rules.len(), 1);
+
+        // The user moves them to the afternoon.
+        quiet.window = daywindow::DailyWindow::from_hm(14, 0, 16, 0).unwrap();
+        shell.focus.set_quiet_hours(&quiet);
+        assert_eq!(
+            shell.focus.auto_rules.len(),
+            1,
+            "the old hours are still there"
+        );
+
+        assert!(
+            shell.evaluate_schedules(at(15, 0)),
+            "the new hours are in force"
+        );
+        shell.evaluate_schedules(at(23, 0));
+        assert_eq!(
+            shell.focus.effective_mode(),
+            FocusMode::Off,
+            "eleven at night is the window the user moved away from"
+        );
+    }
+
+    /// Switching quiet hours off takes them out of force.
+    #[test]
+    fn switching_quiet_hours_off_stops_them() {
+        let mut shell = shell();
+        let mut quiet = QuietHours::default();
+        quiet.enabled = true;
+        shell.focus.set_quiet_hours(&quiet);
+        shell.evaluate_schedules(at(23, 0));
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+
+        quiet.enabled = false;
+        shell.focus.set_quiet_hours(&quiet);
+        assert!(
+            shell.evaluate_schedules(at(23, 0)),
+            "the desktop stayed quiet after the switch was turned off"
+        );
+        assert_eq!(shell.focus.effective_mode(), FocusMode::Off);
+    }
+
+    // ----- turning it off by hand ---------------------------------------
+
+    /// **A switch labelled "off" has to turn it off.**
+    ///
+    /// `set_mode(Off)` clears the manual override, which hands the decision
+    /// straight back to the schedule -- still inside its window, so it
+    /// switches everything on again before the next frame. The switch then
+    /// reads on, and no sequence of presses changes it.
+    ///
+    /// The window here is built from the clock the *code* reads, an hour
+    /// either side of it, rather than from a named hour: this door takes the
+    /// real time, and a test that said 23:00 would only exercise it at night.
+    /// Every day is selected so that the hour-before-midnight case, where the
+    /// window belongs to yesterday, needs no special handling.
+    #[test]
+    fn switching_focus_assist_off_during_quiet_hours_does_not_snap_back() {
+        let mut shell = shell();
+        let now = DesktopShell::unix_now();
+        let (hour, _, _) = shell.clock_reading_at(now);
+        let quiet = QuietHours {
+            enabled: true,
+            window: daywindow::DailyWindow::from_hm((hour + 23) % 24, 0, (hour + 1) % 24, 0)
+                .expect("a real window"),
+            days: [true; 7],
+        };
+        shell.notif.settings.quiet_hours = quiet;
+        shell.focus.set_quiet_hours(&quiet);
+        shell.evaluate_schedules(now);
+        assert_eq!(
+            shell.focus.effective_mode(),
+            FocusMode::PriorityOnly,
+            "the window built around now was not in force"
+        );
+
+        shell.set_focus_mode_by_hand(FocusMode::Off);
+
+        assert_eq!(
+            shell.focus.effective_mode(),
+            FocusMode::Off,
+            "the schedule took over again the instant it was switched off"
+        );
+        // And it stays off when the loop next looks, which is where the old
+        // behaviour would have reappeared.
+        shell.evaluate_schedules(DesktopShell::unix_now());
+        assert_eq!(shell.focus.effective_mode(), FocusMode::Off, "it came back");
+    }
+
+    /// The snooze lasts exactly the rest of the period -- not longer.
+    #[test]
+    fn the_snooze_ends_when_the_schedule_would_have_ended() {
+        let mut shell = shell();
+        let mut quiet = QuietHours::default(); // 22:00-07:00, every day
+        quiet.enabled = true;
+        shell.notif.settings.quiet_hours = quiet;
+        shell.focus.set_quiet_hours(&quiet);
+
+        shell.evaluate_schedules(at(23, 0));
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+        shell.focus.set_mode(FocusMode::Off);
+        shell.snooze_schedule_if_it_would_resume(at(23, 0));
+
+        // Three in the morning: still the same night, still snoozed.
+        assert!(!shell.evaluate_schedules(at(27, 0)));
+        assert_eq!(shell.focus.effective_mode(), FocusMode::Off, "woke early");
+
+        // Seven o'clock, when the window closes anyway.
+        shell.evaluate_schedules(at(31, 0));
+        assert_eq!(shell.focus.effective_mode(), FocusMode::Off);
+
+        // And the *next* night is a new period, which the snooze must not
+        // have eaten.
+        assert!(
+            shell.evaluate_schedules(at(46, 0)),
+            "quiet hours never came back"
+        );
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+    }
+
+    /// Turning off a mode the user set by hand arms no snooze.
+    ///
+    /// "Focus assist is on and a schedule exists" is not the same claim as
+    /// "the schedule is why". Without the distinction, switching off a mode
+    /// set at noon would hold tonight's quiet hours off as well -- a setting
+    /// silently cancelled hours before it was due, by a press that had nothing
+    /// to do with it.
+    #[test]
+    fn turning_off_a_mode_set_by_hand_leaves_tonight_alone() {
+        let mut shell = shell();
+        let mut quiet = QuietHours::default();
+        quiet.enabled = true;
+        shell.notif.settings.quiet_hours = quiet;
+        shell.focus.set_quiet_hours(&quiet);
+
+        // Midday: the user switches focus assist on and off again.
+        shell.evaluate_schedules(at(12, 0));
+        shell.focus.set_mode(FocusMode::TotalSilence);
+        shell.focus.set_mode(FocusMode::Off);
+        shell.snooze_schedule_if_it_would_resume(at(12, 0));
+
+        assert!(
+            shell.evaluate_schedules(at(22, 0)),
+            "quiet hours did not start"
+        );
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+    }
+
+    // ----- the timer ----------------------------------------------------
+
+    /// The idle desktop of design-decisions 812: no timer at all.
+    #[test]
+    fn an_unscheduled_desktop_asks_for_no_wake_up() {
+        let shell = shell();
+        assert!(!shell.notif.settings.quiet_hours.enabled, "shipped off");
+        assert_eq!(shell.next_schedule_change(at(23, 0)), None);
+    }
+
+    /// The timer lands *on* the boundary, not up to 59 seconds after it.
+    #[test]
+    fn the_timer_is_shortened_by_the_seconds_already_spent() {
+        let mut shell = shell();
+        shell.notif.settings.quiet_hours.enabled = true;
+
+        // On the minute: two hours to the 22:00 start.
+        assert_eq!(
+            shell.next_schedule_change(at(20, 0)),
+            Some(Duration::from_hours(2))
+        );
+        // Forty seconds into the minute: forty seconds less.
+        assert_eq!(
+            shell.next_schedule_change(at(20, 0) + 40),
+            Some(Duration::from_secs(2 * 3600 - 40))
+        );
+        // And in the last minute before the boundary it is still positive,
+        // which is what stops the loop re-arming for zero in a spin.
+        let last = shell.next_schedule_change(at(21, 59) + 59).unwrap();
+        assert!(
+            last >= Duration::from_secs(1) && last <= Duration::from_mins(1),
+            "{last:?}"
+        );
+    }
+
+    /// Sleeping the reported time lands on a desktop that answers differently.
+    #[test]
+    fn waking_at_the_reported_moment_finds_the_answer_changed() {
+        let mut shell = shell();
+        shell.notif.settings.quiet_hours.enabled = true;
+        shell
+            .focus
+            .set_quiet_hours(&shell.notif.settings.quiet_hours.clone());
+
+        let now = at(20, 0) + 17;
+        let before = shell.evaluate_schedules(now);
+        assert!(!before, "already changed before any time passed");
+        let sleep = shell.next_schedule_change(now).unwrap();
+
+        assert!(
+            !shell.evaluate_schedules(now + sleep.as_secs() - 1),
+            "the mode changed a second before the boundary"
+        );
+        assert!(
+            shell.evaluate_schedules(now + sleep.as_secs()),
+            "the mode did not change at the boundary"
+        );
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod taskbar_pin_tests {
+    //! Pinning an application to the taskbar.
+    //!
+    //! Every test that pins runs inside `with_scratch_config`: pinning writes
+    //! `taskbar.yaml`, and a test that wrote the developer's own is what
+    //! `scripts/check-scratch-config.py` exists to refuse.
+
+    use super::{
+        DesktopShell, Hit, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        ShellAction, TaskbarSlot, WindowInfo, WindowList,
+    };
+
+    /// A plain key press, as the compositor delivers one.
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+    use appearance::config::testing::with_scratch_config;
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    /// The executable path of the first program the start menu offers.
+    fn first_app(shell: &DesktopShell) -> (String, String) {
+        let entry = shell
+            .start_menu_entries()
+            .first()
+            .copied()
+            .expect("the shipped app database is empty");
+        (entry.executable_path.clone(), entry.name.clone())
+    }
+
+    /// **A pinned application has a button, and it is a launcher.**
+    #[test]
+    fn a_pinned_application_gets_a_taskbar_button() {
+        with_scratch_config("shell-pin-button", |_root| {
+            let mut shell = shell();
+            assert!(
+                shell.taskbar_slots().is_empty(),
+                "nothing is open or pinned"
+            );
+
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+
+            assert_eq!(shell.taskbar_slots(), vec![TaskbarSlot::Pinned(0)]);
+            assert!(shell.is_pinned(&exec));
+            let button = shell.taskbar_button_rect(0);
+            assert!(button.w > 0.0 && button.h > 0.0, "the button has no area");
+        });
+    }
+
+    /// A mouse event of a kind, at a point.
+    fn at(x: f32, y: f32, kind: MouseEventKind) -> MouseEvent {
+        MouseEvent { x, y, kind }
+    }
+
+    /// The middle of the `index`-th taskbar button.
+    fn button_centre(shell: &DesktopShell, index: usize) -> (f32, f32) {
+        let r = shell.taskbar_button_rect(index);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// **Releasing it starts the program**, and the press only takes hold.
+    ///
+    /// Launching on the press would start the program every time the user
+    /// began to rearrange the bar, which is why the tray waits for the release
+    /// too.
+    #[test]
+    fn releasing_a_pinned_button_launches_the_program() {
+        with_scratch_config("shell-pin-launch", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+
+            let (cx, cy) = button_centre(&shell, 0);
+            assert_eq!(shell.hit_test(cx, cy), Hit::TaskbarPinned(0));
+
+            assert_eq!(
+                shell.handle_mouse(&at(cx, cy, MouseEventKind::Press(MouseButton::Left))),
+                ShellAction::Consumed,
+                "the press launched it before the release could say it was a click"
+            );
+            match shell.handle_mouse(&at(cx, cy, MouseEventKind::Release(MouseButton::Left))) {
+                ShellAction::Launch(path) => {
+                    assert_eq!(path.to_string_lossy(), exec, "it started the wrong program");
+                }
+                other => panic!("a pinned button did not launch anything: {other:?}"),
+            }
+        });
+    }
+
+    /// Pinning the same program twice leaves one button.
+    #[test]
+    fn pinning_the_same_program_twice_leaves_one_button() {
+        with_scratch_config("shell-pin-twice", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+            shell.pin_app(&exec, &name);
+
+            assert_eq!(shell.pinned_apps().len(), 1);
+            assert_eq!(shell.taskbar_slots().len(), 1);
+        });
+    }
+
+    /// Unpinning takes the button away again.
+    #[test]
+    fn unpinning_takes_the_button_away() {
+        with_scratch_config("shell-unpin", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+            assert_eq!(shell.taskbar_slots().len(), 1);
+
+            shell.unpin_app(&exec);
+
+            assert!(
+                shell.taskbar_slots().is_empty(),
+                "the button outlived the pin"
+            );
+            assert!(!shell.is_pinned(&exec));
+        });
+    }
+
+    /// **The pins survive a restart**, which is the whole point of pinning.
+    #[test]
+    fn pinned_applications_come_back_after_a_restart() {
+        with_scratch_config("shell-pin-restart", |_root| {
+            let (exec, name) = {
+                let mut shell = shell();
+                let (exec, name) = first_app(&shell);
+                shell.pin_app(&exec, &name);
+                (exec, name)
+            };
+
+            // A fresh shell, as a new login gets.
+            let mut restarted = shell();
+            assert!(!restarted.is_pinned(&exec), "it has not read the file yet");
+            restarted.load_pinned();
+
+            assert!(restarted.is_pinned(&exec), "the pin did not survive");
+            assert_eq!(restarted.taskbar_slots(), vec![TaskbarSlot::Pinned(0)]);
+            // The name comes from the launcher, not from the file: storing it
+            // would be a second copy, stale the first time a program is
+            // renamed.
+            assert_eq!(restarted.pinned_apps()[0].display_name, name);
+        });
+    }
+
+    /// A right-click on a start-menu row offers to pin it, and the label says
+    /// what the click will *do* rather than what is already true.
+    #[test]
+    fn right_clicking_a_start_menu_row_offers_to_pin_and_then_to_unpin() {
+        with_scratch_config("shell-pin-menu", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let row = shell.start_menu_row_rect(0);
+            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+            assert_eq!(shell.hit_test(cx, cy), Hit::StartMenuEntry(0));
+
+            shell.handle_press(cx, cy, MouseButton::Right);
+            let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu opened"));
+            assert!(drawn.contains("Pin to taskbar"), "wrong offer: {drawn}");
+
+            // Taken with the keyboard, which is the other half of the claim:
+            // a menu that can only be used with the mouse is half a menu, and
+            // it is also the only way a test can name a row without guessing
+            // at where the panel drew it.
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            drop(shell.handle_hotkey(&press(Key::Enter)));
+            let (exec, _) = first_app(&shell);
+            assert!(shell.is_pinned(&exec), "the menu did not pin it");
+
+            // Ask again, and the offer is the reverse.
+            shell.handle_press(cx, cy, MouseButton::Right);
+            let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu opened"));
+            assert!(drawn.contains("Unpin from taskbar"), "wrong offer: {drawn}");
+        });
+    }
+
+    /// **And off it again from the button itself**, which is where a user
+    /// looks for it.
+    #[test]
+    fn a_pinned_button_can_be_unpinned_from_the_taskbar() {
+        with_scratch_config("shell-unpin-taskbar", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+
+            let button = shell.taskbar_button_rect(0);
+            let (cx, cy) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+            shell.handle_press(cx, cy, MouseButton::Right);
+
+            let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu opened"));
+            assert!(
+                drawn.contains("Unpin from taskbar"),
+                "the button offered no way off the bar: {drawn}"
+            );
+
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            drop(shell.handle_hotkey(&press(Key::Enter)));
+
+            assert!(!shell.is_pinned(&exec), "it is still pinned");
+            assert!(
+                shell.taskbar_slots().is_empty(),
+                "the button outlived the pin"
+            );
+        });
+    }
+
+    /// A right-click on a *window's* button offers nothing, because pinning
+    /// one is not possible: a window carries no executable path.
+    #[test]
+    fn a_window_button_offers_no_pin_menu() {
+        with_scratch_config("shell-unpin-window", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![WindowInfo::new(1, 1, "A window".to_string())],
+            ));
+            let button = shell.taskbar_button_rect(0);
+            let (cx, cy) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+
+            shell.handle_press(cx, cy, MouseButton::Right);
+
+            assert!(
+                shell.render_pin_menu().is_none(),
+                "a window's button offered to pin something"
+            );
+        });
+    }
+
+    /// **Dragging a pinned button moves it along the bar.**
+    ///
+    /// `reorder_pinned` is the third of the module's model methods the shell
+    /// now uses, and the drag is the same `DragSource` the tray uses -- one
+    /// model of "has this press become a drag yet", two things that drag.
+    #[test]
+    fn dragging_a_pinned_button_reorders_it() {
+        with_scratch_config("shell-pin-drag", |_root| {
+            let mut shell = shell();
+            let apps: Vec<(String, String)> = shell
+                .start_menu_entries()
+                .iter()
+                .take(3)
+                .map(|e| (e.executable_path.clone(), e.name.clone()))
+                .collect();
+            assert_eq!(apps.len(), 3, "three programs are needed to see a move");
+            for (exec, name) in &apps {
+                shell.pin_app(exec, name);
+            }
+            assert_eq!(shell.pinned_apps()[0].exec_path, apps[0].0);
+
+            // Take the first and drop it past the middle of the third.
+            let (from_x, from_y) = button_centre(&shell, 0);
+            let (to_x, _) = button_centre(&shell, 2);
+            shell.handle_mouse(&at(
+                from_x,
+                from_y,
+                MouseEventKind::Press(MouseButton::Left),
+            ));
+            shell.handle_mouse(&at(to_x + 4.0, from_y, MouseEventKind::Move));
+            shell.handle_mouse(&at(
+                to_x + 4.0,
+                from_y,
+                MouseEventKind::Release(MouseButton::Left),
+            ));
+
+            assert_ne!(
+                shell.pinned_apps()[0].exec_path,
+                apps[0].0,
+                "the dragged button did not move"
+            );
+            assert!(
+                shell.pinned_apps().iter().any(|a| a.exec_path == apps[0].0),
+                "the dragged button fell off the bar"
+            );
+            assert_eq!(
+                shell.pinned_apps().len(),
+                3,
+                "a drag changed how many there are"
+            );
+        });
+    }
+
+    /// A press that barely moves is still a click, not a drag.
+    #[test]
+    fn a_press_that_hardly_moves_still_launches() {
+        with_scratch_config("shell-pin-nudge", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+            let (cx, cy) = button_centre(&shell, 0);
+
+            shell.handle_mouse(&at(cx, cy, MouseEventKind::Press(MouseButton::Left)));
+            // One pixel: under any sane threshold, and the gesture a shaky
+            // hand makes while clicking.
+            shell.handle_mouse(&at(cx + 1.0, cy, MouseEventKind::Move));
+            let action = shell.handle_mouse(&at(
+                cx + 1.0,
+                cy,
+                MouseEventKind::Release(MouseButton::Left),
+            ));
+
+            assert!(
+                matches!(action, ShellAction::Launch(_)),
+                "a one-pixel wobble turned a click into a drag: {action:?}"
+            );
+        });
+    }
+
+    /// **A drag cannot push a pinned button in among the windows.**
+    ///
+    /// The window buttons are not the pinned list's to rearrange, and an index
+    /// past its end would be a position `reorder_pinned` has no slot for.
+    #[test]
+    fn dragging_past_the_last_pin_stays_in_the_pinned_run() {
+        with_scratch_config("shell-pin-clamp", |_root| {
+            let mut shell = shell();
+            let apps: Vec<(String, String)> = shell
+                .start_menu_entries()
+                .iter()
+                .take(2)
+                .map(|e| (e.executable_path.clone(), e.name.clone()))
+                .collect();
+            for (exec, name) in &apps {
+                shell.pin_app(exec, name);
+            }
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![WindowInfo::new(1, 1, "A window".to_string())],
+            ));
+
+            let (from_x, from_y) = button_centre(&shell, 0);
+            // Far to the right, over the window button and beyond.
+            let far = shell.taskbar_button_rect(2).x + 500.0;
+            shell.handle_mouse(&at(
+                from_x,
+                from_y,
+                MouseEventKind::Press(MouseButton::Left),
+            ));
+            shell.handle_mouse(&at(far, from_y, MouseEventKind::Move));
+            shell.handle_mouse(&at(far, from_y, MouseEventKind::Release(MouseButton::Left)));
+
+            assert_eq!(shell.pinned_apps().len(), 2, "a pin was lost off the end");
+            let slots = shell.taskbar_slots();
+            assert_eq!(slots[0], TaskbarSlot::Pinned(0));
+            assert_eq!(slots[1], TaskbarSlot::Pinned(1));
+            assert!(
+                matches!(slots[2], TaskbarSlot::Window(_)),
+                "the window moved"
+            );
+        });
+    }
+
+    /// Pinned buttons stand to the left of the windows.
+    #[test]
+    fn pinned_buttons_come_before_window_buttons() {
+        with_scratch_config("shell-pin-order", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![WindowInfo::new(1, 1, "A window".to_string())],
+            ));
+
+            let slots = shell.taskbar_slots();
+            assert_eq!(slots.len(), 2, "one pin and one window: {slots:?}");
+            assert_eq!(slots[0], TaskbarSlot::Pinned(0));
+            assert!(matches!(slots[1], TaskbarSlot::Window(_)));
+            assert!(
+                shell.taskbar_button_rect(0).x < shell.taskbar_button_rect(1).x,
+                "the pinned button is not to the left of the window's"
+            );
+        });
     }
 }

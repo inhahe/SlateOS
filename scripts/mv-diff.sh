@@ -98,6 +98,9 @@
 set -u
 
 DIFF_PROG='mv'
+# `contents` hashes each body; without sha256sum it would emit an empty hash
+# on every line, compare equal for every pair, and report a clean run.
+DIFF_NEED=sha256sum
 # Not `/usr/bin/mv`; see "The reference is built, not found" above.
 DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
@@ -295,6 +298,15 @@ contents_in() {
     find . -type f -printf '%P\0' 2>/dev/null | LC_ALL=C sort -z \
       | while IFS= read -r -d '' f; do
       printf '== %s%s\n' "$1" "$f"
+      # sha256, because this function's output is captured as
+      # `o_body=$(contents ...)` and bash command substitution DISCARDS
+      # NUL bytes -- it warns "ignored null byte in input" and carries
+      # on. Without the hash, two files differing only in NUL placement
+      # compare EQUAL. Hex survives; `cat` stays so a failure is still
+      # legible. Demonstrated both ways in
+      # scripts/probe-cp-diff-nul.sh.
+      printf 'sha %s
+' "$( { sha256sum <"$f"; } 2>/dev/null | cut -d' ' -f1 )"
       cat -- "$f"
       printf '\n'
     done )
@@ -577,6 +589,21 @@ run_case --no-c file.txt dst
 TREE='mktree; printf old > dst'
 run_case --no-cl file.txt dst
 run_case --=x file.txt dst
+
+# A body containing NUL bytes, moved both within a filesystem (a rename, which
+# cannot alter the bytes) and to a destination that forces a copy.
+#
+# These exercise the sha256 in `contents`, added 2026-09-14. Until then this
+# harness could not see a NUL difference at all: its comparison runs through a
+# command substitution, and bash discards NUL bytes there, so two files
+# differing only in NUL placement compared EQUAL. A guard with no case that
+# reaches it is not a guard -- see scripts/probe-cp-diff-nul.sh, which
+# demonstrates the blindness against the old body and its absence against the
+# current one.
+TREE="mktree; printf 'a\\000b\\000c' > nul.bin"
+run_case nul.bin moved.bin
+TREE="mktree; printf '\\000\\000\\000' > allnul.bin"
+run_case allnul.bin dir/
 # A `-` on its own is a file called `-`, not a request to read standard input:
 # `mv` has no standard-input operand for it to mean anything else.
 run_case - dst

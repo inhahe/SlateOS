@@ -102,7 +102,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// Alt+Shift shape that cycles keyboard layouts. Incompatible on exactly the
 /// terms 2 set out: no existing message moves a byte, but an unknown tag stops
 /// the decoder, so a version-10 compositor handed one fails the whole frame.
-pub const CONTROL_VERSION: u8 = 13;
+pub const CONTROL_VERSION: u8 = 14;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1160,6 +1160,22 @@ pub enum RequestBody {
     /// Answered with [`ResponseBody::Ok`], including when the file turns out
     /// not to have changed, exactly as for appearance.
     ReloadInput,
+    /// Tell the compositor the user's notification rules have changed, so that
+    /// it tells the desktop shell to re-read `notifications.yaml`.
+    ///
+    /// **The compositor does not read this file**, which is what makes this
+    /// verb different from the two above it. It has no use for a rule about
+    /// which programs may interrupt; the shell decides that. What the
+    /// compositor has is a connection to every client, so it is the only thing
+    /// that can deliver the announcement.
+    ///
+    /// Carries no data, for the reason [`ReloadInput`](Self::ReloadInput)
+    /// gives at length: a request that *set* the rules would let any process
+    /// able to open this socket silence another program's notifications. A
+    /// request that says "go and read the user's file" cannot.
+    ///
+    /// Answered with [`ResponseBody::Ok`], including when nothing changed.
+    ReloadNotifications,
     /// Hand the compositor a block of pixels and give it a name, so that this
     /// window's [`RenderCommand::Image`](guitk::render::RenderCommand::Image)
     /// commands naming that name have something to draw.
@@ -1344,6 +1360,7 @@ enum RequestTag {
     SwitchWorkspace = 0x12,
     SetWindowWorkspace = 0x13,
     ReloadInput = 0x14,
+    ReloadNotifications = 0x25,
     UploadImage = 0x15,
     DropImage = 0x16,
     GrabKey = 0x17,
@@ -1385,6 +1402,7 @@ impl RequestTag {
             0x12 => Self::SwitchWorkspace,
             0x13 => Self::SetWindowWorkspace,
             0x14 => Self::ReloadInput,
+            0x25 => Self::ReloadNotifications,
             0x15 => Self::UploadImage,
             0x16 => Self::DropImage,
             0x17 => Self::GrabKey,
@@ -1707,6 +1725,9 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         }
         RequestBody::ReloadAppearance => out.push(RequestTag::ReloadAppearance as u8),
         RequestBody::ReloadInput => out.push(RequestTag::ReloadInput as u8),
+        RequestBody::ReloadNotifications => {
+            out.push(RequestTag::ReloadNotifications as u8);
+        }
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
             write_u64(out, *window);
@@ -2093,6 +2114,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         },
         RequestTag::ReloadAppearance => RequestBody::ReloadAppearance,
         RequestTag::ReloadInput => RequestBody::ReloadInput,
+        RequestTag::ReloadNotifications => RequestBody::ReloadNotifications,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
             let b = r.read_u8()?;
@@ -2587,8 +2609,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x25),
+            Some(RequestTag::ReloadNotifications),
+            "0x25 was taken by ReloadNotifications in control version 14"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x26),
             None,
-            "0x25 is the next free tag"
+            "0x26 is the next free tag"
         );
     }
 

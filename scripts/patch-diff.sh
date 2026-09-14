@@ -80,6 +80,23 @@ printf 'nested\ncontent\nhere\n'                        > "$proto/a/sub/deep.txt
 # caught rather than merely a side that got one file wrong.
 printf 'untouched\n'                                    > "$proto/a/keep.txt"
 
+# A file that is NOT valid UTF-8: byte 0351 -- Latin-1 'e-acute' -- sits in a
+# comment, exactly where one turns up in real source. Nothing about a patch
+# requires the file to be text in any particular encoding, and GNU applies
+# this without remark.
+#
+# This build refused it outright until 2026-09-14, and refused it at the
+# *patch* file, before any target was opened:
+#
+#     patch: **** Can't open patch file u.patch : stream did not contain
+#           valid UTF-8
+#
+# The cause was `fs::read_to_string` in three places and a `String`-typed
+# hunk spine behind them. One Latin-1 byte in a comment made a file
+# unpatchable. See known-issues.md ->
+# B-PATCH-REFUSES-EVERY-FILE-THAT-IS-NOT-VALID-UTF-8.
+printf 'alpha\ncaf\351 comment\ncharlie\ndelta\n'        > "$proto/a/latin1.txt"
+
 # --- the patches, produced by GNU diff ----------------------------------------
 mk=$work/mk
 mkdir -p "$mk"
@@ -103,6 +120,12 @@ mkdir -p "$patches"
 # Unified, with `a/` and `b/` prefixes so the strip level matters.
 ( cd "$mk" && /usr/bin/diff -u --label x/a/base.txt --label y/a/base.txt \
     base.txt base.new ) > "$patches/u.patch" || true
+# The high byte lands in a CONTEXT line, so it is copied through rather than
+# rewritten -- the case that proves nothing decodes on the way past.
+cp "$proto/a/latin1.txt" "$mk/latin1.txt"
+printf 'alpha\ncaf\351 comment\nCHANGED\ndelta\n'        > "$mk/latin1.new"
+( cd "$mk" && /usr/bin/diff -u --label x/a/latin1.txt --label y/a/latin1.txt \
+    latin1.txt latin1.new ) > "$patches/latin1.patch" || true
 ( cd "$mk" && /usr/bin/diff -c --label x/a/base.txt --label y/a/base.txt \
     base.txt base.new ) > "$patches/c.patch" || true
 ( cd "$mk" && /usr/bin/diff base.txt base.new ) > "$patches/n.patch" || true
@@ -338,6 +361,13 @@ run_case u.patch -p1 -l
 run_case u.patch -p1 --ignore-whitespace
 
 # --- input that is not a patch -----------------------------------------------------
+# A target and a patch that are both valid files and neither of which is
+# valid UTF-8. Both sides must leave byte 0351 exactly where it was -- and
+# the tree comparison, not the streams, is what checks that.
+run_case latin1.patch -p1
+run_case latin1.patch -p1 --dry-run
+run_case latin1.patch -p1 -R
+
 run_case garbage.patch -p1
 run_case empty.patch -p1
 run_case truncated.patch -p1

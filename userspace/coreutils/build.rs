@@ -10,6 +10,12 @@
 //! "relocation truncated to fit" errors. So we gate the link-arg on the
 //! target triple and skip it for anything that isn't slateos.
 fn main() {
+    // The hand-built sysroot `libc.a` is an input cargo cannot infer. Without
+    // this, rebuilding the libc leaves every binary in this crate stale: the
+    // build reports `Finished` having relinked nothing. See
+    // `userspace/sysroot-dep` for the measurement.
+    sysroot_dep::emit();
+
     println!("cargo:rerun-if-changed=linker.ld");
     // `TARGET` is set by cargo to the target triple (or the JSON spec's file
     // stem, `x86_64-slateos`, for our custom target). Only the slateos target

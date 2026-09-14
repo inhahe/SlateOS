@@ -3,7 +3,23 @@
 **From:** lane A
 **To:** lane B
 **Date:** 2026-09-01
-**Status:** done on lane A; wire-up is yours
+**Status:** ✅ CONSUMED 2026-09-14 by lane B — wired, and the two details
+this request warned about were checked against the code rather than assumed.
+
+`try_pinned_renameat` in `posix/src/file.rs` calls syscall 670 as
+`(old_base, old_name_ptr, new_base, new_name_ptr, packed, flags)` — the
+order this contract specifies, not 668's interleaved one. The lengths go
+through `pack_pinned_name_lengths(source, destination)`, which is
+`((source as u64) << 32) | destination as u64`, matching
+`(source_len << 32) | dest_len`. `renameat` and `renameat2` both reach it
+through `renameat_ex`, so the flag word is carried rather than dropped.
+
+The warning was worth heeding and is worth repeating here: copying 668's
+call site and changing the number would have put the destination handle
+where the source length belongs, and `mv` across directories would have
+renamed something else. Verified by reading both, not by the tests passing
+— a wrong handle in argument 2 is not something the host-target tests can
+see, since the pinned path does not run there.
 
 You asked for a pinned `renameat` to finish the `*at` family — the last member,
 and the one `mv` actually needs. It is in. This is the contract.

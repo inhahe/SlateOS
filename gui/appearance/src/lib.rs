@@ -530,6 +530,69 @@ impl ColorFilter {
 // High contrast schemes
 // ============================================================================
 
+/// The per-channel gains that warm a finished pixel by `strength`.
+///
+/// Returned as three multipliers in `0.0..=1.0` rather than applied here, so
+/// that a caller filtering a whole frame computes them once and multiplies
+/// per pixel. At a 1920x1080 frame that is three floating-point divisions
+/// against two million.
+///
+/// # Where the warm end comes from
+///
+/// Full strength is 2700 K -- the colour of a domestic warm-white bulb, and
+/// the bottom of the range every desktop that has this feature offers. Under
+/// Tanner Helland's black-body approximation that is roughly
+/// `(255, 169, 87)` against a 6500 K white of `(255, 255, 255)`, which gives
+/// the gains below. Red is untouched at every strength: warming a screen means
+/// removing blue and some green, not adding red it cannot emit.
+///
+/// `strength` outside `0.0..=1.0`, or not a number, is clamped to it. A gain
+/// is about to multiply every pixel on the display, and a caller that has
+/// somehow produced a NaN should get an unchanged screen rather than a black
+/// one.
+///
+/// ```
+/// use appearance::night_light_gains;
+/// assert_eq!(night_light_gains(0.0), (1.0, 1.0, 1.0), "off changes nothing");
+/// let (r, g, b) = night_light_gains(1.0);
+/// assert_eq!(r, 1.0, "red is never reduced");
+/// assert!(b < g && g < 1.0, "blue is cut hardest");
+/// assert_eq!(night_light_gains(f32::NAN), (1.0, 1.0, 1.0));
+/// ```
+#[must_use]
+pub fn night_light_gains(strength: f32) -> (f32, f32, f32) {
+    // `clamp` propagates NaN, so the check is explicit rather than implied.
+    let s = if strength.is_finite() {
+        strength.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    const WARM_G: f32 = 169.0 / 255.0;
+    const WARM_B: f32 = 87.0 / 255.0;
+    (1.0, 1.0 - s * (1.0 - WARM_G), 1.0 - s * (1.0 - WARM_B))
+}
+
+/// Warm one packed ARGB pixel by the given gains.
+///
+/// Alpha is carried through untouched: this runs on a finished frame, where
+/// alpha is not a colour but whatever the framebuffer format keeps there, and
+/// scaling it would dim the screen rather than warm it.
+#[must_use]
+pub fn warm_argb(argb: u32, gains: (f32, f32, f32)) -> u32 {
+    let (gr, gg, gb) = gains;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "each product is a u8 scaled by a gain in 0..=1, so it lands in 0..=255"
+    )]
+    let scale = |c: u32, g: f32| -> u32 { (c as f32 * g) as u32 & 0xFF };
+    let a = argb & 0xFF00_0000;
+    let r = scale((argb >> 16) & 0xFF, gr) << 16;
+    let g = scale((argb >> 8) & 0xFF, gg) << 8;
+    let b = scale(argb & 0xFF, gb);
+    a | r | g | b
+}
+
 /// A high-contrast colour scheme: one background, one text colour, no scale
 /// between them.
 ///
@@ -1059,6 +1122,30 @@ pub struct AppearanceSettings {
     /// palette's colours instead would shift the window chrome and leave
     /// photographs untouched, which is worse than not filtering at all.
     pub color_filter: ColorFilter,
+    /// Whether the screen is warmed to cut blue light.
+    ///
+    /// Separate from [`night_light_strength`](Self::night_light_strength)
+    /// rather than folded into it as "strength zero", because a switch that
+    /// forgets how warm you had it is a switch nobody uses twice. Off and on
+    /// again gets the same screen back.
+    ///
+    /// Like [`color_filter`](Self::color_filter), and unlike everything else
+    /// here, this does not reach the palette: it warms *finished pixels* on
+    /// their way to the display. Warming the palette instead would tint the
+    /// window chrome and leave photographs cold, which is worse than not
+    /// warming anything.
+    pub night_light: bool,
+    /// How warm, from 0 (no change) to 1 (fully warm).
+    ///
+    /// A strength rather than a figure in kelvins, because that is the control
+    /// a person can use: "warmer" and "cooler" are the words, and how many
+    /// kelvins that produces is a fact about the mapping rather than about
+    /// what they asked for. [`night_light_gains`] says where the warm end
+    /// comes from.
+    ///
+    /// Clamped on read, so a hand-edited file cannot ask for a negative
+    /// warmth or for more than the mapping defines.
+    pub night_light_strength: f32,
     /// The high-contrast scheme in force, or `None` for an ordinary theme.
     ///
     /// When set it *replaces* [`theme_mode`](Self::theme_mode) rather than
@@ -1139,6 +1226,10 @@ impl Default for AppearanceSettings {
             surface_style: SurfaceStyle::Borders,
             strip_style: StripStyle::Filled,
             color_filter: ColorFilter::None,
+            night_light: false,
+            // Half way, which is where the control opens the first time
+            // somebody switches night light on. Unread while it is off.
+            night_light_strength: 0.5,
             high_contrast: None,
             accent_color: AccentColor::Blue,
             custom_accent: BLUE,
@@ -1639,6 +1730,13 @@ impl AppearanceSettings {
                 .and_then(|v| TransparencyLevel::from_yaml_name(&v))
         );
 
+        read_into!(s.night_light, doc.get_bool(&["theme", "night_light"]));
+        read_into!(
+            s.night_light_strength,
+            doc.get_f64(&["theme", "night_light_strength"])
+                .map(|v| (v as f32).clamp(0.0, 1.0))
+        );
+
         read_into!(
             s.caret_width_scale,
             doc.get_f64(&["accessibility", "caret_width_scale"])
@@ -1734,6 +1832,11 @@ impl AppearanceSettings {
             strip_style_yaml_name(self.strip_style),
         );
         doc.set_str(&["theme", "color_filter"], self.color_filter.yaml_name());
+        doc.set_bool(&["theme", "night_light"], self.night_light);
+        doc.set_f64(
+            &["theme", "night_light_strength"],
+            f64::from(self.night_light_strength),
+        );
         doc.set_str(
             &["theme", "high_contrast"],
             self.high_contrast
@@ -2118,6 +2221,11 @@ mod tests {
             theme_mode: ThemeMode::Light,
             caret_width_scale: 2.5,
             focus_ring_scale: 3.0,
+            night_light: true,
+            // Not 0.5, which is the default, and not 1.0 either: a value in
+            // the middle of the range catches a writer that clamped when it
+            // should not have.
+            night_light_strength: 0.8,
             // Non-default, which is this helper's whole contract: the
             // round-trip test must not be able to pass on a field it forgot.
             surface_style: SurfaceStyle::Cards,

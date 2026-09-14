@@ -51,6 +51,8 @@
 //!   -i, --ignore-case           Case-insensitive comparison
 //!   -b, --ignore-space-change   Ignore changes in amount of whitespace
 //!   -w, --ignore-all-space      Ignore all whitespace
+//!   -Z, --ignore-trailing-space Ignore whitespace at line end
+//!   -a, --text                  Treat all files as text
 //!   -B, --ignore-blank-lines    Ignore blank line insertions/deletions
 //!       --color                 Force color output
 //!       --no-color              Force no color
@@ -68,8 +70,9 @@
 
 use quoting::{quoteaf_os, quotef_os};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -109,8 +112,8 @@ enum Format {
 
 /// Fully parsed command-line configuration.
 struct Config {
-    path1: String,
-    path2: String,
+    path1: OsString,
+    path2: OsString,
     format: Format,
     context_lines: usize,
     width: usize,
@@ -123,6 +126,23 @@ struct Config {
     color: bool,
     recursive: bool,
     new_file: bool,
+    /// `-Z`: whitespace at the END of a line is not a difference.
+    ///
+    /// Narrower than `-b`, which collapses runs anywhere, and much narrower
+    /// than `-w`. A file that differs only in trailing spaces is the common
+    /// case an editor creates, and GNU exits 0 on it under `-Z`.
+    ignore_trailing_space: bool,
+    /// `-a`: compare even a file holding NUL bytes as text.
+    text_mode: bool,
+    /// The option words exactly as the user typed them, for the `diff -r
+    /// da/x.txt db/x.txt` line GNU prints ahead of each file in a directory
+    /// walk.
+    ///
+    /// Kept verbatim rather than reconstructed from the parsed flags,
+    /// because GNU echoes the spelling: measured, `-ru` comes back as `-ru`
+    /// and `-r -u` as `-r -u`. Rebuilding the line from `Config` would
+    /// print one canonical form for both.
+    option_words: Vec<OsString>,
 }
 
 /// Result of argument parsing.
@@ -146,6 +166,48 @@ enum Op {
 }
 
 /// A contiguous group of changes with surrounding context.
+/// Whether a file's last line is terminated.
+///
+/// A `bool` would read as `true`/`false` at four call sites that each have to
+/// remember which way round it is. The bug this exists for was two files, 26
+/// bytes and 25, reported IDENTICAL -- so the cost of getting the polarity
+/// backwards is another silent wrong answer, not a compile error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalNewline {
+    Present,
+    Missing,
+}
+
+/// One line of the edit script, and whether GNU's no-newline marker follows it.
+///
+/// A tuple until 2026-09-14, when it grew the third field. `diff` reported a
+/// file ending in a newline and one that does not as IDENTICAL -- exit 0 on
+/// two files of 26 and 25 bytes -- because splitting into lines throws the
+/// terminator away and both sides then yield the same four lines.
+///
+/// The flag rides on the emitted line rather than being recomputed by each
+/// renderer because that is where the answer is needed: measured, GNU puts
+/// `\ No newline at end of file` immediately after the line it belongs to, on
+/// whichever side lacks the newline, and after BOTH when both lack it.
+#[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+struct Edit {
+    op: Op,
+    text: Vec<u8>,
+    /// This is the final line of a file with no terminating newline.
+    no_final_newline: bool,
+}
+
+impl Edit {
+    fn new(op: Op, text: Vec<u8>) -> Self {
+        Self {
+            op,
+            text,
+            no_final_newline: false,
+        }
+    }
+}
+
 struct Hunk {
     /// Starting line in file 1 (0-based).
     start1: usize,
@@ -156,14 +218,27 @@ struct Hunk {
     /// Number of lines from file 2 in this hunk.
     count2: usize,
     /// Operations and their associated line text.
-    lines: Vec<(Op, String)>,
+    lines: Vec<Edit>,
 }
 
 // ============================================================================
 // Argument parsing
 // ============================================================================
 
-fn parse_args(args: &[String]) -> ParseResult {
+/// Parse `diff`'s command line.
+///
+/// Words arrive as `OsString`, not `String`, because on this OS a filename may
+/// hold any byte but `/` and NUL — and `env::args()`'s iterator is a literal
+/// `unwrap`, so `diff <name holding 0x80> other` died with a Rust panic
+/// message before `diff` ran a line of its own.
+///
+/// Option NAMES are matched through a decoded `&str`, which is safe because
+/// every option `diff` has is ASCII and **every option VALUE it takes is
+/// numeric** — there is no `--from-file=PATH` here for a path to hide in. A
+/// word that is not valid Unicode decodes to `""`, which starts with no `-`
+/// and so falls through to the operand arm, where the original `OsString` is
+/// kept intact.
+fn parse_args(args: &[OsString]) -> ParseResult {
     let mut format = Format::Normal;
     let mut context_lines: Option<usize> = None;
     let mut width: usize = 130;
@@ -176,31 +251,46 @@ fn parse_args(args: &[String]) -> ParseResult {
     let mut color: Option<bool> = None;
     let mut recursive = false;
     let mut new_file = false;
-    let mut positional: Vec<String> = Vec::new();
+    let mut ignore_trailing_space = false;
+    let mut text_mode = false;
+    let mut positional: Vec<OsString> = Vec::new();
+    // Tracked by INDEX, not by value: an operand can be spelled the same as
+    // an option's value -- `diff -U 5 5 other` names a file called `5` -- and
+    // subtracting one list from the other by content would drop the wrong word.
+    let mut positional_at: Vec<usize> = Vec::new();
 
     let mut end_of_opts = false;
     let mut i = 1;
 
     while i < args.len() {
         let arg = &args[i];
+        // `""` for a word that is not Unicode: it matches no option and is
+        // taken as an operand, which is what it must be. Decoding is for
+        // MATCHING only -- the operand arm below keeps `arg` itself.
+        let a: &str = arg.to_str().unwrap_or("");
 
-        if end_of_opts || !arg.starts_with('-') {
+        // A bare `-` is stdin, and so an OPERAND. It was falling into the
+        // option branch on `starts_with('-')`, never reaching `positional`,
+        // and `diff base.txt -` answered `missing operand after '-'` --
+        // which is the most ordinary way anyone writes a diff in a pipeline.
+        if end_of_opts || !a.starts_with('-') || a == "-" {
             positional.push(arg.clone());
+            positional_at.push(i);
             i += 1;
             continue;
         }
 
-        if arg == "--" {
+        if a == "--" {
             end_of_opts = true;
             i += 1;
             continue;
         }
 
         // Long options.
-        if arg.starts_with("--") {
-            if arg == "--unified" {
+        if a.starts_with("--") {
+            if a == "--unified" {
                 format = Format::Unified;
-            } else if let Some(n_str) = arg.strip_prefix("--unified=") {
+            } else if let Some(n_str) = a.strip_prefix("--unified=") {
                 format = Format::Unified;
                 match n_str.parse::<usize>() {
                     Ok(n) => context_lines = Some(n),
@@ -209,9 +299,9 @@ fn parse_args(args: &[String]) -> ParseResult {
                         process::exit(2);
                     }
                 }
-            } else if arg == "--context" {
+            } else if a == "--context" {
                 format = Format::Context;
-            } else if let Some(n_str) = arg.strip_prefix("--context=") {
+            } else if let Some(n_str) = a.strip_prefix("--context=") {
                 format = Format::Context;
                 match n_str.parse::<usize>() {
                     Ok(n) => context_lines = Some(n),
@@ -220,22 +310,22 @@ fn parse_args(args: &[String]) -> ParseResult {
                         process::exit(2);
                     }
                 }
-            } else if arg == "--side-by-side" {
+            } else if a == "--side-by-side" {
                 format = Format::SideBySide;
-            } else if arg == "--width" {
+            } else if a == "--width" {
                 i += 1;
                 if i >= args.len() {
                     eprintln!("diff: option '--width' requires an argument");
                     process::exit(2);
                 }
-                match args[i].parse::<usize>() {
+                match args[i].to_str().unwrap_or("").parse::<usize>() {
                     Ok(w) => width = w,
                     Err(_) => {
                         eprintln!("diff: invalid width {}", quoteaf_os(&args[i]));
                         process::exit(2);
                     }
                 }
-            } else if let Some(w_str) = arg.strip_prefix("--width=") {
+            } else if let Some(w_str) = a.strip_prefix("--width=") {
                 match w_str.parse::<usize>() {
                     Ok(w) => width = w,
                     Err(_) => {
@@ -243,33 +333,37 @@ fn parse_args(args: &[String]) -> ParseResult {
                         process::exit(2);
                     }
                 }
-            } else if arg == "--brief" {
+            } else if a == "--brief" {
                 brief = true;
-            } else if arg == "--report-identical-files" {
+            } else if a == "--report-identical-files" {
                 report_identical = true;
-            } else if arg == "--ignore-case" {
+            } else if a == "--ignore-case" {
                 ignore_case = true;
-            } else if arg == "--ignore-space-change" {
+            } else if a == "--ignore-space-change" {
                 ignore_space_change = true;
-            } else if arg == "--ignore-all-space" {
+            } else if a == "--ignore-trailing-space" {
+                ignore_trailing_space = true;
+            } else if a == "--text" {
+                text_mode = true;
+            } else if a == "--ignore-all-space" {
                 ignore_all_space = true;
-            } else if arg == "--ignore-blank-lines" {
+            } else if a == "--ignore-blank-lines" {
                 ignore_blank_lines = true;
-            } else if arg == "--color" {
+            } else if a == "--color" {
                 color = Some(true);
-            } else if arg == "--no-color" {
+            } else if a == "--no-color" {
                 color = Some(false);
-            } else if arg == "--recursive" {
+            } else if a == "--recursive" {
                 recursive = true;
-            } else if arg == "--new-file" {
+            } else if a == "--new-file" {
                 new_file = true;
-            } else if arg == "--help" {
+            } else if a == "--help" {
                 return ParseResult::Help;
-            } else if arg == "--version" {
+            } else if a == "--version" {
                 return ParseResult::Version;
             } else {
                 eprintln!("diff: unrecognized option {}", quoteaf_os(arg));
-                eprintln!("Try 'diff --help' for more information.");
+                eprintln!("diff: Try 'diff --help' for more information.");
                 process::exit(2);
             }
 
@@ -278,7 +372,9 @@ fn parse_args(args: &[String]) -> ParseResult {
         }
 
         // Short options. Some accept an optional or required value.
-        let chars: Vec<char> = arg[1..].chars().collect();
+        // `a`, not `arg`: a non-Unicode word decoded to `""` above and was
+        // taken as an operand, so anything reaching here is ASCII.
+        let chars: Vec<char> = a.get(1..).unwrap_or("").chars().collect();
         let mut j = 0;
         while j < chars.len() {
             match chars[j] {
@@ -306,6 +402,48 @@ fn parse_args(args: &[String]) -> ParseResult {
                         continue;
                     }
                 }
+                // `-U N` -- unified with N lines of context, the argument in a
+                // SEPARATE word, unlike `-u3` which glues it on. GNU accepts
+                // both spellings and this build accepted only the glued one,
+                // so `diff -U 5` was refused outright as an unknown option.
+                //
+                // The argument is taken unconditionally rather than only when
+                // it does not look like an option, which is measured: GNU
+                // answers `diff -U -1` with `invalid context length '-1'`, so
+                // it consumed the `-1` as the value rather than treating it as
+                // a flag.
+                'U' => {
+                    format = Format::Unified;
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let value = if rest.is_empty() {
+                        i += 1;
+                        if i >= args.len() {
+                            eprintln!("diff: option '-U' requires an argument");
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        }
+                        // Decoded: this value is a COUNT, so a word that is
+                        // not Unicode is simply not a number, and the
+                        // diagnostic below echoes the original bytes anyway.
+                        args[i].to_str().unwrap_or("").to_string()
+                    } else {
+                        rest
+                    };
+                    match value.parse::<usize>() {
+                        Ok(n) => context_lines = Some(n),
+                        Err(_) => {
+                            // GNU's wording, measured: `diff: invalid context
+                            // length 'notanumber'`. Not "invalid width", which
+                            // is what the neighbouring `-W` says, and not the
+                            // generic unknown-option line this used to give.
+                            eprintln!("diff: invalid context length {}", quoteaf_os(&value));
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        }
+                    }
+                    j = chars.len();
+                    continue;
+                }
                 'y' => format = Format::SideBySide,
                 'W' => {
                     // -W may have value glued on or as next arg.
@@ -324,7 +462,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                             eprintln!("diff: option '-W' requires an argument");
                             process::exit(2);
                         }
-                        match args[i].parse::<usize>() {
+                        match args[i].to_str().unwrap_or("").parse::<usize>() {
                             Ok(w) => width = w,
                             Err(_) => {
                                 eprintln!("diff: invalid width {}", quoteaf_os(&args[i]));
@@ -340,12 +478,14 @@ fn parse_args(args: &[String]) -> ParseResult {
                 'i' => ignore_case = true,
                 'b' => ignore_space_change = true,
                 'w' => ignore_all_space = true,
+                'Z' => ignore_trailing_space = true,
+                'a' => text_mode = true,
                 'B' => ignore_blank_lines = true,
                 'r' => recursive = true,
                 'N' => new_file = true,
                 other => {
                     eprintln!("diff: invalid option -- {}", quoteaf_os(other.to_string()));
-                    eprintln!("Try 'diff --help' for more information.");
+                    eprintln!("diff: Try 'diff --help' for more information.");
                     process::exit(2);
                 }
             }
@@ -356,14 +496,44 @@ fn parse_args(args: &[String]) -> ParseResult {
     }
 
     if positional.len() != 2 {
-        eprintln!("diff: requires exactly two file arguments");
-        eprintln!("Try 'diff --help' for more information.");
+        // GNU's two wordings, measured on all three counts rather than
+        // inferred from two:
+        //
+        //     diff                       missing operand after 'diff'
+        //     diff x.txt                 missing operand after 'x.txt'
+        //     diff x.txt y.txt z.txt     extra operand 'z.txt'
+        //
+        // "after WHAT" is the last word on the command line, not the last
+        // operand -- which is why bare `diff` names the program itself. A rule
+        // derived from the one-operand case alone would have printed an empty
+        // name there. `cmp` in this crate already says both of these; this was
+        // the one bin still answering with a sentence of its own invention.
+        if let Some(extra) = positional.get(2) {
+            eprintln!("diff: extra operand {}", quoteaf_os(extra));
+        } else {
+            // The last WORD as typed, byte-exact: it is usually a path, and
+            // this diagnostic is the one place a bad one is echoed back.
+            let fallback = OsString::from("diff");
+            let last = args.last().unwrap_or(&fallback);
+            eprintln!("diff: missing operand after {}", quoteaf_os(last));
+        }
+        eprintln!("diff: Try 'diff --help' for more information.");
         process::exit(2);
     }
 
     // Default color: false (Slate OS does not have reliable isatty yet).
     let use_color = color.unwrap_or(false);
     let ctx = context_lines.unwrap_or(3);
+
+    // Everything that was not an operand, in the order it was typed. `args[0]`
+    // is the program name and is not one of them.
+    let option_words: Vec<OsString> = args
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(at, _)| !positional_at.contains(at))
+        .map(|(_, w)| w.clone())
+        .collect();
 
     ParseResult::Run(Config {
         path1: positional[0].clone(),
@@ -380,6 +550,9 @@ fn parse_args(args: &[String]) -> ParseResult {
         color: use_color,
         recursive,
         new_file,
+        ignore_trailing_space,
+        text_mode,
+        option_words,
     })
 }
 
@@ -388,60 +561,123 @@ fn parse_args(args: &[String]) -> ParseResult {
 // ============================================================================
 
 /// Normalize a line for comparison purposes based on the current flags.
-fn normalize_line(line: &str, config: &Config) -> String {
-    let mut s = line.to_string();
+fn normalize_line(line: &[u8], config: &Config) -> Vec<u8> {
+    // ASCII, not Unicode, and MEASURED rather than conceded. The `char`
+    // versions this replaced were each a divergence from GNU:
+    //
+    //   diff -i  `cafE<U+00C9>` vs `caf<U+00E9>`  GNU: DIFFERENT (not folded)
+    //            `ABC` vs `abc`                   GNU: SAME      (folded)
+    //   diff -w  `a<U+00A0>b` vs `ab`             GNU: DIFFERENT (not space)
+    //            `a b` / `a<TAB>b` vs `ab`        GNU: SAME      (folded)
+    //
+    // GNU's `tolower`/`isspace` are byte-wise, so it folds ASCII case and
+    // ASCII space and nothing else. `str::to_lowercase` and
+    // `char::is_whitespace` did more than that, which meant `-i` and `-w`
+    // each answered a question GNU answers the other way. Both probes were
+    // run with a control pair, so they are known to be sensitive.
+    let mut s = line.to_vec();
 
     if config.ignore_all_space {
-        s.retain(|c| !c.is_whitespace());
+        s.retain(|b| !b.is_ascii_whitespace());
     } else if config.ignore_space_change {
         // Collapse runs of whitespace into a single space; trim trailing.
-        let mut result = String::with_capacity(s.len());
+        let mut result: Vec<u8> = Vec::with_capacity(s.len());
         let mut in_space = false;
-        for ch in s.chars() {
-            if ch.is_whitespace() {
+        for &b in &s {
+            if b.is_ascii_whitespace() {
                 if !in_space {
-                    result.push(' ');
+                    result.push(b' ');
                     in_space = true;
                 }
             } else {
-                result.push(ch);
+                result.push(b);
                 in_space = false;
             }
         }
         // Trim trailing single space that might result from trailing whitespace.
-        if result.ends_with(' ') {
+        if result.last() == Some(&b' ') {
             result.pop();
         }
         s = result;
     }
 
+    // `-Z` trims only the END of the line, and runs AFTER the collapsing
+    // options above so that `-b -Z` sees what `-b` left. `-w` has already
+    // removed every space, so `-Z` finds nothing to do there, which is
+    // correct rather than a special case.
+    if config.ignore_trailing_space {
+        while s.last().is_some_and(u8::is_ascii_whitespace) {
+            s.pop();
+        }
+    }
+
     if config.ignore_case {
-        s = s.to_lowercase();
+        s.make_ascii_lowercase();
     }
 
     s
 }
 
 /// Returns true if a line is considered blank for `--ignore-blank-lines`.
-fn is_blank(line: &str) -> bool {
-    line.chars().all(|c| c.is_whitespace())
+fn is_blank(line: &[u8]) -> bool {
+    line.iter().all(u8::is_ascii_whitespace)
 }
 
 // ============================================================================
 // File reading
 // ============================================================================
 
+/// The lines of `data`, without their terminators.
+///
+/// `str::lines` over bytes, and the reason `diff` has its own rather than
+/// decoding first: a line is file content, and file content is bytes. A
+/// trailing newline does NOT produce a final empty line, and a CR before the
+/// newline goes with it, both matching `str::lines` -- a DOS file must not
+/// report every line as changed against the same file with Unix endings.
+fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let (line, tail) = match rest.iter().position(|&b| b == b'\n') {
+            Some(at) => (rest.get(..at), rest.get(at.saturating_add(1)..)),
+            None => (Some(rest), None),
+        };
+        let Some(line) = line else { break };
+        let line = match line.split_last() {
+            Some((b'\r', head)) => head,
+            _ => line,
+        };
+        out.push(line.to_vec());
+        match tail {
+            Some(t) => rest = t,
+            None => break,
+        }
+    }
+    out
+}
+
 /// Result of reading a file for diffing.
 enum FileContent {
     /// Text file, split into lines.
-    Text(Vec<String>),
+    Text(Vec<Vec<u8>>, FinalNewline),
     /// Binary file detected (contains NUL bytes).
     Binary,
 }
 
 /// Read a file into lines. Returns `Err` on I/O errors, `Ok(Binary)` if the
 /// file contains NUL bytes, or `Ok(Text(lines))` for normal text files.
-fn read_file(path: &Path) -> Result<FileContent, String> {
+fn read_file(path: &Path, text_mode: bool) -> Result<FileContent, String> {
+    // `-` is stdin, which has no metadata to size-check and no mtime. It also
+    // cannot be read twice, so `diff - -` reads it once and compares the result
+    // with an empty second side -- the same thing GNU does with a pipe.
+    if is_stdin(path) {
+        let mut data = Vec::new();
+        io::stdin()
+            .read_to_end(&mut data)
+            .map_err(|e| format!("-: {e}"))?;
+        return Ok(classify(data, text_mode));
+    }
+
     let metadata = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
 
     if metadata.len() > MAX_FILE_SIZE {
@@ -454,23 +690,56 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
     }
 
     let data = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(classify(data, text_mode))
+}
 
-    // Check for binary content in the first BINARY_DETECT_LEN bytes.
+/// Whether this operand names standard input.
+///
+/// A bare `-` only; `./-` is a file called `-`, which is what GNU does and is
+/// the reason this is a function rather than a `== "-"` at each site.
+fn is_stdin(path: &Path) -> bool {
+    path.as_os_str() == "-"
+}
+
+/// A file's bytes, as either binary or a list of lines.
+///
+/// Shared by the path that reads a file and the one that reads stdin, so that
+/// `diff base.txt -` classifies its two sides by the same rule. Before stdin
+/// was supported this was read_file's tail and there was only one caller.
+fn classify(data: Vec<u8>, text_mode: bool) -> FileContent {
+    // Binary is decided on the first BINARY_DETECT_LEN bytes -- unless `-a`
+    // says to treat everything as text, in which case the probe is SKIPPED
+    // rather than its verdict overridden later. A NUL is then just another
+    // byte in a line, which only works because lines are bytes now.
     let check_len = data.len().min(BINARY_DETECT_LEN);
-    if data[..check_len].contains(&0u8) {
-        return Ok(FileContent::Binary);
+    if !text_mode
+        && data
+            .get(..check_len)
+            .is_some_and(|head| head.contains(&0u8))
+    {
+        return FileContent::Binary;
     }
 
-    // Convert to string. We use lossy conversion here only for the purpose of
-    // displaying diff output; the comparison is byte-accurate via the line
-    // strings.
-    let text = String::from_utf8(data)
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    // NO DECODE. The comment that used to stand here said the lossy
+    // conversion below was "only for the purpose of displaying diff output;
+    // the comparison is byte-accurate via the line strings" -- and that was
+    // false in the way that hid the bug: `lines` WAS the lossy text, so the
+    // comparison ran on it. Every byte that is not valid UTF-8 became U+FFFD,
+    // so two files differing only in distinct bad bytes compared EQUAL and
+    // `diff` printed nothing and exited 0 where GNU printed `2c2`.
+    //
+    // A line is bytes. See known-issues.md ->
+    // B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL.
+    let lines: Vec<Vec<u8>> = split_lines(&data);
+    // An EMPTY file is treated as ending with a newline: it has no last line
+    // to mark, and GNU prints no marker for it.
+    let final_newline = if data.is_empty() || data.last() == Some(&b'\n') {
+        FinalNewline::Present
+    } else {
+        FinalNewline::Missing
+    };
 
-    // Split into lines, preserving the line content without trailing newlines.
-    let lines: Vec<String> = text.lines().map(String::from).collect();
-
-    Ok(FileContent::Text(lines))
+    FileContent::Text(lines, final_newline)
 }
 
 // ============================================================================
@@ -482,13 +751,82 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
 ///
 /// Returns a vector of `(Op, line_text)` pairs describing the full edit
 /// sequence from `a` to `b`.
-fn compute_diff(a: &[String], b: &[String], config: &Config) -> Vec<(Op, String)> {
+/// Flag the emitted lines that GNU follows with `\\ No newline at end of file`.
+///
+/// Measured, in all three output formats: the marker goes immediately after
+/// the line it belongs to, on whichever side lacks the newline, and after BOTH
+/// lines when both files lack one.
+///
+/// The last line of file A is simply the last edit that came from A -- a
+/// `Delete` or an `Equal` -- and the last line of B is the last `Insert` or
+/// `Equal`. An `Equal` is the last line of both at once, which is the
+/// single-file case and needs no special handling: the flag is set twice on
+/// the same edit and the marker prints once.
+fn mark_missing_newlines(ops: &mut [Edit], nl_a: FinalNewline, nl_b: FinalNewline) {
+    if nl_a == FinalNewline::Missing
+        && let Some(e) = ops
+            .iter_mut()
+            .rev()
+            .find(|e| matches!(e.op, Op::Delete | Op::Equal))
+    {
+        e.no_final_newline = true;
+    }
+    if nl_b == FinalNewline::Missing
+        && let Some(e) = ops
+            .iter_mut()
+            .rev()
+            .find(|e| matches!(e.op, Op::Insert | Op::Equal))
+    {
+        e.no_final_newline = true;
+    }
+}
+
+/// GNU's no-newline marker, written after the line it belongs to.
+///
+/// It carries NO diff prefix -- not `<`, not `-`, not two spaces -- which is
+/// why it is written here rather than through `write_body_line`.
+fn write_no_newline_marker(w: &mut impl Write) {
+    let _ = w.write_all(b"\\ No newline at end of file\n");
+}
+
+fn compute_diff(
+    a: &[Vec<u8>],
+    b: &[Vec<u8>],
+    nl_a: FinalNewline,
+    nl_b: FinalNewline,
+    config: &Config,
+) -> Vec<Edit> {
     let n = a.len();
     let m = b.len();
 
     // Build normalized comparison keys.
-    let norm_a: Vec<String> = a.iter().map(|l| normalize_line(l, config)).collect();
-    let norm_b: Vec<String> = b.iter().map(|l| normalize_line(l, config)).collect();
+    let mut norm_a: Vec<Vec<u8>> = a.iter().map(|l| normalize_line(l, config)).collect();
+    let mut norm_b: Vec<Vec<u8>> = b.iter().map(|l| normalize_line(l, config)).collect();
+
+    // A LAST LINE WITH NO NEWLINE IS NOT THE SAME LINE as the same text
+    // terminated, and this is the only place that can be said: splitting a
+    // file into lines throws the terminator away, so `delta` and `delta\n`
+    // arrive here identical and two files of 26 and 25 bytes compared EQUAL.
+    //
+    // The marker is a newline, which is not a choice of sentinel but the
+    // absence of one: a line produced by `split_lines` cannot contain a
+    // newline by construction, so no real content can collide with it. It
+    // goes on the NORMALISED key only -- `orig_a`/`orig_b` are what gets
+    // emitted, so nothing printed is affected.
+    //
+    // When NEITHER file ends with a newline, both last lines are marked and
+    // still compare equal, which is right.
+    if nl_a == FinalNewline::Missing
+        && let Some(last) = norm_a.last_mut()
+    {
+        last.push(b'\n');
+    }
+    if nl_b == FinalNewline::Missing
+        && let Some(last) = norm_b.last_mut()
+    {
+        last.push(b'\n');
+    }
+    let (norm_a, norm_b) = (norm_a, norm_b);
 
     // For very large inputs, fall back to a simpler LCS DP when both files are
     // small enough that the O(NM) table fits in memory (< ~10K lines each).
@@ -504,11 +842,11 @@ fn compute_diff(a: &[String], b: &[String], config: &Config) -> Vec<(Op, String)
 /// LCS-based diff using dynamic programming. O(NM) time and space.
 /// Suitable for files up to ~10K lines.
 fn lcs_diff(
-    norm_a: &[String],
-    norm_b: &[String],
-    orig_a: &[String],
-    orig_b: &[String],
-) -> Vec<(Op, String)> {
+    norm_a: &[Vec<u8>],
+    norm_b: &[Vec<u8>],
+    orig_a: &[Vec<u8>],
+    orig_b: &[Vec<u8>],
+) -> Vec<Edit> {
     let n = norm_a.len();
     let m = norm_b.len();
 
@@ -529,20 +867,20 @@ fn lcs_diff(
     }
 
     // Trace back to build edit script.
-    let mut ops: Vec<(Op, String)> = Vec::new();
+    let mut ops: Vec<Edit> = Vec::new();
     let mut i = n;
     let mut j = m;
 
     while i > 0 || j > 0 {
         if i > 0 && j > 0 && norm_a[i - 1] == norm_b[j - 1] {
-            ops.push((Op::Equal, orig_a[i - 1].clone()));
+            ops.push(Edit::new(Op::Equal, orig_a[i - 1].clone()));
             i -= 1;
             j -= 1;
         } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
-            ops.push((Op::Insert, orig_b[j - 1].clone()));
+            ops.push(Edit::new(Op::Insert, orig_b[j - 1].clone()));
             j -= 1;
         } else {
-            ops.push((Op::Delete, orig_a[i - 1].clone()));
+            ops.push(Edit::new(Op::Delete, orig_a[i - 1].clone()));
             i -= 1;
         }
     }
@@ -553,11 +891,11 @@ fn lcs_diff(
 
 /// Myers diff algorithm for large files. O(ND) time where D is edit distance.
 fn myers_diff(
-    norm_a: &[String],
-    norm_b: &[String],
-    orig_a: &[String],
-    orig_b: &[String],
-) -> Vec<(Op, String)> {
+    norm_a: &[Vec<u8>],
+    norm_b: &[Vec<u8>],
+    orig_a: &[Vec<u8>],
+    orig_b: &[Vec<u8>],
+) -> Vec<Edit> {
     let n = norm_a.len();
     let m = norm_b.len();
 
@@ -565,10 +903,16 @@ fn myers_diff(
         return Vec::new();
     }
     if n == 0 {
-        return orig_b.iter().map(|l| (Op::Insert, l.clone())).collect();
+        return orig_b
+            .iter()
+            .map(|l| Edit::new(Op::Insert, l.clone()))
+            .collect();
     }
     if m == 0 {
-        return orig_a.iter().map(|l| (Op::Delete, l.clone())).collect();
+        return orig_a
+            .iter()
+            .map(|l| Edit::new(Op::Delete, l.clone()))
+            .collect();
     }
 
     // Myers shortest edit script. We store the V array for each iteration of d
@@ -679,33 +1023,33 @@ fn myers_diff(
     path.reverse();
 
     // Convert path into edit operations.
-    let mut ops: Vec<(Op, String)> = Vec::new();
+    let mut ops: Vec<Edit> = Vec::new();
     let mut ai: usize = 0;
     let mut bi: usize = 0;
 
     for &(px, py) in &path {
         // If we need to skip to (px, py), emit deletes/inserts.
         while ai < px && bi < py {
-            ops.push((Op::Equal, orig_a[ai].clone()));
+            ops.push(Edit::new(Op::Equal, orig_a[ai].clone()));
             ai += 1;
             bi += 1;
         }
         while ai < px {
-            ops.push((Op::Delete, orig_a[ai].clone()));
+            ops.push(Edit::new(Op::Delete, orig_a[ai].clone()));
             ai += 1;
         }
         while bi < py {
-            ops.push((Op::Insert, orig_b[bi].clone()));
+            ops.push(Edit::new(Op::Insert, orig_b[bi].clone()));
             bi += 1;
         }
         // The point itself.
         if ai == px && bi == py && ai < n && bi < m {
             if norm_a[ai] == norm_b[bi] {
-                ops.push((Op::Equal, orig_a[ai].clone()));
+                ops.push(Edit::new(Op::Equal, orig_a[ai].clone()));
                 ai += 1;
                 bi += 1;
             } else if ai < n {
-                ops.push((Op::Delete, orig_a[ai].clone()));
+                ops.push(Edit::new(Op::Delete, orig_a[ai].clone()));
                 ai += 1;
             }
         }
@@ -713,11 +1057,11 @@ fn myers_diff(
 
     // Flush remaining.
     while ai < n {
-        ops.push((Op::Delete, orig_a[ai].clone()));
+        ops.push(Edit::new(Op::Delete, orig_a[ai].clone()));
         ai += 1;
     }
     while bi < m {
-        ops.push((Op::Insert, orig_b[bi].clone()));
+        ops.push(Edit::new(Op::Insert, orig_b[bi].clone()));
         bi += 1;
     }
 
@@ -730,10 +1074,10 @@ fn myers_diff(
 
 /// If `--ignore-blank-lines` is set, reclassify insertions and deletions of
 /// blank lines as equal (keeping the line from whichever side is available).
-fn filter_blank_lines(ops: &mut [(Op, String)]) {
+fn filter_blank_lines(ops: &mut [Edit]) {
     for entry in ops.iter_mut() {
-        if entry.0 != Op::Equal && is_blank(&entry.1) {
-            entry.0 = Op::Equal;
+        if entry.op != Op::Equal && is_blank(&entry.text) {
+            entry.op = Op::Equal;
         }
     }
 }
@@ -743,7 +1087,7 @@ fn filter_blank_lines(ops: &mut [(Op, String)]) {
 // ============================================================================
 
 /// Group edit operations into hunks with the given number of context lines.
-fn build_hunks(ops: &[(Op, String)], context: usize) -> Vec<Hunk> {
+fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
     if ops.is_empty() {
         return Vec::new();
     }
@@ -752,7 +1096,7 @@ fn build_hunks(ops: &[(Op, String)], context: usize) -> Vec<Hunk> {
     let change_indices: Vec<usize> = ops
         .iter()
         .enumerate()
-        .filter(|(_, (op, _))| *op != Op::Equal)
+        .filter(|(_, e)| e.op != Op::Equal)
         .map(|(i, _)| i)
         .collect();
 
@@ -769,7 +1113,7 @@ fn build_hunks(ops: &[(Op, String)], context: usize) -> Vec<Hunk> {
         // Count equal lines between group_end and ci.
         let gap = ops[group_end + 1..ci]
             .iter()
-            .filter(|(op, _)| *op == Op::Equal)
+            .filter(|e| e.op == Op::Equal)
             .count();
 
         if gap <= 2 * context {
@@ -797,7 +1141,7 @@ fn build_hunks(ops: &[(Op, String)], context: usize) -> Vec<Hunk> {
         let mut line2: usize = 0;
 
         // Count lines before hunk_start to determine the starting line numbers.
-        for (op, _) in &ops[..hunk_start] {
+        for Edit { op, .. } in &ops[..hunk_start] {
             match op {
                 Op::Equal => {
                     line1 += 1;
@@ -813,10 +1157,10 @@ fn build_hunks(ops: &[(Op, String)], context: usize) -> Vec<Hunk> {
 
         let mut count1 = 0usize;
         let mut count2 = 0usize;
-        let mut lines: Vec<(Op, String)> = Vec::new();
+        let mut lines: Vec<Edit> = Vec::new();
 
-        for (op, text) in hunk_ops {
-            match op {
+        for e in hunk_ops {
+            match e.op {
                 Op::Equal => {
                     count1 += 1;
                     count2 += 1;
@@ -824,7 +1168,7 @@ fn build_hunks(ops: &[(Op, String)], context: usize) -> Vec<Hunk> {
                 Op::Delete => count1 += 1,
                 Op::Insert => count2 += 1,
             }
-            lines.push((*op, text.clone()));
+            lines.push(e.clone());
         }
 
         hunks.push(Hunk {
@@ -848,20 +1192,32 @@ const GREEN: &str = "\x1b[32m";
 const CYAN: &str = "\x1b[36m";
 const RESET: &str = "\x1b[0m";
 
-fn color_red(s: &str, color: bool) -> String {
-    if color {
-        format!("{RED}{s}{RESET}")
-    } else {
-        s.to_string()
+/// Write one body line of a diff: an ASCII marker, the line's own BYTES, and a
+/// newline, optionally wrapped in a colour.
+///
+/// The line goes out RAW. Measured: GNU prints `< cafM-i` for a line holding
+/// byte 0351, which is `cat -v` showing the byte itself, not an escape GNU
+/// chose. Rendering it any other way would also break the pipe that matters --
+/// `diff -u | patch` -- since `patch` reads these lines back and compares them
+/// against the file.
+fn write_body_line(w: &mut impl Write, marker: &[u8], text: &[u8], color: Option<&str>) {
+    let mut line: Vec<u8> = Vec::with_capacity(marker.len().saturating_add(text.len()) + 16);
+    if let Some(c) = color {
+        line.extend_from_slice(c.as_bytes());
     }
+    line.extend_from_slice(marker);
+    line.extend_from_slice(text);
+    if color.is_some() {
+        line.extend_from_slice(RESET.as_bytes());
+    }
+    line.push(b'\n');
+    let _ = w.write_all(&line);
 }
 
-fn color_green(s: &str, color: bool) -> String {
-    if color {
-        format!("{GREEN}{s}{RESET}")
-    } else {
-        s.to_string()
-    }
+/// `Some(code)` when colour is on, so `write_body_line` takes one argument
+/// rather than a colour and a flag that must agree.
+fn when(color: bool, code: &str) -> Option<&str> {
+    if color { Some(code) } else { None }
 }
 
 fn color_cyan(s: &str, color: bool) -> String {
@@ -894,19 +1250,11 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
     for hunk in hunks {
         // Determine the operation type for this hunk: all deletes, all inserts,
         // or a change (mix).
-        let has_del = hunk.lines.iter().any(|(op, _)| *op == Op::Delete);
-        let has_ins = hunk.lines.iter().any(|(op, _)| *op == Op::Insert);
+        let has_del = hunk.lines.iter().any(|e| e.op == Op::Delete);
+        let has_ins = hunk.lines.iter().any(|e| e.op == Op::Insert);
 
-        let del_count = hunk
-            .lines
-            .iter()
-            .filter(|(op, _)| *op == Op::Delete)
-            .count();
-        let ins_count = hunk
-            .lines
-            .iter()
-            .filter(|(op, _)| *op == Op::Insert)
-            .count();
+        let del_count = hunk.lines.iter().filter(|e| e.op == Op::Delete).count();
+        let ins_count = hunk.lines.iter().filter(|e| e.op == Op::Insert).count();
 
         // Compute file-1 and file-2 ranges for the changed lines only (not context).
         // We need start positions relative to the hunk's changes.
@@ -914,7 +1262,7 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         let mut line2_pos = hunk.start2;
 
         // Skip leading context to find where changes begin.
-        for (op, _) in &hunk.lines {
+        for Edit { op, .. } in &hunk.lines {
             if *op == Op::Equal {
                 line1_pos += 1;
                 line2_pos += 1;
@@ -944,10 +1292,17 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         let _ = writeln!(w, "{}", color_cyan(&header, config.color));
 
         // Print deleted lines.
-        for (op, text) in &hunk.lines {
+        for Edit {
+            op,
+            text,
+            no_final_newline,
+        } in &hunk.lines
+        {
             if *op == Op::Delete {
-                let line = format!("< {text}");
-                let _ = writeln!(w, "{}", color_red(&line, config.color));
+                write_body_line(&mut w, b"< ", text, when(config.color, RED));
+                if *no_final_newline {
+                    write_no_newline_marker(&mut w);
+                }
             }
         }
 
@@ -957,10 +1312,17 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         }
 
         // Print inserted lines.
-        for (op, text) in &hunk.lines {
+        for Edit {
+            op,
+            text,
+            no_final_newline,
+        } in &hunk.lines
+        {
             if *op == Op::Insert {
-                let line = format!("> {text}");
-                let _ = writeln!(w, "{}", color_green(&line, config.color));
+                write_body_line(&mut w, b"> ", text, when(config.color, GREEN));
+                if *no_final_newline {
+                    write_no_newline_marker(&mut w);
+                }
             }
         }
     }
@@ -970,41 +1332,185 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
 // Unified diff output
 // ============================================================================
 
-fn print_unified(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
+/// The `<path>TAB<mtime>` field GNU puts on a `---`, `+++` or `***` header.
+///
+/// Measured against GNU diffutils rather than reconstructed, because three
+/// details of it are not guessable:
+///
+/// ```text
+/// --- x.txt<TAB>2020-01-02 08:04:05.000000000 +0000
+/// ```
+///
+/// * the separator is a TAB, and `patch` relies on it -- everything after the
+///   tab is the timestamp, which is how a path containing spaces stays
+///   readable;
+/// * the fraction is NINE digits, always, even for a whole second;
+/// * the time is LOCAL, not UTC. `TZ=America/New_York` on the same file gives
+///   `2020-01-02 03:04:05.000000000 -0500`, so the offset moves with it.
+///
+/// A file whose mtime cannot be read -- stdin, above all -- takes the current
+/// time, which is also measured: GNU stamps `diff -u - y.txt` with now.
+/// A path as `diff` writes it in a HEADER, C-quoted when it needs to be.
+///
+/// GNU runs the names in `--- `/`+++ ` and in the `diff -r A B` label through
+/// `quotearg` in the C style, so a name holding a byte like `0xE9` comes out
+/// as `"da/oddéname.txt"` -- double-quoted, with the byte escaped in
+/// octal. Measured (`scripts/probe-diff-name-quoting.sh`), along with three
+/// rules that are not guessable from "it quotes odd names":
+///
+/// * a space or a tab is enough to force the quotes: `"with space1"`,
+///   `"tab\tone"`;
+/// * a single quote is **not** -- `apo'st1` stays bare -- though a double
+///   quote is, as `"quo\"te1"`;
+/// * and `Only in DIR: NAME` does **not** go through this at all. It prints
+///   the raw bytes. Two lines of the same program, two rules, and assuming
+///   they agreed would have been wrong in whichever direction I guessed.
+fn qname(p: &Path) -> Vec<u8> {
+    quoting::quote_c_maybe(&pb(p)).into_bytes()
+}
+
+fn header_field(path: &Path) -> Vec<u8> {
+    let (secs, nanos) = mtime_parts(path);
+    let tm = localtime::Zone::from_env().local(secs, nanos);
+    let mut out = qname(path);
+    out.push(b'\t');
+    out.extend_from_slice(&localtime::strftime(b"%Y-%m-%d %H:%M:%S.%N %z", &tm));
+    out
+}
+
+/// `path`'s modification time as `(seconds, nanoseconds)` since the epoch,
+/// falling back to now.
+///
+/// Split out so the fallback is one decision in one place: every way of
+/// failing to learn a file's mtime -- it does not exist, it is a pipe, the
+/// platform will not say -- produces the same answer GNU produces for stdin.
+fn mtime_parts(path: &Path) -> (i64, u32) {
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or((0, 0), |d| {
+                (i64::try_from(d.as_secs()).unwrap_or(0), d.subsec_nanos())
+            })
+    };
+    let Ok(meta) = fs::metadata(path) else {
+        return now();
+    };
+    let Ok(modified) = meta.modified() else {
+        return now();
+    };
+    epoch_parts(modified)
+}
+
+/// A `SystemTime` as `(seconds, nanoseconds)` since the epoch, with the
+/// nanoseconds always POSITIVE.
+///
+/// Split from [`mtime_parts`] because the pre-1970 branch is the only real
+/// arithmetic here and a path-taking function cannot be given a 1969 file to
+/// test with.
+///
+/// `duration_since` reports a pre-epoch instant as a positive gap the other
+/// way round, so a naive negation puts the instant on the wrong side of the
+/// second: 0.75 s before the epoch is `(-1, 250_000_000)`, not
+/// `(0, -750_000_000)` -- which is not even representable -- nor `(-0, 750...)`,
+/// which would name 1970-01-01T00:00:00.75, three quarters of a second in the
+/// wrong direction. `strftime` renders the two fields independently, so an
+/// error here is a timestamp that looks entirely plausible.
+fn epoch_parts(t: std::time::SystemTime) -> (i64, u32) {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => (i64::try_from(d.as_secs()).unwrap_or(0), d.subsec_nanos()),
+        Err(e) => {
+            let d = e.duration();
+            let secs = i64::try_from(d.as_secs()).unwrap_or(0);
+            if d.subsec_nanos() == 0 {
+                (-secs, 0)
+            } else {
+                (
+                    -secs.saturating_add(1),
+                    1_000_000_000_u32.saturating_sub(d.subsec_nanos()),
+                )
+            }
+        }
+    }
+}
+
+/// One side of a `@@ -a,b +c,d @@` header.
+///
+/// A count of exactly ONE is written as the bare line number, with no comma
+/// and no count: GNU answers `diff -U0` with `@@ -20 +20 @@`, not
+/// `@@ -20,1 +20,1 @@`. That is the unified format's own rule rather than a
+/// preference, and it shows up the moment a hunk has no context -- which is
+/// why `-U0` was the case that exposed it here.
+///
+/// A count of ZERO keeps its `,0` and takes the line number GNU uses for an
+/// insertion point, which the caller has already worked out.
+fn range_field(start: usize, count: usize) -> String {
+    if count == 1 {
+        format!("{start}")
+    } else {
+        format!("{start},{count}")
+    }
+}
+
+fn print_unified(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
 
-    // File headers.
-    let hdr1 = format!("--- {path1}");
-    let hdr2 = format!("+++ {path2}");
-    let _ = writeln!(w, "{}", color_red(&hdr1, config.color));
-    let _ = writeln!(w, "{}", color_green(&hdr2, config.color));
+    // File headers, carrying the mtime GNU puts there. Written as bytes for
+    // the same reason the body is: a path is bytes, and this one is read back
+    // by `patch`.
+    write_body_line(
+        &mut w,
+        b"--- ",
+        &header_field(path1),
+        when(config.color, RED),
+    );
+    write_body_line(
+        &mut w,
+        b"+++ ",
+        &header_field(path2),
+        when(config.color, GREEN),
+    );
 
     for hunk in hunks {
         // Hunk header: @@ -start,count +start,count @@
         let h1_start = hunk.start1 + 1;
         let h2_start = hunk.start2 + 1;
         let header = format!(
-            "@@ -{},{} +{},{} @@",
-            if hunk.count1 == 0 { 0 } else { h1_start },
-            hunk.count1,
-            if hunk.count2 == 0 { 0 } else { h2_start },
-            hunk.count2,
+            "@@ -{} +{} @@",
+            range_field(if hunk.count1 == 0 { 0 } else { h1_start }, hunk.count1),
+            range_field(if hunk.count2 == 0 { 0 } else { h2_start }, hunk.count2),
         );
         let _ = writeln!(w, "{}", color_cyan(&header, config.color));
 
-        for (op, text) in &hunk.lines {
+        for Edit {
+            op,
+            text,
+            no_final_newline,
+        } in &hunk.lines
+        {
             match op {
                 Op::Equal => {
-                    let _ = writeln!(w, " {text}");
+                    // The marker belongs here too. A unified hunk's TRAILING
+                    // CONTEXT is where the last line of the file lands when
+                    // the change is above it -- which is precisely the case
+                    // where both files lack a final newline, since then the
+                    // last line is unchanged and stays an `Equal`.
+                    write_body_line(&mut w, b" ", text, None);
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
                 }
                 Op::Delete => {
-                    let line = format!("-{text}");
-                    let _ = writeln!(w, "{}", color_red(&line, config.color));
+                    write_body_line(&mut w, b"-", text, when(config.color, RED));
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
                 }
                 Op::Insert => {
-                    let line = format!("+{text}");
-                    let _ = writeln!(w, "{}", color_green(&line, config.color));
+                    write_body_line(&mut w, b"+", text, when(config.color, GREEN));
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
                 }
             }
         }
@@ -1015,15 +1521,68 @@ fn print_unified(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
 // Context diff output
 // ============================================================================
 
-fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
+/// The two-character marker a context diff puts in front of a body line.
+///
+/// `changed` is "this hunk has deletions AND insertions", which is what makes
+/// a line a CHANGE rather than a removal or an addition. Measured, one hunk of
+/// each shape:
+///
+/// ```text
+/// change        ! charlie   /  ! CHANGED     -- both halves
+/// pure delete   - charlie                    -- `---` half is header only
+/// pure insert                 + extra        -- `***` half is header only
+/// ```
+///
+/// A function rather than two inline `if`s because the rule is symmetric and
+/// stating it once is what makes that visible: the same `changed` flag turns
+/// both a `-` and a `+` into a `!`, and getting only one of them right would
+/// produce a diff that still looks plausible.
+fn context_marker(op: Op, changed: bool) -> &'static [u8] {
+    match op {
+        Op::Equal => b"  ",
+        Op::Delete if changed => b"! ",
+        Op::Delete => b"- ",
+        Op::Insert if changed => b"! ",
+        Op::Insert => b"+ ",
+    }
+}
+
+fn print_context(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
 
-    let _ = writeln!(w, "{}", color_red(&format!("*** {path1}"), config.color));
-    let _ = writeln!(w, "{}", color_green(&format!("--- {path2}"), config.color));
+    write_body_line(
+        &mut w,
+        b"*** ",
+        &header_field(path1),
+        when(config.color, RED),
+    );
+    write_body_line(
+        &mut w,
+        b"--- ",
+        &header_field(path2),
+        when(config.color, GREEN),
+    );
 
     for hunk in hunks {
         let _ = writeln!(w, "***************");
+
+        // WHICH MARKER, AND WHETHER THE HALF HAS A BODY AT ALL. Measured, on
+        // one hunk of each shape:
+        //
+        //   change (deletes AND inserts)  `!` on BOTH halves, both bodies
+        //   pure delete                   `-`, and the `---` half is HEADER
+        //                                 ONLY -- no body, not even context
+        //   pure insert                   `+`, and the `***` half is header
+        //                                 only
+        //
+        // This build printed `-` and `+` where GNU prints `!`, and printed
+        // both bodies always. A context diff is meant to be re-appliable, and
+        // `!` is what says "these two lines are the same line, changed" rather
+        // than "one line vanished and an unrelated one appeared".
+        let has_del = hunk.lines.iter().any(|e| e.op == Op::Delete);
+        let has_ins = hunk.lines.iter().any(|e| e.op == Op::Insert);
+        let changed = has_del && has_ins;
 
         // File 1 section.
         let f1_start = hunk.start1 + 1;
@@ -1041,17 +1600,30 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
             )
         );
 
-        for (op, text) in &hunk.lines {
-            match op {
-                Op::Equal => {
-                    let _ = writeln!(w, "  {text}");
-                }
-                Op::Delete => {
-                    let line = format!("- {text}");
-                    let _ = writeln!(w, "{}", color_red(&line, config.color));
-                }
-                Op::Insert => {
-                    // Inserts are not shown in the file-1 section.
+        if has_del {
+            for Edit {
+                op,
+                text,
+                no_final_newline,
+            } in &hunk.lines
+            {
+                match op {
+                    Op::Equal => {
+                        write_body_line(&mut w, b"  ", text, None);
+                        if *no_final_newline {
+                            write_no_newline_marker(&mut w);
+                        }
+                    }
+                    Op::Delete => {
+                        let marker = context_marker(Op::Delete, changed);
+                        write_body_line(&mut w, marker, text, when(config.color, RED));
+                        if *no_final_newline {
+                            write_no_newline_marker(&mut w);
+                        }
+                    }
+                    Op::Insert => {
+                        // Inserts are not shown in the file-1 section.
+                    }
                 }
             }
         }
@@ -1072,17 +1644,30 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
             )
         );
 
-        for (op, text) in &hunk.lines {
-            match op {
-                Op::Equal => {
-                    let _ = writeln!(w, "  {text}");
-                }
-                Op::Insert => {
-                    let line = format!("+ {text}");
-                    let _ = writeln!(w, "{}", color_green(&line, config.color));
-                }
-                Op::Delete => {
-                    // Deletes are not shown in the file-2 section.
+        if has_ins {
+            for Edit {
+                op,
+                text,
+                no_final_newline,
+            } in &hunk.lines
+            {
+                match op {
+                    Op::Equal => {
+                        write_body_line(&mut w, b"  ", text, None);
+                        if *no_final_newline {
+                            write_no_newline_marker(&mut w);
+                        }
+                    }
+                    Op::Insert => {
+                        let marker = context_marker(Op::Insert, changed);
+                        write_body_line(&mut w, marker, text, when(config.color, GREEN));
+                        if *no_final_newline {
+                            write_no_newline_marker(&mut w);
+                        }
+                    }
+                    Op::Delete => {
+                        // Deletes are not shown in the file-2 section.
+                    }
                 }
             }
         }
@@ -1093,7 +1678,7 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
 // Side-by-side output
 // ============================================================================
 
-fn print_side_by_side(ops: &[(Op, String)], config: &Config) {
+fn print_side_by_side(ops: &[Edit], config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
 
@@ -1104,37 +1689,67 @@ fn print_side_by_side(ops: &[(Op, String)], config: &Config) {
         30
     };
 
-    for (op, text) in ops {
+    for Edit {
+        op,
+        text,
+        // NOT bound: side-by-side prints no no-newline marker.
+        // Measured -- GNU's `-y` on a file lacking its final
+        // newline shows the line and nothing else, and simply
+        // omits the newline from its own last line of output.
+        ..
+    } in ops
+    {
         match op {
             Op::Equal => {
                 let left = truncate_or_pad(text, col_width);
                 let right = truncate_or_pad(text, col_width);
-                let _ = writeln!(w, "{left}   {right}");
+                let line = [left.as_slice(), b"   ", &right].concat();
+                write_body_line(&mut w, b"", &line, None);
             }
             Op::Delete => {
                 let left = truncate_or_pad(text, col_width);
-                let right = " ".repeat(col_width);
-                let line = format!("{left} < {right}");
-                let _ = writeln!(w, "{}", color_red(&line, config.color));
+                let right = vec![b' '; col_width];
+                let line = [left.as_slice(), b" < ", &right].concat();
+                write_body_line(&mut w, b"", &line, when(config.color, RED));
             }
             Op::Insert => {
-                let left = " ".repeat(col_width);
+                let left = vec![b' '; col_width];
                 let right = truncate_or_pad(text, col_width);
-                let line = format!("{left} > {right}");
-                let _ = writeln!(w, "{}", color_green(&line, config.color));
+                let line = [left.as_slice(), b" > ", &right].concat();
+                write_body_line(&mut w, b"", &line, when(config.color, GREEN));
             }
         }
     }
 }
 
-/// Truncate or pad a string to exactly `width` display characters.
-fn truncate_or_pad(s: &str, width: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= width {
-        format!("{s}{}", " ".repeat(width - char_count))
-    } else {
-        let truncated: String = s.chars().take(width).collect();
-        truncated
+/// Truncate or pad a line to exactly `width` display characters.
+///
+/// Columns are counted over CHARACTERS when the line is text and over BYTES
+/// when it is not. A line that is not valid UTF-8 has no character count to
+/// speak of; falling back to its length keeps every line that IS text aligned
+/// exactly as it was before `diff` moved to bytes, rather than trading one
+/// class of wrong column for another.
+///
+/// Side-by-side is the only mode that needs a width at all -- every other
+/// renderer writes the line and a newline -- which is why this is the one
+/// place `diff` still looks at a line as characters.
+fn truncate_or_pad(s: &[u8], width: usize) -> Vec<u8> {
+    match std::str::from_utf8(s) {
+        Ok(text) => {
+            let char_count = text.chars().count();
+            if char_count <= width {
+                let mut out = s.to_vec();
+                out.extend(std::iter::repeat_n(b' ', width.saturating_sub(char_count)));
+                out
+            } else {
+                text.chars().take(width).collect::<String>().into_bytes()
+            }
+        }
+        Err(_) => {
+            let mut out: Vec<u8> = s.iter().copied().take(width).collect();
+            out.extend(std::iter::repeat_n(b' ', width.saturating_sub(s.len())));
+            out
+        }
     }
 }
 
@@ -1163,7 +1778,7 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
     entries2.sort();
 
     // Merge the two sorted lists.
-    let mut all_names: Vec<String> = Vec::new();
+    let mut all_names: Vec<OsString> = Vec::new();
     let mut i = 0;
     let mut j = 0;
     while i < entries1.len() && j < entries2.len() {
@@ -1201,14 +1816,23 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
         let e2 = p2.exists();
 
         if !e1 && !config.new_file {
-            eprintln!("Only in {}: {name}", path2.display());
+            // STDOUT. Measured: `diff -r da db 2>/dev/null` still shows both
+            // `Only in` lines and `2>&1 >/dev/null` shows neither, so GNU
+            // puts them on stdout. They are a RESULT -- part of the answer to
+            // "how do these trees differ" -- not a diagnostic, and on stderr
+            // they were lost by every caller that redirected the diff.
+            // Bytes, not `Display`: `name` is a directory entry and may
+            // hold any byte. `println!` would not compile against an
+            // `OsString`, and the `to_str()` that used to make it
+            // compile is what silently dropped such entries upstream.
+            print_path_line(&[b"Only in ", &pb(path2), b": ", &pb(Path::new(name))]);
             if worst_exit < 1 {
                 worst_exit = 1;
             }
             continue;
         }
         if !e2 && !config.new_file {
-            eprintln!("Only in {}: {name}", path1.display());
+            print_path_line(&[b"Only in ", &pb(path1), b": ", &pb(Path::new(name))]);
             if worst_exit < 1 {
                 worst_exit = 1;
             }
@@ -1219,9 +1843,20 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
         let is_dir2 = e2 && p2.is_dir();
 
         if is_dir1 && is_dir2 {
-            let code = diff_dirs(&p1, &p2, config);
-            if code > worst_exit {
-                worst_exit = code;
+            if config.recursive {
+                let code = diff_dirs(&p1, &p2, config);
+                if code > worst_exit {
+                    worst_exit = code;
+                }
+            } else {
+                // Measured: this is informational and goes to STDOUT with the
+                // rest of the answer, in the same sorted pass as the file
+                // comparisons rather than collected at the end.
+                println!(
+                    "Common subdirectories: {} and {}",
+                    p1.display(),
+                    p2.display()
+                );
             }
         } else if is_dir1 || is_dir2 {
             eprintln!(
@@ -1233,7 +1868,7 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
                 worst_exit = 1;
             }
         } else {
-            let code = diff_files(&p1.to_string_lossy(), &p2.to_string_lossy(), config);
+            let code = diff_files(&p1, &p2, config, true);
             if code > worst_exit {
                 worst_exit = code;
             }
@@ -1244,15 +1879,23 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
 }
 
 /// List entries in a directory, returning just the file/dir names.
-fn list_dir(path: &Path) -> Result<Vec<String>, String> {
+fn list_dir(path: &Path) -> Result<Vec<OsString>, String> {
     let entries = fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
 
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", path.display()))?;
-        if let Some(name) = entry.file_name().to_str() {
-            names.push(name.to_string());
-        }
+        // The name is taken as it is. This used to read
+        //
+        //     if let Some(name) = entry.file_name().to_str() { names.push(...) }
+        //
+        // which **silently dropped every entry whose name is not valid
+        // Unicode** -- a legal filename on this OS. The effect was worse than
+        // the panic it avoided: `diff -r a b` reported no difference for files
+        // it had never looked at, and said nothing about having skipped them.
+        // A comparison tool answering "these are the same" about a file it
+        // declined to read is the one failure it must never have.
+        names.push(entry.file_name());
     }
     Ok(names)
 }
@@ -1262,26 +1905,62 @@ fn list_dir(path: &Path) -> Result<Vec<String>, String> {
 // ============================================================================
 
 /// Compare two files and print the diff. Returns exit code (0/1/2).
-fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
-    let p1 = Path::new(path1_str);
-    let p2 = Path::new(path2_str);
+/// A verdict line naming two paths, written as BYTES.
+///
+/// `println!("Files {p1} and {p2} differ")` cannot do this: a path may hold
+/// bytes that are not valid Unicode -- on this OS every byte but `/` and NUL
+/// is legal in a name -- and `Path::display()` replaces them, so the line
+/// would name a file nobody can open.
+fn print_path_line(parts: &[&[u8]]) {
+    let out = io::stdout();
+    let mut w = out.lock();
+    let mut line: Vec<u8> = Vec::new();
+    for p in parts {
+        line.extend_from_slice(p);
+    }
+    line.push(b'\n');
+    let _ = w.write_all(&line);
+}
 
-    let e1 = p1.exists();
-    let e2 = p2.exists();
+/// A path's bytes, for the lines above.
+fn pb(p: &Path) -> Vec<u8> {
+    quoting::os_bytes(p.as_os_str()).into_owned()
+}
+
+fn diff_files(p1: &Path, p2: &Path, config: &Config, in_dir_walk: bool) -> i32 {
+    // `-` is stdin, which exists without being a path -- `Path::new("-")
+    // .exists()` is false, so the two guards below turned every
+    // `cmd | diff file -` into `No such file or directory` before `read_file`
+    // was ever reached.
+    let e1 = is_stdin(p1) || p1.exists();
+    let e2 = is_stdin(p2) || p2.exists();
 
     // Handle absent files with --new-file.
-    if !e1 && !config.new_file {
-        eprintln!("diff: {}: No such file or directory", quotef_os(path1_str));
-        return 2;
-    }
-    if !e2 && !config.new_file {
-        eprintln!("diff: {}: No such file or directory", quotef_os(path2_str));
-        return 2;
+    //
+    // BOTH are reported before returning. Measured: `diff nosuch.txt
+    // nosuch2.txt` gives GNU two lines, one per file, and this build gave one
+    // and stopped -- so a user who mistyped both paths fixed the first, re-ran,
+    // and only then learned about the second. Same shape as CLAUDE.md's rule
+    // that a batch operation reports the worst error rather than the first one
+    // it meets.
+    if !config.new_file {
+        let mut absent = false;
+        if !e1 {
+            eprintln!("diff: {}: No such file or directory", quotef_os(p1));
+            absent = true;
+        }
+        if !e2 {
+            eprintln!("diff: {}: No such file or directory", quotef_os(p2));
+            absent = true;
+        }
+        if absent {
+            return 2;
+        }
     }
 
     // Read file contents (absent files treated as empty when -N is set).
     let content1 = if e1 {
-        match read_file(p1) {
+        match read_file(p1, config.text_mode) {
             Ok(c) => c,
             Err(msg) => {
                 eprintln!("diff: {msg}");
@@ -1289,11 +1968,11 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
             }
         }
     } else {
-        FileContent::Text(Vec::new())
+        FileContent::Text(Vec::new(), FinalNewline::Present)
     };
 
     let content2 = if e2 {
-        match read_file(p2) {
+        match read_file(p2, config.text_mode) {
             Ok(c) => c,
             Err(msg) => {
                 eprintln!("diff: {msg}");
@@ -1301,32 +1980,43 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
             }
         }
     } else {
-        FileContent::Text(Vec::new())
+        FileContent::Text(Vec::new(), FinalNewline::Present)
     };
 
     // Handle binary files.
     match (&content1, &content2) {
         (FileContent::Binary, _) | (_, FileContent::Binary) => {
-            // For binary files, just report whether they differ — same
-            // message regardless of --brief.
-            let _ = config.brief;
-            println!("Binary files {path1_str} and {path2_str} differ");
+            // The wording DOES depend on --brief, which the comment that
+            // stood here denied. Measured:
+            //
+            //     diff  nul.txt nul2.txt   Binary files nul.txt and nul2.txt differ
+            //     diff -q nul.txt nul2.txt Files nul.txt and nul2.txt differ
+            //
+            // `-q` asks only whether the files differ, and at that level a
+            // binary file is not a special case -- so it gets the same
+            // sentence a pair of text files gets.
+            if config.brief {
+                print_path_line(&[b"Files ", &pb(p1), b" and ", &pb(p2), b" differ"]);
+            } else {
+                print_path_line(&[b"Binary files ", &pb(p1), b" and ", &pb(p2), b" differ"]);
+            }
             return 1;
         }
         _ => {}
     }
 
-    let lines1 = match &content1 {
-        FileContent::Text(l) => l,
+    let (lines1, nl1) = match &content1 {
+        FileContent::Text(l, nl) => (l, *nl),
         FileContent::Binary => return 2, // unreachable due to match above
     };
-    let lines2 = match &content2 {
-        FileContent::Text(l) => l,
+    let (lines2, nl2) = match &content2 {
+        FileContent::Text(l, nl) => (l, *nl),
         FileContent::Binary => return 2,
     };
 
     // Compute the diff.
-    let mut ops = compute_diff(lines1, lines2, config);
+    let mut ops = compute_diff(lines1, lines2, nl1, nl2, config);
+    mark_missing_newlines(&mut ops, nl1, nl2);
 
     // Apply blank-line filtering if requested.
     if config.ignore_blank_lines {
@@ -1334,18 +2024,41 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
     }
 
     // Check if there are any differences.
-    let has_diff = ops.iter().any(|(op, _)| *op != Op::Equal);
+    let has_diff = ops.iter().any(|e| e.op != Op::Equal);
 
     if !has_diff {
         if config.report_identical {
-            println!("Files {path1_str} and {path2_str} are identical");
+            print_path_line(&[b"Files ", &pb(p1), b" and ", &pb(p2), b" are identical"]);
         }
         return 0;
     }
 
     if config.brief {
-        println!("Files {path1_str} and {path2_str} differ");
+        print_path_line(&[b"Files ", &pb(p1), b" and ", &pb(p2), b" differ"]);
         return 1;
+    }
+
+    // THE `diff -r da/x.txt db/x.txt` LINE, printed here rather than by the
+    // directory walk, because the conditions for it are only known now.
+    // Measured, three ways round:
+    //
+    //   * it appears only for a file that DIFFERS -- an identical pair in the
+    //     same walk gets no line, and under `-s` its `are identical` line has
+    //     no header either, which is why this sits below the `!has_diff`
+    //     return rather than above it;
+    //   * `--brief` prints none at all, which is why it sits below that return
+    //     too;
+    //   * the options are echoed as TYPED.
+    if in_dir_walk {
+        // Bytes: an option word is echoed exactly as typed, and `diff`
+        // accepts words it does not recognise as operands rather than
+        // rejecting them, so this must not assume Unicode.
+        let mut line: Vec<u8> = b"diff".to_vec();
+        for word in &config.option_words {
+            line.push(b' ');
+            line.extend_from_slice(&quoting::os_bytes(word));
+        }
+        print_path_line(&[&line, b" ", &qname(p1), b" ", &qname(p2)]);
     }
 
     // Format the output.
@@ -1359,11 +2072,11 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
         }
         Format::Unified => {
             let hunks = build_hunks(&ops, config.context_lines);
-            print_unified(&hunks, path1_str, path2_str, config);
+            print_unified(&hunks, p1, p2, config);
         }
         Format::Context => {
             let hunks = build_hunks(&ops, config.context_lines);
-            print_context(&hunks, path1_str, path2_str, config);
+            print_context(&hunks, p1, p2, config);
         }
     }
 
@@ -1395,6 +2108,8 @@ fn print_help() {
     println!("  -i, --ignore-case           Case-insensitive comparison");
     println!("  -b, --ignore-space-change   Ignore changes in whitespace amount");
     println!("  -w, --ignore-all-space      Ignore all whitespace");
+    println!("  -Z, --ignore-trailing-space Ignore whitespace at line end");
+    println!("  -a, --text                  Treat all files as text");
     println!("  -B, --ignore-blank-lines    Ignore blank line changes");
     println!();
     println!("OUTPUT:");
@@ -1420,7 +2135,9 @@ fn print_help() {
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so a filename
+    // holding a byte that is not valid Unicode killed the process here.
+    let args: Vec<OsString> = env::args_os().collect();
 
     match parse_args(&args) {
         ParseResult::Help => {
@@ -1438,37 +2155,43 @@ fn main() {
             let is_dir1 = p1.is_dir();
             let is_dir2 = p2.is_dir();
 
+            // TWO DIRECTORIES ARE COMPARED WITH OR WITHOUT `-r`. This build
+            // refused without it -- `diff: da and db are directories (use -r to
+            // compare recursively)`, exit 2 -- where GNU compares the files
+            // they hold and reports `Common subdirectories:` for the ones it
+            // will not descend into. `-r` chooses whether to DESCEND, not
+            // whether to compare at all, and the refusal made the common
+            // `diff olddir newdir` fail outright.
             let exit_code = if is_dir1 && is_dir2 {
-                if config.recursive {
-                    diff_dirs(&p1, &p2, &config)
-                } else {
-                    eprintln!(
-                        "diff: {} and {} are directories (use -r to compare recursively)",
-                        config.path1, config.path2,
-                    );
-                    2
-                }
+                diff_dirs(&p1, &p2, &config)
             } else if is_dir1 || is_dir2 {
                 // One is a directory, one is a file -- diff the file against
                 // the same-named file in the directory.
                 let (dir, file) = if is_dir1 { (&p1, &p2) } else { (&p2, &p1) };
 
                 if let Some(fname) = file.file_name() {
+                    // Paths, not decoded strings. `to_string_lossy` here meant
+                    // that `diff dir file` where either name held a byte that
+                    // is not valid Unicode built a path with U+FFFD in it and
+                    // then failed to open it.
                     let target = dir.join(fname);
-                    let t_str = target.to_string_lossy();
-                    let f_str = file.to_string_lossy();
 
                     if is_dir1 {
-                        diff_files(&t_str, &f_str, &config)
+                        diff_files(&target, file, &config, false)
                     } else {
-                        diff_files(&f_str, &t_str, &config)
+                        diff_files(file, &target, &config, false)
                     }
                 } else {
                     eprintln!("diff: cannot determine filename from path");
                     2
                 }
             } else {
-                diff_files(&config.path1, &config.path2, &config)
+                diff_files(
+                    Path::new(&config.path1),
+                    Path::new(&config.path2),
+                    &config,
+                    false,
+                )
             };
 
             process::exit(exit_code);
@@ -1520,15 +2243,300 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    /// A hunk of exactly one line drops the `,1` from its `@@` header.
+    ///
+    /// Measured: `diff -U0` on a one-line change gives `@@ -20 +20 @@`, and
+    /// this build wrote `@@ -20,1 +20,1 @@`. `patch` reads both -- its
+    /// `parse_range` already treats a bare number as a count of one -- so
+    /// nothing downstream complained, which is exactly why the harness is the
+    /// thing that found it.
+    #[test]
+    fn a_one_line_range_is_written_without_its_count() {
+        assert_eq!(range_field(20, 1), "20");
+        // Every other count keeps the comma, including the two that bracket 1.
+        assert_eq!(range_field(20, 0), "20,0");
+        assert_eq!(range_field(20, 2), "20,2");
+        assert_eq!(range_field(1, 4), "1,4");
+    }
+
+    // ---------------- the header timestamp ----------------
+
+    /// A pre-1970 mtime keeps its nanoseconds on the right side of the second.
+    ///
+    /// `duration_since` hands a pre-epoch instant back as a POSITIVE gap the
+    /// other way round, so the obvious negation is wrong by up to a second in
+    /// the wrong direction -- and `strftime` would render the result without
+    /// complaint, because both fields are individually valid.
+    #[test]
+    fn an_mtime_before_the_epoch_keeps_positive_nanoseconds() {
+        use std::time::{Duration, UNIX_EPOCH};
+        // Exactly on the epoch.
+        assert_eq!(epoch_parts(UNIX_EPOCH), (0, 0));
+        // A whole second before: no remainder to carry.
+        assert_eq!(epoch_parts(UNIX_EPOCH - Duration::from_secs(1)), (-1, 0));
+        // 0.75 s before the epoch is one second before, plus a quarter.
+        let t = UNIX_EPOCH - Duration::from_nanos(750_000_000);
+        assert_eq!(epoch_parts(t), (-1, 250_000_000));
+        // 1.75 s before.
+        let t = UNIX_EPOCH - Duration::from_nanos(1_750_000_000);
+        assert_eq!(epoch_parts(t), (-2, 250_000_000));
+        // After the epoch is the plain case, and is the control: without it a
+        // function that negated everything would pass the cases above.
+        let t = UNIX_EPOCH + Duration::from_nanos(1_250_000_000);
+        assert_eq!(epoch_parts(t), (1, 250_000_000));
+    }
+
+    /// The header field is `<path>TAB<stamp>`, and the fraction is nine digits.
+    ///
+    /// Measured shape, from GNU:
+    ///   `--- x.txt<TAB>2020-01-02 08:04:05.000000000 +0000`
+    /// The TAB is what `patch` splits on, and a fraction printed with fewer
+    /// digits still parses -- so nothing downstream would notice the loss.
+    #[test]
+    fn the_header_field_is_a_tab_then_a_nine_digit_stamp() {
+        let field = header_field(Path::new("nosuchfile.txt"));
+        let at = field
+            .iter()
+            .position(|&b| b == b'\t')
+            .expect("the separator must be a TAB");
+        assert_eq!(&field[..at], b"nosuchfile.txt");
+        let stamp = &field[at + 1..];
+        // `YYYY-MM-DD HH:MM:SS.NNNNNNNNN +ZZZZ`
+        let dot = stamp
+            .iter()
+            .position(|&b| b == b'.')
+            .expect("a fractional second must be present");
+        let frac: Vec<u8> = stamp[dot + 1..]
+            .iter()
+            .copied()
+            .take_while(u8::is_ascii_digit)
+            .collect();
+        assert_eq!(frac.len(), 9, "GNU always prints nine digits");
+        let last = stamp.split(|&b| b == b' ').next_back().unwrap_or(b"");
+        assert_eq!(last.len(), 5, "a +ZZZZ offset, got {last:?}");
+    }
+
+    /// A context diff marks a CHANGED line `!` on both sides, and a pure
+    /// removal or addition `-` / `+`.
+    ///
+    /// The symmetry is the point: the same `changed` flag has to turn both
+    /// markers into `!`, and a build that converted only one of them would
+    /// still produce a diff that looked right.
+    #[test]
+    fn a_changed_context_line_is_marked_on_both_sides() {
+        assert_eq!(context_marker(Op::Delete, true), b"! ");
+        assert_eq!(context_marker(Op::Insert, true), b"! ");
+        assert_eq!(context_marker(Op::Delete, false), b"- ");
+        assert_eq!(context_marker(Op::Insert, false), b"+ ");
+        // Context is two spaces either way -- `changed` does not reach it.
+        assert_eq!(context_marker(Op::Equal, true), b"  ");
+        assert_eq!(context_marker(Op::Equal, false), b"  ");
+    }
+
+    /// `-Z` ignores whitespace at the END of a line and nowhere else.
+    ///
+    /// Narrower than `-b`, which collapses runs anywhere. A file that differs
+    /// only in trailing spaces is what an editor leaves behind, and GNU exits
+    /// 0 on it under `-Z`.
+    #[test]
+    fn ignore_trailing_space_trims_only_the_end() {
+        let mut z = cfg();
+        z.ignore_trailing_space = true;
+        assert_eq!(normalize_line(b"a b   ", &z), b"a b");
+        assert_eq!(normalize_line(b"a b\t", &z), b"a b");
+        // The controls: leading and interior space are untouched.
+        assert_eq!(normalize_line(b"  a b", &z), b"  a b");
+        assert_eq!(normalize_line(b"a   b", &z), b"a   b");
+        // And without the flag nothing is trimmed at all.
+        assert_eq!(normalize_line(b"a b   ", &cfg()), b"a b   ");
+    }
+
+    /// `-a` makes a file holding NUL bytes compare as text.
+    #[test]
+    fn text_mode_stops_a_nul_meaning_binary() {
+        let data = b"a\0nul\n".to_vec();
+        assert!(
+            matches!(classify(data.clone(), false), FileContent::Binary),
+            "a NUL means binary without -a"
+        );
+        match classify(data, true) {
+            FileContent::Text(lines, _) => {
+                assert_eq!(lines, vec![b"a\0nul".to_vec()]);
+            }
+            FileContent::Binary => panic!("-a should have made this text"),
+        }
+    }
+
+    // ---------------- the missing final newline ----------------
+
+    /// The same four lines, one file terminated and one not, are DIFFERENT.
+    ///
+    /// This build called them identical and exited 0 on files of 26 and 25
+    /// bytes, because splitting into lines throws the terminator away and both
+    /// sides then yield the same four lines. GNU prints `4c4`.
+    ///
+    /// See known-issues.md -> B-DIFF-CANNOT-SEE-A-MISSING-FINAL-NEWLINE.
+    #[test]
+    fn a_missing_final_newline_is_a_difference() {
+        let a = s(&["alpha", "bravo", "charlie", "delta"]);
+        let script = compute_diff(&a, &a.clone(), NL, FinalNewline::Missing, &cfg());
+        assert!(
+            script.iter().any(|e| e.op != Op::Equal),
+            "the terminator is part of the file, got {script:?}"
+        );
+    }
+
+    /// The control: when NEITHER file ends with a newline they are equal.
+    ///
+    /// Without this, an implementation that simply called the last lines
+    /// different whenever it was asked would pass the case above.
+    #[test]
+    fn two_files_that_both_lack_a_final_newline_are_equal() {
+        let a = s(&["alpha", "bravo", "charlie", "delta"]);
+        let script = compute_diff(
+            &a,
+            &a.clone(),
+            FinalNewline::Missing,
+            FinalNewline::Missing,
+            &cfg(),
+        );
+        assert!(
+            script.iter().all(|e| e.op == Op::Equal),
+            "both unterminated is still the same file, got {script:?}"
+        );
+    }
+
+    /// The second control: two terminated files are equal, as always.
+    #[test]
+    fn two_terminated_files_are_equal() {
+        let a = s(&["alpha", "delta"]);
+        let script = compute_diff(&a, &a.clone(), NL, NL, &cfg());
+        assert!(script.iter().all(|e| e.op == Op::Equal), "{script:?}");
+    }
+
+    /// The marker lands on the last line of the side that lacks the newline,
+    /// and on that side only.
+    ///
+    /// Measured, both directions:
+    ///   `diff withnl nonl`  -> marker after the `>` line
+    ///   `diff nonl withnl`  -> marker after the `<` line
+    #[test]
+    fn the_marker_goes_on_the_side_that_lacks_the_newline() {
+        let mut edits = vec![
+            Edit::new(Op::Equal, b"alpha".to_vec()),
+            Edit::new(Op::Delete, b"delta".to_vec()),
+            Edit::new(Op::Insert, b"delta".to_vec()),
+        ];
+        mark_missing_newlines(&mut edits, NL, FinalNewline::Missing);
+        assert!(!edits[1].no_final_newline, "the old side is terminated");
+        assert!(edits[2].no_final_newline, "the new side is not");
+
+        let mut edits = vec![
+            Edit::new(Op::Equal, b"alpha".to_vec()),
+            Edit::new(Op::Delete, b"delta".to_vec()),
+            Edit::new(Op::Insert, b"delta".to_vec()),
+        ];
+        mark_missing_newlines(&mut edits, FinalNewline::Missing, NL);
+        assert!(edits[1].no_final_newline, "the old side is not terminated");
+        assert!(!edits[2].no_final_newline, "the new side is");
+    }
+
+    /// An `Equal` line is the last line of BOTH files at once, which is the
+    /// single-hunk-at-the-end case and must be marked from either side.
+    #[test]
+    fn an_equal_line_can_be_the_last_line_of_both_files() {
+        let mut edits = vec![Edit::new(Op::Equal, b"delta".to_vec())];
+        mark_missing_newlines(&mut edits, FinalNewline::Missing, FinalNewline::Missing);
+        assert!(edits[0].no_final_newline);
+    }
+
+    // ---------------- bytes, not UTF-8 ----------------
+
+    /// Two lines that differ, in bytes that are not valid UTF-8, must differ.
+    ///
+    /// This is the bug `from_utf8_lossy` caused: both \xe9 and \xff decoded to
+    /// U+FFFD, so the comparison saw one character twice and called the files
+    /// identical -- no output, exit 0 -- where GNU prints `2c2`.
+    /// `scripts/diff-diff.sh` had the fixtures for this all along
+    /// (`bytes.txt` / `bytes2.txt`) and three of its cases were red because of
+    /// it; they went green with this change and nothing else moved.
+    ///
+    /// See known-issues.md -> B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL.
+    #[test]
+    fn two_distinct_bytes_that_are_not_utf8_are_not_the_same_line() {
+        let a = vec![b"caf\xe9".to_vec()];
+        let b = vec![b"caf\xff".to_vec()];
+        let script = compute_diff(&a, &b, NL, NL, &cfg());
+        assert!(
+            script.iter().any(|e| e.op != Op::Equal),
+            "a difference must be reported, got {script:?}"
+        );
+    }
+
+    /// The control for the case above: the SAME bad byte really is equal.
+    ///
+    /// Without this, a `compute_diff` that called everything different would
+    /// pass the test above and be just as wrong.
+    #[test]
+    fn the_same_byte_that_is_not_utf8_is_still_equal() {
+        let a = vec![b"caf\xe9".to_vec()];
+        let script = compute_diff(&a, &a.clone(), NL, NL, &cfg());
+        assert!(
+            script.iter().all(|e| e.op == Op::Equal),
+            "identical input must produce no edits, got {script:?}"
+        );
+    }
+
+    /// `-i` folds ASCII case and NOT Unicode case, which is what GNU does.
+    ///
+    /// Measured, with the ASCII pair as the control:
+    ///   `caf<U+00C9>` vs `caf<U+00E9>` -> GNU reports DIFFERENT
+    ///   `ABC` vs `abc`                 -> GNU reports SAME
+    #[test]
+    fn ignore_case_folds_ascii_and_leaves_unicode_alone() {
+        let mut ci = cfg();
+        ci.ignore_case = true;
+        assert_eq!(normalize_line(b"ABC", &ci), b"abc");
+        assert_ne!(
+            normalize_line("caf\u{c9}".as_bytes(), &ci),
+            normalize_line("caf\u{e9}".as_bytes(), &ci)
+        );
+    }
+
+    /// A line keeps its bytes through the splitter, and a CR goes with the LF.
+    #[test]
+    fn split_lines_keeps_bytes_and_drops_the_terminator() {
+        assert_eq!(
+            split_lines(b"one\ntwo"),
+            vec![b"one".to_vec(), b"two".to_vec()]
+        );
+        assert_eq!(split_lines(b"a\r\nb\n"), vec![b"a".to_vec(), b"b".to_vec()]);
+        // A trailing newline does not invent a final empty line.
+        assert_eq!(split_lines(b"x\n").len(), 1);
+    }
+
+    /// The common case: both files end with a newline.
+    const NL: FinalNewline = FinalNewline::Present;
+
+    /// File content as the differ now takes it: a line is bytes.
+    fn s(items: &[&str]) -> Vec<Vec<u8>> {
+        items.iter().map(|x| x.as_bytes().to_vec()).collect()
+    }
+
+    /// argv, which is a separate question from content and still a `String`
+    /// here. `diff` remains in `scripts/argv-utf8-baseline.txt`: it cannot yet
+    /// take a filename that is not Unicode. That is the smaller of the two
+    /// faults -- it fails loudly -- and it is deliberately not mixed into the
+    /// change that fixes the one returning a wrong answer.
+    fn argv(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
     }
 
     /// A Config with every knob off, so a test names only what it changes.
     fn cfg() -> Config {
         Config {
-            path1: String::new(),
-            path2: String::new(),
+            path1: OsString::new(),
+            path2: OsString::new(),
             format: Format::Normal,
             context_lines: 3,
             width: 130,
@@ -1541,17 +2549,73 @@ mod tests {
             color: false,
             recursive: false,
             new_file: false,
+            ignore_trailing_space: false,
+            text_mode: false,
+            option_words: Vec::new(),
         }
     }
 
     fn run(args: &[&str]) -> Config {
-        match parse_args(&s(args)) {
+        match parse_args(&argv(args)) {
             ParseResult::Run(c) => c,
             _ => panic!("expected Run"),
         }
     }
 
     // ---------------- parse_args ----------------
+    /// A bare `-` is an OPERAND, not an option.
+    ///
+    /// It was falling into the option branch on `starts_with('-')`, so
+    /// `cmd | diff base.txt -` answered `missing operand after '-'` -- the
+    /// most ordinary way anyone writes a diff in a pipeline.
+    #[test]
+    fn a_bare_dash_is_an_operand() {
+        let c = run(&["diff", "base.txt", "-"]);
+        assert_eq!(c.path1, "base.txt");
+        assert_eq!(c.path2, "-");
+        assert!(c.option_words.is_empty(), "{:?}", c.option_words);
+        // ...on either side.
+        let c = run(&["diff", "-", "base.txt"]);
+        assert_eq!(c.path1, "-");
+        // A real option is still an option, and `--` still ends them.
+        let c = run(&["diff", "-u", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-u"]);
+    }
+
+    /// Only a BARE `-` is stdin. `./-` names a file called `-`.
+    #[test]
+    fn only_a_bare_dash_names_stdin() {
+        assert!(is_stdin(Path::new("-")));
+        assert!(!is_stdin(Path::new("./-")));
+        assert!(!is_stdin(Path::new("-x")));
+        assert!(!is_stdin(Path::new("a-")));
+        assert!(!is_stdin(Path::new("")));
+    }
+
+    /// The `diff -r a/x b/x` header echoes the options AS TYPED, and an
+    /// operand that looks like an option's value is still an operand.
+    ///
+    /// The words are collected by INDEX rather than by subtracting the operand
+    /// list from argv by content. `diff -U 5 5 other` names a file called `5`,
+    /// and a content-based subtraction would remove the wrong `5` -- leaving
+    /// the header reading `diff -U` and the file list intact, which is the
+    /// kind of wrong that looks right.
+    #[test]
+    fn the_option_words_are_kept_as_typed() {
+        let c = run(&["diff", "-r", "-u", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-r", "-u"]);
+        // Measured: GNU echoes `-ru` as `-ru`, not as `-r -u`.
+        let c = run(&["diff", "-ru", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-ru"]);
+        // An option's value is not an operand.
+        let c = run(&["diff", "-U", "5", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-U", "5"]);
+        // ...and an operand spelled like one is still an operand.
+        let c = run(&["diff", "-U", "5", "5", "other"]);
+        assert_eq!(c.option_words, vec!["-U", "5"]);
+        assert_eq!(c.path1, "5");
+        assert_eq!(c.path2, "other");
+    }
 
     #[test]
     fn parse_files_only() {
@@ -1583,11 +2647,11 @@ mod tests {
     #[test]
     fn parse_help_and_version_are_not_runs() {
         assert!(matches!(
-            parse_args(&s(&["diff", "--help"])),
+            parse_args(&argv(&["diff", "--help"])),
             ParseResult::Help
         ));
         assert!(matches!(
-            parse_args(&s(&["diff", "--version"])),
+            parse_args(&argv(&["diff", "--version"])),
             ParseResult::Version
         ));
     }
@@ -1609,15 +2673,15 @@ mod tests {
     #[test]
     fn normalize_line_applies_only_what_is_asked() {
         let plain = cfg();
-        assert_eq!(normalize_line("  A  b  ", &plain), "  A  b  ");
+        assert_eq!(normalize_line(b"  A  b  ", &plain), b"  A  b  ");
 
         let mut ci = cfg();
         ci.ignore_case = true;
-        assert_eq!(normalize_line("AbC", &ci), "abc");
+        assert_eq!(normalize_line(b"AbC", &ci), b"abc");
 
         let mut all = cfg();
         all.ignore_all_space = true;
-        assert_eq!(normalize_line(" a b ", &all), "ab");
+        assert_eq!(normalize_line(b" a b ", &all), b"ab");
 
         let mut some = cfg();
         some.ignore_space_change = true;
@@ -1632,27 +2696,36 @@ mod tests {
         //
         // So the implementation was right and the test was wrong, which is the
         // useful direction for a disagreement between them to run.
-        assert_eq!(normalize_line("  a    b  ", &some), " a b");
+        assert_eq!(normalize_line(b"  a    b  ", &some), b" a b");
 
         // ...and `-w` is the one that removes it, pinned here so the two
         // cannot quietly converge.
         let mut all2 = cfg();
         all2.ignore_all_space = true;
-        assert_eq!(normalize_line("  a    b  ", &all2), "ab");
+        assert_eq!(normalize_line(b"  a    b  ", &all2), b"ab");
     }
 
     #[test]
     fn is_blank_is_about_whitespace_not_emptiness() {
-        assert!(is_blank(""));
-        assert!(is_blank("   "));
-        assert!(is_blank("\t \t"));
-        assert!(!is_blank(" x "));
+        assert!(is_blank(b""));
+        assert!(is_blank(b"   "));
+        assert!(is_blank(b"\t \t"));
+        assert!(!is_blank(b" x "));
     }
 
     // ---------------- compute_diff: the edit-script cases ----------------
 
+    /// The edit script, decoded back to `String` for the assertions.
+    ///
+    /// Decoding is right HERE and nowhere else: every fixture below is ASCII,
+    /// and keeping the return type means all of these cases are the ones that
+    /// were here before the conversion rather than restatements of it. The
+    /// cases that exercise bytes call `compute_diff` directly.
     fn ops(a: &[&str], b: &[&str]) -> Vec<(Op, String)> {
-        compute_diff(&s(a), &s(b), &cfg())
+        compute_diff(&s(a), &s(b), NL, NL, &cfg())
+            .into_iter()
+            .map(|e| (e.op, String::from_utf8(e.text).expect("ASCII fixture")))
+            .collect()
     }
 
     #[test]

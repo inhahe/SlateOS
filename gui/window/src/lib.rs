@@ -1233,6 +1233,22 @@ impl<T: Transport> EventLoop<T> {
         self.conn.confirm(RequestBody::ReloadInput)
     }
 
+    /// Say that the user's notification rules have changed, so that the
+    /// desktop shell re-reads `notifications.yaml` instead of waiting for the
+    /// next login.
+    ///
+    /// The counterpart of [`input_changed`](Self::input_changed) for the third
+    /// settings file, with one difference worth knowing about: the compositor
+    /// only *relays* this one. It keeps no copy of the rules, because it is
+    /// not the thing that decides whether a notification is shown.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn notifications_changed(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::ReloadNotifications)
+    }
+
     /// Every window on the desktop, bottom-to-top, as of the last update.
     ///
     /// Empty until the first list arrives — which, for a client that never
@@ -1994,6 +2010,7 @@ pub mod testing {
                 RequestBody::ClickTrayIcon { .. } => "ClickTrayIcon",
                 RequestBody::ReloadAppearance => "ReloadAppearance",
                 RequestBody::ReloadInput => "ReloadInput",
+                RequestBody::ReloadNotifications => "ReloadNotifications",
                 RequestBody::ShellControl { .. } => "ShellControl",
                 RequestBody::ReserveEdge { .. } => "ReserveEdge",
                 RequestBody::SwitchWorkspace { .. } => "SwitchWorkspace",

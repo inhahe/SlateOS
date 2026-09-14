@@ -113,6 +113,13 @@
 #      error -- the linker takes whichever it sees first, and `-lstubs`
 #      comes before `-lc`. Three stale stubs were shadowing real posix
 #      implementations when this was written.
+#  42. Refuse a test suite that only passes in the order `cargo` happens to
+#      run it in. Alphabetical order is one sample of 20745! and the same
+#      sample forever, so an order-dependent test passes here indefinitely.
+#  43. Refuse a lossy byte->text conversion that reaches a VALUE:
+#      `from_utf8_lossy` on a name, then used. A decoded name is one
+#      nobody can open, and `diff -r` already reported `No such file`
+#      for a file it had itself listed.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -695,6 +702,91 @@ if [ "$skip_raced" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 42: refuse a test suite that only passes in one order.
+#
+# check-test-order-independence.py.
+#
+# `cargo test` runs a crate's tests alphabetically, the same order on every
+# machine forever, so a test that only fails after some other test has run
+# passes here indefinitely. Two such bugs are already recorded in this tree
+# (stdio's stream buffers, sysv_msg's 8-slot queue pool), and neither was
+# found by anything standing -- both by someone running --shuffle by hand.
+#
+# Scoped to posix/ for the same reason raced-globals is scoped: that is where
+# the process-global state lives, and a lane that did not touch it cannot have
+# changed the answer. This costs a lane-A or lane-C push nothing.
+# Initialised before first use: this hook runs under `set -u`, where a bare
+# `skip_toi=1` in a conditional leaves it unbound on the path that does not
+# take the branch. That is how the first version of this block failed -- the
+# push aborted with "skip_toi: unbound variable" before the gate ever ran.
+skip_toi=0
+toi="${repo_root:-.}/scripts/check-test-order-independence.py"
+[ -f "$toi" ] || skip_toi=1
+# No `pushed_shas` guard here, unlike the gates above, and its absence is the
+# point: those loop `for sha in $pushed_shas` and would run their checker zero
+# times on an empty list while `note_gate` recorded them as having run. This
+# gate runs the suite once against the working tree, so there is no loop to
+# degrade to nothing. `touches` alone decides whether it runs.
+touches posix/ scripts/check-test-order-independence.py || skip_toi=1
+note_gate test-order "$skip_toi"
+
+toi_failed=0
+if [ "$skip_toi" != "1" ]; then
+    # The checker before the check, as for raced-globals: a detector that has
+    # broken its own parsing reports a clean tree, not a broken one.
+    if ! run_checker test-order-selftest "$py" "$toi" --selftest; then
+        echo "pre-push: check-test-order-independence.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
+        toi_failed=1
+    elif ! run_checker test-order "$py" "$toi" --quiet; then
+        toi_failed=1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 43: refuse a lossy byte->text conversion that reaches a VALUE.
+#
+# lossy-decode.py.
+#
+# `String::from_utf8_lossy` puts U+FFFD in place of every byte it cannot
+# decode. On this OS a file name may hold every byte but `/` and NUL, so a
+# decoded name is a name nobody can open. CLAUDE.md names the call outright.
+#
+# It has cost once already, in code nobody suspected: `diff_dirs` passed
+# `p1.to_string_lossy()` to `diff_files`, so `diff -r` decoded the names it
+# had just enumerated and then reported `No such file or directory` for a file
+# it had listed itself.
+#
+# The checker excludes test modules, `cfg(not(unix))` host-only halves, and
+# decodes that only reach a diagnostic -- 131 raw hits on the image come down
+# to six, and all six are audited-exempt in its IGNORE table WITH REASONS. So
+# the expected state is zero and any finding is new.
+#
+# Scoped to userspace/, which is where it looks. A lane-A or lane-C push that
+# does not touch it pays nothing.
+skip_lossy=0
+lossy="${repo_root:-.}/scripts/lossy-decode.py"
+[ -f "$lossy" ] || skip_lossy=1
+# No `pushed_shas` guard, for the same reason gate 42 has none: this runs once
+# against the working tree rather than looping over shas, so there is no loop
+# that could degrade to zero runs while `note_gate` recorded it as having run.
+touches userspace/ scripts/lossy-decode.py || skip_lossy=1
+note_gate lossy-decode "$skip_lossy"
+
+lossy_failed=0
+if [ "$skip_lossy" != "1" ]; then
+    # The checker before the check: a detector that has broken its own parsing
+    # reports a clean tree, not a broken one. This one earned the habit --
+    # its self-test caught an inline `/* */` that swallowed the rest of its
+    # line, which would have hidden every call after one.
+    if ! run_checker lossy-decode-selftest "$py" "$lossy" --selftest; then
+        echo "pre-push: lossy-decode.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
+        lossy_failed=1
+    elif ! run_checker lossy-decode "$py" "$lossy"; then
+        lossy_failed=1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # check-read-defaults.py -- a read whose failure is indistinguishable from an
 # empty file.
 #
@@ -1164,6 +1256,81 @@ To push anyway:
     ALLOW_ROADMAP_DONE=1 git push \$remote_name ...
 EOF
     exit 1
+fi
+
+if [ "$lossy_failed" = "1" ]; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — a byte sequence is being decoded into text and
+then used.
+
+The line is named above. `String::from_utf8_lossy` and `to_string_lossy`
+replace every byte they cannot decode with U+FFFD, so what comes out is not
+the thing that went in. On this OS a file name may hold every byte except `/`
+and NUL, which makes a decoded name one nobody can open.
+
+This has happened here. `diff_dirs` passed `p1.to_string_lossy()` to
+`diff_files`, and `diff -r` then answered `No such file or directory` for a
+file it had itself just listed.
+
+What to do instead, in the order they usually apply:
+
+  * carry the bytes. `&[u8]` / `OsString` / `&Path` all the way to the
+    syscall; `quoting::os_bytes` and `os_from_bytes` are the boundary pair;
+  * if it is only being PRINTED, use `quoting::quotef`, which renders an
+    undecodable byte as an octal escape instead of destroying it;
+  * if it is genuinely safe — an ASCII constant, or a decode behind a guard
+    that admits only ASCII — add it to the IGNORE table in
+    scripts/lossy-decode.py WITH THE REASON. Not to a list that records only
+    that it exists: the table is anchored on the text of the line, so editing
+    the line re-opens the question.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/lossy-decode.py
+    python scripts/lossy-decode.py --show all    # including what it excused
+
+To push anyway:
+
+    ALLOW_LOSSY_DECODE=1 git push origin ...
+EOF
+    if [ "${ALLOW_LOSSY_DECODE:-0}" = "1" ]; then
+        echo "pre-push: ALLOW_LOSSY_DECODE=1 — continuing anyway." >&2
+    else
+        exit 1
+    fi
+fi
+
+if [ "$toi_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — the test suite does not pass in every order.
+
+The run above names the seed and the test. That failure is real: a shuffle
+never invents one, it only removes the accident of alphabetical order that was
+hiding it. Re-pushing will not help and the next seed is not a second opinion.
+
+A test that passes in one order and fails in another shares state with another
+test. In this tree it has been, in order of how often:
+
+  * a process-global one test writes and another reads — scripts/raced-globals.py
+    finds these, and the fix is a *_TEST_LOCK or a thread_local;
+  * a fixed-size pool (message queues, semaphores, FILE slots) that a test
+    takes from and never returns, so a later test's allocation fails;
+  * buffered output left on a standard stream — see stdio.rs's
+    StdStreamTestGuard, which purges on acquire *and* on drop precisely so
+    cleanup does not depend on the next author remembering.
+
+Reproduce with the command the failure printed. The seed is in the message, so
+the order is the same on any machine.
+
+To push anyway: ALLOW_TEST_ORDER_DRIFT=1 git push \$remote_name ...
+EOF
+    if [ "${ALLOW_TEST_ORDER_DRIFT:-0}" = "1" ]; then
+        echo "pre-push: ALLOW_TEST_ORDER_DRIFT=1 — continuing anyway." >&2
+    else
+        exit 1
+    fi
 fi
 
 if [ "$raced_failed" = "1" ]; then
@@ -4245,11 +4412,29 @@ touches gui/ apps/ scripts/check-scratch-config.py || skip_scratchcfg=1
 # The crates this push touches, as substrings the checker will match. Empty is
 # not "check everything": it means the push changed no crate directory, and the
 # gate is skipped above by the same `touches` test that produced this list.
+#
+# CRATES THE PUSH *DELETED* ARE FILTERED OUT -- the `while read` in the
+# pipeline below keeps only directories still on disk. `git diff --name-only`
+# lists a deleted file's path, so a push that removes a crate hands the checker
+# a directory that is no longer there; it matches nothing, exits 2 (this tree's
+# code for "I did not reach a verdict"), and this gate refuses the push. The
+# checker is behaving exactly as designed and it is still a wall in front of a
+# legitimate change: deleting a crate is not a reason to be unable to push.
+#
+# Found by deleting apps/systray on 2026-09-14 -- as far as the log shows, the
+# first push to remove a crate directory since this gate was wired.
+#
+# It is one line rather than an indented block because the pipeline is one
+# line: a `|` may not begin a line in sh, and the first attempt at this broke
+# the hook's syntax that way. `bash -n scripts/hooks/pre-push` catches it.
+#
+# If every changed crate was a deleted one, the list comes out empty and the
+# gate skips -- right, but for a different reason than the paragraph above:
+# nothing is left to check, rather than nothing having changed.
 scratchcfg_crates=""
 if [ "$skip_scratchcfg" != "1" ]; then
     # shellcheck disable=SC2086
-    scratchcfg_crates=$(git diff --name-only $pushed_shas --not --remotes="$remote_name"                             -- gui/ apps/ 2>/dev/null                         | awk -F/ 'NF>2 {print $1 "/" $2}' | sort -u | tr '
-' ' ')
+    scratchcfg_crates=$(git diff --name-only $pushed_shas --not --remotes="$remote_name"                             -- gui/ apps/ 2>/dev/null                         | awk -F/ 'NF>2 {print $1 "/" $2}' | sort -u | while read -r d; do [ -d "${repo_root:-.}/$d" ] && printf '%s|' "$d"; done | tr '|' ' ')
     [ -n "$scratchcfg_crates" ] || skip_scratchcfg=1
 fi
 note_gate scratch-config "$skip_scratchcfg"

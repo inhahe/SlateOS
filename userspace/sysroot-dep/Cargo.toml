@@ -1,0 +1,13 @@
+[package]
+name = "sysroot-dep"
+version = "0.1.0"
+edition = "2024"
+description = "Tell cargo that the hand-built sysroot libc.a is a build input"
+
+[dependencies]
+
+[lints]
+# The workspace's policy, not a private one. A crate that sets its own is
+# exactly what scripts/check-workspace-lints.py exists to catch, and it caught
+# this one on the first push.
+workspace = true

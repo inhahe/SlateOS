@@ -4,8 +4,16 @@
 //! common ioctl requests in userspace by inspecting the fd's handle
 //! kind and returning appropriate defaults or errors:
 //!
-//! - **`TIOCGWINSZ`**: returns default terminal dimensions for Console fds.
-//! - **`TIOCSWINSZ`**: accepts (no-op) for Console fds.
+//! - **`TIOCGWINSZ`**: real for every terminal kind, via the kernel's
+//!   `SYS_PTY_GET_WINSIZE`. Console fds go through it too, using `CTTY`.
+//! - **`TIOCSWINSZ`**: real, via `SYS_PTY_SET_WINSIZE`. On a pty this is
+//!   what makes a resized emulator visible to the program inside it. On the
+//!   console it still cannot resize anything — the geometry comes from the
+//!   display mode — but it reaches the kernel rather than being swallowed
+//!   here, so the size the console reports and the size it was told cannot
+//!   drift apart. (This list said "accepts (no-op) for Console fds" until
+//!   2026-09-13, long after the function stopped doing that; the doc on
+//!   `handle_tiocswinsz` was correct the whole time.)
 //! - **`FIONBIO`**: non-blocking mode flag — sets/clears `O_NONBLOCK` on
 //!   the fd (equivalent to `fcntl(fd, F_SETFL, ... | O_NONBLOCK)`).
 //! - **`FIONREAD`**: bytes available to read without blocking.

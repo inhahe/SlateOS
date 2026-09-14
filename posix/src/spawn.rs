@@ -1768,14 +1768,21 @@ unsafe fn spawn_impl(
         }
     };
 
-    // Pack argv into a contiguous null-terminated buffer.
+    // Pack argv into a contiguous null-terminated buffer. `None` means the
+    // list is longer than `ARG_MAX`, which POSIX spells `E2BIG` for exec --
+    // "argument list too long" -- and which this used to answer by quietly
+    // dropping the arguments that did not fit.
     let mut argv_buf = [0u8; EXEC_PACKED_MAX];
-    let argv_packed_len = pack_cstring_array(argv, &mut argv_buf);
-    let argc = count_cstring_array(argv);
-
-    // Pack envp into a contiguous null-terminated buffer.
     let mut envp_buf = [0u8; EXEC_PACKED_MAX];
-    let envp_packed_len = pack_cstring_array(envp, &mut envp_buf);
+    let (Some(argv_packed_len), Some(envp_packed_len)) = (
+        pack_cstring_array(argv, &mut argv_buf),
+        pack_cstring_array(envp, &mut envp_buf),
+    ) else {
+        opened.close_all();
+        errno::set_errno(errno::E2BIG);
+        return errno::E2BIG;
+    };
+    let argc = count_cstring_array(argv);
     let envc = count_cstring_array(envp);
 
     // The fields both syscalls share. Computed once and copied into whichever
@@ -1966,13 +1973,18 @@ pub extern "C" fn execve(path: *const u8, argv: *const *const u8, envp: *const *
         }
     };
 
-    // Pack argv into a contiguous null-terminated buffer.
+    // Pack argv and envp. `None` is a list longer than `ARG_MAX`: `E2BIG`,
+    // not a silent truncation. `execve` reports by returning -1 with errno
+    // set, since on success it does not return at all.
     let mut argv_buf = [0u8; EXEC_PACKED_MAX];
-    let argv_len = pack_cstring_array(argv, &mut argv_buf);
-
-    // Pack envp into a contiguous null-terminated buffer.
     let mut envp_buf = [0u8; EXEC_PACKED_MAX];
-    let envp_len = pack_cstring_array(envp, &mut envp_buf);
+    let (Some(argv_len), Some(envp_len)) = (
+        pack_cstring_array(argv, &mut argv_buf),
+        pack_cstring_array(envp, &mut envp_buf),
+    ) else {
+        errno::set_errno(errno::E2BIG);
+        return -1;
+    };
 
     // Preserve the current userspace fd table across the image
     // replacement.  A native process keeps its fd → kernel-handle map in
@@ -2040,11 +2052,23 @@ pub extern "C" fn execve(path: *const u8, argv: *const *const u8, envp: *const *
 
 /// Pack a null-terminated array of C strings into a contiguous buffer.
 ///
-/// Each string is copied with its null terminator.  Returns the total
-/// byte length written.  If `array` is null, returns 0.
-fn pack_cstring_array(array: *const *const u8, buf: &mut [u8]) -> usize {
+/// Each string is copied with its null terminator. `Some(total_bytes)`, or
+/// `None` if the list does not fit — which is `E2BIG`'s case and the caller's
+/// to report. A null `array` packs nothing and fits trivially.
+///
+/// IT USED TO TRUNCATE SILENTLY. `break; // Truncate silently if buffer is
+/// full.` stood here, and the loss was invisible in both directions:
+/// `count_cstring_array` counts the whole list regardless of any buffer, so an
+/// oversized `argv` was packed short AND announced at its full `argc`. The
+/// child started with fewer arguments than its parent passed and nothing
+/// anywhere said so.
+///
+/// The buffer is `EXEC_PACKED_MAX` (128 KiB), which is also what
+/// `sysconf(_SC_ARG_MAX)` advertises — so refusing here is the limit the
+/// library already promises, not a new one.
+fn pack_cstring_array(array: *const *const u8, buf: &mut [u8]) -> Option<usize> {
     if array.is_null() {
-        return 0;
+        return Some(0);
     }
     let mut pos = 0usize;
     let mut i = 0usize;
@@ -2058,7 +2082,9 @@ fn pack_cstring_array(array: *const *const u8, buf: &mut [u8]) -> usize {
         // Need slen + 1 bytes (string + null terminator).
         let needed = slen + 1;
         if pos + needed > buf.len() {
-            break; // Truncate silently if buffer is full.
+            // The whole list or none of it. Packing what fits would hand the
+            // kernel a buffer that disagrees with the `argc` beside it.
+            return None;
         }
         // SAFETY: ptr points to a valid C string of length slen.
         unsafe {
@@ -2071,7 +2097,7 @@ fn pack_cstring_array(array: *const *const u8, buf: &mut [u8]) -> usize {
         pos += needed;
         i += 1;
     }
-    pos
+    Some(pos)
 }
 
 /// Count the number of strings in a null-terminated C string array.
@@ -3524,6 +3550,40 @@ mod tests {
 
     // -- pack_cstring_array (existing, but add a round-trip test with count) --
 
+    /// A list that does not fit is REFUSED, not packed short.
+    ///
+    /// It used to be packed short, and the loss was invisible from both
+    /// sides: `count_cstring_array` counts the whole list regardless of any
+    /// buffer, so the kernel was handed a truncated buffer AND the full
+    /// `argc`. A child started with fewer arguments than its parent passed
+    /// and nothing said so. `E2BIG` is what POSIX spells for this.
+    #[test]
+    fn an_oversized_list_is_refused_not_truncated() {
+        let s = b"0123456789\0";
+        let ptrs: [*const u8; 5] = [
+            s.as_ptr(),
+            s.as_ptr(),
+            s.as_ptr(),
+            s.as_ptr(),
+            core::ptr::null(),
+        ];
+        assert_eq!(count_cstring_array(ptrs.as_ptr()), 4);
+        // Room for two of the four: refused outright.
+        let mut buf = [0u8; 25];
+        assert_eq!(
+            pack_cstring_array(ptrs.as_ptr(), &mut buf),
+            None,
+            "a list that does not fit must be refused, not packed short"
+        );
+        // The controls. Exactly enough room still packs, so the check is not
+        // simply refusing everything...
+        let mut exact = [0u8; 44];
+        assert_eq!(pack_cstring_array(ptrs.as_ptr(), &mut exact), Some(44));
+        // ...and one byte short of exactly enough does not.
+        let mut short = [0u8; 43];
+        assert_eq!(pack_cstring_array(ptrs.as_ptr(), &mut short), None);
+    }
+
     #[test]
     fn test_pack_and_count_consistency() {
         let s1 = b"alpha\0";
@@ -3538,7 +3598,7 @@ mod tests {
         let packed_len = pack_cstring_array(ptrs.as_ptr(), &mut buf);
 
         // "alpha\0beta\0" = 6 + 5 = 11 bytes.
-        assert_eq!(packed_len, 11);
+        assert_eq!(packed_len, Some(11));
         assert_eq!(&buf[..6], b"alpha\0");
         assert_eq!(&buf[6..11], b"beta\0");
     }

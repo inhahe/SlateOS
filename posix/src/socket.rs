@@ -4551,7 +4551,8 @@ const _: () = assert!(
     "getaddrinfo's trailing SockaddrIn would be misaligned"
 );
 
-/// Total size of one result block.
+/// Size of one result block *without* a canonical name — and therefore also
+/// the offset of the name within a block that has one, since it goes last.
 const GAI_BLOCK_SIZE: usize = GAI_ADDR_OFFSET + core::mem::size_of::<SockaddrIn>();
 
 /// Allocate and fill one `getaddrinfo` result, or NULL if out of memory.
@@ -4559,17 +4560,48 @@ const GAI_BLOCK_SIZE: usize = GAI_ADDR_OFFSET + core::mem::size_of::<SockaddrIn>
 /// `ip` is in network byte order (as [`inet_pton`] and `gethostbyname` produce
 /// it); `port` is in host byte order and is converted here.
 ///
+/// `canon` is the canonical name to copy into the block, or `None` to leave
+/// `ai_canonname` NULL.  Only the *first* node of a result list carries one —
+/// that is what POSIX specifies and what glibc does.
+///
 /// The returned node has `ai_next == NULL`; the caller links the list.
-fn gai_alloc(family: i32, socktype: i32, protocol: i32, ip: u32, port: u16) -> *mut Addrinfo {
-    let block = crate::malloc::malloc(GAI_BLOCK_SIZE);
+fn gai_alloc(
+    family: i32,
+    socktype: i32,
+    protocol: i32,
+    ip: u32,
+    port: u16,
+    canon: Option<&[u8]>,
+) -> *mut Addrinfo {
+    // Room for the canonical name, terminator included, inside this same
+    // block.  It has to live here: `freeaddrinfo` frees the node pointer and
+    // nothing else, so a separately allocated name would leak on every call
+    // that asked for one.  Bytes have alignment 1 and go last, so they cannot
+    // disturb the `SockaddrIn` alignment the assertion above establishes.
+    let name_room = match canon {
+        None => 0,
+        // Checked rather than `+ 1`: `canon`'s length is derived from caller
+        // data, and a value at `usize::MAX` would wrap to a zero-byte request
+        // — a block the copy below would immediately run off the end of.
+        Some(c) => match c.len().checked_add(1) {
+            Some(n) => n,
+            None => return core::ptr::null_mut(),
+        },
+    };
+    let Some(total) = GAI_BLOCK_SIZE.checked_add(name_room) else {
+        return core::ptr::null_mut();
+    };
+
+    let block = crate::malloc::malloc(total);
     if block.is_null() {
         return core::ptr::null_mut();
     }
 
-    // SAFETY: `malloc` returned a live block of exactly `GAI_BLOCK_SIZE` bytes,
-    // aligned to a page (so to both structs), and `GAI_ADDR_OFFSET` is in
-    // bounds with a whole `SockaddrIn` behind it.  Nothing else holds a pointer
-    // into it yet, so these writes cannot race.
+    // SAFETY: `malloc` returned a live block of exactly `total` bytes, aligned
+    // to a page (so to both structs), with `GAI_ADDR_OFFSET` in bounds and a
+    // whole `SockaddrIn` behind it, followed by `name_room` bytes reserved for
+    // the name.  Nothing else holds a pointer into it yet, so these writes
+    // cannot race.
     unsafe {
         let addr = block.add(GAI_ADDR_OFFSET).cast::<SockaddrIn>();
         addr.write(SockaddrIn {
@@ -4579,6 +4611,22 @@ fn gai_alloc(family: i32, socktype: i32, protocol: i32, ip: u32, port: u16) -> *
             sin_zero: [0u8; 8],
         });
 
+        // The name goes immediately after the `SockaddrIn`, which is what
+        // `GAI_BLOCK_SIZE` measures.
+        let canonname = match canon {
+            None => core::ptr::null_mut(),
+            Some(c) => {
+                let dst = block.add(GAI_BLOCK_SIZE);
+                // `c` is the caller's buffer and `dst` is inside a block
+                // `malloc` has just handed us, so the two cannot overlap.
+                core::ptr::copy_nonoverlapping(c.as_ptr(), dst, c.len());
+                // C callers read this with `strlen`/`printf`, so it must be
+                // terminated even when the name is empty.
+                dst.add(c.len()).write(0);
+                dst
+            }
+        };
+
         let node = block.cast::<Addrinfo>();
         node.write(Addrinfo {
             ai_flags: 0,
@@ -4586,10 +4634,7 @@ fn gai_alloc(family: i32, socktype: i32, protocol: i32, ip: u32, port: u16) -> *
             ai_socktype: socktype,
             ai_protocol: protocol,
             ai_addrlen: core::mem::size_of::<SockaddrIn>() as SocklenT,
-            // Always NULL: we do not implement AI_CANONNAME.  If it is ever
-            // added, the name must live inside this same block (glibc does the
-            // same) — `freeaddrinfo` frees the node and nothing else.
-            ai_canonname: core::ptr::null_mut(),
+            ai_canonname: canonname,
             ai_addr: addr.cast::<Sockaddr>(),
             ai_next: core::ptr::null_mut(),
         });
@@ -4736,6 +4781,30 @@ pub unsafe extern "C" fn getaddrinfo(
         AF_INET
     };
 
+    // POSIX: with `AI_CANONNAME` set and `nodename` non-null, the first
+    // result's `ai_canonname` refers to the canonical name of the host.  Ours
+    // is the queried name itself, because `SYS_DNS_RESOLVE` answers with four
+    // address bytes and no name — there is no CNAME chain to follow and
+    // nothing else to report.  That is exactly what glibc returns for a host
+    // with no CNAME, so it is right rather than merely convenient; what it
+    // does *not* do is turn a short name into an FQDN, which is why
+    // `hostname -f` is still short (known-issues.md,
+    // B-POSIX-GETADDRINFO-CANNOT-ANSWER-AI-CANONNAME).
+    //
+    // The flag is ignored when `nodename` is NULL: POSIX defines the
+    // canonical name in terms of `nodename`, so with no name there is nothing
+    // for it to be canonical *of*, and glibc leaves it NULL there too.
+    let canon: Option<&[u8]> = if (want_flags & AI_CANONNAME) != 0 && !node.is_null() {
+        // SAFETY: `node` is non-null and the caller guarantees a valid C
+        // string; `strlen` stops at the terminator inside it, so the slice is
+        // within the caller's allocation.  It is read before this function
+        // returns and never stored.
+        let n = unsafe { crate::string::strlen(node) };
+        Some(unsafe { core::slice::from_raw_parts(node, n) })
+    } else {
+        None
+    };
+
     if want_socktype != 0 {
         // Caller specified a socket type — return one result.
         let protocol = match want_socktype {
@@ -4743,7 +4812,7 @@ pub unsafe extern "C" fn getaddrinfo(
             SOCK_DGRAM => IPPROTO_UDP,
             _ => 0,
         };
-        let node = gai_alloc(family, want_socktype, protocol, ip, port);
+        let node = gai_alloc(family, want_socktype, protocol, ip, port, canon);
         if node.is_null() {
             return EAI_MEMORY;
         }
@@ -4753,11 +4822,12 @@ pub unsafe extern "C" fn getaddrinfo(
     } else {
         // No socket type specified — return TCP first, then UDP.
         // This lets callers iterate the list to find either type.
-        let r1 = gai_alloc(family, SOCK_STREAM, IPPROTO_TCP, ip, port);
+        let r1 = gai_alloc(family, SOCK_STREAM, IPPROTO_TCP, ip, port, canon);
         if r1.is_null() {
             return EAI_MEMORY;
         }
-        let r2 = gai_alloc(family, SOCK_DGRAM, IPPROTO_UDP, ip, port);
+        // `None`, not `canon`: only the head of the list carries the name.
+        let r2 = gai_alloc(family, SOCK_DGRAM, IPPROTO_UDP, ip, port, None);
         if r2.is_null() {
             // Release the head rather than leaking it: a failed `getaddrinfo`
             // leaves `*res` untouched, so the caller has no pointer to free.
@@ -8080,6 +8150,127 @@ mod tests {
         // Address should be 192.168.1.1 in network byte order.
         assert_eq!(sa.sin_addr.s_addr, u32::from_ne_bytes([192, 168, 1, 1]));
 
+        unsafe { freeaddrinfo(res) };
+    }
+
+    /// Hints asking for a numeric lookup with `extra` added to `ai_flags`.
+    ///
+    /// Numeric on purpose: these tests run on the host, where `SYS_DNS_RESOLVE`
+    /// is not a real resolver, so `inet_pton` has to be the thing that
+    /// succeeds.  `AI_CANONNAME` is orthogonal to how the address was obtained.
+    fn canon_hints(extra: i32, socktype: i32) -> Addrinfo {
+        Addrinfo {
+            ai_flags: AI_NUMERICHOST | AI_NUMERICSERV | extra,
+            ai_family: AF_INET,
+            ai_socktype: socktype,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: core::ptr::null_mut(),
+            ai_next: core::ptr::null_mut(),
+        }
+    }
+
+    /// Assert `ai_canonname` reads back as exactly `want`.
+    ///
+    /// Reads it the way a C caller would — `strlen` to the terminator — rather
+    /// than comparing a known length, because the terminator is the part most
+    /// likely to be wrong and the part that decides whether `printf("%s")`
+    /// walks off the end of the block.
+    fn assert_canonname(info: &Addrinfo, want: &[u8]) {
+        assert!(!info.ai_canonname.is_null(), "expected a canonical name");
+        // SAFETY: `gai_alloc` wrote a NUL-terminated name into the block, so
+        // `strlen` stops inside it and the slice stays within the allocation.
+        let n = unsafe { crate::string::strlen(info.ai_canonname) };
+        let got = unsafe { core::slice::from_raw_parts(info.ai_canonname.cast_const(), n) };
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn getaddrinfo_ai_canonname_answers_with_the_queried_name() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = canon_hints(AI_CANONNAME, SOCK_STREAM);
+        let ret = unsafe {
+            getaddrinfo(
+                b"192.168.1.1\0".as_ptr(),
+                b"80\0".as_ptr(),
+                &hints,
+                &mut res,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert!(!res.is_null());
+        let info = unsafe { &*res };
+        assert_canonname(info, b"192.168.1.1");
+
+        // The address must still be intact.  The name lives in the same block,
+        // immediately after the `SockaddrIn`, so an offset that is off by even
+        // one byte corrupts the address the caller is about to `connect()` to
+        // — and that corruption would be invisible to a test that only looked
+        // at the name it just asked for.
+        let sa = unsafe { &*(info.ai_addr as *const SockaddrIn) };
+        assert_eq!(sa.sin_family, AF_INET as u16);
+        assert_eq!(ntohs(sa.sin_port), 80);
+        assert_eq!(sa.sin_addr.s_addr, u32::from_ne_bytes([192, 168, 1, 1]));
+
+        unsafe { freeaddrinfo(res) };
+    }
+
+    #[test]
+    fn getaddrinfo_without_ai_canonname_leaves_it_null() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = canon_hints(0, SOCK_STREAM);
+        let ret = unsafe {
+            getaddrinfo(
+                b"192.168.1.1\0".as_ptr(),
+                b"80\0".as_ptr(),
+                &hints,
+                &mut res,
+            )
+        };
+        assert_eq!(ret, 0);
+        // The control for the test above: without the flag the field stays
+        // NULL, so that test is measuring the flag rather than a name we now
+        // always attach.
+        assert!(unsafe { (*res).ai_canonname }.is_null());
+        unsafe { freeaddrinfo(res) };
+    }
+
+    #[test]
+    fn getaddrinfo_ai_canonname_is_attached_to_the_head_only() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        // `ai_socktype: 0` is the branch that returns two nodes, TCP then UDP.
+        let hints = canon_hints(AI_CANONNAME, 0);
+        let ret = unsafe {
+            getaddrinfo(
+                b"192.168.1.1\0".as_ptr(),
+                b"80\0".as_ptr(),
+                &hints,
+                &mut res,
+            )
+        };
+        assert_eq!(ret, 0);
+        let head = unsafe { &*res };
+        assert_canonname(head, b"192.168.1.1");
+
+        let next = head.ai_next;
+        assert!(!next.is_null(), "expected a second (UDP) result");
+        // POSIX puts the canonical name on the first result only, and glibc
+        // does the same.  A name on every node would also mean paying for a
+        // copy of it per node.
+        assert!(unsafe { (*next).ai_canonname }.is_null());
+        unsafe { freeaddrinfo(res) };
+    }
+
+    #[test]
+    fn getaddrinfo_ai_canonname_with_no_node_stays_null() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = canon_hints(AI_CANONNAME | AI_PASSIVE, SOCK_STREAM);
+        let ret = unsafe { getaddrinfo(core::ptr::null(), b"80\0".as_ptr(), &hints, &mut res) };
+        assert_eq!(ret, 0);
+        // POSIX defines the canonical name in terms of `nodename`; with no
+        // name there is nothing for it to be canonical of.
+        assert!(unsafe { (*res).ai_canonname }.is_null());
         unsafe { freeaddrinfo(res) };
     }
 

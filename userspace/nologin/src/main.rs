@@ -19,6 +19,7 @@
 #![deny(clippy::all)]
 
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::process;
 
@@ -27,9 +28,13 @@ const NOLOGIN_MSG_FILE: &str = "/etc/nologin.txt";
 
 const DEFAULT_MESSAGE: &str = "This account is currently not available.";
 
-fn cmd_nologin(args: &[String]) {
+fn cmd_nologin(args: &[OsString]) {
     for arg in args {
-        match arg.as_str() {
+        // `""` for a word that is not valid Unicode. `nologin` takes no
+        // operands and every option it has is ASCII, so such a word matches
+        // nothing and falls to the ignoring arm below -- which is what it did
+        // before, except that the process now survives long enough to do it.
+        match arg.to_str().unwrap_or("") {
             "-h" | "--help" => {
                 println!("Usage: nologin [options]");
                 println!();
@@ -58,10 +63,15 @@ fn cmd_nologin(args: &[String]) {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so ANY argument
+    // holding a byte that is not valid Unicode aborted the process with a
+    // Rust panic message. For `nologin` of all programs that is the wrong
+    // answer twice over -- it is the shell a locked account gets, so its job
+    // is to refuse politely and exit 1, not to crash.
+    let args: Vec<OsString> = env::args_os().collect();
 
     // No personality probe: this binary is `nologin` under every name.
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
     cmd_nologin(&rest);
 }
 

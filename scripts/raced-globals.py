@@ -233,6 +233,49 @@ IGNORE: dict[str, str] = {
     # `#[test]` body always runs with live TLS, so no test can reach it -- and a
     # thread that does is, as the comment there notes, the last one alive.
     "posix/src/perthread.rs:HOST_FALLBACK": "only reachable after thread-local teardown, which no #[test] body is",
+    # One writer, and the reader does not care. `sleep_interruptible_respects_
+    # running_flag` is the only test that stores here; it sets the flag false,
+    # checks the sleep returns early, and restores it. The other test sleeps
+    # for **zero** milliseconds and asserts that took under 50 ms, which holds
+    # whichever value it reads. Audited 2026-09-14.
+    "userspace/ping/src/main.rs:RUNNING": "only one test writes it, and the other's assertion holds for either value",
+    # tmpnam's counter. Every test that reaches it only ever increments, and no
+    # test asserts a particular value: the one that cares checks that two
+    # successive names DIFFER, which a concurrent increment can only help.
+    # Same shape as `*:TESTS_RAN` above.
+    "posix/src/stdio.rs:COUNTER": "monotonic; the only assertion is that two names differ, which an extra bump cannot break",
+    # Written only on tmpnam's `buf == NULL` path, which exactly one test takes
+    # (`test_tmpnam_null_uses_static`). The other two pass their own buffer and
+    # never reach it, so there is one writer and no reader of a foreign write.
+    "posix/src/stdio.rs:STATIC_BUF": "written only on the NULL-buffer path, which a single test takes",
+    # All seven `mbrtowc` tests pass their OWN `&mut state` -- a local
+    # `MbstateT::new()` -- so none of them touches the internal one. What the
+    # detector sees is the *function* referencing `INTERNAL_MBSTATE` for the
+    # `ps == NULL` case, which no test exercises. Checked argument by argument
+    # 2026-09-14: the only `null_mut()` among them, in
+    # `test_mbrtowc_null_s_resets_state`, is for `pwc` and `s`, not `ps`.
+    "posix/src/wchar.rs:INTERNAL_MBSTATE": "every mbrtowc test supplies its own mbstate; the internal one is only reached when ps is NULL, which none does",
+    # `if_nameindex` takes this buffer's address and never writes it; the name
+    # bytes are a compile-time initialiser. Four tests reach the function, none
+    # of them can change it.
+    "posix/src/socket.rs:IF_NAMEINDEX_NAMES": "only its address is taken; the contents are a compile-time initialiser",
+    # The one write is `entry.if_name = name_ptr`, where `name_ptr` is the
+    # address of a static -- a constant. Every caller stores the same value, so
+    # racing writers cannot disagree, the same reasoning as `ctype.rs:CACHED`
+    # above. Audited 2026-09-14.
+    "posix/src/socket.rs:IF_NAMEINDEX_TABLE": "the single write stores a constant address; every writer stores the same value",
+    # `__cxa_allocate_exception` returns `addr_of_mut!(EXCEPTION_BUF)` and does
+    # nothing else -- no write, not even a length check. All three tests that
+    # reach it assert only `!ptr.is_null()`; none dereferences the pointer, let
+    # alone stores through it. Three readers of a constant address cannot
+    # disagree. Audited by hand 2026-09-13.
+    "posix/src/crt.rs:EXCEPTION_BUF": "the allocator only returns its address; all three tests assert non-null and never write",
+    # Both tests are read-only: one asserts `.len() == MAX_INIT_FDS`, the other
+    # walks the entries asserting every field is still zero. Nothing in the test
+    # suite writes this buffer -- it is filled by `__libc_start_main` on the real
+    # target, which no `#[test]` runs -- so the two cannot observe each other.
+    # Audited by hand 2026-09-13.
+    "posix/src/crt.rs:INIT_FDS_BUF": "both tests only read; the buffer is written by startup, which no test runs",
     # Write-once under a three-state latch. `ensure_at_random_initialized()`
     # admits exactly one writer via compare_exchange(UNINIT -> FILLING); every
     # other caller spins until READY rather than writing, and the Release/Acquire

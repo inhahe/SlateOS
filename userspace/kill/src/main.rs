@@ -32,6 +32,7 @@
 
 use quoting::quoteaf_os;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::process;
 
@@ -469,7 +470,7 @@ fn read_process_name(pid: u64) -> Option<Vec<u8>> {
 }
 
 /// Find all PIDs whose process name matches the given target name.
-fn find_pids_by_name(target: &str) -> Vec<u64> {
+fn find_pids_by_name(target: &OsStr) -> Vec<u64> {
     let mut pids = Vec::new();
 
     let entries = match fs::read_dir("/proc") {
@@ -493,7 +494,7 @@ fn find_pids_by_name(target: &str) -> Vec<u64> {
         // `proc_name` is what the kernel reported; comparing them after
         // decoding either one is a comparison of two guesses.
         if let Some(proc_name) = read_process_name(pid)
-            && proc_name == target.as_bytes()
+            && proc_name == quoting::os_bytes(target).as_ref()
         {
             pids.push(pid);
         }
@@ -778,7 +779,7 @@ struct Options {
     /// If true, we are in killall mode (match by name).
     killall_mode: bool,
     /// Process name to match in killall mode.
-    target_name: Option<String>,
+    target_name: Option<OsString>,
     /// Interactive confirmation for killall.
     interactive: bool,
     /// Wait for processes to actually terminate.
@@ -803,7 +804,7 @@ fn is_killall_invocation(argv0: &str) -> bool {
 /// Parse command-line arguments into an `Options` struct.
 ///
 /// Returns `Err(message)` for usage errors.
-fn parse_args(args: &[String]) -> Result<Options, String> {
+fn parse_args(args: &[OsString]) -> Result<Options, String> {
     let mut opts = Options {
         action: Action::GracefulTerm,
         pids: Vec::new(),
@@ -822,13 +823,21 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     }
 
     // Check if invoked as killall.
-    opts.killall_mode = is_killall_invocation(&args[0]);
+    // argv[0] is a program name; one that is not Unicode is not either of
+    // the two spellings this binary answers to.
+    opts.killall_mode = is_killall_invocation(args[0].to_str().unwrap_or(""));
 
     let mut i = 1; // skip argv[0]
     let mut explicit_signal = false;
 
     while i < args.len() {
         let arg = &args[i];
+        // `""` for a word that is not valid Unicode: it matches no option and
+        // falls to the operand arm. That arm takes a PROCESS NAME in killall
+        // mode, and a process name is bytes -- the kernel reports `comm` as
+        // bytes and the comparison below was already made on bytes, so the
+        // only thing missing was the ability to receive one.
+        let s: &str = arg.to_str().unwrap_or("");
 
         if arg == "--help" || arg == "-h" {
             return Err(String::new()); // triggers usage display
@@ -875,17 +884,21 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             if i >= args.len() {
                 return Err("--timeout requires a value".to_string());
             }
-            opts.timeout = Some(
-                args[i]
-                    .parse::<u64>()
-                    .map_err(|_| format!("invalid timeout: {}", args[i]))?,
-            );
+            opts.timeout =
+                Some(
+                    args[i].to_str().unwrap_or("").parse::<u64>().map_err(|_| {
+                        format!("invalid timeout: {}", quoting::quoteaf_os(&args[i]))
+                    })?,
+                );
             i += 1;
             continue;
         }
 
         // Signal specification: -<number> or -<NAME>
-        if let Some(stripped) = arg.strip_prefix('-')
+        // On the decoded view: a signal is a number or an ASCII name, so a
+        // word that does not decode is neither and falls through to the
+        // operand arm below.
+        if let Some(stripped) = s.strip_prefix('-')
             && !stripped.is_empty()
             && !explicit_signal
         {
@@ -916,11 +929,16 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             opts.target_name = Some(arg.clone());
         } else {
             // Parse as PID.
-            match arg.parse::<u64>() {
+            // A PID is digits, so a word that does not decode is not one
+            // and takes the same refusal a letter would.
+            match s.parse::<u64>() {
                 Ok(pid) => opts.pids.push(pid),
                 Err(_) => {
                     // If it looks like a name, suggest killall.
-                    return Err(format!("invalid PID: {arg} (use killall to kill by name)"));
+                    return Err(format!(
+                        "invalid PID: {} (use killall to kill by name)",
+                        quoting::quoteaf_os(arg)
+                    ));
                 }
             }
         }
@@ -1022,11 +1040,15 @@ fn print_usage(is_killall: bool) {
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator unwraps. `killall <name
+    // holding a byte that is not UTF-8>` died before it could look for the
+    // process -- and the name-matching underneath was ALREADY byte-based,
+    // with a comment saying why, so the panic was the only thing in the way.
+    let args: Vec<OsString> = env::args_os().collect();
 
     let is_killall = args
         .first()
-        .map(|a| is_killall_invocation(a))
+        .map(|a| is_killall_invocation(a.to_str().unwrap_or("")))
         .unwrap_or(false);
 
     let opts = match parse_args(&args) {
@@ -1085,7 +1107,13 @@ fn main() {
     for &pid in &target_pids {
         // Interactive confirmation for killall -i.
         if opts.interactive {
-            let name = opts.target_name.as_deref().unwrap_or("?");
+            // Escaped for display: this prompt goes to a terminal, and an
+            // unprintable byte in a process name must not be able to write
+            // extra lines into the question being asked.
+            let name = opts
+                .target_name
+                .as_deref()
+                .map_or_else(|| "?".to_string(), quoting::quoteaf_os);
             if !confirm(&format!("Kill {name} (pid {pid})?")) {
                 continue;
             }

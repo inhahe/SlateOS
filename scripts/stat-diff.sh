@@ -88,6 +88,21 @@ run_side() {
 #     %f after                             : 238861777
 #
 # So the capture files go on tmpfs, a different filesystem from the fixtures.
+#
+# THE SAME REASONING RULES OUT RUNNING THIS CONCURRENTLY WITH ANYTHING ELSE
+# THAT WRITES HERE, and that is not theoretical either. Running it three times
+# alongside `all-diff.sh` -- which runs ~70 harnesses, all of them creating and
+# deleting fixtures on this filesystem -- gave three different answers in a
+# row: 85 passed/0 differed, then 82/3, then 83/2. Every one of them looked
+# like a real verdict, and the middle one would have been recorded as a
+# regression that did not exist.
+#
+# Nothing here can defend against that: the free-block count IS the thing being
+# compared, and another process changing it between our run and GNU's is
+# indistinguishable from us reporting it wrongly. `all-diff.sh` serialises the
+# harnesses it runs, so the only way to hit this is to start a second one by
+# hand. Do not. If a number from this harness disagrees with a previous one,
+# check for a concurrent run before believing either.
 # The general form, which is the same shape as `env-diff.sh` having to keep its
 # own `PATH` out of the subject's environment: **a harness must not write to the
 # thing it measures.**
@@ -228,9 +243,22 @@ run_case -f -t .
 # --- several operands, and failures among them ------------------------------------------------
 report_case file.txt dir link
 report_case file.txt nosuch.txt empty.txt
-run_case nosuch.txt
-run_case nosuch.txt nosuch2.txt
-run_case -c %n file.txt nosuch.txt
+# GNU says `cannot statx`, we say `cannot stat`. Everything else about these
+# three agrees -- the file named, the reason, the exit status, and that BOTH
+# missing files are reported rather than only the first.
+#
+# Not matched, deliberately. GNU's wording names the syscall its
+# implementation makes, and it changed when that implementation changed --
+# older coreutils says `cannot stat`. Ours goes through Rust's
+# `fs::metadata`, and whether std issues `statx` or `stat` on this musl target
+# is not something this side has established. Printing `statx` would be
+# asserting a syscall we have not verified we make, to win a string compare.
+#
+# If someone establishes it, these become run_case again and the message
+# changes with them.
+xfail_case "GNU names the syscall it makes (statx); we name the operation" nosuch.txt
+xfail_case "ditto, and both missing files are reported either way" nosuch.txt nosuch2.txt
+xfail_case "ditto, mixed with a file that exists" -c %n file.txt nosuch.txt
 
 # --- refusals ------------------------------------------------------------------------------------
 run_case

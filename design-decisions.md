@@ -73427,3 +73427,261 @@ on the developer's.
   is enough taskbar. If tray icons ever become something a user arranges
   deliberately rather than something programs do to them, this should
   become a setting.
+
+## 845. The system tray is the shell's: fold `apps/systray` in — the operator's answer
+
+**Date:** 2026-09-14
+**Lane:** C
+**Decided by:** Operator (Claude recommended A; the operator chose A). Relayed through lane A, who noted that filing it is the owning lane's job.
+
+**In short:** the row of little icons at the right of the taskbar existed
+twice — once inside the desktop shell, which drew a clock but could not hold
+a program's icon, and once as `apps/systray`, a separate program that held
+icons but which nothing ever launched. The drag-and-drop the spec asks for
+was written, 1 184 lines of it, and lived with the half that had no icons.
+The tray is the shell's. `apps/systray` stops being a program and its
+unique parts move in.
+
+**The question.** `open-questions.md` — C-Q12, with three options: A fold the
+app into the shell, B give the app a strip of the taskbar and a protocol to
+negotiate it, C leave both and delete the drag-and-drop.
+
+**Why A, in the operator's terms rather than mine.** One taskbar drawn by
+one program, so the icons and the clock cannot disagree about where the
+tray starts or how wide it is. B's cost was a protocol that does not exist:
+the shell would have to tell the tray how much room it has on every clock
+tick that changes the clock's width, and two programs would have to agree
+about the theme, the scale factor and the autohide animation, all of which
+the shell owns outright today.
+
+**This confirms §842 rather than replacing it.** That entry reached the same
+answer on 2026-09-13 by applying §815's dividing line, and said so:
+*"Claude (autonomous), but only in the sense of applying an Operator
+decision."* The operator has now made it directly. Where they differ is
+worth keeping: 842 argued the tray *belongs in* the shell; this settles
+that `apps/systray` **stops existing**, which 842 did not decide and the
+work has been proceeding as though it had.
+
+**What is already built under it.** The shell-side tray was implemented
+across 2026-09-13 on 842's strength: a control verb to register an icon, a
+registry in the compositor reaped per client, a `TRAY` frame and
+subscription, the shell drawing the row, a click routed back to the owning
+program, drag to reorder, an overflow chevron, and hover tooltips. See
+`known-issues.md`
+`TD-C-FOUR-MODELS-OF-A-TRAY-ICON-AND-NO-PROCESS-BOUNDARY-BETWEEN-ANY-OF-THEM`.
+
+**What is left, and it is now unambiguous.** `apps/systray`'s unique parts
+— quick settings, the volume and network popups — move into the shell, and
+the program goes. Until this answer that deletion was a judgement nobody
+had made; it is now the decision.
+
+**The one cost worth restating, because it does not go away.** A crash in a
+tray popup now takes the taskbar with it, where a separate program could
+have died alone. That is the price of one program owning one bar, and it is
+an argument for the popups being simple rather than for them living
+elsewhere.
+
+## 846. Quiet hours hold back the ordinary, not the important
+
+**Date:** 2026-09-14
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** You can now tell the desktop "do not interrupt me between
+these hours". The question decided here is what that should mean. It
+means ordinary pop-ups are held back and important ones still get
+through -- an alarm, a low battery, a message from a program you have
+marked as important -- rather than nothing at all getting through. If you
+want total silence you can still switch it on by hand for as long as you
+want it; what the *schedule* does is the gentler of the two.
+
+### The decision
+
+Quiet hours install one automatic rule set to **Priority only**, not to
+**Total silence**.
+
+| | Priority only | Total silence |
+|---|---|---|
+| an alarm at 3 a.m. | rings | does not ring |
+| an ordinary chat message | held | held |
+| a program the user marked Priority | shown | held |
+| the user's recourse when it is wrong | mark the program lower | none until they notice |
+
+The argument for total silence is that it is what the words on the switch
+sound like, and that a user who asked not to be disturbed and then was
+disturbed has been let down.
+
+The argument against, which won: **the cost of the two mistakes is not
+symmetric.** A schedule is set once and then runs unattended for months.
+If it is slightly too permissive the user is interrupted by something they
+would rather have missed, notices, and turns that program down -- the
+system tells them about its own mistake. If it is too restrictive they
+miss the notification that mattered, and *nothing tells them*; the only
+symptom is a thing that did not happen. A setting that fails silently in
+the direction of losing information, months after it was configured, is
+the worse failure, and the ladder of importances exists precisely so that
+"important" can be honoured here.
+
+Total silence remains available as a manual mode, which is the right home
+for it: switched on deliberately, for a bounded stretch, by someone who is
+thinking about it now.
+
+Reversible in one line (`FocusMode::PriorityOnly` in
+`FocusAssistManager::set_quiet_hours`) and the obvious next step if the
+operator disagrees is a third choice on the page -- "hold everything" --
+rather than changing what the existing setting means.
+
+## 847. A recurring window belongs to the day it opened on
+
+**Date:** 2026-09-14
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** If you set quiet hours from 10 p.m. to 7 a.m. and tick only
+Friday, you mean Friday night -- which is mostly Saturday. Two places in
+the code worked out for themselves which day a given hour belonged to, and
+only one of them got this right; the other compared against *today*, so a
+Friday-only overnight schedule switched itself off at midnight and gave
+you two of the nine hours you asked for. Nothing on screen would have said
+so. There is now one function that answers this, and both places call it.
+
+### What was wrong
+
+`QuietHours::active_at` stepped back a day when the window wrapped past
+midnight. `AutoRule::is_schedule_active` -- the focus-assist rule that had
+shipped long before -- did not: it checked `days.contains(&today)` and then
+asked whether the clock was inside the window. For a window that does not
+cross midnight the two agree. For one that does, they disagree for every
+hour after midnight, which on a nine-hour night is seven of them.
+
+This is the same defect as two snap implementations and two clock
+implementations before it: **two models of one fact.** Neither copy was
+obviously wrong on its own; they were wrong *relative to each other*, and
+nothing in the type system or the test suite compares two functions in
+different files for agreement.
+
+### The decision
+
+`DailyWindow::started_on(hour, minute, weekday) -> Option<u8>` answers
+"which weekday's window is open now", and lives **on the window**, because
+the window is the only thing that knows whether it wraps. The two callers
+keep their own day masks -- a `[bool; 7]` in `notifsettings`, a `Vec<u8>`
+in `focus_assist` -- and simply look the answer up.
+
+Two *editors* of one model is fine. Two *models* of one fact is the
+defect. The alternative considered was to give both callers the same day
+representation and share the whole predicate; rejected because the two
+representations are each right for their own file (a fixed seven-day mask
+that a settings page draws as seven pills, versus a list that also
+expresses "every day" as an empty set), and forcing one on the other would
+be paying in the wrong currency for a problem that is really about the
+*window*.
+
+## 848. The schedule's next boundary is searched for, not solved for
+
+**Date:** 2026-09-14
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** For the desktop to sleep properly it has to know how long
+until the quiet hours next start or stop, so it can set one alarm instead
+of checking the clock every minute. Working that out with arithmetic is
+fiddly -- the window can run past midnight and only some days are ticked.
+So instead the code simply asks "is it different a minute from now? two
+minutes? three?" until the answer changes. That is up to ten thousand
+integer comparisons, which sounds like a lot and takes well under a
+millisecond, and it happens once per change rather than once a minute.
+
+### The decision
+
+`QuietHours::minutes_until_change` walks forward minute by minute over a
+week, asking `active_at` at each step, and returns the first offset whose
+answer differs. `None` -- the common case, since the feature ships off --
+means "set no timer at all", which is design-decisions 812's idle desktop.
+
+| | search | closed form |
+|---|---|---|
+| cost | ≤10,080 comparisons, once per transition | a few dozen operations |
+| how often | twice a day on a typical schedule | the same |
+| can it disagree with `active_at`? | no -- it *asks* `active_at` | yes, and silently |
+| what has to be re-derived | nothing | midnight wrap × day mask, again |
+
+The closed form is not hard; it is *hard to be sure of*. It would have to
+re-derive exactly the midnight-wrap-and-day-mask interaction that 847 is
+about, in a second place, with the same opportunity to get it subtly wrong
+-- and its failure mode is a desktop that wakes up at the wrong minute,
+which nobody would ever notice as a bug.
+
+Measured against what this is for, the cost is not real: the alternative
+being avoided is a wake-up every minute, so even a thousand-fold-more
+expensive answer computed twice a day is cheaper than the thing it
+replaces by three orders of magnitude.
+
+## 849. Two taskbars become one: the module keeps the model, the shell keeps the screen
+
+**Date:** 2026-09-14
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop has two taskbars. One is on screen and is what you
+use; the other is 2,600 lines of finished, tested code that nothing runs, and
+it is the one that knows how to pin an application. Rather than throw either
+away, the unused one keeps the part that decides *what buttons there are* and
+the live one keeps the part that decides *what they look like*. The result is
+that pinning starts working and neither implementation is rewritten.
+
+### How there came to be two
+
+`gui/desktop/src/lib.rs` draws the taskbar the user sees: window buttons, the
+system tray, the clock, auto-hide, and the tray drag-and-drop added on
+2026-09-13. `gui/desktop/src/taskbar.rs` is a separate module -- pinned
+shortcuts persisted to config, running-app indicators with window grouping,
+drag-to-reorder, drag in and out of the pinned section -- with its own
+renderer, its own mouse handling and its own `WindowId`.
+
+Nothing calls it, and nothing noticed: `scripts/scan-orphan-modules.py` was
+clearing it, because its `pub struct WindowId` is a name the shell writes
+hundreds of times and the file that also declares it (`lib.rs`) was never
+collected as an owner. That is fixed; see
+`TD-C-THE-ORPHAN-SCAN-CLEARS-A-MODULE-ON-A-NAME-AN-APP-HAPPENS-TO-SHARE`.
+
+### The decision
+
+**`taskbar.rs` becomes the model. `lib.rs` stays the renderer.** The shell
+sources its button list from `Taskbar::buttons()` instead of deriving it from
+`WindowList`, and `Taskbar::render` -- the part that has never drawn a pixel --
+is what gets deleted.
+
+| | adopt the module's model | delete the module, write pinning in the shell |
+|---|---|---|
+| pinning, grouping, reorder rules | kept, with their tests | rewritten from scratch |
+| tray, clock, auto-hide, tray DnD | untouched, they are the renderer's | untouched |
+| lines deleted | the module's renderer | 2 600, including 40-odd tests |
+| risk | the shell's button list changes shape | the same rules written a second time |
+| "two models of one fact" | resolved: one model, one renderer | resolved: one of each, by deletion |
+
+### Why not the other way round
+
+Two arguments were weighed for deleting the module outright and writing
+pinning directly into the shell.
+
+The first is that the module has **never run**, so its tests prove it agrees
+with itself and nothing more. That is real and is the honest case against
+trusting it. It is outweighed by the alternative being to write the same rules
+again, untested against anything better, with the same risk and none of the
+existing coverage.
+
+The second is that the shell's taskbar carries work the module knows nothing
+about -- the tray's width budget, the overflow menu, the drag-and-drop arranger
+-- and subordinating the live surface to an unrun module could regress it. This
+is why the split is at the model/renderer line rather than wholesale: the
+module never learns what a tray is, because it never draws one.
+
+### What this does not decide
+
+Whether `TaskbarConfig`'s *position* and *icon-only* options should be
+user-visible settings is left open -- they are model fields today with no page
+to set them from, and wiring a settings page for them is the
+`TD-C-ELEVEN-SETTINGS-PAGES-SAY-COMING-SOON` question, which is blocked on
+consumers existing at all.
+

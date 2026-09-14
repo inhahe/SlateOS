@@ -31,6 +31,7 @@
 
 use appearance::Palette;
 use guitk::color::Color;
+use guitk::filetypes::FileCategory;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -598,13 +599,17 @@ impl ColumnManager {
         let mut has_archive = false;
 
         for file in files {
-            let ext = file.extension.to_lowercase();
-            match ext.as_str() {
-                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" => has_image = true,
-                "mp3" | "wav" | "flac" | "ogg" => has_audio = true,
-                "rs" | "c" | "cpp" | "h" | "py" | "js" | "ts" | "java" | "go" | "rb" | "html"
-                | "css" | "toml" | "yaml" | "json" | "xml" => has_code = true,
-                "zip" | "tar" | "gz" | "7z" | "rar" => has_archive = true,
+            // The registry, not a fourth extension list. This one was narrower
+            // than the other three and disagreed with them: `.webp` was an
+            // image to the file list and nothing at all here, so a folder of
+            // them suggested no image columns.
+            match guitk::filetypes::category_from_extension(file.extension) {
+                FileCategory::Image => has_image = true,
+                FileCategory::Audio => has_audio = true,
+                FileCategory::Code | FileCategory::Config | FileCategory::Data => has_code = true,
+                FileCategory::Archive | FileCategory::Package | FileCategory::DiskImage => {
+                    has_archive = true;
+                }
                 _ => {}
             }
         }

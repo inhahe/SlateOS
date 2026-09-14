@@ -13,5 +13,20 @@ guitk = { path = "../../gui/toolkit" }
 # every control in the program was a picture of a control.
 oswindow = { path = "../../gui/window" }
 
+# Format-preserving YAML, and where the file lives. Associations are
+# configuration, and design.txt says configuration is YAML "processed with a
+# library that preserves comments and formatting" -- so they go through the two
+# crates every other settings surface in this tree uses, rather than the
+# hand-rolled `ext=app` codec this program used to carry.
+yamldoc = { path = "../../yamldoc" }
+settingsfile = { path = "../../gui/settingsfile" }
+
+[dev-dependencies]
+# `settingsfile::testing::with_scratch_config`. Four tests here change an
+# association, and changing one now writes the file -- so without this they
+# would write the developer's own ~/.config/slateos, which is what
+# scripts/check-scratch-config.py exists to refuse.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

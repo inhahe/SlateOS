@@ -106,11 +106,50 @@ struct StatInfo {
     btime: Option<(i64, u32)>,
 }
 
+/// The name GNU prints for a filesystem magic.
+///
+/// Measured from `stat -f -c %T` rather than transcribed from a header, which
+/// matters for two of them: `ext2/ext3` is one name covering ext2, ext3 AND
+/// ext4 -- they share magic `0xef53`, so no amount of reading the kernel would
+/// separate them -- and the fallback keeps GNU's own spelling for a magic it
+/// does not know.
+fn fs_type_name(magic: i64) -> String {
+    // Verified against GNU on this machine: / ef53, /proc 9fa0, /sys 62656572,
+    // /dev and /run 1021994, /dev/pts 1cd1.
+    let name = match magic {
+        0xef53 => "ext2/ext3",
+        0x9fa0 => "proc",
+        0x6265_6572 => "sysfs",
+        0x0102_1994 => "tmpfs",
+        0x1cd1 => "devpts",
+        0x7461_7261 => "ramfs",
+        0x794c_7630 => "overlayfs",
+        0x5346_544e => "ntfs",
+        0x4d44 => "msdos",
+        0x9123_683e => "btrfs",
+        0x5846_5342 => "xfs",
+        0x6969 => "nfs",
+        0x7371_7368 => "squashfs",
+        0x2011_bab0 => "exfat",
+        0x0102_1997 => "v9fs",
+        0x6163_6673 => "autofs",
+        0x2765_2723 => "cgroup2",
+        0x6465_764d => "devtmpfs",
+        // GNU's own wording for a magic it has no name for. Not `UNKNOWN`
+        // alone: the number is the only thing that identifies the filesystem
+        // when the name is missing, so dropping it loses the whole answer.
+        _ => return format!("UNKNOWN (0x{magic:x})"),
+    };
+    name.to_string()
+}
+
 /// The fields of `struct statvfs` this program can print.
 #[derive(Clone, Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct FsInfo {
     fsid: u64,
+    /// The filesystem magic from `statfs`, for `%t` and `%T`.
+    fs_type: i64,
     namelen: u64,
     bsize: u64,
     frsize: u64,
@@ -854,11 +893,13 @@ fn render_statfs(out: &mut Vec<u8>, conv: Conv, spec: u8, f: &FsFacts) {
         b'n' => out_string(out, conv, &f.name),
         b'i' => hex(out, conv, fs.fsid),
         b'l' => uint(out, conv, fs.namelen),
-        // `statvfs` carries no filesystem-type field, so there is nothing to
-        // print. GNU prints `?` here too on a kernel whose `statfs` lacks
-        // `f_type`; this is that same case, not a new one.
-        b't' => out.push(b'?'),
-        b'T' => out_string(out, conv, b"UNKNOWN"),
+        // The magic, and the name it stands for. Both come from `statfs`'s
+        // `f_type`; the comment that stood here said `statvfs` has no such
+        // field and that GNU prints `?` for the same reason -- true about
+        // `statvfs`, false about GNU, which calls `statfs` and on this kernel
+        // prints `ext2/ext3`.
+        b't' => out_string(out, conv, format!("{:x}", fs.fs_type).as_bytes()),
+        b'T' => out_string(out, conv, fs_type_name(fs.fs_type).as_bytes()),
         // Signed, as upstream prints them: these come from a kernel field wide
         // enough to look negative, and a script comparing them must see the
         // same text GNU shows.
@@ -1194,27 +1235,38 @@ mod imp {
     use std::process::ExitCode;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// The layout the posix crate's `statvfs` writes.
+    /// The layout the posix crate's `statfs` writes -- `posix::statvfs::Statfs`.
+    ///
+    /// `statfs`, NOT `statvfs`, and the difference is the whole of two bugs.
+    /// POSIX `statvfs` has no filesystem-type field at all, which is why `%T`
+    /// used to be hard-coded to `UNKNOWN` under a comment claiming GNU does
+    /// the same "on a kernel whose statfs lacks f_type" -- measured, GNU on
+    /// this kernel prints `ext2/ext3`, because it calls `statfs` and this
+    /// kernel supplies the magic. And `statvfs` flattens the two-word
+    /// `f_fsid` into one machine word in the opposite order, so `%i` printed
+    /// its halves swapped: `465b201c68867c45` against GNU's
+    /// `68867c45465b201c`, the same eight bytes read the wrong way round.
     #[repr(C)]
     #[derive(Default)]
-    struct PosixStatvfs {
-        f_bsize: u64,
-        f_frsize: u64,
+    struct PosixStatfs {
+        f_type: i64,
+        f_bsize: i64,
         f_blocks: u64,
         f_bfree: u64,
         f_bavail: u64,
         f_files: u64,
         f_ffree: u64,
-        f_favail: u64,
-        f_fsid: u64,
-        f_flag: u64,
-        f_namemax: u64,
+        f_fsid: [i32; 2],
+        f_namelen: i64,
+        f_frsize: i64,
+        f_flags: i64,
+        f_spare: [i64; 4],
     }
 
     // SAFETY: `statvfs` is provided by the posix crate with exactly this C
     // signature. It returns 0 on success and -1 with `errno` set on failure.
     unsafe extern "C" {
-        fn statvfs(path: *const u8, buf: *mut PosixStatvfs) -> i32;
+        fn statfs(path: *const u8, buf: *mut PosixStatfs) -> i32;
     }
 
     /// Split a `SystemTime` into the epoch seconds and nanoseconds `%W`/`%w`
@@ -1408,10 +1460,10 @@ mod imp {
             ));
             return None;
         };
-        let mut raw = PosixStatvfs::default();
+        let mut raw = PosixStatfs::default();
         // SAFETY: `cpath` is a valid NUL-terminated C string that outlives the
         // call, and `raw` is a valid, writable buffer of the declared layout.
-        let ret = unsafe { statvfs(cpath.as_ptr().cast::<u8>(), &raw mut raw) };
+        let ret = unsafe { statfs(cpath.as_ptr().cast::<u8>(), &raw mut raw) };
         if ret != 0 {
             diags.error(&format!(
                 "cannot read file system information for {}: {}",
@@ -1422,10 +1474,16 @@ mod imp {
         }
         Some(FsFacts {
             fs: FsInfo {
-                fsid: raw.f_fsid,
-                namelen: raw.f_namemax,
-                bsize: raw.f_bsize,
-                frsize: raw.f_frsize,
+                // `val[0] << 32 | val[1]`, which is what GNU prints and the
+                // order the tests below already assume. The two halves are
+                // signed in the C struct and must be widened as UNSIGNED --
+                // sign-extending `val[1]` would flood the high half with ones
+                // for any id whose low word has bit 31 set.
+                fsid: (u64::from(raw.f_fsid[0] as u32) << 32) | u64::from(raw.f_fsid[1] as u32),
+                fs_type: raw.f_type,
+                namelen: u64::try_from(raw.f_namelen).unwrap_or(0),
+                bsize: u64::try_from(raw.f_bsize).unwrap_or(0),
+                frsize: u64::try_from(raw.f_frsize).unwrap_or(0),
                 blocks: raw.f_blocks,
                 bfree: raw.f_bfree,
                 bavail: raw.f_bavail,
@@ -1642,6 +1700,8 @@ mod tests {
         let facts = FsFacts {
             fs: FsInfo {
                 fsid: 0x68867c45465b201c,
+                // ext2/ext3's magic, so `%T` has a real name to print.
+                fs_type: 0xef53,
                 namelen: 255,
                 bsize: 4096,
                 frsize: 4096,
@@ -1869,7 +1929,7 @@ mod tests {
     fn filesystem_directives_render() {
         assert_eq!(
             render_fs("[%i][%l][%t][%T][%b][%f][%a][%c][%d][%s][%S][%n]"),
-            "[68867c45465b201c][255][?][UNKNOWN][1000][400][300][500][200][4096][4096][.]"
+            "[68867c45465b201c][255][ef53][ext2/ext3][1000][400][300][500][200][4096][4096][.]"
         );
     }
 
@@ -1885,7 +1945,7 @@ mod tests {
             render_fs(&fmt),
             concat!(
                 "  File: \".\"\n",
-                "    ID: 68867c45465b201c Namelen: 255     Type: UNKNOWN\n",
+                "    ID: 68867c45465b201c Namelen: 255     Type: ext2/ext3\n",
                 "Block size: 4096       Fundamental block size: 4096\n",
                 "Blocks: Total: 1000       Free: 400        Available: 300\n",
                 "Inodes: Total: 500        Free: 200\n",

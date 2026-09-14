@@ -6,3 +6,8 @@ description = "SlateOS syslog message logger"
 [dependencies]
 userdb = { path = "../userdb" }
 authlib = { path = "../authlib" }
+
+# A message or a `-f` path that is not valid Unicode still has to appear in
+# the diagnostic that refuses it, as the bytes the caller passed. Pure
+# formatting, no I/O, so 768-exempt.
+quoting = { path = "../quoting" }

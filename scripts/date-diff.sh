@@ -182,10 +182,19 @@ run_case -d '2021-03-04 05:06:07 UTC'
 run_case -d '2021-03-04 05:06:07 +0200'
 run_case -d '1970-01-01 00:00:00 UTC'
 run_case -d 'epoch'
-run_case -d 'now'
-run_case -d 'today'
-run_case -d 'tomorrow'
-run_case -d 'yesterday'
+
+# `now`, `today`, `tomorrow` and `yesterday` are NOT here, and were removed on
+# 2026-09-14 after being added in violation of this file's own preamble: they
+# read the clock, so the two sides race exactly as a bare `date` does. The
+# window is the few milliseconds between the two invocations, and the default
+# format prints seconds -- so the chance of a spurious difference is a few
+# percent PER RUN, not the once-in-a-blue-moon the phrasing might suggest.
+# They passed when removed; this is not a failure being hidden.
+#
+# They are covered better elsewhere. `d_clock_relative_forms` in date.rs pins
+# "now" to a constant and asserts the exact instant each keyword produces,
+# which is something no differential harness can do, because it cannot make
+# two processes agree about what time it is.
 run_case -d '@0 + 1 day'
 run_case -d 'not a date at all'
 run_case -d ''

@@ -41,7 +41,10 @@
 //! still saves with the bar open.
 
 use crate::{Document, EditorState, ExternalChoice};
+use guitk::event::EventResult;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::menu::MenuItemId;
+use guitk::menubar::{MenuBarEntry, MenuBarEvent, MenuBarItem};
 // The verdict every handler below returns. Until the editor was moved onto the
 // shared harness this was `EditorResponse`, declared in this file, with the same
 // three variants and the same meanings -- a second name for a concept the loop
@@ -61,6 +64,123 @@ pub const TAB_WIDTH: f32 = 160.0;
 pub const TAB_GAP: f32 = 1.0;
 /// Width of the close box at the right end of a tab.
 pub const TAB_CLOSE_WIDTH: f32 = 24.0;
+
+/// One thing the editor can be asked to do.
+///
+/// The editor had a keyboard and nothing else, so every command lived inside
+/// the `match` arm of the key that ran it: "what Ctrl+F does" and "what Find
+/// does" were the same thing only by being the same six lines, written once.
+/// A second way to ask -- a menu -- is exactly the point where that stops
+/// holding, so the arms moved out into named methods and this enum names them.
+/// The keyboard and the menu are two *editors* of one command model rather
+/// than two models of one command. That is the distinction the comment at the
+/// top of this file is already about.
+///
+/// Only commands a pointer can reach are here. Caret motion (Ctrl+Left, Home)
+/// stays in the key tables: there is no menu row for "move one word left", and
+/// inventing one would be a menu written for this enum's benefit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    /// Write the active document back to its file.
+    Save,
+    /// Close the active tab.
+    CloseTab,
+    /// Undo the last edit.
+    Undo,
+    /// Redo the last undone edit.
+    Redo,
+    /// Copy the selection, then delete it.
+    Cut,
+    /// Copy the selection.
+    Copy,
+    /// Insert the clipboard at the caret.
+    Paste,
+    /// Select the whole document.
+    SelectAll,
+    /// Select the word under the caret.
+    SelectWord,
+    /// Open the find bar.
+    Find,
+    /// Open the find bar with the caret in the replacement field.
+    Replace,
+}
+
+impl Command {
+    /// Every command, in the order the menus present them.
+    ///
+    /// The one table. A variant left out of it is absent from the menu *and*
+    /// undispatchable -- consistently missing rather than silently running
+    /// something else, which is why [`Command::id`] is the discriminant rather
+    /// than a position in this list.
+    pub const ALL: [Self; 11] = [
+        Self::Save,
+        Self::CloseTab,
+        Self::Undo,
+        Self::Redo,
+        Self::Cut,
+        Self::Copy,
+        Self::Paste,
+        Self::SelectAll,
+        Self::SelectWord,
+        Self::Find,
+        Self::Replace,
+    ];
+
+    /// The identifier a menu row carries.
+    #[must_use]
+    pub fn id(self) -> MenuItemId {
+        self as MenuItemId
+    }
+
+    /// The command a menu row's identifier names.
+    #[must_use]
+    pub fn from_id(id: MenuItemId) -> Option<Self> {
+        Self::ALL.into_iter().find(|command| command.id() == id)
+    }
+
+    /// The row's text.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Save => "Save",
+            Self::CloseTab => "Close Tab",
+            Self::Undo => "Undo",
+            Self::Redo => "Redo",
+            Self::Cut => "Cut",
+            Self::Copy => "Copy",
+            Self::Paste => "Paste",
+            Self::SelectAll => "Select All",
+            Self::SelectWord => "Select Word",
+            Self::Find => "Find...",
+            Self::Replace => "Replace...",
+        }
+    }
+
+    /// The keystroke shown alongside the row.
+    ///
+    /// Spelled out rather than derived from the key tables, and that is a real
+    /// duplication -- the lesser of two. Deriving it would need the tables to
+    /// answer "which key runs Save", and they are `match` arms *on the key*,
+    /// which can only answer the question the other way round. The test
+    /// `every_shortcut_a_menu_advertises_is_really_bound` closes the gap by
+    /// pressing each one and checking the command ran.
+    #[must_use]
+    pub fn shortcut(self) -> &'static str {
+        match self {
+            Self::Save => "Ctrl+S",
+            Self::CloseTab => "Ctrl+W",
+            Self::Undo => "Ctrl+Z",
+            Self::Redo => "Ctrl+Y",
+            Self::Cut => "Ctrl+X",
+            Self::Copy => "Ctrl+C",
+            Self::Paste => "Ctrl+V",
+            Self::SelectAll => "Ctrl+A",
+            Self::SelectWord => "Ctrl+D",
+            Self::Find => "Ctrl+F",
+            Self::Replace => "Ctrl+H",
+        }
+    }
+}
 
 /// Which of the find bar's two text fields the keyboard is typing into.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -166,6 +286,12 @@ impl EditorState {
     fn dispatch_key(&mut self, key: &KeyEvent) -> Response {
         if self.external_prompt.is_some() {
             return self.prompt_key(key);
+        }
+        // The bar sees the key after the modal prompt, which is asking a
+        // question that has to be answered first, and before the typing tables,
+        // which it cannot steal from: a closed bar claims Alt+mnemonic only.
+        if let Some(response) = self.menu_bar_key(key) {
+            return response;
         }
         if self.find_visible
             && let Some(response) = self.find_key(key)
@@ -337,92 +463,263 @@ impl EditorState {
         find.replace_all(tabs.active_mut())
     }
 
-    /// Keys with Ctrl held, in the document.
-    #[allow(clippy::too_many_lines)]
-    fn control_key(&mut self, key: &KeyEvent) -> Response {
-        let shift = key.modifiers.shift;
-        match key.key {
-            Key::S => {
+    /// Whether a command has anything to do right now.
+    ///
+    /// A row greyed by this is greyed because running it would do nothing, and
+    /// each condition is the one the command itself already checks --
+    /// `Document::undo` pops an empty stack and returns, so "the stack is
+    /// empty" is a reading of its precondition rather than a guess at it.
+    #[must_use]
+    pub fn command_enabled(&self, command: Command) -> bool {
+        let doc = self.active_document();
+        match command {
+            Command::Undo => !doc.undo_stack.is_empty(),
+            Command::Redo => !doc.redo_stack.is_empty(),
+            Command::Cut | Command::Copy => doc.has_selection(),
+            Command::Paste => !self.clipboard.is_empty(),
+            Command::Save
+            | Command::CloseTab
+            | Command::SelectAll
+            | Command::SelectWord
+            | Command::Find
+            | Command::Replace => true,
+        }
+    }
+
+    /// Run a command, whoever asked for it.
+    ///
+    /// The single body of every command the menu and the keyboard share. A
+    /// command that is not enabled does nothing and says so, which is what
+    /// makes the greying above advisory rather than the only guard: a menu can
+    /// be opened, the document changed under it by a reload, and the row
+    /// clicked afterwards.
+    pub fn run(&mut self, command: Command) -> Response {
+        if !self.command_enabled(command) {
+            return Response::Idle;
+        }
+        match command {
+            Command::Save => {
                 self.save_active();
                 Response::Redraw
             }
-            Key::Z => {
-                if shift {
-                    self.active_document_mut().redo();
-                } else {
-                    self.active_document_mut().undo();
-                }
+            Command::CloseTab => {
+                self.close_active_tab();
+                Response::Redraw
+            }
+            Command::Undo => {
+                self.active_document_mut().undo();
                 self.after_cursor_move();
                 Response::Redraw
             }
-            Key::Y => {
+            Command::Redo => {
                 self.active_document_mut().redo();
                 self.after_cursor_move();
                 Response::Redraw
             }
-            Key::F => {
-                self.find_visible = true;
-                self.find_field = FindField::Query;
-                // Searching for what is selected is what the user almost always
-                // wants, and typing over it costs one keystroke if not. Only a
-                // single-line selection: a search term with a newline in it
-                // cannot match anything, since matching is per line.
-                let selected = self.active_document().selected_text();
-                if !selected.is_empty() && !selected.contains('\n') {
-                    self.find.query = selected;
-                }
-                self.refresh_matches();
+            Command::Cut => {
+                self.cut_selection();
                 Response::Redraw
             }
-            Key::H => {
-                self.find_visible = true;
-                self.find_field = FindField::Replace;
+            // Copying changes nothing on screen -- the selection it read is
+            // still there and still looks the same -- so it asks for no frame.
+            Command::Copy => {
+                self.copy_selection();
+                Response::Idle
+            }
+            Command::Paste => {
+                self.paste_clipboard();
                 Response::Redraw
             }
-            Key::A => {
+            Command::SelectAll => {
                 self.active_document_mut().select_all();
                 self.after_cursor_move();
                 Response::Redraw
             }
-            Key::C => {
-                self.copy_selection();
-                Response::Idle
-            }
-            Key::X => {
-                if self.copy_selection() {
-                    self.active_document_mut().delete_selection();
-                    self.after_cursor_move();
-                    return Response::Redraw;
-                }
-                Response::Idle
-            }
-            Key::V => {
-                if self.clipboard.is_empty() {
-                    return Response::Idle;
-                }
-                let text = self.clipboard.clone();
-                let doc = self.active_document_mut();
-                doc.delete_selection();
-                doc.insert_text(&text);
-                self.after_cursor_move();
-                Response::Redraw
-            }
-            Key::D => {
+            Command::SelectWord => {
                 self.active_document_mut().select_word_at_cursor();
                 self.after_cursor_move();
                 Response::Redraw
             }
-            Key::W => {
-                if self.close_tab() {
-                    Response::Redraw
-                } else {
-                    self.status = Some(
-                        "Unsaved changes — save with Ctrl+S, or Ctrl+Shift+W to discard"
-                            .to_string(),
-                    );
-                    Response::Redraw
-                }
+            Command::Find => {
+                self.open_find(FindField::Query);
+                Response::Redraw
             }
+            Command::Replace => {
+                self.open_find(FindField::Replace);
+                Response::Redraw
+            }
+        }
+    }
+
+    /// Open the find bar with one of its fields focused.
+    ///
+    /// Searching for what is selected is what the user almost always wants, and
+    /// typing over it costs one keystroke if not. Only a single-line selection:
+    /// a search term with a newline in it cannot match anything, since matching
+    /// is per line.
+    fn open_find(&mut self, field: FindField) {
+        self.find_visible = true;
+        self.find_field = field;
+        let selected = self.active_document().selected_text();
+        if !selected.is_empty() && !selected.contains('\n') {
+            self.find.query = selected;
+        }
+        self.refresh_matches();
+    }
+
+    /// Copy the selection, then delete it.
+    fn cut_selection(&mut self) {
+        if self.copy_selection() {
+            self.active_document_mut().delete_selection();
+            self.after_cursor_move();
+        }
+    }
+
+    /// Insert the clipboard at the caret, replacing any selection.
+    fn paste_clipboard(&mut self) {
+        let text = self.clipboard.clone();
+        let doc = self.active_document_mut();
+        doc.delete_selection();
+        doc.insert_text(&text);
+        self.after_cursor_move();
+    }
+
+    /// Close the active tab, or say why it will not close.
+    fn close_active_tab(&mut self) {
+        if !self.close_tab() {
+            self.status =
+                Some("Unsaved changes — save with Ctrl+S, or Ctrl+Shift+W to discard".to_string());
+        }
+    }
+
+    // ======================================================================
+    // Menu bar
+    // ======================================================================
+
+    /// Rebuild the menu rows from the editor's current state.
+    ///
+    /// Called on the event that is about to *open* a menu rather than on every
+    /// change, and **only while the bar is shut**: `MenuBar::set_items` closes
+    /// any open dropdown, because the open index and the hovered row are
+    /// offsets into the rows being replaced. Refreshing mid-navigation would
+    /// shut the menu under the user on their first arrow key -- which is what
+    /// it did, until `the_search_menu_opens_the_find_bar` said so.
+    ///
+    /// The top-level labels never change, so a shut bar is never stale, and
+    /// the rows cannot go stale while open because every event reaches the bar
+    /// before it reaches the document.
+    pub fn refresh_menu_items(&mut self) {
+        let row = |command: Command| MenuBarEntry::Action {
+            label: command.label().to_string(),
+            shortcut: Some(command.shortcut().to_string()),
+            enabled: self.command_enabled(command),
+            id: command.id(),
+        };
+        let items = vec![
+            MenuBarItem {
+                label: "&File".to_string(),
+                children: vec![
+                    row(Command::Save),
+                    MenuBarEntry::Separator,
+                    row(Command::CloseTab),
+                ],
+            },
+            MenuBarItem {
+                label: "&Edit".to_string(),
+                children: vec![
+                    row(Command::Undo),
+                    row(Command::Redo),
+                    MenuBarEntry::Separator,
+                    row(Command::Cut),
+                    row(Command::Copy),
+                    row(Command::Paste),
+                    MenuBarEntry::Separator,
+                    row(Command::SelectAll),
+                    row(Command::SelectWord),
+                ],
+            },
+            MenuBarItem {
+                label: "&Search".to_string(),
+                children: vec![row(Command::Find), row(Command::Replace)],
+            },
+        ];
+        self.menu_bar.set_items(items);
+    }
+
+    /// The window size the bar lays its dropdowns out inside.
+    fn viewport(&self) -> (f32, f32) {
+        (self.window_width as f32, self.window_height as f32)
+    }
+
+    /// Run whatever the bar reported.
+    ///
+    /// Always a redraw: the bar consumed the event, which means it opened,
+    /// closed or moved its highlight, and all three are visible whatever the
+    /// command underneath did or did not change.
+    fn drain_menu_bar(&mut self) -> Response {
+        for event in self.menu_bar.drain_events() {
+            if let MenuBarEvent::ItemClicked(id) = event
+                && let Some(command) = Command::from_id(id)
+            {
+                // Discarded deliberately: see the note above on why the answer
+                // is a redraw regardless of what the command reports.
+                let _ = self.run(command);
+            }
+        }
+        Response::Redraw
+    }
+
+    /// Offer a mouse event to the bar, `None` if it did not want it.
+    fn menu_bar_mouse(&mut self, mouse: &MouseEvent) -> Option<Response> {
+        if !self.menu_bar.is_open() {
+            // A shut bar can only be reached by a pointer inside its own strip,
+            // and a mouse *move* arrives on every pixel of travel, which is not
+            // a rate to be allocating eleven strings at.
+            if mouse.y >= crate::TAB_BAR_TOP {
+                return None;
+            }
+            self.refresh_menu_items();
+        }
+        let viewport = self.viewport();
+        if self.menu_bar.handle_mouse_event(mouse, viewport) == EventResult::Ignored {
+            return None;
+        }
+        Some(self.drain_menu_bar())
+    }
+
+    /// Offer a key event to the bar, `None` if it did not want it.
+    ///
+    /// A closed bar claims only Alt+mnemonic, so this can sit ahead of the
+    /// typing tables without swallowing anything typed into the document.
+    fn menu_bar_key(&mut self, key: &KeyEvent) -> Option<Response> {
+        if !self.menu_bar.is_open() {
+            if !key.modifiers.alt {
+                return None;
+            }
+            self.refresh_menu_items();
+        }
+        let viewport = self.viewport();
+        if self.menu_bar.handle_key_event(key, viewport) == EventResult::Ignored {
+            return None;
+        }
+        Some(self.drain_menu_bar())
+    }
+
+    /// Keys with Ctrl held, in the document.
+    fn control_key(&mut self, key: &KeyEvent) -> Response {
+        let shift = key.modifiers.shift;
+        match key.key {
+            Key::S => self.run(Command::Save),
+            Key::Z => self.run(if shift { Command::Redo } else { Command::Undo }),
+            Key::Y => self.run(Command::Redo),
+            Key::F => self.run(Command::Find),
+            Key::H => self.run(Command::Replace),
+            Key::A => self.run(Command::SelectAll),
+            Key::C => self.run(Command::Copy),
+            Key::X => self.run(Command::Cut),
+            Key::V => self.run(Command::Paste),
+            Key::D => self.run(Command::SelectWord),
+            Key::W => self.run(Command::CloseTab),
             Key::Home => {
                 self.moving(shift, Document::move_to_start);
                 Response::Redraw
@@ -553,6 +850,17 @@ impl EditorState {
     // ======================================================================
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> Response {
+        // The bar gets first refusal -- except during a drag that began in the
+        // text, which owns the pointer until it is released: a selection being
+        // extended past the top of the window must not be taken over by a menu
+        // the pointer merely crossed on the way. And not while the modal prompt
+        // is up, for the reason the keyboard does not reach it either.
+        if !self.dragging
+            && self.external_prompt.is_none()
+            && let Some(response) = self.menu_bar_mouse(mouse)
+        {
+            return response;
+        }
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => self.mouse_press(mouse.x, mouse.y),
             MouseEventKind::DoubleClick(MouseButton::Left) => {
@@ -668,7 +976,7 @@ impl EditorState {
     /// `None` for anything below the tab bar or past the last tab.
     #[must_use]
     pub fn tab_at(&self, x: f32, y: f32) -> Option<(usize, bool)> {
-        if y < 0.0 || y >= crate::TAB_BAR_HEIGHT || x < 0.0 {
+        if y < crate::TAB_BAR_TOP || y >= crate::TEXT_TOP || x < 0.0 {
             return None;
         }
         let pitch = TAB_WIDTH + TAB_GAP;
@@ -823,6 +1131,367 @@ mod tests {
 
     fn plain(key: Key) -> Event {
         press(key, Modifiers::NONE)
+    }
+
+    // ---- the menu bar and the commands under it ------------------------
+
+    /// Turn a menu's advertised spelling ("Ctrl+S") into the keystroke it names.
+    ///
+    /// The test reads the same string the user does, so a shortcut advertised
+    /// wrongly fails here rather than being quietly restated in the test.
+    fn keystroke(spelling: &str) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        let mut named: Option<Key> = None;
+        for part in spelling.split('+') {
+            match part {
+                "Ctrl" => modifiers.ctrl = true,
+                "Shift" => modifiers.shift = true,
+                "Alt" => modifiers.alt = true,
+                other => named = Some(letter_key(other)),
+            }
+        }
+        let key = named.unwrap_or_else(|| panic!("{spelling} names no key"));
+        press(key, modifiers)
+    }
+
+    fn letter_key(name: &str) -> Key {
+        match name {
+            "A" => Key::A,
+            "C" => Key::C,
+            "D" => Key::D,
+            "F" => Key::F,
+            "H" => Key::H,
+            "S" => Key::S,
+            "V" => Key::V,
+            "W" => Key::W,
+            "X" => Key::X,
+            "Y" => Key::Y,
+            "Z" => Key::Z,
+            other => panic!("no key is named {other}"),
+        }
+    }
+
+    /// **Every shortcut a menu advertises really runs that command.**
+    ///
+    /// `Command::shortcut` spells the keystroke out by hand -- it cannot be
+    /// derived, because the key tables are `match` arms *on the key* and can
+    /// only answer "what does Ctrl+S do", never "what runs Save". This is the
+    /// test that doc comment promises: it presses what the menu advertises and
+    /// checks the command actually happened, so a row labelled with a
+    /// keystroke nobody bound fails here.
+    ///
+    /// The inner `match` is exhaustive on purpose. A command added to the enum
+    /// stops this file compiling until someone says what pressing its
+    /// advertised key should do -- the one moment when whoever is adding it
+    /// holds both halves of the answer at once.
+    #[test]
+    fn every_shortcut_a_menu_advertises_is_really_bound() {
+        for command in Command::ALL {
+            let event = keystroke(command.shortcut());
+            match command {
+                Command::Save => {
+                    let mut editor = editor_with("ab");
+                    editor.handle_event(&event);
+                    let status = editor.status.clone().unwrap_or_default();
+                    assert!(
+                        status.contains("No file name"),
+                        "{} did not reach Save: {status:?}",
+                        command.shortcut()
+                    );
+                }
+                Command::CloseTab => {
+                    let mut editor = editor_with("ab");
+                    editor.tabs.open(Document::new());
+                    assert_eq!(editor.tabs.count(), 2);
+                    editor.handle_event(&event);
+                    assert_eq!(editor.tabs.count(), 1, "Ctrl+W did not reach Close Tab");
+                }
+                Command::Undo => {
+                    let mut editor = editor_with("ab");
+                    editor.handle_event(&typed('c'));
+                    editor.handle_event(&event);
+                    assert_eq!(
+                        editor.active_document().lines[0],
+                        "ab",
+                        "Ctrl+Z did not reach Undo"
+                    );
+                }
+                Command::Redo => {
+                    let mut editor = editor_with("ab");
+                    editor.handle_event(&typed('c'));
+                    editor.handle_event(&ctrl(Key::Z));
+                    editor.handle_event(&event);
+                    assert_eq!(
+                        editor.active_document().lines[0],
+                        "cab",
+                        "Ctrl+Y did not reach Redo"
+                    );
+                }
+                Command::Cut => {
+                    let mut editor = editor_with("ab");
+                    editor.active_document_mut().select_all();
+                    editor.handle_event(&event);
+                    assert_eq!(editor.clipboard, "ab", "Ctrl+X did not copy");
+                    assert_eq!(
+                        editor.active_document().lines[0],
+                        "",
+                        "Ctrl+X copied but did not cut"
+                    );
+                }
+                Command::Copy => {
+                    let mut editor = editor_with("ab");
+                    editor.active_document_mut().select_all();
+                    editor.handle_event(&event);
+                    assert_eq!(editor.clipboard, "ab", "Ctrl+C did not reach Copy");
+                    assert_eq!(
+                        editor.active_document().lines[0],
+                        "ab",
+                        "Ctrl+C deleted what it copied"
+                    );
+                }
+                Command::Paste => {
+                    let mut editor = editor_with("ab");
+                    editor.clipboard = "zz".to_string();
+                    editor.handle_event(&event);
+                    assert_eq!(
+                        editor.active_document().lines[0],
+                        "zzab",
+                        "Ctrl+V did not reach Paste"
+                    );
+                }
+                Command::SelectAll => {
+                    let mut editor = editor_with("ab");
+                    editor.handle_event(&event);
+                    assert!(
+                        editor.active_document().has_selection(),
+                        "Ctrl+A did not reach Select All"
+                    );
+                }
+                Command::SelectWord => {
+                    let mut editor = editor_with("hello world");
+                    editor.handle_event(&event);
+                    assert_eq!(
+                        editor.active_document().selected_text(),
+                        "hello",
+                        "Ctrl+D did not reach Select Word"
+                    );
+                }
+                Command::Find => {
+                    let mut editor = editor_with("ab");
+                    editor.handle_event(&event);
+                    assert!(editor.find_visible, "Ctrl+F did not open the find bar");
+                    assert_eq!(editor.find_field, FindField::Query);
+                }
+                Command::Replace => {
+                    let mut editor = editor_with("ab");
+                    editor.handle_event(&event);
+                    assert!(editor.find_visible, "Ctrl+H did not open the find bar");
+                    assert_eq!(
+                        editor.find_field,
+                        FindField::Replace,
+                        "Ctrl+H opened the find bar on the wrong field"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every command a menu row can carry maps back to the command itself.
+    #[test]
+    fn a_menu_rows_identifier_names_the_command_that_made_it() {
+        for command in Command::ALL {
+            assert_eq!(
+                Command::from_id(command.id()),
+                Some(command),
+                "{command:?} did not survive the trip through its own id"
+            );
+        }
+    }
+
+    /// **The menu reaches a command, through the same body the keyboard uses.**
+    #[test]
+    fn the_search_menu_opens_the_find_bar() {
+        let mut editor = editor_with("hello");
+        assert!(!editor.find_visible);
+
+        editor.handle_event(&press(Key::S, Modifiers::alt()));
+        assert!(
+            editor.menu_bar.is_open(),
+            "Alt+S did not open the Search menu"
+        );
+        // Opening highlights nothing, so the first Down lands on the first row.
+        editor.handle_event(&plain(Key::Down));
+        editor.handle_event(&plain(Key::Enter));
+
+        assert!(
+            editor.find_visible,
+            "the menu's Find row did not open the find bar"
+        );
+        assert!(
+            !editor.menu_bar.is_open(),
+            "the menu stayed open after running a row"
+        );
+    }
+
+    /// The bar sits at the top of the window, where a click can reach it.
+    #[test]
+    fn clicking_the_top_of_the_window_opens_a_menu() {
+        let mut editor = editor_with("hello");
+        editor.resize(900, 600);
+
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x: 20.0,
+            y: guitk::menubar::BAR_HEIGHT / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+
+        assert!(
+            editor.menu_bar.is_open(),
+            "a click on the bar opened nothing"
+        );
+    }
+
+    /// **Typing still reaches the document.**
+    ///
+    /// The bar is offered every key before the typing tables see them, which is
+    /// only safe because a closed bar claims Alt+mnemonic and nothing else.
+    #[test]
+    fn the_menu_bar_does_not_swallow_typing() {
+        let mut editor = editor_with("");
+        editor.handle_event(&typed('x'));
+
+        assert_eq!(editor.active_document().lines[0], "x");
+        assert!(!editor.menu_bar.is_open(), "typing opened a menu");
+    }
+
+    /// **A drag that crosses the bar is not stolen by it.**
+    ///
+    /// Selecting upwards past the first line puts the pointer in the bar, and a
+    /// menu opening mid-drag would both lose the selection and leave a menu
+    /// open that nobody asked for.
+    #[test]
+    fn a_drag_that_crosses_the_menu_bar_is_not_stolen_by_it() {
+        let mut editor = editor_with("zero\none\ntwo");
+        editor.resize(900, 600);
+        let x = editor.text_x() + 1.0;
+
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y: crate::TEXT_TOP + editor.line_height * 1.5,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(editor.dragging, "the press did not start a drag");
+
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y: guitk::menubar::BAR_HEIGHT / 2.0,
+            kind: MouseEventKind::Move,
+        }));
+
+        assert!(
+            !editor.menu_bar.is_open(),
+            "a drag across the bar opened a menu"
+        );
+        assert!(editor.dragging, "the drag was dropped at the bar");
+    }
+
+    /// A command with nothing to do does nothing, however it is asked.
+    ///
+    /// The greying on a menu row is advisory: a menu can be opened, the
+    /// document changed under it by a reload, and the row clicked afterwards,
+    /// so the command checks for itself as well.
+    #[test]
+    fn a_command_with_nothing_to_do_does_nothing() {
+        let mut editor = editor_with("ab");
+
+        assert!(
+            !editor.command_enabled(Command::Undo),
+            "a document nobody has edited has an edit to undo"
+        );
+        assert_eq!(editor.run(Command::Undo), Response::Idle);
+        assert_eq!(editor.active_document().lines[0], "ab");
+
+        assert!(
+            !editor.command_enabled(Command::Paste),
+            "the clipboard starts empty"
+        );
+        assert_eq!(editor.run(Command::Paste), Response::Idle);
+        assert_eq!(editor.active_document().lines[0], "ab");
+    }
+
+    /// An edit makes Undo available, and undoing it makes Redo available.
+    #[test]
+    fn what_a_menu_row_offers_follows_the_document() {
+        let mut editor = editor_with("ab");
+        editor.handle_event(&typed('c'));
+
+        assert!(
+            editor.command_enabled(Command::Undo),
+            "an edit is not undoable"
+        );
+        assert!(
+            !editor.command_enabled(Command::Redo),
+            "nothing was undone yet"
+        );
+
+        editor.handle_event(&ctrl(Key::Z));
+        assert!(
+            editor.command_enabled(Command::Redo),
+            "an undo is not redoable"
+        );
+    }
+
+    /// **A click lands on the line it looks like it landed on.**
+    ///
+    /// The renderer and the hit test have to read the same top edge. They did
+    /// not, once: `visible_lines` subtracted a hardcoded 64 for a strip 32
+    /// pixels tall, and the viewport came out two lines short. The menu bar
+    /// moved that edge again, and one copy of it left behind looks, from the
+    /// outside, exactly like a click landing on the wrong line.
+    #[test]
+    fn a_click_lands_on_the_line_it_looks_like_it_landed_on() {
+        let mut editor = editor_with("zero\none\ntwo\nthree");
+        editor.resize(900, 600);
+        let x = editor.text_x() + 1.0;
+
+        for row in 0..4 {
+            let y = crate::TEXT_TOP + (row as f32 + 0.5) * editor.line_height;
+            let (line, _) = editor
+                .caret_cursor_at(x, y)
+                .unwrap_or_else(|| panic!("nothing to click at row {row}"));
+            assert_eq!(line, row, "row {row} at y={y} reported line {line}");
+        }
+
+        // And the chrome above it is chrome, not line zero.
+        assert!(
+            editor.caret_cursor_at(x, crate::TEXT_TOP - 1.0).is_none(),
+            "a click in the tab strip reached the text"
+        );
+        assert!(
+            editor
+                .caret_cursor_at(x, guitk::menubar::BAR_HEIGHT / 2.0)
+                .is_none(),
+            "a click on the menu bar reached the text"
+        );
+    }
+
+    /// The text area is what is left between the bars, and never negative.
+    #[test]
+    fn the_text_area_is_what_the_bars_leave() {
+        let mut editor = editor_with("x");
+        editor.resize(900, 600);
+        let expected = 600.0 - crate::TEXT_TOP - crate::STATUS_BAR_HEIGHT;
+        assert!((editor.editor_height() - expected).abs() < f32::EPSILON);
+
+        // A window shorter than its own chrome asks for an empty text area
+        // rather than a negative one.
+        editor.resize(900, 10);
+        assert!(
+            editor.editor_height().abs() < f32::EPSILON,
+            "a window shorter than its chrome asked for {} pixels of text",
+            editor.editor_height()
+        );
+        assert_eq!(editor.visible_lines(), 0);
     }
 
     #[test]
@@ -1076,7 +1745,7 @@ mod tests {
     fn a_click_places_the_caret_and_a_drag_selects() {
         let mut editor = editor_with("hello world");
         let x = editor.window_width as f32 / 2.0;
-        let y = crate::TAB_BAR_HEIGHT + 1.0;
+        let y = crate::TEXT_TOP + 1.0;
 
         let press_at = Event::Mouse(MouseEvent {
             x: editor.text_x() + 1.0,
@@ -1130,7 +1799,7 @@ mod tests {
         let mut editor = editor_with("alpha beta");
         let event = Event::Mouse(MouseEvent {
             x: editor.text_x() + 1.0,
-            y: crate::TAB_BAR_HEIGHT + 1.0,
+            y: crate::TEXT_TOP + 1.0,
             kind: MouseEventKind::DoubleClick(MouseButton::Left),
         });
         assert_eq!(editor.handle_event(&event), Response::Redraw);
@@ -1250,19 +1919,23 @@ mod tests {
         assert_eq!(editor.tabs.count(), 2);
         assert_eq!(editor.tabs.active_index(), 1);
 
-        assert_eq!(editor.tab_at(10.0, 10.0), Some((0, false)));
+        // Ten pixels into the strip, wherever the strip begins -- a bare
+        // `10.0` meant "inside the tabs" only while they were at the very top
+        // of the window, and stopped meaning it when the menu bar went above.
+        let in_strip = crate::TAB_BAR_TOP + 10.0;
+        assert_eq!(editor.tab_at(10.0, in_strip), Some((0, false)));
         editor.handle_event(&Event::Mouse(MouseEvent {
             x: 10.0,
-            y: 10.0,
+            y: in_strip,
             kind: MouseEventKind::Press(MouseButton::Left),
         }));
         assert_eq!(editor.tabs.active_index(), 0);
 
         let close_x = TAB_WIDTH - 4.0;
-        assert_eq!(editor.tab_at(close_x, 10.0), Some((0, true)));
+        assert_eq!(editor.tab_at(close_x, in_strip), Some((0, true)));
         editor.handle_event(&Event::Mouse(MouseEvent {
             x: close_x,
-            y: 10.0,
+            y: in_strip,
             kind: MouseEventKind::Press(MouseButton::Left),
         }));
         assert_eq!(editor.tabs.count(), 1);
@@ -1271,8 +1944,13 @@ mod tests {
     #[test]
     fn the_gap_between_tabs_belongs_to_neither() {
         let editor = editor_with("only");
-        assert_eq!(editor.tab_at(TAB_WIDTH + 0.5, 10.0), None);
-        assert_eq!(editor.tab_at(10.0, crate::TAB_BAR_HEIGHT + 1.0), None);
+        assert_eq!(
+            editor.tab_at(TAB_WIDTH + 0.5, crate::TAB_BAR_TOP + 10.0),
+            None
+        );
+        // Below the strip is the text, and above it is the menu bar.
+        assert_eq!(editor.tab_at(10.0, crate::TEXT_TOP + 1.0), None);
+        assert_eq!(editor.tab_at(10.0, crate::TAB_BAR_TOP - 1.0), None);
     }
 
     #[test]

@@ -11,6 +11,7 @@
 
 use quoting::quoteaf_os;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::process;
 
@@ -34,7 +35,7 @@ enum EjectAction {
 
 #[derive(Clone, Debug)]
 struct EjectOptions {
-    device: String,
+    device: OsString,
     action: EjectAction,
     force: bool,
     verbose: bool,
@@ -61,28 +62,42 @@ impl Default for EjectOptions {
 // Device detection
 // ============================================================================
 
-fn default_device() -> String {
+/// A device name as a diagnostic should show it.
+///
+/// The bytes are what open the file; this is the other half. A device name may
+/// hold any byte but `/` and NUL, and a diagnostic that wrote them raw would
+/// let a newline in one forge a second line of output -- so unprintable bytes
+/// are escaped here, and ONLY here. Until 2026-09-14 the escaped form was the
+/// only form: it was produced at the mount-table lookup and then used as the
+/// path as well, which is the wrong way round.
+fn dshow(device: &OsStr) -> String {
+    quoting::escape_unprintable(&quoting::os_bytes(device))
+}
+
+fn default_device() -> OsString {
     // Check common CD/DVD device paths.
     let candidates = ["/dev/cdrom", "/dev/dvd", "/dev/sr0", "/dev/sr1", "/dev/fd0"];
     for dev in &candidates {
         if std::path::Path::new(dev).exists() {
-            return dev.to_string();
+            return OsString::from(*dev);
         }
     }
-    "/dev/cdrom".to_string()
+    OsString::from("/dev/cdrom")
 }
 
-fn resolve_device(name: &str) -> String {
-    // If it's already an absolute path, use it.
-    if name.starts_with('/') {
-        return name.to_string();
+fn resolve_device(name: &OsStr) -> OsString {
+    let bytes = quoting::os_bytes(name);
+    // Already an absolute path: use it as it is.
+    if bytes.first() == Some(&b'/') {
+        return name.to_os_string();
     }
-    // Check if it's a mount point.
+    // A mount point?
     if let Some(dev) = find_device_for_mountpoint(name) {
         return dev;
     }
-    // Try prepending /dev/.
-    format!("/dev/{name}")
+    // Otherwise a bare name under /dev. Joined as a PATH rather than
+    // `format!`ed, so a name that is not Unicode survives.
+    std::path::Path::new("/dev").join(name).into_os_string()
 }
 
 /// The mount table, through [`procinfo`].
@@ -102,22 +117,32 @@ fn mount_table() -> Vec<procinfo::Mount> {
         .unwrap_or_default()
 }
 
-fn find_device_for_mountpoint(mountpoint: &str) -> Option<String> {
+fn find_device_for_mountpoint(mountpoint: &OsStr) -> Option<OsString> {
     mount_table()
         .iter()
-        .find(|m| m.mount_point == mountpoint.as_bytes())
-        .map(|m| quoting::escape_unprintable(&m.device))
+        .find(|m| m.mount_point == quoting::os_bytes(mountpoint).as_ref())
+        // The RAW bytes. This used to return `escape_unprintable(&m.device)`,
+        // and the result was then handed to `File::open` -- so a device whose
+        // name held an unprintable byte was opened under its ` `-style
+        // rendering, which names a different file or none. Escaping is for
+        // DISPLAY, and [`dshow`] is where it happens now.
+        .map(|m| quoting::os_from_bytes(&m.device))
 }
 
-fn find_mountpoint_for_device(device: &str) -> Option<String> {
+fn find_mountpoint_for_device(device: &OsStr) -> Option<String> {
     // The canonical path too: `/dev/cdrom` is usually a symlink to `/dev/sr0`,
     // and `/proc/mounts` names whichever the mount was made with.
     let canonical = fs::canonicalize(device).unwrap_or_else(|_| std::path::PathBuf::from(device));
-    let canonical_str = canonical.to_string_lossy();
+    // Bytes on both sides. This used to compare against
+    // `canonical.to_string_lossy()`, which replaces any byte that is not UTF-8
+    // with U+FFFD -- so a device whose canonical path held one could never
+    // match the mount table, and silently looked unmounted.
+    let canonical_bytes = quoting::os_bytes(canonical.as_os_str()).into_owned();
+    let device_bytes = quoting::os_bytes(device);
 
     mount_table()
         .iter()
-        .find(|m| m.device == device.as_bytes() || m.device == canonical_str.as_bytes())
+        .find(|m| m.device == device_bytes.as_ref() || m.device == canonical_bytes.as_slice())
         .map(|m| quoting::escape_unprintable(&m.mount_point))
 }
 
@@ -142,27 +167,31 @@ struct DeviceInfo {
     device_type: String,
 }
 
-fn get_device_info(device: &str) -> DeviceInfo {
-    // Extract base device name (e.g., "sr0" from "/dev/sr0").
-    let base_name = device.rsplit('/').next().unwrap_or(device);
+fn get_device_info(device: &OsStr) -> DeviceInfo {
+    // Extract the base device name (e.g. "sr0" from "/dev/sr0"), by BYTES:
+    // the name came from the command line and need not be Unicode.
+    let bytes = quoting::os_bytes(device);
+    let base_name = match bytes.iter().rposition(|&b| b == b'/') {
+        Some(i) => bytes.get(i.saturating_add(1)..).unwrap_or(&[]),
+        None => bytes.as_ref(),
+    };
+    let sys_path = std::path::Path::new("/sys/block").join(quoting::os_from_bytes(base_name));
 
-    let sys_path = format!("/sys/block/{base_name}");
-
-    let removable = fs::read_to_string(format!("{sys_path}/removable"))
+    let removable = fs::read_to_string(sys_path.join("removable"))
         .ok()
         .map(|s| s.trim() == "1");
 
-    let model = fs::read_to_string(format!("{sys_path}/device/model"))
+    let model = optionalfile::read_or_empty(&sys_path.join("device/model"))
         .unwrap_or_default()
         .trim()
         .to_string();
 
-    let vendor = fs::read_to_string(format!("{sys_path}/device/vendor"))
+    let vendor = optionalfile::read_or_empty(&sys_path.join("device/vendor"))
         .unwrap_or_default()
         .trim()
         .to_string();
 
-    let dev_type = fs::read_to_string(format!("{sys_path}/device/type"))
+    let dev_type = fs::read_to_string(sys_path.join("device/type"))
         .unwrap_or_else(|_| "0".to_string())
         .trim()
         .to_string();
@@ -174,7 +203,7 @@ fn get_device_info(device: &str) -> DeviceInfo {
     };
 
     DeviceInfo {
-        name: device.to_string(),
+        name: dshow(device),
         removable,
         _model: model,
         _vendor: vendor,
@@ -186,9 +215,11 @@ fn list_removable_devices() -> Vec<DeviceInfo> {
     let mut devices = Vec::new();
     if let Ok(entries) = fs::read_dir("/sys/block") {
         for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let dev_path = format!("/dev/{name}");
-            let info = get_device_info(&dev_path);
+            // The entry name as BYTES. `to_string_lossy` here meant a
+            // block device whose name is not UTF-8 was probed under a
+            // different path -- one with U+FFFD in it, which names nothing.
+            let dev_path = std::path::Path::new("/dev").join(entry.file_name());
+            let info = get_device_info(dev_path.as_os_str());
             // Listing removable devices: one we could not ask is not one we
             // can list as removable.
             if info.removable == Some(true) {
@@ -203,7 +234,7 @@ fn list_removable_devices() -> Vec<DeviceInfo> {
 // Volume name reading (ISO 9660)
 // ============================================================================
 
-fn read_volume_name(device: &str) -> Option<String> {
+fn read_volume_name(device: &OsStr) -> Option<String> {
     // ISO 9660 primary volume descriptor is at sector 16 (2048 bytes/sector).
     // Volume ID is at offset 40 within the PVD, 32 bytes.
     let data = fs::read(device).ok()?;
@@ -254,12 +285,15 @@ fn do_eject(opts: &EjectOptions) -> i32 {
 
     if !opts.force && info.removable != Some(true) {
         match info.removable {
-            Some(false) => eprintln!("eject: {device} is not a removable device"),
+            Some(false) => eprintln!("eject: {} is not a removable device", dshow(device)),
             // Distinct wording, because the advice that follows differs in
             // kind: forcing past a device that SAYS it is fixed is a decision,
             // and forcing past one nobody could ask is a guess.
             None => {
-                eprintln!("eject: cannot read whether {device} is removable; not assuming it is")
+                eprintln!(
+                    "eject: cannot read whether {} is removable; not assuming it is",
+                    dshow(device)
+                )
             }
             Some(true) => unreachable!("handled by the condition above"),
         }
@@ -294,13 +328,20 @@ fn do_eject(opts: &EjectOptions) -> i32 {
         EjectAction::DisplaySpeed => "query the drive speed",
         EjectAction::SetSpeed(_) => "set the drive speed",
     };
-    eprintln!("eject: cannot {what} on {device}: this kernel has no CD-ROM driver");
+    eprintln!(
+        "eject: cannot {what} on {}: this kernel has no CD-ROM driver",
+        dshow(device)
+    );
     if !opts.no_unmount && find_mountpoint_for_device(device).is_some() {
         eprintln!(
-            "eject: {device} is still mounted and has NOT been unmounted -- \
-             unmounting without ejecting would suggest the medium is safe to remove"
+            "eject: {} is still mounted and has NOT been unmounted -- \
+             unmounting without ejecting would suggest the medium is safe to remove",
+            dshow(device)
         );
-        eprintln!("eject: use `umount {device}` if that is what you meant");
+        eprintln!(
+            "eject: use `umount {}` if that is what you meant",
+            dshow(device)
+        );
     }
     1
 }
@@ -309,18 +350,28 @@ fn do_eject(opts: &EjectOptions) -> i32 {
 // eject personality
 // ============================================================================
 
-fn eject_main(args: &[String]) -> i32 {
+fn eject_main(args: &[OsString]) -> i32 {
     let mut opts = EjectOptions::default();
     let mut i = 0;
 
     while i < args.len() {
-        match args[i].as_str() {
+        let arg = &args[i];
+        // `""` for a word that is not valid Unicode: it matches no option and
+        // falls to the operand arm, which keeps `arg` itself -- and the
+        // operand here is a DEVICE PATH, the one thing that must survive.
+        let s: &str = arg.to_str().unwrap_or("");
+        match s {
             "-t" | "--trayclose" => opts.action = EjectAction::Close,
             "-T" | "--traytoggle" => opts.action = EjectAction::ToggleTray,
             "-i" | "--manualeject" => {
                 i += 1;
                 if i < args.len() {
-                    match args[i].as_str() {
+                    let arg = &args[i];
+                    // `""` for a word that is not valid Unicode: it matches no option and
+                    // falls to the operand arm, which keeps `arg` itself -- and the
+                    // operand here is a DEVICE PATH, the one thing that must survive.
+                    let s: &str = arg.to_str().unwrap_or("");
+                    match s {
                         "on" | "1" => opts.action = EjectAction::SetAutoEject(true),
                         _ => opts.action = EjectAction::SetAutoEject(false),
                     }
@@ -331,7 +382,9 @@ fn eject_main(args: &[String]) -> i32 {
             "-x" | "--cdspeed" => {
                 i += 1;
                 if i < args.len() {
-                    if let Ok(speed) = args[i].parse::<u32>() {
+                    // A drive speed is digits, so a value that does not
+                    // decode is not one and falls to the display branch.
+                    if let Ok(speed) = args[i].to_str().unwrap_or("").parse::<u32>() {
                         opts.action = EjectAction::SetSpeed(speed);
                     } else {
                         opts.action = EjectAction::DisplaySpeed;
@@ -342,7 +395,7 @@ fn eject_main(args: &[String]) -> i32 {
             "-v" | "--verbose" => opts.verbose = true,
             "-n" | "--noop" | "--no-unmount" => opts.no_unmount = true,
             "-d" | "--default" => {
-                println!("eject: default device: {}", default_device());
+                println!("eject: default device: {}", dshow(&default_device()));
                 return 0;
             }
             "-p" | "--proc" => opts._proc_mount = true,
@@ -381,8 +434,8 @@ fn eject_main(args: &[String]) -> i32 {
                 println!("eject (Slate OS coreutils) {VERSION}");
                 return 0;
             }
-            s if !s.starts_with('-') => {
-                opts.device = resolve_device(s);
+            _ if !s.starts_with('-') => {
+                opts.device = resolve_device(arg);
             }
             other => {
                 eprintln!("eject: unknown option {}", quoteaf_os(other));
@@ -399,23 +452,24 @@ fn eject_main(args: &[String]) -> i32 {
 // volname personality
 // ============================================================================
 
-fn volname_main(args: &[String]) -> i32 {
+fn volname_main(args: &[OsString]) -> i32 {
     let device = if args.is_empty() {
         default_device()
     } else {
-        match args[0].as_str() {
+        match args[0].to_str().unwrap_or("") {
             "--help" | "-h" => {
                 println!("Usage: volname [device]");
                 println!();
                 println!("Display the volume name of a CD-ROM.");
-                println!("Default device: {}", default_device());
+                println!("Default device: {}", dshow(&default_device()));
                 return 0;
             }
             "--version" => {
                 println!("volname (Slate OS coreutils) {VERSION}");
                 return 0;
             }
-            s => resolve_device(s),
+            // `args[0]`, not the decoded view: this operand is the DEVICE.
+            _ => resolve_device(&args[0]),
         }
     };
 
@@ -425,7 +479,7 @@ fn volname_main(args: &[String]) -> i32 {
             0
         }
         None => {
-            eprintln!("volname: cannot read volume name from {device}");
+            eprintln!("volname: cannot read volume name from {}", dshow(&device));
             1
         }
     }
@@ -436,10 +490,15 @@ fn volname_main(args: &[String]) -> i32 {
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so naming a device
+    // whose path holds a byte that is not valid Unicode killed the process.
+    let args: Vec<OsString> = env::args_os().collect();
 
     let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("eject");
+        // The personality name (argv[0]); a name that is not Unicode is
+        // not one of the two this binary answers to, so it falls to the
+        // `eject` default just as any other unknown name does.
+        let s = args.first().and_then(|s| s.to_str()).unwrap_or("eject");
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
@@ -452,7 +511,7 @@ fn main() {
         base.to_string()
     };
 
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
 
     let exit_code = match prog_name.as_str() {
         "volname" => volname_main(&rest),
@@ -472,13 +531,38 @@ mod tests {
 
     #[test]
     fn test_resolve_device_absolute() {
-        assert_eq!(resolve_device("/dev/sr0"), "/dev/sr0");
+        assert_eq!(
+            resolve_device(OsStr::new("/dev/sr0")),
+            OsStr::new("/dev/sr0")
+        );
     }
 
     #[test]
     fn test_resolve_device_relative() {
-        let result = resolve_device("sr0");
-        assert!(result.contains("sr0"));
+        let result = resolve_device(OsStr::new("sr0"));
+        assert!(quoting::os_bytes(&result).ends_with(b"sr0"));
+    }
+
+    /// A device name that is not valid UTF-8 survives resolution as bytes.
+    ///
+    /// This is what the conversion is for: `eject` used to read argv as
+    /// `Vec<String>`, so naming such a device killed the process, and the
+    /// mount-table lookup it would have reached returned the ESCAPED
+    /// rendering and then opened *that* as a path.
+    ///
+    /// `#[cfg(unix)]` because only there can an `OsStr` hold arbitrary bytes;
+    /// the development host is Windows, where `OsString` is WTF-16.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_device_keeps_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let name = OsStr::from_bytes(b"sr\xe9");
+        let got = resolve_device(name);
+        assert_eq!(
+            quoting::os_bytes(&got).as_ref(),
+            b"/dev/sr\xe9",
+            "the byte must survive into the device path"
+        );
     }
 
     #[test]
@@ -489,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_device_info_nonexistent() {
-        let info = get_device_info("/dev/nonexistent_device_xyz");
+        let info = get_device_info(OsStr::new("/dev/nonexistent_device_xyz"));
         // `None`, not `Some(false)`. There is no sysfs entry for this device,
         // so nobody said it is fixed -- the attribute could not be read, and
         // the two now print differently. The guard treats both as "do not
@@ -501,14 +585,14 @@ mod tests {
 
     #[test]
     fn test_find_mountpoint_nonexistent() {
-        let mp = find_mountpoint_for_device("/dev/nonexistent_device_xyz");
+        let mp = find_mountpoint_for_device(OsStr::new("/dev/nonexistent_device_xyz"));
         // Should be None — no such device mounted.
         assert!(mp.is_none());
     }
 
     #[test]
     fn test_find_device_for_mountpoint_nonexistent() {
-        let dev = find_device_for_mountpoint("/nonexistent_mountpoint_xyz");
+        let dev = find_device_for_mountpoint(OsStr::new("/nonexistent_mountpoint_xyz"));
         assert!(dev.is_none());
     }
 
@@ -520,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_read_volume_name_nonexistent() {
-        let name = read_volume_name("/dev/nonexistent_device_xyz");
+        let name = read_volume_name(OsStr::new("/dev/nonexistent_device_xyz"));
         assert!(name.is_none());
     }
 

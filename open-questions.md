@@ -811,89 +811,6 @@ that let them through is untouched.
 
 The cost grows with the number of app crates, which is growing.
 
-## C-Q12 — [C] There are two system trays, and neither can do what the spec asks. Which one is the real one? — Status: OPEN
-
-**In short:** the little row of icons at the right-hand end of the taskbar —
-the clock, the volume and network icons, the icons programs put there when they
-tuck themselves away — exists twice in this codebase, built two different ways,
-and the two halves cannot see each other. One of them draws the clock but has
-no way to hold a program's icon. The other holds program icons but is a
-separate program of its own. `design.txt` asks that you be able to **drag icons
-into and out of the tray**, and the code for that drag-and-drop is written —
-1,184 lines of it — but it lives with the half that has no icons to drag. So
-the feature cannot be finished without first deciding which half is the real
-tray. Nothing is broken today; the drag-and-drop simply does nothing, because
-nothing constructs it.
-
-**The two halves.**
-
-| | `gui/desktop` (the shell's taskbar) | `apps/systray` |
-|---|---|---|
-| What it is | Part of the desktop shell, drawn into the taskbar the shell already owns | A standalone program, 3,715 lines, with its own window |
-| What it draws | Clock, notification bell, virtual-desktop indicator | Tray icons with badges and tooltips, quick-settings flyout, volume popup, network popup, calendar popup |
-| Icons a program can add | **None.** There is no list of them anywhere in the shell | Yes — `TrayIconId`, add/remove/show/hide |
-| Drag-and-drop | `tray_dnd.rs`, fully written, **constructed by nothing** | None |
-| Reached by anything today | Yes, the shell runs it | **No.** Nothing launches it |
-
-**What the spec says.** `design.txt` line 710 lists the tray's contents as
-"optional icons on taskbar like Windows: clock, wifi, ... volume", and 714–716
-add "a system tray like on Windows / can drag and drop icons into and out of
-the system tray / apps have the option of starting in system tray or minimizing
-to system tray". It reads as one thing, in the taskbar. It does not say whether
-the program that *draws* it must be the shell.
-
-**The options.**
-
-**A — the tray belongs to the shell; fold `apps/systray` into it.**
-*What changes:* the taskbar grows a real icon list and the popups that go with
-it; `apps/systray` stops existing as a program.
-Pros: one taskbar drawn by one program, so the icons and the clock cannot
-disagree about where the tray starts or how wide it is; `tray_dnd.rs` is then
-in the right place and can be wired as written; dragging an icon *out of* the
-tray and onto the taskbar is a move within one program rather than a protocol.
-Cons: the largest of the three — 3,715 lines to merge into a shell that is
-already the biggest thing in `gui/`; a crash in a tray popup takes the taskbar
-with it.
-
-**B — the tray is its own program; move `tray_dnd.rs` to it.**
-*What changes:* `apps/systray` gets launched and given a strip of the taskbar
-to draw into; the shell reserves the space and stays out of it.
-Pros: smallest change to what already exists, and the two halves are already
-split this way; a misbehaving tray icon cannot take the taskbar down; matches
-the microkernel instinct of the rest of the project.
-Cons: needs a protocol the shell does not have — the shell must tell the tray
-how much room it has and where, and the tray must tell the shell when it wants
-more, on every clock tick that changes the clock's width. Dragging an icon from
-the tray to the taskbar crosses a process boundary. Two programs must agree on
-the theme, the scale factor and the autohide animation, all of which the shell
-currently owns outright.
-
-**C — leave it, and delete `tray_dnd.rs`.**
-*What changes:* nothing a user sees; 1,184 lines of unreachable code go.
-Pros: honest about the fact that neither half is finished; nothing pretends to
-work.
-Cons: throws away written, tested code for a feature the spec explicitly asks
-for, and the decision still has to be made the day anyone wants tray icons.
-
-**My recommendation: A.** The reason is not size but the one thing neither
-option can fake — the tray and the taskbar share a *layout*. The tray's width
-is computed from its contents (the clock alone roughly triples in width when
-the date is switched on, which already had to be handled), and the taskbar's
-window buttons shrink to fit what is left. Under B that arithmetic spans two
-programs and has to be renegotiated on every change, which is the kind of seam
-that produces a tray overlapping its neighbours in one theme and not another.
-Under A it stays one function. The crash-isolation argument for B is real, but
-it is an argument for isolating *tray icon plugins* — which is a separate
-mechanism either way, since a third-party icon should not run in-process under
-A *or* B.
-
-**If this is never answered:** nothing degrades and nothing breaks. The tray
-keeps showing a clock, a bell and a desktop indicator; no program can put an
-icon in it; `tray_dnd.rs` stays unreachable. The cost is only that the
-"minimize to tray" feature in `design.txt` cannot be started, since it needs
-somewhere to minimise *to*.
-
-
 ## C-Q15 — [C] Under the optional "Filled" theme, should the shaded boxes be made paler? — Status: OPEN
 
 **In short:** you chose outlined boxes as the normal look and kept the older
@@ -1886,6 +1803,74 @@ that cannot work on this system.
 **Where it bites:** `userspace/sbctl/src/main.rs`; `roadmap.md:3835`, which
 claimed this was done and now says `[~]`;
 `requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`.
+## B-Q18 — [B] My roadmap list is down to three huge ports. Which one, and is now the time? — Status: OPEN
+
+**In short:** The list of jobs assigned to me has run out, except for three
+very large ones. Each is "take a big program other people wrote and make it run
+on SlateOS", and each is weeks of work rather than hours. I have been working
+from the bug list instead, which is not empty and is producing real fixes — but
+nobody has decided which of the three big jobs comes next, or whether any of
+them should start yet. I would rather you picked than have me pick for you,
+because the three lead the project in genuinely different directions.
+
+**What is actually left.** `roadmap.md` has exactly three unstarted items
+tagged for my lane:
+
+| | what it means in plain terms | where it leads |
+|---|---|---|
+| **Rust toolchain** | SlateOS can compile its own kernel, on itself | the machine stops needing Windows to rebuild itself |
+| **fastpy compiler** | the Python-to-native compiler runs on SlateOS | already part-built (initiative F); this is the rest of it |
+| **WINE** | Windows programs run on SlateOS | a large existing app library, at once |
+
+Everything else assigned to me is either done or is a bug, and bugs I can pick
+up without asking.
+
+**Why I am asking rather than choosing.** The standing rule is that I should
+just start the next task, and for anything ordinary I do. These three are the
+named exception: each is a *giant external port*, each takes the project
+somewhere different, and the cost of starting the wrong one is weeks, not
+minutes. It is also possible the right answer is "none yet" — see below.
+
+### The options
+
+**A. Rust toolchain first.**
+*What changes:* you could rebuild the kernel from inside SlateOS instead of
+from Windows. Today the OS cannot reproduce itself; after this it can.
+Self-hosting is also the usual milestone at which an OS stops being an
+experiment.
+
+**B. fastpy compiler first.**
+*What changes:* programs written in Python compile to native code *on* SlateOS.
+This is the least risky of the three because roughly half of it already exists
+and works — the cross-compiler, the linker step and the C runtime are done and
+tested. It is finishing something rather than starting something.
+
+**C. WINE first.**
+*What changes:* a large body of existing Windows software becomes runnable. It
+is the biggest single jump in what the OS can *do* for a user, and by far the
+largest and least predictable of the three — WINE leans on a great deal of
+Linux behaviour we have only partly built.
+
+**D. None of them yet — keep working the bug list.**
+*What changes:* nothing visible; I carry on fixing defects. Today that has
+meant `patch` and `diff`, both of which were giving wrong answers on ordinary
+files. There is no shortage of this work, and it is what makes the ports
+land on solid ground when they do start.
+
+**My recommendation is B, then D as the standing default.** B is half-built
+and its remaining half is the part that unblocks writing OS components in
+Python at all, which the design spec already assumes. A and C both rest on
+libc and kernel surface that is still gaining features weekly — starting either
+now means porting against a moving target, and re-porting later.
+
+### If this is never answered
+
+Nothing breaks and nothing is blocked. I will keep working the bug list, which
+is option D, and the three ports stay unstarted. The cost of leaving it is not
+risk but direction: the project keeps getting more correct without getting
+more capable, and at some point that becomes the wrong trade. There is no
+deadline on answering.
+
 
 # Resolved
 

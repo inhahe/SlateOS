@@ -1,0 +1,31 @@
+[package]
+name = "notifsettings"
+version = "0.1.0"
+edition = "2024"
+description = "Which programs may interrupt you, and how — shared by the desktop shell and the Settings application"
+
+[dependencies]
+# Format-preserving YAML. A settings file a user has commented has to come
+# back with the comments intact. See yamldoc/src/lib.rs.
+yamldoc = { path = "../../yamldoc" }
+
+# Where the file lives, how it is replaced atomically, and the `yaml_enum!`
+# macro that gives an enum its spelling in the file. The same choice
+# `inputsettings` made and for the same reason: nothing here has a colour in
+# it, so depending on `appearance` would drag the widget toolkit into a crate
+# that never names a `Color`.
+settingsfile = { path = "../settingsfile" }
+
+# A recurring window of the day, validated. Its own crate precisely so that
+# this one can name an hour without compiling a widget toolkit, and so that
+# quiet hours are not the fourth hand-rolled copy of the same four u8s --
+# see gui/daywindow/src/lib.rs, which lists the three that already were.
+daywindow = { path = "../daywindow" }
+
+[dev-dependencies]
+# `settingsfile::testing` for the tests that run against a scratch
+# configuration directory instead of the developer's own.
+settingsfile = { path = "../settingsfile", features = ["testing"] }
+
+[lints]
+workspace = true

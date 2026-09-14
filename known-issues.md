@@ -587,6 +587,16 @@ guessing at it would reintroduce this very defect in a subtler form: a date that
 is plausible and wrong), plus `-s`, `-f`, `--debug` and `--resolution`. Each
 says so. 21 of the remaining 42 are those refusals.
 
+> **Superseded 2026-09-14 — `-d` and `-f` are implemented and the harness is
+> green (117 passed / 0 differed).** The paragraph above is kept because its
+> *reasoning* was right and is what shaped the fix: the answer to "guessing
+> would produce a plausible wrong date" was to stop guessing, not to stop
+> implementing. `scripts/probe-date-d-grammar.sh` measured GNU 9.4 first, and
+> three of its results contradict a careful guess — `epoch` is not a keyword,
+> `@0 + 1 day` is an error, and `-d ''` means today at midnight. Anything the
+> probe did not confirm (`2 weeks ago`, `next Friday`) is still refused.
+> `-s`, `--debug` and `--resolution` remain refused.
+
 *`scripts/check-argv-ignored.py`'s baseline is now empty* — both bins it was
 written for are fixed, and the gate stands as a ratchet against the next one.
 
@@ -656,6 +666,308 @@ with `AI_CANONNAME` on the result of `gethostname`, which is what net-tools
 does — rather than reading `/etc/resolv.conf`'s `search` line. The distinction
 matters beyond this program: the resolver's search list is for *completing
 queries*, not for naming this host.
+
+### BLOCKED, 2026-09-14 — our own libc does not implement `AI_CANONNAME`
+
+The fix above names a mechanism this project does not have.
+`posix/src/socket.rs:4589` says so outright, in the `getaddrinfo` result
+constructor:
+
+```rust
+// Always NULL: we do not implement AI_CANONNAME.  If it is ever
+// added, the name must live inside this same block (glibc does the
+// same) — `freeaddrinfo` frees the node and nothing else.
+ai_canonname: core::ptr::null_mut(),
+```
+
+So `getaddrinfo(…, AI_CANONNAME, …)` returned a node whose canonical name was
+`NULL`, and `hostname` would have had nothing to read. **The prerequisite is in
+this lane** — `posix/**` is lane B's — so this was not a request to file, it
+was two pieces of work in order:
+
+1. ~~implement `AI_CANONNAME` in `posix`~~ — **DONE 2026-09-14**, see below;
+2. then change `hostname` to use it — **still open, and step 1 did not unblock
+   it.** Read the next subsection before starting it.
+
+### STEP 1 DONE, 2026-09-14 — and it does not fix `hostname -f`
+
+`gai_alloc` now takes a `canon: Option<&[u8]>` and copies the name into the
+same block, after the `SockaddrIn`, honouring the constraint the old comment
+stated; `getaddrinfo` attaches it to the head node only, and only when
+`AI_CANONNAME` is set and `nodename` is non-null. Four tests cover it,
+including a control (no flag ⇒ still `NULL`) and an assertion that the
+`SockaddrIn` survives — writing the name at the wrong offset inside the shared
+block reads `sin_family` back as `14641`, the ASCII `"19"` of the test's
+`"192.168.1.1"`, which is how that assertion was confirmed to fail when it
+ought to.
+
+**What that fixed is a NULL dereference, not the FQDN.** A program that sets
+`AI_CANONNAME` and does `printf("%s", res->ai_canonname)` — which is normal,
+since glibc guarantees the field is non-NULL there — was dereferencing NULL
+against our libc. That is now correct, and it is worth having on its own.
+
+**What it cannot fix, and why step 2 is still blocked.** The canonical name we
+return is *the queried name itself*, because there is nothing else to return:
+
+* `gethostbyname` fills `h_name` from its own `name` argument
+  (`HostentBuf::fill(…, name, name_len, resolved)`), not from the answer;
+* the answer has no room for a name — `SYS_DNS_RESOLVE` takes
+  `(hostname_ptr, hostname_len, output_ptr)` and writes **four address bytes**.
+
+So the resolver cannot report a CNAME, and `AI_CANONNAME` echoes its input: a
+short hostname in, a short hostname out. That is precisely what glibc does for
+a host with no CNAME, and precisely what `hostname -f` must *not* do.
+**Step 2 as written would replace an invented FQDN with a short name — it
+would not produce a correct one.** Whether that trade is an improvement (a
+confidently wrong answer versus an admittedly incomplete one) is a real
+question, and not one to settle silently while implementing it.
+
+Closing this properly needs the FQDN to exist somewhere a libc call can reach:
+either `SYS_DNS_RESOLVE` grows a canonical-name output, or the kernel's hosts
+table in `kernel/src/fs/nameservice.rs` becomes readable by name. Both are
+lane A's, so both are requests rather than work.
+
+**Scale, so the next reader knows what they are picking up:**
+`scripts/hostname-diff.sh` is **7 passed / 50 differed** — by ratio the worst
+harness in the tree, and the largest single family of those is this one cause.
+Doing (1) without (2) fixes nothing visible — and, as the subsection above
+records, (1) is now done and (2) turns out to need a third thing that is not
+in this lane, so the ratio is unchanged and will stay that way until the
+resolver can carry a name.
+
+Written down because the entry as it stood sends someone to `getaddrinfo` with
+a plausible plan and no warning that the call cannot answer.
+
+**And one thing that is NOT wrong, checked on the way.** Reading the above, the
+next step looked alarming: nothing in `posix` reads `/etc/hosts` — the path is
+defined in `paths.rs` and referenced by nothing else, and `getaddrinfo`
+resolves by numeric parse, then the DNS syscall. That reads like "`localhost`
+does not resolve", which would be far worse than an FQDN.
+
+**That paragraph was right, and the "reassurance" that followed it here was
+wrong. See `B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER` below.**
+
+What this entry said until 2026-09-14 was: *"It is not the case.
+`kernel/src/fs/nameservice.rs` holds the hosts table, `localhost` and
+`ip6-localhost` included, and the DNS syscall `getaddrinfo` calls goes there."*
+The first half is true — that table exists and has those entries. The second
+half is false: `sys_dns_resolve` calls **`crate::net::dns::resolve`**, which is
+a different module that never consults `fs::nameservice` at all.
+
+**The lesson, which is the reusable part.** I went looking for something that
+would explain `localhost` working, found a module named `nameservice` holding a
+hosts table with `localhost` in it, and stopped — the name matched the
+behaviour I was hoping to confirm. I never traced the call. Had I, the chain is
+two greps long: `sys_dns_resolve` → `net::dns::resolve` → the wire.
+**Finding a component that *would* explain the behaviour is not evidence that
+it is the component in use** — and it is more dangerous than finding nothing,
+because it ends the search with a false result instead of an open question. The
+alarming reading was correct and I talked myself out of it with a plausible
+mechanism, which is the worse of the two ways to be wrong here.
+
+**Corrected 2026-09-14: the paragraph above said "there is no
+`gethostbyname`". That was false** — it is `posix/src/socket.rs:3892`, and
+`getaddrinfo` calls it for every non-numeric name. The grep behind the claim
+was `pub extern "C" fn gethostbyname`, which misses the actual signature
+`pub unsafe extern "C" fn`. The conclusion the paragraph reaches survives
+(resolution is kernel-side, `localhost` does resolve), but it reached it
+through a false premise, in a paragraph whose entire purpose was to stop a
+misleading claim being recorded. Noted rather than quietly edited because the
+false version was committed and pushed, and because the failure is a reusable
+one: **an absence proved by grepping for a signature is only as good as the
+modifiers in the pattern.** `unsafe`, `pub(crate)`, `async`, `const` and a
+line break after `fn` all defeat it. Grep for the bare name first, then narrow.
+
+## B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER (lane B, 2026-09-14) — OPEN, fix is lane A's
+
+`getaddrinfo("localhost", …)` and `gethostbyname("localhost")` send a DNS query
+over the network. There is no hosts-file lookup anywhere in the path, so on a
+machine with no DNS server — or one whose upstream declines to answer for
+`localhost`, which is the normal configuration — **`localhost` does not
+resolve.**
+
+**The call chain, which is the whole evidence:**
+
+| step | where | what it does |
+|---|---|---|
+| `getaddrinfo` | `posix/src/socket.rs` | `inet_pton` first; not numeric ⇒ `gethostbyname` |
+| `gethostbyname` | `posix/src/socket.rs:3892` | `syscall3(SYS_DNS_RESOLVE, …)` |
+| `sys_dns_resolve` | `kernel/src/syscall/handlers.rs:13793` | calls `crate::net::dns::resolve` |
+| `net::dns::resolve` | `kernel/src/net/dns.rs:1035` | container DNS, else `resolve_single` ⇒ **the wire** |
+
+`kernel/src/fs/nameservice.rs` *does* hold a hosts table with `localhost` and
+`ip6-localhost` in it. **Nothing in that chain reaches it.** It is a second,
+unused resolver; the syscall goes to `net::dns`, which contains no hosts table
+and no loopback special case (its only `localhost` is inside a test at
+`dns.rs:1775`). Checked for a shortcut on both sides and there is none:
+`resolve_single` has no hosts/loopback check, and `posix` has no `localhost`
+special case — the `loopback` hits there are `in6addr_loopback`, `IFF_LOOPBACK`
+and the `AI_PASSIVE` default, none of them on this path.
+
+**Why it matters beyond `localhost`.** Every name a normal system would answer
+from `/etc/hosts` — build-machine aliases, a pinned service name, an offline
+development host, the `127.0.1.1 <hostname>` line Debian writes — misses here
+and goes to the network instead. Two consequences worth separating:
+
+* **It fails** where the upstream has no answer, and the failure is a network
+  timeout rather than a prompt "no such host", so it is slow as well as wrong.
+* **It leaks.** Internal-only names get transmitted to whatever upstream
+  resolver is configured. A hosts file is often used precisely to keep a name
+  off the network.
+
+**Status of the evidence.** This is a code-read finding, not an observed one: I
+cannot boot the image from this lane. The chain above is four greps and I have
+stated each hop, so it should be cheap to confirm or refute — and refuting it
+is welcome, because *this entry's own predecessor claimed the opposite and was
+wrong.* See the correction in
+`B-POSIX-HOSTNAME-INVENTS-AN-FQDN` above for how that happened.
+
+**The fix is lane A's** (`kernel/**`), and is filed as
+`requests/b-a-sys-dns-resolve-never-consults-the-hosts-table.md`. Either
+`net::dns::resolve` consults `fs::nameservice` before going to the wire, or
+`sys_dns_resolve` does so before calling it. The first is better — it fixes
+in-kernel callers too — but that is lane A's call, not mine.
+
+**Not fixable in libc**, which is why this is a request rather than work:
+reading `/etc/hosts` from `posix` would need the file to exist in the image and
+would still leave in-kernel resolution wrong, and it would duplicate a table
+the kernel already has.
+
+## B-USERSPACE-176-BINS-CANNOT-REACH-THE-BYTE-SAFE-GETOPT (lane B, 2026-09-14) — OPEN
+
+`scripts/argv-utf8-baseline.txt` holds **178 findings, 176 of them the same
+one**: `let argv: Vec<String> = env::args().collect()`. Every one is a program
+that **dies on a legal filename** — `env::args()`'s iterator is a literal
+`unwrap`, and on this OS a filename may hold every byte but `/` and NUL.
+
+**Why they are all spelled the same, and why that matters.** The coreutils
+bins are clean because they share `userspace/coreutils/src/getopt.rs`, which is
+byte-based. Not one `userspace/*/Cargo.toml` depends on `coreutils`, so all 176
+standalone bins hand-roll their argv walk in `String`.
+
+> **CORRECTED 2026-09-14, same day, before anything was built on it.** This
+> paragraph first said "**No crate outside `userspace/coreutils` can use it**",
+> and that is **false**. I had checked that none *does* depend on `coreutils`
+> and wrote it up as a wall. Tested instead of asserted: adding
+> `coreutils = { path = "../coreutils" }` to `blockdev` and calling
+> `coreutils::getopt::Program` **compiles and works today**. There is no wall.
+>
+> What there is, is **weight**, and that is measured rather than guessed.
+> `blockdev`, debug, `x86_64-pc-windows-gnu`:
+>
+> | | bytes |
+> |---|---|
+> | as it is | 2,858,660 |
+> | with the `coreutils` dependency, using `getopt` | 6,502,583 |
+> | | **2.27×** |
+>
+> because `coreutils`' lib pulls `bignum`, `charwidth`, `ere`, `bstr`,
+> `memchr` and `localtime` behind it. A 3.6 MB payload on a small utility to
+> reach a 1,838-line parser.
+>
+> **This changes the priority, not just the wording.** The 176 bins are *not
+> blocked* on an extraction — each could be fixed today, either by taking the
+> dependency or by converting its argv to `OsString` in place. Extracting
+> `getopt` into a small crate is an optimisation with a measured
+> justification (the 2.27×), not a prerequisite. Recorded because the original
+> phrasing would have had the next reader treat a multi-crate refactor as
+> something they had to finish before touching a single bin.
+
+**The precedent is already in the tree.** `userspace/quoting` exists for
+exactly this reason: a helper the whole userland needs, extracted into its own
+crate rather than copied. `getopt` is the same shape and has not had the same
+treatment.
+
+**WHICH of them ship, measured 2026-09-14 — and it reorders the work.**
+
+Intersecting the baseline with `scripts/rootfs-bin-manifest.txt`, which is what
+`create-ext4-rootfs.sh` actually installs into `/bin`:
+
+| | count |
+|---|---|
+| binaries on the argv baseline | 169 |
+| binaries on the image | 75 |
+| **on both** | **3** — `ar`, `kill`, `logger` |
+
+The coreutils binaries dominate the image and are already clean, because they
+share the byte-based `getopt`. So of 169 programs that die on a legal filename,
+**three can be run by a user of the current image.** The other 166 are real
+defects in binaries that are built and not installed.
+
+That is a correction to how this sweep was being run, not a footnote. The first
+seven conversions were chosen by FILE SIZE — smallest first, fastest to
+convert — and of those only `diff` is on the image. `blockdev`, `look`,
+`nologin`, `timeout`, `lsns`, `eject` and `ldconfig` are all shipped nowhere.
+The defects were real and the fixes stand; the ORDER was wrong, and picking by
+"cheapest to convert" is what produced it.
+
+**Take the three that ship first.** After them the baseline is a backlog of
+things nobody can currently run, and its priority should be read that way —
+against, say, the lossy-decode column, which `scripts/lossy-decode.py` reports
+as VALUE 0 for the image's binaries and 182 for everything else.
+
+**The route, revised after the measurement above:**
+
+1. **Fix bins now; the extraction is not a gate.** Each bin needs a real pass
+   anyway — `patch` and `diff` each took one, and `diff`'s turned up a silent
+   `to_str()` skip in its directory walk that was worse than the panic it was
+   filed for. That work does not wait on any crate reshuffle.
+2. **Extract `getopt.rs` into a small crate when the weight is the reason**,
+   not before. The name `userspace/getopt` is taken — it is the `getopt(1)`
+   *binary*, and it is itself on the baseline — so a new name is needed.
+
+**The one thing the extraction genuinely blocks on**, found while scoping it
+and worth writing down so it is not rediscovered: `Program::report` cannot move
+to an I/O-free crate. It goes through `stdfd::diag_line`, which **flushes
+stdout first** — glibc's `error()` behaviour, and without it a block-buffered
+`cat big missing >out 2>&1` puts the complaint ahead of output written before
+it. So an extracted parser either drags `stdfd` (1,357 lines) and `errmsg`
+(299) with it, or gives up `report` and changes its 44 call sites. `quoting`
+set the standard that a move should cost callers nothing, and this one cannot
+meet it for free.
+
+**Taking the `coreutils` dependency is a third option** and is the cheapest
+per bin — it compiles and works — but it is the 2.27× above, so it suits a bin
+that already wants several of those helpers rather than one that wants only the
+parser.
+
+**Scale, measured rather than guessed:** two bins have been converted by hand
+so far — `patch` and `diff` — and each took a single focused pass, with `diff`
+also turning up a silent-skip bug worse than the panic it was filed for. The
+work is real but it is not research.
+
+**Not yet started.** Recorded now because the finding is the structural one,
+and because a reader looking at a 176-line baseline needs to know it is one
+wall and not 176 separate jobs.
+
+## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) — OPEN
+
+`ar` no longer dies on an operand that is not valid UTF-8, but it does not
+handle one either: it **refuses**, naming the bytes, at `decode_operand`.
+
+**Why the refusal is where it is.** The `ar` format stores a member name in a
+16-byte header field, with longer names in the `//` table. Those are **bytes** —
+a member name is not required to be UTF-8, and `ar` on any other system will
+happily produce an archive containing one. This implementation carries
+`name: String` in the header structs (`main.rs:110`, `:567`, `:577`) and
+outward through `member_basename`, `find_member`, the symbol table and the
+listing. So a name it cannot decode is one it cannot represent, and the
+boundary is the honest place to say so.
+
+**What it cost before:** nothing was refused, because `env::args()`'s iterator
+is a literal `unwrap` and the process died first. The refusal is strictly
+better and is not the end state.
+
+**The fix** is to carry member names as bytes through the format layer —
+`name: Vec<u8>`, comparisons on bytes, and `escape_unprintable` at the
+display sites (`t` listing, `v` output, diagnostics). It is a real piece of
+work across ~12 functions in a 3,130-line file, which is why it is written
+down rather than half-done: a partial conversion that decodes in one place
+and not another would produce archives whose index disagrees with their
+members.
+
+**Reachability:** `ar` is one of only three argv-baseline binaries on the
+image, so this one is worth doing, unlike most of that backlog.
 
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
@@ -68639,10 +68951,19 @@ Also: `println!` panics on a write error, so `env | head -1` produced a panic
 message. Checked writes, `BrokenPipe` the one deliberate success — the same
 family as `tee`, `tar`, `dd`, `stat` and `kill`.
 
-**Not implemented:** `-S`/`--split-string`, GNU's `#!`-line helper. It is a
-quoting grammar rather than a flag, nothing in the tree uses it (verified: no
-`env -S` anywhere in `userspace/`, `services/`, `init/`, `scripts/`), and the
-proper shape for it is recorded in `todo.txt`.
+**`-S`/`--split-string`: implemented 2026-09-14**, which took `env-diff.sh` to
+59 passed / 0 differed. The grammar was measured first (58 cases,
+`scripts/probe-env-split-string.sh` plus four companion probes) rather than
+written from the documentation, and three rules would have been wrong
+otherwise: `\t` puts a tab *inside* an argument where a raw tab separates;
+only `${NAME}` expands, never re-splitting; and an unset variable contributes
+no argument where a set-but-empty one contributes an empty one. `\a`, `\b` and
+`\e` are rejected by GNU despite being standard C escapes.
+
+The `todo.txt` design for it was wrong on its central point — it held that
+`${VAR}` must expand against the environment `env` is building, and GNU
+expands against the *process* environment, ignoring `-i`, `-u` and assignments
+alike.
 
 **Eight for eight.**
 
@@ -75115,6 +75436,46 @@ That does not change the count: the paint path still reaches the same four
 modules, and which of the other fifty-odd should be on screen is still this
 entry's question. What changes is that the answer can now be observed rather
 than argued, because there is a running desktop to look at.
+
+**Update 2026-09-14 (lane C): one of the fifty is a taskbar, and it is the
+sharpest case in the pile.**
+
+`scripts/scan-orphan-modules.py` had been *clearing*
+`gui/desktop/src/taskbar.rs` -- 2 600 lines -- because it declares
+`pub struct WindowId`, a name the shell writes hundreds of times and which
+`gui/desktop/src/lib.rs` also declares. Both `lib.rs` are aggregators and were
+never collected as owners, so the taskbar module looked like the sole owner of
+the name, and every window id in the desktop vouched for it. Fixed the same
+day; the module is now pinned like the rest.
+
+**What that module is.** "Pinned application shortcuts (persisted to config),
+running application indicators with window grouping, drag-to-reorder, drag
+into/out of the pinned section to pin/unpin." The shell draws its own taskbar
+from `lib.rs` -- `taskbar_rect`, `taskbar_thickness`, `taskbar_button_width` --
+and `PinnedApp` appears nowhere in it. So **pinning an application to the
+taskbar is a finished, tested feature that no user can reach**, and the
+taskbar they do see cannot pin anything.
+
+**Update 2026-09-14, later the same day: it has a caller now.** The shell
+uses `TaskbarState::add_pinned`, `remove_pinned`, `pinned_apps` and
+`reorder_pinned` -- four of the module's model methods -- for taskbar pinning,
+per design-decisions 849. Its *renderer* still has none and is the part 849
+says goes. The window-grouping half of its model is blocked on
+`TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS`.
+
+So one of the fifty is no longer unreachable, and the way it happened is worth
+noting: not by wiring the module up, but by finding the *feature* the user was
+missing and discovering the module already implemented it. The other
+forty-nine are still best triaged that way round.
+
+**And it has been polished twice while unreachable.** The palette sweep
+converted this module's fourteen hard-coded colours to roles -- its own comment
+records the work -- and `gui/toolkit/src/menubar.rs`, also unused, was threaded
+with a `viewport` argument by the viewport sweep on 2026-09-14, tests and all.
+Neither sweep had any way to know. That is the cost of this entry stated
+precisely: not just that fifty modules are unreachable, but that careful work
+keeps being spent on them, because nothing in the toolchain says which of the
+fifty-seven are alive.
 
 **Where:** `gui/desktop/src/session.rs`, `ShellSession::paint_background`
 (`:334`) and `ShellSession::paint_chrome` (`:353`), are the only two functions
@@ -118692,6 +119053,27 @@ still worth having.
 
 ## B-A-VERDICT-ABOUT-DEAD-CODE-DEPENDS-ON-A-CONFIGURATION-THE-COMMAND-DID-NOT-NAME (lane B, 2026-09-13)
 
+**One mistake in FOUR costumes, made four times in one day while actively
+watching for it** — the fourth arriving hours after this entry was written, by
+its own author, who had just finished describing the shape.
+
+**Fourth costume (added later the same day): a lint that is denied only on a
+target I never build.** The `RWF_` change to `file.rs` left a doc comment
+orphaned from its function. `cargo test -p posix --target x86_64-pc-windows-gnu`
+passed, `cargo clippy` on that same target passed, `cargo fmt --check` passed.
+The pre-push hook then refused with `error: empty line after doc comment`,
+because `scripts/check-cfg-unix.py` builds for `x86_64-unknown-linux-gnu`, where
+`cfg(unix)` is true and that lint is denied. **Every check I ran was green and
+the code did not compile.** The axis is the same one the third row names, seen
+from the other side: there I had unused-import findings that existed only on one
+target; here I had an error that existed only on the target I do not run.
+
+The practical consequence, and the reason this is worth the fourth entry:
+`cargo clippy --target x86_64-pc-windows-gnu` is **not** a sufficient pre-push
+check for this tree, and treating it as one costs a full pre-push gate run
+(~10 minutes) to find out. `python scripts/check-cfg-unix.py` takes 19 seconds
+and answers the question directly.
+
 **One mistake in three costumes, made three times in one day while actively
 watching for it.** Recorded together because separately each looks like a
 detail of the tool that found it, and together the shape is obvious: a
@@ -129344,6 +129726,42 @@ viewer invents, and there is no service yet.
 regressed here — this is a gap that was invisible until the parser moved out
 and left an unused import pointing straight at it.
 
+**Fixed 2026-09-13. There is a dialog.** Pages (all / current / a typed
+range), copies, colour, sides and scale, committed to `print_job` on Print
+and discarded on Cancel. Eleven tests, every one of them driven through
+`probe::click` on the controls rather than by assigning to the job.
+
+Three things the work turned up that this entry did not anticipate:
+
+- **`PageRange::CurrentPage` has no spelling.** `parse("")` is `All` and no
+  input produces `CurrentPage`, so a free-text box alone would have left a
+  variant of the message format unreachable from the only program that
+  sends one. Hence a cycling Pages button and not just the range box this
+  entry asked for.
+- **The range box keeps the user's text, not a rendering of the parse.**
+  `PageRange` has no `Display` and should not grow one: `parse("1-3,5")` is
+  `Custom([(0,2),(4,4)])`, and writing that back out is a second conversion
+  that can disagree with the first — re-rendering `7-7` as `7` would
+  quietly edit what someone typed.
+- **Typing has to select the custom choice.** Otherwise a user types `2-4`,
+  presses Print, and gets every page: the exact defect this entry describes,
+  reintroduced one control along and invisible, because both the typed text
+  and the output would look deliberate.
+
+**A vacuous test, caught before it was committed.** The first version of
+`a_miss_inside_the_dialog_does_not_page_the_document` used `probe::click`
+on the dialog panel — which clicks the *centre* of the box it finds, and
+the centre of the panel is the Copies stepper. It pressed "+" and then
+asserted the page had not changed, which was true and proved nothing. It
+now asserts `target_at` returns the panel at the point it is about to
+click, before clicking there.
+
+**Still absent: a printer chooser.** There is no printing service to ask
+which printers exist (§540), so the dialog configures the job and does not
+choose a destination. That half is unchanged and still waits on the
+service; the half a user feels — printing one page of a four-hundred-page
+manual — does not.
+
 ---
 
 ## TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING -- FIXED 2026-09-13
@@ -129827,6 +130245,7 @@ so that destination became a running program rather than a library.
 | 3. a `TRAY` frame and a subscription | **done** — `guiremote::tray`, `SubscribeTrayIcons` 0x23, `route_tray_list` |
 | 4. drag, drop, pin, reorder (`tray_dnd.rs`) | **reorder done** — drag the row; pin and hide have no door yet |
 | 5. a click reaching the program that owns the icon | **done** — `ClickTrayIcon` 0x24, `Event::TrayIconClicked` 0x0C, `App::tray_icon_clicked` |
+| 6. the user being able to tell the icons apart | **done** — resting on one shows the `tooltip` its program registered, which the shell had been receiving and never displaying |
 
 Plus the two ends: `oswindow::EventLoop` has `watch_tray`, `set_tray_icon`,
 `remove_tray_icon` and `tray_icons`, and the shell subscribes, folds each
@@ -129893,9 +130312,13 @@ quarter of the bar, with a chevron for the rest — see
 
 **What is left:**
 
-- **`apps/systray` is still the copy**, and 842 says its unique parts — quick
-  settings, the volume and network popups — move into the shell rather than
-  to Settings. Nothing has moved yet.
+- ~~**`apps/systray` is still the copy**~~ — **done 2026-09-14.** The operator
+  answered C-Q12 with option A (§845): the tray is the shell's and that program
+  stops existing. Deleted, 3 809 lines. The five things it offered that have
+  no home yet — a volume popup with per-application volumes, a network popup,
+  airplane mode, battery saver, a brightness slider — are recorded in
+  `TD-C-FIVE-TRAY-FEATURES-EXISTED-ONLY-IN-A-PROGRAM-NOTHING-LAUNCHED`, each
+  needing a service that does not exist rather than a place to be drawn.
 - **Hiding and pinning have no way in.** `TrayIconSlot` carries `visible`
   and `pinned`, the arrangement honours both, and nothing can set either:
   right-click belongs to the program that owns the icon, so the shell's own
@@ -131177,10 +131600,61 @@ change — so the natural first reaction is that something is badly wrong, and t
 natural second is to start bisecting a change that is innocent. It cost lane C a
 detour today on the way to merging a caret-width change.
 
-**Proper fix (not done):** the kernel package could carry
-`forced-target = "x86_64-slateos"`, which would make cargo build it for its own
-target regardless of `--target` on the command line and let the plain workspace
-command work. That is lane A's file, so it is written here rather than done.
+**~~Proper fix (not done)~~: the kernel package could carry**
+**`forced-target`. Measured 2026-09-13: it cannot, on this toolchain.**
+The suggestion above was written from the cargo documentation without
+checking which channel the feature is on, and it is wrong. Kept rather than
+deleted because the wrong fix is the part that would have cost somebody an
+afternoon, and because a lane that must not edit `kernel/Cargo.toml` filing
+a request for an impossible change is worse than filing nothing.
+
+Three things were measured, in a scratch workspace outside the tree rather
+than by editing lane A's manifest:
+
+| mechanism | on stable 1.95 | verdict |
+|---|---|---|
+| `forced-target` (`cargo-features = ["per-package-target"]`) | *"requires a nightly version of Cargo, but this is the `stable` channel"* | **unavailable** |
+| the same on `+nightly` | works — the bare crate lands in `target/x86_64-unknown-none/` while the rest lands in `target/x86_64-pc-windows-gnu/` | works, but would put the whole tree on nightly |
+| `required-features` on the `[[bin]]` | cargo **silently skips** the binary. No warning, no note, `Finished` as if nothing were missing | works, and is worse |
+
+That last row is the one that settles it. `required-features` would make
+`cargo build --workspace` clean on stable today, and the price is that a
+kernel build which forgot the feature flag would exit **0 having built no
+kernel**. Trading a loud linker error for a silent omission is the opposite
+of what this file exists to prevent — it is the same shape as a test runner
+reporting PASS over zero targets, which cost this lane a real defect
+earlier the same day.
+
+**And the problem is smaller than this entry implies, because half of it is
+already solved and the entry did not say so.** `kernel/Cargo.toml` carries
+
+```toml
+[[bin]]
+name = "kernel"
+test = false   # "so `cargo test --workspace` is clean on a normal dev host"
+```
+
+so `cargo test --workspace --target x86_64-pc-windows-gnu` **works**, and is
+what `scripts/workspace-test.py` runs — 581 targets, repeatedly, all day.
+Together with the `cargo check` result already recorded above, that means:
+
+| spelling | state |
+|---|---|
+| `cargo check --workspace --target …` | works |
+| `cargo test --workspace --target …` | works (this is the pre-merge run) |
+| `cargo build --workspace --target …` | fails at the kernel's link step |
+
+Neither gate anyone has proposed uses the `build` spelling: C-Q11's option A
+is `cargo check`, and the actual pre-merge run is `cargo test`. So what is
+left is a trap in a *sentence*, not in the build — someone reading
+"`cargo build --workspace`" in `CLAUDE.md` literally, hitting a wall of
+mingw relocation errors, and bisecting an innocent change.
+
+**So the fix is not in `kernel/Cargo.toml` at all**, and no request has been
+filed against lane A. It is either a line in `CLAUDE.md` naming the
+spellings that work, which only the operator may add, or nothing — this
+entry, findable by anyone who hits the wall, may be the whole of the answer
+a once-a-month trap deserves.
 
 ## TD-C-OVERLAY0-IS-A-DISABLED-INK-AND-SOME-LIVE-TEXT-IS-DRAWN-IN-IT -- FIXED 2026-09-13
 
@@ -131590,7 +132064,363 @@ test can take it, is to ask the palette — `palette.surface_paint(Surface::Cont
 — rather than naming a shade, which is what the system tray's slider test now
 does.
 
-## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
+## TD-C-FIVE-TRAY-FEATURES-EXISTED-ONLY-IN-A-PROGRAM-NOTHING-LAUNCHED
+
+**Date:** 2026-09-14. **Lane:** C.
+**Where:** nowhere any more — that is the point. They were in
+`apps/systray`, 3 809 lines, deleted under `design-decisions.md` §845.
+
+**In short:** the tray existed twice, and the operator's answer to C-Q12 is
+that it belongs to the shell. The other copy was a whole program that
+nothing ever launched. Most of what it did the shell now does — a tray a
+program can put an icon in, arrange, click and hover. Five things it
+offered have no home yet, and this is the record of them so that deleting
+the program does not quietly delete the ideas.
+
+**The five.** None was working before: the program was unreachable, so
+every one of these was a control nothing could press. Nothing regressed.
+
+| feature | what it was | why it did not move |
+|---|---|---|
+| **A volume popup** | master slider, mute, output device, and a **per-application volume list** | The shell has a volume *OSD*, which reports a change; this was a panel you adjust. Both want an audio service to talk to, and there is none — `apps/settings`' Sound page has the same list and the same gap |
+| **A network popup** | connected state, SSID, signal strength, IP address | Needs a network daemon to ask. `net80211` exists; nothing serves a list of visible networks |
+| **Airplane mode** | a quick-settings switch | Would have to reach the same radios Wi-Fi and Bluetooth do, which the shell's own quick settings already record as unreachable |
+| **Battery saver** | a quick-settings switch | Needs a power manager. There are two dead `PowerConfig`s in the shell and no consumer for either — see `TD-C-ELEVEN-SETTINGS-PAGES-SAY-COMING-SOON` |
+| **A brightness slider** | in quick settings | Needs a backlight. The compositor warms the screen now (§845's neighbour, night light) but cannot dim it: that is panel hardware, not a colour transform |
+
+**What did move, and is already built.** The tray itself, across
+2026-09-13: a control verb to register an icon, a registry in the
+compositor reaped per client, a `TRAY` frame and subscription, the shell
+drawing the row, clicks routed back to the owning program with the button
+they were made with, drag to reorder, an overflow chevron with a menu, and
+hover tooltips carrying the name the program gave. That is every tray
+capability `apps/systray` had, reachable for the first time.
+
+**Why deleting rather than porting the five.** Adding five controls to a
+taskbar users can actually reach, that read nothing and change nothing, is
+worse than deleting five nobody could reach — the argument
+`TD-C-FOUR-DISPLAY-FEATURES-EXISTED-ONLY-IN-A-DEAD-SHELL-PANEL` makes about
+its own four, and the same conclusion. Every one of the five needs a
+service first.
+
+**The one thing to check before building any of them.** Each is a *popup*
+in a taskbar the shell owns outright, so the question that killed option B
+of C-Q12 does not arise again: there is no protocol to negotiate, only a
+service to call. Build the service, then the popup.
+## TD-C-A-PUSH-THE-SCRATCH-CONFIG-GATE-REFUSED-LANDED-ON-A-RETRY
+
+**Date:** 2026-09-14. **Lane:** C.
+**Where:** `scripts/hooks/pre-push` gate 35, and/or
+`scripts/check-scratch-config.py`.
+
+**In short:** a pre-push check refused a push, I ran the same push again to
+read its message properly, and the second one went through. The commit it
+had refused is on `origin/lane-c`. A ratchet that can be passed by trying
+twice is not a ratchet, and the fact is recorded here because I could not
+work out the mechanism and would rather leave evidence than a guess.
+
+**What is certain.**
+
+| | |
+|---|---|
+| The content was genuinely bad | `check-scratch-config.py` run by hand on that tree: *"settings wrote slateos/appearance.yaml"*. The warmth-slider test saved the developer's real `appearance.yaml` |
+| The first push was refused | the hook printed the gate's full message, ending *"To push anyway: ALLOW_SCRATCH_CONFIG=1"*, and `git push` exited non-zero |
+| `ALLOW_SCRATCH_CONFIG` was never set | no invocation in that session set it |
+| The commit reached the remote anyway | `origin/lane-c` was at `5cd55fb6e`, the commit carrying the offending test |
+| The gate is not simply broken | on the *next* push, with the test fixed, `scratch-config` appears in the hook's `ran:` list and passes |
+
+**A candidate mechanism, offered as checkable rather than as an answer.**
+The gate narrows to the crates a push touches, and the file list comes from
+
+```sh
+git diff --name-only $pushed_shas --not --remotes="$remote_name"
+```
+
+`--not --remotes` subtracts everything reachable from *any* remote-tracking
+ref. So a commit that has reached `origin/main` — by the integration
+worktree merging and pushing it — contributes no files to that list on a
+later `git push origin lane-c`, the list is empty, and the hook's own
+comment says an empty list means skip. The narrowing is deliberate and
+well-argued in the hook (105 s against ten), and this would be a hole in it
+rather than a mistake in the idea.
+
+That does not fit this instance cleanly — the merge to `main` reported
+*"Already up to date"*, so `main` should not have carried the commit — which
+is exactly why it is written here as a candidate and not as the cause.
+
+**How to check it, cheaply.** Make a commit the gate refuses, push it to a
+lane branch and observe the refusal; merge the same commit to `main` and
+push that; then push the lane branch again. If the second lane push skips
+the gate, the mechanism is confirmed and the fix is to compute the narrowing
+against the *remote branch being pushed to* rather than against all remotes.
+
+**Not urgent, and worth saying why.** The gate's job is to stop a defect
+reaching `main`, and the boot test runs the unnarrowed check, so the ratchet
+holds where it matters. What is lost is the fast feedback — which is most of
+its value, because a gate that catches you at push time is a gate you
+believe.
+## TD-C-THE-NOTIFICATIONS-PAGE-HAS-NO-PROGRAMS-TO-LIST
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the Settings application's Notifications page works, and on a
+real machine it will be empty. It lists the programs the user has a rule
+for, and nothing ever creates the first rule. The desktop is the only thing
+that sees which programs send notifications, and it has no way to tell the
+Settings application — they are separate processes and there is no verb for
+it.
+
+**Where:** `apps/settings/src/main.rs` — `build_notifications_page` renders
+`self.notif.settings.apps`. `gui/desktop/src/lib.rs` — `DesktopShell::notify`
+is where a program first becomes known.
+
+### The obvious fix was tried and is wrong
+
+Have `notify` record a default rule for a program it has not seen, and save
+the file. Written, and it fails for a reason worth keeping:
+
+**It writes a configuration file from the notification path.** Every test
+in `gui/desktop` that posts a notification — and many do — would write
+`notifications.yaml` into whatever `XDG_CONFIG_HOME` is set at that moment.
+For a test not wrapped in `with_scratch_config` that is *the developer's own*
+`~/.config/slateos/notifications.yaml*. For one running while another test
+holds a scratch turn, it is that test's fixture.
+
+It was caught by the second kind: `a_rule_written_to_the_config_file_lets_
+that_program_through` passed alone and failed in the full run. A test that
+passes in isolation and fails in company is shared state, and the shared
+state here was a real file on a real disk.
+
+This is the same family as
+`TD-C-A-TEST-THAT-WRITES-TO-AN-ABSOLUTE-POSIX-PATH-WRITES-TO-THE-DEV-DRIVE-ROOT`,
+which has a whole script guarding it. The lesson generalises further than
+either: **a settings write does not belong on a path that runs in response
+to something a program did.** It belongs on a path that runs in response to
+something a *person* did.
+
+### Update, same day: something does create rules, and it is the right
+### something
+
+The notification pane's per-app switch now writes one. It always reported
+the change; the shell discarded the report. Applying it means a user who
+silences a program **where they notice it** — in the pane, on the
+notification that interrupted them — gets a rule in `notifications.yaml`,
+and the Settings page lists it.
+
+So the page is empty only for someone who has never touched the switch,
+and it fills with exactly the programs they have an opinion about rather
+than with every program that has ever spoken. That is arguably the better
+list: you set a rule where the problem is and review it in Settings.
+
+**This is the write that is safe.** It is the same file the rejected fix
+wrote, from the same process, and the difference is the whole point of the
+rule this entry states: a person clicked a switch, so a settings write is
+what should happen. The rejected version ran on the path that *receives* a
+notification, where the trigger is another program and a test suite posting
+notifications becomes a test suite writing configuration files.
+
+**So `SubscribeNotifiers` is no longer urgent, and may not be wanted.** The
+case for it was an empty page; the case against was always that the list of
+programs that notify you is not public. What is left is the narrower
+question of whether Settings should be able to add a rule for a program the
+user has not met yet — which is a feature request, not a defect, and one
+the answer above may make unnecessary.
+### What the fix actually needs
+
+The list of programs that notify is *live desktop state*, like the window
+list and the tray. It is not a setting, and pushing it through a settings
+file to get it into another process is using the wrong pipe — which is
+precisely why the wrong pipe leaked.
+
+The shape the tree already has for exactly this is a subscription: the
+compositor carries a list, a shell or a settings application asks for it,
+and it is pushed when it changes. `SubscribeWindowList` and
+`SubscribeTrayIcons` are both this, gated through `require_shell`. A third
+would be `SubscribeNotifiers` — the programs that have sent a notification
+this session — and the Settings page would list the union of that and the
+rules already in the file.
+
+**Blocked on nothing, and deliberately not started here.** It is a protocol
+addition with a privilege question attached (the list of programs that
+notify you is not public), and it should begin a session rather than end
+one. What is above is the whole of the preparation: the fix that looks
+obvious, the measurement that killed it, and the shape the tree already uses.
+
+**Meanwhile the page is correct and honest.** With no rules it says
+"Programs appear here once they have sent you a notification", which is
+true, and describes the feature this entry is about rather than pretending
+to be finished.
+## TD-C-ELEVEN-SETTINGS-PAGES-SAY-COMING-SOON-AND-FIVE-OF-THEM-ARE-ALREADY-WRITTEN
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the Settings application has twenty-nine pages down its side.
+Eleven of them, when you click on them, say *"This page is under
+construction"* under a roadworks sign. Five of those eleven are finished
+somewhere else — complete, tested panels sitting inside the desktop shell
+with no way to open them. So a user is told a feature does not exist yet
+while the code for it is compiled into the machine they are running.
+
+**Where:** `apps/settings/src/main.rs` — `build_page` dispatches eighteen of
+the twenty-nine pages to a real builder and sends the rest to
+`build_placeholder_page`, which draws the roadworks. The finished panels are
+`gui/desktop/src/*.rs`, all on `scripts/orphan-modules-baseline.txt`.
+
+| placeholder page | finished panel | lines |
+|---|---|---|
+| ~~Notifications~~ | **done 2026-09-14** — `gui/notifsettings` + a real `build_notifications_page`; `desktop::notification_settings` is now a dead copy to delete | — |
+| Power | `desktop::power_settings` | 1 695 |
+| WiFi, Ethernet, VPN | `desktop::network_settings` | 4 107 |
+| Default apps | `desktop::default_apps` | 2 325 |
+| Startup apps | `desktop::startup_settings` | 2 129 |
+| Wallpaper, Fonts, Lock screen, Installed apps | — nothing written | — |
+
+**This is not a new decision. It is §815's second half, unstarted.** That
+entry is an *operator* decision and says plainly: *"Everything you open from
+a menu moves to the Settings app, and the shell's copies are deleted."* The
+deletions happened — three panels went on 2026-09-07. The **moves** did not.
+So the tree is currently in the worst of the three states C-Q6 offered:
+neither copy reachable, one of them deleted.
+
+**What makes it worth doing rather than deleting.** Deleting the shell's
+copies is the cheap reading of 815 and it would leave eleven roadworks signs
+where five features are. The operator picked the most expensive option
+deliberately — "It is also the most work, which is why it was worth asking
+rather than assuming" — and the expensive part is exactly this: the panels
+have to be rebuilt in the Settings app's idiom before the shell's copies can
+go.
+
+**Why it is a port and not a copy.** `apps/settings` builds every page
+through a `PageSink`, walked once by a `DrawSink` to paint and once by a
+`HitSink` to hit-test, *"so the two can never disagree about where a row
+is"*. The shell's panels each draw and hit-test in their own way. Moving one
+means re-expressing it as a `build_*_page`, which is where the work is and
+also where the value is: the target idiom is the one that cannot drift.
+
+**How this was found, and the correction worth keeping.** The first pass
+read the page *enum*, saw `Notifications`, `Power`, `DefaultApps` and
+`StartupApps` listed, and concluded the shell's panels were duplicates ready
+to delete under 815. Eleven thousand lines were about to be deleted on the
+strength of a list of names. The enum is the sidebar, not the
+implementation; `build_page`'s `_ =>` arm is the implementation, and it is
+where four of those four go. A page that exists in a menu and a page that
+exists are different things, which is the same mistake as counting a grep's
+hits and calling them callers.
+
+**~~Order to do them in. Power first~~ — corrected within the hour, and the
+reasoning was backwards.** The paragraph here said to start with Power
+because *"nothing in the shell consumes power settings, so the panel has no
+second consumer to keep in step"*. That is not a reason to start; it is a
+reason not to. **No second consumer turned out to mean no consumer at all.**
+
+Checked, per this file's own standing rule that you look at what a module
+talks to before wiring it:
+
+| page | who reads the setting | verdict |
+|---|---|---|
+| Power | **nobody.** And there are *two* dead models: `power_settings.rs` has a `PowerConfig`, and so does `power.rs` | building it produces controls that change nothing |
+| Default apps | **nobody.** The only mention of associations outside the panel is a line in `apps/explorer`'s module doc | same |
+| Startup apps | **nobody** in the session's launch path | same |
+| WiFi / Ethernet / VPN | **nobody** (checked 2026-09-14) | same |
+| Notifications | the shell's pane holds `app_settings` in memory — a real reader, but not a persisted one | the closest to ready, and still a three-part job |
+
+**So the blocker is not the port.** It is that these settings have nowhere
+to be read from. The pattern this tree already uses for exactly that is a
+third crate both halves depend on: `gui/appearance` with `ReloadAppearance`,
+and `gui/inputsettings` with `ReloadInput` (control verb `0x14`). There is a
+`gui/notifications`, but it is a **binary**, not a shared model.
+
+So each of these is a three-part change and not a move: a settings crate,
+a page that edits it, and a consumer that re-reads on a verb. Doing only the
+middle part is how a panel full of live-looking controls that change nothing
+gets built — which is strictly worse than the roadworks sign it replaces,
+because the sign is honest.
+
+**`power.rs` is worth its own line, because it also shows a blind spot in
+the orphan scanner.** It is 2 880 lines and is *not* on the baseline — but
+only three of its public items are reached (`PowerMenuRow`, `PowerMenuStyle`,
+`render_power_menu`, the Start menu's power rows). The scanner asks whether a
+*module* has any named item, so one reached item hides the rest of the file.
+A second dead `PowerConfig` sat there in plain sight.
+
+**Revised order.** Notifications first, because it is the only one with a
+reader today, and because doing it builds the settings-crate-plus-reload-verb
+chain that the other four will each need. The rest wait on that chain, or on
+a consumer existing at all — and for Power that means a power manager, which
+is not lane C's.
+
+**The last unknown is closed, and it closes the entry: none of the four have
+a reader.** The network row was the one row that had not been checked, on the
+grounds that `net*/**` is lane C's own glob and a consumer might therefore be
+lane C's to write. Checked 2026-09-14: the only `NetworkConfig` outside
+`gui/desktop/src/network_settings.rs` is `apps/installer`'s, which is
+*install-time* answers to a questionnaire and not a running machine's
+configuration. Nothing under `net/`, `net80211/`, `netipc/`, `netproto/` or
+`netring/` reads a network setting, and nothing could: those crates are
+protocol and transport, with no daemon above them to own an interface.
+
+So the chain the Notifications port built is available and unused, and all
+four remaining pages are blocked on the same missing thing -- a service that
+owns the hardware and re-reads its settings on a verb. Power needs a power
+manager, network needs a network daemon, default apps and startup apps each
+need something in the session's launch path. **None of those are lane C's**
+(`services/**` and `init/**` are lane B's), so this entry is blocked rather
+than deferred, and the honest state of the Settings app is eleven roadworks
+signs of which ten are telling the truth.
+
+**Do not "just build the page" for any of them.** The entry above already
+says why and it is worth repeating at the bottom where the next reader will
+be: a page of live-looking controls that change nothing is strictly worse
+than the roadworks sign it replaces, because the sign is honest.
+## TD-C-A-SWEEP-FOR-CODE-THAT-ASSUMES-THE-SCREEN-IS-1920-BY-1080 -- DONE 2026-09-13
+
+**Date:** 2026-09-13. **Lane:** C.
+
+**In short:** three separate bugs in one day came from the same mistake — a
+piece of code comparing against a fixed 1920x1080 instead of asking how big
+the screen actually is. Rather than wait to meet the fourth, this is a
+deliberate look through every place in this lane's tree that mentions those
+numbers. Two more real defects, one false alarm, and two cases that are
+correct and should stay.
+
+**Why it was worth doing.** The failures this produces are invisible on the
+machine they are written on and obvious on anyone else's, and they are all
+the same shape: something is drawn or bounded past an edge the code does not
+know about. On a smaller display that means rows, buttons and notifications
+that cannot be reached at all.
+
+| where | verdict |
+|---|---|
+| `guitk::menu` | **real, and live.** Every popup in the shell was placed against the constant. At 1024x768 the tray overflow menu was capped to a 1080px panel, put at y=0, and drawn to y=1080 — 312 pixels past the bottom, every row below 768 unreachable. Fixed |
+| `guitk::menubar` | **real, latent.** Its constants said *"Matches `menu.rs`"* and did, bug included. No consumers, so the fix was free and lands before anyone meets it. Fixed |
+| `desktop::notif_pane` | **real, and not where it looked.** The constant is a documented pre-first-render default and is fine. The defect was that **nothing ever called `set_screen_height`**, which the pane's own doc asks a keyboard-driven shell to call. Fixed |
+| `desktop::screen_capture` | real (`effective_region` returns a fixed 1920x1080 for full-screen) but the module has no consumers *and* screen capture is blocked on a compositor capability that does not exist. Left, recorded here |
+| `apps/magnifier` | correct as it stands: *"The screen this magnifier is pointed at, until there is an API to ask."* A labelled placeholder for the same missing capability |
+| `apps/lockscreen` | **false alarm.** The constants are the size the window *asks* for; `render` overwrites both fields with the size it was *granted*, and says why: *"a render that kept 1920x1080 on an 800x600 window would draw the password field in one place and accept clicks for it in another"* |
+
+**The lock screen is the row worth keeping.** It has the same two constants
+with the same two values as the modules that were broken, and it is right.
+A sweep that counted occurrences would have filed a bug against it; reading
+it shows the design is correct and the constants are something else
+entirely. This lane keeps relearning that a grep counts *shapes* and a
+defect is a *thing*.
+
+**What actually makes these findable, and it is not the number.** In all
+three real cases the give-away was the same: a placement rule that had no
+parameter for the screen. `menu.rs`'s `show(x, y)`, `menubar.rs`'s
+`place(...)`, and `notif_pane`'s keyboard path all decided where something
+went without anything in scope telling them where the edges were. The
+constant was how they filled the gap. So the check that generalises is
+"does this position something against a boundary it was not handed?" rather
+than "does this file say 1080?".
+
+**And why the tests could not have caught any of it.** Every test involved
+used a 1920x1080 window, and every piece of code under test compared against
+a 1920x1080 constant. Two readings of one number agree however wrong the
+number is. Each fix therefore adds a second screen size — `SMALL` in
+`menubar.rs`, an explicit 1024x768 in the others — because that, not the
+fix itself, is what stops it coming back.
+## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY -- DONE 2026-09-13
 
 **Date:** 2026-09-09. **Lane:** C.
 **Where:** `gui/desktop/src/a11y.rs` — 1,360 lines, referenced by nothing.
@@ -131659,15 +132489,82 @@ superseded.
 | `CursorSettings` | duplicates `AppearanceSettings::cursor_size`/`cursor_scheme`, and nothing draws a pointer at all (C-Q18) |
 | `AccessibilityConfig` | the parallel config this entry is named for |
 
-So the remainder splits cleanly. `AccessibilityConfig` and `CursorSettings` are
-**duplicates** and follow the precedent: the live definition is elsewhere, and
-these go once nothing needs them. The magnifier is **not** a duplicate -- it is
-the only implementation of a feature the roadmap lists as done, unreachable for
-the same reason `login_screen` and `blur` are, and it belongs with those in
-`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED` rather than being
-deleted as a stale copy. Deleting it would be the misreading of
-`design-decisions.md` 815 that entry warns about: a magnifier is the desktop
-showing you something, not a screen you open.
+**Deleted 2026-09-13 -- all 1 239 lines, magnifier included. The paragraph
+that used to stand here argued for keeping the magnifier, and it was wrong
+on its facts.** It is kept in outline because the argument was a good one
+and only the facts under it failed.
+
+It said the magnifier was *"not a duplicate -- the only implementation of a
+feature the roadmap lists as done"*, and that deleting it would misread
+`design-decisions.md` 815: a magnifier is the desktop showing you
+something, not a screen you open. Three things were checked before acting:
+
+1. **It is not the only implementation.** `apps/magnifier/src/main.rs` is
+   **5 769 lines**, has a real `fn main` running through `app::launch`, and
+   opens *"Screen Magnifier -- the accessibility zoom for SlateOS, in a real
+   window"*. It carries lens mode, docked modes, colour filters, a
+   crosshair, a ruler and a pixel colour readout.
+2. **It is not even the better one.** The dead `MagnifierShape` conflated
+   two concepts in one enum -- `Circle`, `Rectangle`, `DockedTop`,
+   `FullScreen` -- where the application separates `MagnifyMode` (with
+   `DockedBottom` as well) from `LensShape`. Every `MagnifierConfig` field
+   has an equivalent there.
+3. **It did not magnify anything.** Its own doc says so: *"The magnified
+   content itself is the compositor's; what is here is the frame around it
+   and the placeholder the content lands on."* It drew a lens outline and
+   crosshairs over an opaque rectangle. 131 lines of chrome for a
+   magnification that nothing performed.
+
+**The 815 argument survives the deletion and is recorded here instead,
+because it is a design question and not a reason to keep placeholder
+code.** It is genuinely unsettled where this feature ends up:
+
+| | |
+|---|---|
+| A lens the *shell* composites over everything | what 815 implies, and what the deleted code was the frame for |
+| A *window* that shows a magnified view | what `apps/magnifier` is, and what ships today |
+
+**Neither can magnify the screen, and both are blocked on the same missing
+thing.** `apps/magnifier`'s `sample_pixel` is labelled *"a stub for a
+compositor capture that does not exist yet"* and returns a procedural
+pattern; the shell copy left the content to a compositor that was never
+asked. Until the compositor can hand out screen contents, the question of
+*where* the magnifier lives cannot be answered by either codebase, and
+keeping the smaller one alive did not move it any closer.
+
+**Nothing else was lost, checked type by type.**
+
+| what was in it | where the live one is |
+|---|---|
+| `HighContrastTheme` | a `pub use` alias of `appearance::HighContrastScheme`, whose own docs are fuller and cite §816 |
+| `ColorFilter` | a `pub use` alias of `appearance::ColorFilter` |
+| `MagnifierConfig`, `MagnifierShape`, `Magnifier` | `apps/magnifier` |
+| `CursorSettings` | `AppearanceSettings::cursor_size` / `cursor_scheme` |
+| `AccessibilityConfig` | `appearance::AppearanceSettings` and `gui/inputsettings` |
+
+Deleting a file deletes its reasoning, so the prose was read before the
+code. Two passages were load-bearing -- why high contrast is exempt from
+palette conversion, and why the lens ink stopped being white. The first is
+already stated where the real type lives, with the §816 reference this copy
+lacked; the second is in this file.
+
+`cargo test -p desktop` goes from 2 954 to 2 922, which is exactly the 32
+tests that were in the file and nothing else.
+
+**What the deletion does lose the only record of, so it is written here.**
+Three fields had no live equivalent, confirmed by grep across `gui` and
+`apps`:
+
+| wanted | state |
+|---|---|
+| `screen_reader` | **no implementation anywhere** -- zero hits outside the deleted file |
+| `text_scale` | wanted as a *multiplier*; `FontSettings::ui_size` is absolute, which is a different control |
+| `visual_alerts` | a field of the same name exists in `apps/settings` and reaches nothing |
+
+That table is the record now, which is this entry's own standing rule: a
+dead field may go once what it recorded lives somewhere else, and somewhere
+else may be this file. `caret_width` and `focus_indicator` left the same
+way -- and both were *built* first, because this table had recorded them.
 
 **This is the unfinished remainder of a cleanup that already happened.**
 `TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`
@@ -142601,6 +143498,845 @@ called, `CreateSessionParams` never built, and the inhibitor fields
 `who`, `why`, `uid` and `pid` never read. It models sessions in detail
 and never populates the model.
 
+## TD-C-A-FILE-COPY-FREEZES-THE-EXPLORER-AND-THE-PROGRESS-BAR-CANNOT-MOVE -- FIXED 2026-09-14
+
+**Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**
+
+**What was done.** `OperationExecutor` was split into `begin` / `step` /
+`finish`, with `execute` kept as a loop over them for the callers that
+genuinely want to block (the tests, and undo). The explorer holds the
+operation and works at it for eight milliseconds of each frame, so the window
+draws, answers clicks, counts the files up in the status bar, and can be
+cancelled. `tick_interval` asks for the frame interval while an operation runs
+and `None` when it stops, so a finished copy does not hold the desktop awake.
+
+The loop body and the Move source-deletion phase were **moved, not retyped** --
+four control-flow edits and nothing else, verified by reading the diff with
+indentation stripped -- because that phase deletes the user's sources and its
+guard carries a comment about an earlier version that deleted the wrong ones.
+
+**What it did not fix, which is now its own entry:** a step is a *whole file*,
+so one enormous file still holds the loop for the length of its copy. See
+`TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY`.
+
+The original entry follows.
+
+**In short:** copying or moving files in the file explorer runs the whole job
+in one go, without letting the window draw in between. So for as long as the
+copy takes -- seconds for a folder of photos, many minutes for a disk's worth
+-- the window is frozen: it does not repaint, it does not answer a click, and
+the progress bar it has sitting right there never moves, because the code that
+would move it does not get a turn until the copy is already finished. There is
+no way to cancel, either. The machinery for all of this exists and is tested;
+what is missing is that the work is not broken into pieces the event loop can
+run between.
+
+**Where:** `apps/explorer/src/fileops.rs` --
+`OperationExecutor::execute`, whose own doc comment says it: *"Run the full
+operation synchronously, collecting events."* It opens the journal, calls
+`run_actions`, and returns every `FileOpEvent` the operation ever emitted, all
+at once, after the last byte is copied. `apps/explorer/src/main.rs` calls it in
+three places (paste, drop, and the delete path), each
+
+```rust
+let mut executor = OperationExecutor::new(plan);
+let events = executor.execute();
+```
+
+which is a blocking call inside an event handler.
+
+**What is already right, and makes this a smaller job than it looks.**
+Everything the engine needs to be step-wise is there:
+
+* `run_actions` is already a `for action in &actions` loop with a
+  cancellation check at the top, so the loop *body* is the step;
+* `OperationProgress` carries bytes, files, current file, rate and ETA, and is
+  updated after every action -- and a `FileOpEvent::Progress(..)` is pushed
+  each time round, so the events a progress bar would consume are already
+  being produced in the right places, just delivered too late to use;
+* `OperationState` already has `Paused` and `Cancelled` variants;
+* `OperationJournal` already makes an interrupted operation resumable, which
+  is what allows a step to be the unit of interruption.
+
+**What the fix looks like.** Split `run_actions` into `begin` (open the
+journal, mark `Running`), `step` (one action, return whether more remain) and
+`finish` (the Move source-deletion phase, which has to run after the last
+action and nowhere else), with the journal, the cloned action list and the
+index held on the executor across steps. `execute` stays, as
+`begin(); while self.step() {} finish();` -- tests and the undo path genuinely
+want to block. `main.rs` then holds the executor and steps it from the frame
+clock, repainting between steps.
+
+**Do this carefully: a Move deletes the user's only copy.** The finish phase
+is guarded by `journal.transferred(index)` and the comment there records that
+an earlier version deleted sources whose copy had been *skipped* or had
+*failed*, destroying data. A refactor that moves that phase must keep it
+downstream of every action and must not let it run on a cancelled operation.
+
+**Why this is filed now: it is the prerequisite for a roadmap item that would
+otherwise be built on sand.** `roadmap.md` 4.1 asks for *"queue a copy/move
+against a drive another operation is already using, instead of running both at
+once"*. There are no two operations at once to arbitrate between: `execute`
+blocks its caller, so the explorer can only ever have one, and it cannot even
+have one *and* a live window. Building the scheduler first would produce a
+queue that never has anything in it -- the same mistake as building a settings
+page for a setting nothing reads, which this file already has an entry about.
+
+**A second thing found on the way, and it is the usual shape.** There are
+**two** copies of the same-device test: `fileops::same_device` (public) and a
+private `same_device` in `apps/explorer/src/dropzone.rs`, whose comment says
+*"the same heuristic as `fileops::same_device`"*. Both compare the path's first
+component. The dropzone's copy decides whether a drag is a **Move or a Copy**,
+which is user-visible and destructive if wrong; `move_path` in `fileops`
+declines to use either and attempts the rename instead, reacting to `EXDEV` --
+which is the correct answer and documents why. The roadmap item above is
+explicit that the comparison must be *"on the backing device or volume,
+resolved from the path -- not on the mount path, and not on the path prefix"*,
+so this wants one resolver in one place before anything else keys a queue on
+it. Two editors of one model is fine; two models of one fact is the defect.
+
+## TD-C-THE-FILE-OPERATION-QUEUE-CANNOT-BE-PER-DRIVE-UNTIL-COPIES-CAN-OVERLAP -- **WITHDRAWN: it could, and it now is**
+
+**Date:** 2026-09-14. **Lane:** C. **Corrected the same day.**
+
+**The correction, and it is the useful part.** This entry said the per-drive
+rule "would change nothing a user could measure" because `fs::copy` blocks and
+the explorer runs on one thread, so two operations admitted at once would
+merely interleave. That skipped a step. **Writes go to a page cache** --
+`design.txt` discusses swappiness against it -- so a write returns before the
+device has the data, and two interleaved copies on one thread *can* keep two
+devices busy. Whether they do on this system is a **measurement nobody has
+made**. "Inert" was a confident claim resting on an unchecked assumption, which
+is the failure this file has more entries about than any other.
+
+**Done 2026-09-14.** The queue is keyed on drives: `OperationPlan::drives`
+resolves every path a plan touches to a `DriveSet`, `start_operation` admits an
+operation whose set shares nothing with anything in flight and queues one that
+does, `admit_pending` scans *past* a blocked operation so one on a free drive
+does not wait behind it, and the frame's budget is split between however many
+are running. No threads were needed.
+
+**What remains unmeasured, and is now the only open part:** whether two
+operations interleaved on one thread actually keep two devices busy. It rests
+on writes returning before the device has the data. The *correctness* half --
+never two operations on one drive -- does not depend on the answer and is what
+the rule delivers today.
+
+**What that changes.** The blocker named in the title does not exist. Multiple
+operations in flight need a `Vec<RunningOperation>` and a round-robin of the
+eight-millisecond budget the explorer already has -- no threads, no `Send`
+audit of the executor, no channels, none of the work listed below. The
+threading plan stays recorded because it is the right answer *if* a
+measurement later shows the interleave buys nothing; it is not a prerequisite.
+
+**And the half that never depended on any of this:** not running two operations
+on one drive is implementable today, is the rule roadmap 4.1 actually asks for,
+and is the half with the rationale that does not rest on throughput at all --
+two operations on one disk interleave two access patterns into one device
+queue, and fewer in flight on a drive is fewer left half-done when it is
+yanked.
+
+**How to settle the throughput question when a machine with two drives is
+available:** copy two large files, once one after the other and once
+interleaved a chunk at a time, on (a) one drive and (b) two. The same-drive
+case should show the interleave *slower*, which is 4.1's first claim; the
+two-drive case is the one this entry guessed at.
+
+The original entry follows, and its reasoning about threads is still right
+about threads -- it is only wrong that threads are required first.
+
+**In short:** start a second copy in the file explorer while one is running and
+it now waits its turn instead of being refused. What `roadmap.md` 4.1 actually
+asks for is finer: a copy on *a different drive* should start **immediately**,
+and only one that would touch a drive already in use should wait. That part is
+not built, and building it now would change nothing a user could measure --
+because the explorer can only carry out one copy at a time anyway, so "start
+immediately" and "wait" reach the same finish line.
+
+**Why the drive check would be inert.** `fs::copy` blocks until the file is
+written, and the explorer runs its operations on the one thread that also draws
+the window. Two operations admitted at once would therefore *interleave* their
+steps rather than run in parallel: a slice of one, a slice of the other. Two
+copies on two different disks finish no sooner that way than one after the
+other -- and slightly later, since they alternate. The rule would be real code
+with a real test and no effect on the machine, which is the shape this file has
+several entries warning about.
+
+**What it needs first: an operation that runs off the drawing thread.** Not
+threads in general -- one worker per in-flight operation, with:
+
+* `OperationExecutor` made `Send`, which means auditing what it holds: the
+  journal's file handle, the plan, the collected events and errors. Nothing in
+  it is obviously thread-hostile, but "obviously" is not an audit;
+* progress and events crossing back over a channel instead of being read
+  directly, so `ExplorerState::step_operation` becomes a drain rather than a
+  stepper;
+* cancellation crossing the other way -- an `AtomicBool` the executor checks
+  where `is_done` checks `stopped` today;
+* a cap on how many run at once that is about *drives*, not a number: the whole
+  point of 4.1 is that two operations on one disk are slower than the same work
+  done in turn.
+
+**The parts that are already done, so this is smaller than it looks.**
+`apps/explorer/src/drives.rs` resolves a path to its backing device properly
+(and `same_drive` already answers `Option<bool>` with the "don't know" case
+split, which the queue reads as "assume it collides"). The engine is stepped,
+so an operation is already a sequence of interruptible units rather than one
+blocking call. What is missing is only that the units run somewhere other than
+the drawing thread.
+
+**Until then.** The queue is a plain FIFO, and that is honest: a second
+operation is accepted, visible in the status bar as "(N waiting)", and can be
+cancelled for free before it starts. The user-visible loss against 4.1 is that
+a copy to a USB stick waits behind a copy to the internal disk when it did not
+have to. The user-visible *gain* over what was there before is that it is
+accepted at all.
+
+## TD-C-THE-ORPHAN-SCAN-CLEARS-A-MODULE-ON-A-NAME-AN-APP-HAPPENS-TO-SHARE
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the checker that finds library modules nobody uses can be fooled
+into clearing one, by an unrelated application that happens to define a type
+with the same name. It cleared a 2 201-line file-type registry that no file in
+the tree referred to, and the file explorer went on classifying files with its
+own hardcoded extension lists for three days afterwards.
+
+**Where:** `scripts/scan-orphan-modules.py`. Two rules that are each sensible
+alone:
+
+* candidates skip `main.rs` -- a binary's root is not a library module, which
+  is right;
+* a mention is any identifier token equal to one of the module's public item
+  names, and names *shared with another module* are dropped from the evidence
+  so that a common noun cannot clear anything.
+
+Together they leave a hole: a name owned by a `main.rs` is not "shared with
+another module", because a `main.rs` was never collected as an owner -- while
+that same file's tokens still count as mentions. So an application that models
+the same subject in its own binary clears the library module that models it
+properly.
+
+**Reproduced.** `apps/fileassoc/src/main.rs` declares `FileCategory` and
+`FileType`. `gui/toolkit/src/filetypes.rs` exports `FileCategory` (among
+others). Before 2026-09-14 nothing in the tree named `guitk::filetypes` or
+`crate::filetypes`, and the only other occurrence of the string was a method
+called `render_filetypes_tab` -- yet the scan did not report the module, and
+`--check` was silent. Checked by restoring the pre-change explorer and running
+the scan again.
+
+**The fix.** Collect shared-name owners from every Rust file, not only from
+candidate modules: being ineligible to *be* an island does not make a file
+ineligible to *own* a name. Expect the tightened rule to surface more islands
+-- that is the point -- and expect at least `filetypes` to reappear if its new
+caller is ever removed.
+
+**The second-order lesson, which is the one worth keeping.** The two rules were
+written at different times for different reasons and each is correct. The
+defect is in their *interaction*, and no test of either one could find it. What
+found it was using the thing the gate had cleared and discovering it had no
+users -- which is to say, the gate was checked by accident, by someone doing
+unrelated work. A gate nobody checks is a gate whose clearances nobody has
+reason to believe.
+
+## TD-C-NINETY-FIVE-OF-THE-HUNDRED-AND-THIRTY-SIX-WINDOWED-APPS-IGNORE-A-RIGHT-CLICK
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** right-clicking does nothing in most of the applications. It did
+nothing in the file explorer until 2026-09-14 -- no menu, no handler, not a
+single mention of the right button anywhere in it -- and asking the same
+question of every other application gives a large number. **Not all of those
+are defects**, which is why this entry is a measurement and a method rather
+than a list of work.
+
+**The measurement.** Of the applications that open a window
+(`oswindow::app::launch`):
+
+| | count |
+|---|---|
+| windowed applications | 136 |
+| with no mention of `MouseButton::Right` anywhere | 95 |
+| of those, with some notion of a selection | 73 |
+
+**Why the number overstates the problem.** A calculator, a compass, a
+metronome and a game of klotski have nothing a context menu would say. Several
+of the 73 match on `selection` for something that is not a user's selection of
+an item. The honest reading of 95 is *"here is where to look"*, not *"here are
+95 bugs"* -- and an entry that claimed the latter would be the sort of list
+this file has already learned nobody reads.
+
+**Why it is worth recording at all.** The explorer's gap was invisible for as
+long as nobody tried the gesture. Nothing in the toolchain can see it: the
+application compiles, its tests pass, every control it *does* have works, and
+a missing gesture leaves no trace. The same is true of the other 95, and the
+only way any of them will be found is somebody asking.
+
+**How to triage one**, which is the part worth keeping. Ask what the
+application's main surface is a list *of*:
+
+* a list of the user's own things -- files, contacts, messages, notes,
+  clipboard entries, saved connections -- **almost certainly wants a menu**,
+  because every operation it offers is already on a keyboard shortcut nobody
+  can discover;
+* a list the application generated -- search results, log lines, a disk map --
+  wants one only if there is something to *do* to a row;
+* a canvas, a game or a single-purpose readout usually wants nothing, and
+  giving it a menu is worse than leaving it.
+
+The explorer is the worked example: its menu offers Open, Cut, Copy, Rename
+and two deletes for a file, and New folder, Paste and Refresh for the folder
+-- every one an operation that already existed and was reachable only from the
+keyboard.
+
+**Not a sweep.** Adding a menu to seventy applications is seventy design
+questions, and doing it mechanically would produce seventy menus full of rows
+that do nothing -- which is the defect this file has the most entries about.
+Take them one at a time, when touching the application for another reason.
+
+## TD-C-CONTEXT-MENU-EXTENSIONS-ARE-IMPLEMENTED-TWICE-AND-REACHED-NEITHER-TIME
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** `design.txt` specifies that programs can add items to context
+menus -- "Open with…", "Compress to .zip" -- behind a capability, loaded lazily
+so that showing the menu does not start the program, with a settings page to
+turn individual ones off. That feature has been written **twice**, in two
+crates, by two different pieces of work, and neither copy is reached by
+anything. About 3 650 lines between them.
+
+| | lines | tests | what it says it is |
+|---|---|---|---|
+| `gui/toolkit/src/context_ext.rs` | 1 603 | 53 | "capability-gated, lazy-loading context menu extension system" |
+| `gui/desktop/src/context_ext.rs` | 2 052 | (12 public items) | "allows applications to register context menu items with the desktop shell" |
+
+Both cite the same three design constraints, in the same order. Neither is
+named by any file outside itself. `scripts/scan-orphan-modules.py` reports both
+and says so out loud -- each is listed as *"also spelled in"* the other, which
+is the scan's way of saying two modules model one noun.
+
+**Which should survive is an architectural question, not a quality one.** A
+context-menu *widget* belongs in the toolkit and is already there
+(`guitk::menu`). An extension *registry* -- who may add an item, which
+capability it needs, when the program behind it is loaded, which ones the user
+has disabled -- is policy about programs on this machine, and the shell is what
+owns that. On that reading the desktop's copy is the one in the right place and
+the toolkit's is the one to delete.
+
+That reading is not obviously right, and nothing should be deleted on the
+strength of a paragraph: the toolkit's copy has 53 tests and may simply be the
+better code, in which case the right move is to move *it* into the shell and
+delete the other. The deciding work is a read of both, which nobody has done.
+
+**Why it is worth doing rather than leaving.** Two implementations of one
+specified feature is the defect this file has more instances of than any other
+-- two snap implementations, two taskbars, two `same_device`, two clocks -- and
+every one of them was found by accident, late, after work had been spent on the
+copy nobody used. Here both copies are already known and neither is wired, so
+the cost of choosing now is a read; the cost of choosing later is another
+sweep polishing the wrong one.
+
+## TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the desktop cannot tell that the window in front of you belongs to
+the program you started. It knows the program by the file it ran, and it knows
+the window by a name the program chose for itself, and nothing anywhere maps
+one to the other. So a pinned application and its own open window get two
+separate taskbar buttons, and neither knows about the other.
+
+**Where:** `launcher::AppEntry` has `name`, `description`, `executable_path`,
+`keywords`, `category` and `launch_count` -- and no identifier.
+`ManagedWindow` has `app_id`, *"which program the window belongs to, as that
+program declares it"*, read fresh from the compositor on every list. The two
+are different kinds of fact: one is what the desktop ran, the other is what the
+running thing calls itself.
+
+**What it blocks.** Taskbar pinning shipped on 2026-09-14 showing a pinned
+button *and* a window button for the same program, and the code says why in as
+many words. Merging them is the ordinary behaviour of every desktop and cannot
+be written until this exists. It is also `design-decisions.md` 849's second
+step: the shell adopting `taskbar.rs`'s window-*grouping* model, which is keyed
+on exactly this correspondence.
+
+**Why it is not a five-minute fix.** Adding an `app_id` field to `AppEntry` is
+easy and answers nothing on its own, because the value has to be the one the
+*program* will declare -- and the built-in app database would then be asserting
+identities that the programs themselves have never agreed to. The question is
+which end is the authority:
+
+* **the launcher**, with programs required to declare the id their desktop
+  entry gives them -- the freedesktop model, and it means a program that says
+  nothing gets no grouping;
+* **the program**, with the launcher learning the id the first time it sees a
+  window from something it started -- no contract needed, but the first launch
+  of each program is unmatched, and a program that changes its mind is
+  indistinguishable from a second program;
+* **the compositor**, which knows the process it spawned and the surface that
+  appeared, and could attribute one to the other without either end declaring
+  anything. This is the only one that needs no cooperation, and it is also a
+  change to the protocol rather than to an application.
+
+**Recommendation, for whoever picks this up:** the third. The compositor is
+already the authority on which window is which, `ShellAction::Launch` goes
+through it, and a launch-to-surface attribution is the same kind of fact it
+already keeps. The first two both require every program to be well-behaved
+before anything works, which is the condition this tree keeps discovering it
+cannot rely on.
+
+Not filed in `open-questions.md` because nothing is blocked *today* -- pinning
+works, it just does not merge -- and the operator's queue is for decisions that
+have to be made now.
+
+## TD-C-SIX-TOOLKIT-WIDGETS-ARE-WRITTEN-TESTED-AND-USED-BY-NOTHING
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the GUI toolkit contains six finished, tested components that no
+program anywhere in the tree refers to -- about thirteen thousand lines and two
+hundred and sixty tests of working code that no user can reach. Some of them do
+a job an application is currently doing worse by hand, which is the part that
+costs something: the file explorer classifies files with its own hardcoded list
+of extensions while `guitk::filetypes` sits unused, and its own module doc says
+in as many words that this is what must not happen.
+
+**How this was found.** Not by a sweep -- by wiring `guitk::pathbar` into the
+file explorer on 2026-09-14 and noticing it had been carrying
+`#![allow(dead_code)]` and had no users. Asking the same question of every
+`pub mod` in `gui/toolkit/src/lib.rs` gave the list below.
+
+| module | lines | tests | files mentioning it |
+|---|---|---|---|
+| `menubar` | 3 490 | 61 | 0 |
+| `svg` | 3 391 | 47 | 0 |
+| `filetypes` | 2 201 | 41 | 0 |
+| `disabled` | 1 754 | 41 | 0 |
+| `context_ext` | 1 602 | 53 | 0 |
+| `signal` | 853 | 20 | 0 |
+
+(Counted as: no file outside `gui/toolkit/src/<module>.rs` names `<module>::`
+or `guitk::<module>`. `pathbar` was a seventh until this morning; `fontdb` and
+`row_strip` have a mention each and are not counted here.)
+
+**`menubar` is the one to be embarrassed about.** It was edited *this session*
+-- the viewport sweep threaded a `viewport` argument through
+`MenuBar::handle_mouse_event` and `handle_key_event` and updated its tests --
+without anyone noticing that no program opens a menu bar. Work was done to a
+component and its tests, carefully, while the component reached nothing. That
+is the same shape as `apps/automator`'s mutation table: it proved the worker
+and never knocked on the door.
+
+**`filetypes` is the one that is actively costing something.** Its module doc
+opens with
+
+> Every GUI component that needs to display, open, or classify a file should go
+> through this module rather than hard-coding extension lists.
+
+and `apps/explorer/src/main.rs` has a `FileType` enum with its own
+`from_extension` match over about fifty extensions, plus two further extension
+matches in `apps/explorer/src/columns.rs`. So the rule the module states is
+broken three times in the one application that most obviously needs it, and the
+registry with the magic-byte signatures and MIME types goes unread. A file the
+explorer calls "WEBP File" is one `filetypes` knows the category of.
+
+**What to do with each, which is not the same answer.** A component with no
+consumer is either a feature the user cannot reach or code to delete, and
+deciding which needs the question "who would use this?" asked per module:
+
+* `filetypes` -- **wire it.** The consumer exists and is doing the job worse.
+* `disabled` -- probably wire it. It carries a *reason* a control is disabled,
+  which is better than the bare `bool` the explorer's toolbar was given on
+  2026-09-14; that bool was written without checking here first, which is the
+  habit this entry is really about.
+* `menubar` -- **wired 2026-09-14**, into `apps/editor`. See the correction
+  below: the sentence this bullet used to carry was wrong.
+* `context_ext` -- wants an application with a menu bar. The shell has its own
+  menus; whether a second implementation should exist at all is a design
+  question, not a wiring one.
+* `svg` -- a renderer with no caller. `apps/imageviewer` and the icon paths are
+  the candidates; 3 391 lines is worth an hour's look before either wiring or
+  deleting.
+* `signal` -- 853 lines of what is probably an observer mechanism. Least
+  obviously needed; check what it is before deciding.
+
+**Corrected within the hour: there IS a gate, and it is better than this
+entry first said.** `scripts/scan-orphan-modules.py` asks exactly this
+question, covers `gui/`, and reports `menubar`, `svg`, `context_ext` and
+`signal` by name. `pathbar` was in its baseline until this morning, and
+`--check` printed *"reached now, drop from the baseline"* the moment the file
+explorer used it. The first version of this paragraph said no gate looked at a
+library crate's public surface. That was written without running the gate, and
+it is the same failure the rest of this file is about.
+
+**What is actually wrong is narrower and worse.** The scan cleared
+`gui/toolkit/src/filetypes.rs` while *nothing at all* used it -- verified by
+checking out the pre-change explorer and running the scan again, which still
+did not report it. Lane A pruned it from the baseline on 2026-09-11 as
+"reached by lane C's own later work", consistently with what the gate said;
+the gate was wrong, not the prune.
+
+**Why it was wrong.** A mention is any identifier token equal to one of the
+module's public item names, anywhere in the tree. The candidate loop skips
+`main.rs`, so a type defined in an application's `main.rs` is never registered
+as *another owner* of that name -- but its every appearance still counts as a
+mention of the library module. `apps/fileassoc/src/main.rs` declares its own
+`FileCategory` and its own `FileType`, and those two names alone were enough to
+clear a 2 201-line registry that no file in the tree referred to.
+
+The docstring already anticipates this class -- *"names shared with another
+module ... are dropped from the evidence entirely"* -- and the rule does not
+reach a name whose other owner is a `main.rs`. The fix is to collect
+shared-name owners from every Rust file rather than from candidates only; a
+file that is not a candidate module can still own a name.
+
+**What it cost.** Three hard-coded extension lists in `apps/explorer` and a
+fourth model in `apps/fileassoc`, all beside an unread registry with MIME types
+and magic-byte signatures, for three days after the gate said the registry was
+fine. Filed as
+`TD-C-THE-ORPHAN-SCAN-CLEARS-A-MODULE-ON-A-NAME-AN-APP-HAPPENS-TO-SHARE`.
+
+**Correction, 2026-09-14: `menubar` was never a design question, and saying it
+was is what kept it unwired for a day longer.** The plan above deferred it as
+*"the shell has its own menus; whether a second implementation should exist at
+all is a design question"*. That reasoning only holds if the shell is the
+consumer -- and the consumer is `apps/editor`, a text editor with five thousand
+lines, eleven commands, and no menus of any kind. There is no second
+implementation and no conflict: the shell's menus are the compositor's, an
+application's menu bar is the application's, and the two never meet. The
+question I should have asked was the one this entry's own heading asks --
+*who would use this?* -- and I answered it for the shell without asking it of
+the applications.
+
+That is the second time in this entry I deferred something on reasoning I had
+not checked; the first is the paragraph above about the gate. The pattern is the
+same both times: a confident sentence about the state of the tree, written
+without reading the tree.
+
+**What `menubar` wiring actually turned up**, which is the part that makes it
+worth more than one feature:
+
+* `MenuBar::set_items` **closes any open dropdown**, and its doc said only
+  *"Replace the entire menu structure"*. The editor rebuilds its rows so a
+  greyed-out Undo is greyed for a live reason, and doing that on every event
+  shut the menu on the user's first arrow key. Caught by a test, not by
+  reading. Its doc now says what it does.
+* The editor's `TAB_BAR_HEIGHT` was doing duty as both *the strip's height* and
+  *the y where the text starts* -- equal only while nothing sat above the
+  strip. `visible_lines` already carried a comment about the last time two
+  copies of that number disagreed (a hardcoded 64 for a 32-pixel strip, which
+  under-reported the viewport by two lines). Five tests were hardcoding `y =
+  10.0` to mean "inside the tab strip" and broke the moment it moved, which is
+  the same defect in the tests.
+
+## TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** twelve applications have a test that checks every colour they draw
+comes from the user's chosen theme. Eight of those tests look at the program as
+it appears the instant it opens -- nothing selected, no menu open, nothing
+running -- and at nothing else. A colour that ignores the theme anywhere else
+in the program passes them. The tests are not wrong about what they checked;
+they are silent about the rest, and they read as though they covered it.
+
+**Measured, not guessed** (2026-09-14), by reading each guard rather than
+grepping for a pattern -- the first two attempts to count this mechanically
+were both wrong, in opposite directions, which is itself the lesson:
+
+| app | what its guard renders |
+|---|---|
+| `procexplorer` | **six named panels with demo data.** The model to copy; it also filters to commands that *carry a colour*, guarding against a vacuous pass |
+| `explorer` | nine named states, both modes (fixed 2026-09-14) |
+| `benchmark` | six tabs x three phases x hover, both modes (fixed 2026-09-14) |
+| `imageviewer` | one scene, but a *maximal* one -- info panel, thumbnails and slideshow all switched on |
+| `sysinfo`, `pdfviewer`, `musicplayer`, `speedtest`, `devicemanager`, `pomodoro`, `screenshot`, `mixer` | **one bare default scene.** The only line before the render is the palette assignment |
+
+**Why this is not pedantry.** Two of the three that have been fixed were caught
+*failing* once they were widened:
+
+* `benchmark` passed against a hardcoded green pushed deliberately into a
+  button's hover branch. Its guard rendered the resting, idle state of one tab
+  out of six.
+* `explorer` -- the application this roadmap item names as "the visible
+  failure" -- rendered a brand-new window on an *empty* directory: the one
+  moment it has no rows, nothing selected, no menu open, no transfer running,
+  and a toolbar with nothing to grey. A context menu drawn from a fixed light
+  palette passed it, because it never opened a menu.
+
+Neither was found by reading. Both were found by *disabling the fix and
+watching for a failure*, which is the only method that distinguishes "the test
+passes because the code is right" from "the test passes because it is not
+looking".
+
+**The fix, per app.** A named list of scenes, in both modes, plus a second test
+asserting the scenes are not all the same picture -- without that, an arranger
+that quietly stops working (a selection that selects nothing, a menu that does
+not open) goes on being swept as a duplicate of the default, and the guard
+reports nine states while looking at one. `apps/explorer` has both tests and is
+the worked example; `apps/procexplorer` is the older and better-established one.
+
+Cheap where the app already enumerates its own screens: `pomodoro` has
+`Screen::ALL` (four) and a `TimerState` (three), `musicplayer` a `Tab` (three),
+`devicemanager` three `all()` lists, `speedtest` a phase enum whose `Error`
+variant no default render ever reaches.
+
+**Where this sits in the pattern.** It is the same defect as
+`TD-C-THE-SCRATCH-CONFIG-GATE-COULD-NOT-SEE-A-STORE` and the orphan scanner's
+false clear: *a check reporting success over a population it cannot see*. The
+three differ only in what the invisible population is -- crates, module names,
+program states. Green and wrong is worse than red, because a green check ends
+the investigation.
+
+## TD-C-FILE-ASSOCIATIONS-WERE-NEVER-WRITTEN-DOWN -- FIXED 2026-09-14
+
+**Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**
+
+**In short:** the File Associations program let you choose which application
+opens each kind of file, and then threw the answer away when you closed the
+window. It never read or wrote a file of any kind -- 4,826 lines, no
+`std::fs`, no `PathBuf`, nothing. Every setting reverted to the built-in
+default at the next start.
+
+**What made it hard to see.** The program had a complete save format sitting
+right there: `export_config` and `import_config`, a matching pair with eight
+tests including a round-trip over deliberately hostile extension names. All of
+it worked. None of it went anywhere -- `export_config` was reachable only as
+text in a panel the user could read, and `import_config` had **no caller at
+all** outside its own tests. So every signal a reader would use said the
+feature was present: a format, tests, a round-trip, even a hardened escaping
+scheme with a comment about a bug it had already fixed. The one thing missing
+was the call that touches a disk.
+
+That is the same shape as `apps/automator`'s mutation table and `guitk::svg`:
+the work was done, carefully and with tests, on a component whose output
+nobody collected.
+
+**What was done.**
+
+* Associations are a YAML document now, under `settingsfile`, like every other
+  settings surface here -- `design.txt` says configuration is YAML "processed
+  with a library that preserves comments and formatting", and this program had
+  a hand-rolled `ext=app` grammar instead. The document is kept and *edited*
+  rather than rebuilt, so a hand-written comment survives being saved over.
+* `read_from` / `write_into` on the registry, and `FileAssocUI::load` /
+  `from_document` / `persist` on the UI. The `load`/`from_document` split is
+  the one `inputsettings` already has, and it exists for a concrete reason:
+  48 tests build a `FileAssocUI`, and a constructor that read the config
+  directory would make all 48 of them read the developer's own.
+* Saved after every change rather than behind a Save button. There is no Save
+  button and there should not be one: this program is a list of choices, and a
+  choice that has to be confirmed elsewhere is a choice a user can lose.
+* The old `ext=app` codec, its `CONFIG_META`, and the `AssocError::ParseError`
+  variant are gone with it. `ParseError` carried the line number of a bad line;
+  `yamldoc` repairs what it can and reports no line, and inventing one to keep
+  the variant alive is exactly what the comment beside it warned against.
+
+**Two things the tests caught that reading had not.**
+
+1. **A cleared association came back.** `load` started from the built-in
+   defaults and applied the file on top, so an association the user had
+   *cleared* -- an absence from the file -- was indistinguishable from one
+   never set, and the default under it won. Once a file exists it is now the
+   whole truth about associations: the defaults are cleared before it is
+   applied. The catalogue of file types and applications is untouched, because
+   that is not a choice the user made.
+2. **A cleared entry has to be removed from the document**, not merely omitted
+   from what is written. Writing only what is present leaves the old key in the
+   file, and it reads back as though the clear never happened.
+
+**Verified by reintroduction**: with the `store` call disabled, and again with
+the defaults left to override the file, `an_association_survives_a_restart`
+fails and nothing else does.
+
+## TD-C-THE-SCRATCH-CONFIG-GATE-COULD-NOT-SEE-A-STORE -- FIXED 2026-09-14
+
+**Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**
+
+**In short:** `scripts/check-scratch-config.py` is the gate that stops a test
+writing settings into the developer's own home directory instead of a
+throwaway one. It found the crates to watch by searching for two spellings --
+a method called `save`, or `settingsfile::...write...`. The actual function
+that writes the file is `settingsfile::store`. Any crate whose saving method
+was called something else was therefore invisible to it, and the gate reported
+success over the crates it could see while saying nothing about the rest.
+
+**How it surfaced.** `apps/fileassoc` gained persistence through a method named
+`persist`. Four of its tests immediately started writing
+`~/.config/slateos/fileassoc.yaml` for real. The gate ran and answered:
+
+> ok: 12 save-capable crates wrote nothing to the real config
+
+-- true of the twelve, and silent about the thirteenth. Adding `store` to the
+pattern turned that into `fileassoc wrote slateos/fileassoc.yaml` on the very
+next run, and the count went from 12 to **14**: `notifsettings` had been
+unwatched as well, and had simply happened not to be writing.
+
+**Why it belongs in this file even though it is fixed.** This is the third
+instance this week of one defect: *a check that reports success over a
+population it cannot enumerate.* The others were `check-scratch-config.py`
+itself running tests in parallel, so a stray write landed in a neighbouring
+scratch directory and was attributed to nobody; and `scan-orphan-modules.py`
+clearing a module because a name it owned was also declared in a file the scan
+skipped. In all three the gate was **green and wrong**, which is worse than
+red, because a green gate ends the investigation.
+
+The general shape to look for: a checker that discovers its own subjects by
+pattern. Its blind spot is never in what it reports -- it is in what it never
+looked at, and no output will mention that.
+
+**A second lesson, about finding the writers.** Wrapping the offending tests
+took three rounds of reading call paths and guessing wrong, because two of the
+eight were sweeps that click *every* control without naming any of them. A
+temporary panic inside `persist` listed all eight in one run. Enumerating a
+population beats reasoning about it -- which is the same sentence as the
+paragraph above, pointed at my own method.
+
+**The proper fix, applied after the patch.** Adding `store` to the pattern
+fixed one spelling and left the design intact: a gate choosing its subjects by
+how they *spell* a call. The proof that this was not paranoia is that
+`apps/stickynotes` had **also** named its saving method `persist` -- entirely
+independently, before any of this -- and was equally invisible.
+
+So the subject list is no longer derived from spellings alone. The config
+directory's location comes from `settingsfile::config_dir`, which means a crate
+that does not depend on `settingsfile` **cannot name that directory at all**.
+That is not a better heuristic; it is the actual population, read off the
+manifests, and a crate joins it by adding a dependency rather than by choosing
+a verb. The list is the union of that with the old pattern, which is kept
+because it also reaches crates that save through a helper living somewhere
+else.
+
+The run went 12 crates -> 14 (adding `store`) -> **17** (adding the manifests):
+`stickynotes`, `appearance` and `settingsfile` itself had never been checked.
+All three are clean, which is the good outcome -- but nothing before this knew
+that, and "we were lucky" is not a property a gate is supposed to rely on. The
+`store` spelling is now one of the self-test's ten cases, so the pattern cannot
+quietly narrow again.
+
+## TD-C-THE-TEXT-EDITOR-CANNOT-OPEN-OR-CREATE-A-FILE-FROM-INSIDE-ITSELF
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the text editor can only ever edit the files that were named on
+the command line that started it. There is no New, no Open and no Save As --
+not on the menu bar added today, not on the keyboard, nowhere. Start it with no
+arguments and you get an empty page you can type into and then cannot keep. The
+editor already says so itself: pressing Ctrl+S on that page answers *"No file
+name -- Save As needs a file dialog"*.
+
+**It is one gap wearing three faces.** New, Open and Save As all need the same
+missing thing: a way to ask the user for a path. There is no file picker
+anywhere in `gui/` -- no dialog crate, no chooser, no prompt -- so all three are
+blocked on the same absent part rather than on three separate oversights. That
+is why the menu bar ships with File holding only Save and Close Tab: a greyed
+`Open...` that can never ungrey is a dead control, and this tree has been
+removing those all week, not adding them.
+
+**Where it lives.** `apps/editor/src/input.rs` -- `save_active` is the function
+that prints the message above. `EditorState::open_file` exists,
+`Document::save_as` exists, and both are reachable only from tests and from
+`open_all` at startup. `apps/editor/src/main.rs` has no `Key::O` or `Key::N`
+binding at all.
+
+**The proper fix, and it does not belong in the editor.** A file picker is
+wanted by every application that opens a document, so building one inside the
+text editor would be the first of several. It belongs in `gui/toolkit`, and
+most of it already exists there:
+
+* `guitk::pathbar` -- path editing with completion, wired into the file
+  explorer on 2026-09-14, so it is known to work against a real directory.
+* `guitk::filetypes` -- categories and icons for the listing.
+* `guitk::modal` -- the overlay and the focus trap.
+* `apps/explorer`'s own listing and sorting are the model for the file list,
+  though the picker must not depend on the explorer binary.
+
+So the shape is a `guitk` module that composes three existing ones, and the
+editor's File menu grows three rows that are already written. Until then the
+editor is a file *editor* and not a file *creator*, which is a fair description
+of what ships but not of what a text editor is.
+
+**Not urgent, and worth saying why:** the editor opens files perfectly well
+when something else chooses them -- the file explorer's double-click, a command
+line, a future "Open with". The missing piece is only the case where the editor
+itself has to ask.
+
+## TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY -- FIXED 2026-09-14
+
+**Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**
+
+**What was done.** A megabyte is the unit of interruption now, not a file.
+`OperationExecutor` carries a `CopyCursor` -- the open source, the open
+temporary, and which action they belong to -- and `copy_chunk` answers a third
+outcome, `ActionOutcome::Partial`, on which the executor steps *back* to the
+same action without journalling it, counting it, or giving it an undo entry.
+None of those are true of a file still being written.
+
+Two details that are not obvious and are the reason it works:
+
+* the chunk is **filled**, not read once. `Read::read` may return fewer bytes
+  than asked for at any time, so a short read says nothing; a short *fill* is
+  the end of the file. Without that every file would spend one extra step
+  discovering its own end, which for a folder of small files is twice the steps
+  for no bytes -- and the whole existing suite passed unchanged because of it;
+* the partial bytes go to the temporary `atomic_copy_file` already used, and
+  the rename that gives them the real name happens only when the last one
+  lands. A cancelled copy therefore leaves *nothing* under the name the user
+  expects, rather than a truncated file that is indistinguishable from a small
+  one. `finish` removes the temporary as well, so a stopped copy leaves nothing
+  at all.
+
+**What it deliberately did not change:** `copied_bytes` still advances a whole
+file at a time, so the explorer's progress bar -- which is by files anyway --
+does not creep within one enormous file. Counting part-files would need the
+byte total and the file count to be reconciled at the moment a partial becomes
+a whole, and the bar and the words beside it must not disagree. The window
+staying alive was the defect; this is a refinement of the picture.
+
+The original entry follows.
+
+**In short:** the file explorer no longer freezes while copying *many* files --
+it does a few, draws, does a few more. But it still freezes while copying **one
+big** file, for as long as that single copy takes, because the smallest piece
+of work it knows how to stop between is a whole file. Copy a folder of ten
+thousand photos and the window stays alive throughout; copy one four-gigabyte
+disk image and it is frozen until the image is done, with the progress bar
+stuck at whatever it said when the file started.
+
+**Where:** `apps/explorer/src/fileops.rs` --
+`OperationExecutor::step_action` carries out one `PlannedAction`, and
+`execute_copy_action` copies the file with a single `fs::copy`, which does not
+return until the whole file is written. `ExplorerState::step_operation` in
+`main.rs` has an eight-millisecond budget, and the budget cannot help: it is
+checked *between* actions, so an action that takes nine seconds overruns it by
+nine seconds.
+
+**What the proper fix looks like.** Copy in chunks and make the chunk the unit
+of interruption, which means an action needs to be resumable part-way:
+
+* a `CopyCursor` on the executor -- the open source and destination handles and
+  the offset reached -- so `step_action` can copy a bounded number of bytes and
+  return with the action unfinished;
+* `is_done` and the journal stay as they are: the journal records *completed
+  actions*, and a part-copied file is not one, so an interrupted copy still
+  resumes by redoing that file from the start. Making the journal record byte
+  offsets is a separate and much larger change, and is not needed for this;
+* the progress already carries `copied_bytes`, so a part-copied file makes the
+  bar move for the first time on exactly the operation where it matters most.
+
+**Why it was not done with the stepping change.** The stepping change was a
+text-preserving carve of a path that deletes the user's sources on a Move; a
+chunked copy is new code in the same function, and mixing the two would have
+meant no diff anyone could read. The two are independent: everything above
+works today for the case that is far more common, which is many files rather
+than one enormous one.
+
+**What a user sees until then.** A folder copy is smooth. A single large file
+freezes the window for its duration and then everything catches up at once.
+That is strictly better than before -- it used to be true of *every* copy --
+and it is worth knowing that the remaining case exists rather than wondering
+why one copy behaves differently from another.
+
 ## TD-C-SYSINFO-PARSES-HARDWARE-FIELDS-BY-DEFAULTING-TO-ZERO
 
 **In short:** the code that reads hardware facts out of the files the kernel
@@ -143426,6 +145162,81 @@ were older than `libc.a` and every one would have been reported.
 
 ### The proper fix, not done here
 
+**FIXED 2026-09-14, and it was three crates rather than ~200.** The estimate
+below counted every crate under `userspace/`; what actually ships is the
+`scripts/rootfs-bin-manifest.txt` list, and **70 of its 72 binaries live in one
+crate** (`coreutils`). The other two are `ar` and `logrotate`. Measuring the
+scope before starting turned a change nobody wanted to make into one that took
+a tick.
+
+`userspace/sysroot-dep` holds the logic; each of the three crates has a
+three-line `build.rs` calling `sysroot_dep::emit()`. It is a
+**build-dependency**, not a normal one, and that is the whole design: a shared
+*library* crate would not work, because cargo would re-run ITS build script,
+find the output unchanged and leave the dependents alone. The
+`cargo:rerun-if-changed` has to be emitted by the build script of the crate
+whose rebuild it governs.
+
+`rerun-if-changed` alone is also not enough — it only re-runs the script. The
+script therefore emits `cargo:rustc-env=SYSROOT_LIBC_FINGERPRINT=<mtime>.<len>`
+so the crate's own compilation input changes when the archive does. Without
+that second half the fix is a no-op that looks correct.
+
+**Verified three ways**, because one direction would not have been enough:
+
+| | result |
+|---|---|
+| touch `libc.a`, rebuild | `cp` **relinks** (was: unchanged) |
+| rebuild again, touching nothing | `cp` unchanged, 0.75 s — it has not made every build rebuild the world |
+| touch `libc.a`, build for the **host** target | `cp.exe` unchanged — the host links its own libc and must not depend on this archive |
+
+**And verified at scale, which the three above do not cover.** The three
+checks are all about one binary. After the `libc.a` touches those measurements
+required, the whole image manifest was left genuinely stale, and a single
+ordinary rebuild of the three crates cleared it:
+
+| | |
+|---|---|
+| before | **70 of 72** manifest binaries older than `libc.a` |
+| `cargo +nightly build --release` in the three crates | 37 s, 3 s, 2 s |
+| after | **0 of 72** |
+
+Before today that same rebuild left all 70 stale and reported `Finished`. This
+also confirms the precondition for making the staging gate fatal: the refusal
+is satisfiable by the command the gate prints, for every binary on the image,
+in about forty seconds.
+
+### What is deliberately NOT covered, and why
+
+The three crates fixed are the ones holding the image's binaries. Measured, the
+rest of the tree is larger than that:
+
+| | count |
+|---|---|
+| `userspace/` crates producing binaries | **194** |
+| of those, already having a `build.rs` | **9** |
+
+**The image is protected without touching the other 191**, and that is the
+whole argument: `create-ext4-rootfs.sh` now refuses to build an image from a
+binary older than `libc.a`, and the boot test runs the image. A stale binary
+that is not on the image is a developer-build annoyance, not something that can
+ship or be tested against.
+
+So extending this is optional, and it is not free. The nine crates that already
+have a `build.rs` would need their scripts **merged**, not replaced — and that
+is not a hypothetical hazard. It is exactly how this fix broke `coreutils`:
+`cat > build.rs` in a loop over three crates destroyed the one that already had
+a script, which emitted the bare-metal linker script every binary in that crate
+is laid out by. Two commits and 70 rebuilt binaries passed before the baseline
+comment on an unrelated gate led back to it.
+
+If the other 191 are ever done, the merge cases are the whole of the risk and
+should be done by hand and read individually, not by the loop that does the 185
+safe ones.
+
+The original proper-fix note follows; the part about ~200 crates is what was
+wrong with it.
+
 A `build.rs` in the crates that link the sysroot, emitting
 
     cargo:rerun-if-changed=<path to sysroot>/lib/libc.a
@@ -143523,3 +145334,1413 @@ still `check-cfg-unix.py`, so the confusion survives where it costs the most.
 takes it: the narrow one wants a name about `cfg(unix)` *arms*, and the broad
 one is really a whole-workspace unix-target lint, which is a different claim.
 
+---
+
+## FIXED 2026-09-14 — and the paragraph directly above is WRONG
+
+**It was a silent loss.** The table at the top of this entry followed the value
+from the kernel backwards and stopped at `posix/src/spawn.rs` without reading
+what that file does before it calls. It packs first:
+
+```rust
+if pos + needed > buf.len() {
+    break; // Truncate silently if buffer is full.
+}
+```
+
+`buf` is `EXEC_PACKED_MAX`, **128 KiB** — half the kernel's 256 KiB. So an
+argument list over 128 KiB never reached the kernel check at all. It was packed
+short, and `count_cstring_array` counts the whole list regardless of any
+buffer, so the child was handed **a truncated buffer and the full `argc`**. A
+program started with fewer arguments than its parent passed, and nothing
+anywhere reported it.
+
+Proved before fixing, with four strings and room for two:
+
+    count_cstring_array -> 4
+    pack_cstring_array  -> 22 bytes (two strings), no error
+
+**The dilemma above dissolves, because its premise was false.** Option 1 was
+rejected on the grounds that enforcing `ARG_MAX` "would start refusing spawns
+between 128 KiB and 256 KiB that succeed today". Those spawns do not succeed
+today — they truncate. Enforcing 128 KiB refuses nothing that works; it reports
+something that was already broken. So the choice that looked like a
+user-visible policy call was not one, and did not need the operator.
+
+**Fixed:** `pack_cstring_array` returns `Option<usize>` and refuses rather than
+truncating; `posix_spawn` and `execve` answer `E2BIG`, which is what POSIX
+spells for exec with too long an argument list. That fixes the errno this entry
+was originally about as a side effect.
+
+**One thing worth noticing about the tests.** A test named
+`test_pack_and_count_consistency` already existed and exercised only a case
+where the buffer was ample — it asserted the invariant in the one situation
+where it cannot fail. And `slateos_spawn_caps_rejects_an_oversized_list` passes
+with the truncation reinstated, so it was not covering this either. Two tests
+whose names describe the defect, neither of which could see it.
+
+**Still open, and genuinely a question:** `sysconf(_SC_ARG_MAX)` advertises
+128 KiB and the kernel enforces 256 KiB. They now agree in effect, because libc
+refuses at 128 KiB first — but the kernel's limit is still twice what anyone is
+told, which is worth reconciling on the kernel side rather than leaving as two
+numbers that happen not to collide.
+
+
+## B-AIO-TOOK-AN-EVENTFD-TO-NOTIFY-AND-NEVER-NOTIFIED-IT (lane B, 2026-09-13) — **fixed**, and so is its sibling
+
+**In short:** a program can hand the kernel-AIO interface an eventfd and say
+"poke this when my I/O finishes". We took the eventfd, ran the I/O, and never
+poked it. A program that waits on that eventfd — which is the entire reason the
+feature exists — waits forever.
+
+### What it was
+
+`posix/src/linux_aio_abi.rs` listed it under **Limitations**:
+
+> `aio_resfd` / eventfd notification is silently ignored — the next
+> `io_getevents` will see the completion regardless.
+
+The second clause is true, and it is why the first looked survivable. It is
+not. A caller sets `IOCB_FLAG_RESFD` *precisely so it does not have to poll
+`io_getevents`* — typically because it is already in an epoll loop and wants
+AIO completions to arrive there. Ignoring the flag does not degrade that caller
+to polling; it hangs it, with no error anywhere. `aio_resfd` was a struct field
+no code read.
+
+Fixed: `io_submit` now increments the eventfd as it queues each completion, per
+completion rather than per batch so the eventfd is never readable before the
+event it announces exists. The decision is split into `completion_resfd()` so
+it is testable — the eventfd is a kernel object that does nothing on the host
+triple, but *whether* a notification is owed and *to which* descriptor is
+arithmetic, and the defect was never asking the question. Five tests, including
+that fd 0 is a real descriptor (treating zero as "unset" would silently drop
+exactly one caller) and that an `aio_resfd` too large for an `i32` is refused
+rather than cast into a plausible small fd belonging to someone else.
+
+### The sibling, which was worse — fixed the same day
+
+The same Limitations list has one more line:
+
+> Per-I/O RWF_* flags (`aio_rw_flags`) are ignored.
+
+`aio_rw_flags` is, like `aio_resfd` was, a field nothing reads. The flags it
+carries are not hints:
+
+| flag | what the caller asked for | what we do |
+|---|---|---|
+| `RWF_DSYNC` | the write is on stable storage before completion | report success without syncing |
+| `RWF_SYNC` | as above, including metadata | report success without syncing |
+| `RWF_NOWAIT` | fail with `EAGAIN` rather than block | block |
+| `RWF_HIPRI` | poll for completion (a hint) | ignore — legitimately |
+
+**`RWF_DSYNC` ignored is a durability lie**, and it is the kind that survives
+until a power cut: a database or journal that asks for a synchronous write, is
+told it succeeded, and finds the bytes absent after a crash. That is worse than
+the eventfd hang, because the hang is at least visible while it is happening.
+
+**Deferred one tick on purpose, then done.** It was written down rather than
+patched immediately because the semantics needed deciding rather than typing,
+and a durability bug fixed carelessly becomes a different durability bug. The
+policy settled on asks one question per flag — *can we actually deliver this?*
+— because the one answer never available is to accept a flag and not honour it:
+
+| flag | answer | why |
+|---|---|---|
+| `RWF_HIPRI` | ignored | a scheduling hint with nothing observable behind it; the only one where ignoring is legitimate |
+| `RWF_DSYNC` | honoured | `fdatasync` after a successful write |
+| `RWF_SYNC` | honoured | `fsync`; wins when both are set, since it is the stronger promise |
+| `RWF_NOWAIT` | `EAGAIN` | the flag means *fail rather than block*, and a synchronous executor always blocks, so failing IS the honest answer |
+| `RWF_APPEND` | `EINVAL` | it makes `aio_offset` irrelevant and writes at end-of-file; we `pwrite` at the caller's offset, so ignoring it misplaces the bytes |
+| unknown bits | `EINVAL` | as Linux does, and checked **first**, so a caller hears about the bit it got wrong rather than a consequence of it |
+
+Two details that are the actual substance. Flags are decided **before** the I/O
+runs — one we cannot honour has to stop the operation, not be discovered after
+the bytes have moved. And if the post-write sync itself fails, its error
+**replaces** the byte count: the caller asked for stable storage and did not get
+it, so reporting how many bytes were written would reinstate precisely the lie
+being removed.
+
+The policy lives in a pure `plan_rw_flags()`, so the part that can be wrong is
+the part a host test can reach. Reverting it to ignore-everything fails exactly
+the four tests that assert a flag is honoured or refused.
+
+### The pattern, stated once
+
+This is the third instance today of *the library said yes and did nothing*:
+argv over 64 KiB silently discarded, argv past 512 entries silently truncated,
+and this. In every case the code was correct about the mechanism and honest in
+its comment — `"fall back to no args"`, `"silently ignored"` — and in every
+case the comment described a **defect** in the tone of a **design note**. The
+tell is a Limitations list whose entries are phrased as things the caller will
+not get, when what they actually describe is something the caller *asked for
+and was told it received*.
+
+
+## B-A-SURVEY-OF-FLAGS-WE-ACCEPT-AND-DO-NOT-HONOUR (lane B, 2026-09-13)
+
+**In short:** after fixing three separate bugs in one day that were all the same
+shape — the library said yes and did nothing — I went looking for the rest
+instead of waiting to trip over them. There are at least nine more, and one of
+them can corrupt a database.
+
+### How the search was done
+
+The three fixed today (argv over 64 KiB discarded, argv past 512 truncated,
+`aio_resfd` accepted and ignored) were each documented **accurately**, in a
+module's own `## Limitations` list, in the tone of a design note. So the search
+was for that tone: 24 modules under `posix/src/` carry a Limitations section,
+and their bullets were read for the tell — *accepted but*, *is ignored*,
+*no-op*, *always succeeds*, *unenforced*.
+
+This distinguishes the dangerous kind from the safe kind. "Not implemented,
+returns `EINVAL`" is fine: the caller is told. "Accepted but ignored" means the
+caller asked for something, was told it got it, and did not.
+
+### What is there, worst first
+
+| where | what is accepted and not done | what a caller loses |
+|---|---|---|
+| `fcntl_ops.rs` | `F_SETLK`/`F_SETLKW`/`F_GETLK` — advisory record locking | **two processes both hold the same exclusive lock.** Verified in the code, not just its comment: `F_GETLK` unconditionally writes `l_type = F_UNLCK` ("no conflicting lock") and `F_SETLK` returns success without taking one |
+| `sysv_shm.rs` | `SHM_RDONLY` — accepted but unenforced | a read-only shared mapping is writable; a process that attached read-only can corrupt the segment |
+| ~~`sysv_msg.rs`~~ | ~~`MSG_COPY` — "treated as a normal receive"~~ | **FIXED 2026-09-13.** `MSG_COPY` is now a real peek: `msgtyp` is a 0-based queue index in `seq` order, `IPC_NOWAIT` is required and `MSG_EXCEPT` refused (it selects by type, so one call cannot mean both), and the message stays queued for whoever it was sent to |
+| `sysv_sem.rs` | `SEM_UNDO` — accepted but ignored | a process that dies holding a semaphore never releases it; everyone waiting deadlocks |
+| ~~`pthread.rs`~~ | ~~`pthread_cancel`~~ | **NOT A DEFECT — row withdrawn.** The code is `pthread_cancel(_thread) -> i32 { errno::ENOSYS }`. It refuses, which is correct; only the module doc still said "accepted but never actually cancels" |
+| `sysv_shm.rs` | `SHM_REMAP`, `SHM_RND`, caller-supplied `shmaddr` | the segment lands somewhere other than where it was asked to |
+| ~~`ioctl.rs`~~ | ~~`TIOCSWINSZ` on Console fds~~ | **NOT A DEFECT — row withdrawn.** `handle_tiocswinsz` issues `SYS_PTY_SET_WINSIZE` for Console too (via `CTTY`). Its own function doc said so; the module's summary list did not |
+| `syslog.rs` | `openlog` facility ignored | entries are filed under the wrong facility |
+| `fts.rs` | `FTS_COMFOLLOW` partial; `FTS_LOGICAL` re-stat is a no-op | weakest of the set: `FTS_COMFOLLOW` **is** read (`fts.rs:952`), so this is a documented partial implementation rather than a flag ignored. Listed for completeness, not as a defect |
+
+`fcntl_ops.rs` is the one that matters most and is not fixable here. SQLite —
+which CPython links — uses POSIX advisory record locks as its **entire**
+cross-process correctness mechanism. On a libc where `F_SETLK` always succeeds,
+two SQLite connections both believe they have the write lock and interleave
+writes into one file. It needs a kernel-side lock table keyed by inode, so it is
+filed as `requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`.
+
+### Second pass — the list is much shorter than it looked
+
+Having withdrawn two rows, I went back and read the code behind the rest rather
+than the bullet describing it. The honest triage:
+
+| item | verdict |
+|---|---|
+| `F_SETLK`/`F_GETLK` | **Real and severe.** Verified in code. Filed to lane A; not fixable here |
+| ~~`SEM_UNDO`~~ | **WITHDRAWN on a third look.** `sysv_sem` makes **zero syscalls** — the whole set lives in this process's static memory, as its own doc says ("Single-process only"). `SEM_UNDO` exists to stop a dead process wedging a semaphore *other processes* are waiting on, and there are no other processes sharing this pool. Ignoring it cannot cost anything |
+| `MSG_COPY` | **Was real. Fixed** (see Progress) |
+| `SHM_RDONLY` | Real gap, but **documented with its reason** — "we have no per-mapping permission machinery" — and **not enforceable in this design at all**: one static pool address serves every attacher, so a read-only and a read-write attacher cannot be told apart. Refusing the flag would punish correct callers, who pass it and never write |
+| `SHM_RND`, `SHM_REMAP`, `shmaddr` | **Low.** Documented; `shmat` returns the address it used, and a correct caller uses the return value rather than assuming its hint was taken |
+| `SHM_LOCK` / `SHM_UNLOCK` | **Not a defect.** "Accepted as no-ops; our memory is never swapped" — the guarantee is vacuously satisfied, which is the right answer, not a missing one |
+| `openlog` facility | **Weak.** `do_syslog` writes to **stderr**; there is no daemon, so a facility has nowhere to be routed to. Nothing is lost that could have been delivered |
+| `FTS_COMFOLLOW` | **Not a defect.** Read at `fts.rs:952`; a documented partial, not an ignored flag |
+
+So the honest count is **one** open defect, not nine: `F_SETLK`, severe, out of
+my lane and filed. Plus one fixed today.
+
+**A third look removed the second one too.** `SEM_UNDO` fell to the same test
+that saved me from "fixing" `SHM_RDONLY`: all three SysV IPC modules
+(`sysv_sem`, `sysv_shm`, `sysv_msg`) make **zero syscalls** — against 54 in
+`ioctl.rs` — so every one of them is process-local static memory, and each says
+"Single-process only" in its own header. A flag whose purpose is to protect
+*other processes* cannot be a defect where there are none.
+
+And the limitation bites nothing today: the only match for SysV IPC across all
+of `userspace/` and `services/` is `time_cmd.rs`, where `msgsnd`/`msgrcv` are
+**`struct rusage` fields** — message counts reported by `getrusage` — not calls.
+Nothing we ship uses SysV IPC at all.
+
+**Why the first pass read as nine.** "Accepted but ignored" covers two very
+different things, and the phrase does not distinguish them: a promise the
+implementation *could* keep and does not, versus a request the design *cannot*
+express an answer to, documented as such. Only the first is a defect. The three
+bugs that started this sweep — argv, argv again, `aio_resfd` — were all the
+first kind, and I generalised from them to every bullet that sounded similar.
+
+**The method that would have worked** is the one used on the second pass and on
+`F_SETLK` in the first: read the code, not the bullet. It is slower and it is
+the only part of either pass that produced a claim worth acting on.
+
+### Correction — the survey caught its own disease
+
+**Two of the nine rows were wrong, and both for the reason the survey exists.**
+The sweep was built by grepping *documentation* — the `## Limitations` lists —
+and documentation is precisely the artifact this session has spent all day
+proving unreliable. I hunted stale comments with a method that trusted comments.
+
+- `pthread_cancel` does not accept-and-ignore. It is
+  `pthread_cancel(_thread) -> i32 { errno::ENOSYS }` — an honest refusal, and
+  the right answer.
+- `TIOCSWINSZ` is not a Console no-op. It issues `SYS_PTY_SET_WINSIZE` for
+  every terminal kind.
+
+In both cases the **function-level** doc was accurate and the **module-level**
+summary was stale. `handle_tiocswinsz`'s own doc even says the operation "now
+goes to the kernel rather than being swallowed here" — the word *now* marking a
+fix whose author updated the doc beside the code and not the list at the top of
+the file. Both module docs are corrected in the same change as this note.
+
+**So a Limitations list goes stale in both directions**, and the second is the
+one I walked into: it can describe a defect as a design note (the original
+finding, three instances), and it can describe a *fixed* defect as still
+present. The first misleads a user; the second misleads the reader who believes
+it — here, a survey row published with confidence.
+
+The six rows that survive were re-checked against code rather than prose: the
+flag's constant is defined and its only other occurrences are in tests. That is
+a weaker claim than reading the logic, but it is falsifiable, and it is what the
+remaining rows now rest on.
+
+### Progress
+
+`MSG_COPY` was taken first because it is the clearest case of the property that
+makes one of these safe to fix on sight: **nothing can be relying on the broken
+behaviour.** No caller benefits from a peek that destroys what it looked at, and
+the flag's own name says so. The queue already carried a per-message `seq`, so
+"the message at index *n*" was well-defined without inventing an ordering.
+
+The rest still need that question asked one at a time. `F_SETLK` notably fails
+it — programs run today *because* the lie lets them through.
+
+### Why this is a survey and not nine fixes
+
+Several of these are one-line refusals and could be changed today, and that is
+exactly why they need thought rather than speed. Turning `F_SETLK` from a lie
+into `ENOLCK` is honest, and it also breaks every program that currently runs
+because the lie let it through — which on this image includes anything CPython
+does with SQLite. **"Refuse instead of lying" is the right default and is still
+a user-visible behaviour change**, so the ones with live callers want the
+operator or a boot test, not a quiet commit at the end of a session.
+
+The three fixed today were all cases where nothing could have been relying on
+the broken behaviour: no program benefits from losing its arguments. That is
+what made them safe to fix on sight, and it is the property to check before
+fixing each of the nine.
+
+### The sweep that did work, and its numbers
+
+After the constant-based idea failed at 93% noise, a narrower one succeeded. The
+signature is not *a constant nobody reads* — a libc exports those by the
+thousand — but **a parameter we were handed and chose not to look at, in a
+function that then reports success**:
+
+| filter | count |
+|---|---|
+| exported `pub extern "C"` functions in `posix/src` | 1203 |
+| …ignoring at least one `_`-prefixed parameter | 168 |
+| …where that parameter is flag/mode-like | 17 |
+| …**and the function returns success** | **13** |
+
+That last row is what makes it usable. `mkfifo`, `mkfifoat`, `dbm_open` and
+`open_by_handle_at` all ignore a mode or flag and are *correct* to: they return
+`ENOSYS` after validating, so nothing was created and nothing was promised.
+
+Of the 13 survivors, exactly **one** was a defect: `siginterrupt`, fixed. The
+other twelve, each checked against code:
+
+- `dlopen` returns null — nothing is loaded, so `RTLD_*` has nothing to affect.
+- `mq_open`, `shmat` — single-process implementations, where a permission or
+  attach flag cannot mean anything (the same reasoning that withdrew
+  `SHM_RDONLY` and `SEM_UNDO`).
+- `openlog`'s facility — `do_syslog` writes to stderr; there is no daemon to
+  route to.
+- the seven `__*_chk` fortify wrappers — the ignored parameter is the fortify
+  *level*, and they always apply `maxlen.min(slen)`, the stricter of the two
+  bounds. Ignoring a level while taking the strict path is safe by
+  construction.
+
+**One real defect from 13 candidates**, against nine claimed and one real from
+the documentation sweep. The difference is entirely that this reads what the
+code does with its arguments, and a doc comment reads what someone believed at
+the time they wrote it.
+
+### Why there is no gate for this, measured
+
+The obvious follow-up is a standing check: **a flag constant that production
+code never reads**. That is the mechanical signature behind every real instance
+here — `aio_resfd`, `aio_rw_flags`, `MSG_COPY`, `SHM_RDONLY`, `SEM_UNDO` were
+all defined, referenced in tests, and read nowhere else. It reads code rather
+than prose, so it would not have made the mistakes the first pass made.
+
+It was measured before being built, and it does not work:
+
+    public integer consts in production code: 50008
+    defined but never read in production:     46736
+
+**93%.** The reason is structural and not fixable by tuning: `posix` is a
+**libc**, and a libc's job is to export constants for *callers* to use. Not
+reading `KEY_LEFTSHIFT`, `TCSANOW` or `EADDRINUSE` is the correct state for
+almost every constant in the tree. The signature that identified five real bugs
+by hand is, mechanically, the normal condition of the codebase.
+
+What actually distinguished the real ones is narrower: the constant names a
+flag **passed into a function we implement**, and that function does not branch
+on it. Detecting that needs to know which constants are inputs to which
+functions, which is not recoverable from the text. Noted so the next reader
+weighs the same idea against the same number rather than building it.
+
+### The general rule this session produced
+
+A `## Limitations` bullet is a defect report whenever it describes something the
+caller **asked for**. If the caller cannot express the request, a limitation is
+just a boundary and is fine to document. The grep that finds them is the phrase
+*accepted but*, and there are nine.
+
+
+## TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED (lane B, 2026-09-13)
+
+**In short:** `access(path, W_OK)` answers "yes" for any file that exists. On a
+stock system that is correct. On a system where someone has set an ACL or a
+capability file-tag, it is wrong in the dangerous direction: the program is told
+it may write, and the `open()` that follows returns `EACCES`.
+
+### What is and is not enforced, measured
+
+The comment on `access()` said *"our OS doesn't have a permission system yet"*.
+That has two mechanisms' worth of counter-evidence:
+
+| mechanism | stored? | enforced? |
+|---|---|---|
+| traditional rwx mode bits | **yes** — `fchmodat` (`SYS_FS_FCHMODAT_PINNED`, 665) records them, `stat` returns them | **no** — `S_IWUSR`, `S_IRUSR` and `S_IXUSR` appear **nowhere** in `kernel/src` |
+| POSIX ACLs | yes (`kernel/src/fs/acl.rs`) | **yes** — via `vfs::check_path_access` |
+| capability file-tags | yes (`cap::file_tags`) | **yes** — same gate |
+
+`vfs::check_path_access` documents itself as *"the single permission gate every
+path operation passes through"*, and exists because the ACL check previously
+"was called from none of" the sixteen call sites, so `setfacl` reported success
+while governing nothing. It is a gate that was itself once unwired.
+
+### Why `access()` must NOT simply consult `st_mode`
+
+This is the trap, and it is the reason this is written down rather than fixed in
+five minutes. The obvious fix — read `st_mode` from the `stat` that `access()`
+already performs, and answer from the rwx bits — would **introduce** a defect.
+Nothing enforces those bits, so a file with mode `0o444` is genuinely writable;
+answering `W_OK` = denied would refuse access that a write would get. A wrong
+answer in the safe-looking direction is still wrong, and it would break callers
+that probe before writing.
+
+The answer `access()` owes is *"would the gate that actually runs let me in?"*,
+and only ACLs and tags are behind that gate.
+
+### What closing it needs
+
+A kernel query — something like `SYS_FS_CHECK_ACCESS(path, want)` returning the
+verdict `check_path_access` would give. Nothing in libc can compute it: ACL
+tables and file-tag tables live in the kernel and are keyed by the calling
+process's credentials.
+
+**Not filed as a request yet, deliberately.** Both mechanisms are inert until
+configured — `check_path_access` returns immediately while both tables are empty
+— so on every system we currently boot, `access()` is correct. Lane A already
+has `b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md` open, which
+is severe and active; adding a second request for a gap that bites only a
+configured system would dilute that. Worth folding into a kernel-side change
+that touches this area anyway.
+
+
+## B-SEVEN-COMMENTS-SAID-THE-KERNEL-CANNOT-DO-SOMETHING-IT-CAN (lane B, 2026-09-13)
+
+**In short:** libc is full of comments explaining that a function does nothing
+*because the kernel cannot do the thing*. Seven of those were out of date, and
+each one was pointing the next reader at the wrong repair.
+
+### Why it was worth sweeping
+
+Two of them cost me real time the same day before I thought to look for the
+pattern. `_start`'s "the kernel jumps here with no arguments on the stack
+(argc/argv not yet supported)" reads, next to a disassembly that matches it
+instruction for instruction, as proof that no SlateOS program can see its
+arguments — it can, one call further in. `siginterrupt`'s "our OS doesn't
+deliver signals" is the reason its flag was ignored, and signals have been
+delivered for a long time.
+
+The search was for the shape rather than any one instance: comments matching
+*our OS doesn't*, *we don't have*, *no kernel support*, *the kernel doesn't*.
+**60 candidates in `posix/src`. Seven were stale**, and four of those had a
+code fix behind them.
+
+| claim | reality | outcome |
+|---|---|---|
+| `_start`: kernel doesn't provide argv | `SYS_PROCESS_GET_ARGS` does, and the kernel also builds a SysV stack | comment fixed; the retry bug beneath it fixed |
+| `siginterrupt`: OS doesn't deliver signals | trampoline registered in `crt.rs`; kernel reads `SA_RESTART` | **flag now honoured** |
+| `__stack_chk_guard`: no `/dev/urandom` | `SYS_GETRANDOM` wired; kernel supplies `AT_RANDOM` | led to the **zero-canary** fix in `tls.rs` |
+| `access()`: no permission system | ACLs and capability file-tags are enforced; mode bits stored | comment fixed; real gap recorded |
+| `readahead`: no page cache | `fs/cache.rs` is a write-back LRU block cache | comment fixed |
+| `posix_fadvise`: kernel ignores hints | `fs/fscache.rs` manages per-device read-ahead policy | comment fixed |
+| `sync_file_range`: no writeback cache | the block cache *is* write-back and `fsync` reaches it | comment fixed |
+
+### What the three remaining no-ops are actually missing
+
+Not machinery — a **syscall**. The kernel has the block cache, the read-ahead
+policy layer and a working sync; what `kernel/src/syscall/number.rs` does not
+have is anything exposing prefetch or a *range* sync. `SYS_FS_SYNC` (641) takes
+no fd and no offset, so `fsync`, `fdatasync` and `sync_file_range` all
+necessarily collapse onto a global flush.
+
+That has a consequence worth knowing for the `RWF_DSYNC` work landed earlier
+today: honouring it costs a **global** sync per write. Correct, and expensive.
+The fix is a per-fd sync syscall, not a weaker promise in libc, and the policy
+doc now says so rather than leaving the next reader to discover it under load.
+
+### The rule
+
+A comment saying *we cannot* is a claim about another subsystem, and it is the
+kind that rots silently — the subsystem gains the capability and nothing tells
+the file that assumed otherwise. A comment saying *we do not* is a claim about
+this file, and stays true until this file changes. Where the distinction is
+available, prefer the second.
+
+
+## TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE (lane B, 2026-09-13)
+
+**In short:** three times in one day I estimated how big a problem was with a
+grep, and three times the real number was between five and twenty times
+smaller. Written down because the pattern is in *how I look*, not in any one
+subject, and because twice the correct answer was already sitting in a tool
+this repo ships.
+
+**The same failure runs the other way, and that direction is worse.** Later the
+same day I overwrote `userspace/coreutils/build.rs` — it held the bare-metal
+linker-script emission and I replaced it with nine lines — and then wrote an
+audit over all 75 of that day's commits to find any other file I had clobbered.
+It reported **none**. It was wrong: the one case I already knew about counted
+its previous size as `stdout.count("
+") + 1`, which over-counts a file ending
+in a newline, so the ratio came out 21/25 = 0.84 against a 0.85 cutoff and the
+known clobbering fell just under it.
+
+An over-report wastes time. **An under-report ends the investigation**, and it
+ends it with a number that reads like reassurance. The fix is the one habit
+that catches both: give the instrument a case whose answer you already know,
+and refuse to believe a clean result until it has found that one. Re-run with
+the count fixed and a control asserting the known case was found, the audit
+reported exactly one file — which was the truth, and is why the blast radius is
+now known to be one rather than assumed to be.
+
+| question | my ad-hoc answer | the real answer | what got it right |
+|---|---|---|---|
+| how many flags do we accept and ignore? | **9** (grep the `## Limitations` lists) | **1** | reading the code behind each row |
+| which flag constants are never honoured? | **46,736** (constants unread in production) | ~13 worth looking at, 1 real | narrowing to *parameters* we were handed, in functions that return success |
+| how many gates are unwired? | **45** (grep `scripts/hooks/pre-push` for each name) | **2, both pinned with reasons** | `scripts/check-gates-are-wired.py`, which exists for this |
+
+### The shape
+
+Each ad-hoc search answered a question *adjacent* to the one I asked. Grepping
+the pre-push hook answers "which gates does **pre-push** name", not "which gates
+are unwired" — `boot-test.sh` runs 62 of them, and my search could not see that.
+Grepping Limitations lists answers "which bullets sound like a defect", not
+"which are". Counting unread constants answers "what does a libc export", which
+is nearly everything.
+
+**The tell is that the ad-hoc number is implausibly large.** 45 unwired gates in
+a tree that gates obsessively, or 46,736 unhonoured flags, should both have read
+as "my query is wrong" before they read as "the codebase is broken". A finding
+that indicts the whole tree is usually indicting the method.
+
+### What to do instead
+
+1. **Look for an existing instrument first.** `check-gates-are-wired.py` was in
+   the very list my grep called unwired. It took ten seconds and was right.
+2. **If there is none, sanity-check the magnitude before reporting it** — and
+   before building anything on it. Both surveys I published had to be walked
+   back in public afterwards.
+3. **Narrow until the survivors are individually checkable**, then check them
+   individually. The one sweep that worked ended at 13 candidates precisely
+   because that is a number you can read.
+
+
+## B-THE-IMAGE-NOW-CREATES-THE-MULTI-CALL-NAMES-IT-PROMISES (lane B, 2026-09-13)
+
+**In short:** several of our programs answer to more than one name — `ar` is
+also `ranlib` and `strip` — but nothing ever created the second name, so typing
+`ranlib` got "command not found" from a system that contains a working one.
+`scripts/create-ext4-rootfs.sh` now makes the links.
+
+### What was already known, and what was not
+
+The diagnosis is not mine: `scripts/multicall-aliases.py` exists precisely for
+this and says it plainly — *"We wrote the dispatch about seventy times and
+**never wrote the links**."* It reports **167** command names that some program
+answers to and nothing produces.
+
+What was missing is the other half: somewhere to write them. The links belong
+on the image, and the image's manifest is the list of what ships, so that is
+where they now live. A line
+
+    ranlib = ar
+
+asks for `ranlib` as a second name for an already-listed binary.
+
+### Why only three
+
+Of the 167, exactly **three** have a producer that is on the image today:
+`ranlib` and `strip` (from `ar`) and `killall` (from `kill`). The other 164 are
+unreachable for a more ordinary reason — **their producer is not staged
+either**. The personality gap and the staging gap are largely the same gap seen
+from two ends, and the 167 will shrink as a side effect of the manifest growing
+rather than needing separate work.
+
+`ranlib` is the one that is not cosmetic. `ar` was added to the manifest hours
+earlier with the argument that an autoconf build needs it — and an autoconf
+build calls `ranlib` immediately after `ar`, so staging one without the other
+left that argument half-finished.
+
+### The shape of the implementation
+
+Aliases are collected during the manifest pass and created *after* it, because
+a producer may be listed below its alias and a link needs its target to exist.
+They are hard links (falling back to a copy): both give the program the argv[0]
+it reads, and a hard link cannot dangle.
+
+Three refusals, each tested:
+
+- an alias whose producer is **not staged** is **named**, not dropped — a
+  manifest promising a name the image lacks is an error, and silence is how it
+  stays one;
+- an alias colliding with a real binary does **not** overwrite it, the same
+  rule the staging collision guard follows;
+- a link that cannot be made is reported rather than counted.
+
+Seven assertions added. Neutralising the alias loop fails five of them.
+
+### The bug the unit tests could not see
+
+They all passed, and the feature was broken. The first real image build printed
+
+    [rootfs] NOTE: alias(es) with no staged producer: ranlib(->arstrip = arkillall = kill)
+
+— three alias specs run together into one unparseable line. The accumulator
+joined them with `$(printf '<newline>')`, and **command substitution strips
+trailing newlines**, so the separator was the empty string.
+
+Every one of the seven assertions used **a single alias**, so not one of them
+could distinguish a working separator from no separator at all. *One alias is
+not a test of a list.* The regression pin now stages three and asserts all
+three exist, are counted, and that none is reported orphaned; restoring the old
+expression reproduces the exact string above and fails it.
+
+Worth noting where the fix came from as well: the edit to repair it was
+attempted twice by matching the source line as a string and failed both times,
+because the Bash tool collapses a doubled backslash before bash sees the
+heredoc, so the Python literal arrived as a real newline and matched nothing.
+Editing the line by **index** worked first time. Both halves of this — a
+shell-quoting hazard in the subject and a shell-quoting hazard in the tool
+editing it — are the same hazard, and the second is recorded in this file
+already.
+
+**The general point.** This is the session's own lesson applied to my own code:
+a thing that has only been tested is not a thing that has been run. The unit
+tests were fast, targeted, mutation-checked, and blind to the one property that
+mattered. The ~3-minute image build found it immediately.
+
+
+## B-SHUFFLING-THE-TEST-ORDER-FOUND-A-FLAKE-I-HAD-WRITTEN-THAT-DAY (lane B, 2026-09-13)
+
+**In short:** `posix`'s 20,745 tests pass every time in the default order. Run
+them in a random order and one fails — a test I had added hours earlier, which
+took a slot from a shared pool of eight and never gave it back.
+
+### How it surfaced
+
+`stdio.rs`'s `StdStreamTestGuard` documents a flake that was "26-in-30 under
+`--shuffle` while the default alphabetical order hid it completely", so after
+de-racing the stdio streams I ran the suite shuffled to check the fix. It found
+something else:
+
+    running 20745 tests (shuffle seed: 1789357352031162400)
+    test sysv_msg::tests::msg_copy_without_nowait_is_einval ... FAILED
+    assertion failed: qid >= 0
+
+`msgget` had returned -1. The queue pool is `MAX_QUEUES` = **8**, thirty tests
+allocate from it, and the five I wrote for `MSG_COPY` allocated **outside the
+`with_clean()` helper every other test uses** — which takes a lock and resets
+the pool. Mine leaked a slot each. The failing test is simply the one that
+happened to ask ninth; under alphabetical order it asked earlier and passed.
+
+### Two wrong fixes before the right one, for one reason
+
+I changed the code twice before reading the failure message.
+
+1. **An RAII `QueueReaper`** to release each slot on drop. It broke
+   `test_msgget_pool_exhaustion_enospc`, which fills the pool deliberately and
+   asserts the ninth `msgget` fails: my inserted `let _reap` landed **inside a
+   loop body**, so each slot was freed on the next iteration and the pool never
+   filled.
+2. **A second lock** over the pool. Redundant — and still not the problem.
+
+The actual message said `assertion left == right, left: 2293761, right: -1`,
+which names the pool-exhaustion test and no other. **The file already had the
+right mechanism** (`with_clean`, since before I arrived); five tests of mine
+simply did not use it. The fix is five lines.
+
+*Read the failure before changing the code* is not a new rule. It is worth
+recording that I broke it while actively working through a backlog of
+test-hygiene defects.
+
+### A real defect found along the way
+
+`with_clean` took its lock with `.unwrap()`. When the pool-exhaustion test
+panicked, the mutex poisoned and the next **seventeen** tests panicked inside
+`.unwrap()` — one defect reported as eighteen failures, seventeen of them
+pointing at innocent code. Now poison-tolerant, the same repair made in
+`crt.rs`, `pthread.rs` and `stdio.rs` this session.
+
+### Verified
+
+The failing seed (1789357352031162400) now passes all 20,745, as do two further
+random shuffles. **`--shuffle` is worth running after any test-ordering change**
+and is not in any gate; the default order is a single sample of one
+permutation out of 20,745!.
+
+
+## B-FOUR-STAGED-UTILITIES-STILL-DIE-ON-A-LEGAL-FILENAME (lane B, 2026-09-14)
+
+**FIXED 2026-09-14 — all four.** `patch` and `diff` were converted first,
+and both turned out to have a larger content-side fault sitting behind the
+argv one: `patch` refused every file that was not valid UTF-8, and `diff`
+reported two different files as identical. `logger` had the same shape —
+`BufRead::lines()` failed the whole read on one undecodable byte, so
+`cat something-binary | logger` logged nothing. **`ps` was the mildest and
+is now done too.**
+
+**That is the pattern worth keeping from all four: the argv detector found
+the door, and in three cases out of four the bigger hole was inside.** A
+checker that looks at one narrow thing will report that narrow thing; what
+it is actually telling you is *where to read*.
+
+### One deliberate divergence, in `ps`
+
+procps picks its refusal sentence by WHERE the bad byte appeared, measured:
+
+| input | procps says |
+|---|---|
+| `ps -<0xE9>` | `error: garbage option` |
+| `ps -u<0xE9>` | `error: user name does not exist` |
+| `ps -o<0xE9>` | `error: unknown user-defined format specifier "..."` |
+| `ps --sort <0xE9>` | `error: unknown sort specifier` |
+
+This build answers `garbage option` for all four. The first matches exactly
+and is pinned in `scripts/ps-diff.sh`; the other three differ in wording,
+not in outcome — all refuse, all exit 1. Reaching the three sentences would
+mean reparsing the argument as bytes throughout a file already at **60
+passed / 0 differed** against procps, to change what a program says about
+an input nobody types. Recorded here rather than pinned red, so it is a
+decision on the record instead of an omission.
+
+`logger` had the argv panic AND a second fault the argv detector cannot
+see: `BufRead::lines()` on stdin yields `Result<String>` and fails the
+whole read on one undecodable byte, so `cat something-binary | logger`
+logged nothing and reported an I/O error — for input a log is exactly the
+right place to put. Same shape as `diff`'s: the argv detector found the
+door, and the bigger hole was inside.
+
+**In short:** four of the 72 programs on the image abort with a Rust panic if
+any argument is not valid Unicode. On this OS a filename may hold every byte
+except `/` and NUL — that is `design.txt`, not an implementation accident — so
+`patch -i <name-with-byte-0x80>` does not fail, it dies before reaching its own
+first statement.
+
+### Which, and why these four
+
+`scripts/argv-utf8.py` reports **187** findings tree-wide. Crossed against
+`scripts/rootfs-bin-manifest.txt`, exactly four are on the image:
+
+| bin | takes a path? | note |
+|---|---|---|
+| `patch` | **yes** — `-i FILE`, `-o FILE` | the sharpest case; it writes files |
+| `diff` | **yes** — two operands | also renders the name into a `--- path` header |
+| `ps` | no | dies only on a non-Unicode option value |
+| `logger` | no | no file handling at all; dies on a non-Unicode *message* |
+
+The other 183 findings are in `userspace/*` crates that the manifest does not
+stage, so nothing on the image reaches them.
+
+### The fix is getopt, not a hand conversion
+
+I started converting `patch` in place and stopped, because the hard part has
+already been solved once. `--input=<path>` cannot be handled with
+`to_str()`: if the *path* is not Unicode then the whole argument fails to
+decode, and the option silently stops matching. It needs a byte-level split,
+and `coreutils::getopt` already does exactly that
+(`getopt.rs:865`, `bytes.strip_prefix(b"--")`), over `&[OsString]`.
+
+That is also what the detector's own header says, as a measured correlation
+rather than a preference: *"of the 35 bins already clean, 24 go through
+`getopt`; of the 49 dirty ones, **none** do. A bin that parses options through
+the shared module never had a reason to reach for `String`."*
+
+So the work is: route each of the four through `getopt`, hold `patch_file` /
+`output_file` / `diff`'s two operands as `OsString` to the syscall, and render
+a name only where it is printed. `diff` carries one extra decision — GNU writes
+the operand **raw** into the `--- path` header, so that header has to be
+emitted as bytes rather than `format!`ed, and quoting it instead would be
+inventing a format.
+
+### Why this is written down rather than half-done
+
+The conversion is a real refactor of a file-writing utility, and the one
+subtlety in it — the encoding boundary after `--input=` — is the kind that
+produces a silently wrong path rather than a compile error. The measurement is
+the expensive part and it is now done: four bins, named, with the mechanism
+identified and the one non-obvious case called out.
+
+## B-PATCH-REFUSES-EVERY-FILE-THAT-IS-NOT-VALID-UTF-8 (lane B, 2026-09-14)
+
+**Status:** FIXED 2026-09-14 · `userspace/coreutils/src/bin/patch.rs`
+
+**How it was closed.** `patch` carries lines as `Vec<u8>` end to end now:
+`HunkLine`, `FilePatch`'s two paths and its header lines, and the ~14 `&str`
+signatures between them. The three `fs::read_to_string` calls became
+`fs::read`, `env::args()` became `args_os()`, and the ASCII structure a patch
+is made of (`@@`, `---`, `+++`, the column-one marker) is matched on byte
+literals. A private `mod bytes` supplies the six `str` operations that have no
+slice counterpart; `coreutils::quote`'s `os_bytes`/`os_from_bytes` do the
+syscall boundary, so the conversion added no `unsafe`.
+
+**Measured, not asserted.** `scripts/patch-diff.sh` runs 68 cases against real
+GNU patch 2.7.6 and compares the resulting *tree* — every file's mode, size
+and checksum — not just the three streams: **68 passed, 0 differed**. Three of
+those cases are new and are the bug itself, and the harness was probed in both
+directions: restoring the UTF-8 requirement on the patch file turns exactly
+those three red and nothing else. Six unit cases cover the same ground at the
+function level, and reintroducing a decode inside `bytes::lines` turns three of
+them red.
+
+**One regression the harness caught that nothing else would have.** Routing
+the strip-count error through `quote_glibc` printed `**** strip count 'abc' is
+not a number`; GNU prints it unquoted. GNU quotes an option *name*
+(`invalid option -- 'Q'`) and not this value, which is not a rule anyone would
+guess — §371 again, and the reason the reference is run rather than recalled.
+
+Measured, both sides, on the same two files:
+
+    $ patch -i u.diff orig.txt          # orig.txt line 2 holds byte 0xE9
+    patch: **** Can't open patch file u.diff : stream did not contain valid UTF-8
+    exit 2                                                        # ours
+
+    $ patch -i u.diff orig.txt
+    patching file orig.txt
+    exit 0, byte 0xE9 preserved                                   # GNU patch 2.7.6
+
+`patch` cannot apply a patch to a file that is not valid UTF-8, and cannot
+even *read* a patch file that is not — the 0xE9 above is in a context line, so
+the refusal happens before any target is opened. A single Latin-1 byte
+anywhere in a source file's comments is enough. `patch` is on the image.
+
+### This is the bug the argv finding was a symptom of
+
+Yesterday's entry (`B-FOUR-STAGED-UTILITIES-STILL-DIE-ON-A-LEGAL-FILENAME`)
+scoped this as an argv problem and proposed routing the four bins through
+`coreutils::getopt`. That scoping was too small, and the reason is worth
+keeping: I found the argv panic with a detector that only looks at argv, so
+the answer it gave was shaped like its question. Reading the downstream uses
+to plan the conversion is what turned it up — `target_file` flows into a
+`String` that comes from `fs::read_to_string`, which meant the `String` was
+never really about argv at all.
+
+Both faults are the same cause and the fix is one job, not two:
+
+| | Chokepoint | Symptom |
+|---|---|---|
+| 1 | `env::args()` at line 1054 | panic on a non-Unicode *filename* |
+| 2 | `fs::read_to_string` ×3 | refusal on non-UTF-8 *content*, the above |
+
+Chokepoint 2 is the larger of the two by any measure a user would apply: a
+non-Unicode filename is rare, a Latin-1 byte in a patched file is not.
+
+### The proper fix, and why it is not a boundary patch
+
+`patch` is `String`-typed through its spine, not just at its edges:
+`HunkLine::{Context,Remove,Add}(String)`, `FilePatch { old_path: String,
+new_path: String, header_lines: Vec<String> }`, and `apply_hunk(lines:
+&[String])` / `try_hunk_at` / `strip_path` / `parse_file_path` and ~11 more
+`&str` signatures. There is no encode/decode boundary to move, because the
+line *contents* are what must stay exact and they are carried the whole way.
+So the fix is to carry lines as `Vec<u8>`/`&[u8]` and keep the ASCII
+structural parsing (`@@`, `---`, `+++`, `+`/`-`/space) on byte literals.
+
+Per CLAUDE.md §7 this is what should have been written in the first place:
+*"Never force UTF-8 on filesystem paths, environment variables, or pipe
+data."* Patch content is file data, which is the same rule.
+
+### Reproduction
+
+    python -c "
+    open('orig.txt','wb').write(b'first line\ncaf\xe9 comment\nthird line\n')
+    open('u.diff','wb').write(b'--- orig.txt\n+++ orig.txt\n@@ -1,3 +1,3 @@\n first line\n caf\xe9 comment\n-third line\n+THIRD LINE\n')
+    "
+    patch -i u.diff orig.txt
+
+GNU exits 0 and leaves `THIRD LINE` with the 0xE9 untouched. Keep this as the
+acceptance case: it fails on the *patch* file, so it also covers chokepoint 1's
+sibling — a patch whose own `---` path is not UTF-8.
+
+### WITHDRAWN: the "GNU patch -Q exits 0" note that was here
+
+An earlier revision of this entry recorded that GNU `patch -Q` prints
+`patch: invalid option -- 'Q'` and **exits 0** where ours exits 2, flagged as
+wanting deliberate re-measurement. It has now been re-measured and **there is
+no such divergence** — GNU exits non-zero, same as us, and
+`scripts/patch-diff.sh` case `u.patch -p1 -Q` passes on both sides
+independently.
+
+The note was an artifact of the instrument, not an observation. See
+`TD-B-EVERY-EXIT-CODE-I-MEASURED-THROUGH-WSL-WAS-THE-SAME-ZERO`. Left in
+place rather than deleted because a withdrawn finding is worth more than a
+missing one: whoever reads this next would otherwise re-measure it.
+
+## TD-B-EVERY-EXIT-CODE-I-MEASURED-THROUGH-WSL-WAS-THE-SAME-ZERO (lane B, 2026-09-14)
+
+**Status:** instrument defect, understood; no code change needed
+
+Every exit status read with `$?` inside a `wsl -d Ubuntu -- bash -c '…'`
+payload comes back **0**, whatever actually happened. The control that
+settles it is one line:
+
+    $ wsl -d Ubuntu -- bash -c '... false; echo "false_rc=$?" ...'
+    false_rc=0          # `false` exits 1, by definition
+
+It is not the heredoc, and not a quoting slip in one probe: a script written
+inside WSL with a quoted delimiter and run as `bash /tmp/rc.sh` gives the same
+`false_rc=0`. Something in the layering between the Bash tool and WSL resolves
+`$?` before the inner shell ever sees it.
+
+### What it cost
+
+One false entry in this file — "GNU `patch -Q` exits 0" — now withdrawn above.
+It was recorded *with* a caveat that a one-sample exit code wants
+re-measuring, which is the only reason it did no damage. A GNU-abbreviation
+probe from the previous tick (`patch --dry-run --inp=…`, "exit 0") rests on
+the same broken reading and should not be relied on either.
+
+### The workaround, which is also the better habit
+
+Ask the shell the question directly instead of reading a variable:
+
+    if patch -Q </dev/null >/dev/null 2>&1; then echo zero; else echo NONZERO; fi
+
+`if` consumes the status where it is produced, so nothing can rewrite it in
+between. Run `false` and `true` alongside as controls in the same script —
+that is what caught this, and it costs two lines.
+
+### What was NOT affected, and why it is worth saying
+
+* **`scripts/patch-diff.sh` is sound.** It runs as a real script from Git Bash
+  and prints genuine non-zero codes (`ours (rc=2)`, `gnu (rc=2)`), so all 68
+  of its verdicts stand. The bug is specific to my ad-hoc one-liners.
+* **Every conclusion I drew from stdout stands**, because none of the ones
+  that mattered rested on the exit code: GNU applying the Latin-1 patch was
+  read off `patching file orig.txt` plus the resulting bytes, and GNU seeing
+  the `diff` difference was read off `2c2`.
+
+This is the same shape as `TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE`,
+one layer down: there the ad-hoc instrument over-reported, here it under-read.
+Both say the purpose-built harness is the thing to trust, and both were caught
+by running a control rather than by reasoning about the tool.
+
+## B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL (lane B, 2026-09-14)
+
+**Status:** FIXED 2026-09-14 · `userspace/coreutils/src/bin/diff.rs`
+
+**How it was closed.** Lines are `Vec<u8>` from `fs::read` to the writer:
+`FileContent::Text`, `compute_diff`/`lcs_diff`/`myers_diff`'s four slices and
+their `(Op, line)` result, `Hunk::lines`, `normalize_line`, `is_blank`. The
+renderers emit the line's own bytes through one `write_body_line` rather than
+`format!`, because GNU writes it raw and `diff -u | patch` reads it back.
+`normalize_line` folds with `to_ascii_lowercase`/`is_ascii_whitespace`, which
+the two measurements above showed is what GNU does — so `-i` and `-w` each
+shed a divergence as a side effect. `truncate_or_pad`, the only place a width
+is needed, still counts characters when the line is valid UTF-8 and falls back
+to bytes when it is not, so no line that aligned before moved.
+
+**Measured:** `scripts/diff-diff.sh` went from **43 passed / 64 differed** to
+**46 / 61** — three cases fixed, and `comm` over the two runs confirms
+**nothing newly differs**. Four unit cases were added, including a control
+asserting the *same* bad byte still compares equal; reintroducing the lossy
+decode turns the bug's case red and correctly leaves the control green.
+
+**The part worth keeping.** The three cases that went green are
+`diff bytes.txt bytes2.txt`, `diff -q bytes.txt bytes2.txt` and
+`diff base.txt bytes.txt`. **The harness already had those fixtures and was
+already failing them.** The bug was being reported on every run and was
+invisible because it sat among 64 other divergences — a harness with a large
+standing red count cannot tell anyone that something new broke. `diff` is now
+the tree's biggest such backlog at 61, which is an argument for baselining it
+the way `argv-utf8` and `raced-globals` are baselined, so the number that gets
+watched is *new* divergences rather than all of them.
+
+`diff` reports **no difference** between two files that differ, and exits 0.
+Measured, with `cmp` as the control:
+
+    $ cmp x.txt y.txt
+    x.txt y.txt differ: char 10, line 2
+
+    $ diff x.txt y.txt          # ours
+    $                           # nothing at all, exit 0
+
+    $ diff x.txt y.txt          # GNU diffutils
+    2c2
+    < cafM-i
+    ---
+    > cafM-^?
+
+The two files are `alpha/caf\351/gamma` and `alpha/caf\377/gamma`. Byte
+`0351` and byte `0377` are different bytes; neither is valid UTF-8 on its
+own.
+
+### Cause
+
+```rust
+// Convert to string. We use lossy conversion here only for the purpose of
+// displaying diff output; the comparison is byte-accurate via the line
+// strings.
+let text = String::from_utf8(data)
+    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+let lines: Vec<String> = text.lines().map(String::from).collect();
+```
+
+**The comment is wrong, and it is wrong in the specific way that hides the
+bug.** There is no byte-accurate path: `lines` *is* the lossy text, and the
+comparison runs on it. Every byte that is not valid UTF-8 becomes U+FFFD, so
+any two distinct bad bytes become the same character and compare equal.
+
+`from_utf8_lossy` is named in CLAUDE.md's self-review list — *"No
+`from_utf8_lossy` — that's silent data corruption"* — and this is exactly the
+failure it is named for. The comment reads as though someone had already
+thought about it, which is what makes it worse than no comment.
+
+### Why this is sharper than the `patch` bug fixed today
+
+`patch` **refused**: exit 2, a message, nothing written. Loud and safe.
+`diff` **answers wrongly and confidently**. Two consequences:
+
+* `diff expected actual && echo OK` — the idiom every test harness and build
+  script uses — passes when it should fail.
+* `diff -u` output is fed to `patch`. A diff of a file holding one Latin-1
+  byte emits a patch with U+FFFD in the context lines, which then fails to
+  match, or matches and writes the corruption in. Today's `patch` fix makes
+  `patch` byte-exact, so `diff` is now the weaker half of that pair.
+
+### The fix
+
+The same one `patch` just had: keep lines as `Vec<u8>`. `diff` already reads
+with `fs::read`, so the bytes are in hand and thrown away one line later —
+there is no I/O change needed, only the type. `FileContent::Text(Vec<String>)`
+becomes `Vec<Vec<u8>>`, and the hunk renderer writes the line rather than
+formatting it.
+
+One thing to settle first, noted while converting `patch`: GNU writes the
+operand **raw** into the `--- path` / `+++ path` header, so that header must
+be emitted as bytes. Quoting it would invent a format, and `patch` reads it
+back.
+
+`scripts/patch-diff.sh` gained a Latin-1 fixture today; `scripts/diff-*`
+should get the same pair of files, and the case above — two files differing
+only in a high byte — belongs in it as the regression, because it is the one
+that returns the wrong answer rather than an error.
+
+### The one question the conversion had to settle first, now measured
+
+`normalize_line` folds case with `str::to_lowercase`, which is Unicode-aware.
+Carrying lines as bytes means `to_ascii_lowercase` instead, so `-i` would stop
+folding `É`/`é`. That is a user-visible change and worth checking rather than
+assuming — so it was measured, with an ASCII pair as the control:
+
+| input pair | GNU `diff -i` says |
+|---|---|
+| `cafÉ` vs `café` (U+00C9 / U+00E9) | **DIFFERENT** — not folded |
+| `ABC` vs `abc` | SAME — folded |
+
+So GNU folds ASCII case and not Unicode case, which is what a byte-wise
+`tolower()` does. **`to_ascii_lowercase` is not a concession to the byte
+conversion — it is what GNU actually does**, and our `to_lowercase()` is a
+present-day divergence that the conversion removes. Nothing blocks the fix.
+
+`is_whitespace()` in the same function got the same treatment, with two
+controls so the probe is known to be sensitive in both directions:
+
+| input pair | GNU `diff -w` says |
+|---|---|
+| `a<U+00A0>b` vs `ab` | **DIFFERENT** — U+00A0 is not whitespace |
+| `a b` vs `ab` (control) | SAME — folded |
+| `a<TAB>b` vs `ab` (control) | SAME — folded |
+
+`is_ascii_whitespace` is therefore exactly GNU too. **Both of the conversion's
+semantic questions came back the same way**: the byte version is not a
+concession, it is closer to the reference than what is there now, and `-i` and
+`-w` each lose a divergence. Nothing about the `diff` fix is blocked on a
+judgement call.
+
+## TD-B-TWENTY-NINE-OF-THE-SEVENTY-TWO-BINS-ON-THE-IMAGE-DECODE-LOSSILY (lane B, 2026-09-14)
+
+**Status:** OPEN — a candidate list, deliberately not a defect list
+
+Cross-referencing `scripts/rootfs-bin-manifest.txt` against a grep for
+`from_utf8_lossy` in each binary's own source: **29 of the 72** Rust utilities
+on the image contain the construct CLAUDE.md names as silent data corruption.
+
+    awk 3   basename 2   cp 3    csplit 4   dd 1    df 4     diff 1
+    du 2    ed 1        env 1    expr 4     fetch 2 find 2   hostname 1
+    ln 2    mkfifo 1    nl 3     od 2       readlink 1       realpath 9
+    sed 20  split 6     stat 2   strings 3  tar 6   test 2   touch 1
+    tty 1   which 2
+
+### Why this is NOT "29 broken binaries", and I want to be exact about it
+
+A lossy decode is only a *defect* where the decoded value is then **compared,
+stored, or written**. That is what made `diff` wrong: it decoded lossily and
+then diffed the result, so two distinct bad bytes became one U+FFFD and
+compared equal. A lossy decode used only to put a name in a diagnostic is
+cosmetic and, on a name that is not text, arguably the right thing.
+
+This grep cannot tell those apart. It counts occurrences, and occurrences are
+not findings — `TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE`
+records this exact instrument being wrong by 5–20× three times in one day
+(9→1, 46,736→13, 45→2). The honest state is: **one confirmed defect (`diff`),
+28 other files worth reading**, and a prior expectation that well under half
+survive.
+
+**CORRECTED 2026-09-14, and both of the priorities below were wrong.** The
+paragraph that stood here read: *"`sed` at 20 and `realpath` at 9 are the two
+worth opening first — not because the count is high, but because both are
+fundamentally about transforming text and paths rather than printing them, so
+their lossy calls are the most likely to sit on a value path rather than a
+message path."* That is reasoning about what a program is *for*, not a
+measurement of what its code does, and it picked the two worst candidates on
+the list.
+
+Re-measured with the test modules cut off at `#[cfg(test)]` and the remaining
+uses classified by whether a diagnostic macro appears within two lines:
+
+| | occurrences |
+|---|---|
+| raw, as the count above was taken | 131 |
+| outside test modules | **46** |
+| not feeding a diagnostic | **36** |
+
+* **`realpath` has ZERO outside its tests** — all nine were assertion messages.
+* **`sed` has one**, and it formats `can't find label for jump to ...`. Five
+  probes confirm `sed` passes byte 0xE9 through `s///`, `y///`, `d`, an anchored
+  insert and a wildcard match untouched.
+* The actual head of the list was **`diff`** — the file being edited all day —
+  with three, two of which were a real defect: a directory walk decoded the
+  names it had just listed and then could not open them. Fixed; see the commit
+  *"diff: carry paths as paths"*.
+
+Two things this adds to `TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE`:
+a grep that does not exclude test code over-reports by roughly **3×** on top of
+everything else, and ranking candidates by subject-matter intuition is worse
+than not ranking them at all, because it moves the genuinely broken one down
+the list.
+
+### RESOLVED 2026-09-14 — the instrument exists, and the answer is one defect
+
+`scripts/lossy-decode.py` now does what the section below asked for. Against
+the 72 binaries on the image:
+
+| | count |
+|---|---|
+| raw occurrences of the two names | **131** |
+| inside `#[cfg(test)]` (assertion messages) | 85 |
+| `#[cfg(not(unix))]` host-only halves | 18 |
+| rendered into a diagnostic | 12 |
+| **VALUE — could corrupt something** | **6** |
+
+All six were then read, and **all six are benign**: two are
+`String::from_utf8_lossy` of an ASCII *constant* (`stat`'s `TERSE_FILE` /
+`TERSE_FS`), one sits behind `looks_like_integer` which admits only ASCII
+digits and a sign (`expr`), one decodes solely to match an ASCII long-option
+name (`od`), and two are bindings used only in messages that the checker's
+binding-following rule does not quite reach (`split`, `strings`). `split`'s is
+worth naming because it is the shape that looks worst and is right: the
+decoded name goes to `println!` while the child's `FILE=` environment variable
+gets `os_from_bytes(name)` beside it.
+
+**So the entire image held exactly one real defect of this kind, and it was in
+`diff`** — fixed the same day. Not `sed`, not `realpath`, the two this entry
+originally named.
+
+The checker's four exclusions were each added because a real site needed it,
+and two were added after it produced a false positive on the very file whose
+shape most resembled the bug:
+
+* `test.rs` writes `path_of` as a `#[cfg(unix)]` block beside a
+  `#[cfg(not(unix))]` block INSIDE one function — the first draft only looked
+  at attributes on the function itself and called the second block a defect;
+* five of the nine it then reported were `let x = lossy(...)` used in a
+  `format!` two statements later, which no fixed window can see.
+
+Both directions are pinned in its 15-case self-test, including that a cfg
+block which has already *closed* does not excuse a later call, and that a
+binding which reaches real work is still a VALUE even if it is also printed.
+
+**Still to do:** a baseline file so the six audited sites are recorded as
+accepted and the checker can be wired into `scripts/hooks/pre-push` as a
+ratchet, the way `argv-utf8` and `raced-globals` are. Until then it is a tool
+to run, not a gate. Note also that `--all` reports **VALUE 183** across the
+whole of `userspace/`, which is a much larger surface than the image and has
+not been audited at all.
+
+### The instrument this actually wants
+
+A checker that classifies each `from_utf8_lossy` / `to_string_lossy` by what
+happens to its result:
+
+* flows into `==`, `contains`, a `match`, a sort key, a hash → **defect**;
+* flows into `fs::write`, `write_all`, a path passed to a syscall → **defect**;
+* flows only into `format!`/`diag!`/`eprintln!` → allowed, and should be
+  recorded as allowed so the count stops re-alarming whoever greps next.
+
+That is a dataflow question, not a pattern question, which is why the grep
+above is the wrong shape and why the number it produced should not be quoted
+as a defect count. Written down now so the *measurement* is not lost while the
+triage waits; the `diff` fix is the thing that comes first, since it is the one
+known to answer wrongly.
+
+## B-THE-DIFF-PATCH-PIPELINE-NOW-SURVIVES-A-BYTE-THAT-IS-NOT-UNICODE (lane B, 2026-09-14)
+
+**Status:** VERIFIED 2026-09-14 — the joint result of the two fixes above
+
+Neither entry above states the thing a user would actually care about, because
+neither fix alone delivers it. Measured end to end, with our own two binaries:
+
+    $ diff -u orig.txt new.txt > u.patch     # line 2 holds byte 0351
+    $ cat -v u.patch
+    --- orig.txt
+    +++ new.txt
+    @@ -1,3 +1,3 @@
+     alpha
+     cafM-i comment
+    -charlie
+    +CHARLIE
+    $ patch -i u.patch target.txt
+    $ cmp target.txt new.txt                 # IDENTICAL
+
+**Before today this pipeline was broken twice over, independently**, and each
+fault would have masked the other:
+
+| stage | what it did | class |
+|---|---|---|
+| `diff` | wrote U+FFFD into the patch in place of `0351` | silent corruption |
+| `patch` | refused to read the patch at all, exit 2 | loud refusal |
+
+Fixing only `patch` would have left `patch` faithfully applying a corrupted
+patch — a *worse* outcome than the refusal, because the corruption would then
+reach the file. That is worth stating plainly: the two fixes were found
+separately and are recorded separately, but shipping one without the other
+would have made the pipeline quieter rather than better.
+
+The round trip is the case to reach for when either file is touched again. It
+exercises both halves through their real entry points and its assertion is
+`cmp`, not a transcript, so it cannot pass on a right-looking message.
+
+## B-DIFF-CANNOT-SEE-A-MISSING-FINAL-NEWLINE (lane B, 2026-09-14)
+
+**Status:** FIXED 2026-09-14 · `userspace/coreutils/src/bin/diff.rs`
+
+**How it was closed**, following the design below almost exactly. The
+comparison marker is a newline pushed onto the normalised last line of
+whichever side lacks one — collision-free by construction — and the emitted
+lines are untouched, so it cost nothing in output. The output half rides on
+the line itself: `(Op, Vec<u8>)` became an `Edit` struct with a
+`no_final_newline` flag, set by one pass over the edit script that finds the
+last `Delete`-or-`Equal` for file A and the last `Insert`-or-`Equal` for B.
+
+**One thing the design did not anticipate, and it needed measuring.**
+Side-by-side prints **no** marker: GNU's `-y` on an unterminated file shows
+the line and nothing else, and simply omits the newline from its own last
+line of output. So that renderer deliberately does not bind the flag, with
+the measurement recorded where the `..` is.
+
+`FinalNewline` is an enum rather than a `bool` because the polarity has four
+call sites and getting it backwards produces another silent wrong answer
+rather than a compile error — which is exactly what the bug was. The first
+draft of `read_file` did name the variable backwards, so the concern was not
+hypothetical.
+
+**Measured:** `scripts/diff-diff.sh` 71 passed/36 differed → **75/32**, four
+cases fixed and `comm` confirming none newly differ. Five unit cases, three
+of them controls — both-unterminated is equal, both-terminated is equal, and
+an `Equal` line can be the last line of both files at once. Removing the
+comparison marker turns the bug's case red and leaves all three controls
+green.
+
+---
+
+Original report follows.
+
+`diff` reports two files as identical, **exit 0**, when one ends with a newline
+and the other does not:
+
+    $ diff base.txt nonl.txt          # ours
+    $                                 # nothing, exit 0
+
+    $ diff base.txt nonl.txt          # GNU
+    4c4
+    < delta
+    ---
+    > delta
+    \ No newline at end of file
+    exit 1
+
+`base.txt` is `alpha/bravo/charlie/delta` with a trailing newline and
+`nonl.txt` is the same four lines without one. They are different files —
+26 bytes against 25 — and we say they are the same.
+
+This is the **same class** as `B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL`,
+which was fixed today: a wrong answer rather than an error, and the idiom
+`diff expected actual && echo OK` passes when it should fail. It is NOT the
+same cause — that one was `from_utf8_lossy`; this one is that splitting a file
+into lines throws the terminator away, so both files yield the same four lines.
+Fixing the first did not touch it, and the harness case stayed red throughout.
+
+### The fix, worked out but not yet applied
+
+**The comparison half is small and provably safe.** `compute_diff` already
+builds `norm_a`/`norm_b` as comparison keys *separate* from the `orig_a`/`orig_b`
+it emits, which is exactly the seam needed. Give it the two
+"ends with a newline" flags and append a marker byte to the normalised **last**
+line of whichever side lacks one:
+
+* if neither ends with a newline, both get the marker and still compare equal —
+  correct;
+* if one does, only that side is marked and the last lines differ — correct;
+* the marker touches no emitted line, because output comes from `orig_*`.
+
+**Use `\n` itself as the marker.** A line produced by `split_lines` cannot
+contain a newline by construction, so the collision is not merely unlikely, it
+is impossible — no sentinel value to pick and no escaping to get wrong.
+
+**The output half is the plumbing.** GNU prints
+`\ No newline at end of file` after the line from the side that lacks it, so
+`print_normal` / `print_unified` / `print_context` each need the two flags and
+the two total line counts, and must recognise the final line of each side
+(`start + count - 1 == total - 1`). That is three renderers, mechanical, and is
+the reason this is written down rather than half-done: the comparison fix alone
+would turn a *wrong* answer into a *right answer with incomplete output*, which
+still leaves the harness case red and would read afterwards like an oversight
+rather than a decision.
+
+### Where it sits
+
+`scripts/diff-diff.sh` covers it as `diff base.txt nonl.txt` and three
+neighbours (`-u`, `-c`, `-q` of the same pair) — it has had the fixtures all
+along, like the byte cases did. Today's work took that harness from **43 passed
+/ 64 differed to 68 / 39**; this is the largest single wrong-answer left in the
+remainder.
+
+## TD-B-CP-DIFF-CANNOT-SEE-A-DIFFERENCE-MADE-OF-NUL-BYTES (lane B, 2026-09-14)
+
+**Status:** OPEN — diagnosed and the fix written, but **reverted unverified**
+
+`scripts/cp-diff.sh` compares the copied tree's file contents by capturing them
+in a command substitution:
+
+```sh
+o_body=$(contents "$o_dir" | scrub "$o_dir"); g_body=$(contents "$g_dir" | ...)
+```
+
+A command substitution **drops NUL bytes**, and bash says so, once per file:
+
+    cp-diff.sh: line 419: warning: command substitution: ignored null byte in input
+
+Both sides lose them identically, so two files differing **only** in NUL bytes
+compare EQUAL and the harness reports the copy as faithful. That is the same
+shape as the `diff` bug fixed earlier today: comparing a lossy projection of
+the thing rather than the thing.
+
+`contents()` is what feeds it, and it `cat`s each file raw — so every fixture
+holding a NUL reaches the capture. The warnings have presumably been printed on
+every run for as long as those fixtures have existed.
+
+### The fix, written and then backed out
+
+Add a per-file checksum inside `contents()`, above the body:
+
+```sh
+printf '== %s\n' "$f"
+printf 'sha %s\n' "$(sha256sum <"$f" 2>/dev/null | cut -d' ' -f1)"
+cat -- "$f"
+```
+
+The sum is over the raw bytes and is plain hex, so it survives the capture; the
+readable body stays beneath it so a failure is still diagnosable rather than a
+wall of differing hashes. Both sides get it, so no expected output changes —
+what changes is that a NUL-only difference stops being invisible.
+
+**Backed out because I could not verify it.** `all-diff.sh` was running, the
+machine was saturated, and three attempts at an isolated probe either mangled
+in the shell layers or timed out. A harness change that has not been shown to
+(a) catch the case it is for and (b) still call identical trees identical is
+exactly the kind that turns green into noise for the other two lanes. The
+diagnosis is solid and the patch is above; applying it wants a quiet machine
+and the two-way probe, not a confident-sounding commit.
+
+## B-DATE-IGNORES-EVERY-STRFTIME-FLAG-AND-WIDTH (lane B, 2026-09-14)
+
+**Status:** flags and widths **FIXED 2026-09-14**; the `-d` grammar remains open
+
+`localtime::strftime` now reads flags and a width before the conversion, so
+all seven flag/width cases pass: `scripts/date-diff.sh` went **80 passed / 41
+differed to 87 / 34**. The remaining 34 are the second cluster below — `-d`
+accepting anything but `@SECONDS` — which is GNU's whole date grammar and a
+separate job.
+
+**One rule needed a third measurement.** `%#a` was implemented as a
+per-character case swap, the obvious reading of "opposite case", which gives
+`sUN`. Measuring six fields showed `#` flips the FIELD, with the direction
+taken from its text — `%#a` `SUN`, `%#p` `am`, `%#B` `SEPTEMBER`, `%#Z` `utc`
+— and that `%P` is exempt, because `%P` is already the flipped spelling of
+`%p`. Six tests pin the measured rules, including `%1d` and last-flag-wins.
+
+`date +%-d` prints the literal text `%-d`. So does `%_d`, `%0e`, `%^a`, `%#a`,
+`%5S` and every other flagged or width-qualified conversion:
+`localtime::strftime` reads exactly one byte after the `%`, so a flag is an
+unrecognised specifier and comes out verbatim.
+
+Found by running `date` over `scripts/date-diff.sh`'s own 77 cases against GNU
+directly: **45 differ**, in two clusters.
+
+| cluster | cases | size |
+|---|---|---|
+| flags and widths (`%-d`, `%_d`, `%0e`, `%^a`, `%#a`, `%5S`, `%-5S`) | ~7 | bounded, specified below |
+| `-d` accepting anything but `@SECONDS` (`-d '2021-03-04 05:06:07'`) | ~30 | GNU's whole date grammar; a separate job |
+
+### The measured specification
+
+Every line below was run, not recalled. `date -d @1000000000 +'[%X]'`, TZ=UTC:
+
+| format | output | what it shows |
+|---|---|---|
+| `%d` `%-d` `%_d` `%0d` | `09` `9` `⎵9` `09` | `-` no pad, `_` space pad, `0` zero pad |
+| `%e` `%0e` `%_e` | `⎵9` `09` `⎵9` | `0` overrides a space-padded field |
+| `%a` `%^a` `%#a` | `Sun` `SUN` `SUN` | `^` upper, `#` swap case |
+| `%S` `%5S` `%-5S` `%_5S` `%05S` | `40` `00040` `40` `⎵⎵⎵40` `00040` | width; `-` discards the width too |
+| `%5e` `%5a` `%10B` `%5Z` | `⎵⎵⎵⎵9` `⎵⎵Sun` `⎵September` | **string fields pad with SPACE** |
+| `%0a` `%_a` | `Sun` `Sun` | a pad flag on a string field does nothing |
+| `%3H` `%3j` `%12N` | `001` `252` `000000000000` | width applies to any numeric field |
+
+**Two rules that a reasonable implementation would get wrong:**
+
+1. **`%1d` is `9`, not `09`.** The width *replaces* the field's default width;
+   it is not a minimum applied to the default rendering. An implementation that
+   renders `%d` as `09` and then pads to the requested width returns `09` here
+   and is wrong. The value must be formatted *with* the requested width.
+2. **The last flag wins.** `%-0d` is `09` and `%0-d` is `9`.
+
+### Why this was measured twice
+
+The first sweep captured both sides with `.strip()`, which showed `%_d` as `9`.
+Implementing from that reading would have produced no space padding at all and
+looked right against the stripped comparison. Re-measuring with `[` `]`
+delimiters is what turned it into ` 9`. **A comparison that normalises
+whitespace cannot be used to specify something whose whole content is
+whitespace.**
+
+### What the fix needs
+
+`strftime` currently formats each field inline, so there is no single place a
+width or pad can be applied. The numeric arms need to go through one helper
+taking `(value, default_width, default_pad)` with the flags and width
+overriding both — which is a real change to a ~40-arm function shared by
+`date`, `ls` and `diff`'s header, and wants doing with attention rather than at
+the end of a tick.

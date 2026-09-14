@@ -5,7 +5,9 @@
 
 use quoting::quoteaf_os;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{self, Write};
 use std::process;
 
 struct Options {
@@ -18,7 +20,7 @@ struct Options {
     /// String to search for
     prefix: String,
     /// File to search in (default: /usr/share/dict/words)
-    file: String,
+    file: OsString,
 }
 
 fn print_help() {
@@ -37,27 +39,46 @@ fn print_help() {
     println!("digits are considered when comparing.");
 }
 
-fn parse_args(args: &[String]) -> Options {
+/// The search key as text, or exit 1 if it is not text.
+///
+/// See the call site for why "not text" means "matches nothing" here rather
+/// than being decoded: `look`'s whole comparison is Unicode-aware and its
+/// dictionary is read as UTF-8, so a key that is not UTF-8 has nothing it
+/// could match. Exiting 1 with no output is the same answer `look` gives for
+/// a word that is simply absent.
+fn decode_key(arg: &OsStr) -> String {
+    match arg.to_str() {
+        Some(s) => s.to_string(),
+        None => process::exit(1),
+    }
+}
+
+fn parse_args(args: &[OsString]) -> Options {
     let mut opts = Options {
         alpha_only: false,
         case_insensitive: false,
         terminate: None,
         prefix: String::new(),
-        file: "/usr/share/dict/words".to_string(),
+        file: OsString::from("/usr/share/dict/words"),
     };
 
-    let mut positional: Vec<String> = Vec::new();
+    let mut positional: Vec<OsString> = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
         let arg = &args[i];
-        match arg.as_str() {
+        // `""` for a word that is not valid Unicode: it matches no option and
+        // falls through to the operand arm, which keeps `arg` itself. Every
+        // option name here is ASCII.
+        match arg.to_str().unwrap_or("") {
             "-d" | "--alphanum" => opts.alpha_only = true,
             "-f" | "--ignore-case" => opts.case_insensitive = true,
             "-t" => {
                 i += 1;
-                if i < args.len() && !args[i].is_empty() {
-                    opts.terminate = args[i].chars().next();
+                if let Some(s) = args.get(i).and_then(|a| a.to_str())
+                    && !s.is_empty()
+                {
+                    opts.terminate = s.chars().next();
                 }
             }
             "-h" | "--help" => {
@@ -68,9 +89,11 @@ fn parse_args(args: &[String]) -> Options {
                 println!("look (Slate OS coreutils) 0.1.0");
                 process::exit(0);
             }
-            _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
-                // Combined flags like -df
-                let chars: Vec<char> = arg[1..].chars().collect();
+            s if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
+                // Combined flags like -df. `s` is the decoded view: a word
+                // that is not Unicode decoded to `""`, which fails this guard
+                // and is taken as an operand, where it belongs.
+                let chars: Vec<char> = s.get(1..).unwrap_or("").chars().collect();
                 let mut j = 0;
                 while j < chars.len() {
                     match chars[j] {
@@ -83,8 +106,10 @@ fn parse_args(args: &[String]) -> Options {
                                 continue;
                             } else {
                                 i += 1;
-                                if i < args.len() && !args[i].is_empty() {
-                                    opts.terminate = args[i].chars().next();
+                                if let Some(v) = args.get(i).and_then(|a| a.to_str())
+                                    && !v.is_empty()
+                                {
+                                    opts.terminate = v.chars().next();
                                 }
                             }
                         }
@@ -109,11 +134,24 @@ fn parse_args(args: &[String]) -> Options {
             eprintln!("Try 'look --help' for more information.");
             process::exit(1);
         }
+        // THE SEARCH KEY MUST BE TEXT, and that is not a shortcut.
+        //
+        // Everything `look` compares goes through `normalize`, which asks
+        // `char::is_alphanumeric` and `to_lowercase` -- Unicode questions
+        // about characters, not bytes -- and the dictionary itself is read
+        // with `read_to_string`, so a file that is not UTF-8 is already
+        // refused whole. A key that is not UTF-8 therefore cannot match any
+        // line of any file this program can read.
+        //
+        // So it is reported as no match (status 1, no output) rather than
+        // decoded lossily. `to_string_lossy` would turn the offending bytes
+        // into U+FFFD and then search for THAT, which is a different word
+        // from the one asked for and could match a line the user never named.
         1 => {
-            opts.prefix = positional[0].clone();
+            opts.prefix = decode_key(&positional[0]);
         }
         2 => {
-            opts.prefix = positional[0].clone();
+            opts.prefix = decode_key(&positional[0]);
             opts.file = positional[1].clone();
         }
         _ => {
@@ -163,13 +201,23 @@ fn extract_key(
 }
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so a dictionary
+    // path holding a byte that is not valid Unicode killed the process here.
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let opts = parse_args(&args);
 
     let content = match fs::read_to_string(&opts.file) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("look: {}: {}", opts.file, e);
+            // Bytes: the path came from argv and may hold any byte but `/`
+            // and NUL. `OsString` has no `Display` for that reason, and the
+            // `to_string_lossy` that would make this compile prints a name
+            // the user never typed.
+            let mut line: Vec<u8> = b"look: ".to_vec();
+            line.extend_from_slice(&quoting::os_bytes(&opts.file));
+            line.extend_from_slice(format!(": {e}").as_bytes());
+            line.push(b'\n');
+            let _ = io::stderr().write_all(&line);
             process::exit(2);
         }
     };
@@ -292,7 +340,7 @@ mod tests {
     // Argument parsing
     #[test]
     fn test_parse_basic() {
-        let args = vec!["hello".to_string()];
+        let args = vec!["hello".into()];
         let opts = parse_args(&args);
         assert_eq!(opts.prefix, "hello");
         assert_eq!(opts.file, "/usr/share/dict/words");
@@ -302,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_parse_with_file() {
-        let args = vec!["hello".to_string(), "/tmp/words".to_string()];
+        let args = vec!["hello".into(), "/tmp/words".into()];
         let opts = parse_args(&args);
         assert_eq!(opts.prefix, "hello");
         assert_eq!(opts.file, "/tmp/words");
@@ -310,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_parse_flags() {
-        let args = vec!["-df".to_string(), "hello".to_string()];
+        let args = vec!["-df".into(), "hello".into()];
         let opts = parse_args(&args);
         assert!(opts.alpha_only);
         assert!(opts.case_insensitive);
@@ -318,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_parse_terminate() {
-        let args = vec!["-t".to_string(), ":".to_string(), "hello".to_string()];
+        let args = vec!["-t".into(), ":".into(), "hello".into()];
         let opts = parse_args(&args);
         assert_eq!(opts.terminate, Some(':'));
     }

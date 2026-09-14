@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "Coreutils for SlateOS (86 binaries)"
 
+[build-dependencies]
+# Tells cargo that the hand-built sysroot libc.a is an input, so a
+# libc rebuild relinks these binaries instead of silently leaving them
+# stale. See userspace/sysroot-dep.
+sysroot-dep = { path = "../sysroot-dep" }
+
 [dependencies]
 # `/proc` parsing lives in `procinfo`, shared with `userspace/htop`,
 # `apps/procexplorer`, and `userspace/ps` until it was retired on

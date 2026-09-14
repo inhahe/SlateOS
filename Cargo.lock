@@ -50,6 +50,7 @@ name = "ar"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "sysroot-dep",
 ]
 
 [[package]]
@@ -415,6 +416,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "sha2",
+ "sysroot-dep",
  "userspec",
  "utmpfile",
 ]
@@ -502,6 +504,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "daywindow"
+version = "0.1.0"
+
+[[package]]
 name = "dbus"
 version = "0.1.0"
 dependencies = [
@@ -546,12 +552,14 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "authlib",
+ "daywindow",
  "guiremote",
  "guitk",
  "imagecodec",
  "inputsettings",
  "keylayout",
  "loginusers",
+ "notifsettings",
  "oswindow",
  "posix",
  "scratchdir",
@@ -727,6 +735,7 @@ dependencies = [
 name = "eject"
 version = "0.1.0"
 dependencies = [
+ "optionalfile",
  "procinfo",
  "quoting",
 ]
@@ -790,6 +799,8 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -1355,6 +1366,9 @@ dependencies = [
 [[package]]
 name = "ldconfig"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ldd"
@@ -1450,6 +1464,7 @@ name = "logger"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "quoting",
  "userdb",
 ]
 
@@ -1509,6 +1524,7 @@ dependencies = [
  "deflate",
  "quoting",
  "scratchdir",
+ "sysroot-dep",
 ]
 
 [[package]]
@@ -1582,6 +1598,7 @@ name = "lsns"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "quoting",
 ]
 
 [[package]]
@@ -1929,6 +1946,15 @@ dependencies = [
  "guitk",
  "oswindow",
  "tzrules",
+]
+
+[[package]]
+name = "notifsettings"
+version = "0.1.0"
+dependencies = [
+ "daywindow",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -2502,6 +2528,7 @@ dependencies = [
  "compositor",
  "guitk",
  "inputsettings",
+ "notifsettings",
  "oswindow",
  "settingsfile",
 ]
@@ -2851,6 +2878,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysroot-dep"
+version = "0.1.0"
+
+[[package]]
 name = "sysstat"
 version = "0.1.0"
 dependencies = [
@@ -2877,16 +2908,6 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "systray"
-version = "0.1.0"
-dependencies = [
- "appearance",
- "guitk",
- "oswindow",
- "tzrules",
 ]
 
 [[package]]

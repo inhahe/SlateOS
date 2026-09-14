@@ -19,6 +19,35 @@ call graph outward from every `save()` on a settings type, one crate at a
 time, and reports any `#[test]` that can reach one without a scratch guard in
 its body.
 
+WHEN IT FIRES, which is the useful thing to know before you go looking. On
+2026-09-14 it caught three tests in one session, and none of them had been
+edited. All three were pressing a control that had just stopped being inert:
+
+  * a warmth slider whose value nothing read until the compositor began
+    warming frames from it;
+  * `the_panes_event_buffer_does_not_grow`, which presses the notification
+    pane's Night Light switch five times -- free for as long as that switch
+    did nothing;
+  * a per-app notification toggle, once the shell started applying it.
+
+So the pattern is not "somebody wrote a careless test". It is: **wiring up a
+dead control makes every test that was already pressing it start having
+effects.** The tests were correct when written and correct afterwards; what
+changed was underneath them. If you have just given a switch its first real
+consumer, run this before you push -- the tests that will trip it are the ones
+you did not touch, which is exactly the set you will not think to check.
+
+FINDING THE CULPRIT, when the report names a crate and you want a test. The
+gate answers "which crate", deliberately -- walking to a test name costs a
+second pass. The quickest way across is to make the write itself panic:
+
+    fn save_whatever(&mut self) {
+        panic!("PROBE");
+        ...
+
+and run the crate's tests; the failures name themselves. Two minutes, against
+guessing which of several thousand tests reaches a `save()`.
+
 Usage:  python scripts/check-scratch-config.py [--self-test] [crate-substring ...]
 """
 
@@ -45,7 +74,20 @@ from rustslice import production_end  # noqa: E402
 
 # The call that actually touches the disk. `InputFile`, `AppearanceFile` and
 # the rest all reach it through `settingsfile`.
-SAVES = re.compile(r"[.]save" + BS + "s*" + BS + "(|settingsfile::[" + BS + "w:]*write")
+#
+# `store` is here because it was missing, and the miss is the exact shape this
+# whole script is about. `settingsfile::store` is *the* way a settings surface
+# writes its file -- `InputFile::save` is a one-line wrapper over it -- and the
+# pattern matched `write` only. A crate was therefore save-capable and invisible
+# the moment its saving method was called anything other than `save`:
+# `apps/fileassoc` gained persistence on 2026-09-14 through a method named
+# `persist`, its four mutation tests started writing, and this gate answered
+# "ok: 12 save-capable crates wrote nothing to the real config" -- true of the
+# twelve it could see, and silent about the thirteenth. A check that reports
+# success over a population it cannot enumerate is the defect it exists to find.
+SAVES = re.compile(
+    r"[.]save" + BS + "s*" + BS + "(|settingsfile::[" + BS + "w:]*(write|store)"
+)
 GUARD = re.compile(r"with_scratch_config|with_env" + BS + "b|ScratchDir::new")
 FN = re.compile(r"^(\s*)(?:pub(?:\([\w:]+\))?\s+)?(?:async\s+)?(?:const\s+)?fn\s+(\w+)")
 TEST_ATTR = re.compile(r"^\s*#\[(test|tokio::test)\]")
@@ -94,6 +136,35 @@ def scan():
     return crates
 
 
+def can_address_the_config_dir(crate):
+    """Whether a crate's manifest gives it any way to name the config directory.
+
+    This exists because `SAVES` -- a pattern over *call spellings* -- is not an
+    enumeration of anything. It answers "which crates write settings?" with
+    "the ones that spell it the way I expect", and a crate is free to spell it
+    otherwise without telling anyone. Two did: `apps/fileassoc` and
+    `apps/stickynotes` both named their saving method `persist`, independently,
+    and neither matched the `.save(` the pattern looked for. fileassoc's tests
+    wrote a real `~/.config/slateos/fileassoc.yaml` while this gate
+    printed "ok: 12 save-capable crates wrote nothing to the real config" --
+    a true sentence about twelve crates and a silent one about the thirteenth.
+
+    The manifest is a sounder question, and not by degree: **the config
+    directory's location comes from `settingsfile::config_dir`, so a crate that
+    does not depend on `settingsfile` cannot name that directory at all.** It
+    is not a better heuristic; it is the actual population, and a crate joins it
+    by adding a dependency rather than by choosing a verb.
+
+    A crate that depends on `settingsfile` only to *read* is included too, and
+    that is the right side to err on: checking one costs a second, and the run
+    below is a no-op for a crate that writes nothing.
+    """
+    toml = ROOT / crate / "Cargo.toml"
+    if not toml.exists():
+        return False
+    return "settingsfile" in toml.read_text(encoding="utf-8", errors="replace")
+
+
 def package_of(crate):
     """The cargo package name for a directory, which is not always its name."""
     toml = ROOT / crate / "Cargo.toml"
@@ -120,6 +191,18 @@ SELF_TESTS = [
         "a bare settingsfile::write is a save too",
         """    fn persist(&self) {
         settingsfile::write_atomic(path, bytes);
+    }
+""",
+        {"saves": True, "test": False},
+    ),
+    (
+        # The spelling the pattern did not know, and the reason it now does.
+        # `settingsfile::store` is how a settings surface writes its file --
+        # `InputFile::save` is a one-line wrapper over it -- and a method that
+        # calls it without being called `save` was invisible here.
+        "a settingsfile::store is a save whatever the method is called",
+        """    fn persist(&mut self) {
+        settingsfile::store(CONFIG_NAME, &self.doc).ok();
     }
 """,
         {"saves": True, "test": False},
@@ -249,9 +332,11 @@ def main(argv):
     is a list nobody reads.
 
     The verdict is empirical instead. Point `XDG_CONFIG_HOME` at an empty
-    directory, run the tests, and look. Anything that appears was written by a
-    test with no scratch directory of its own -- which in a developer's
-    checkout would have been their own configuration.
+    directory, run the tests **one at a time**, and look. Anything that appears
+    was written by a test with no scratch directory of its own -- which in a
+    developer's checkout would have been their own configuration.
+
+    The "one at a time" is load-bearing; see the comment on the run below.
     """
     if selftestflag.wants_selftest(argv):
         return selftest()
@@ -267,7 +352,15 @@ def main(argv):
         return 2
 
     found = scan()
-    crates = [c for c, v in sorted(found.items()) if v["saves"]]
+    # The union of "writes settings, as far as a pattern can tell" and "can
+    # name the config directory at all". The second is the population; the
+    # first is kept because it also reaches crates that save through a helper
+    # in another crate, and because losing it would make the rot check below
+    # meaningless.
+    crates = sorted(
+        {c for c, v in found.items() if v["saves"]}
+        | {c for c in found if can_address_the_config_dir(c)}
+    )
     wanted = [a for a in argv if not a.startswith("-")]
 
     # THREE WAYS THE LIST CAN BE EMPTY, AND ONLY TWO ARE FAILURES. They were
@@ -317,7 +410,19 @@ def main(argv):
         env = dict(os.environ, XDG_CONFIG_HOME=str(probe), HOME=str(probe))
         run = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "run-timeout.py"), "900",
-             "cargo", "test", "-p", pkg, "--target", TARGET],
+             "cargo", "test", "-p", pkg, "--target", TARGET,
+             # One thread, and this gate is worthless without it. Cargo runs a
+             # binary's tests in parallel, and `with_scratch_config` swaps the
+             # *process-wide* `XDG_CONFIG_HOME` -- so a stray write from a test
+             # with no scratch directory lands in a neighbouring test's scratch
+             # directory whenever the two overlap, and that directory is deleted
+             # before this looks. The gate then reports "wrote nothing" about a
+             # write it could not see, which is the exact failure it exists to
+             # catch, one level up. Observed: `apps/settings` wrote a real
+             # `appearance.yaml` on every run for days while this said ok, and
+             # started being caught only when an unrelated new test changed the
+             # scheduling. Serial costs about a second per crate.
+             "--", "--test-threads=1"],
             cwd=ROOT, env=env, capture_output=True, text=True, check=False,
         )
         left = sorted(p for p in probe.rglob("*") if p.is_file())
@@ -335,7 +440,8 @@ def main(argv):
             print("  " + f)
         print(str(len(failures)) + " problem(s): a test wrote settings outside a scratch directory.")
         return 1
-    print("ok: " + str(checked) + " save-capable crates wrote nothing to the real config")
+    print("ok: " + str(checked) + " crates that can name the config directory "
+          "wrote nothing to the real one")
     return 0
 
 

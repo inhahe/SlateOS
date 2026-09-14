@@ -30,9 +30,22 @@
 //!   that request more than this via `io_setup`'s `nr_events` get
 //!   `EINVAL`.
 //! - At most `MAX_AIO_CONTEXTS` (8) contexts may be alive at once.
-//! - `aio_resfd` / eventfd notification is silently ignored — the next
-//!   `io_getevents` will see the completion regardless.
-//! - Per-I/O RWF_* flags (`aio_rw_flags`) are ignored.
+//! - `aio_resfd` / eventfd notification **is** honoured: an iocb carrying
+//!   `IOCB_FLAG_RESFD` has its `aio_resfd` eventfd incremented as the
+//!   completion is queued. Until 2026-09-13 this was accepted and ignored,
+//!   which is worse than not supporting it: a caller that waits on that
+//!   eventfd rather than calling `io_getevents` waits forever, and nothing
+//!   tells it why. What is *not* diagnosed is an `aio_resfd` that is not a
+//!   valid eventfd — Linux rejects that at submit time with `EINVAL`, and we
+//!   queue the completion anyway, so `io_getevents` still returns it.
+//! - Per-I/O `RWF_*` flags (`aio_rw_flags`) are honoured or refused, never
+//!   ignored. `RWF_DSYNC`/`RWF_SYNC` sync the file after a successful write;
+//!   `RWF_NOWAIT` is refused with `EAGAIN` (a synchronous executor always
+//!   blocks, so "fail rather than block" can only be answered by failing);
+//!   `RWF_APPEND` is refused with `EINVAL`; unknown bits are `EINVAL`.
+//!   `RWF_HIPRI` is a scheduling hint with no observable semantics and is the
+//!   only one genuinely ignored. Until 2026-09-13 all of them were ignored,
+//!   which for `RWF_DSYNC` meant reporting a durable write that was not one.
 
 use crate::errno;
 use crate::perprocess::process_global;
@@ -298,6 +311,31 @@ pub extern "C" fn io_destroy(ctx_id: u64) -> i32 {
     0
 }
 
+use crate::file::{PostWriteSync, plan_rw_flags};
+
+/// Whether this opcode writes, and so whether a post-write sync applies.
+fn is_write_opcode(op: u16) -> bool {
+    op == IOCB_CMD_PWRITE || op == IOCB_CMD_PWRITEV
+}
+
+/// The eventfd to poke when this iocb completes, if the caller asked for one.
+///
+/// Split out from `io_submit` so the decision is testable: the eventfd itself
+/// is a kernel object and does nothing on the host triple, but *whether* a
+/// notification is owed, and *which* descriptor it is owed to, is arithmetic.
+/// The bug this replaces was not a failed notification, it was never asking
+/// the question at all.
+fn completion_resfd(iocb: &Iocb) -> Option<i32> {
+    if iocb.aio_flags & IOCB_FLAG_RESFD == 0 {
+        return None;
+    }
+    // aio_resfd is a u32 in the ABI and a descriptor is an i32. A value that
+    // does not fit is not a descriptor anyone could have opened, so there is
+    // nothing to notify -- and casting it would invent a plausible small fd
+    // out of a large one and poke a stranger's file.
+    i32::try_from(iocb.aio_resfd).ok()
+}
+
 // ---------------------------------------------------------------------------
 // io_submit
 // ---------------------------------------------------------------------------
@@ -313,6 +351,36 @@ fn execute_iocb(iocb: &Iocb) -> IoEvent {
     errno::set_errno(0);
 
     let fd = iocb.aio_fildes as crate::types::Fd;
+
+    // Per-I/O flags, decided BEFORE the I/O runs: a flag we cannot honour has
+    // to stop the operation, not be discovered after the bytes have moved.
+    // i32 for the shared policy; a u32 that does not fit is a bit pattern
+    // no RWF_ flag occupies, so it is refused rather than truncated.
+    let raw_flags = match i32::try_from(iocb.aio_rw_flags) {
+        Ok(f) => f,
+        Err(_) => {
+            errno::set_errno(errno::EINVAL);
+            return IoEvent {
+                data: iocb.aio_data,
+                obj: core::ptr::from_ref::<Iocb>(iocb) as u64,
+                res: -i64::from(errno::EINVAL),
+                res2: 0,
+            };
+        }
+    };
+    let sync_after = match plan_rw_flags(raw_flags, is_write_opcode(iocb.aio_lio_opcode)) {
+        Ok(s) => s,
+        Err(e) => {
+            errno::set_errno(e);
+            return IoEvent {
+                data: iocb.aio_data,
+                obj: core::ptr::from_ref::<Iocb>(iocb) as u64,
+                res: -i64::from(e),
+                res2: 0,
+            };
+        }
+    };
+
     let res: i64 = match iocb.aio_lio_opcode {
         IOCB_CMD_PREAD => {
             // Reject buffer addresses that don't fit in a usize on this
@@ -366,6 +434,27 @@ fn execute_iocb(iocb: &Iocb) -> IoEvent {
         -i64::from(if e == 0 { errno::EIO } else { e })
     } else {
         res
+    };
+
+    // The durability the caller asked for, applied once the bytes are written.
+    let final_res = if final_res >= 0 && is_write_opcode(iocb.aio_lio_opcode) {
+        let rc = match sync_after {
+            PostWriteSync::None => 0,
+            PostWriteSync::Data => crate::file::fdatasync(fd),
+            PostWriteSync::Full => crate::file::fsync(fd),
+        };
+        if rc < 0 {
+            // The bytes reached the file but not stable storage, and stable
+            // storage is what was asked for. Returning the byte count here
+            // would be exactly the durability lie this replaced: a caller
+            // whose journal write "succeeded" and is gone after a power cut.
+            let e = errno::get_errno();
+            -i64::from(if e == 0 { errno::EIO } else { e })
+        } else {
+            final_res
+        }
+    } else {
+        final_res
     };
 
     IoEvent {
@@ -453,6 +542,24 @@ pub extern "C" fn io_submit(ctx_id: u64, nr: i64, iocbpp: *mut *mut Iocb) -> i64
             *slot_ref = event;
             ctx.count += 1;
             submitted += 1;
+            // Notify the caller's eventfd, if it asked for one. Done here
+            // rather than after the batch so the eventfd is never readable
+            // before the event it announces is queued -- a waiter that woke
+            // early and called io_getevents would get nothing and could
+            // reasonably conclude the notification was spurious.
+            //
+            // LOCK ORDER: this takes the descriptor table's lock while the
+            // AIO lock is held. That is the same order `execute_iocb` above
+            // already establishes by doing read/write on a descriptor under
+            // this lock, so it adds no new edge and cannot introduce a cycle.
+            if let Some(resfd) = completion_resfd(iocb) {
+                // The return value is deliberately not propagated: the I/O
+                // itself already succeeded and its completion is queued, so
+                // failing the submission over an undeliverable notification
+                // would discard a real result. `io_getevents` still returns
+                // it. See the module docs for the Linux divergence.
+                let _ = crate::epoll::eventfd_write(resfd, 1);
+            }
         } else {
             // Unreachable given the modulo, but keep it defensive.
             return submitted;
@@ -701,6 +808,67 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(io_destroy(ctx), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- io_submit: completion notification (IOCB_FLAG_RESFD) --
+
+    /// An iocb with everything zeroed, so each test sets only what it means.
+    fn blank_iocb() -> Iocb {
+        // SAFETY: Iocb is a plain repr(C) POD of integers; all-zero is a
+        // valid value for every field and is what a caller that memsets its
+        // iocb (the usual idiom) actually passes.
+        unsafe { core::mem::zeroed() }
+    }
+
+    #[test]
+    fn no_resfd_flag_means_no_notification() {
+        let iocb = blank_iocb();
+        assert_eq!(completion_resfd(&iocb), None);
+    }
+
+    #[test]
+    fn resfd_flag_names_the_descriptor_to_notify() {
+        // The regression pin. This used to be unasked: aio_resfd was a field
+        // nothing read, so a caller waiting on the eventfd waited forever.
+        let mut iocb = blank_iocb();
+        iocb.aio_flags = IOCB_FLAG_RESFD;
+        iocb.aio_resfd = 7;
+        assert_eq!(completion_resfd(&iocb), Some(7));
+    }
+
+    #[test]
+    fn resfd_zero_is_a_real_descriptor() {
+        // fd 0 is stdin and a perfectly legal eventfd target; treating the
+        // zero value as "unset" would silently drop exactly one caller.
+        let mut iocb = blank_iocb();
+        iocb.aio_flags = IOCB_FLAG_RESFD;
+        iocb.aio_resfd = 0;
+        assert_eq!(completion_resfd(&iocb), Some(0));
+    }
+
+    #[test]
+    fn a_resfd_too_large_for_a_descriptor_is_not_notified() {
+        // u32 in the ABI, i32 as a descriptor. Casting would turn a huge
+        // value into a plausible small fd and poke an unrelated file.
+        let mut iocb = blank_iocb();
+        iocb.aio_flags = IOCB_FLAG_RESFD;
+        iocb.aio_resfd = u32::MAX;
+        assert_eq!(completion_resfd(&iocb), None);
+        iocb.aio_resfd = 0x8000_0000;
+        assert_eq!(completion_resfd(&iocb), None);
+        iocb.aio_resfd = 0x7fff_ffff;
+        assert_eq!(completion_resfd(&iocb), Some(0x7fff_ffff));
+    }
+
+    #[test]
+    fn other_flags_do_not_request_a_notification() {
+        let mut iocb = blank_iocb();
+        iocb.aio_flags = IOCB_FLAG_IOPRIO;
+        iocb.aio_resfd = 7;
+        assert_eq!(completion_resfd(&iocb), None);
+        // ...but set alongside RESFD it still notifies.
+        iocb.aio_flags = IOCB_FLAG_IOPRIO | IOCB_FLAG_RESFD;
+        assert_eq!(completion_resfd(&iocb), Some(7));
     }
 
     // -- io_submit: validation --

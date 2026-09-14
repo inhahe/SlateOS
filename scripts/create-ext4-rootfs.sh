@@ -2008,6 +2008,9 @@ SLATE_STALE=0
 SLATE_BYTES=0
 SLATE_MISSING=0
 SLATE_MISSING_NAMES=""
+SLATE_ALIASES=0
+SLATE_ALIAS_LINES=""
+SLATE_ALIAS_ORPHANS=""
 if [ ! -f "$SLATE_MANIFEST" ]; then
     echo "[rootfs] ERROR: $SLATE_MANIFEST does not exist, so NO SlateOS-native utility"
     echo "[rootfs]        can be staged. This is an error and not a NOTE because the"
@@ -2025,6 +2028,21 @@ while IFS= read -r name; do
     # it is.
     name="$(printf '%s' "$name" | tr -d '\r' | sed 's/[[:space:]]*$//')"
     [ -n "$name" ] || continue
+    # `alias = producer` asks for a second name for an already-listed binary.
+    # Collected now and created after the copy loop, because the producer may
+    # be listed after its alias and a link needs its target to exist.
+    case "$name" in
+        *=*)
+            # A LITERAL newline below, not a printf in command substitution:
+            # `$(...)` strips trailing newlines, so that separator was the
+            # empty string and all three aliases landed on one line. Every
+            # unit test used a single alias and none could see it; the first
+            # real image build printed them concatenated.
+            SLATE_ALIAS_LINES="$SLATE_ALIAS_LINES$name
+"
+            continue
+            ;;
+    esac
     f="$SLATE_BIN_DIR/$name"
     if [ ! -f "$f" ]; then
         SLATE_MISSING=$((SLATE_MISSING + 1))
@@ -2066,11 +2084,37 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
     if [ "$SLATE_SKIPPED" -gt 0 ]; then
         echo "[rootfs]          ($SLATE_SKIPPED skipped, already present -- see the NOTEs above)"
     fi
+    # STALE IS NOW FATAL, and the reason it was only a warning has gone away.
+    #
+    # Until 2026-09-14 cargo could not see `libc.a` as an input at all -- it is
+    # built by toolchain/build-sysroot.ps1, outside cargo -- so after any
+    # sysroot rebuild EVERY binary was stale and there was no command that
+    # fixed it. Measured then: `rm` the outputs and rebuild took 1.23 s and
+    # left 0 of 70 newer, because the outputs are hardlinks into deps/ and
+    # cargo restores the name from cache, mtime and all. A gate nobody can
+    # satisfy is a gate that gets bypassed, so it warned.
+    #
+    # userspace/sysroot-dep fixed that: the three crates holding the image's
+    # binaries now declare the archive through a build script, and a libc
+    # rebuild relinks them. The command printed below genuinely works, so the
+    # warning can become what it should always have been -- a refusal.
+    #
+    # ALLOW_STALE_FIXTURES=1 downgrades it, the same knob and the same meaning
+    # as the spike gates above: "I know they are stale, pack anyway."
     if [ "$SLATE_STALE" -gt 0 ]; then
-        echo "[rootfs] WARNING: $SLATE_STALE of them are OLDER than the sysroot libc.a, so they link"
-        echo "[rootfs]          a stale libc and prove nothing about the current one. Rebuild:"
-        echo "[rootfs]            cd userspace/coreutils"
-        echo "[rootfs]            CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
+        echo "[rootfs] $SLATE_STALE of $SLATE_COUNT staged binaries are OLDER than the sysroot libc.a."
+        echo "[rootfs] They link a stale libc and prove nothing about the current one."
+        echo "[rootfs] Rebuild them:"
+        echo "[rootfs]   cd userspace/coreutils"
+        echo "[rootfs]   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
+        echo "[rootfs] and the same in userspace/ar and userspace/logrotate."
+        if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+            echo "[rootfs] NOTE: ALLOW_STALE_FIXTURES=1 — packing them anyway."
+        else
+            echo "[rootfs] ERROR: refusing to build an image from stale binaries."
+            echo "[rootfs]        Set ALLOW_STALE_FIXTURES=1 to pack them regardless."
+            exit 1
+        fi
     fi
     # A SIZE TRIPWIRE. This block is the largest single consumer of image bytes
     # and nothing else in this script accounts for free space at all. Running
@@ -2107,6 +2151,51 @@ else
     echo "[rootfs]         cd userspace/coreutils"
     echo "[rootfs]         CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
 fi
+# --- multi-call aliases ------------------------------------------------------
+#
+# A multi-call program reads argv[0] and behaves as a different tool: our `ar`
+# is `ranlib` and `strip` when invoked under those names. That only works if
+# something creates the second name, and `scripts/multicall-aliases.py` found
+# 167 such names across the tree that nothing produces -- "we wrote the
+# dispatch about seventy times and never wrote the links". This writes the
+# links for the binaries that are actually on the image.
+#
+# Hard links rather than symlinks: both give the program the argv[0] it needs,
+# and a hard link cannot dangle if something later moves the target.
+while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    alias_name="$(printf '%s' "$spec" | sed 's/=.*//; s/[[:space:]]*$//')"
+    target_name="$(printf '%s' "$spec" | sed 's/^[^=]*=//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$alias_name" ] && [ -n "$target_name" ] || continue
+    if [ ! -e "$STAGE/bin/$target_name" ]; then
+        # The producer is not on the image, so the alias would be a link to
+        # nothing. Named rather than dropped: an alias whose target was never
+        # staged is a manifest error, and silence is how it stays one.
+        SLATE_ALIAS_ORPHANS="$SLATE_ALIAS_ORPHANS $alias_name(->$target_name)"
+        continue
+    fi
+    if [ -e "$STAGE/bin/$alias_name" ]; then
+        echo "[rootfs] NOTE: /bin/$alias_name already exists, so the alias to"
+        echo "[rootfs]       /bin/$target_name was NOT created. One of the two is wrong."
+        continue
+    fi
+    if ln "$STAGE/bin/$target_name" "$STAGE/bin/$alias_name" 2>/dev/null \
+       || cp -L "$STAGE/bin/$target_name" "$STAGE/bin/$alias_name"; then
+        SLATE_ALIASES=$((SLATE_ALIASES + 1))
+    else
+        SLATE_ALIAS_ORPHANS="$SLATE_ALIAS_ORPHANS $alias_name(link-failed)"
+    fi
+done <<EOF
+$SLATE_ALIAS_LINES
+EOF
+if [ "$SLATE_ALIASES" -gt 0 ]; then
+    echo "[rootfs] created $SLATE_ALIASES multi-call alias(es) in /bin"
+fi
+if [ -n "$SLATE_ALIAS_ORPHANS" ]; then
+    echo "[rootfs] NOTE: alias(es) with no staged producer:$SLATE_ALIAS_ORPHANS"
+    echo "[rootfs]       Each is a name the manifest promises and the image does not have."
+fi
+
 if [ "$SLATE_MISSING" -gt 0 ]; then
     echo "[rootfs] NOTE: $SLATE_MISSING name(s) in the manifest have no built binary and were"
     echo "[rootfs]       skipped:$SLATE_MISSING_NAMES"

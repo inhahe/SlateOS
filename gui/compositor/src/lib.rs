@@ -3123,6 +3123,12 @@ pub enum CompositorRequest {
     /// [`Compositor::reload_input`] for what it does and what it deliberately
     /// leaves alone.
     ReloadInput,
+    /// Tell every client the user's notification rules changed.
+    ///
+    /// Pure relay: unlike the two above, the compositor does not read
+    /// `notifications.yaml` and holds nothing from it. The shell is the reader.
+    /// See [`guiremote::control::RequestBody::ReloadNotifications`].
+    ReloadNotifications,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
@@ -5393,6 +5399,23 @@ impl Compositor {
     #[must_use]
     pub fn color_filter(&self) -> appearance::ColorFilter {
         self.appearance.color_filter
+    }
+
+    /// The per-channel gains that warm the screen, or `None` when night light
+    /// is off.
+    ///
+    /// Read by [`Server::show`] once per frame, beside
+    /// [`color_filter`](Self::color_filter) and for the same reason: this is
+    /// a transform of what finally reaches the display, not of what the
+    /// compositor draws.
+    ///
+    /// `None` rather than gains of `(1, 1, 1)` so that the common case is a
+    /// branch and not two million multiplications by one.
+    #[must_use]
+    pub fn night_light_gains(&self) -> Option<(f32, f32, f32)> {
+        self.appearance
+            .night_light
+            .then(|| appearance::night_light_gains(self.appearance.night_light_strength))
     }
 
     /// How close together two title-bar clicks must be to maximize the window.
@@ -9309,6 +9332,13 @@ impl Compositor {
                 // told the compositor has re-read the file, which is true
                 // either way, and a reply that differed would leak the state of
                 // the user's settings to anyone allowed to ask for a reload.
+                CompositorResponse::Ok
+            }
+            CompositorRequest::ReloadNotifications => {
+                // No `self.reload_*` beside it, and that is not an omission:
+                // this compositor keeps no copy of the notification rules to
+                // refresh. It is announcing, not adopting.
+                self.announce_settings_change(SettingsGroup::Notifications);
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadInput => {

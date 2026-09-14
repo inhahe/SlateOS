@@ -150,6 +150,34 @@ mkdir -p da/sub db/sub
 printf 'nested\n'                                > da/sub/deep.txt
 printf 'NESTED\n'                                > db/sub/deep.txt
 
+# Names holding a byte that is not valid UTF-8, which on this OS is a legal
+# filename -- every byte but `/` and NUL is.
+#
+# These exist because `diff` handled them in the worst possible way until
+# 2026-09-14: `list_dir` read each entry with `.to_str()` and SKIPPED the ones
+# that did not decode, so `diff -r` compared trees while silently omitting
+# files, and reported no difference for a file it had never opened. A
+# comparison tool answering "the same" about something it declined to read is
+# the one failure it must not have. Separately, `main` used `env::args()`,
+# whose iterator unwraps, so naming such a file on the command line killed the
+# process before `diff` ran at all.
+#
+# `\351` is the Latin-1 encoding of `é` and is not valid UTF-8 on its own,
+# which is exactly the property being tested.
+# Both names go through `$(printf ...)`. Writing `"da/only\351.txt"` directly
+# does NOT work and is the trap here: bash does not process `\351` inside
+# double quotes, so that creates a file whose name contains a literal
+# backslash, three digits and a dot -- valid ASCII throughout, and therefore
+# testing nothing. The first version of this block did exactly that, and it
+# looked right because both sides agreed about it.
+nonutf8=$(printf 'odd\351name.txt')
+onlyodd=$(printf 'only\351.txt')
+printf 'alpha\n'                                 > "da/$nonutf8"
+printf 'ALPHA\n'                                 > "db/$nonutf8"
+printf 'lonely\n'                                > "da/$onlyodd"
+printf 'top level\n'                             > "$nonutf8"
+stamp "da/$nonutf8" "db/$nonutf8" "da/$onlyodd" "$nonutf8"
+
 # Everything gets the same mtime, including the directories, so no header and no
 # `-r` listing can differ for a reason that is not the program's.
 stamp ./*.txt da/*.txt db/*.txt da/sub/*.txt db/sub/*.txt da/sub db/sub da db .
@@ -211,6 +239,20 @@ run_stdin() { local i="$1"; shift; compare "$i" "$@"; report "printf '$i' | diff
 # A case expected to differ, with the reason. Counted apart so that one which
 # starts agreeing is reported too: an xfail that silently becomes correct is a
 # stale note in the harness rather than a success.
+# `xfail_case` for a case that feeds stdin. Same counting, same XPASS report.
+xfail_stdin() {
+  local why="$1"; local i="$2"; shift 2
+  compare "$i" "$@"
+  if [ "$AGREED" = yes ]; then
+    xpass=$((xpass+1))
+    printf 'XPASS %s -- expected to differ (%s) and did not\n' "printf '$i' | diff $*" "$why"
+  else
+    xfail=$((xfail+1))
+    [ -n "${VERBOSE:-}" ] && printf 'xfail %s (%s)\n' "printf '$i' | diff $*" "$why"
+  fi
+  return 0
+}
+
 xfail_case() {
   local why="$1"; shift
   compare - "$@"
@@ -323,13 +365,31 @@ run_case -u bytes.txt bytes2.txt
 run_stdin 'alpha\nbravo\ncharlie\ndelta\n' base.txt -
 run_stdin 'alpha\nbravo\nCHANGED\ndelta\n' base.txt -
 run_stdin 'alpha\nbravo\ncharlie\ndelta\n' - base.txt
-run_stdin 'alpha\nbravo\nCHANGED\ndelta\n' -u - base.txt
+# STDIN HAS NO MTIME, so `-u` stamps its `--- -` header with the CURRENT
+# time -- measured, that is what GNU does too -- and the two sides of this
+# harness run milliseconds apart. The nanosecond field cannot agree, so
+# this case can never pass and is not a defect.
+#
+# WHAT IT STOPS CHECKING, stated so nobody has to work it out later: this
+# is the only case exercising UNIFIED output with stdin as an operand, so
+# a regression in that combination would hide here. The other four stdin
+# cases use the normal format, which prints no header, so the reading of
+# stdin is still checked; and every other unified case still checks the
+# header. Only the intersection is unwatched.
+xfail_stdin 'the --- header stamps stdin with the current time' \
+  'alpha\nbravo\nCHANGED\ndelta\n' -u - base.txt
 run_stdin '' - empty.txt
 
 # --- directories ---------------------------------------------------------------
 run_case da db
 run_case -r da db
 run_case --recursive da db
+
+# A non-UTF-8 filename named on the command line, and one reached by the
+# directory walk. See the fixture block for what these caught.
+run_case "$nonutf8" base.txt
+run_case base.txt "$nonutf8"
+run_case -u "da/$nonutf8" "db/$nonutf8"
 run_case -q -r da db
 run_case -N da db
 run_case --new-file da db

@@ -1499,8 +1499,10 @@ mod tests {
         };
         let before = width_of(&app);
 
-        let mut settings = appearance::AppearanceSettings::default();
-        settings.caret_width_scale = 3.0;
+        let settings = appearance::AppearanceSettings {
+            caret_width_scale: 3.0,
+            ..appearance::AppearanceSettings::default()
+        };
         app.appearance_changed(&settings);
 
         let after = width_of(&app);

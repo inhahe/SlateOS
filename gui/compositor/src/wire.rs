@@ -529,6 +529,7 @@ fn to_compositor_request(
         // *not* contain.
         RequestBody::ReloadAppearance => CompositorRequest::ReloadAppearance,
         RequestBody::ReloadInput => CompositorRequest::ReloadInput,
+        RequestBody::ReloadNotifications => CompositorRequest::ReloadNotifications,
         // Handled by `answer_requests` before it reaches here, because it
         // changes the *link*, not the compositor: nothing about a subscription
         // belongs in the window/display state a `CompositorRequest` describes,
@@ -2703,6 +2704,46 @@ mod tests {
 
             exchange(&mut comp, &mut link, vec![RequestBody::ReloadInput]);
             assert_eq!(announced(&mut comp), vec![(w.0, SettingsGroup::Input)]);
+        });
+    }
+
+    /// A notification-rules reload announces its own group and reads nothing.
+    ///
+    /// Three tags now, so the confusion this file's neighbour warns about has
+    /// one more way to happen. This one is also the first reload verb the
+    /// compositor does **not** act on: it keeps no copy of the rules, so the
+    /// whole of its job here is to say so to every window. A version that
+    /// re-read `input.yaml` on the way past would pass a test that only
+    /// checked the group.
+    #[test]
+    fn a_notifications_reload_announces_notifications_and_changes_nothing_here() {
+        inputsettings::config::testing::with_scratch_config("wire-announce-notif", |_root| {
+            let (mut comp, mut link) = wired();
+            let w = comp.create_window("a".to_string(), 100, 100, 7);
+            let _ = announced(&mut comp);
+            let before = comp.double_click_ms();
+
+            let responses = exchange(&mut comp, &mut link, vec![RequestBody::ReloadNotifications]);
+
+            assert!(
+                matches!(
+                    responses.as_slice(),
+                    [Response {
+                        body: ResponseBody::Ok,
+                        ..
+                    }]
+                ),
+                "a notifications reload is answered Ok, got {responses:?}"
+            );
+            assert_eq!(
+                announced(&mut comp),
+                vec![(w.0, SettingsGroup::Notifications)]
+            );
+            assert_eq!(
+                comp.double_click_ms(),
+                before,
+                "the compositor re-read a file it has no business reading"
+            );
         });
     }
 

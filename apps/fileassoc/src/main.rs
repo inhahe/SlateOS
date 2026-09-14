@@ -15,13 +15,13 @@ use std::process::ExitCode;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
-use guitk::kv;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use yamldoc::Document;
 
 // ============================================================================
 // Colours come from `appearance::Palette` -- see design-decisions 822.
@@ -281,54 +281,12 @@ pub struct Association {
 }
 
 impl Association {
-    /// The characters the config grammar treats as structure: the separator
-    /// and the comment marker.
-    const CONFIG_META: &'static [char] = &['=', '#'];
-
     /// Create a new association.
     pub fn new(extension: &str, app_id: &str) -> Self {
         Self {
             extension: extension.to_string(),
             app_id: app_id.to_string(),
         }
-    }
-
-    /// Serialize to a config line: `extension=app_id`.
-    ///
-    /// Both halves are escaped, and the reader below undoes exactly this. The
-    /// unescaped version was wrong in a way that produced no error: because
-    /// [`Self::from_config_line`] trims, an extension registered as `"txt "`
-    /// wrote the line `txt =gedit` and read back as `txt`, silently
-    /// reassigning a *different* extension's default application. Nothing in
-    /// the path catches that — [`AssocRegistry::register_file_type`] does not
-    /// validate the extension string, so `"txt "` is a registerable file type
-    /// and the two are genuinely distinct entries in the registry.
-    ///
-    /// `#` is escaped along with the separator because a line beginning with
-    /// one is a comment: an extension of `#txt` would otherwise export to a
-    /// line the importer skips, losing the association without a word.
-    pub fn to_config_line(&self) -> String {
-        let mut buf = kv::escape(&self.extension, Self::CONFIG_META);
-        buf.push('=');
-        buf.push_str(&kv::escape(&self.app_id, Self::CONFIG_META));
-        buf
-    }
-
-    /// Parse from a config line: `extension=app_id`.
-    /// Returns `None` if the line is malformed.
-    pub fn from_config_line(line: &str) -> Option<Self> {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            return None;
-        }
-        // Split at the first *unescaped* `=`: a `\=` belongs to the extension,
-        // and `split_once` cannot tell the two apart because it does not know
-        // what escaped it.
-        let (ext, app) = kv::split_once_unescaped(trimmed, '=')?;
-        if ext.is_empty() || app.is_empty() {
-            return None;
-        }
-        Some(Self::new(&kv::unescape(ext), &kv::unescape(app)))
     }
 }
 
@@ -349,12 +307,13 @@ pub enum AssocError {
     AlreadyExists(String),
     /// The extension typed into the "Add File Type" dialog is not usable.
     ///
-    /// Distinct from `ParseError`, which is about a *config file* and carries a
-    /// line number there is no honest value for when the text came from a text
-    /// box the user is still standing in front of.
+    /// There used to be a `ParseError` beside this one, carrying the line
+    /// number of a bad line in the config file. It went with the hand-rolled
+    /// `ext=app` grammar it belonged to: the file is a YAML document now, read
+    /// by `yamldoc`, which repairs what it can and reports no line. Inventing a
+    /// line number to keep the variant alive is exactly what the old comment
+    /// here warned against doing.
     InvalidExtension(String),
-    /// Config parse error at a given line number.
-    ParseError { line_number: usize, detail: String },
 }
 
 impl core::fmt::Display for AssocError {
@@ -367,12 +326,6 @@ impl core::fmt::Display for AssocError {
             }
             Self::AlreadyExists(ext) => write!(f, "Association already exists for .{ext}"),
             Self::InvalidExtension(detail) => write!(f, "Not a usable extension: {detail}"),
-            Self::ParseError {
-                line_number,
-                detail,
-            } => {
-                write!(f, "Parse error at line {line_number}: {detail}")
-            }
         }
     }
 }
@@ -382,6 +335,32 @@ impl core::fmt::Display for AssocError {
 // ============================================================================
 
 /// The central registry managing file types, applications, and their associations.
+/// The configuration file associations live in, under the user's config
+/// directory. Named without an extension because `settingsfile` adds one.
+pub const CONFIG_NAME: &str = "fileassoc";
+
+/// The mapping inside that file: extension -> application id.
+const ASSOCIATIONS_KEY: &str = "associations";
+
+/// What a freshly written associations file says about itself.
+///
+/// Only used when there is no file yet; an existing one keeps whatever the
+/// user wrote in it, comments and key order included, because the document is
+/// edited rather than rebuilt.
+const CONFIG_HEADER: &str = "\
+# Slate OS file associations.
+#
+# Each entry names the application that opens one kind of file. Editing this
+# by hand is fine -- the File Associations program reads it back, and keeps
+# any comments you add.
+#
+# The key below is part of this header, empty though it is: a comment with
+# no key under it is trailing content with nothing to attach to, and the
+# first association written would be inserted above it -- leaving the file
+# explaining itself at the bottom.
+associations:
+";
+
 pub struct AssociationRegistry {
     /// All known file types, keyed by extension (lowercase).
     pub file_types: BTreeMap<String, FileType>,
@@ -695,39 +674,52 @@ impl AssociationRegistry {
     /// grew a `trim` and an escape-aware split while the writer here stayed a
     /// bare `push_str`, so what came out was not what went back in.
     pub fn export_config(&self) -> String {
-        let mut out = String::from("# Slate OS File Associations\n");
-        for assoc in self.associations.values() {
-            out.push_str(&assoc.to_config_line());
-            out.push('\n');
-        }
-        out
+        let mut doc = Document::parse(CONFIG_HEADER);
+        self.write_into(&mut doc);
+        doc.to_text()
     }
 
-    /// Import associations from a line-based config string.
-    /// Skips blank lines and comment lines (starting with `#`).
-    /// Returns a list of errors for lines that failed to parse or apply.
-    pub fn import_config(&mut self, config: &str) -> Vec<AssocError> {
+    /// Read associations out of a configuration document.
+    ///
+    /// Answers the entries it could not apply rather than failing on them: an
+    /// association naming an application that is no longer installed is the
+    /// ordinary consequence of uninstalling something, not a damaged file, and
+    /// every other entry is still good.
+    pub fn read_from(&mut self, doc: &Document) -> Vec<AssocError> {
         let mut errors = Vec::new();
-        for (idx, line) in config.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+        for extension in doc.keys(&[ASSOCIATIONS_KEY]) {
+            let Some(app_id) = doc.get_str(&[ASSOCIATIONS_KEY, &extension]) else {
                 continue;
-            }
-            match Association::from_config_line(trimmed) {
-                Some(assoc) => {
-                    if let Err(e) = self.set_default_app(&assoc.extension, &assoc.app_id) {
-                        errors.push(e);
-                    }
-                }
-                None => {
-                    errors.push(AssocError::ParseError {
-                        line_number: idx.wrapping_add(1),
-                        detail: String::from("invalid format, expected extension=app_id"),
-                    });
-                }
+            };
+            if let Err(e) = self.set_default_app(&extension, &app_id) {
+                errors.push(e);
             }
         }
         errors
+    }
+
+    /// Fold the current associations into a configuration document.
+    ///
+    /// **Entries the registry no longer holds are removed**, which is the half
+    /// that is easy to leave out: writing only what is present would leave a
+    /// cleared association sitting in the file, and it would come back at the
+    /// next start looking like the clear had never happened.
+    pub fn write_into(&self, doc: &mut Document) {
+        for extension in doc.keys(&[ASSOCIATIONS_KEY]) {
+            if !self.associations.contains_key(&extension) {
+                doc.remove(&[ASSOCIATIONS_KEY, &extension]);
+            }
+        }
+        for (extension, assoc) in &self.associations {
+            doc.set_str(&[ASSOCIATIONS_KEY, extension], &assoc.app_id);
+        }
+    }
+
+    /// Import associations from the text of a configuration document.
+    /// Skips blank lines and comment lines (starting with `#`).
+    /// Returns a list of errors for lines that failed to parse or apply.
+    pub fn import_config(&mut self, config: &str) -> Vec<AssocError> {
+        self.read_from(&Document::parse(config))
     }
 
     // -- Built-in data -------------------------------------------------------
@@ -1444,6 +1436,12 @@ pub struct FileAssocUI {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The configuration file as it was read, kept rather than rebuilt.
+    ///
+    /// This is what makes a hand-edited file survive being saved over: the
+    /// user's comments, their key order and their spacing are all in here, and
+    /// `write_into` edits it in place instead of writing a fresh one.
+    doc: Document,
 }
 
 impl Default for FileAssocUI {
@@ -1453,10 +1451,83 @@ impl Default for FileAssocUI {
 }
 
 impl FileAssocUI {
-    /// Create a new UI state with default registry.
+    /// Open on the user's saved associations.
+    ///
+    /// The one `main` calls. A missing or unreadable file yields the defaults,
+    /// which is the ordinary state on a fresh install rather than an error to
+    /// report to someone who has simply never changed an association.
+    #[must_use]
+    pub fn load() -> Self {
+        Self::from_document(settingsfile::load(CONFIG_NAME))
+    }
+
+    /// Open on an already-read document.
+    ///
+    /// Split out from [`load`](Self::load) so the saved format can be
+    /// exercised without a filesystem.
+    #[must_use]
+    pub fn from_document(doc: Document) -> Self {
+        let mut ui = Self::new();
+        // **Once a file exists it is the whole truth about associations**, so
+        // the built-in defaults are cleared before it is applied. Otherwise an
+        // association the user deliberately cleared comes straight back: a
+        // cleared entry is an *absence* from the file, and an absence is
+        // indistinguishable from one that was never set, so the default under
+        // it would win every time. The file types and the applications are
+        // untouched -- those are the catalogue, not the choices.
+        //
+        // A missing file has no `associations` key at all, which is the
+        // first-run case and the one where the defaults are wanted.
+        if doc.contains(&[ASSOCIATIONS_KEY]) {
+            ui.registry.associations.clear();
+        }
+        let dropped = ui.registry.read_from(&doc);
+        if !dropped.is_empty() {
+            // Said out loud rather than swallowed. An entry that will not
+            // restore is almost always an application that has been
+            // uninstalled since, and the association silently reverting to a
+            // default is the kind of change a user notices later and cannot
+            // explain.
+            ui.status = format!(
+                "{} saved association(s) could not be restored",
+                dropped.len()
+            );
+        }
+        ui.doc = doc;
+        ui
+    }
+
+    /// Write the associations back to the user's configuration file.
+    ///
+    /// Called after every change, because there is no Save button and there
+    /// should not be one: this program is a list of choices, and a choice that
+    /// has to be confirmed somewhere else is a choice the user can lose. Until
+    /// this existed, every one of them *was* lost -- the registry was built
+    /// from defaults at startup and never read or written to a disk at all,
+    /// while `export_config` and `import_config` sat beside it fully tested,
+    /// with the export reachable only as text in a panel and the import
+    /// reachable from nothing.
+    ///
+    /// Only failure is reported. A save that worked has nothing to say that
+    /// the change itself did not already say.
+    fn persist(&mut self) {
+        self.registry.write_into(&mut self.doc);
+        if let Err(e) = settingsfile::store(CONFIG_NAME, &self.doc) {
+            self.status = format!("Could not save associations: {e}");
+        }
+    }
+
+    /// Create a new UI state with the default registry and no saved file.
+    ///
+    /// **Touches no filesystem**, which is why it is not the one `main` calls:
+    /// 48 tests build a UI, and a constructor that read the configuration
+    /// directory would have all of them reading -- and the ones that go on to
+    /// change an association, writing -- the developer's own settings. See
+    /// [`load`](Self::load).
     pub fn new() -> Self {
         Self {
             registry: AssociationRegistry::with_defaults(),
+            doc: Document::parse(CONFIG_HEADER),
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected_category: None,
             search_query: String::new(),
@@ -1563,6 +1634,7 @@ impl FileAssocUI {
                     Ok(()) => format!(".{ext} now opens with {app_id}"),
                     Err(e) => format!("Could not set the default for .{ext}: {e}"),
                 };
+                self.persist();
             } else {
                 // Without "always", the choice is a one-off launch. There is no
                 // launcher to hand it to yet, so say so rather than pretending
@@ -1797,6 +1869,7 @@ impl FileAssocUI {
                 self.selected_index = None;
                 self.clamp_scroll();
                 self.status = String::from("Associations reset to defaults");
+                self.persist();
                 EventResult::Consumed
             }
             Some(Target::Category(cat)) => {
@@ -1818,6 +1891,7 @@ impl FileAssocUI {
                         Ok(()) => format!(".{ext} has no default app"),
                         Err(e) => format!("Could not clear .{ext}: {e}"),
                     };
+                    self.persist();
                 }
                 EventResult::Consumed
             }
@@ -1840,6 +1914,7 @@ impl FileAssocUI {
                         Ok(()) => format!(".{ext} now opens with {app_id}"),
                         Err(e) => format!("Could not set the default for .{ext}: {e}"),
                     };
+                    self.persist();
                 }
                 EventResult::Consumed
             }
@@ -3121,7 +3196,7 @@ impl Probe for FileAssocUI {
 // ============================================================================
 
 fn main() -> ExitCode {
-    app::launch("fileassoc", &mut FileAssocUI::new())
+    app::launch("fileassoc", &mut FileAssocUI::load())
 }
 
 // ============================================================================
@@ -3256,55 +3331,6 @@ mod tests {
         assert_eq!(a.app_id, "textedit");
     }
 
-    #[test]
-    fn test_association_to_config_line() {
-        let a = Association::new("txt", "textedit");
-        assert_eq!(a.to_config_line(), "txt=textedit");
-    }
-
-    #[test]
-    fn test_association_from_config_line_valid() {
-        let a = Association::from_config_line("txt=textedit");
-        assert!(a.is_some());
-        let a = a.expect("tested above");
-        assert_eq!(a.extension, "txt");
-        assert_eq!(a.app_id, "textedit");
-    }
-
-    #[test]
-    fn test_association_from_config_line_with_spaces() {
-        let a = Association::from_config_line("  pdf = pdfviewer  ");
-        assert!(a.is_some());
-        let a = a.expect("tested above");
-        assert_eq!(a.extension, "pdf");
-        assert_eq!(a.app_id, "pdfviewer");
-    }
-
-    #[test]
-    fn test_association_from_config_line_empty() {
-        assert!(Association::from_config_line("").is_none());
-    }
-
-    #[test]
-    fn test_association_from_config_line_comment() {
-        assert!(Association::from_config_line("# comment").is_none());
-    }
-
-    #[test]
-    fn test_association_from_config_line_no_equals() {
-        assert!(Association::from_config_line("txtonly").is_none());
-    }
-
-    #[test]
-    fn test_association_from_config_line_empty_value() {
-        assert!(Association::from_config_line("txt=").is_none());
-    }
-
-    #[test]
-    fn test_association_from_config_line_empty_key() {
-        assert!(Association::from_config_line("=textedit").is_none());
-    }
-
     // -- AssocError Display tests -------------------------------------------
 
     #[test]
@@ -3330,17 +3356,6 @@ mod tests {
         let s = format!("{e}");
         assert!(s.contains("textedit"));
         assert!(s.contains("mp3"));
-    }
-
-    #[test]
-    fn test_error_display_parse_error() {
-        let e = AssocError::ParseError {
-            line_number: 5,
-            detail: String::from("bad format"),
-        };
-        let s = format!("{e}");
-        assert!(s.contains('5'));
-        assert!(s.contains("bad format"));
     }
 
     #[test]
@@ -3632,14 +3647,25 @@ mod tests {
         reg.register_app(AppInfo::new("myapp", "My App", "/bin/myapp", &["txt"], 1));
         let _ = reg.set_default_app("txt", "myapp");
         let config = reg.export_config();
-        assert!(config.contains("txt=myapp"));
-        assert!(config.starts_with("# Slate OS File Associations"));
+        assert!(
+            config.contains("txt: myapp"),
+            "the association is not in the exported document: {config}"
+        );
+        assert!(
+            config.contains("associations:"),
+            "the exported document has no associations mapping: {config}"
+        );
+        // The header a fresh file is written with survives the fold.
+        assert!(
+            config.starts_with("# Slate OS file associations."),
+            "header lost: {config:?}"
+        );
     }
 
     #[test]
     fn test_import_config_valid() {
         let mut reg = AssociationRegistry::with_defaults();
-        let config = "txt=codeeditor\npng=imageeditor\n";
+        let config = "associations:\n  txt: codeeditor\n  png: imageeditor\n";
         let errors = reg.import_config(config);
         assert!(errors.is_empty());
         let app = reg.get_default_app("txt");
@@ -3650,23 +3676,15 @@ mod tests {
     #[test]
     fn test_import_config_with_comments() {
         let mut reg = AssociationRegistry::with_defaults();
-        let config = "# comment\n\ntxt=codeeditor\n";
+        let config = "# comment\n\nassociations:\n  # which editor\n  txt: codeeditor\n";
         let errors = reg.import_config(config);
         assert!(errors.is_empty());
     }
 
     #[test]
-    fn test_import_config_invalid_lines() {
-        let mut reg = AssociationRegistry::with_defaults();
-        let config = "badline\ntxt=codeeditor\n";
-        let errors = reg.import_config(config);
-        assert_eq!(errors.len(), 1);
-    }
-
-    #[test]
     fn test_import_config_nonexistent_app() {
         let mut reg = AssociationRegistry::with_defaults();
-        let config = "txt=doesnotexist\n";
+        let config = "associations:\n  txt: doesnotexist\n";
         let errors = reg.import_config(config);
         assert_eq!(errors.len(), 1);
     }
@@ -3776,36 +3794,54 @@ mod tests {
         }
     }
 
+    /// Carry one extension out to a document and back again.
+    ///
+    /// These three used to call the hand-rolled `to_config_line` /
+    /// `from_config_line` pair directly. Going through `export_config` and
+    /// `import_config` instead tests the path the program takes, not a codec
+    /// beside it -- and it is the path that changed, from an escaped
+    /// `ext=app` grammar to a YAML document, so the question these tests ask
+    /// is exactly the question the change raises.
+    fn survives_a_round_trip(extension: &str) -> Option<String> {
+        let mut reg = registry_over(&[extension]);
+        reg.set_default_app(extension, "app0")
+            .expect("a registered extension and an app that opens it");
+
+        let text = reg.export_config();
+        let mut back = registry_over(&[extension]);
+        let errors = back.import_config(&text);
+        assert!(errors.is_empty(), "{extension:?} -> {text}: {errors:?}");
+
+        back.get_default_app(extension).map(|a| a.id.clone())
+    }
+
     #[test]
-    fn an_extension_starting_with_a_hash_is_not_exported_as_a_comment() {
-        // A comment line is skipped in full, so an unescaped `#txt=app0` would
-        // lose the association silently rather than misreport it.
-        let assoc = Association::new("#txt", "app0");
-        let line = assoc.to_config_line();
-        assert!(
-            !line.starts_with('#'),
-            "exported line reads as a comment: {line:?}"
-        );
-        assert_eq!(Association::from_config_line(&line), Some(assoc));
+    fn an_extension_starting_with_a_hash_is_not_written_as_a_comment() {
+        // `#` opens a comment in YAML exactly as it did in the old grammar, so
+        // an unquoted `#txt:` key would be skipped in full -- losing the
+        // association silently rather than misreporting it.
+        assert_eq!(survives_a_round_trip("#txt").as_deref(), Some("app0"));
     }
 
     #[test]
     fn an_extension_containing_the_separator_stays_one_extension() {
-        let assoc = Association::new("a=b", "app0");
-        assert_eq!(
-            Association::from_config_line(&assoc.to_config_line()),
-            Some(assoc)
-        );
+        // The separator moved with the format: `=` was the old one, `:` is
+        // YAML's, and an extension may legally contain either.
+        assert_eq!(survives_a_round_trip("a=b").as_deref(), Some("app0"));
+        assert_eq!(survives_a_round_trip("a: b").as_deref(), Some("app0"));
     }
 
     #[test]
-    fn a_hand_written_line_still_parses_without_escapes() {
-        // The leniency the reader has always had, kept deliberately: these
-        // files are hand-edited, and an unrecognised `\c` decodes to `c`, so
-        // an ordinary line means what it looks like it means.
-        let a = Association::from_config_line("  pdf = pdfviewer  ").expect("a parse");
-        assert_eq!(a.extension, "pdf");
-        assert_eq!(a.app_id, "pdfviewer");
+    fn a_hand_written_file_means_what_it_looks_like() {
+        // These files are meant to be edited by hand, so the plainest possible
+        // spelling has to work -- no quoting, ordinary indentation.
+        let mut reg = registry_over(&["pdf"]);
+        let errors = reg.import_config("associations:\n  pdf: app0\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            reg.get_default_app("pdf").map(|a| a.id.as_str()),
+            Some("app0")
+        );
     }
 
     // -- UI state tests ------------------------------------------------------
@@ -3915,16 +3951,28 @@ mod tests {
         assert_eq!(ui.active_dialog, ActiveDialog::None);
     }
 
+    /// Run a body that changes an association.
+    ///
+    /// Changing one writes the configuration file, so these have to run against
+    /// a throwaway directory rather than the developer's own. Before
+    /// `FileAssocUI::persist` existed this program wrote nothing at all, which
+    /// is why no test here needed it until now.
+    fn writing<T>(tag: &str, body: impl FnOnce() -> T) -> T {
+        settingsfile::testing::with_scratch_config(tag, |_| body())
+    }
+
     #[test]
     fn test_ui_confirm_open_with() {
-        let mut ui = FileAssocUI::new();
-        ui.select_file_type(0);
-        ui.open_open_with_dialog();
-        ui.dialog_always_use = true;
-        ui.dialog_selected_app = Some(0);
-        let result = ui.confirm_open_with();
-        assert!(result.is_ok());
-        assert_eq!(ui.active_dialog, ActiveDialog::None);
+        writing("confirm_open_with", || {
+            let mut ui = FileAssocUI::new();
+            ui.select_file_type(0);
+            ui.open_open_with_dialog();
+            ui.dialog_always_use = true;
+            ui.dialog_selected_app = Some(0);
+            let result = ui.confirm_open_with();
+            assert!(result.is_ok());
+            assert_eq!(ui.active_dialog, ActiveDialog::None);
+        });
     }
 
     // -- Render tests --------------------------------------------------------
@@ -4277,44 +4325,46 @@ mod tests {
 
     #[test]
     fn the_open_with_dialog_only_changes_the_default_when_always_is_ticked() {
-        let mut ui = FileAssocUI::new();
-        select_ext(&mut ui, SHARED_EXT);
-        let before = ui
-            .registry
-            .get_default_app(SHARED_EXT)
-            .map(|a| a.id.clone())
-            .expect("the shared extension has no default to change");
-
-        // Pick a different app, leave "always" alone, confirm.
-        probe::click(&mut ui, Target::OpenWithButton);
-        let other = ui
-            .registry
-            .apps_for_extension(SHARED_EXT)
-            .iter()
-            .position(|a| a.id != before)
-            .expect("only one app opens it, so this test cannot say anything");
-        probe::click(&mut ui, Target::DialogApp(other));
-        probe::click(&mut ui, Target::DialogOk);
-        assert_eq!(
-            ui.registry
+        writing("open_with_dialog", || {
+            let mut ui = FileAssocUI::new();
+            select_ext(&mut ui, SHARED_EXT);
+            let before = ui
+                .registry
                 .get_default_app(SHARED_EXT)
-                .map(|a| a.id.clone()),
-            Some(before.clone()),
-            "a one-off open changed the default",
-        );
+                .map(|a| a.id.clone())
+                .expect("the shared extension has no default to change");
 
-        // Again, with the box ticked this time.
-        probe::click(&mut ui, Target::OpenWithButton);
-        probe::click(&mut ui, Target::DialogApp(other));
-        probe::click(&mut ui, Target::DialogAlwaysUse);
-        assert!(ui.dialog_always_use);
-        probe::click(&mut ui, Target::DialogOk);
-        assert_ne!(
-            ui.registry
-                .get_default_app(SHARED_EXT)
-                .map(|a| a.id.clone()),
-            Some(before),
-        );
+            // Pick a different app, leave "always" alone, confirm.
+            probe::click(&mut ui, Target::OpenWithButton);
+            let other = ui
+                .registry
+                .apps_for_extension(SHARED_EXT)
+                .iter()
+                .position(|a| a.id != before)
+                .expect("only one app opens it, so this test cannot say anything");
+            probe::click(&mut ui, Target::DialogApp(other));
+            probe::click(&mut ui, Target::DialogOk);
+            assert_eq!(
+                ui.registry
+                    .get_default_app(SHARED_EXT)
+                    .map(|a| a.id.clone()),
+                Some(before.clone()),
+                "a one-off open changed the default",
+            );
+
+            // Again, with the box ticked this time.
+            probe::click(&mut ui, Target::OpenWithButton);
+            probe::click(&mut ui, Target::DialogApp(other));
+            probe::click(&mut ui, Target::DialogAlwaysUse);
+            assert!(ui.dialog_always_use);
+            probe::click(&mut ui, Target::DialogOk);
+            assert_ne!(
+                ui.registry
+                    .get_default_app(SHARED_EXT)
+                    .map(|a| a.id.clone()),
+                Some(before),
+            );
+        });
     }
 
     #[test]
@@ -4342,52 +4392,143 @@ mod tests {
 
     #[test]
     fn clicking_a_compatible_app_makes_it_the_default_without_a_dialog() {
-        let mut ui = FileAssocUI::new();
-        select_ext(&mut ui, SHARED_EXT);
+        writing("compatible_app", || {
+            let mut ui = FileAssocUI::new();
+            select_ext(&mut ui, SHARED_EXT);
 
-        let apps = ui.registry.apps_for_extension(SHARED_EXT);
-        let before = ui
-            .registry
-            .get_default_app(SHARED_EXT)
-            .map(|a| a.id.clone());
-        let other = apps
-            .iter()
-            .position(|a| Some(&a.id) != before.as_ref())
-            .expect("only one app opens the shared extension");
-        let wanted = apps[other].id.clone();
-
-        probe::click(&mut ui, Target::CompatibleApp(other));
-        assert_eq!(
-            ui.registry
+            let apps = ui.registry.apps_for_extension(SHARED_EXT);
+            let before = ui
+                .registry
                 .get_default_app(SHARED_EXT)
-                .map(|a| a.id.clone()),
-            Some(wanted),
-        );
-        assert_eq!(ui.active_dialog, ActiveDialog::None, "a dialog opened");
+                .map(|a| a.id.clone());
+            let other = apps
+                .iter()
+                .position(|a| Some(&a.id) != before.as_ref())
+                .expect("only one app opens the shared extension");
+            let wanted = apps[other].id.clone();
+
+            probe::click(&mut ui, Target::CompatibleApp(other));
+            assert_eq!(
+                ui.registry
+                    .get_default_app(SHARED_EXT)
+                    .map(|a| a.id.clone()),
+                Some(wanted),
+            );
+            assert_eq!(ui.active_dialog, ActiveDialog::None, "a dialog opened");
+        });
     }
 
     #[test]
     fn clear_association_empties_the_default_for_the_selected_row() {
-        let mut ui = FileAssocUI::new();
-        select_ext(&mut ui, "mp3");
-        assert!(ui.registry.get_default_app("mp3").is_some());
+        writing("clear_association", || {
+            let mut ui = FileAssocUI::new();
+            select_ext(&mut ui, "mp3");
+            assert!(ui.registry.get_default_app("mp3").is_some());
 
-        probe::click(&mut ui, Target::ClearButton);
-        assert!(ui.registry.get_default_app("mp3").is_none());
-        assert!(ui.status.contains("mp3"), "status was {:?}", ui.status);
+            probe::click(&mut ui, Target::ClearButton);
+            assert!(ui.registry.get_default_app("mp3").is_none());
+            assert!(ui.status.contains("mp3"), "status was {:?}", ui.status);
+        });
     }
 
     #[test]
     fn reset_puts_back_an_association_that_was_cleared() {
-        let mut ui = FileAssocUI::new();
-        select_ext(&mut ui, "mp3");
-        probe::click(&mut ui, Target::ClearButton);
-        assert!(ui.registry.get_default_app("mp3").is_none());
+        writing("reset_association", || {
+            let mut ui = FileAssocUI::new();
+            select_ext(&mut ui, "mp3");
+            probe::click(&mut ui, Target::ClearButton);
+            assert!(ui.registry.get_default_app("mp3").is_none());
 
-        // Reset is in the toolbar, which the search filter does not cover.
-        probe::click(&mut ui, Target::ResetButton);
-        assert!(ui.registry.get_default_app("mp3").is_some());
-        assert_eq!(ui.selected_index, None);
+            // Reset is in the toolbar, which the search filter does not cover.
+            probe::click(&mut ui, Target::ResetButton);
+            assert!(ui.registry.get_default_app("mp3").is_some());
+            assert_eq!(ui.selected_index, None);
+        });
+    }
+
+    // -- Persistence ---------------------------------------------------------
+
+    /// **A change survives the program closing.**
+    ///
+    /// The whole point. Until 2026-09-14 this program built its registry from
+    /// built-in defaults at startup and never read or wrote a file: every
+    /// choice the user made was gone the moment the window closed. The test
+    /// goes through the real door -- a click, then a fresh `load` -- because
+    /// the parts either side of the door were already tested and it was the
+    /// door that did not exist.
+    #[test]
+    fn an_association_survives_a_restart() {
+        writing("survives_restart", || {
+            let mut ui = FileAssocUI::new();
+            select_ext(&mut ui, "mp3");
+            probe::click(&mut ui, Target::ClearButton);
+            assert!(
+                ui.registry.get_default_app("mp3").is_none(),
+                "the clear did not take: {:?}",
+                ui.status
+            );
+            assert!(
+                !ui.status.starts_with("Could not save"),
+                "the save failed: {:?}",
+                ui.status
+            );
+
+            // A second program, reading what the first one wrote.
+            let restarted = FileAssocUI::load();
+            assert!(
+                restarted.registry.get_default_app("mp3").is_none(),
+                "the cleared association came back after a restart"
+            );
+            // And the ones that were never touched are still there, so
+            // clearing the defaults to honour the file does not throw the
+            // rest of them away.
+            assert!(
+                restarted.registry.association_count() > 0,
+                "a restart lost every association, not just the cleared one"
+            );
+        });
+    }
+
+    /// And a cleared entry is *removed* from the file rather than left in it.
+    ///
+    /// The half that is easy to leave out of a writer: writing only what is
+    /// present leaves the old key sitting there, and it reads back as though
+    /// the clear never happened. Asked of the document directly, because the
+    /// test above would pass either way if the registry happened to re-derive
+    /// the same answer.
+    #[test]
+    fn clearing_an_association_takes_it_out_of_the_file() {
+        let mut reg = registry_over(&["mp3"]);
+        reg.set_default_app("mp3", "app0")
+            .expect("a registered pair");
+
+        let mut doc = Document::parse(CONFIG_HEADER);
+        reg.write_into(&mut doc);
+        assert_eq!(
+            doc.get_str(&["associations", "mp3"]).as_deref(),
+            Some("app0")
+        );
+
+        reg.clear_association("mp3")
+            .expect("an association to clear");
+        reg.write_into(&mut doc);
+        assert!(
+            doc.get_str(&["associations", "mp3"]).is_none(),
+            "the cleared association is still in the file: {}",
+            doc.to_text()
+        );
+    }
+
+    /// An entry naming an application that is gone is reported, not hidden.
+    #[test]
+    fn an_association_for_a_missing_app_is_reported_on_load() {
+        let doc = Document::parse("associations:\n  mp3: nosuchapp\n");
+        let ui = FileAssocUI::from_document(doc);
+        assert!(
+            ui.status.contains("could not be restored"),
+            "status was {:?}",
+            ui.status
+        );
     }
 
     #[test]
@@ -4555,103 +4696,107 @@ mod tests {
 
     #[test]
     fn only_an_event_that_changes_something_asks_for_a_frame() {
-        let mut ui = FileAssocUI::new();
-        // Nothing under the pointer, nothing to redraw.
-        let (bx, by) = probe::bare_point(&ui, (WINDOW_WIDTH, WINDOW_HEIGHT))
-            .expect("every point in the window is covered");
-        assert_eq!(
-            ui.on_event(&Event::Mouse(MouseEvent {
-                x: bx,
-                y: by,
-                kind: MouseEventKind::Press(MouseButton::Left),
-            })),
-            Response::Idle,
-        );
-        assert_eq!(ui.on_event(&Event::FocusOut), Response::Idle);
+        writing("event_asks_for_a_frame", || {
+            let mut ui = FileAssocUI::new();
+            // Nothing under the pointer, nothing to redraw.
+            let (bx, by) = probe::bare_point(&ui, (WINDOW_WIDTH, WINDOW_HEIGHT))
+                .expect("every point in the window is covered");
+            assert_eq!(
+                ui.on_event(&Event::Mouse(MouseEvent {
+                    x: bx,
+                    y: by,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                })),
+                Response::Idle,
+            );
+            assert_eq!(ui.on_event(&Event::FocusOut), Response::Idle);
 
-        let l = layout();
-        assert_eq!(
-            ui.on_event(&Event::Mouse(MouseEvent {
-                x: l.reset.centre().0,
-                y: l.reset.centre().1,
-                kind: MouseEventKind::Press(MouseButton::Left),
-            })),
-            Response::Redraw,
-        );
+            let l = layout();
+            assert_eq!(
+                ui.on_event(&Event::Mouse(MouseEvent {
+                    x: l.reset.centre().0,
+                    y: l.reset.centre().1,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                })),
+                Response::Redraw,
+            );
+        });
     }
 
     #[test]
     fn every_target_the_frame_records_is_one_the_app_handles() {
-        // A control drawn but not routed is the fault this whole app had: a
-        // toolbar, a sidebar, a table and a modal dialog, all pictures. This
-        // walks every state that draws anything and clicks all of it.
-        let mut seen: Vec<String> = Vec::new();
-        for state in 0..3 {
-            let mut ui = FileAssocUI::new();
-            ui.select_file_type(0);
-            match state {
-                1 => ui.open_open_with_dialog(),
-                2 => ui.open_add_file_type_dialog(),
-                _ => {}
-            }
-            for name in probe::control_names(&ui) {
-                if !seen.contains(&name) {
-                    seen.push(name);
-                }
-            }
-            let targets: Vec<Target> = ui
-                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
-                .hits()
-                .iter()
-                .map(|(t, _)| *t)
-                .collect();
-            for target in targets {
-                let mut fresh = FileAssocUI::new();
-                fresh.select_file_type(0);
+        writing("every_target_handled", || {
+            // A control drawn but not routed is the fault this whole app had: a
+            // toolbar, a sidebar, a table and a modal dialog, all pictures. This
+            // walks every state that draws anything and clicks all of it.
+            let mut seen: Vec<String> = Vec::new();
+            for state in 0..3 {
+                let mut ui = FileAssocUI::new();
+                ui.select_file_type(0);
                 match state {
-                    1 => fresh.open_open_with_dialog(),
-                    2 => fresh.open_add_file_type_dialog(),
+                    1 => ui.open_open_with_dialog(),
+                    2 => ui.open_add_file_type_dialog(),
                     _ => {}
                 }
-                // `Table` is the one deliberate exception: it exists so the
-                // wheel works over the header and the space below the last
-                // row, and a click there is meant to do nothing.
-                let outcome = probe::click(&mut fresh, target);
-                if target != Target::Table {
-                    assert_eq!(
-                        outcome,
-                        EventResult::Consumed,
-                        "{target:?} is drawn but a click on it does nothing",
-                    );
+                for name in probe::control_names(&ui) {
+                    if !seen.contains(&name) {
+                        seen.push(name);
+                    }
+                }
+                let targets: Vec<Target> = ui
+                    .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                    .hits()
+                    .iter()
+                    .map(|(t, _)| *t)
+                    .collect();
+                for target in targets {
+                    let mut fresh = FileAssocUI::new();
+                    fresh.select_file_type(0);
+                    match state {
+                        1 => fresh.open_open_with_dialog(),
+                        2 => fresh.open_add_file_type_dialog(),
+                        _ => {}
+                    }
+                    // `Table` is the one deliberate exception: it exists so the
+                    // wheel works over the header and the space below the last
+                    // row, and a click there is meant to do nothing.
+                    let outcome = probe::click(&mut fresh, target);
+                    if target != Target::Table {
+                        assert_eq!(
+                            outcome,
+                            EventResult::Consumed,
+                            "{target:?} is drawn but a click on it does nothing",
+                        );
+                    }
                 }
             }
-        }
 
-        // And every variant of `Target` is reachable in at least one of them.
-        for name in [
-            "Search",
-            "AddButton",
-            "ExportButton",
-            "ResetButton",
-            "Category",
-            "Row",
-            "Table",
-            "OpenWithButton",
-            "ClearButton",
-            "CompatibleApp",
-            "DialogApp",
-            "DialogAlwaysUse",
-            "DialogOk",
-            "DialogCancel",
-            "DialogField",
-            "DialogCategory",
-            "Scrim",
-        ] {
-            assert!(
-                seen.iter().any(|s| s == name),
-                "no state draws {name}; drawn were {seen:?}",
-            );
-        }
+            // And every variant of `Target` is reachable in at least one of them.
+            for name in [
+                "Search",
+                "AddButton",
+                "ExportButton",
+                "ResetButton",
+                "Category",
+                "Row",
+                "Table",
+                "OpenWithButton",
+                "ClearButton",
+                "CompatibleApp",
+                "DialogApp",
+                "DialogAlwaysUse",
+                "DialogOk",
+                "DialogCancel",
+                "DialogField",
+                "DialogCategory",
+                "Scrim",
+            ] {
+                assert!(
+                    seen.iter().any(|s| s == name),
+                    "no state draws {name}; drawn were {seen:?}",
+                );
+            }
+        });
     }
 
     // -- Following the user's theme -------------------------------------------

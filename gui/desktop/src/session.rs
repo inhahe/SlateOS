@@ -1191,7 +1191,18 @@ impl<T: Transport> ShellSession<T> {
         // The overlays, on their own surface and on their own schedule: an OSD
         // is not a popup and neither one's visibility implies anything about
         // the other's.
-        let overlays = self.shell.render_osd();
+        // The volume overlay and a tray tooltip share this surface: both are
+        // transient, both are above the menus, and both are here to be read
+        // rather than clicked. Merged rather than given two surfaces, because
+        // a second full-screen overlay window would have to be ordered against
+        // this one and there is no case where that ordering matters.
+        let overlays = match (self.shell.render_osd(), self.shell.render_tray_tooltip()) {
+            (Some(mut osd), Some(tip)) => {
+                osd.commands.extend(tip.commands);
+                Some(osd)
+            }
+            (some, None) | (None, some) => some,
+        };
         let showing = overlays.is_some();
         if showing != self.osd_shown {
             if let Some(mut handle) = self.events.window_mut(self.osd.window) {
@@ -1289,6 +1300,16 @@ impl<T: Transport> ShellSession<T> {
         // rather than one per event.
         if self.shell.take_widgets_dirty() {
             self.save_widgets();
+        }
+
+        // The shell writes `appearance.yaml` itself for the quick toggles --
+        // night light is one -- and the compositor reads that file rather than
+        // being handed a value. Only this session holds the connection, so
+        // saying "go and read it again" is its job. Drained here beside the
+        // widget save rather than at the toggle, so one pump that flipped a
+        // switch twice sends one notification rather than two.
+        if self.shell.take_appearance_change() {
+            self.events.appearance_changed()?;
         }
 
         if self.dirty {
@@ -1403,6 +1424,23 @@ impl<T: Transport> ShellSession<T> {
         // to act on: the caller is adopting the saved state wholesale and is
         // about to repaint regardless.
         let _ = self.shell.load_input_settings();
+        // And the notification rules, by the same argument. These are the
+        // strongest case for the one-door rule: a program the user silenced
+        // that starts interrupting them again after a reboot is a setting
+        // that looks like it was never saved, and the user's only recourse is
+        // to set it a second time and distrust it.
+        self.shell.load_notification_rules();
+        // Quiet hours saved before the last logout are in force now if the
+        // hour says so. Without this the desktop would be noisy from login
+        // until whatever else happened to tick it, which at three in the
+        // morning is nothing at all.
+        let _ = self.shell.evaluate_schedules(unix_now());
+        // And their *end* is a moment nothing else would ask for. `pump`
+        // returns without ticking when there is nothing to do, so a loop that
+        // reached its first park with no wake-up registered would sleep
+        // through every boundary until the user touched something -- which is
+        // the whole night, on the one setting whose entire job is to cover it.
+        self.arm_next_frame();
     }
 
     /// Persist the widget layout, reporting a failure rather than hiding it.
@@ -1697,6 +1735,24 @@ impl<T: Transport> ShellSession<T> {
             // and later ones are free: `poll_appearance` re-reads, finds the
             // settings identical to what it just applied, and answers `false`.
             Event::SettingsChanged {
+                group: SettingsGroup::Notifications,
+            } => {
+                // The answer is deliberately discarded: a per-app rule decides
+                // which *future* notifications are shown, so nothing already
+                // on screen moves. Said out loud because every other arm here
+                // repaints, and one that does not looks like an omission.
+                let _ = self.shell.poll_notification_rules();
+                // Quiet hours are the exception, and they are why this arm is
+                // no longer a no-op. Editing them can put focus assist into
+                // force this instant -- the user may well have set them while
+                // inside the window they just chose -- and it changes when the
+                // next boundary is, which the loop is asleep until.
+                if self.shell.evaluate_schedules(unix_now()) {
+                    self.dirty = true;
+                }
+                self.arm_next_frame();
+            }
+            Event::SettingsChanged {
                 group: SettingsGroup::Appearance,
             } => {
                 if self.shell.poll_appearance() {
@@ -1944,6 +2000,14 @@ impl<T: Transport> ShellSession<T> {
             self.place_panel()?;
             self.dirty = true;
         }
+        // Quiet hours are dated against the *wall* clock rather than against
+        // `clock_ms`: the user set "22:00", not "six hours after I logged in".
+        // Free when no automatic rule is set, which is the shipped default.
+        if self.shell.evaluate_schedules(unix_now()) {
+            // The taskbar shows whether focus assist is on, so a schedule that
+            // has just started or ended is a thing on screen that changed.
+            self.dirty = true;
+        }
 
         if moved {
             self.dirty = true;
@@ -1958,18 +2022,29 @@ impl<T: Transport> ShellSession<T> {
             self.events.wake_after(self.panel.window, FRAME_INTERVAL);
             return;
         }
-        // Nothing is animating, but a widget may still be due at a *known*
-        // future moment -- a clock, once a minute. Armed at that moment rather
-        // than at the frame interval, which would wake sixty times a second to
-        // redraw a minute hand, and rather than not at all, which is what the
-        // first version of this did: `needs_tick` is false for the whole minute
-        // between updates, so the loop parked unbounded and the clock showed
-        // the minute it was created for ever.
-        if let Some(ms) = self.shell.widgets.next_due_in(self.clock_ms) {
-            self.events.wake_after(
-                self.panel.window,
-                std::time::Duration::from_millis(ms.max(1)),
-            );
+        // Nothing is animating, but something may still be due at a *known*
+        // future moment -- a widget clock once a minute, quiet hours at their
+        // next boundary. Armed at that moment rather than at the frame
+        // interval, which would wake sixty times a second to redraw a minute
+        // hand, and rather than not at all, which is what the first version of
+        // this did: `needs_tick` is false for the whole minute between
+        // updates, so the loop parked unbounded and the clock showed the
+        // minute it was created for ever.
+        //
+        // **The soonest, not the last.** A window has one wake-up and
+        // `wake_after` replaces it, so arming the candidates in turn would let
+        // a quiet-hours boundary six hours out overwrite a clock tick thirty
+        // seconds out and stop the clock until the small hours. `None` from
+        // every candidate is the idle desktop of design-decisions 812: no
+        // wake-up is registered at all.
+        let widget = self
+            .shell
+            .widgets
+            .next_due_in(self.clock_ms)
+            .map(|ms| Duration::from_millis(ms.max(1)));
+        let schedule = self.shell.next_schedule_change(unix_now());
+        if let Some(delay) = [widget, schedule].into_iter().flatten().min() {
+            self.events.wake_after(self.panel.window, delay);
         }
     }
 

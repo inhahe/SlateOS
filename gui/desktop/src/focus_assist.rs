@@ -60,8 +60,8 @@
 //! shell, and a page that spelled it differently would be the odd one out.
 
 use appearance::{Palette, Surface, readable_on};
+use daywindow::DailyWindow;
 use guitk::color::Color;
-use guitk::daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -144,29 +144,18 @@ impl FocusMode {
     }
 }
 
-/// Notification priority level for an app.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NotifPriority {
-    /// Silenced — never shown in focus mode.
-    Silent,
-    /// Normal — follows focus mode rules.
-    Normal,
-    /// Priority — shown in PriorityOnly mode.
-    Priority,
-    /// Critical — always shown (alarms, security alerts).
-    Critical,
-}
-
-impl NotifPriority {
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Silent => "Silent",
-            Self::Normal => "Normal",
-            Self::Priority => "Priority",
-            Self::Critical => "Critical",
-        }
-    }
-}
+/// How far a program's notifications get while the user is focusing.
+///
+/// **The definition moved to `notifsettings` and this is the same type**, not
+/// a copy that agrees. It had to move because the Settings application has to
+/// write the value this module reads, and two processes cannot share an enum
+/// that lives inside one of them.
+///
+/// Re-exported under the old name so that the twenty-one call sites here read
+/// as they did. The name is worth keeping locally: within this module the
+/// question really is "what priority is this app", and `Importance` is the
+/// word that makes sense to a settings page listing every program.
+pub use notifsettings::Importance as NotifPriority;
 
 /// An automatic rule that activates focus assist.
 #[derive(Clone, Debug, PartialEq)]
@@ -228,49 +217,38 @@ impl AutoRule {
     }
 
     /// Check if a schedule rule is currently active.
+    ///
+    /// The day the rule is checked against is the day the window *opened* on,
+    /// not the day it is now -- see [`DailyWindow::started_on`]. This used to
+    /// compare the day list against the current day, which meant a
+    /// Friday-night 22:00-07:00 rule switched itself off at midnight and gave
+    /// the user two hours of the nine they asked for. It did that silently.
     pub fn is_schedule_active(&self, hour: u8, minute: u8, day_of_week: u8) -> bool {
         let Self::Schedule { window, days, .. } = self else {
             return false;
         };
-        // An empty day list means every day.
-        if !days.is_empty() && !days.contains(&day_of_week) {
+        let Some(began) = window.started_on(hour, minute, day_of_week) else {
             return false;
-        }
-        window.contains_hm(hour, minute)
+        };
+        // An empty day list means every day.
+        days.is_empty() || days.contains(&began)
     }
 }
 
 /// Per-app notification override.
-#[derive(Clone, Debug)]
-pub struct AppNotifOverride {
-    /// Application identifier.
-    pub app_id: String,
-    /// Display name.
-    pub app_name: String,
-    /// Priority level override.
-    pub priority: NotifPriority,
-    /// Whether to show banners for this app.
-    pub show_banner: bool,
-    /// Whether to play sound for this app.
-    pub play_sound: bool,
-}
-
-impl AppNotifOverride {
-    pub fn new(app_id: &str, app_name: &str) -> Self {
-        Self {
-            app_id: app_id.to_string(),
-            app_name: app_name.to_string(),
-            priority: NotifPriority::Normal,
-            show_banner: true,
-            play_sound: true,
-        }
-    }
-
-    pub fn with_priority(mut self, priority: NotifPriority) -> Self {
-        self.priority = priority;
-        self
-    }
-}
+///
+/// **Was a local struct with both an `app_id` and an `app_name`, and the pair
+/// was a latent bug.** `app_priority` looked a rule up by `app_id`, while the
+/// shell's only caller passes a notification's `app_name`
+/// (`DesktopShell::notify`, which says in its own comment that the name is
+/// "the only app identity a `Notification` carries"). So a rule written with
+/// an id that differed from the name — which is exactly what this module's own
+/// tests did, `new("chat", "Chat")` — could never be found. Nothing in
+/// production ever wrote one, so it never bit; a settings page writing rules
+/// would have been the first thing to meet it, silently.
+///
+/// One key now, and it is the one the caller passes.
+pub use notifsettings::AppRule as AppNotifOverride;
 
 // ============================================================================
 // Focus Assist Manager
@@ -288,6 +266,21 @@ pub struct FocusAssistManager {
     pub app_overrides: Vec<AppNotifOverride>,
     /// Whether auto rules are enabled.
     pub auto_rules_enabled: bool,
+    /// Whether the automatic rules are being held off for now.
+    ///
+    /// Distinct from [`auto_rules_enabled`](Self::auto_rules_enabled), which is
+    /// the user's standing answer to "use schedules at all". This one is
+    /// temporary and is set by whoever owns a clock -- the shell -- when the
+    /// user switches focus assist **off** while a schedule is the reason it is
+    /// on. Without it the two controls fight and the user loses: `set_mode`
+    /// clears `manual_override`, the next tick re-evaluates the schedule, finds
+    /// the clock still inside quiet hours, and silences the desktop again. The
+    /// switch reads "off" and the desktop stays quiet, with no sequence of
+    /// presses that changes it.
+    ///
+    /// The shell clears it at the schedule's own next boundary, so a snooze
+    /// lasts exactly the rest of this period and not a minute longer.
+    pub auto_suppressed: bool,
     /// Show summary when focus assist deactivates.
     pub show_summary: bool,
     /// Number of suppressed notifications (for summary).
@@ -312,6 +305,7 @@ impl FocusAssistManager {
             auto_rules: Vec::new(),
             app_overrides: Vec::new(),
             auto_rules_enabled: true,
+            auto_suppressed: false,
             show_summary: true,
             suppressed_count: 0,
             auto_active: false,
@@ -365,6 +359,44 @@ impl FocusAssistManager {
         self.auto_rules.push(rule);
     }
 
+    /// Adopt the user's quiet hours as *the* schedule rule.
+    ///
+    /// Replaces any schedule rule rather than adding one. This is called every
+    /// time `notifications.yaml` changes, and an add would leave the previous
+    /// hours in the list behind the new ones -- still firing, with nothing on
+    /// screen to say why the desktop went quiet at a time the user had just
+    /// changed away from.
+    ///
+    /// Quiet hours are [`FocusMode::PriorityOnly`]: the user asked for nothing
+    /// *ordinary* to interrupt, not for nothing at all. A rule they set once,
+    /// months ago, must not swallow the notification that matters.
+    ///
+    /// A schedule that runs on no day installs nothing. It cannot come from
+    /// the file -- `NotifSettings::read_from` reads an empty day list as "the
+    /// user did not say" -- but it can be assigned in code, and it must not
+    /// reach [`AutoRule::Schedule`], whose empty `days` means *every* day.
+    /// Passing it through would turn "never" into "always", which is the worst
+    /// possible way to be wrong about a switch that silences a computer.
+    pub fn set_quiet_hours(&mut self, quiet: &notifsettings::QuietHours) {
+        self.auto_rules
+            .retain(|rule| !matches!(rule, AutoRule::Schedule { .. }));
+        let days: Vec<u8> = quiet
+            .days
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .filter_map(|(i, _)| u8::try_from(i).ok())
+            .collect();
+        if !quiet.enabled || days.is_empty() {
+            return;
+        }
+        self.auto_rules.push(AutoRule::Schedule {
+            window: quiet.window,
+            days,
+            mode: FocusMode::PriorityOnly,
+        });
+    }
+
     /// Remove an auto rule by index.
     pub fn remove_auto_rule(&mut self, index: usize) -> bool {
         if index < self.auto_rules.len() {
@@ -375,13 +407,16 @@ impl FocusAssistManager {
         }
     }
 
-    /// Set an app override.
+    /// Set an app override, replacing any rule already held for that program.
+    ///
+    /// Keyed on `app_name`, the same field [`app_priority`](Self::app_priority)
+    /// reads, so a rule written here is a rule that can be found. The version
+    /// this replaced matched on a separate `app_id` that no caller supplied.
     pub fn set_app_override(&mut self, override_entry: AppNotifOverride) {
-        // Replace existing or add new.
         if let Some(existing) = self
             .app_overrides
             .iter_mut()
-            .find(|o| o.app_id == override_entry.app_id)
+            .find(|o| o.app_name == override_entry.app_name)
         {
             *existing = override_entry;
         } else {
@@ -390,21 +425,37 @@ impl FocusAssistManager {
     }
 
     /// Get the notification priority for an app.
-    pub fn app_priority(&self, app_id: &str) -> NotifPriority {
+    ///
+    /// Matched on the name the caller passes, which is a notification's
+    /// `app_name`. See [`AppNotifOverride`] for the two-key version this
+    /// replaced and why it could not match.
+    #[must_use]
+    pub fn app_priority(&self, app_name: &str) -> NotifPriority {
         self.app_overrides
             .iter()
-            .find(|o| o.app_id == app_id)
-            .map(|o| o.priority)
-            .unwrap_or(NotifPriority::Normal)
+            .find(|o| o.app_name == app_name)
+            .map_or(NotifPriority::Normal, |o| o.importance)
     }
 
     /// Should a notification from this app be shown right now?
+    ///
+    /// The four modes are rungs on one ladder: each admits everything at or
+    /// above a level, and the level a program sits at is its
+    /// [`NotifPriority`].
+    ///
+    /// **`Off` is not "show everything".** It used to be, and that made
+    /// `Silent` mean "silent only while the user is focusing" -- so a program
+    /// the user had switched off went on interrupting them for as long as no
+    /// focus mode was on, which is nearly always. The word on the switch is
+    /// the promise: a program set to `Silent` is silent. `Off` is the bottom
+    /// rung, admitting everything *above* `Silent`, and the ladder now reads
+    /// the same way at every rung.
     pub fn should_show_notification(&self, app_id: &str) -> bool {
         let mode = self.effective_mode();
         let priority = self.app_priority(app_id);
 
         match mode {
-            FocusMode::Off => true,
+            FocusMode::Off => priority > NotifPriority::Silent,
             FocusMode::PriorityOnly => priority >= NotifPriority::Priority,
             FocusMode::AlarmsOnly => priority >= NotifPriority::Critical,
             FocusMode::TotalSilence => false,
@@ -418,7 +469,7 @@ impl FocusAssistManager {
 
     /// Evaluate auto rules given current time and system state.
     pub fn evaluate_auto_rules(&mut self, hour: u8, minute: u8, day_of_week: u8) {
-        if !self.auto_rules_enabled || self.manual_override {
+        if !self.auto_rules_enabled || self.manual_override || self.auto_suppressed {
             self.auto_active = false;
             return;
         }
@@ -879,9 +930,9 @@ mod tests {
         let mut mgr = make_mgr();
         mgr.set_mode(FocusMode::PriorityOnly);
         mgr.set_app_override(
-            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Priority),
+            AppNotifOverride::new("Chat").with_importance(NotifPriority::Priority),
         );
-        assert!(mgr.should_show_notification("chat"));
+        assert!(mgr.should_show_notification("Chat"));
         assert!(!mgr.should_show_notification("other_app")); // Normal priority
     }
 
@@ -890,13 +941,13 @@ mod tests {
         let mut mgr = make_mgr();
         mgr.set_mode(FocusMode::AlarmsOnly);
         mgr.set_app_override(
-            AppNotifOverride::new("alarm", "Alarm").with_priority(NotifPriority::Critical),
+            AppNotifOverride::new("Alarm").with_importance(NotifPriority::Critical),
         );
         mgr.set_app_override(
-            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Priority),
+            AppNotifOverride::new("Chat").with_importance(NotifPriority::Priority),
         );
-        assert!(mgr.should_show_notification("alarm"));
-        assert!(!mgr.should_show_notification("chat"));
+        assert!(mgr.should_show_notification("Alarm"));
+        assert!(!mgr.should_show_notification("Chat"));
         assert!(!mgr.should_show_notification("other"));
     }
 
@@ -905,9 +956,9 @@ mod tests {
         let mut mgr = make_mgr();
         mgr.set_mode(FocusMode::TotalSilence);
         mgr.set_app_override(
-            AppNotifOverride::new("alarm", "Alarm").with_priority(NotifPriority::Critical),
+            AppNotifOverride::new("Alarm").with_importance(NotifPriority::Critical),
         );
-        assert!(!mgr.should_show_notification("alarm"));
+        assert!(!mgr.should_show_notification("Alarm"));
     }
 
     // ---- App overrides ----
@@ -918,16 +969,68 @@ mod tests {
         assert_eq!(mgr.app_priority("unknown"), NotifPriority::Normal);
     }
 
+    /// A rule is found under the same string the shell looks it up by.
+    ///
+    /// **The test the two-key version could not have.** `AppNotifOverride`
+    /// used to carry an `app_id` and an `app_name`; rules were written under
+    /// the id and `DesktopShell::notify` looks up by a notification's
+    /// `app_name`. This module's own tests wrote `new("chat", "Chat")` and
+    /// then queried `"chat"`, so they agreed with each other and with nothing
+    /// the shell does. Nothing in production wrote a rule, so it never bit --
+    /// a settings page would have been the first thing to meet it, and the
+    /// symptom would have been a preference that saved and did nothing.
+    /// A silenced program is silent with no focus mode on.
+    ///
+    /// `Off` used to be `=> true`, which made `Silent` mean "silent only while
+    /// the user is focusing" -- so a program they had switched off went on
+    /// interrupting them for as long as no focus mode was on, which is nearly
+    /// always. Found by the shell test for the notification pane's switch,
+    /// which asserted the thing the switch promises and got the opposite.
+    #[test]
+    fn a_silenced_program_is_silent_even_with_no_focus_mode_on() {
+        let mut mgr = make_mgr();
+        assert_eq!(mgr.effective_mode(), FocusMode::Off, "precondition");
+        assert!(
+            mgr.should_show_notification("Chat"),
+            "an unconfigured program notifies with no focus mode on"
+        );
+
+        mgr.set_app_override(AppNotifOverride::new("Chat").with_importance(NotifPriority::Silent));
+
+        assert!(
+            !mgr.should_show_notification("Chat"),
+            "a program set to Silent notified anyway"
+        );
+        assert!(
+            mgr.should_show_notification("Mail"),
+            "silencing Chat silenced everything"
+        );
+    }
+
+    #[test]
+    fn a_rule_is_found_by_the_name_a_notification_carries() {
+        let mut mgr = make_mgr();
+        mgr.set_mode(FocusMode::PriorityOnly);
+        // Exactly what the shell passes: `Notification::app_name`.
+        let as_the_shell_spells_it = "Chat";
+        mgr.set_app_override(
+            AppNotifOverride::new(as_the_shell_spells_it).with_importance(NotifPriority::Priority),
+        );
+
+        assert!(
+            mgr.should_show_notification(as_the_shell_spells_it),
+            "a rule written under the name the shell uses was not found by it"
+        );
+    }
+
     #[test]
     fn set_app_override_replaces() {
         let mut mgr = make_mgr();
+        mgr.set_app_override(AppNotifOverride::new("Chat").with_importance(NotifPriority::Silent));
         mgr.set_app_override(
-            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Silent),
+            AppNotifOverride::new("Chat").with_importance(NotifPriority::Priority),
         );
-        mgr.set_app_override(
-            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Priority),
-        );
-        assert_eq!(mgr.app_priority("chat"), NotifPriority::Priority);
+        assert_eq!(mgr.app_priority("Chat"), NotifPriority::Priority);
         assert_eq!(mgr.app_overrides.len(), 1);
     }
 
@@ -954,6 +1057,30 @@ mod tests {
         };
         assert!(rule.is_schedule_active(10, 0, 1)); // Monday
         assert!(!rule.is_schedule_active(10, 0, 0)); // Sunday
+    }
+
+    /// **The bug this used to have.** An overnight rule with a day list has
+    /// to survive midnight, because that is most of what the user selected.
+    #[test]
+    fn an_overnight_rule_does_not_stop_at_midnight() {
+        let rule = AutoRule::Schedule {
+            window: DailyWindow::from_hm(22, 0, 7, 0).unwrap(),
+            days: vec![5], // Friday only
+            mode: FocusMode::PriorityOnly,
+        };
+        assert!(rule.is_schedule_active(23, 0, 5), "Friday at eleven");
+        assert!(
+            rule.is_schedule_active(1, 0, 6),
+            "one o'clock on Saturday morning is still Friday night"
+        );
+        assert!(
+            !rule.is_schedule_active(23, 0, 6),
+            "Saturday night was not selected"
+        );
+        assert!(
+            !rule.is_schedule_active(1, 0, 0),
+            "Sunday morning would be Saturday's window"
+        );
     }
 
     #[test]

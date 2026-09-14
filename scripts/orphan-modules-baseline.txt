@@ -4,7 +4,7 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
-# 38 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# 39 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs; and
@@ -35,6 +35,31 @@
 # again anyway: every stale line is a place a genuinely new island can hide, because
 # a reader who sees seven known-wrong entries stops trusting the other thirty-eight.
 #
+# THIRD BATCH, 2026-09-13, pruned by lane C: a11y.rs, deleted outright as a dead
+# parallel copy, and tray_dnd.rs, wired into the shell's tray.
+#
+# FOURTH BATCH, 2026-09-14, lane C, five in one day and all the same move -- find
+# the application that should already have been using the module, and use it:
+# gui/toolkit's pathbar.rs (the file explorer's address bar), disabled.rs (why a
+# greyed toolbar button is grey), svg.rs (a thumbnail of the drawing instead of a
+# coloured rectangle) and menubar.rs (the text editor's File/Edit/Search bar),
+# plus the desktop shell's taskbar.rs.  Worth noting what the wirings kept turning
+# up, since it was not the feature: menubar.rs found that `set_items` silently
+# closes an open dropdown, and the editor's TAB_BAR_HEIGHT doing duty as two
+# different facts.  An island is not only unreached code -- it is code whose
+# assumptions nobody has had to satisfy yet.
+#
+# The two paragraphs above were written straight into the generated file and were
+# one `--pin` away from deletion; this run is the one that would have done it.  They
+# are moved here verbatim, which is where the header four paragraphs down says all
+# prose has to live.  That instruction has now been given twice and disobeyed twice,
+# by two different lanes, which is worth more than another warning: a file that is
+# regenerated cannot hold hand-written text safely, and the only reason the loss is
+# survivable is that every version of it is in git.  If it happens a third time the
+# answer is not a sterner comment -- it is `--pin` preserving blocks it did not
+# write, or `--check` refusing a baseline that differs from what `--pin` would
+# produce.
+#
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
 # wired up or it does not land.  When you connect one, delete its line
@@ -53,6 +78,14 @@
 # so that the loop is not duplicated once per driver.  Writing the caller is
 # what paid the line off; pinning it was what let it sit unwritten.
 #
+# THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
+# rewrites this file from that constant, so anything added directly to the
+# generated file is deleted by the next run -- silently, because the gate
+# stays green and the entries stay correct while only the reasoning goes.
+# Three blocks above were lost that way on 2026-09-10 and restored from git.
+# The prose naming specific modules is hand-maintained; only the count is
+# filled in at write time.
+#
 # Being on this list is not absolution.  See known-issues.md ->
 # TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
 # largest entries are blocked on open-questions.md -> C-Q6, which decides
@@ -60,9 +93,9 @@
 apps/imageviewer/src/video.rs
 apps/installer/src/grub.rs
 apps/procexplorer/src/features.rs
+apps/settings/src/remote.rs
 apps/sysinfo/src/hwquery.rs
 gui/compositor/src/server.rs
-gui/desktop/src/a11y.rs
 gui/desktop/src/about.rs
 gui/desktop/src/backup_settings.rs
 gui/desktop/src/bluetooth.rs
@@ -81,17 +114,18 @@ gui/desktop/src/power_settings.rs
 gui/desktop/src/print_manager.rs
 gui/desktop/src/resmon.rs
 gui/desktop/src/screen_capture.rs
+gui/desktop/src/security_dialog.rs
+gui/desktop/src/session_mgr.rs
 gui/desktop/src/startup_settings.rs
 gui/desktop/src/storage_settings.rs
 gui/desktop/src/touchpad.rs
-gui/desktop/src/tray_dnd.rs
+gui/desktop/src/update_settings.rs
+gui/desktop/src/user_accounts.rs
 gui/desktop/src/window_peek.rs
 gui/remote/src/reader.rs
 gui/toolkit/src/context_ext.rs
-gui/toolkit/src/menubar.rs
-gui/toolkit/src/pathbar.rs
 gui/toolkit/src/signal.rs
-gui/toolkit/src/svg.rs
+gui/toolkit/src/textview.rs
 netproto/src/arp.rs
 netproto/src/dhcp.rs
 netproto/src/icmp.rs

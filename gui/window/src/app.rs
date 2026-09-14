@@ -147,6 +147,8 @@ pub struct Reloads {
     pub appearance: bool,
     /// `input.yaml` was rewritten.
     pub input: bool,
+    /// `notifications.yaml` was rewritten.
+    pub notifications: bool,
 }
 
 /// A picture an application wants the compositor to be holding, or to stop
@@ -675,6 +677,9 @@ fn announce_reloads<T: Transport>(
     }
     if reloads.input {
         events.input_changed()?;
+    }
+    if reloads.notifications {
+        events.notifications_changed()?;
     }
     Ok(())
 }
@@ -1679,6 +1684,7 @@ mod tests {
         let mut app = Recorder::new(Response::Redraw).having_written(Reloads {
             appearance: true,
             input: false,
+            notifications: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1700,6 +1706,7 @@ mod tests {
         let mut app = Recorder::new(Response::Idle).having_written(Reloads {
             appearance: true,
             input: false,
+            notifications: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1728,6 +1735,7 @@ mod tests {
         let mut app = Recorder::new(Response::Idle).having_written(Reloads {
             appearance: false,
             input: true,
+            notifications: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1753,6 +1761,7 @@ mod tests {
         let mut app = Recorder::new(Response::Idle).having_written(Reloads {
             appearance: true,
             input: true,
+            notifications: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1789,6 +1798,7 @@ mod tests {
         let mut app = Recorder::new(Response::Redraw).having_written(Reloads {
             appearance: true,
             input: false,
+            notifications: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");

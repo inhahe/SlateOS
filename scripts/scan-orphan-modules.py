@@ -84,10 +84,14 @@ benign explanation.  Comments and string literals do not count either; see
 unqualified use in a third file is invisible as an edge to the module, though
 the *item* mention in that third file is still counted, so the module is
 correctly reported as reached.  Macro-generated paths are invisible.  Names
-shared with another module, with any enum variant, or with any associated
-`fn`/`const`/`type` are dropped from the evidence entirely (see
-`variant_names` and `member_names`), so a module all of whose items have
-common names rests on its module path alone.  Struct field names are the one
+shared with another module, with any enum variant, with any associated
+`fn`/`const`/`type`, or with any public item of a file that is not itself a
+candidate -- a `main.rs`, most of all -- are dropped from the evidence entirely
+(see `variant_names` and `member_names`), so a module all of whose items have
+common names rests on its module path alone.  That last clause was added on
+2026-09-14 and is not hypothetical: without it, an application declaring its
+own `FileCategory` cleared the toolkit's file-type registry, which nothing
+used.  Struct field names are the one
 spelling hazard still not folded in; `member_names` says why.  It never proves
 a module is dead; it produces a short list worth reading.
 """
@@ -347,6 +351,33 @@ BASELINE_HEADER = """\
 # wrong.  It just quietly stops describing the tree, and the count in this
 # header — the number anyone actually quotes — drifts away from the truth.
 #
+# SECOND BATCH, 2026-09-11, and the second time the stale direction went unacted on:
+# apps/settings' associations.rs, the desktop shell's blur.rs, display_settings.rs,
+# input_method.rs, login_screen.rs and mouse_settings.rs, and gui/toolkit's
+# filetypes.rs -- 6,655 lines between them, all reached by lane C's own later work.
+# `--check` had been naming all seven on every run. Pruned by lane A, which owns
+# neither the modules nor the debt: the deletion only tightens a ratchet, the file's
+# header says deletion is the only edit it should ever receive, and the gate itself
+# prints the line to delete. Nothing here is a judgement about lane C's code.
+#
+# Worth saying plainly, since the note above already said it once and it happened
+# again anyway: every stale line is a place a genuinely new island can hide, because
+# a reader who sees seven known-wrong entries stops trusting the other thirty-eight.
+#
+# THIRD BATCH, 2026-09-13, pruned by lane C: a11y.rs, deleted outright as a dead
+# parallel copy, and tray_dnd.rs, wired into the shell's tray.
+#
+# The two paragraphs above were written straight into the generated file and were
+# one `--pin` away from deletion; this run is the one that would have done it.  They
+# are moved here verbatim, which is where the header four paragraphs down says all
+# prose has to live.  That instruction has now been given twice and disobeyed twice,
+# by two different lanes, which is worth more than another warning: a file that is
+# regenerated cannot hold hand-written text safely, and the only reason the loss is
+# survivable is that every version of it is in git.  If it happens a third time the
+# answer is not a sterner comment -- it is `--pin` preserving blocks it did not
+# write, or `--check` refusing a baseline that differs from what `--pin` would
+# produce.
+#
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
 # wired up or it does not land.  When you connect one, delete its line
@@ -477,6 +508,42 @@ def main():
     variants = {}
     for f, lines in tree:
         for name in variant_names(lines) | member_names(lines):
+            variants.setdefault(name, set()).add(f)
+
+    # And public items declared by files that cannot themselves be candidates:
+    # every `main.rs`, `lib.rs` and `mod.rs`.
+    #
+    # None of those is a library module, so none is rightly ever reported as an
+    # island -- but each is still an *owner* of the names it declares, and this
+    # scan used to count their mentions while ignoring their declarations. So a
+    # name the rest of the tree uses constantly could be attributed, alone and
+    # unambiguously, to a module nobody had ever called.
+    #
+    # The two that were measured on 2026-09-14:
+    #
+    #   `WindowId` is declared in `gui/compositor/src/lib.rs`, in
+    #   `gui/desktop/src/lib.rs`, and in `gui/desktop/src/taskbar.rs`. Both
+    #   `lib.rs` are aggregators and so were not owners -- which left the
+    #   taskbar module the sole owner of a name the shell writes hundreds of
+    #   times. A 2,600-line module nothing calls was vouched for by every
+    #   window id in the desktop.
+    #
+    #   `apps/fileassoc/src/main.rs` declares its own `FileCategory` and
+    #   `FileType`; `gui/toolkit/src/filetypes.rs` exports `FileCategory`.
+    #   Those two names were the whole of the evidence clearing a 2,201-line
+    #   file-type registry that **no file in the tree referred to** -- so it
+    #   was pruned from the baseline as reached, and `apps/explorer` went on
+    #   classifying files with three hard-coded extension lists beside it.
+    #
+    # Two rules, each right on its own: a binary's or a crate's root is not a
+    # library module, and an ambiguous name is dropped so a common noun cannot
+    # clear anything. The hole was in their interaction, and no test of either
+    # one could have found it. Widening this set moved the count from 38
+    # islands to 48.
+    for f, lines in tree:
+        if f in candidates:
+            continue
+        for name in public_items(lines):
             variants.setdefault(name, set()).add(f)
 
     unambiguous = {

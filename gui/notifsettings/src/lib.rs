@@ -50,7 +50,11 @@
 
 #![deny(clippy::all, clippy::pedantic)]
 
-use daywindow::{DailyWindow, TimeOfDay};
+// Re-exported, not merely used: `QuietHours::window` is a `DailyWindow`, so
+// every caller that reads or sets one needs the type, and making each of them
+// depend on `daywindow` separately would be three crates agreeing by accident
+// rather than one crate stating its own vocabulary.
+pub use daywindow::{DailyWindow, TimeOfDay};
 use settingsfile::yaml_enum;
 use yamldoc::Document;
 
@@ -467,6 +471,14 @@ impl NotifSettings {
 /// The days, Sunday first, as they are spelled in the file.
 const WEEKDAYS: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
+/// The days, Sunday first, as they are shown to a person.
+///
+/// Beside the file's spellings rather than in the Settings application, so
+/// that the two orders cannot disagree: a page with its own list, ordered
+/// Monday-first, would light up Tuesday when the user chose Monday and there
+/// would be nothing on either screen to say why.
+pub const WEEKDAY_LABELS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 /// The index of a day's spelling, or `None`.
 ///
 /// Case-insensitive and prefix-based, so `Mon`, `monday` and `MONDAY` all
@@ -484,7 +496,12 @@ fn parse_hm(text: &str) -> Option<TimeOfDay> {
 }
 
 /// A time of day as `HH:MM`, zero-padded.
-fn format_hm(t: TimeOfDay) -> String {
+///
+/// Public because the Settings page shows the same spelling the file uses. A
+/// page that formatted its own would be a second opinion about what 22:00
+/// looks like, and the two would drift the first time either gained a case.
+#[must_use]
+pub fn format_hm(t: TimeOfDay) -> String {
     format!("{:02}:{:02}", t.hour(), t.minute())
 }
 

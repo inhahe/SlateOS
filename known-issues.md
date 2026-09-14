@@ -135980,7 +135980,7 @@ accepted. **A correct answer already in the tree does not propagate by
 existing.**
 
 
-## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10) -- four left; lane B's is fixed
+## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10) -- three left; lane B's is fixed
 
 **In short:** `cargo test -p <name>` takes a *package* name. Everyone types the
 *directory* name, because for 2944 of this workspace's 2955 crates they are the
@@ -136041,6 +136041,15 @@ parse of the tree finds 417 crates with a `Cargo.toml`, of which ten differ from
 their directory. The two numbers are not reconciled; do not treat 2955 as
 confirmed. Stated rather than harmonised, because quietly adjusting a number to
 agree with a different measurement is how the tmux row got here.
+
+**This entry classifies as CLOSED while three crates are live, and that is not
+mine to change.** `check-known-issues-index.py`'s `is_closed()` slices the slug
+off and word-matches the tail, which here reads "lane B's is fixed" -- so every
+triage count reads the whole entry as done. The heading mixes an open count with
+a closed marker. Rewording it would flip the entry's open/closed status for two
+other lanes' crates, and the words are lane B's claim about lane B's fix, so it
+is theirs or lane C's to reword rather than mine. I corrected the *count* in the
+marker (four to three), which is a fact with two witnesses, and stopped there.
 
 **What this entry still does not cover, and it is the part that actually bit.**
 The gate refuses an *unrecorded* mismatch. It does not, and cannot, stop anyone

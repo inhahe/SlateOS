@@ -143856,6 +143856,34 @@ also confirms the precondition for making the staging gate fatal: the refusal
 is satisfiable by the command the gate prints, for every binary on the image,
 in about forty seconds.
 
+### What is deliberately NOT covered, and why
+
+The three crates fixed are the ones holding the image's binaries. Measured, the
+rest of the tree is larger than that:
+
+| | count |
+|---|---|
+| `userspace/` crates producing binaries | **194** |
+| of those, already having a `build.rs` | **9** |
+
+**The image is protected without touching the other 191**, and that is the
+whole argument: `create-ext4-rootfs.sh` now refuses to build an image from a
+binary older than `libc.a`, and the boot test runs the image. A stale binary
+that is not on the image is a developer-build annoyance, not something that can
+ship or be tested against.
+
+So extending this is optional, and it is not free. The nine crates that already
+have a `build.rs` would need their scripts **merged**, not replaced — and that
+is not a hypothetical hazard. It is exactly how this fix broke `coreutils`:
+`cat > build.rs` in a loop over three crates destroyed the one that already had
+a script, which emitted the bare-metal linker script every binary in that crate
+is laid out by. Two commits and 70 rebuilt binaries passed before the baseline
+comment on an unrelated gate led back to it.
+
+If the other 191 are ever done, the merge cases are the whole of the risk and
+should be done by hand and read individually, not by the loop that does the 185
+safe ones.
+
 The original proper-fix note follows; the part about ~200 crates is what was
 wrong with it.
 

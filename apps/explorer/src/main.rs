@@ -42,6 +42,7 @@ use guitk::wheel::Accumulator as WheelAccumulator;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
 use drives::DriveSet;
+use guitk::disabled::DisabledState;
 use guitk::filetypes::{self, FileCategory};
 use guitk::menu::{ContextMenu, MenuItem};
 use guitk::pathbar::{CompletionItem, PathBar, PathBarEvent};
@@ -612,6 +613,13 @@ pub struct ExplorerState {
     /// so no paste, delete, rename or error message was ever actually seen.
     /// Empty means "nothing to report"; the status bar then shows the summary.
     pub status_message: String,
+    /// What the pointer is resting on, when that is worth saying.
+    ///
+    /// Kept apart from `status_message` rather than written into it: a hover
+    /// is transient and a status message is a *result*, and letting the
+    /// pointer overwrite "Deleted 5 items, 2 failed" on its way past a button
+    /// would lose the one line the user needed to read.
+    hover_hint: String,
     /// The context menu a right-click opened, if any.
     ///
     /// `guitk::menu::ContextMenu`, not a list drawn here: the shell already
@@ -728,6 +736,7 @@ impl ExplorerState {
             pathbar: PathBar::new(&start_path.to_string_lossy()),
             address_editing: false,
             status_message: String::new(),
+            hover_hint: String::new(),
             menu: None,
             operations: Vec::new(),
             pending: VecDeque::new(),
@@ -1749,11 +1758,41 @@ impl ExplorerState {
             .unwrap_or_default()
     }
 
+    /// Say why the button under the pointer cannot be pressed, if it cannot.
+    ///
+    /// Answers whether the hint changed, which is what a caller repaints on.
+    fn update_hover_hint(&mut self, x: f32, y: f32) -> bool {
+        let hint = Self::toolbar_button_at(x, y)
+            .map(|button| self.toolbar_button_state(button))
+            .filter(DisabledState::is_disabled)
+            .and_then(|state| state.reason().map(str::to_string))
+            .unwrap_or_default();
+        if hint == self.hover_hint {
+            return false;
+        }
+        self.hover_hint = hint;
+        true
+    }
+
     /// The text the status bar should display.
     ///
     /// An operation result takes precedence over the directory summary until
     /// the user navigates away.
+    ///
+    /// **Live progress outranks a hover hint, and a hover hint outranks a
+    /// finished operation's summary.** A copy running now is the most
+    /// important thing on the bar; with nothing running, what the pointer is
+    /// resting on is more useful than a result the user has already read, and
+    /// it goes away again the moment the pointer does -- which a summary must
+    /// not, since a half-failed delete is exactly what they need to still be
+    /// there.
     pub fn status_bar_text(&self) -> &str {
+        if self.work_in_flight() {
+            return &self.status_message;
+        }
+        if !self.hover_hint.is_empty() {
+            return &self.hover_hint;
+        }
         if self.status_message.is_empty() {
             &self.dir_summary
         } else {
@@ -2482,21 +2521,43 @@ impl ExplorerState {
             .map(|(button, _)| button)
     }
 
-    /// Whether a button has anything to do right now.
+    /// Whether a button has anything to do right now, and if not, why not.
+    ///
+    /// `guitk::disabled::DisabledState`, which carries the reason -- that is
+    /// what the type is for, and its own module doc says "shows reason on
+    /// hover". This was a bare `bool` when the toolbar was first wired, which
+    /// left a greyed button with nothing to say for itself; the toolkit had
+    /// the better answer sitting unused. See
+    /// `TD-C-SIX-TOOLKIT-WIDGETS-ARE-WRITTEN-TESTED-AND-USED-BY-NOTHING`.
     ///
     /// A disabled button is drawn grey and refuses the click, rather than
     /// being hidden: a toolbar whose buttons come and go moves the others
     /// under the pointer between one glance and the next.
     #[must_use]
+    pub fn toolbar_button_state(&self, button: ToolbarButton) -> DisabledState {
+        let reason = match button {
+            ToolbarButton::Back if self.history_back.is_empty() => Some("Nothing to go back to"),
+            ToolbarButton::Forward if self.history_forward.is_empty() => {
+                Some("Nothing to go forward to")
+            }
+            ToolbarButton::Up if self.current_path.parent().is_none() => {
+                Some("This is the top of the drive")
+            }
+            ToolbarButton::Cut if self.selected_indices.is_empty() => {
+                Some("Select something to cut")
+            }
+            ToolbarButton::Paste if self.clipboard.is_none() => Some("The clipboard is empty"),
+            _ => None,
+        };
+        reason.map_or(DisabledState::Enabled, |reason| DisabledState::Disabled {
+            reason: Some(reason.to_string()),
+        })
+    }
+
+    /// Whether a button has anything to do right now.
+    #[must_use]
     pub fn toolbar_button_enabled(&self, button: ToolbarButton) -> bool {
-        match button {
-            ToolbarButton::Back => !self.history_back.is_empty(),
-            ToolbarButton::Forward => !self.history_forward.is_empty(),
-            ToolbarButton::Up => self.current_path.parent().is_some(),
-            ToolbarButton::NewFolder => true,
-            ToolbarButton::Cut => !self.selected_indices.is_empty(),
-            ToolbarButton::Paste => self.clipboard.is_some(),
-        }
+        self.toolbar_button_state(button).is_enabled()
     }
 
     /// Do what a toolbar button says. Answers whether anything changed.
@@ -2560,7 +2621,7 @@ impl ExplorerState {
                 rect.height,
                 self.palette.surface0,
             );
-            let ink = if self.toolbar_button_enabled(button) {
+            let ink = if self.toolbar_button_state(button).is_enabled() {
                 self.palette.text
             } else {
                 // The palette's disabled grey, and this is what it is for:
@@ -3729,6 +3790,9 @@ impl ExplorerState {
                 was.is_some()
             }
             MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
+            // Motion with nothing grabbed: the only thing the explorer does
+            // with it is say why the button under the pointer is greyed.
+            MouseEventKind::Move => self.update_hover_hint(m.x, m.y),
             MouseEventKind::DoubleClick(MouseButton::Left) => self.open_at(m.x, m.y),
             // A file manager's back/forward thumb buttons are the one mouse
             // gesture users expect to work without a toolbar.
@@ -4866,6 +4930,131 @@ mod tests {
         );
         assert!(!items[0].is_directory, "apple.txt is not a folder");
         assert!(items[1].is_directory, "apples is");
+    }
+
+    // ---- why a button is greyed ---------------------------------------
+
+    /// Move the pointer to a point.
+    fn hover(state: &mut ExplorerState, x: f32, y: f32) {
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+    }
+
+    /// The middle of a toolbar button.
+    fn toolbar_centre(button: ToolbarButton) -> (f32, f32) {
+        let (_, rect) = ExplorerState::toolbar_layout()
+            .into_iter()
+            .find(|(b, _)| *b == button)
+            .unwrap_or_else(|| panic!("{button:?} is not in the layout"));
+        (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0)
+    }
+
+    /// **A greyed button says why**, which a bare `bool` could not.
+    #[test]
+    fn a_disabled_button_carries_its_reason() {
+        let scratch = temp_dir("why_reason");
+        let root = scratch.dir().to_path_buf();
+        let state = state_at(&root);
+
+        let back = state.toolbar_button_state(ToolbarButton::Back);
+        assert!(back.is_disabled(), "there is history to go back to");
+        assert_eq!(back.reason(), Some("Nothing to go back to"));
+
+        let paste = state.toolbar_button_state(ToolbarButton::Paste);
+        assert_eq!(paste.reason(), Some("The clipboard is empty"));
+
+        // And a live one carries none, rather than a reason nobody should see.
+        let new_folder = state.toolbar_button_state(ToolbarButton::NewFolder);
+        assert!(new_folder.is_enabled());
+        assert_eq!(new_folder.reason(), None);
+    }
+
+    /// Resting the pointer on it puts the reason in the status bar.
+    #[test]
+    fn hovering_a_greyed_button_says_why_in_the_status_bar() {
+        let scratch = temp_dir("why_hover");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        let (cx, cy) = toolbar_centre(ToolbarButton::Back);
+
+        hover(&mut state, cx, cy);
+        assert_eq!(state.status_bar_text(), "Nothing to go back to");
+
+        // And it goes away again when the pointer does.
+        hover(&mut state, cx, cy + 200.0);
+        assert_ne!(state.status_bar_text(), "Nothing to go back to");
+    }
+
+    /// A live button says nothing on hover.
+    #[test]
+    fn hovering_a_live_button_says_nothing() {
+        let scratch = temp_dir("why_live");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        let before = state.status_bar_text().to_string();
+        let (cx, cy) = toolbar_centre(ToolbarButton::NewFolder);
+
+        hover(&mut state, cx, cy);
+
+        assert_eq!(
+            state.status_bar_text(),
+            before,
+            "a live button explained itself"
+        );
+    }
+
+    /// **A hover never covers a running copy.**
+    ///
+    /// The progress line is the most important thing on the bar while it is
+    /// there, and a pointer wandering past a greyed button must not take it
+    /// away.
+    #[test]
+    fn a_hover_does_not_cover_a_running_operation() {
+        let scratch = temp_dir("why_busy");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        let (cx, cy) = toolbar_centre(ToolbarButton::Back);
+
+        hover(&mut state, cx, cy);
+
+        assert!(
+            state.status_bar_text().starts_with("Pasted"),
+            "the hover covered the progress: {:?}",
+            state.status_bar_text()
+        );
+        settle(&mut state);
+    }
+
+    /// **And a hover does outrank a finished operation's summary**, which the
+    /// user has already read, while the summary still outlives the pointer.
+    #[test]
+    fn a_hover_outranks_a_summary_but_does_not_erase_it() {
+        let scratch = temp_dir("why_after");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 2);
+        state.paste();
+        settle(&mut state);
+        let summary = state.status_bar_text().to_string();
+        assert!(!summary.is_empty());
+
+        let (cx, cy) = toolbar_centre(ToolbarButton::Back);
+        hover(&mut state, cx, cy);
+        assert_eq!(state.status_bar_text(), "Nothing to go back to");
+
+        // Off the button again: the summary is still there.
+        hover(&mut state, cx, cy + 200.0);
+        assert_eq!(
+            state.status_bar_text(),
+            summary,
+            "the hover ate the summary"
+        );
     }
 
     // ---- the context menu ---------------------------------------------

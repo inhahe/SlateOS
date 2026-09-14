@@ -155,6 +155,43 @@ impl DailyWindow {
     pub fn contains_hm(self, hour: u8, minute: u8) -> bool {
         TimeOfDay::new(hour, minute).is_some_and(|at| self.contains(at))
     }
+
+    /// Which weekday's window is open at `hour:minute` on `weekday`, or `None`
+    /// if none is.
+    ///
+    /// **A window belongs to the day it opened, not the day it is now.** A
+    /// Friday 22:00-07:00 rule is still in force at one o'clock on Saturday
+    /// morning: the user asked for Friday night, and Friday night is mostly
+    /// Saturday. Reading that hour as Saturday's -- the obvious reading, and
+    /// the one two hand-written copies in this tree had -- makes every
+    /// overnight schedule with a day list stop dead at midnight, and stop
+    /// without saying anything.
+    ///
+    /// It lives here, on the window, because the window is the only thing that
+    /// knows whether it wraps. A caller holding a day mask asks this and then
+    /// looks up the answer; it does not redo the reasoning, which is what made
+    /// two copies of it disagree.
+    ///
+    /// `weekday` is 0=Sunday..6=Saturday and is taken modulo 7, so the
+    /// returned day is always in range.
+    #[must_use]
+    pub fn started_on(self, hour: u8, minute: u8, weekday: u8) -> Option<u8> {
+        let now = TimeOfDay::new(hour, minute)?;
+        if !self.contains(now) {
+            return None;
+        }
+        // Normalised before anything is added to it, which is what makes the
+        // step back to yesterday safe: after this, `weekday` is at most 6.
+        let weekday = weekday % 7;
+        if self.wraps_midnight() && now < self.start {
+            // Before the start on an overnight window: this is yesterday's,
+            // still running. Adding 6 rather than subtracting 1 keeps it in
+            // unsigned arithmetic.
+            Some(weekday.saturating_add(6) % 7)
+        } else {
+            Some(weekday)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +208,60 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The case both hand-written copies got wrong.**
+    #[test]
+    fn an_overnight_window_is_still_the_day_it_opened_on() {
+        let night = DailyWindow::from_hm(22, 0, 7, 0).unwrap();
+        // Friday is 5, Saturday is 6.
+        assert_eq!(night.started_on(23, 0, 5), Some(5), "Friday at eleven");
+        assert_eq!(
+            night.started_on(1, 0, 6),
+            Some(5),
+            "one o'clock on Saturday morning is Friday's window"
+        );
+        assert_eq!(
+            night.started_on(6, 59, 6),
+            Some(5),
+            "a minute before the end is still Friday's"
+        );
+        assert_eq!(night.started_on(7, 0, 6), None, "the end is outside");
+        assert_eq!(night.started_on(12, 0, 5), None, "midday is outside");
+        // Sunday is 0, so the step back must wrap rather than underflow.
+        assert_eq!(
+            night.started_on(1, 0, 0),
+            Some(6),
+            "Sunday morning is Saturday's"
+        );
+    }
+
+    /// A window that does not wrap belongs to today, every time.
+    #[test]
+    fn a_daytime_window_is_always_todays() {
+        let day = DailyWindow::from_hm(9, 0, 17, 0).unwrap();
+        for weekday in 0..7 {
+            assert_eq!(day.started_on(12, 0, weekday), Some(weekday));
+            assert_eq!(day.started_on(3, 0, weekday), None);
+            assert_eq!(day.started_on(20, 0, weekday), None);
+        }
+    }
+
+    /// A clock reading that is not a time is not inside anything.
+    #[test]
+    fn an_impossible_clock_reading_opens_no_window() {
+        let night = DailyWindow::from_hm(22, 0, 7, 0).unwrap();
+        assert_eq!(night.started_on(25, 0, 3), None);
+        assert_eq!(night.started_on(23, 60, 3), None);
+    }
+
+    /// A weekday out of range is taken modulo 7 rather than answered wrongly.
+    #[test]
+    fn a_weekday_past_saturday_wraps() {
+        let day = DailyWindow::from_hm(9, 0, 17, 0).unwrap();
+        assert_eq!(day.started_on(12, 0, 7), Some(0), "7 is Sunday again");
+        assert_eq!(day.started_on(12, 0, 9), Some(2));
+        assert_eq!(day.started_on(12, 0, 255), Some(255 % 7));
+    }
 
     #[test]
     fn a_time_of_day_cannot_be_built_out_of_something_that_is_not_one() {

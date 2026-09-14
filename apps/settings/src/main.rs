@@ -830,6 +830,11 @@ impl DropdownLayout {
 pub enum DropdownId {
     /// How far the `n`-th program's notifications get while focusing.
     NotifImportance(usize),
+    /// When quiet hours begin.
+    QuietStart,
+    /// When they end. Earlier than the start means they run through midnight,
+    /// which is what nearly everyone wants and what the default is.
+    QuietEnd,
     Resolution,
     RefreshRate,
     Scale,
@@ -848,9 +853,15 @@ impl DropdownId {
     ///
     /// Exists so a test can walk the whole set and check each one is reachable.
     /// Three of these were drawn with nothing that could open them, and the
-    /// only cheap way to keep an eleventh from joining them is to iterate the
+    /// only cheap way to keep the next one from joining them is to iterate the
     /// enum rather than trust that whoever adds it also wires it.
-    pub const ALL: [Self; 11] = [
+    ///
+    /// `NotifImportance` is absent because it is one dropdown per program in a
+    /// list that may be empty; there is no fixed value to walk. Everything with
+    /// a fixed identity belongs here.
+    pub const ALL: [Self; 13] = [
+        Self::QuietStart,
+        Self::QuietEnd,
         Self::Resolution,
         Self::RefreshRate,
         Self::Scale,
@@ -863,6 +874,26 @@ impl DropdownId {
         Self::NarratorVerbosity,
         Self::HighContrast,
     ];
+}
+
+/// The settings documents as they stood before an event.
+///
+/// See [`SettingsState::snapshot`].
+struct SettingsSnapshot {
+    appearance: appearance::AppearanceSettings,
+    input: inputsettings::InputSettings,
+    notif: notifsettings::NotifSettings,
+}
+
+/// Which of them an event changed.
+///
+/// Deliberately a struct of named fields rather than a `Vec` or a bitmask:
+/// adding a document means adding a field, and a field that nothing reads is a
+/// warning rather than a setting that quietly stops being saved.
+struct ChangedDocuments {
+    appearance: bool,
+    input: bool,
+    notif: bool,
 }
 
 impl Default for SettingsState {
@@ -1990,6 +2021,8 @@ enum ToggleId {
     NotifSound(usize),
     /// Whether it shows a banner rather than only appearing in the list.
     NotifBanner(usize),
+    /// Whether the nightly quiet hours are in force at all.
+    QuietHours,
     MonoAudio,
     VisualAlerts,
     NarratorEnabled,
@@ -2160,6 +2193,10 @@ fn render_theme_preview(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, wi
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PillId {
+    /// Which days of the week quiet hours run on. Unlike its neighbours here
+    /// this is a *many*-of-many choice: a click toggles one day rather than
+    /// selecting it alone.
+    QuietDays,
     Transparency,
     AnimationSpeed,
     SurfaceStyle,
@@ -4298,6 +4335,32 @@ impl SettingsState {
     /// The empty state says that rather than showing an empty box, because a
     /// page with nothing on it and no explanation reads as broken.
     fn build_notifications_page<S: PageSink>(&self, s: &mut S) {
+        let quiet = &self.notif.settings.quiet_hours;
+        s.section("Quiet hours");
+        s.note(
+            "Between these times, only programs set to Priority or above can \
+             interrupt you.",
+            28.0,
+        );
+        s.toggle_row("Quiet hours", ToggleId::QuietHours, quiet.enabled);
+        s.dropdown_row(
+            "From",
+            DropdownId::QuietStart,
+            &notifsettings::format_hm(quiet.window.start()),
+        );
+        s.dropdown_row(
+            "Until",
+            DropdownId::QuietEnd,
+            &notifsettings::format_hm(quiet.window.end()),
+        );
+        let days: Vec<(&str, bool)> = notifsettings::WEEKDAY_LABELS
+            .iter()
+            .enumerate()
+            .map(|(i, label)| (*label, quiet.days.get(i).copied().unwrap_or(false)))
+            .collect();
+        s.pill_row("On", PillId::QuietDays, &days);
+        s.gap();
+
         s.section("Programs");
         if self.notif.settings.apps.is_empty() {
             s.note(
@@ -4426,6 +4489,23 @@ impl SettingsState {
                     })
                     .unwrap_or(0);
                 (items, at)
+            }
+            DropdownId::QuietStart | DropdownId::QuietEnd => {
+                let window = self.notif.settings.quiet_hours.window;
+                let current = if dropdown_id == DropdownId::QuietStart {
+                    window.start()
+                } else {
+                    window.end()
+                };
+                let choices = Self::quiet_time_choices(current);
+                let at = choices.iter().position(|t| *t == current).unwrap_or(0);
+                (
+                    choices
+                        .iter()
+                        .map(|t| notifsettings::format_hm(*t))
+                        .collect(),
+                    at,
+                )
             }
             DropdownId::OutputDevice => {
                 let items: Vec<String> =
@@ -4679,16 +4759,48 @@ impl SettingsState {
     /// click, and — because each save schedules a notification — would have the
     /// compositor re-read its colours every time a slider moved.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
-        let appearance_before = self.appearance.settings.clone();
-        let input_before = self.input.settings.clone();
+        let before = self.snapshot();
         let result = self.dispatch_event(event);
-        if self.appearance.settings != appearance_before {
+        let changed = self.changed_since(&before);
+        if changed.appearance {
             self.save_appearance();
         }
-        if self.input.settings != input_before {
+        if changed.input {
             self.save_input();
         }
+        if changed.notif {
+            self.save_notifications();
+        }
         result
+    }
+
+    /// Every settings document this application writes, as it stands now.
+    ///
+    /// One value rather than a loose `_before` clone per document, because the
+    /// loose version is a checklist nobody reads: `notif` was missing from it,
+    /// so the Sound and Banner switches on the notifications page flipped on
+    /// screen and were never written to the file. The user set them, watched
+    /// them move, and found them back the next time they opened the page.
+    fn snapshot(&self) -> SettingsSnapshot {
+        SettingsSnapshot {
+            appearance: self.appearance.settings.clone(),
+            input: self.input.settings.clone(),
+            notif: self.notif.settings.clone(),
+        }
+    }
+
+    /// Which documents differ from `before`.
+    ///
+    /// Split from the saving so a test can ask what *would* be written without
+    /// anything being written -- `handle_event` reaches the user's real home
+    /// directory, which is why the tests below go through `dispatch_event`
+    /// instead and why this wiring had no test to omit before.
+    fn changed_since(&self, before: &SettingsSnapshot) -> ChangedDocuments {
+        ChangedDocuments {
+            appearance: self.appearance.settings != before.appearance,
+            input: self.input.settings != before.input,
+            notif: self.notif.settings != before.notif,
+        }
     }
 
     /// Route an event to its handler. Split from [`handle_event`](Self::handle_event)
@@ -4904,6 +5016,13 @@ impl SettingsState {
                     *flag = !*flag;
                 }
             }
+            RowHit::Pill(PillId::QuietDays, idx) => {
+                // Toggled, not selected: the days are a set, and a user who
+                // wants Friday *and* Saturday must be able to say so.
+                if let Some(day) = self.notif.settings.quiet_hours.days.get_mut(idx) {
+                    *day = !*day;
+                }
+            }
             RowHit::Pill(PillId::Transparency, idx) => {
                 if let Some(level) = TransparencyLevel::ALL.get(idx) {
                     self.appearance.settings.transparency = *level;
@@ -5051,9 +5170,17 @@ impl SettingsState {
         let (lo, hi) = id.range();
         let value = (hi - lo).mul_add(fraction.clamp(0.0, 1.0), lo);
         match id {
+            // No save here. `handle_event` compares this document before and
+            // after every event and writes it if it moved, and this runs inside
+            // that -- a drag is a mouse event. The save that used to be here was
+            // a second door, and it cost: `set_slider_fraction` is reachable from
+            // `handle_click`, which the slider *geometry* tests drive directly,
+            // so every one of them wrote the developer's real `appearance.yaml`
+            // and `check-scratch-config.py` caught it only once a change of
+            // timing stopped a neighbouring test's scratch directory from
+            // absorbing the write.
             SliderId::NightLightTemperature => {
                 self.appearance.settings.night_light_strength = value;
-                self.save_appearance();
             }
             SliderId::NarratorRate => self.narrator_rate = value,
             SliderId::OutputVolume => self.output_volume = round_u8(value),
@@ -5105,6 +5232,7 @@ impl SettingsState {
             }
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
             ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
+            ToggleId::QuietHours => &mut self.notif.settings.quiet_hours.enabled,
             ToggleId::MonoAudio => &mut self.mono_audio,
             ToggleId::VisualAlerts => &mut self.visual_alerts,
             ToggleId::NarratorEnabled => &mut self.narrator_enabled,
@@ -5118,6 +5246,27 @@ impl SettingsState {
             ToggleId::AutoUpdate => &mut self.auto_update_enabled,
             ToggleId::TaskbarAutohide => &mut self.appearance.settings.taskbar_autohide,
         })
+    }
+
+    /// The times the quiet-hours dropdowns offer, in order.
+    ///
+    /// Every half hour, plus `current` if it is not one of them. That last
+    /// clause is the point: the file accepts any minute and a person editing
+    /// it by hand may well write 22:15, and a list that did not contain their
+    /// own setting would show the dropdown reading "00:00" -- the page
+    /// reporting a time the user never chose, and writing it the moment they
+    /// touched anything else on the row.
+    fn quiet_time_choices(current: notifsettings::TimeOfDay) -> Vec<notifsettings::TimeOfDay> {
+        let mut times: Vec<notifsettings::TimeOfDay> = (0..48)
+            .filter_map(|half| {
+                notifsettings::TimeOfDay::new(half / 2, if half % 2 == 0 { 0 } else { 30 })
+            })
+            .collect();
+        if !times.contains(&current) {
+            times.push(current);
+            times.sort_unstable();
+        }
+        times
     }
 
     fn handle_hover(&mut self, mx: f32, my: f32) -> EventResult {
@@ -5192,12 +5341,23 @@ impl SettingsState {
                     self.scale = *scale;
                 }
             }
+            DropdownId::QuietStart | DropdownId::QuietEnd => {
+                let window = self.notif.settings.quiet_hours.window;
+                let start = dropdown_id == DropdownId::QuietStart;
+                let current = if start { window.start() } else { window.end() };
+                if let Some(chosen) = Self::quiet_time_choices(current).get(index) {
+                    self.notif.settings.quiet_hours.window = if start {
+                        notifsettings::DailyWindow::new(*chosen, window.end())
+                    } else {
+                        notifsettings::DailyWindow::new(window.start(), *chosen)
+                    };
+                }
+            }
             DropdownId::NotifImportance(app) => {
                 if let Some(chosen) = notifsettings::Importance::ALL.get(index)
                     && let Some(rule) = self.notif.settings.apps.get_mut(app)
                 {
                     rule.importance = *chosen;
-                    self.save_notifications();
                 }
             }
             DropdownId::OutputDevice => {
@@ -5456,19 +5616,47 @@ mod tests {
     #[test]
     fn the_night_light_controls_write_the_appearance_file() {
         with_scratch_config("settings-night-light", |_root| {
-            let mut state = SettingsState::new();
-            assert!(!state.appearance.settings.night_light, "off by default");
+            // Through the doors a person uses -- a click and a drag -- rather
+            // than by assigning the fields. The first version of this test set
+            // the switch with `toggle_mut` and moved the slider with
+            // `set_slider_fraction`, and only the slider had a save of its own:
+            // the switch reached the file purely as a side effect of the
+            // slider's write. A test claiming both controls work would have
+            // passed with the switch wired to nothing at all.
+            let mut state = state_showing(RowHit::Toggle(ToggleId::NightLight))
+                .expect("no page draws the night-light switch");
+            // `state_showing` hands back a page with every switch turned on,
+            // which is the wrong starting point for a test about turning one on.
+            state.appearance.settings.night_light = false;
+            let (cx, cy) =
+                center_of(&state, RowHit::Toggle(ToggleId::NightLight)).expect("just found it");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
 
-            *state
-                .toggle_mut(ToggleId::NightLight)
-                .expect("the toggle resolves to a field") = true;
-            state.set_slider_fraction(SliderId::NightLightTemperature, 1.0);
-
-            let saved = appearance::AppearanceFile::load();
             assert!(
-                saved.settings.night_light,
+                state.appearance.settings.night_light,
+                "the switch did not move"
+            );
+            assert!(
+                appearance::AppearanceFile::load().settings.night_light,
                 "the switch did not reach the file"
             );
+
+            let (track_x, track_y) = state
+                .anchor_at(AnchorId::Slider(SliderId::NightLightTemperature))
+                .expect("a drawn slider has a track");
+            drag(
+                &mut state,
+                track_x,
+                track_y + SLIDER_HEIGHT / 2.0,
+                track_x + SLIDER_WIDTH,
+            );
+
+            let saved = appearance::AppearanceFile::load();
+            assert!(saved.settings.night_light, "the switch came back off");
             assert!(
                 (saved.settings.night_light_strength - 1.0).abs() < f32::EPSILON,
                 "the slider did not reach the file: {}",
@@ -5487,10 +5675,12 @@ mod tests {
     #[test]
     fn dragging_the_warmth_slider_right_is_warmer() {
         // Scratch-wrapped although nothing here looks like a write: moving
-        // this slider saves `appearance.yaml`, two calls further down. That is
-        // exactly the shape `check-scratch-config.py` exists for, and it
-        // refused this test's first version -- which had asserted only on an
-        // in-memory field.
+        // this slider used to save `appearance.yaml` two calls further down,
+        // and `check-scratch-config.py` refused this test's first version for
+        // it -- even though the assertions are on an in-memory field, which is
+        // exactly the shape that gate exists to catch. The save has since moved
+        // to `handle_event`, so this call writes nothing; the wrapper stays
+        // because a test has no business depending on which of the two it is.
         with_scratch_config("settings-warmth-direction", |_root| {
             let mut state = SettingsState::new();
             state.set_slider_fraction(SliderId::NightLightTemperature, 0.2);
@@ -5563,6 +5753,191 @@ mod tests {
             text.contains("once they have sent you"),
             "an empty page with no explanation reads as broken"
         );
+    }
+
+    // ---- Quiet hours ----
+
+    /// Every control the setting needs is on the page, with no rules present.
+    ///
+    /// Quiet hours are not about a particular program, so they sit above the
+    /// per-program list and outlive its early return -- the first version put
+    /// them below it, and on a fresh desktop, which has no programs listed,
+    /// the whole section was unreachable.
+    #[test]
+    fn the_notifications_page_offers_the_quiet_hours_controls() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        assert!(app.notif.settings.apps.is_empty(), "the empty-page case");
+
+        let bands = hit_bands(&app);
+        let has = |what: RowHit| bands.iter().any(|(w, _)| *w == what);
+        assert!(has(RowHit::Toggle(ToggleId::QuietHours)), "no switch");
+        assert!(has(RowHit::Dropdown(DropdownId::QuietStart)), "no start");
+        assert!(has(RowHit::Dropdown(DropdownId::QuietEnd)), "no end");
+        for day in 0..7 {
+            assert!(
+                has(RowHit::Pill(PillId::QuietDays, day)),
+                "no pill for day {day}"
+            );
+        }
+    }
+
+    /// A day is a set member, not a choice: clicking one leaves the others.
+    #[test]
+    fn a_day_pill_toggles_that_day_alone() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        let before = app.notif.settings.quiet_hours.days;
+        assert!(before[3], "the default runs every day");
+
+        app.apply_row_hit(RowHit::Pill(PillId::QuietDays, 3), 0.0);
+        let after = app.notif.settings.quiet_hours.days;
+
+        assert!(!after[3], "Wednesday did not turn off");
+        for day in [0, 1, 2, 4, 5, 6] {
+            assert_eq!(after[day], before[day], "day {day} moved with Wednesday");
+        }
+
+        // And back again, which is what makes it a toggle rather than a clear.
+        app.apply_row_hit(RowHit::Pill(PillId::QuietDays, 3), 0.0);
+        assert!(
+            app.notif.settings.quiet_hours.days[3],
+            "it did not come back"
+        );
+    }
+
+    /// Setting one end of the window leaves the other where it was.
+    #[test]
+    fn choosing_a_start_time_does_not_move_the_end() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        let end_before = app.notif.settings.quiet_hours.window.end();
+
+        app.show_dropdown(DropdownId::QuietStart);
+        let items = app
+            .dropdown_layout()
+            .expect("the dropdown has no layout")
+            .items;
+        let at = items
+            .iter()
+            .position(|label| label == "23:30")
+            .expect("half past eleven is not offered");
+        app.apply_dropdown_selection(at);
+
+        let window = app.notif.settings.quiet_hours.window;
+        assert_eq!(notifsettings::format_hm(window.start()), "23:30");
+        assert_eq!(window.end(), end_before, "the end moved with the start");
+    }
+
+    /// A time written by hand into the file is in the list, and shown as
+    /// chosen.
+    ///
+    /// The list is every half hour, and the file accepts any minute. Without
+    /// this the row would read 00:00 for a user who had set 22:15 -- the page
+    /// reporting a time nobody chose, and writing it the moment they touched
+    /// anything else.
+    #[test]
+    fn a_time_between_the_offered_ones_is_still_shown_as_chosen() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        let odd = notifsettings::TimeOfDay::new(22, 15).expect("a real time");
+        app.notif.settings.quiet_hours.window =
+            notifsettings::DailyWindow::new(odd, app.notif.settings.quiet_hours.window.end());
+
+        app.show_dropdown(DropdownId::QuietStart);
+        let layout = app.dropdown_layout().expect("the dropdown has no layout");
+        assert_eq!(
+            layout.items.get(layout.selected).map(String::as_str),
+            Some("22:15"),
+            "the user's own time is not the selected item"
+        );
+        // In order, so it reads as a list of times rather than an oddity
+        // stapled to the end.
+        let at = layout.selected;
+        assert_eq!(
+            layout.items.get(at.wrapping_sub(1)).map(String::as_str),
+            Some("22:00")
+        );
+        assert_eq!(layout.items.get(at + 1).map(String::as_str), Some("22:30"));
+    }
+
+    /// **A switch on this page has to reach the file.**
+    ///
+    /// `handle_event` saved the appearance and input documents and not the
+    /// notification one, so Sound and Banner moved on screen and were never
+    /// written: the user set them, saw them set, and found them back at the
+    /// next login. Asked through `changed_since` rather than by watching for a
+    /// write, because the write goes to the real home directory -- which is
+    /// also why this wiring had nothing testing it in the first place.
+    #[test]
+    fn changing_a_notification_switch_asks_for_the_file_to_be_written() {
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        app.notif
+            .settings
+            .set_rule(notifsettings::AppRule::new("Chat"));
+
+        for what in [
+            RowHit::Toggle(ToggleId::QuietHours),
+            RowHit::Toggle(ToggleId::NotifSound(0)),
+            RowHit::Toggle(ToggleId::NotifBanner(0)),
+            RowHit::Pill(PillId::QuietDays, 1),
+        ] {
+            let before = app.snapshot();
+            app.apply_row_hit(what, 0.0);
+            let changed = app.changed_since(&before);
+            assert!(changed.notif, "{what:?} changed nothing that gets saved");
+            assert!(
+                !changed.appearance && !changed.input,
+                "{what:?} touched another file"
+            );
+        }
+    }
+
+    /// And the change that `changed_since` reports really is written.
+    ///
+    /// The test above pins the *decision*; this one pins the *act*, by
+    /// clicking the switch the way a person does and then reading
+    /// `notifications.yaml` back off the disk. Deleting either half of the
+    /// wiring -- the comparison or the save that follows it -- fails here.
+    ///
+    /// Inside `with_scratch_config` because this writes a real file: without
+    /// it the test would silently edit the developer's own settings, which is
+    /// what `scripts/check-scratch-config.py` exists to refuse.
+    #[test]
+    fn clicking_a_switch_on_the_notifications_page_writes_the_file() {
+        with_scratch_config("settings-quiet-hours-save", |_root| {
+            let mut app = SettingsState::new();
+            app.current_page = SettingsPage::Notifications;
+            assert!(
+                !app.notif.settings.quiet_hours.enabled,
+                "quiet hours ship off"
+            );
+            let (cx, cy) = center_of(&app, RowHit::Toggle(ToggleId::QuietHours))
+                .expect("the page draws no switch for quiet hours");
+
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            assert!(
+                app.notif.settings.quiet_hours.enabled,
+                "the switch did not move"
+            );
+            assert!(
+                notifsettings::NotifFile::load()
+                    .settings
+                    .quiet_hours
+                    .enabled,
+                "the switch moved on screen and the file still says off"
+            );
+            assert!(
+                app.take_notifications_change(),
+                "the desktop was never told to re-read the file"
+            );
+        });
     }
 
     // ---- Measured widths ----

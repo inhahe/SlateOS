@@ -217,15 +217,21 @@ impl AutoRule {
     }
 
     /// Check if a schedule rule is currently active.
+    ///
+    /// The day the rule is checked against is the day the window *opened* on,
+    /// not the day it is now -- see [`DailyWindow::started_on`]. This used to
+    /// compare the day list against the current day, which meant a
+    /// Friday-night 22:00-07:00 rule switched itself off at midnight and gave
+    /// the user two hours of the nine they asked for. It did that silently.
     pub fn is_schedule_active(&self, hour: u8, minute: u8, day_of_week: u8) -> bool {
         let Self::Schedule { window, days, .. } = self else {
             return false;
         };
-        // An empty day list means every day.
-        if !days.is_empty() && !days.contains(&day_of_week) {
+        let Some(began) = window.started_on(hour, minute, day_of_week) else {
             return false;
-        }
-        window.contains_hm(hour, minute)
+        };
+        // An empty day list means every day.
+        days.is_empty() || days.contains(&began)
     }
 }
 
@@ -260,6 +266,21 @@ pub struct FocusAssistManager {
     pub app_overrides: Vec<AppNotifOverride>,
     /// Whether auto rules are enabled.
     pub auto_rules_enabled: bool,
+    /// Whether the automatic rules are being held off for now.
+    ///
+    /// Distinct from [`auto_rules_enabled`](Self::auto_rules_enabled), which is
+    /// the user's standing answer to "use schedules at all". This one is
+    /// temporary and is set by whoever owns a clock -- the shell -- when the
+    /// user switches focus assist **off** while a schedule is the reason it is
+    /// on. Without it the two controls fight and the user loses: `set_mode`
+    /// clears `manual_override`, the next tick re-evaluates the schedule, finds
+    /// the clock still inside quiet hours, and silences the desktop again. The
+    /// switch reads "off" and the desktop stays quiet, with no sequence of
+    /// presses that changes it.
+    ///
+    /// The shell clears it at the schedule's own next boundary, so a snooze
+    /// lasts exactly the rest of this period and not a minute longer.
+    pub auto_suppressed: bool,
     /// Show summary when focus assist deactivates.
     pub show_summary: bool,
     /// Number of suppressed notifications (for summary).
@@ -284,6 +305,7 @@ impl FocusAssistManager {
             auto_rules: Vec::new(),
             app_overrides: Vec::new(),
             auto_rules_enabled: true,
+            auto_suppressed: false,
             show_summary: true,
             suppressed_count: 0,
             auto_active: false,
@@ -335,6 +357,44 @@ impl FocusAssistManager {
     /// Add an auto rule.
     pub fn add_auto_rule(&mut self, rule: AutoRule) {
         self.auto_rules.push(rule);
+    }
+
+    /// Adopt the user's quiet hours as *the* schedule rule.
+    ///
+    /// Replaces any schedule rule rather than adding one. This is called every
+    /// time `notifications.yaml` changes, and an add would leave the previous
+    /// hours in the list behind the new ones -- still firing, with nothing on
+    /// screen to say why the desktop went quiet at a time the user had just
+    /// changed away from.
+    ///
+    /// Quiet hours are [`FocusMode::PriorityOnly`]: the user asked for nothing
+    /// *ordinary* to interrupt, not for nothing at all. A rule they set once,
+    /// months ago, must not swallow the notification that matters.
+    ///
+    /// A schedule that runs on no day installs nothing. It cannot come from
+    /// the file -- `NotifSettings::read_from` reads an empty day list as "the
+    /// user did not say" -- but it can be assigned in code, and it must not
+    /// reach [`AutoRule::Schedule`], whose empty `days` means *every* day.
+    /// Passing it through would turn "never" into "always", which is the worst
+    /// possible way to be wrong about a switch that silences a computer.
+    pub fn set_quiet_hours(&mut self, quiet: &notifsettings::QuietHours) {
+        self.auto_rules
+            .retain(|rule| !matches!(rule, AutoRule::Schedule { .. }));
+        let days: Vec<u8> = quiet
+            .days
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .filter_map(|(i, _)| u8::try_from(i).ok())
+            .collect();
+        if !quiet.enabled || days.is_empty() {
+            return;
+        }
+        self.auto_rules.push(AutoRule::Schedule {
+            window: quiet.window,
+            days,
+            mode: FocusMode::PriorityOnly,
+        });
     }
 
     /// Remove an auto rule by index.
@@ -409,7 +469,7 @@ impl FocusAssistManager {
 
     /// Evaluate auto rules given current time and system state.
     pub fn evaluate_auto_rules(&mut self, hour: u8, minute: u8, day_of_week: u8) {
-        if !self.auto_rules_enabled || self.manual_override {
+        if !self.auto_rules_enabled || self.manual_override || self.auto_suppressed {
             self.auto_active = false;
             return;
         }
@@ -997,6 +1057,30 @@ mod tests {
         };
         assert!(rule.is_schedule_active(10, 0, 1)); // Monday
         assert!(!rule.is_schedule_active(10, 0, 0)); // Sunday
+    }
+
+    /// **The bug this used to have.** An overnight rule with a day list has
+    /// to survive midnight, because that is most of what the user selected.
+    #[test]
+    fn an_overnight_rule_does_not_stop_at_midnight() {
+        let rule = AutoRule::Schedule {
+            window: DailyWindow::from_hm(22, 0, 7, 0).unwrap(),
+            days: vec![5], // Friday only
+            mode: FocusMode::PriorityOnly,
+        };
+        assert!(rule.is_schedule_active(23, 0, 5), "Friday at eleven");
+        assert!(
+            rule.is_schedule_active(1, 0, 6),
+            "one o'clock on Saturday morning is still Friday night"
+        );
+        assert!(
+            !rule.is_schedule_active(23, 0, 6),
+            "Saturday night was not selected"
+        );
+        assert!(
+            !rule.is_schedule_active(1, 0, 0),
+            "Sunday morning would be Saturday's window"
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ use std::process::ExitCode;
 
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -56,6 +57,7 @@ const DIALOG_APP_ROW_HEIGHT: f32 = 36.0;
 // "Reset" swimming in empty space.
 const ADD_WIDTH: f32 = 110.0;
 const EXPORT_WIDTH: f32 = 90.0;
+const IMPORT_WIDTH: f32 = 90.0;
 const RESET_WIDTH: f32 = 80.0;
 /// The gap between two buttons sitting side by side.
 const BUTTON_GAP: f32 = 8.0;
@@ -1125,6 +1127,22 @@ pub enum ActiveDialog {
     OpenWith,
     /// Add New File Type dialog.
     AddFileType,
+    /// The file picker, for an import or an export.
+    ChooseFile,
+}
+
+/// Which way a configuration file is being moved.
+///
+/// Both directions put the same file picker on screen, and what the chosen
+/// path means depends entirely on this. Keeping it beside the dialog rather
+/// than inferring it later is what stops a cancelled export from being read
+/// back as an import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transfer {
+    /// Read a configuration document and apply it.
+    Import,
+    /// Write the current associations out.
+    Export,
 }
 
 /// Which of the "Add File Type" dialog's three text fields has the caret.
@@ -1174,6 +1192,7 @@ pub enum Target {
     /// The search box. Clicking it puts the caret in it.
     Search,
     AddButton,
+    ImportButton,
     ExportButton,
     ResetButton,
     /// A sidebar entry. `None` is "All Types".
@@ -1219,6 +1238,7 @@ struct Layout {
     /// the buttons. Whatever room is left over, which may be none.
     status: Rect,
     add: Rect,
+    import: Rect,
     export: Rect,
     reset: Rect,
     sidebar: Rect,
@@ -1265,8 +1285,14 @@ impl Layout {
             EXPORT_WIDTH,
             BUTTON_HEIGHT,
         );
+        let import = Rect::new(
+            (export.x - IMPORT_WIDTH - BUTTON_GAP).max(0.0),
+            btn_y,
+            IMPORT_WIDTH,
+            BUTTON_HEIGHT,
+        );
         let add = Rect::new(
-            (export.x - ADD_WIDTH - BUTTON_GAP).max(0.0),
+            (import.x - ADD_WIDTH - BUTTON_GAP).max(0.0),
             btn_y,
             ADD_WIDTH,
             BUTTON_HEIGHT,
@@ -1332,6 +1358,7 @@ impl Layout {
             search: trim(search),
             status: trim(status),
             add: trim(add),
+            import: trim(import),
             export: trim(export),
             reset: trim(reset),
             sidebar: trim(sidebar),
@@ -1462,9 +1489,19 @@ pub struct FileAssocUI {
     /// they can, they have to say something, because "the config was exported"
     /// is otherwise indistinguishable from "the click missed".
     pub status: String,
-    /// The text the Export button last produced, kept so the status line can
-    /// describe it and a test can prove the button really exported.
-    pub last_export: String,
+    /// The file picker, when one is up.
+    ///
+    /// Replaces a `last_export: String` that held the exported text and was
+    /// **rendered nowhere**. Clicking Export set that field and put "Exported
+    /// 8 association(s)" in the status bar, and that was the whole of it: no
+    /// file, no panel, nothing the user could carry to another machine. The
+    /// message was true about a variable and false about the world.
+    ///
+    /// `import_config` had the matching problem from the other side -- fully
+    /// tested, reachable from nothing. Both are this dialog now.
+    pub file_dialog: Option<FileDialog>,
+    /// Which direction `file_dialog` is serving.
+    pub transfer: Transfer,
     /// Window dimensions.
     pub window_width: f32,
     pub window_height: f32,
@@ -1582,7 +1619,8 @@ impl FileAssocUI {
             new_category: FileCategory::Other,
             new_field: NewField::Extension,
             status: String::new(),
-            last_export: String::new(),
+            file_dialog: None,
+            transfer: Transfer::Export,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
         }
@@ -1732,6 +1770,102 @@ impl FileAssocUI {
     /// Shut whichever dialog is open, changing nothing.
     pub fn cancel_dialog(&mut self) {
         self.active_dialog = ActiveDialog::None;
+        self.file_dialog = None;
+    }
+
+    /// Put up the file picker for an import or an export.
+    ///
+    /// The toolkit's dialog is pure: it draws whatever listing it is given and
+    /// reads no directory itself, so the host lists and hands it over. That is
+    /// the same contract `pathbar::set_completions` follows, and the reason a
+    /// dialog opened without this step draws its chrome and lists nothing for
+    /// ever.
+    fn open_transfer_dialog(&mut self, transfer: Transfer) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = match transfer {
+            Transfer::Import => FileDialog::open().with_initial_path(start),
+            Transfer::Export => FileDialog::save()
+                .with_initial_path(start)
+                .with_filename("associations.conf"),
+        };
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.transfer = transfer;
+        self.file_dialog = Some(dialog);
+        self.active_dialog = ActiveDialog::ChooseFile;
+    }
+
+    /// Carry out the transfer the user just chose a path for.
+    ///
+    /// An import saves afterwards for the same reason every other change here
+    /// does: this program has no Save button, and a choice that has to be
+    /// confirmed somewhere else is a choice the user can lose.
+    fn transfer_with(&mut self, path: &std::path::Path) {
+        match self.transfer {
+            Transfer::Export => {
+                let text = self.registry.export_config();
+                self.status = match safeio::write_str_atomically(path, &text) {
+                    Ok(()) => format!(
+                        "Exported {} association(s) to {}",
+                        self.registry.association_count(),
+                        path.display()
+                    ),
+                    Err(e) => format!("Could not write {}: {e}", path.display()),
+                };
+            }
+            Transfer::Import => match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    let errors = self.registry.import_config(&text);
+                    self.status = match errors.first() {
+                        // Every line that parsed has been applied; the count is
+                        // what could not be. Naming the first is what makes the
+                        // message actionable -- "3 problems" sends the user
+                        // looking through the file themselves.
+                        Some(first) => format!(
+                            "Imported with {} problem(s), first: {first}",
+                            errors.len()
+                        ),
+                        None => format!(
+                            "Imported {} association(s) from {}",
+                            self.registry.association_count(),
+                            path.display()
+                        ),
+                    };
+                    self.persist();
+                }
+                Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
+            },
+        }
+    }
+
+    /// Give the picker an event; `None` when there is no picker up.
+    fn file_dialog_event(&mut self, event: &Event) -> Option<EventResult> {
+        let (width, height) = (self.window_width, self.window_height);
+        let action = {
+            let dialog = self.file_dialog.as_mut()?;
+            match event {
+                Event::Key(key) if key.pressed => dialog.handle_event(key, height),
+                Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
+                _ => DialogAction::None,
+            }
+        };
+        match action {
+            DialogAction::Selected(path) => {
+                self.cancel_dialog();
+                self.transfer_with(&path);
+            }
+            DialogAction::Cancelled => self.cancel_dialog(),
+            // It has moved and is still showing the old directory's contents
+            // until it is told what is in the new one.
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+            }
+            DialogAction::None => {}
+        }
+        Some(EventResult::Consumed)
     }
 
     /// Select a category in the sidebar.
@@ -1847,6 +1981,13 @@ impl FileAssocUI {
 
     /// Handle a UI event (keyboard or mouse).
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker is modal and answers everything but a resize, which
+        // belongs to the surface rather than to what is drawn on it.
+        if !matches!(event, Event::Resize { .. })
+            && let Some(result) = self.file_dialog_event(event)
+        {
+            return result;
+        }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Resize { width, height } => {
@@ -1894,12 +2035,12 @@ impl FileAssocUI {
                 self.open_add_file_type_dialog();
                 EventResult::Consumed
             }
+            Some(Target::ImportButton) => {
+                self.open_transfer_dialog(Transfer::Import);
+                EventResult::Consumed
+            }
             Some(Target::ExportButton) => {
-                self.last_export = self.registry.export_config();
-                self.status = format!(
-                    "Exported {} association(s)",
-                    self.registry.association_count()
-                );
+                self.open_transfer_dialog(Transfer::Export);
                 EventResult::Consumed
             }
             Some(Target::ResetButton) => {
@@ -2001,6 +2142,12 @@ impl FileAssocUI {
                 // the error at all.
                 let _added = self.confirm_add_file_type();
             }
+            // The picker decides for itself what Enter means -- a directory
+            // row opens it, a file row chooses it -- and it sees the key
+            // first, in `file_dialog_event`. Nothing here can improve on
+            // that, and guessing would mean confirming a selection the
+            // dialog had not made.
+            ActiveDialog::ChooseFile => {}
             ActiveDialog::None => {}
         }
     }
@@ -2050,11 +2197,11 @@ impl FileAssocUI {
             Key::Up => self.move_selection(-1),
             Key::Down => self.move_selection(1),
             Key::E if key.modifiers.ctrl => {
-                self.last_export = self.registry.export_config();
-                self.status = format!(
-                    "Exported {} association(s)",
-                    self.registry.association_count()
-                );
+                self.open_transfer_dialog(Transfer::Export);
+                EventResult::Consumed
+            }
+            Key::I if key.modifiers.ctrl => {
+                self.open_transfer_dialog(Transfer::Import);
                 EventResult::Consumed
             }
             Key::F if key.modifiers.ctrl => {
@@ -2098,6 +2245,9 @@ impl FileAssocUI {
             }
             // The "Open With" dialog has nothing to type into.
             ActiveDialog::OpenWith => EventResult::Ignored,
+            // Unreachable: the picker consumes every key before `handle_key`
+            // is called, including the ones that fill in its filename field.
+            ActiveDialog::ChooseFile => EventResult::Ignored,
             ActiveDialog::None if self.search_focused => {
                 let mut q = self.search_query.clone();
                 q.push_str(text);
@@ -2116,7 +2266,7 @@ impl FileAssocUI {
                 self.new_field_mut().pop();
                 EventResult::Consumed
             }
-            ActiveDialog::OpenWith => EventResult::Ignored,
+            ActiveDialog::OpenWith | ActiveDialog::ChooseFile => EventResult::Ignored,
             ActiveDialog::None if self.search_focused => {
                 let mut q = self.search_query.clone();
                 if q.pop().is_none() {
@@ -2255,6 +2405,13 @@ impl FileAssocUI {
             match self.active_dialog {
                 ActiveDialog::OpenWith => self.draw_open_with_dialog(&mut frame, &l),
                 ActiveDialog::AddFileType => self.draw_add_file_type_dialog(&mut frame, &l),
+                ActiveDialog::ChooseFile => {
+                    if let Some(dialog) = &self.file_dialog {
+                        for cmd in dialog.render(&self.palette, l.width, l.height) {
+                            frame.push(cmd);
+                        }
+                    }
+                }
                 ActiveDialog::None => {}
             }
         }
@@ -2375,6 +2532,15 @@ impl FileAssocUI {
             Target::AddButton,
             l.add,
             "Add Type",
+            self.palette.surface1,
+            self.palette.text,
+            FONT_SIZE_SMALL,
+        );
+        Self::draw_button(
+            frame,
+            Target::ImportButton,
+            l.import,
+            "Import",
             self.palette.surface1,
             self.palette.text,
             FONT_SIZE_SMALL,
@@ -4147,9 +4313,10 @@ mod tests {
     /// answers `Row`, which is the intended behaviour rather than a fault —
     /// `the_empty_table_below_the_last_row_selects_nothing` is where it is
     /// checked.
-    const ALWAYS_DRAWN: [Target; 5] = [
+    const ALWAYS_DRAWN: [Target; 6] = [
         Target::Search,
         Target::AddButton,
+        Target::ImportButton,
         Target::ExportButton,
         Target::ResetButton,
         Target::Category(None),
@@ -4644,19 +4811,157 @@ mod tests {
         );
     }
 
+    /// Point the picker at `dir` and list it, as the program does on opening.
+    fn showing<'a>(ui: &'a mut FileAssocUI, dir: &std::path::Path) -> &'a mut FileDialog {
+        let dialog = ui.file_dialog.as_mut().expect("no picker is up");
+        dialog.navigate_to(dir);
+        dialog.set_entries(guitk::dialog::list_directory(dir));
+        dialog
+    }
+
+    /// Type a name and confirm it. **A save picker only.**
+    fn save_as(ui: &mut FileAssocUI, dir: &std::path::Path, name: &str) {
+        showing(ui, dir).set_filename(name);
+        probe::key(ui, &probe::press(Key::Enter));
+    }
+
+    /// Select the row for an existing file and confirm it. **An open picker.**
+    ///
+    /// Not `set_filename`: an open picker has no filename field, so typing at
+    /// one is typing at nothing. Both import tests were written that way first
+    /// and both failed at the confirm -- the picker simply stayed up, which is
+    /// exactly what a user would have seen.
+    fn pick(ui: &mut FileAssocUI, dir: &std::path::Path, name: &str) {
+        let dialog = showing(ui, dir);
+        let index = dialog
+            .entries()
+            .iter()
+            .position(|e| e.name == *std::ffi::OsStr::new(name))
+            .unwrap_or_else(|| panic!("{name} is not in the listing"));
+        dialog.select_entry(index);
+        probe::key(ui, &probe::press(Key::Enter));
+    }
+
+    /// **Export puts the associations in a file the user can carry away.**
+    ///
+    /// It used to put them in `last_export`, a `String` field that nothing
+    /// rendered, and then say "Exported 8 association(s)" -- a true statement
+    /// about a variable and a false one about the world. This test would not
+    /// have compiled against that version, which is the point: it reads the
+    /// file back off the disk.
     #[test]
-    fn export_captures_the_current_associations_and_ctrl_e_does_the_same() {
+    fn export_writes_the_associations_to_the_chosen_file() {
+        let dir = scratchdir::ScratchDir::new("fileassoc_export");
         let mut ui = FileAssocUI::new();
-        assert_eq!(ui.last_export, "");
 
         probe::click(&mut ui, Target::ExportButton);
-        let by_click = ui.last_export.clone();
-        assert!(by_click.contains("mp3"), "export was {by_click:?}");
-        assert!(ui.status.contains("Exported"), "status was {:?}", ui.status);
+        assert_eq!(ui.active_dialog, ActiveDialog::ChooseFile);
+        save_as(&mut ui, dir.dir(), "assoc.conf");
 
-        let mut other = FileAssocUI::new();
-        probe::key(&mut other, &probe::ctrl(Key::E));
-        assert_eq!(other.last_export, by_click);
+        assert!(ui.file_dialog.is_none(), "the picker stayed up");
+        let written = std::fs::read_to_string(dir.path("assoc.conf"))
+            .unwrap_or_else(|e| panic!("nothing was written: {e}; status {:?}", ui.status));
+        assert!(written.contains("mp3"), "exported {written:?}");
+        assert!(ui.status.contains("Exported"), "status was {:?}", ui.status);
+    }
+
+    /// Ctrl+E reaches the same picker as the button.
+    #[test]
+    fn ctrl_e_opens_the_export_picker() {
+        let mut ui = FileAssocUI::new();
+        probe::key(&mut ui, &probe::ctrl(Key::E));
+        assert_eq!(ui.active_dialog, ActiveDialog::ChooseFile);
+        assert_eq!(ui.transfer, Transfer::Export);
+    }
+
+    /// Ctrl+I reaches the import picker, which had no door of any kind.
+    #[test]
+    fn ctrl_i_opens_the_import_picker() {
+        let mut ui = FileAssocUI::new();
+        probe::key(&mut ui, &probe::ctrl(Key::I));
+        assert_eq!(ui.active_dialog, ActiveDialog::ChooseFile);
+        assert_eq!(ui.transfer, Transfer::Import);
+    }
+
+    /// **A choice exported from one copy of the program arrives in another.**
+    ///
+    /// The whole feature, end to end, through the two buttons a user has.
+    /// `import_config` was complete and tested for weeks with nothing calling
+    /// it outside its own tests -- `scripts/check-tested-but-uncalled.py` is
+    /// what eventually said so, and only after it was itself repaired.
+    #[test]
+    fn an_association_survives_export_and_import_into_another_copy() {
+        writing("fileassoc_transfer", || {
+            let dir = scratchdir::ScratchDir::new("fileassoc_transfer");
+
+            let mut from = FileAssocUI::new();
+            from.registry
+                .set_default_app("zip", "explorer")
+                .expect("explorer handles zip");
+            probe::click(&mut from, Target::ExportButton);
+            save_as(&mut from, dir.dir(), "carried.conf");
+
+            let mut to = FileAssocUI::new();
+            assert_ne!(
+                to.registry.get_default_app("zip").map(|a| a.id.as_str()),
+                Some("explorer"),
+                "the fixture proves nothing if it is already the default"
+            );
+
+            probe::click(&mut to, Target::ImportButton);
+            pick(&mut to, dir.dir(), "carried.conf");
+
+            assert!(to.file_dialog.is_none(), "the picker stayed up");
+            assert_eq!(
+                to.registry.get_default_app("zip").map(|a| a.id.as_str()),
+                Some("explorer"),
+                "status was {:?}",
+                to.status
+            );
+        });
+    }
+
+    /// Escape puts the picker away and imports nothing.
+    #[test]
+    fn cancelling_the_picker_changes_no_association() {
+        let mut ui = FileAssocUI::new();
+        let before = ui.registry.export_config();
+
+        probe::click(&mut ui, Target::ImportButton);
+        // Without this the test passes when the button does nothing at all:
+        // "no picker is up" is what it asserts afterwards, and that is also
+        // true of a button that never opened one. Caught by removing the
+        // door and finding only one of the two tests went red.
+        assert_eq!(ui.active_dialog, ActiveDialog::ChooseFile);
+
+        probe::key(&mut ui, &probe::press(Key::Escape));
+
+        assert!(ui.file_dialog.is_none(), "Escape did not dismiss it");
+        assert_eq!(ui.active_dialog, ActiveDialog::None);
+        assert_eq!(ui.registry.export_config(), before);
+    }
+
+    /// A file that cannot be read is reported, not swallowed.
+    ///
+    /// Called directly rather than through the picker, because a picker cannot
+    /// offer a file that is not there -- the first version of this test tried,
+    /// and proved only that an open dialog ignores a typed filename. The path
+    /// this covers is real (a file removed between the listing and the read,
+    /// or one whose permissions changed), and the door it sits behind is
+    /// proven by `an_association_survives_export_and_import_into_another_copy`.
+    #[test]
+    fn an_unreadable_import_says_so_instead_of_failing_silently() {
+        let dir = scratchdir::ScratchDir::new("fileassoc_missing");
+        let mut ui = FileAssocUI::new();
+        ui.transfer = Transfer::Import;
+
+        ui.transfer_with(&dir.path("no-such-file.conf"));
+
+        assert!(
+            ui.status.contains("Could not read"),
+            "status was {:?}",
+            ui.status
+        );
     }
 
     #[test]

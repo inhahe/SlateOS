@@ -21,12 +21,18 @@ oswindow = { path = "../../gui/window" }
 yamldoc = { path = "../../yamldoc" }
 settingsfile = { path = "../../gui/settingsfile" }
 
+# Exporting writes a file the user chose, and a half-written export is a
+# config that imports as garbage. Same atomic write the rest of the tree uses.
+safeio = { path = "../safeio" }
+
 [dev-dependencies]
 # `settingsfile::testing::with_scratch_config`. Four tests here change an
 # association, and changing one now writes the file -- so without this they
 # would write the developer's own ~/.config/slateos, which is what
 # scripts/check-scratch-config.py exists to refuse.
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+# A directory to export into and import back out of.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]
 workspace = true

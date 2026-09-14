@@ -1987,6 +1987,74 @@ answered question left in the body is pure cost — and, being older, it sorts
 *first*, right where it is most in the way. (Why this is not append-only:
 `design-decisions.md` §437.)
 
+## B-Q18 — [B] My roadmap list is down to three huge ports. Which one, and is now the time? — Status: OPEN
+
+**In short:** The list of jobs assigned to me has run out, except for three
+very large ones. Each is "take a big program other people wrote and make it run
+on SlateOS", and each is weeks of work rather than hours. I have been working
+from the bug list instead, which is not empty and is producing real fixes — but
+nobody has decided which of the three big jobs comes next, or whether any of
+them should start yet. I would rather you picked than have me pick for you,
+because the three lead the project in genuinely different directions.
+
+**What is actually left.** `roadmap.md` has exactly three unstarted items
+tagged for my lane:
+
+| | what it means in plain terms | where it leads |
+|---|---|---|
+| **Rust toolchain** | SlateOS can compile its own kernel, on itself | the machine stops needing Windows to rebuild itself |
+| **fastpy compiler** | the Python-to-native compiler runs on SlateOS | already part-built (initiative F); this is the rest of it |
+| **WINE** | Windows programs run on SlateOS | a large existing app library, at once |
+
+Everything else assigned to me is either done or is a bug, and bugs I can pick
+up without asking.
+
+**Why I am asking rather than choosing.** The standing rule is that I should
+just start the next task, and for anything ordinary I do. These three are the
+named exception: each is a *giant external port*, each takes the project
+somewhere different, and the cost of starting the wrong one is weeks, not
+minutes. It is also possible the right answer is "none yet" — see below.
+
+### The options
+
+**A. Rust toolchain first.**
+*What changes:* you could rebuild the kernel from inside SlateOS instead of
+from Windows. Today the OS cannot reproduce itself; after this it can.
+Self-hosting is also the usual milestone at which an OS stops being an
+experiment.
+
+**B. fastpy compiler first.**
+*What changes:* programs written in Python compile to native code *on* SlateOS.
+This is the least risky of the three because roughly half of it already exists
+and works — the cross-compiler, the linker step and the C runtime are done and
+tested. It is finishing something rather than starting something.
+
+**C. WINE first.**
+*What changes:* a large body of existing Windows software becomes runnable. It
+is the biggest single jump in what the OS can *do* for a user, and by far the
+largest and least predictable of the three — WINE leans on a great deal of
+Linux behaviour we have only partly built.
+
+**D. None of them yet — keep working the bug list.**
+*What changes:* nothing visible; I carry on fixing defects. Today that has
+meant `patch` and `diff`, both of which were giving wrong answers on ordinary
+files. There is no shortage of this work, and it is what makes the ports
+land on solid ground when they do start.
+
+**My recommendation is B, then D as the standing default.** B is half-built
+and its remaining half is the part that unblocks writing OS components in
+Python at all, which the design spec already assumes. A and C both rest on
+libc and kernel surface that is still gaining features weekly — starting either
+now means porting against a moving target, and re-porting later.
+
+### If this is never answered
+
+Nothing breaks and nothing is blocked. I will keep working the bug list, which
+is option D, and the three ports stay unstarted. The cost of leaving it is not
+risk but direction: the project keeps getting more correct without getting
+more capable, and at some point that becomes the wrong trade. There is no
+deadline on answering.
+
 ## Resolved — lane A
 
 - A-Q9 Networking exists twice, in the kernel and as a daemon: should the daemon

@@ -135984,7 +135984,8 @@ existing.**
 
 **In short:** `cargo test -p <name>` takes a *package* name. Everyone types the
 *directory* name, because for 2944 of this workspace's 2955 crates they are the
-same string. For five they are not, and the directory name belongs to a
+same string. For ten they are not, and for **three** of those the directory
+name belongs to a
 different crate -- so the command compiles, runs a test suite, prints a green
 result and exits 0, having tested a crate nobody touched.
 
@@ -135993,7 +135994,7 @@ result and exits 0, having tested a crate nobody touched.
 | `apps/backup` | `backup-app` | the `backup` crate | C |
 | `apps/indexer` | `indexer-app` | the `indexer` crate | C |
 | `apps/sysinfo` | `sysinfo-app` | the `sysinfo` crate | C |
-| `apps/tmux` | `tmux-app` | the `tmux` crate | C |
+| ~~`apps/tmux`~~ | `tmux-app` | ~~the `tmux` crate~~ -- **no such crate; this errors** | C -- see correction |
 | ~~`userspace/login`~~ | ~~`login-cli`~~ | ~~`init/loginmgr`~~ | B -- **fixed 2026-09-10**, see below |
 
 **How it was found.** Giving `userspace/login` its exec on 2026-09-10. Every
@@ -136005,16 +136006,50 @@ all. Nothing else would have said a word.
 
 **The asymmetry that makes this worth a gate.** A mistyped `-p` that matches no
 package fails loudly and immediately. The dangerous case is the one that
-*resolves*, to somebody else. Six other crates in the tree have a package name
+*resolves*, to somebody else. Seven other crates in the tree have a package name
 that differs from their directory -- `gui/toolkit` is `guitk`,
 `toolchain/stubs` is `slateos-stubs` -- and they are harmless for exactly this
 reason: nothing claims `toolkit` or `stubs`.
 
 **Gate 18 (`scripts/check-crate-names.py`) stops it growing**, and only that:
-the five above are baselined, because four are lane C's to rename and a gate
+the three live collisions above are baselined, because all three are lane C's
+to rename and a gate
 that refuses every lane's push over pre-existing state is a gate that gets
 bypassed. The baseline may only shrink -- resolving one and leaving it listed
 is also a failure, so the list cannot rot into things that used to be true.
+
+**Correction, 2026-09-14 (lane A).** The `apps/tmux` row was wrong: there is no
+package named `tmux` anywhere in the tree -- `apps/tmux` is the only claimant of
+that string and it is named `tmux-app` -- so `-p tmux` does not reach another
+crate, it **errors**, which is the harmless case this entry itself describes two
+paragraphs down. The row asserted a collision that cannot occur, and the counts
+built on it ("five", "four are lane C's") were wrong with it. Live collisions are
+**three**: `backup`, `indexer`, `sysinfo`. `tmux` belongs with `gui/font`,
+`gui/remote`, `gui/toolkit`, `gui/vulkan`, `gui/window` and `toolchain/stubs` --
+seven crates whose name differs harmlessly.
+
+Two independent witnesses, per 932: lane C ran `cargo pkgid` across all of them,
+and lane A parsed every `Cargo.toml` in the tree directly. Both give the same
+three. `scripts/check-crate-names.py`'s baseline is also exactly those three and
+has been since 2026-09-04 -- and because that gate flags a *stale* baseline entry
+as a failure too, tmux could never have been in it. The gate was right and this
+prose drifted from it.
+
+**The census figures in the opening paragraph (2944 of 2955) are the gate's own,
+over a wider walk than the audit above, and are NOT re-verified here.** A direct
+parse of the tree finds 417 crates with a `Cargo.toml`, of which ten differ from
+their directory. The two numbers are not reconciled; do not treat 2955 as
+confirmed. Stated rather than harmonised, because quietly adjusting a number to
+agree with a different measurement is how the tmux row got here.
+
+**What this entry still does not cover, and it is the part that actually bit.**
+The gate refuses an *unrecorded* mismatch. It does not, and cannot, stop anyone
+typing `cargo test -p sysinfo` at a prompt -- which is how lane C lost an
+afternoon on 2026-09-14, reading "26 tests ok" from `userspace/sysinfo` while the
+test it had just written in `apps/sysinfo` had never been compiled. The hazard was
+recorded here, with a gate, ten days earlier. The record was not found. That is a
+findability failure in a 144,000-line document, not a documentation gap, and no
+further gate fixes it -- the durable fix is the rename, which is lanes B and C's.
 
 **The fix, for whoever owns each crate:** rename the package to match its
 directory, or rename the directory to match the package.

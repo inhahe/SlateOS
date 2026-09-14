@@ -54866,7 +54866,30 @@ erase at column 0 (→ 8), at column 3 (→ 5), and ECHOKE of a line with a
 tab. The pty caveat (emulator owns the screen, so our column is an
 approximation) remains and is documented in the `feed` doc comment.
 
---- env -S / --split-string not implemented (lane B, 2026-08-22) ---
+--- env -S / --split-string not implemented (lane B, 2026-08-22) --- DONE 2026-09-14
+
+RESOLVED: implemented. scripts/env-diff.sh is now 59 passed / 0 differed.
+
+AND THE DESIGN BELOW WAS WRONG ON ITS CENTRAL POINT, which is worth more than
+the fix. It says the ${VAR} substitution "must see -i, -u and the NAME=VALUE
+operands already applied", and calls that "the subtle part". Measured
+(scripts/probe-env-split-expansion-env.sh), GNU does the opposite:
+
+    env -i          -S'... ${PROBEVAR}'   ->  [fromparent]   -i ignored
+    env -u PROBEVAR -S'... ${PROBEVAR}'   ->  [fromparent]   -u ignored
+    env -S'NEWVAR=made ... ${NEWVAR}'     ->  []             assignment unseen
+
+Expansion reads the PROCESS environment and nothing else. Feeding it the
+output of effective_env -- the "proper fix" below -- would have produced a
+more complicated implementation that was also incorrect, and the plan gave no
+sign of being a guess. It is the same failure the rest of this file's
+measurements keep finding: a claim about the reference, written in the
+confident register, with nothing behind it.
+
+The implementation is `split_string_with(&OsStr, F)` with the lookup injected,
+so the expansion rules are testable without touching a process global.
+
+Original entry follows.
 
 `userspace/coreutils/src/bin/env.rs` implements -i, -u, -0, -C and --, but not
 GNU's -S/--split-string. That option exists for one purpose: a `#!` line may

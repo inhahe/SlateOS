@@ -1157,6 +1157,32 @@ impl ExplorerState {
             .map(|r| r.executor.progress().clone())
     }
 
+    /// How far the operation in flight has got, from 0.0 to 1.0.
+    ///
+    /// **By files, not by bytes**, because that is what the status line beside
+    /// it counts. The two numbers are the same claim in two forms, and a bar
+    /// nine tenths full next to the words "3 of 10" is worse than either on
+    /// its own: the reader has to decide which to believe, and nothing on
+    /// screen helps them. Bytes would make a smoother bar and is the right
+    /// answer once the line quotes bytes too.
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a file count large enough to lose f32 precision is 16 million, \
+                  against a track 140 pixels wide"
+    )]
+    pub fn operation_fraction(&self) -> Option<f32> {
+        let running = self.operation.as_ref()?;
+        if running.total_files == 0 {
+            // A plan of no files is over the moment it starts. A full bar is
+            // the honest picture of that, and it is also why this is not a
+            // division.
+            return Some(1.0);
+        }
+        let done = running.executor.progress().completed_files as f32;
+        Some((done / running.total_files as f32).clamp(0.0, 1.0))
+    }
+
     /// Put the operation's progress where the status bar will find it.
     ///
     /// The waiting count is part of it and not a second line, because there is
@@ -2448,9 +2474,38 @@ impl ExplorerState {
         let w = self.window_width as f32;
 
         tree.fill_rect(0.0, bar_y, w, 24.0, self.palette.crust);
-        tree.text(
+
+        // The track takes its room out of the *text's*, and the text is
+        // measured against what is left. `tree.text` sets no `max_width` at
+        // all, so the line this replaces ran off the end of the window on any
+        // path long enough -- and a silently clipped status line reads as a
+        // short one, which is how a truncated path gets taken for the whole
+        // thing. `text_in` elides and marks the cut.
+        let mut text_width = (w - 16.0).max(0.0);
+        if let Some(fraction) = self.operation_fraction() {
+            // A third of the bar at most: on a narrow window the words matter
+            // more than the picture, and below the floor there is no picture
+            // worth having -- so the track is dropped rather than drawn as a
+            // sliver the text then has to squeeze past.
+            let track_w = PROGRESS_TRACK_W.min(w / 3.0);
+            if track_w >= PROGRESS_TRACK_MIN_W {
+                let track_x = w - 8.0 - track_w;
+                text_width = (track_x - 16.0).max(0.0);
+                tree.fill_rect(track_x, bar_y + 8.0, track_w, 8.0, self.palette.surface1);
+                tree.fill_rect(
+                    track_x,
+                    bar_y + 8.0,
+                    track_w * fraction,
+                    8.0,
+                    self.palette.blue,
+                );
+            }
+        }
+
+        tree.text_in(
             8.0,
             bar_y + 5.0,
+            text_width,
             self.status_bar_text(),
             self.palette.subtext0,
             11.0,
@@ -2644,6 +2699,16 @@ const OPERATION_SLICE: std::time::Duration = std::time::Duration::from_millis(8)
 
 /// How often the loop comes back while an operation is running.
 const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// How wide the status bar's progress track is, at most.
+const PROGRESS_TRACK_W: f32 = 140.0;
+
+/// And the width below which it is not drawn at all.
+///
+/// A track narrower than this cannot show the difference between a tenth and a
+/// fifth, so it is a decoration that costs the status line room it needs for
+/// words. Dropping it is the better answer on a narrow window.
+const PROGRESS_TRACK_MIN_W: f32 = 40.0;
 
 impl oswindow::app::App for ExplorerState {
     /// Adopt the user's colours (§822).
@@ -4106,6 +4171,128 @@ mod tests {
         assert!(
             !state.handle_event(&key(Key::Escape)),
             "Escape with nothing to do must not claim the key"
+        );
+    }
+
+    // ---- the progress track -------------------------------------------
+
+    /// The fraction agrees with the words beside it.
+    ///
+    /// Both are the same claim in two forms. A bar nine tenths full next to
+    /// "3 of 10" is worse than either alone: the reader has to pick one to
+    /// believe and nothing on screen helps them.
+    #[test]
+    fn the_track_and_the_count_tell_the_same_story() {
+        let scratch = temp_dir("bar_fraction");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 4);
+        assert_eq!(state.operation_fraction(), None, "nothing is running");
+
+        state.paste();
+        assert_eq!(state.operation_fraction(), Some(0.0), "nothing copied yet");
+
+        let mut seen = Vec::new();
+        while state.operation_progress().is_some() {
+            let _ = state.handle_event(&Event::Tick { elapsed_ms: 16 });
+            if let Some(f) = state.operation_fraction() {
+                seen.push(f);
+            }
+        }
+        assert_eq!(state.operation_fraction(), None, "it never finished");
+        for f in &seen {
+            assert!((0.0..=1.0).contains(f), "the track ran off its end: {f}");
+        }
+        assert!(
+            seen.windows(2).all(|w| w[1] >= w[0]),
+            "the track went backwards: {seen:?}"
+        );
+    }
+
+    /// A plan of no files is over the moment it starts, and says so.
+    #[test]
+    fn an_empty_operation_shows_a_full_track_rather_than_dividing_by_zero() {
+        let scratch = temp_dir("bar_empty");
+        let root = scratch.dir().to_path_buf();
+        let dst = root.join("dst");
+        fs::create_dir_all(&dst).expect("dst");
+        fs::create_dir(root.join("empty")).expect("empty");
+
+        let mut state = state_at(&dst);
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("empty")]));
+        state.paste();
+
+        if let Some(fraction) = state.operation_fraction() {
+            assert!(
+                (0.0..=1.0).contains(&fraction),
+                "an empty plan produced {fraction}"
+            );
+        }
+        settle(&mut state);
+    }
+
+    /// Every fill drawn in the status bar's row, by width.
+    ///
+    /// Counted by *where it is* rather than by how many fills the whole frame
+    /// has: copying files changes the listing above the bar, so a frame-wide
+    /// count compares two different directories and proves nothing about the
+    /// track.
+    fn status_bar_fills(state: &mut ExplorerState) -> Vec<f32> {
+        let track_y = f32::from(u16::try_from(state.window_height).unwrap_or(u16::MAX)) - 16.0;
+        state
+            .render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::FillRect {
+                    y, width, height, ..
+                } if (*y - track_y).abs() < 0.01 && (*height - 8.0).abs() < 0.01 => Some(*width),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The track is drawn while a copy runs, and not otherwise.
+    #[test]
+    fn the_status_bar_grows_a_track_only_while_something_is_copying() {
+        let scratch = temp_dir("bar_drawn");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 4);
+
+        assert!(
+            status_bar_fills(&mut state).is_empty(),
+            "an idle status bar has a progress track in it"
+        );
+
+        state.paste();
+        let busy = status_bar_fills(&mut state);
+        assert_eq!(busy.len(), 2, "a track is a groove and a fill: {busy:?}");
+        assert!(busy[1] <= busy[0], "the fill is wider than its groove");
+
+        settle(&mut state);
+        assert!(
+            status_bar_fills(&mut state).is_empty(),
+            "the track outlived the copy"
+        );
+    }
+
+    /// **A status line too long for the window is cut and marked, not run off
+    /// the edge.**
+    ///
+    /// It used to be drawn with no `max_width` at all. A silently clipped line
+    /// reads as a short one, which is how a truncated path gets taken for the
+    /// whole thing.
+    #[test]
+    fn a_long_status_line_is_kept_inside_the_window() {
+        let scratch = temp_dir("bar_long");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        state.window_width = 320;
+        state.status_message = "x".repeat(400);
+
+        let drawn = format!("{:?}", state.render());
+        assert!(
+            drawn.contains("max_width: Some("),
+            "the status line was drawn with no width to stay inside"
         );
     }
 

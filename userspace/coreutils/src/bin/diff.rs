@@ -1373,6 +1373,32 @@ fn print_unified(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
 // Context diff output
 // ============================================================================
 
+/// The two-character marker a context diff puts in front of a body line.
+///
+/// `changed` is "this hunk has deletions AND insertions", which is what makes
+/// a line a CHANGE rather than a removal or an addition. Measured, one hunk of
+/// each shape:
+///
+/// ```text
+/// change        ! charlie   /  ! CHANGED     -- both halves
+/// pure delete   - charlie                    -- `---` half is header only
+/// pure insert                 + extra        -- `***` half is header only
+/// ```
+///
+/// A function rather than two inline `if`s because the rule is symmetric and
+/// stating it once is what makes that visible: the same `changed` flag turns
+/// both a `-` and a `+` into a `!`, and getting only one of them right would
+/// produce a diff that still looks plausible.
+fn context_marker(op: Op, changed: bool) -> &'static [u8] {
+    match op {
+        Op::Equal => b"  ",
+        Op::Delete if changed => b"! ",
+        Op::Delete => b"- ",
+        Op::Insert if changed => b"! ",
+        Op::Insert => b"+ ",
+    }
+}
+
 fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
@@ -1393,6 +1419,23 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
     for hunk in hunks {
         let _ = writeln!(w, "***************");
 
+        // WHICH MARKER, AND WHETHER THE HALF HAS A BODY AT ALL. Measured, on
+        // one hunk of each shape:
+        //
+        //   change (deletes AND inserts)  `!` on BOTH halves, both bodies
+        //   pure delete                   `-`, and the `---` half is HEADER
+        //                                 ONLY -- no body, not even context
+        //   pure insert                   `+`, and the `***` half is header
+        //                                 only
+        //
+        // This build printed `-` and `+` where GNU prints `!`, and printed
+        // both bodies always. A context diff is meant to be re-appliable, and
+        // `!` is what says "these two lines are the same line, changed" rather
+        // than "one line vanished and an unrelated one appeared".
+        let has_del = hunk.lines.iter().any(|e| e.op == Op::Delete);
+        let has_ins = hunk.lines.iter().any(|e| e.op == Op::Insert);
+        let changed = has_del && has_ins;
+
         // File 1 section.
         let f1_start = hunk.start1 + 1;
         let f1_end = hunk.start1 + hunk.count1;
@@ -1409,27 +1452,30 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
             )
         );
 
-        for Edit {
-            op,
-            text,
-            no_final_newline,
-        } in &hunk.lines
-        {
-            match op {
-                Op::Equal => {
-                    write_body_line(&mut w, b"  ", text, None);
-                    if *no_final_newline {
-                        write_no_newline_marker(&mut w);
+        if has_del {
+            for Edit {
+                op,
+                text,
+                no_final_newline,
+            } in &hunk.lines
+            {
+                match op {
+                    Op::Equal => {
+                        write_body_line(&mut w, b"  ", text, None);
+                        if *no_final_newline {
+                            write_no_newline_marker(&mut w);
+                        }
                     }
-                }
-                Op::Delete => {
-                    write_body_line(&mut w, b"- ", text, when(config.color, RED));
-                    if *no_final_newline {
-                        write_no_newline_marker(&mut w);
+                    Op::Delete => {
+                        let marker = context_marker(Op::Delete, changed);
+                        write_body_line(&mut w, marker, text, when(config.color, RED));
+                        if *no_final_newline {
+                            write_no_newline_marker(&mut w);
+                        }
                     }
-                }
-                Op::Insert => {
-                    // Inserts are not shown in the file-1 section.
+                    Op::Insert => {
+                        // Inserts are not shown in the file-1 section.
+                    }
                 }
             }
         }
@@ -1450,27 +1496,30 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
             )
         );
 
-        for Edit {
-            op,
-            text,
-            no_final_newline,
-        } in &hunk.lines
-        {
-            match op {
-                Op::Equal => {
-                    write_body_line(&mut w, b"  ", text, None);
-                    if *no_final_newline {
-                        write_no_newline_marker(&mut w);
+        if has_ins {
+            for Edit {
+                op,
+                text,
+                no_final_newline,
+            } in &hunk.lines
+            {
+                match op {
+                    Op::Equal => {
+                        write_body_line(&mut w, b"  ", text, None);
+                        if *no_final_newline {
+                            write_no_newline_marker(&mut w);
+                        }
                     }
-                }
-                Op::Insert => {
-                    write_body_line(&mut w, b"+ ", text, when(config.color, GREEN));
-                    if *no_final_newline {
-                        write_no_newline_marker(&mut w);
+                    Op::Insert => {
+                        let marker = context_marker(Op::Insert, changed);
+                        write_body_line(&mut w, marker, text, when(config.color, GREEN));
+                        if *no_final_newline {
+                            write_no_newline_marker(&mut w);
+                        }
                     }
-                }
-                Op::Delete => {
-                    // Deletes are not shown in the file-2 section.
+                    Op::Delete => {
+                        // Deletes are not shown in the file-2 section.
+                    }
                 }
             }
         }
@@ -2010,6 +2059,23 @@ mod tests {
         assert_eq!(frac.len(), 9, "GNU always prints nine digits");
         let last = stamp.split(|&b| b == b' ').next_back().unwrap_or(b"");
         assert_eq!(last.len(), 5, "a +ZZZZ offset, got {last:?}");
+    }
+
+    /// A context diff marks a CHANGED line `!` on both sides, and a pure
+    /// removal or addition `-` / `+`.
+    ///
+    /// The symmetry is the point: the same `changed` flag has to turn both
+    /// markers into `!`, and a build that converted only one of them would
+    /// still produce a diff that looked right.
+    #[test]
+    fn a_changed_context_line_is_marked_on_both_sides() {
+        assert_eq!(context_marker(Op::Delete, true), b"! ");
+        assert_eq!(context_marker(Op::Insert, true), b"! ");
+        assert_eq!(context_marker(Op::Delete, false), b"- ");
+        assert_eq!(context_marker(Op::Insert, false), b"+ ");
+        // Context is two spaces either way -- `changed` does not reach it.
+        assert_eq!(context_marker(Op::Equal, true), b"  ");
+        assert_eq!(context_marker(Op::Equal, false), b"  ");
     }
 
     // ---------------- the missing final newline ----------------

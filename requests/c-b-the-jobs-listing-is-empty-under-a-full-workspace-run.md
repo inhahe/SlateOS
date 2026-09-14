@@ -110,6 +110,49 @@ That also means adding `oils` to `check-test-order-independence.py`'s crate
 list would not catch it, which lane C checked before proposing it and is
 therefore not proposing it.
 
+## A third one, 2026-09-14, and this one shows the mechanism
+
+`interp::tests::a_poll_before_the_grace_does_not_lose_the_exit_forever` failed
+the same way: red under `cargo test --workspace`, `1 passed` on its own
+(1 499 filtered out). That is three distinct tests in this crate in two days,
+all in job control, all passing alone.
+
+**This one names its own cause in a comment.** It sleeps five milliseconds
+against a twenty-millisecond grace and then asserts it landed inside the
+window:
+
+```rust
+// Land INSIDE the window: the body must be finished, the grace must
+// not have passed. 5 ms against a 20 ms grace, and the first attempt
+// at this test used no sleep at all -- it passed, because the thread
+// had not finished yet and the poll did nothing.
+//
+// Both halves are then ASSERTED rather than assumed, because a test
+// that silently missed the window would pass for the wrong reason and
+// go on passing after the bug came back.
+std::thread::sleep(std::time::Duration::from_millis(5));
+```
+
+The assertion is doing exactly what it was written to do -- it says *"the poll
+must have reaped the body, or the window was missed"* -- and under a workspace
+run the window **is** missed. `sleep(5ms)` is a floor, not a duration: with two
+dozen test binaries sharing the machine, the thread can be off the CPU for far
+longer than the fifteen milliseconds of slack that window allows.
+
+So the three failures are one family, and it is not test order -- lane C
+checked that and reported it above. It is that these tests measure a real
+clock while something else is using the machine.
+
+**A suggestion, offered as one.** The assertion already distinguishes "the
+window was missed" from "the bug is back". If the two were reported
+differently -- the first skipping or retrying, the second failing -- the suite
+would stop going red for a reason that is not a product defect, without losing
+the check. The alternative, driving the grace from an injected clock rather
+than a real one, is the version that cannot be perturbed at all, and is
+probably what the other two want as well.
+
+Lane C has no standing to choose between those; `userspace/**` is yours.
+
 ## What lane C is doing meanwhile
 
 Merging `lane-c` to `main` regardless, having checked that this is not ours:

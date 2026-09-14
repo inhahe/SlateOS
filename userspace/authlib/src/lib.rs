@@ -643,6 +643,25 @@ mod tests {
         Authenticator, FREE_ATTEMPTS, MAX_DELAY_SECS, Outcome, Tally, check_stored, combine,
         delay_for,
     };
+
+    /// Serialises the two tests that drive `FAKE_NOW_PAIR`.
+    ///
+    /// It is an `AtomicU64`, so there is no data race to have. What there is:
+    /// `a_caller_that_owns_its_verdict_shares_the_one_tally_both_ways` ADVANCES
+    /// the fake clock mid-test (`13_000 + wait`) to walk a lockout forward,
+    /// while `asking_whether_a_user_is_delayed_does_not_count_against_them`
+    /// sets it to `13_000` and asserts on a verdict computed at that instant.
+    /// Interleaved, the second reads a clock the first moved -- and a delay
+    /// verdict is precisely the thing that changes when the time does.
+    static FAKE_CLOCK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Poison-tolerant: one failure must not make its sibling panic in
+    /// `.unwrap()` and report two defects for one.
+    fn fake_clock_guard() -> std::sync::MutexGuard<'static, ()> {
+        FAKE_CLOCK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     use std::path::PathBuf;
 
     /// A `$6$` entry for the password `correct horse`, computed here rather
@@ -1159,6 +1178,7 @@ mod tests {
     /// `authenticate`, and failures `authenticate` records must delay it.
     #[test]
     fn a_caller_that_owns_its_verdict_shares_the_one_tally_both_ways() {
+        let _clock = fake_clock_guard();
         let (users, lock) = shared_fixture("pair");
         FAKE_NOW_PAIR.store(13_000, std::sync::atomic::Ordering::Relaxed);
 
@@ -1221,6 +1241,7 @@ mod tests {
     /// bug `authenticate` avoids by not counting a rate-limited attempt.
     #[test]
     fn asking_whether_a_user_is_delayed_does_not_count_against_them() {
+        let _clock = fake_clock_guard();
         let (users, lock) = shared_fixture("askfree");
         FAKE_NOW_PAIR.store(13_000, std::sync::atomic::Ordering::Relaxed);
 

@@ -1932,6 +1932,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "notifsettings"
+version = "0.1.0"
+dependencies = [
+ "settingsfile",
+ "yamldoc",
+]
+
+[[package]]
 name = "notimpl"
 version = "0.1.0"
 

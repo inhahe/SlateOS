@@ -24,13 +24,126 @@
 //! ```
 
 use coreutils::diag;
+use coreutils::quote;
 use coreutils::quote::quotef_os;
 use coreutils::stdfd::Stream;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process;
+
+/// The path `diff` writes for "this side of the patch has no file" --
+/// a creation names it as the old path, a deletion as the new one.
+///
+/// A constant because it is compared against `FilePatch`'s byte paths in
+/// six places, and `b"/dev/null"` is an array rather than a slice, so each
+/// comparison would otherwise need its own `.as_slice()`.
+const DEV_NULL: &[u8] = b"/dev/null";
+
+/// The byte-slice operations `str` gives away for free.
+///
+/// `patch` carries file content, and content is bytes: a source file with one
+/// Latin-1 byte in a comment is a file GNU patches and this build used to
+/// refuse outright (`known-issues.md` ->
+/// B-PATCH-REFUSES-EVERY-FILE-THAT-IS-NOT-VALID-UTF-8). The structure a patch
+/// is made of -- `@@`, `---`, `+++`, and the `+`/`-`/space in column one -- is
+/// ASCII and stays comparable as bytes; only the line *contents* have to
+/// survive untouched, and they only survive if nothing decodes them.
+///
+/// These are kept private rather than pushed into `coreutils::quote` or a
+/// crate of their own because `patch` is the first bin to need them. `diff` is
+/// the expected second; that is the point to extract, not this one.
+mod bytes {
+    /// The first index at which `needle` occurs in `hay`.
+    ///
+    /// `str::find`'s counterpart. Naive, and deliberately so: the needles here
+    /// are two or three ASCII bytes (`@@`, `--- `) against a single line.
+    pub fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() {
+            return Some(0);
+        }
+        hay.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Split on ASCII whitespace, dropping empty runs -- `str::split_whitespace`.
+    pub fn split_whitespace(s: &[u8]) -> impl Iterator<Item = &[u8]> {
+        s.split(|b: &u8| b.is_ascii_whitespace())
+            .filter(|part| !part.is_empty())
+    }
+
+    /// Split at the first `sep` -- `str::split_once`.
+    pub fn split_once(s: &[u8], sep: u8) -> Option<(&[u8], &[u8])> {
+        let at = s.iter().position(|&b| b == sep)?;
+        Some((s.get(..at)?, s.get(at.saturating_add(1)..)?))
+    }
+
+    /// Parse a decimal count.
+    ///
+    /// Via `from_utf8` rather than a hand-rolled digit loop: a line number in a
+    /// patch is ASCII digits by definition, so the check is free, and anything
+    /// that is not digits must fail rather than be salvaged. This is the one
+    /// place decoding is right -- it decodes a *number*, never a name or a line.
+    pub fn parse_usize(s: &[u8]) -> Option<usize> {
+        std::str::from_utf8(s).ok()?.parse().ok()
+    }
+
+    /// `s` with any trailing byte that appears in `set` removed --
+    /// `str::trim_end_matches` over a set of ASCII characters.
+    pub fn trim_end_matches<'a>(s: &'a [u8], set: &[u8]) -> &'a [u8] {
+        let mut out = s;
+        while let Some((last, head)) = out.split_last() {
+            if set.contains(last) {
+                out = head;
+            } else {
+                break;
+            }
+        }
+        out
+    }
+
+    /// The lines of `text`, without their terminators -- `str::lines`.
+    ///
+    /// Matches `str::lines` on the case that matters here: a trailing newline
+    /// does NOT produce a final empty line, because a patch body's last line is
+    /// terminated like every other one and an extra empty line would be an
+    /// extra hunk line.
+    pub fn lines(text: &[u8]) -> Vec<&[u8]> {
+        let mut out: Vec<&[u8]> = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            match rest.iter().position(|&b| b == b'\n') {
+                Some(at) => {
+                    if let (Some(line), Some(tail)) =
+                        (rest.get(..at), rest.get(at.saturating_add(1)..))
+                    {
+                        out.push(strip_cr(line));
+                        rest = tail;
+                    } else {
+                        break;
+                    }
+                }
+                None => {
+                    out.push(strip_cr(rest));
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// A line without its CR, for a patch written with DOS terminators.
+    ///
+    /// `str::lines` does this and the byte version must too, or every context
+    /// line of a CRLF patch fails to match a target read with LF.
+    fn strip_cr(line: &[u8]) -> &[u8] {
+        match line.split_last() {
+            Some((b'\r', head)) => head,
+            _ => line,
+        }
+    }
+}
 
 /// A single hunk from a unified diff.
 #[derive(Debug, Clone)]
@@ -46,24 +159,24 @@ struct Hunk {
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 enum HunkLine {
-    Context(String),
-    Remove(String),
-    Add(String),
+    Context(Vec<u8>),
+    Remove(Vec<u8>),
+    Add(Vec<u8>),
 }
 
 /// A patch for a single file, consisting of one or more hunks.
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 struct FilePatch {
-    old_path: String,
-    new_path: String,
+    old_path: Vec<u8>,
+    new_path: Vec<u8>,
     hunks: Vec<Hunk>,
     /// The `---` and `+++` lines exactly as they appeared, timestamps and all.
     ///
     /// Kept because GNU echoes them back when it cannot find the target, and a
     /// reconstruction would not match: the timestamps come from the patch file
     /// rather than from the filesystem.
-    header_lines: Vec<String>,
+    header_lines: Vec<Vec<u8>>,
     /// 1-based input line of this file's first hunk header, which is the number
     /// GNU names in `can't find file to patch at input line N`.
     first_hunk_line: usize,
@@ -89,7 +202,7 @@ struct FilePatch {
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Options {
     strip: Option<usize>,
-    patch_file: Option<String>,
+    patch_file: Option<OsString>,
     reverse: bool,
     dry_run: bool,
     /// `--verbose`: narrate the run -- the dialect, the header block,
@@ -98,7 +211,7 @@ struct Options {
     silent: bool,
     backup: bool,
     /// `-o FILE`: write the result to FILE, leaving the target untouched.
-    output_file: Option<String>,
+    output_file: Option<OsString>,
     /// `-l`: match ignoring whitespace. Accepted and currently inert -- see the
     /// note on `forward` for what that does and does not mean. It changes an
     /// answer only where a hunk differs from the target in whitespace alone,
@@ -107,7 +220,7 @@ struct Options {
     /// `-E`: delete a file the patch has emptied.
     remove_empty: bool,
     /// `-r FILE`: write rejects to FILE instead of `<target>.rej`.
-    reject_file: Option<String>,
+    reject_file: Option<OsString>,
     /// `--no-backup-if-mismatch`: do not save `<target>.orig` when a hunk fails.
     no_backup_if_mismatch: bool,
     /// Accepted and currently inert: `-N/--forward`, `-f/--force`,
@@ -126,8 +239,8 @@ struct Options {
     fuzz: Option<usize>,
     set_utc: bool,
     /// `-d DIR`: change to DIR before doing anything else.
-    directory: Option<String>,
-    target_file: Option<String>,
+    directory: Option<OsString>,
+    target_file: Option<OsString>,
 }
 
 /// Parse patch's argv into an `Options`.  Recognised flags:
@@ -135,34 +248,51 @@ struct Options {
 ///   --silent / --quiet / -b / --backup.
 /// Anything else not starting with `-` (and not the bare string "-")
 /// is the target file.  Unknown flags return an error.
-fn parse_args(args: &[String]) -> Result<Options, String> {
+fn parse_args(args: &[OsString]) -> Result<Options, String> {
     let mut opts = Options::default();
     let mut i: usize = 0;
 
     while let Some(arg) = args.get(i) {
-        let a = arg.as_str();
+        // Decoded for MATCHING ONLY, and `""` when the argument is not
+        // Unicode. Every option `patch` accepts is ASCII, so a non-Unicode
+        // argument cannot be one; `""` matches nothing here and falls through
+        // to the operand arm, which keeps the original `OsString`. Option
+        // VALUES are never decoded -- they are the paths, and the whole point
+        // of taking `OsString` is that they reach the syscall unaltered.
+        let a = arg.to_str().unwrap_or("");
+        let raw = quote::os_bytes(arg);
         if a == "-i" || a == "--input" {
             i = i.saturating_add(1);
             let v = args
                 .get(i)
                 .ok_or_else(|| "option -i requires an argument".to_string())?;
             opts.patch_file = Some(v.clone());
-        } else if let Some(v) = a.strip_prefix("--input=") {
+        } else if let Some(v) = raw.strip_prefix(b"--input=") {
             // `--input` is the one thing the retired `userspace/patch` crate
             // accepted that this did not. It is carried over rather than lost:
             // deleting the worse half of a duplicate pair means the better half
             // has to end up with everything, and a survey column reading
             // "1 only in the standalone" is a list of one to go and check, not
             // a rounding error.
-            opts.patch_file = Some(v.to_string());
+            opts.patch_file = Some(quote::os_from_bytes(v));
         } else if a == "-p" {
             i = i.saturating_add(1);
             let v = args
                 .get(i)
                 .ok_or_else(|| "option -p requires an argument".to_string())?;
-            let n: usize = v
-                .parse()
-                .map_err(|_| format!("**** strip count {v} is not a number"))?;
+            let n: usize = v.to_str().and_then(|s| s.parse().ok()).ok_or_else(|| {
+                // `quotef`, NOT `quote_glibc`. Measured: GNU prints
+                // `**** strip count abc is not a number` with no quotes at
+                // all, where it DOES quote an option name
+                // (`invalid option -- 'Q'`). `quotef` leaves plain text alone
+                // and escapes only a value that could forge a line, so it
+                // matches GNU on every input GNU is defined on. The harness
+                // caught this: `quote_glibc` here printed `'abc'`.
+                format!(
+                    "**** strip count {} is not a number",
+                    quote::quotef(&quote::os_bytes(v))
+                )
+            })?;
             opts.strip = Some(n);
         } else if let Some(rest) = a.strip_prefix("-p") {
             if !rest.is_empty() {
@@ -194,8 +324,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 Some(v) => opts.output_file = Some(v.clone()),
                 None => return Err("option requires an argument -- 'o'".to_string()),
             }
-        } else if let Some(v) = a.strip_prefix("--output=") {
-            opts.output_file = Some(v.to_string());
+        } else if let Some(v) = raw.strip_prefix(b"--output=") {
+            opts.output_file = Some(quote::os_from_bytes(v));
         } else if a == "-N" || a == "--forward" {
             opts.forward = true;
         } else if a == "-f" || a == "--force" {
@@ -206,7 +336,11 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             opts.no_backup_if_mismatch = true;
         } else if a == "-F" || a == "--fuzz" {
             i = i.saturating_add(1);
-            match args.get(i).and_then(|v| v.parse::<usize>().ok()) {
+            match args
+                .get(i)
+                .and_then(|v| v.to_str())
+                .and_then(|v| v.parse::<usize>().ok())
+            {
                 Some(v) => opts.fuzz = Some(v),
                 None => return Err("invalid fuzz factor".to_string()),
             }
@@ -221,19 +355,19 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 Some(v) => opts.reject_file = Some(v.clone()),
                 None => return Err("option requires an argument -- 'r'".to_string()),
             }
-        } else if let Some(v) = a.strip_prefix("--reject-file=") {
-            opts.reject_file = Some(v.to_string());
+        } else if let Some(v) = raw.strip_prefix(b"--reject-file=") {
+            opts.reject_file = Some(quote::os_from_bytes(v));
         } else if a == "-d" || a == "--directory" {
             i = i.saturating_add(1);
             match args.get(i) {
                 Some(v) => opts.directory = Some(v.clone()),
                 None => return Err("option requires an argument -- 'd'".to_string()),
             }
-        } else if let Some(v) = a.strip_prefix("--directory=") {
-            opts.directory = Some(v.to_string());
-        } else if let Some(v) = a.strip_prefix("-d") {
-            opts.directory = Some(v.to_string());
-        } else if a.starts_with('-') && a.len() > 1 && a != "-" {
+        } else if let Some(v) = raw.strip_prefix(b"--directory=") {
+            opts.directory = Some(quote::os_from_bytes(v));
+        } else if let Some(v) = raw.strip_prefix(b"-d") {
+            opts.directory = Some(quote::os_from_bytes(v));
+        } else if raw.starts_with(b"-") && raw.len() > 1 && &*raw != b"-".as_slice() {
             // GNU's two spellings, measured rather than guessed. A long option
             // is quoted and named in full; a short one is reported as the
             // single character, the way getopt does it:
@@ -246,11 +380,22 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             // instead. The two were fixed the same night in opposite
             // directions, which is the argument for measuring each program
             // rather than carrying a house style between them.
-            let sentence = if a.starts_with("--") {
-                format!("unrecognized option \'{a}\'")
+            // The RAW bytes, and `quote_glibc` rather than a bare `'{a}'`, for
+            // two reasons the decoded form gets wrong. An argument that is not
+            // Unicode decodes to the empty string, so `-<0x80>` would be
+            // reported as an empty option -- or, before this line existed,
+            // would not be reported at all, because it never reached this arm
+            // and was silently taken as the target file. And a name holding a
+            // newline, printed raw, lets whoever chose it forge a second line
+            // of our error stream. Both are what `coreutils::getopt` already
+            // does, down to the octal spelling of a non-ASCII byte: glibc
+            // answers `invalid option -- '\\303'`, never the character
+            // that byte might begin.
+            let sentence = if raw.starts_with(b"--") {
+                format!("unrecognized option {}", quote::quote_glibc(&raw))
             } else {
-                let ch = a.chars().nth(1).unwrap_or('?');
-                format!("invalid option -- \'{ch}\'")
+                let flag = raw.get(1).copied().unwrap_or(b'?');
+                format!("invalid option -- {}", quote::quote_glibc(&[flag]))
             };
             return Err(format!(
                 "{sentence}\npatch: Try \'patch --help\' for more information."
@@ -265,33 +410,33 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 }
 
 /// Strip NUM leading path components from a file path.
-fn strip_path(path: &str, num: usize) -> String {
+fn strip_path(path: &[u8], num: usize) -> Vec<u8> {
     if num == 0 {
-        return path.to_string();
+        return path.to_vec();
     }
-    let parts: Vec<&str> = path.splitn(num.saturating_add(1), '/').collect();
+    let parts: Vec<&[u8]> = path.splitn(num.saturating_add(1), |&b| b == b'/').collect();
     if let Some(tail) = parts.get(num) {
-        (*tail).to_string()
+        (*tail).to_vec()
     } else {
         // If there aren't enough components, return the basename.
-        path.rsplit('/').next().unwrap_or(path).to_string()
+        path.rsplit(|&b| b == b'/').next().unwrap_or(path).to_vec()
     }
 }
 
 /// Parse the @@ -old_start,old_count +new_start,new_count @@ line.
-fn parse_hunk_header(line: &str) -> Option<(usize, usize, usize, usize)> {
+fn parse_hunk_header(line: &[u8]) -> Option<(usize, usize, usize, usize)> {
     // Format: @@ -A,B +C,D @@ optional text
-    let line = line.trim();
-    let after_at = line.strip_prefix("@@")?;
-    let end_at = after_at.find("@@")?;
-    let range_part = after_at.get(..end_at)?.trim();
+    let line = line.trim_ascii();
+    let after_at = line.strip_prefix(b"@@")?;
+    let end_at = bytes::find(after_at, b"@@")?;
+    let range_part = after_at.get(..end_at)?.trim_ascii();
 
-    let mut parts = range_part.split_whitespace();
+    let mut parts = bytes::split_whitespace(range_part);
     let old_range = parts.next()?;
     let new_range = parts.next()?;
 
-    let old_range = old_range.strip_prefix('-')?;
-    let new_range = new_range.strip_prefix('+')?;
+    let old_range = old_range.strip_prefix(b"-")?;
+    let new_range = new_range.strip_prefix(b"+")?;
 
     let (old_start, old_count) = parse_range(old_range)?;
     let (new_start, new_count) = parse_range(new_range)?;
@@ -299,12 +444,12 @@ fn parse_hunk_header(line: &str) -> Option<(usize, usize, usize, usize)> {
     Some((old_start, old_count, new_start, new_count))
 }
 
-fn parse_range(s: &str) -> Option<(usize, usize)> {
-    if let Some((start_s, count_s)) = s.split_once(',') {
-        Some((start_s.parse().ok()?, count_s.parse().ok()?))
+fn parse_range(s: &[u8]) -> Option<(usize, usize)> {
+    if let Some((start_s, count_s)) = bytes::split_once(s, b',') {
+        Some((bytes::parse_usize(start_s)?, bytes::parse_usize(count_s)?))
     } else {
         // Single number means count=1.
-        Some((s.parse().ok()?, 1))
+        Some((bytes::parse_usize(s)?, 1))
     }
 }
 
@@ -328,7 +473,7 @@ fn parse_range(s: &str) -> Option<(usize, usize)> {
 /// than updating a file that already has permissions of its own, so there is no
 /// existing mode to preserve and the safe default is the private one.
 /// In-place writes are left alone: those go to a file that already exists.
-fn write_result(dest: &str, output: &str, is_output_option: bool) -> io::Result<()> {
+fn write_result(dest: &OsStr, output: &[u8], is_output_option: bool) -> io::Result<()> {
     #[cfg(unix)]
     if is_output_option && !Path::new(dest).exists() {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -338,28 +483,28 @@ fn write_result(dest: &str, output: &str, is_output_option: bool) -> io::Result<
             .truncate(true)
             .mode(0o600)
             .open(dest)?;
-        return f.write_all(output.as_bytes());
+        return f.write_all(output);
     }
     #[cfg(not(unix))]
     let _ = is_output_option;
     fs::write(dest, output)
 }
 
-fn render_hunk(h: &Hunk) -> String {
-    let mut out = format!(
-        "@@ -{},{} +{},{} @@
-",
+fn render_hunk(h: &Hunk) -> Vec<u8> {
+    let mut out: Vec<u8> = format!(
+        "@@ -{},{} +{},{} @@\n",
         h.old_start, h.old_count, h.new_start, h.new_count
-    );
+    )
+    .into_bytes();
     for line in &h.lines {
         let (prefix, text) = match line {
-            HunkLine::Context(t) => (' ', t),
-            HunkLine::Remove(t) => ('-', t),
-            HunkLine::Add(t) => ('+', t),
+            HunkLine::Context(t) => (b' ', t),
+            HunkLine::Remove(t) => (b'-', t),
+            HunkLine::Add(t) => (b'+', t),
         };
         out.push(prefix);
-        out.push_str(text);
-        out.push('\n');
+        out.extend_from_slice(text);
+        out.push(b'\n');
     }
     out
 }
@@ -383,14 +528,14 @@ enum Dialect {
     Unknown,
 }
 
-fn detect_dialect(input: &str) -> Dialect {
-    let lines: Vec<&str> = input.lines().collect();
+fn detect_dialect(input: &[u8]) -> Dialect {
+    let lines: Vec<&[u8]> = bytes::lines(input);
     for (i, line) in lines.iter().enumerate() {
-        let next = lines.get(i.saturating_add(1)).copied().unwrap_or("");
-        if line.starts_with("*** ") && next.starts_with("--- ") {
+        let next = lines.get(i.saturating_add(1)).copied().unwrap_or(&[]);
+        if line.starts_with(b"*** ") && next.starts_with(b"--- ") {
             return Dialect::Context;
         }
-        if line.starts_with("--- ") && next.starts_with("+++ ") {
+        if line.starts_with(b"--- ") && next.starts_with(b"+++ ") {
             return Dialect::Unified;
         }
         if parse_normal_command(line).is_some() {
@@ -406,19 +551,19 @@ fn detect_dialect(input: &str) -> Dialect {
 /// ends, which is the normal format's own convention and NOT unified's
 /// start-plus-count. Conflating the two is the mistake that makes a
 /// three-line hunk one line long.
-fn parse_normal_command(line: &str) -> Option<(usize, usize, char, usize, usize)> {
-    let at = line.find(['a', 'c', 'd'])?;
-    let action = line.get(at..at.saturating_add(1))?.chars().next()?;
+fn parse_normal_command(line: &[u8]) -> Option<(usize, usize, u8, usize, usize)> {
+    let at = line.iter().position(|&b| matches!(b, b'a' | b'c' | b'd'))?;
+    let action = line.get(at)?.to_owned();
     let left = line.get(..at)?;
     let right = line.get(at.saturating_add(1)..)?;
     if left.is_empty() || right.is_empty() {
         return None;
     }
-    let range = |s: &str| -> Option<(usize, usize)> {
-        match s.split_once(',') {
-            Some((a, b)) => Some((a.parse().ok()?, b.parse().ok()?)),
+    let range = |s: &[u8]| -> Option<(usize, usize)> {
+        match bytes::split_once(s, b',') {
+            Some((a, b)) => Some((bytes::parse_usize(a)?, bytes::parse_usize(b)?)),
             None => {
-                let n: usize = s.parse().ok()?;
+                let n: usize = bytes::parse_usize(s)?;
                 Some((n, n))
             }
         }
@@ -452,29 +597,29 @@ fn parse_normal_command(line: &str) -> Option<(usize, usize, char, usize, usize)
 /// `- ` appears only in the old half and `+ ` only in the new; a hunk that
 /// only deletes omits the `---` half's body entirely, and one that only adds
 /// omits the `***` half's.
-fn parse_context_patch(input: &str) -> Vec<FilePatch> {
-    let lines: Vec<&str> = input.lines().collect();
+fn parse_context_patch(input: &[u8]) -> Vec<FilePatch> {
+    let lines: Vec<&[u8]> = bytes::lines(input);
     let mut patches: Vec<FilePatch> = Vec::new();
     let mut i = 0;
 
     while let Some(line) = lines.get(i).copied() {
-        let next = lines.get(i.saturating_add(1)).copied().unwrap_or("");
-        if !(line.starts_with("*** ") && next.starts_with("--- ")) {
+        let next = lines.get(i.saturating_add(1)).copied().unwrap_or(&[]);
+        if !(line.starts_with(b"*** ") && next.starts_with(b"--- ")) {
             i = i.saturating_add(1);
             continue;
         }
-        let old_path = parse_file_path(line, "*** ");
-        let new_path = parse_file_path(next, "--- ");
-        let header_lines = vec![line.to_string(), next.to_string()];
+        let old_path = parse_file_path(line, b"*** ");
+        let new_path = parse_file_path(next, b"--- ");
+        let header_lines = vec![line.to_vec(), next.to_vec()];
         i = i.saturating_add(2);
         let first_hunk_line = i.saturating_add(1);
         let mut hunks: Vec<Hunk> = Vec::new();
 
         while let Some(cur) = lines.get(i).copied() {
-            if cur.starts_with("*** ") && !cur.trim_end().ends_with("****") {
+            if cur.starts_with(b"*** ") && !cur.trim_ascii_end().ends_with(b"****") {
                 break; // the next file's header
             }
-            if !cur.starts_with("***************") {
+            if !cur.starts_with(b"***************") {
                 i = i.saturating_add(1);
                 continue;
             }
@@ -484,14 +629,14 @@ fn parse_context_patch(input: &str) -> Vec<FilePatch> {
             let Some(old_hdr) = lines.get(i).copied() else {
                 break;
             };
-            let Some((os, oe)) = context_range(old_hdr, "*** ") else {
+            let Some((os, oe)) = context_range(old_hdr, b"*** ") else {
                 i = i.saturating_add(1);
                 continue;
             };
             i = i.saturating_add(1);
-            let mut old_body: Vec<(char, String)> = Vec::new();
+            let mut old_body: Vec<(u8, Vec<u8>)> = Vec::new();
             while let Some(b) = lines.get(i).copied() {
-                if b.starts_with("--- ") || b.starts_with("***************") {
+                if b.starts_with(b"--- ") || b.starts_with(b"***************") {
                     break;
                 }
                 if let Some(item) = context_body_line(b) {
@@ -501,17 +646,17 @@ fn parse_context_patch(input: &str) -> Vec<FilePatch> {
             }
 
             // `--- 1,4 ----`
-            let mut new_body: Vec<(char, String)> = Vec::new();
+            let mut new_body: Vec<(u8, Vec<u8>)> = Vec::new();
             let mut ns = os;
             let mut ne = oe;
             if let Some(new_hdr) = lines.get(i).copied()
-                && let Some((a, b)) = context_range(new_hdr, "--- ")
+                && let Some((a, b)) = context_range(new_hdr, b"--- ")
             {
                 ns = a;
                 ne = b;
                 i = i.saturating_add(1);
                 while let Some(bl) = lines.get(i).copied() {
-                    if bl.starts_with("***************") || bl.starts_with("*** ") {
+                    if bl.starts_with(b"***************") || bl.starts_with(b"*** ") {
                         break;
                     }
                     if let Some(item) = context_body_line(bl) {
@@ -537,13 +682,16 @@ fn parse_context_patch(input: &str) -> Vec<FilePatch> {
 }
 
 /// `*** 1,4 ****` / `--- 1,4 ----` -> the INCLUSIVE line range.
-fn context_range(line: &str, prefix: &str) -> Option<(usize, usize)> {
+fn context_range(line: &[u8], prefix: &[u8]) -> Option<(usize, usize)> {
     let rest = line.strip_prefix(prefix)?;
-    let body = rest.trim_end_matches(['*', '-', ' ']);
-    match body.split_once(',') {
-        Some((a, b)) => Some((a.trim().parse().ok()?, b.trim().parse().ok()?)),
+    let body = bytes::trim_end_matches(rest, b"*- ");
+    match bytes::split_once(body, b',') {
+        Some((a, b)) => Some((
+            bytes::parse_usize(a.trim_ascii())?,
+            bytes::parse_usize(b.trim_ascii())?,
+        )),
         None => {
-            let n: usize = body.trim().parse().ok()?;
+            let n: usize = bytes::parse_usize(body.trim_ascii())?;
             Some((n, n))
         }
     }
@@ -555,14 +703,13 @@ fn context_range(line: &str, prefix: &str) -> Option<(usize, usize)> {
 /// begins at the third. A line that is exactly the marker with nothing after
 /// it is a blank line, not a short line, so the fallback keeps the empty
 /// string rather than dropping the entry.
-fn context_body_line(line: &str) -> Option<(char, String)> {
-    let mut chars = line.chars();
-    let marker = chars.next()?;
-    if !matches!(marker, ' ' | '-' | '+' | '!') {
+fn context_body_line(line: &[u8]) -> Option<(u8, Vec<u8>)> {
+    let marker = line.first().copied()?;
+    if !matches!(marker, b' ' | b'-' | b'+' | b'!') {
         return None;
     }
-    let rest = line.get(2..).unwrap_or("");
-    Some((marker, rest.to_string()))
+    let rest = line.get(2..).unwrap_or(&[]);
+    Some((marker, rest.to_vec()))
 }
 
 /// Fold a context hunk's two halves into the unified `Hunk` the applier uses.
@@ -575,8 +722,8 @@ fn context_hunk(
     oe: usize,
     ns: usize,
     ne: usize,
-    old_body: &[(char, String)],
-    new_body: &[(char, String)],
+    old_body: &[(u8, Vec<u8>)],
+    new_body: &[(u8, Vec<u8>)],
 ) -> Hunk {
     let mut lines: Vec<HunkLine> = Vec::new();
     let (mut a, mut b) = (0usize, 0usize);
@@ -584,34 +731,34 @@ fn context_hunk(
         let om = old_body.get(a).map(|x| x.0);
         let nm = new_body.get(b).map(|x| x.0);
         match (om, nm) {
-            (Some(' '), Some(' ')) => {
+            (Some(b' '), Some(b' ')) => {
                 if let Some((_, text)) = old_body.get(a) {
                     lines.push(HunkLine::Context(text.clone()));
                 }
                 a = a.saturating_add(1);
                 b = b.saturating_add(1);
             }
-            (Some('-'), _) => {
+            (Some(b'-'), _) => {
                 if let Some((_, text)) = old_body.get(a) {
                     lines.push(HunkLine::Remove(text.clone()));
                 }
                 a = a.saturating_add(1);
             }
-            (_, Some('+')) => {
+            (_, Some(b'+')) => {
                 if let Some((_, text)) = new_body.get(b) {
                     lines.push(HunkLine::Add(text.clone()));
                 }
                 b = b.saturating_add(1);
             }
-            (Some('!'), _) | (_, Some('!')) => {
+            (Some(b'!'), _) | (_, Some(b'!')) => {
                 // Every `!` on the old side, then every `!` facing it on the
                 // new side. Emitting them interleaved would produce a hunk
                 // that renders back into a .rej file no shell could reapply.
-                while let Some(('!', text)) = old_body.get(a) {
+                while let Some((b'!', text)) = old_body.get(a) {
                     lines.push(HunkLine::Remove(text.clone()));
                     a = a.saturating_add(1);
                 }
-                while let Some(('!', text)) = new_body.get(b) {
+                while let Some((b'!', text)) = new_body.get(b) {
                     lines.push(HunkLine::Add(text.clone()));
                     b = b.saturating_add(1);
                 }
@@ -662,8 +809,8 @@ fn context_hunk(
 /// A normal hunk has no context lines, so it is applied by line number rather
 /// than by matching surroundings. `old_start` is therefore load-bearing in a
 /// way it is not for unified.
-fn parse_normal_patch(input: &str) -> Vec<FilePatch> {
-    let lines: Vec<&str> = input.lines().collect();
+fn parse_normal_patch(input: &[u8]) -> Vec<FilePatch> {
+    let lines: Vec<&[u8]> = bytes::lines(input);
     let mut hunks: Vec<Hunk> = Vec::new();
     let mut i = 0;
     let mut first_hunk_line = 1;
@@ -681,17 +828,17 @@ fn parse_normal_patch(input: &str) -> Vec<FilePatch> {
         i = i.saturating_add(1);
         let mut body: Vec<HunkLine> = Vec::new();
         while let Some(b) = lines.get(i).copied() {
-            if let Some(rest) = b.strip_prefix("< ") {
-                body.push(HunkLine::Remove(rest.to_string()));
-            } else if let Some(rest) = b.strip_prefix("> ") {
-                body.push(HunkLine::Add(rest.to_string()));
-            } else if b == "---" || b == "<" || b == ">" {
+            if let Some(rest) = b.strip_prefix(b"< ") {
+                body.push(HunkLine::Remove(rest.to_vec()));
+            } else if let Some(rest) = b.strip_prefix(b"> ") {
+                body.push(HunkLine::Add(rest.to_vec()));
+            } else if b == b"---".as_slice() || b == b"<".as_slice() || b == b">".as_slice() {
                 // The `c` separator, and the two degenerate spellings of a
                 // blank line on either side.
-                if b == "<" {
-                    body.push(HunkLine::Remove(String::new()));
-                } else if b == ">" {
-                    body.push(HunkLine::Add(String::new()));
+                if b == b"<".as_slice() {
+                    body.push(HunkLine::Remove(Vec::new()));
+                } else if b == b">".as_slice() {
+                    body.push(HunkLine::Add(Vec::new()));
                 }
             } else {
                 break;
@@ -709,11 +856,11 @@ fn parse_normal_patch(input: &str) -> Vec<FilePatch> {
         // zero-context UNIFIED insertions broken -- the same fix in one
         // dialect's parser instead of in the shared applier.
         let (old_start, old_count) = match action {
-            'a' => (os, 0),
+            b'a' => (os, 0),
             _ => (os, oe.saturating_add(1).saturating_sub(os)),
         };
         let (new_start, new_count) = match action {
-            'd' => (ns.saturating_add(1), 0),
+            b'd' => (ns.saturating_add(1), 0),
             _ => (ns, ne.saturating_add(1).saturating_sub(ns)),
         };
         hunks.push(Hunk {
@@ -729,8 +876,8 @@ fn parse_normal_patch(input: &str) -> Vec<FilePatch> {
         return Vec::new();
     }
     vec![FilePatch {
-        old_path: String::new(),
-        new_path: String::new(),
+        old_path: Vec::new(),
+        new_path: Vec::new(),
         hunks,
         header_lines: Vec::new(),
         first_hunk_line,
@@ -738,8 +885,8 @@ fn parse_normal_patch(input: &str) -> Vec<FilePatch> {
     }]
 }
 
-fn parse_patch(input: &str) -> Vec<FilePatch> {
-    let lines: Vec<&str> = input.lines().collect();
+fn parse_patch(input: &[u8]) -> Vec<FilePatch> {
+    let lines: Vec<&[u8]> = bytes::lines(input);
     let mut patches: Vec<FilePatch> = Vec::new();
     let mut i = 0;
 
@@ -747,12 +894,12 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
         // Look for --- line followed by +++ line.
         let next_starts_with_plus = lines
             .get(i.saturating_add(1))
-            .is_some_and(|l| l.starts_with("+++ "));
-        if line_i.starts_with("--- ") && next_starts_with_plus {
-            let old_path = parse_file_path(line_i, "--- ");
-            let plus_line = lines.get(i.saturating_add(1)).copied().unwrap_or("");
-            let new_path = parse_file_path(plus_line, "+++ ");
-            let header_lines = vec![line_i.to_string(), plus_line.to_string()];
+            .is_some_and(|l| l.starts_with(b"+++ "));
+        if line_i.starts_with(b"--- ") && next_starts_with_plus {
+            let old_path = parse_file_path(line_i, b"--- ");
+            let plus_line = lines.get(i.saturating_add(1)).copied().unwrap_or(&[]);
+            let new_path = parse_file_path(plus_line, b"+++ ");
+            let header_lines = vec![line_i.to_vec(), plus_line.to_vec()];
             i = i.saturating_add(2);
             // `i` now indexes the first hunk header; GNU counts from one.
             let first_hunk_line = i.saturating_add(1);
@@ -762,7 +909,7 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
 
             // Parse hunks for this file.
             while let Some(cur) = lines.get(i).copied() {
-                if cur.starts_with("@@ ") {
+                if cur.starts_with(b"@@ ") {
                     if let Some((os, oc, ns, nc)) = parse_hunk_header(cur) {
                         let header_line = i.saturating_add(1);
                         i = i.saturating_add(1);
@@ -779,31 +926,31 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
                             let Some(line) = lines.get(i).copied() else {
                                 break;
                             };
-                            if line.starts_with("@@ ")
-                                || line.starts_with("--- ")
-                                || line.starts_with("diff ")
+                            if line.starts_with(b"@@ ")
+                                || line.starts_with(b"--- ")
+                                || line.starts_with(b"diff ")
                             {
                                 break;
                             }
 
-                            if let Some(rest) = line.strip_prefix('+') {
-                                hunk_lines.push(HunkLine::Add(rest.to_string()));
+                            if let Some(rest) = line.strip_prefix(b"+") {
+                                hunk_lines.push(HunkLine::Add(rest.to_vec()));
                                 new_left = new_left.saturating_sub(1);
-                            } else if let Some(rest) = line.strip_prefix('-') {
-                                hunk_lines.push(HunkLine::Remove(rest.to_string()));
+                            } else if let Some(rest) = line.strip_prefix(b"-") {
+                                hunk_lines.push(HunkLine::Remove(rest.to_vec()));
                                 old_left = old_left.saturating_sub(1);
-                            } else if let Some(rest) = line.strip_prefix(' ') {
-                                hunk_lines.push(HunkLine::Context(rest.to_string()));
+                            } else if let Some(rest) = line.strip_prefix(b" ") {
+                                hunk_lines.push(HunkLine::Context(rest.to_vec()));
                                 old_left = old_left.saturating_sub(1);
                                 new_left = new_left.saturating_sub(1);
-                            } else if line == "\\ No newline at end of file" {
+                            } else if line == b"\\ No newline at end of file".as_slice() {
                                 // Informational line from diff; it stands for
                                 // no line on either side, so it consumes
                                 // neither count.
                             } else {
                                 // Treat lines without prefix as context
                                 // (some patches have bare context lines).
-                                hunk_lines.push(HunkLine::Context(line.to_string()));
+                                hunk_lines.push(HunkLine::Context(line.to_vec()));
                                 old_left = old_left.saturating_sub(1);
                                 new_left = new_left.saturating_sub(1);
                             }
@@ -828,7 +975,7 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
                     } else {
                         i = i.saturating_add(1);
                     }
-                } else if cur.starts_with("--- ") || cur.starts_with("diff ") {
+                } else if cur.starts_with(b"--- ") || cur.starts_with(b"diff ") {
                     // Next file patch starts here.
                     break;
                 } else {
@@ -852,19 +999,19 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
     patches
 }
 
-fn parse_file_path(line: &str, prefix: &str) -> String {
+fn parse_file_path(line: &[u8], prefix: &[u8]) -> Vec<u8> {
     let rest = line.strip_prefix(prefix).unwrap_or(line);
     // Remove timestamp suffix if present (e.g., "file.c\t2024-01-01 ...")
-    match rest.find('\t') {
-        Some(tab_pos) => rest.get(..tab_pos).unwrap_or(rest).to_string(),
-        None => rest.to_string(),
+    match rest.iter().position(|&b| b == b'\t') {
+        Some(tab_pos) => rest.get(..tab_pos).unwrap_or(rest).to_vec(),
+        None => rest.to_vec(),
     }
 }
 
 /// Apply a single hunk to the file lines. Returns the new lines if successful,
 /// or None if the hunk doesn't match the expected context.
 /// `offset` is the cumulative line offset from previous hunks.
-fn apply_hunk(lines: &[String], hunk: &Hunk, offset: i64) -> Option<(Vec<String>, i64)> {
+fn apply_hunk(lines: &[Vec<u8>], hunk: &Hunk, offset: i64) -> Option<(Vec<Vec<u8>>, i64)> {
     // A HUNK THAT REMOVES NOTHING NAMES THE LINE TO INSERT *AFTER*, so its
     // 0-based insertion point is `old_start` itself and the usual `- 1` is
     // wrong. For delete and change, `old_start` is the first affected line and
@@ -952,7 +1099,7 @@ fn apply_hunk(lines: &[String], hunk: &Hunk, offset: i64) -> Option<(Vec<String>
 }
 
 /// Check if a hunk's context/remove lines match at the given position.
-fn try_hunk_at(lines: &[String], hunk: &Hunk, pos: usize) -> bool {
+fn try_hunk_at(lines: &[Vec<u8>], hunk: &Hunk, pos: usize) -> bool {
     let mut line_idx = pos;
     for hl in &hunk.lines {
         match hl {
@@ -1051,7 +1198,11 @@ fn help_text() -> String {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so a filename
+    // holding a byte that is not valid Unicode aborts the process before
+    // `patch` runs a line of its own. Our paths allow every byte but `/`
+    // and NUL (design.txt), so that is a legal name, not a malformed one.
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
 
     // HANDLED BEFORE `parse_args`, AND WITH THE SPELLINGS GNU ACTUALLY HAS.
     // Measured rather than copied from the sibling utilities, because `patch`
@@ -1112,13 +1263,13 @@ fn main() {
     if let Some(dir) = &opts.directory
         && let Err(e) = env::set_current_dir(dir)
     {
-        diag!("patch: {dir}: {e}");
+        diag!("patch: {}: {e}", quotef_os(dir));
         process::exit(2);
     }
 
     // Read patch input.
     let patch_input = if let Some(ref path) = opts.patch_file {
-        match fs::read_to_string(path) {
+        match fs::read(path) {
             Ok(s) => s,
             Err(e) => {
                 // GNU: `patch: **** Can't open patch file <path> : <reason>`,
@@ -1138,8 +1289,8 @@ fn main() {
             }
         }
     } else {
-        let mut buf = String::new();
-        if io::stdin().read_to_string(&mut buf).is_err() {
+        let mut buf: Vec<u8> = Vec::new();
+        if io::stdin().read_to_end(&mut buf).is_err() {
             diag!("patch: error reading stdin");
             process::exit(2);
         }
@@ -1172,7 +1323,7 @@ fn main() {
     if file_patches.is_empty() {
         // Whitespace-only counts as empty: GNU's reader skips blank lines
         // before deciding it found nothing at all.
-        if patch_input.trim().is_empty() {
+        if patch_input.trim_ascii().is_empty() {
             return;
         }
         diag!("patch: **** Only garbage was found in the patch input.");
@@ -1200,32 +1351,39 @@ fn main() {
                 "The next patch looks like"
             };
             announced = announced.saturating_add(1);
-            let mut intro = format!("Hmm...  {lead} a {dialect_name} diff to me...\n");
+            let mut intro: Vec<u8> =
+                format!("Hmm...  {lead} a {dialect_name} diff to me...\n").into_bytes();
             // A normal diff carries no header lines at all, so GNU omits the
             // whole block rather than printing an empty one. The same block is
             // already built for the can't-find-file diagnostic; this is the
             // only other place it appears.
             if !fp.header_lines.is_empty() {
-                intro.push_str("The text leading up to this was:\n");
-                intro.push_str("--------------------------\n");
+                intro.extend_from_slice(b"The text leading up to this was:\n");
+                intro.extend_from_slice(b"--------------------------\n");
                 for h in &fp.header_lines {
-                    intro.push('|');
-                    intro.push_str(h);
-                    intro.push('\n');
+                    intro.push(b'|');
+                    // The header line as it arrived. It is echoed back, so
+                    // it has to be the bytes the patch held, not a render.
+                    intro.extend_from_slice(h);
+                    intro.push(b'\n');
                 }
-                intro.push_str("--------------------------\n");
+                intro.extend_from_slice(b"--------------------------\n");
             }
             let mut out = Stream::stdout();
-            let _ = out.write_all(intro.as_bytes());
+            let _ = out.write_all(&intro);
         }
         // Determine the target file path.
-        let raw_path = if let Some(ref target) = opts.target_file {
-            target.clone()
+        // Bytes, not `OsString`: nearly everything done to this value is
+        // byte arithmetic -- `strip_path` cuts it at a `/`, and the reject and
+        // backup names are it with a suffix stuck on. It becomes something a
+        // syscall takes, via `os_from_bytes`, only where a syscall takes it.
+        let raw_path: Vec<u8> = if let Some(ref target) = opts.target_file {
+            quote::os_bytes(target).into_owned()
         } else if opts.reverse {
             fp.new_path.clone()
         } else {
             // Prefer new_path if old_path is /dev/null (new file).
-            if fp.old_path == "/dev/null" {
+            if fp.old_path == DEV_NULL {
                 fp.new_path.clone()
             } else {
                 fp.old_path.clone()
@@ -1240,21 +1398,28 @@ fn main() {
         // the case failed with `can't find file to patch` while GNU patched
         // happily.
         let file_path = match &opts.target_file {
-            Some(named) => named.clone(),
+            Some(named) => quote::os_bytes(named).into_owned(),
             None => match opts.strip {
                 Some(n) => strip_path(&raw_path, n),
                 None => raw_path.clone(),
             },
         };
 
+        // The same name as something a syscall takes, converted once. On the
+        // target this is free -- an `OsStr` there IS its bytes.
+        let file_path_os = quote::os_from_bytes(&file_path);
+
         // Read the original file (or start empty for new files).
-        let original = if fp.old_path == "/dev/null" && !opts.reverse {
-            String::new()
+        let original = if fp.old_path == DEV_NULL && !opts.reverse {
+            Vec::new()
         } else {
-            match fs::read_to_string(&file_path) {
+            // `fs::read`, not `read_to_string`. The file being patched is the
+            // user's, and one Latin-1 byte in a comment is enough to make it
+            // not valid UTF-8 -- which GNU patches and this used to refuse.
+            match fs::read(quote::os_from_bytes(&file_path)) {
                 Ok(s) => s,
                 Err(e) => {
-                    if fp.old_path == "/dev/null" || opts.target_file.is_some() {
+                    if fp.old_path == DEV_NULL || opts.target_file.is_some() {
                         // A NAMED TARGET IS NOT A SEARCH, so it cannot fail as
                         // one. The block below is what GNU prints when it
                         // *looked* for a file and could not work out which one
@@ -1270,7 +1435,7 @@ fn main() {
                         // could not create a file from a patch at all when the
                         // target was named -- and a normal diff names no file,
                         // so for that dialect it could not create one ever.
-                        String::new()
+                        Vec::new()
                     } else {
                         // GNU's whole block, on STDOUT, measured:
                         //
@@ -1301,12 +1466,18 @@ fn main() {
                         // stopped the open is not what went wrong.
                         let _ = e;
                         let mut out = Stream::stdout();
-                        let mut block = String::new();
-                        block.push_str(&format!(
-                            "can't find file to patch at input line {}
+                        // Bytes: the header lines this echoes back are the patch's own,
+                        // and a patch may name a file this OS allows and
+                        // Unicode does not.
+                        let mut block: Vec<u8> = Vec::new();
+                        block.extend_from_slice(
+                            format!(
+                                "can't find file to patch at input line {}
 ",
-                            fp.first_hunk_line
-                        ));
+                                fp.first_hunk_line
+                            )
+                            .as_bytes(),
+                        );
                         // TWO MESSAGES, not one, and which you get says which
                         // mistake GNU thinks you made. Measured across `-p`
                         // absent, `-p0` and `-p5`:
@@ -1322,50 +1493,54 @@ fn main() {
                         // exactly this reason: `None` is "not supplied", not
                         // "supplied as zero", and `-p0` is a real and
                         // different thing.
-                        block.push_str(if opts.strip.is_none() {
-                            "Perhaps you should have used the -p or --strip option?
+                        block.extend_from_slice(if opts.strip.is_none() {
+                            b"Perhaps you should have used the -p or --strip option?
 "
                         } else {
-                            "Perhaps you used the wrong -p or --strip option?
+                            b"Perhaps you used the wrong -p or --strip option?
 "
                         });
-                        block.push_str(
-                            "The text leading up to this was:
+                        block.extend_from_slice(
+                            b"The text leading up to this was:
 ",
                         );
-                        block.push_str(
-                            "--------------------------
+                        block.extend_from_slice(
+                            b"--------------------------
 ",
                         );
                         for h in &fp.header_lines {
-                            block.push_str(&format!(
-                                "|{h}
-"
-                            ));
+                            block.push(b'|');
+                            // Verbatim. GNU echoes back the header line it
+                            // read, and a render of it would not be that line.
+                            block.extend_from_slice(h);
+                            block.push(b'\n');
                         }
-                        block.push_str(
-                            "--------------------------
+                        block.extend_from_slice(
+                            b"--------------------------
 ",
                         );
-                        block.push_str(
-                            "File to patch: 
+                        block.extend_from_slice(
+                            b"File to patch: 
 ",
                         );
-                        block.push_str(
-                            "Skip this patch? [y] 
+                        block.extend_from_slice(
+                            b"Skip this patch? [y] 
 ",
                         );
-                        block.push_str(
-                            "Skipping patch.
+                        block.extend_from_slice(
+                            b"Skipping patch.
 ",
                         );
                         let n = fp.hunks.len();
                         let plural = if n == 1 { "hunk" } else { "hunks" };
-                        block.push_str(&format!(
-                            "{n} out of {n} {plural} ignored
+                        block.extend_from_slice(
+                            format!(
+                                "{n} out of {n} {plural} ignored
 "
-                        ));
-                        let _ = out.write_all(block.as_bytes());
+                            )
+                            .as_bytes(),
+                        );
+                        let _ = out.write_all(&block);
                         any_failed = true;
                         continue;
                     }
@@ -1393,25 +1568,31 @@ fn main() {
             // With `-o`, GNU announces the DESTINATION and names the source in
             // parentheses -- `patching file out.txt (read from a/base.txt)` --
             // because the file being written is no longer the file being read.
-            let named = opts
+            let named: Vec<u8> = opts
                 .output_file
-                .clone()
-                .unwrap_or_else(|| file_path.clone());
-            let source = if opts.output_file.is_some() {
-                format!(" (read from {file_path})")
+                .as_ref()
+                .map_or_else(|| file_path.clone(), |p| quote::os_bytes(p).into_owned());
+            let source: Vec<u8> = if opts.output_file.is_some() {
+                [b" (read from ".as_slice(), &file_path, b")"].concat()
             } else {
-                String::new()
+                Vec::new()
             };
             // No ellipsis on the dry-run line. GNU prints
             // "checking file a/base.txt"; this build printed a trailing
             // "..." that predates tonight and that nothing upstream produces.
-            let line = if opts.dry_run {
-                format!("checking file {named}{source}\n")
+            // Assembled as bytes rather than `format!`ed. GNU writes the
+            // name into this line RAW -- it is stdout, not a diagnostic -- so
+            // a name holding a byte that is not valid Unicode has to reach the
+            // line unaltered. `quotef` would be the wrong answer here for the
+            // same reason it is the right one on stderr.
+            let lead: &[u8] = if opts.dry_run {
+                b"checking file "
             } else {
-                format!("patching file {named}{source}\n")
+                b"patching file "
             };
+            let line: Vec<u8> = [lead, &named, &source, b"\n"].concat();
             let mut out = Stream::stdout();
-            let _ = out.write_all(line.as_bytes());
+            let _ = out.write_all(&line);
         }
         if opts.verbose {
             // GNU has a Plan A and a Plan B; Plan B is the out-of-core path
@@ -1439,7 +1620,10 @@ fn main() {
             process::exit(2);
         }
 
-        let mut lines: Vec<String> = original.lines().map(|l| l.to_string()).collect();
+        let mut lines: Vec<Vec<u8>> = bytes::lines(&original)
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect();
         let mut offset: i64 = 0;
         let mut hunks_applied = 0;
         let mut hunks_failed = 0;
@@ -1480,21 +1664,27 @@ fn main() {
             any_failed = true;
             // `-r FILE` names the reject file outright; without it the reject
             // sits beside the target as `<target>.rej`.
-            let reject_path = opts
-                .reject_file
-                .clone()
-                .unwrap_or_else(|| format!("{file_path}.rej"));
+            let reject_path: Vec<u8> = opts.reject_file.as_ref().map_or_else(
+                || [file_path.as_slice(), b".rej"].concat(),
+                |p| quote::os_bytes(p).into_owned(),
+            );
             if !opts.dry_run {
                 let strip_n = opts.strip.unwrap_or(0);
-                let mut reject = format!(
-                    "--- {}\n+++ {}\n",
-                    strip_path(&fp.old_path, strip_n),
-                    strip_path(&fp.new_path, strip_n)
-                );
+                // The paths go in RAW, as GNU writes them: a reject has to be
+                // a patch someone can re-apply, and a quoted path would not
+                // name the file.
+                let mut reject: Vec<u8> = [
+                    b"--- ".as_slice(),
+                    &strip_path(&fp.old_path, strip_n),
+                    b"\n+++ ",
+                    &strip_path(&fp.new_path, strip_n),
+                    b"\n",
+                ]
+                .concat();
                 for h in &hunks {
-                    reject.push_str(&render_hunk(h));
+                    reject.extend_from_slice(&render_hunk(h));
                 }
-                let _ = fs::write(&reject_path, reject.as_bytes());
+                let _ = fs::write(quote::os_from_bytes(&reject_path), &reject);
             }
             if !opts.silent {
                 let detected = if opts.reverse {
@@ -1510,13 +1700,20 @@ fn main() {
                 // this; this path had not, because the two were written weeks
                 // apart and only the other one had a differential case. The
                 // same defect twice in one file is what a harness is for.
-                let reject_clause = if opts.dry_run {
-                    String::new()
-                } else {
-                    format!(" -- saving rejects to file {reject_path}")
-                };
+                // Assembled as bytes: the reject path goes in RAW, the way
+                // GNU writes it on stdout, so a name this OS allows and
+                // Unicode does not still names the file it wrote.
+                let mut msg: Vec<u8> = format!(
+                    "{detected}\nApply anyway? [n] \nSkipping patch.\n{n} out of {n} {plural} ignored"
+                )
+                .into_bytes();
+                if !opts.dry_run {
+                    msg.extend_from_slice(b" -- saving rejects to file ");
+                    msg.extend_from_slice(&reject_path);
+                }
+                msg.push(b'\n');
                 let mut out = Stream::stdout();
-                let _ = out.write_all(format!("{detected}\nApply anyway? [n] \nSkipping patch.\n{n} out of {n} {plural} ignored{reject_clause}\n").as_bytes());
+                let _ = out.write_all(&msg);
             }
             continue;
         }
@@ -1581,10 +1778,10 @@ fn main() {
             // not the same thing as `-b`'s backup.
             // `-r FILE` names the reject file outright; without it the reject
             // sits beside the target as `<target>.rej`.
-            let reject_path = opts
-                .reject_file
-                .clone()
-                .unwrap_or_else(|| format!("{file_path}.rej"));
+            let reject_path: Vec<u8> = opts.reject_file.as_ref().map_or_else(
+                || [file_path.as_slice(), b".rej"].concat(),
+                |p| quote::os_bytes(p).into_owned(),
+            );
             // A NAMED TARGET THAT NEVER EXISTED, whose hunks then failed.
             //
             // GNU's shape is odd and is reproduced deliberately, ORDER
@@ -1600,15 +1797,19 @@ fn main() {
             // snapshot could see, since all three streams agreed.
             //
             // Bug-for-bug on purpose; design-decisions.md 371.
-            if opts.target_file.is_some() && !Path::new(&file_path).exists() && !opts.dry_run {
+            if opts.target_file.is_some() && !Path::new(&file_path_os).exists() && !opts.dry_run {
                 if !opts.no_backup_if_mismatch {
-                    let _ = fs::write(format!("{file_path}.orig"), original.as_bytes());
+                    let orig_path = [file_path.as_slice(), b".orig"].concat();
+                    let _ = fs::write(quote::os_from_bytes(&orig_path), &original);
                 }
-                diag!("patch: **** Can't reopen file {file_path} : No such file or directory");
+                diag!(
+                    "patch: **** Can't reopen file {} : No such file or directory",
+                    quote::quotef(&file_path)
+                );
                 process::exit(2);
             }
             if !opts.dry_run {
-                let mut reject = String::new();
+                let mut reject: Vec<u8> = Vec::new();
                 // THE REJECT HEADER CARRIES THE STRIPPED PATHS, and the
                 // missing-target block above carries the RAW ones. The asymmetry
                 // is GNU's and it is not arbitrary: that block quotes the patch
@@ -1622,20 +1823,26 @@ fn main() {
                 // made ours four bytes longer, and that was the last difference
                 // in the whole `drift.patch` family.
                 let strip_n = opts.strip.unwrap_or(0);
-                reject.push_str(&format!(
-                    "--- {}\n+++ {}\n",
-                    strip_path(&fp.old_path, strip_n),
-                    strip_path(&fp.new_path, strip_n)
-                ));
+                reject.extend_from_slice(
+                    &[
+                        b"--- ".as_slice(),
+                        &strip_path(&fp.old_path, strip_n),
+                        b"\n+++ ",
+                        &strip_path(&fp.new_path, strip_n),
+                        b"\n",
+                    ]
+                    .concat(),
+                );
                 for h in &rejected {
-                    reject.push_str(&render_hunk(h));
+                    reject.extend_from_slice(&render_hunk(h));
                 }
-                let _ = fs::write(&reject_path, reject.as_bytes());
+                let _ = fs::write(quote::os_from_bytes(&reject_path), &reject);
                 // `--no-backup-if-mismatch` suppresses exactly this and nothing
                 // else: the reject is still written, because the reject is the
                 // failure report rather than a backup.
                 if !opts.no_backup_if_mismatch {
-                    let _ = fs::write(format!("{file_path}.orig"), original.as_bytes());
+                    let orig_path = [file_path.as_slice(), b".orig"].concat();
+                    let _ = fs::write(quote::os_from_bytes(&orig_path), &original);
                 }
             }
             // NOT gated on `-s`. Measured: `patch -s` on a failing patch still
@@ -1649,57 +1856,59 @@ fn main() {
                 // singular when there is one. Ours said `hunks FAILED for X`
                 // and never mentioned the reject file, because there was none.
                 let total = hunks_applied + hunks_failed;
-                let reject_clause = if opts.dry_run {
-                    String::new()
-                } else {
-                    format!(" -- saving rejects to file {reject_path}")
-                };
                 let plural = if total == 1 { "hunk" } else { "hunks" };
+                // Bytes, so the reject path goes in raw -- see the sibling
+                // summary above. The reject clause is omitted under
+                // `--dry-run`, because no reject file was written: GNU
+                // prints the bare `1 out of 1 hunk FAILED` there, and
+                // naming a file that does not exist would send the reader
+                // looking for it.
+                let mut msg: Vec<u8> =
+                    format!("{hunks_failed} out of {total} {plural} FAILED").into_bytes();
+                if !opts.dry_run {
+                    msg.extend_from_slice(b" -- saving rejects to file ");
+                    msg.extend_from_slice(&reject_path);
+                }
+                msg.push(b'\n');
                 let mut out = Stream::stdout();
-                let _ = out.write_all(
-                    format!(
-                        // The reject clause is omitted under `--dry-run`,
-                        // because no reject file was written. GNU prints the
-                        // bare `1 out of 1 hunk FAILED` there, and naming a
-                        // file that does not exist would send the reader
-                        // looking for it.
-                        "{hunks_failed} out of {total} {plural} FAILED{reject_clause}\n"
-                    )
-                    .as_bytes(),
-                );
+                let _ = out.write_all(&msg);
             }
         }
 
         if !opts.dry_run && hunks_applied > 0 {
             // Create backup if requested.
-            if opts.backup && Path::new(&file_path).exists() {
-                let backup_path = format!("{file_path}.orig");
-                if let Err(e) = fs::copy(&file_path, &backup_path) {
-                    diag!("patch: cannot create backup {backup_path}: {e}");
+            if opts.backup && Path::new(&file_path_os).exists() {
+                let backup_path = [file_path.as_slice(), b".orig"].concat();
+                if let Err(e) = fs::copy(&file_path_os, quote::os_from_bytes(&backup_path)) {
+                    diag!(
+                        "patch: cannot create backup {}: {e}",
+                        quote::quotef(&backup_path)
+                    );
                 }
             }
 
             // Create parent directories if needed (for new files).
-            if let Some(parent) = Path::new(&file_path).parent()
+            if let Some(parent) = Path::new(&file_path_os).parent()
                 && !parent.as_os_str().is_empty()
             {
                 let _ = fs::create_dir_all(parent);
             }
 
             // Write the patched file.
-            let mut output = lines.join("\n");
+            let mut output = lines.join(&b'\n');
             // Preserve trailing newline if the original had one.
-            if original.ends_with('\n') || fp.old_path == "/dev/null" {
-                output.push('\n');
+            if original.ends_with(b"\n") || fp.old_path == DEV_NULL {
+                output.push(b'\n');
             }
 
             // `-o` redirects the RESULT and leaves the target alone, so a
             // `-E` deletion would be deleting the wrong file: the emptiness is
             // a property of what was written, not of what was read.
-            let dest = opts
+            let dest: Vec<u8> = opts
                 .output_file
-                .clone()
-                .unwrap_or_else(|| file_path.clone());
+                .as_ref()
+                .map_or_else(|| file_path.clone(), |p| quote::os_bytes(p).into_owned());
+            let dest_os = quote::os_from_bytes(&dest);
             // A PATCH WHOSE DESTINATION IS /dev/null DELETES THE FILE, and it
             // does so with or without `-E`. Measured: `diff -u --label x/a/keep.txt
             // --label /dev/null keep.txt /dev/null` applied by GNU leaves no
@@ -1713,18 +1922,18 @@ fn main() {
             // harness disproved on a case that passes no flag at all.
             //
             // Reversed, a deletion is a creation, so the rule is off under `-R`.
-            let is_deletion = fp.new_path == "/dev/null" && !opts.reverse;
+            let is_deletion = fp.new_path == DEV_NULL && !opts.reverse;
             if (is_deletion || (opts.remove_empty && output.is_empty()))
                 && opts.output_file.is_none()
             {
                 // `-E` removes a file the patch has emptied. Measured: the file
                 // is gone from the tree, not left at zero length.
-                if let Err(e) = fs::remove_file(&dest) {
-                    diag!("patch: cannot remove {dest}: {e}");
+                if let Err(e) = fs::remove_file(&dest_os) {
+                    diag!("patch: cannot remove {}: {e}", quote::quotef(&dest));
                     any_failed = true;
                 }
-            } else if let Err(e) = write_result(&dest, &output, opts.output_file.is_some()) {
-                diag!("patch: cannot write {dest}: {e}");
+            } else if let Err(e) = write_result(&dest_os, &output, opts.output_file.is_some()) {
+                diag!("patch: cannot write {}: {e}", quote::quotef(&dest));
                 any_failed = true;
             }
         }
@@ -1750,8 +1959,116 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    // ---------------- bytes, not UTF-8 ----------------
+    //
+    // Measured against GNU patch 2.7.6 before any of this was written:
+    //
+    //     $ patch -i u.diff orig.txt        # a context line holds byte 0xE9
+    //     patching file orig.txt            # GNU:  exit 0, byte preserved
+    //     patch: **** Can't open patch file u.diff : stream did not contain
+    //           valid UTF-8                 # ours: exit 2, nothing patched
+    //
+    // The refusal came from `fs::read_to_string`, so it happened before any
+    // target was opened -- one Latin-1 byte in a comment was enough to make a
+    // file unpatchable. See known-issues.md ->
+    // B-PATCH-REFUSES-EVERY-FILE-THAT-IS-NOT-VALID-UTF-8.
+
+    /// The byte that is not valid UTF-8 on its own: Latin-1 `é`.
+    const HIGH: u8 = 0xE9;
+
+    #[test]
+    fn a_context_line_that_is_not_utf8_survives_parsing() {
+        let mut input: Vec<u8> = b"--- a.txt~+++ a.txt~@@ -1,2 +1,2 @@~ caf".to_vec();
+        input.push(HIGH);
+        input.extend_from_slice(b"~-old~+new~");
+        let input: Vec<u8> = input
+            .iter()
+            .map(|&b| if b == b'~' { b'\n' } else { b })
+            .collect();
+
+        let ps = parse_patch(&input);
+        assert_eq!(ps.len(), 1, "the patch should parse");
+        let ctxt = &ps[0].hunks[0].lines[0];
+        // The byte is carried through untouched -- not replaced, not dropped,
+        // and above all not a reason to refuse the file.
+        assert_eq!(*ctxt, HunkLine::Context(b"caf\xe9".to_vec()));
+    }
+
+    #[test]
+    fn a_path_that_is_not_utf8_survives_parsing() {
+        // A name this OS allows -- design.txt: every byte but `/` and NUL.
+        let mut input: Vec<u8> = b"--- caf".to_vec();
+        input.push(HIGH);
+        input.extend_from_slice(b".txt~+++ caf");
+        input.push(HIGH);
+        input.extend_from_slice(b".txt~@@ -1 +1 @@~-a~+b~");
+        let input: Vec<u8> = input
+            .iter()
+            .map(|&b| if b == b'~' { b'\n' } else { b })
+            .collect();
+
+        let ps = parse_patch(&input);
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].old_path, b"caf\xe9.txt");
+    }
+
+    #[test]
+    fn strip_path_cuts_a_name_that_is_not_utf8() {
+        // `-p1` over a directory whose name is not Unicode. Cutting at a `/`
+        // is a byte operation; decoding first would fail on the whole path.
+        let mut p: Vec<u8> = b"caf".to_vec();
+        p.push(HIGH);
+        p.extend_from_slice(b"/inner.txt");
+        assert_eq!(strip_path(&p, 1), b"inner.txt");
+    }
+
+    #[test]
+    fn an_option_value_that_is_not_utf8_is_split_at_the_byte_level() {
+        // `--input=<name>` where the NAME is not Unicode. Splitting a decoded
+        // `&str` cannot do this: the whole argument fails to decode, the
+        // option stops matching, and the path is taken as an operand -- a
+        // wrong file rather than an error.
+        let name = coreutils::quote::os_from_bytes(&[b'c', b'a', b'f', HIGH]);
+        let mut arg = OsString::from("--input=");
+        arg.push(&name);
+
+        let o = parse_args(&[arg]).expect("the option should still match");
+        assert_eq!(o.patch_file.as_deref(), Some(name.as_os_str()));
+        assert!(o.target_file.is_none(), "it is an option, not an operand");
+    }
+
+    #[test]
+    fn a_line_keeps_its_bytes_through_the_splitter() {
+        // `bytes::lines` is the one place every line passes through, so this
+        // is the narrowest place to pin that nothing decodes.
+        let mut text: Vec<u8> = b"one~".to_vec();
+        text.push(HIGH);
+        text.extend_from_slice(b"~three");
+        let text: Vec<u8> = text
+            .iter()
+            .map(|&b| if b == b'~' { b'\n' } else { b })
+            .collect();
+        assert_eq!(
+            bytes::lines(&text),
+            vec![b"one".as_slice(), &[HIGH], b"three"]
+        );
+    }
+
+    #[test]
+    fn a_crlf_patch_line_loses_only_its_terminator() {
+        // `str::lines` drops a trailing CR and the byte version must too, or
+        // every context line of a DOS patch fails to match an LF target.
+        assert_eq!(bytes::lines(b"a\r\nb\n"), vec![b"a".as_slice(), b"b"]);
+    }
+
+    /// argv for a test, as `parse_args` now takes it.
+    ///
+    /// Only the element type changed when `patch` moved to bytes; every call
+    /// site and every assertion below is the one that was there before, which
+    /// is what makes them a check on the conversion rather than a restatement
+    /// of it.
+    fn s(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
     }
 
     // ---------------- parse_args ----------------
@@ -1765,7 +2082,7 @@ mod tests {
     #[test]
     fn parse_input_file() {
         let o = parse_args(&s(&["-i", "x.patch"])).unwrap();
-        assert_eq!(o.patch_file.as_deref(), Some("x.patch"));
+        assert_eq!(o.patch_file.as_deref(), Some(OsStr::new("x.patch")));
     }
 
     #[test]
@@ -1813,7 +2130,7 @@ mod tests {
     #[test]
     fn parse_target_file() {
         let o = parse_args(&s(&["foo.txt"])).unwrap();
-        assert_eq!(o.target_file.as_deref(), Some("foo.txt"));
+        assert_eq!(o.target_file.as_deref(), Some(OsStr::new("foo.txt")));
     }
 
     /// GNU's wording, not ours, and the two spellings differ from each other.
@@ -1867,92 +2184,92 @@ mod tests {
     #[test]
     fn parse_bare_dash_is_target() {
         let o = parse_args(&s(&["-"])).unwrap();
-        assert_eq!(o.target_file.as_deref(), Some("-"));
+        assert_eq!(o.target_file.as_deref(), Some(OsStr::new("-")));
     }
 
     // ---------------- strip_path ----------------
 
     #[test]
     fn strip_zero_keeps_path() {
-        assert_eq!(strip_path("a/b/c", 0), "a/b/c");
+        assert_eq!(strip_path(b"a/b/c", 0), b"a/b/c");
     }
 
     #[test]
     fn strip_one() {
-        assert_eq!(strip_path("a/b/c", 1), "b/c");
+        assert_eq!(strip_path(b"a/b/c", 1), b"b/c");
     }
 
     #[test]
     fn strip_two() {
-        assert_eq!(strip_path("a/b/c", 2), "c");
+        assert_eq!(strip_path(b"a/b/c", 2), b"c");
     }
 
     #[test]
     fn strip_too_many_falls_back_to_basename() {
-        assert_eq!(strip_path("a/b/c", 5), "c");
+        assert_eq!(strip_path(b"a/b/c", 5), b"c");
     }
 
     #[test]
     fn strip_no_slashes_basename() {
-        assert_eq!(strip_path("file.c", 1), "file.c");
+        assert_eq!(strip_path(b"file.c", 1), b"file.c");
     }
 
     // ---------------- parse_range ----------------
 
     #[test]
     fn parse_range_with_count() {
-        assert_eq!(parse_range("10,5"), Some((10, 5)));
+        assert_eq!(parse_range(b"10,5"), Some((10, 5)));
     }
 
     #[test]
     fn parse_range_single_number_implies_one() {
-        assert_eq!(parse_range("7"), Some((7, 1)));
+        assert_eq!(parse_range(b"7"), Some((7, 1)));
     }
 
     #[test]
     fn parse_range_garbage_is_none() {
-        assert!(parse_range("x").is_none());
-        assert!(parse_range("1,x").is_none());
+        assert!(parse_range(b"x").is_none());
+        assert!(parse_range(b"1,x").is_none());
     }
 
     // ---------------- parse_hunk_header ----------------
 
     #[test]
     fn parse_hunk_header_basic() {
-        let h = parse_hunk_header("@@ -1,3 +1,4 @@").unwrap();
+        let h = parse_hunk_header(b"@@ -1,3 +1,4 @@").unwrap();
         assert_eq!(h, (1, 3, 1, 4));
     }
 
     #[test]
     fn parse_hunk_header_with_trailing_context() {
-        let h = parse_hunk_header("@@ -10,5 +20,7 @@ fn foo()").unwrap();
+        let h = parse_hunk_header(b"@@ -10,5 +20,7 @@ fn foo()").unwrap();
         assert_eq!(h, (10, 5, 20, 7));
     }
 
     #[test]
     fn parse_hunk_header_single_line_count_one() {
-        let h = parse_hunk_header("@@ -5 +5 @@").unwrap();
+        let h = parse_hunk_header(b"@@ -5 +5 @@").unwrap();
         assert_eq!(h, (5, 1, 5, 1));
     }
 
     #[test]
     fn parse_hunk_header_no_at_markers_is_none() {
-        assert!(parse_hunk_header("nope").is_none());
-        assert!(parse_hunk_header("@@ no end").is_none());
+        assert!(parse_hunk_header(b"nope").is_none());
+        assert!(parse_hunk_header(b"@@ no end").is_none());
     }
 
     // ---------------- parse_file_path ----------------
 
     #[test]
     fn parse_file_path_plain() {
-        assert_eq!(parse_file_path("--- foo.c", "--- "), "foo.c");
+        assert_eq!(parse_file_path(b"--- foo.c", b"--- "), b"foo.c");
     }
 
     #[test]
     fn parse_file_path_strips_timestamp() {
         assert_eq!(
-            parse_file_path("+++ bar.c\t2024-01-01 12:00", "+++ "),
-            "bar.c"
+            parse_file_path(b"+++ bar.c\t2024-01-01 12:00", b"+++ "),
+            b"bar.c"
         );
     }
 
@@ -1970,11 +2287,11 @@ mod tests {
 
     #[test]
     fn parse_patch_simple() {
-        let ps = parse_patch(SIMPLE_PATCH);
+        let ps = parse_patch(SIMPLE_PATCH.as_bytes());
         assert_eq!(ps.len(), 1);
         let fp = &ps[0];
-        assert_eq!(fp.old_path, "old.txt");
-        assert_eq!(fp.new_path, "new.txt");
+        assert_eq!(fp.old_path, b"old.txt");
+        assert_eq!(fp.new_path, b"new.txt");
         assert_eq!(fp.hunks.len(), 1);
         let h = &fp.hunks[0];
         assert_eq!(h.old_start, 1);
@@ -1982,18 +2299,18 @@ mod tests {
         assert_eq!(
             h.lines,
             vec![
-                HunkLine::Context("line1".to_string()),
-                HunkLine::Remove("line2".to_string()),
-                HunkLine::Add("line2 modified".to_string()),
-                HunkLine::Context("line3".to_string()),
+                HunkLine::Context(b"line1".to_vec()),
+                HunkLine::Remove(b"line2".to_vec()),
+                HunkLine::Add(b"line2 modified".to_vec()),
+                HunkLine::Context(b"line3".to_vec()),
             ]
         );
     }
 
     #[test]
     fn parse_patch_no_diff_returns_empty() {
-        assert!(parse_patch("no diff here").is_empty());
-        assert!(parse_patch("").is_empty());
+        assert!(parse_patch(b"no diff here").is_empty());
+        assert!(parse_patch(b"").is_empty());
     }
 
     #[test]
@@ -2010,10 +2327,10 @@ mod tests {
 -x
 +y
 ";
-        let ps = parse_patch(input);
+        let ps = parse_patch(input.as_bytes());
         assert_eq!(ps.len(), 2);
-        assert_eq!(ps[0].old_path, "a.c");
-        assert_eq!(ps[1].old_path, "b.c");
+        assert_eq!(ps[0].old_path, b"a.c");
+        assert_eq!(ps[1].old_path, b"b.c");
     }
 
     // ---------------- reverse_hunk ----------------
@@ -2055,8 +2372,9 @@ mod tests {
 
     // ---------------- try_hunk_at / apply_hunk ----------------
 
-    fn lines(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    /// File content as `apply_hunk` now takes it: a line is bytes.
+    fn lines(items: &[&str]) -> Vec<Vec<u8>> {
+        items.iter().map(|x| x.as_bytes().to_vec()).collect()
     }
 
     fn modify_hunk() -> Hunk {
@@ -2097,7 +2415,7 @@ mod tests {
     fn apply_hunk_modifies_buffer() {
         let l = lines(&["line1", "line2", "line3"]);
         let (new_lines, new_offset) = apply_hunk(&l, &modify_hunk(), 0).unwrap();
-        assert_eq!(new_lines, vec!["line1", "line2 modified", "line3"]);
+        assert_eq!(new_lines, lines(&["line1", "line2 modified", "line3"]));
         assert_eq!(new_offset, 0); // new_count(3) - old_count(3) = 0
     }
 
@@ -2112,7 +2430,10 @@ mod tests {
         // Add a blank prefix line — hunk says start=1 but actual match is at line 2.
         let l = lines(&["blank", "line1", "line2", "line3"]);
         let (new_lines, _) = apply_hunk(&l, &modify_hunk(), 0).unwrap();
-        assert_eq!(new_lines, vec!["blank", "line1", "line2 modified", "line3"]);
+        assert_eq!(
+            new_lines,
+            lines(&["blank", "line1", "line2 modified", "line3"])
+        );
     }
 
     #[test]
@@ -2131,7 +2452,7 @@ mod tests {
         };
         let l = lines(&["x"]);
         let (new_lines, offset) = apply_hunk(&l, &h, 0).unwrap();
-        assert_eq!(new_lines, vec!["a", "b", "c"]);
+        assert_eq!(new_lines, lines(&["a", "b", "c"]));
         assert_eq!(offset, 2); // 3 - 1
     }
 
@@ -2153,7 +2474,7 @@ mod tests {
             " alpha~",
             "-bravo~",
         );
-        let ps = parse_patch(&patch.replace('~', "\n"));
+        let ps = parse_patch(patch.replace('~', "\n").as_bytes());
         assert_eq!(ps.len(), 1);
         // Line 5 is `-bravo`, the last line the parser managed to read, which
         // is the line GNU names and the one a reader's eye has to go to.
@@ -2170,7 +2491,7 @@ mod tests {
             "@@ -1,4 +1,4 @@~",
             " alpha~",
         );
-        let ps = parse_patch(&patch.replace('~', "\n"));
+        let ps = parse_patch(patch.replace('~', "\n").as_bytes());
         assert_eq!(ps[0].malformed_at, Some(4));
     }
 
@@ -2195,7 +2516,7 @@ mod tests {
             " delta~",
             " surplus~",
         );
-        let ps = parse_patch(&patch.replace('~', "\n"));
+        let ps = parse_patch(patch.replace('~', "\n").as_bytes());
         assert_eq!(ps[0].malformed_at, None);
         assert_eq!(ps[0].hunks.len(), 1);
         // Five body lines consumed, not six: the counts were satisfied.
@@ -2213,7 +2534,7 @@ mod tests {
             "-bravo~",
             "+BRAVO~",
         );
-        let ps = parse_patch(&patch.replace('~', "\n"));
+        let ps = parse_patch(patch.replace('~', "\n").as_bytes());
         assert_eq!(ps[0].malformed_at, None);
     }
 
@@ -2239,10 +2560,11 @@ mod tests {
             "#ALPHA~",
         );
         let ps = parse_patch(
-            &patch
+            patch
                 .replace('~', "\n")
                 .replace('#', "+")
-                .replace('$', "\\"),
+                .replace('$', "\\")
+                .as_bytes(),
         );
         assert_eq!(ps[0].malformed_at, None);
         // Two counted lines, and the marker is not one of them.
@@ -2275,14 +2597,14 @@ mod tests {
 
     #[test]
     fn the_three_dialects_are_told_apart() {
-        assert_eq!(detect_dialect(&ctx(CTX)), Dialect::Context);
-        assert_eq!(detect_dialect(SIMPLE_PATCH), Dialect::Unified);
+        assert_eq!(detect_dialect(ctx(CTX).as_bytes()), Dialect::Context);
+        assert_eq!(detect_dialect(SIMPLE_PATCH.as_bytes()), Dialect::Unified);
         assert_eq!(
-            detect_dialect(&ctx("2c2~< bravo~---~> BRAVO~")),
+            detect_dialect(ctx("2c2~< bravo~---~> BRAVO~").as_bytes()),
             Dialect::Normal
         );
-        assert_eq!(detect_dialect("this is not a patch"), Dialect::Unknown);
-        assert_eq!(detect_dialect(""), Dialect::Unknown);
+        assert_eq!(detect_dialect(b"this is not a patch"), Dialect::Unknown);
+        assert_eq!(detect_dialect(b""), Dialect::Unknown);
     }
 
     /// THE ORDER OF THE TESTS IS THE WHOLE OF IT. A context diff's SECOND
@@ -2292,15 +2614,15 @@ mod tests {
     #[test]
     fn a_context_header_is_not_read_as_a_unified_one() {
         let headers_only = ctx("*** x/a/base.txt~--- y/a/base.txt~");
-        assert_eq!(detect_dialect(&headers_only), Dialect::Context);
+        assert_eq!(detect_dialect(headers_only.as_bytes()), Dialect::Context);
     }
 
     #[test]
     fn a_context_hunk_becomes_one_removal_and_one_addition() {
-        let ps = parse_context_patch(&ctx(CTX));
+        let ps = parse_context_patch(ctx(CTX).as_bytes());
         assert_eq!(ps.len(), 1);
-        assert_eq!(ps[0].old_path, "x/a/base.txt");
-        assert_eq!(ps[0].new_path, "y/a/base.txt");
+        assert_eq!(ps[0].old_path, b"x/a/base.txt");
+        assert_eq!(ps[0].new_path, b"y/a/base.txt");
         assert_eq!(ps[0].hunks.len(), 1);
         let h = &ps[0].hunks[0];
         assert_eq!(
@@ -2337,7 +2659,7 @@ mod tests {
             "  e~",
             "  f~",
         ));
-        let h = &parse_context_patch(&shifted)[0].hunks[0];
+        let h = &parse_context_patch(shifted.as_bytes())[0].hunks[0];
         assert_eq!(h.old_start, 3);
         assert_eq!(h.old_count, 4, "3..=6 is four lines, not six and not three");
         assert_eq!(h.new_start, 3);
@@ -2359,7 +2681,7 @@ mod tests {
             "--- 1,1 ----~",
             "  a~",
         ));
-        let h = &parse_context_patch(&del)[0].hunks[0];
+        let h = &parse_context_patch(del.as_bytes())[0].hunks[0];
         assert_eq!(
             h.lines,
             vec![HunkLine::Context("a".into()), HunkLine::Remove("b".into())]
@@ -2375,7 +2697,7 @@ mod tests {
             "  a~",
             "+ b~",
         ));
-        let h = &parse_context_patch(&add)[0].hunks[0];
+        let h = &parse_context_patch(add.as_bytes())[0].hunks[0];
         assert_eq!(
             h.lines,
             vec![HunkLine::Context("a".into()), HunkLine::Add("b".into())]
@@ -2384,25 +2706,25 @@ mod tests {
 
     #[test]
     fn normal_command_lines_parse() {
-        assert_eq!(parse_normal_command("2c2"), Some((2, 2, 'c', 2, 2)));
-        assert_eq!(parse_normal_command("1,3d0"), Some((1, 3, 'd', 0, 0)));
-        assert_eq!(parse_normal_command("4a5,7"), Some((4, 4, 'a', 5, 7)));
-        assert_eq!(parse_normal_command("2,4c3,5"), Some((2, 4, 'c', 3, 5)));
+        assert_eq!(parse_normal_command(b"2c2"), Some((2, 2, b'c', 2, 2)));
+        assert_eq!(parse_normal_command(b"1,3d0"), Some((1, 3, b'd', 0, 0)));
+        assert_eq!(parse_normal_command(b"4a5,7"), Some((4, 4, b'a', 5, 7)));
+        assert_eq!(parse_normal_command(b"2,4c3,5"), Some((2, 4, b'c', 3, 5)));
         // Not command lines, and each would be a plausible false positive.
-        assert_eq!(parse_normal_command("< bravo"), None);
-        assert_eq!(parse_normal_command("---"), None);
-        assert_eq!(parse_normal_command("alpha"), None);
-        assert_eq!(parse_normal_command("c2"), None);
-        assert_eq!(parse_normal_command("2c"), None);
+        assert_eq!(parse_normal_command(b"< bravo"), None);
+        assert_eq!(parse_normal_command(b"---"), None);
+        assert_eq!(parse_normal_command(b"alpha"), None);
+        assert_eq!(parse_normal_command(b"c2"), None);
+        assert_eq!(parse_normal_command(b"2c"), None);
     }
 
     #[test]
     fn a_normal_change_becomes_a_removal_and_an_addition() {
-        let ps = parse_normal_patch(&ctx("2c2~< bravo~---~> BRAVO~"));
+        let ps = parse_normal_patch(ctx("2c2~< bravo~---~> BRAVO~").as_bytes());
         assert_eq!(ps.len(), 1);
         // A normal diff names no file at all, which is why patch requires the
         // target as an operand.
-        assert_eq!(ps[0].old_path, "");
+        assert_eq!(ps[0].old_path, b"");
         let h = &ps[0].hunks[0];
         assert_eq!(h.old_start, 2);
         assert_eq!(h.old_count, 1);
@@ -2432,7 +2754,7 @@ mod tests {
     /// nothing else.
     #[test]
     fn append_inserts_after_the_line_it_names() {
-        let h = &parse_normal_patch(&ctx("4a5~> new~"))[0].hunks[0];
+        let h = &parse_normal_patch(ctx("4a5~> new~").as_bytes())[0].hunks[0];
         assert_eq!(h.old_start, 4);
         assert_eq!(h.old_count, 0);
         assert_eq!(h.lines, vec![HunkLine::Add("new".into())]);
@@ -2447,7 +2769,7 @@ mod tests {
     /// wrong: `diff -U0` of a single added line after line one.
     #[test]
     fn a_zero_context_unified_insertion_lands_where_gnu_puts_it() {
-        let ps = parse_patch(&ctx("--- x/f.txt~+++ y/f.txt~@@ -1,0 +2 @@~+X~"));
+        let ps = parse_patch(ctx("--- x/f.txt~+++ y/f.txt~@@ -1,0 +2 @@~+X~").as_bytes());
         let h = &ps[0].hunks[0];
         assert_eq!(h.old_count, 0, "a -U0 insertion removes nothing");
         let (out, _) =
@@ -2460,7 +2782,7 @@ mod tests {
     /// starts after the named zero.
     #[test]
     fn delete_leaves_the_new_side_empty() {
-        let h = &parse_normal_patch(&ctx("1,2d0~< a~< b~"))[0].hunks[0];
+        let h = &parse_normal_patch(ctx("1,2d0~< a~< b~").as_bytes())[0].hunks[0];
         assert_eq!(h.old_start, 1);
         assert_eq!(h.old_count, 2);
         assert_eq!(h.new_count, 0);

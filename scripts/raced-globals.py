@@ -233,6 +233,21 @@ IGNORE: dict[str, str] = {
     # `#[test]` body always runs with live TLS, so no test can reach it -- and a
     # thread that does is, as the comment there notes, the last one alive.
     "posix/src/perthread.rs:HOST_FALLBACK": "only reachable after thread-local teardown, which no #[test] body is",
+    # One writer, and the reader does not care. `sleep_interruptible_respects_
+    # running_flag` is the only test that stores here; it sets the flag false,
+    # checks the sleep returns early, and restores it. The other test sleeps
+    # for **zero** milliseconds and asserts that took under 50 ms, which holds
+    # whichever value it reads. Audited 2026-09-14.
+    "userspace/ping/src/main.rs:RUNNING": "only one test writes it, and the other's assertion holds for either value",
+    # tmpnam's counter. Every test that reaches it only ever increments, and no
+    # test asserts a particular value: the one that cares checks that two
+    # successive names DIFFER, which a concurrent increment can only help.
+    # Same shape as `*:TESTS_RAN` above.
+    "posix/src/stdio.rs:COUNTER": "monotonic; the only assertion is that two names differ, which an extra bump cannot break",
+    # Written only on tmpnam's `buf == NULL` path, which exactly one test takes
+    # (`test_tmpnam_null_uses_static`). The other two pass their own buffer and
+    # never reach it, so there is one writer and no reader of a foreign write.
+    "posix/src/stdio.rs:STATIC_BUF": "written only on the NULL-buffer path, which a single test takes",
     # All seven `mbrtowc` tests pass their OWN `&mut state` -- a local
     # `MbstateT::new()` -- so none of them touches the internal one. What the
     # detector sees is the *function* referencing `INTERNAL_MBSTATE` for the

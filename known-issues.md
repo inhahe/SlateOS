@@ -144390,3 +144390,525 @@ The failing seed (1789357352031162400) now passes all 20,745, as do two further
 random shuffles. **`--shuffle` is worth running after any test-ordering change**
 and is not in any gate; the default order is a single sample of one
 permutation out of 20,745!.
+
+
+## B-FOUR-STAGED-UTILITIES-STILL-DIE-ON-A-LEGAL-FILENAME (lane B, 2026-09-14)
+
+**In short:** four of the 72 programs on the image abort with a Rust panic if
+any argument is not valid Unicode. On this OS a filename may hold every byte
+except `/` and NUL — that is `design.txt`, not an implementation accident — so
+`patch -i <name-with-byte-0x80>` does not fail, it dies before reaching its own
+first statement.
+
+### Which, and why these four
+
+`scripts/argv-utf8.py` reports **187** findings tree-wide. Crossed against
+`scripts/rootfs-bin-manifest.txt`, exactly four are on the image:
+
+| bin | takes a path? | note |
+|---|---|---|
+| `patch` | **yes** — `-i FILE`, `-o FILE` | the sharpest case; it writes files |
+| `diff` | **yes** — two operands | also renders the name into a `--- path` header |
+| `ps` | no | dies only on a non-Unicode option value |
+| `logger` | no | no file handling at all; dies on a non-Unicode *message* |
+
+The other 183 findings are in `userspace/*` crates that the manifest does not
+stage, so nothing on the image reaches them.
+
+### The fix is getopt, not a hand conversion
+
+I started converting `patch` in place and stopped, because the hard part has
+already been solved once. `--input=<path>` cannot be handled with
+`to_str()`: if the *path* is not Unicode then the whole argument fails to
+decode, and the option silently stops matching. It needs a byte-level split,
+and `coreutils::getopt` already does exactly that
+(`getopt.rs:865`, `bytes.strip_prefix(b"--")`), over `&[OsString]`.
+
+That is also what the detector's own header says, as a measured correlation
+rather than a preference: *"of the 35 bins already clean, 24 go through
+`getopt`; of the 49 dirty ones, **none** do. A bin that parses options through
+the shared module never had a reason to reach for `String`."*
+
+So the work is: route each of the four through `getopt`, hold `patch_file` /
+`output_file` / `diff`'s two operands as `OsString` to the syscall, and render
+a name only where it is printed. `diff` carries one extra decision — GNU writes
+the operand **raw** into the `--- path` header, so that header has to be
+emitted as bytes rather than `format!`ed, and quoting it instead would be
+inventing a format.
+
+### Why this is written down rather than half-done
+
+The conversion is a real refactor of a file-writing utility, and the one
+subtlety in it — the encoding boundary after `--input=` — is the kind that
+produces a silently wrong path rather than a compile error. The measurement is
+the expensive part and it is now done: four bins, named, with the mechanism
+identified and the one non-obvious case called out.
+
+## B-PATCH-REFUSES-EVERY-FILE-THAT-IS-NOT-VALID-UTF-8 (lane B, 2026-09-14)
+
+**Status:** FIXED 2026-09-14 · `userspace/coreutils/src/bin/patch.rs`
+
+**How it was closed.** `patch` carries lines as `Vec<u8>` end to end now:
+`HunkLine`, `FilePatch`'s two paths and its header lines, and the ~14 `&str`
+signatures between them. The three `fs::read_to_string` calls became
+`fs::read`, `env::args()` became `args_os()`, and the ASCII structure a patch
+is made of (`@@`, `---`, `+++`, the column-one marker) is matched on byte
+literals. A private `mod bytes` supplies the six `str` operations that have no
+slice counterpart; `coreutils::quote`'s `os_bytes`/`os_from_bytes` do the
+syscall boundary, so the conversion added no `unsafe`.
+
+**Measured, not asserted.** `scripts/patch-diff.sh` runs 68 cases against real
+GNU patch 2.7.6 and compares the resulting *tree* — every file's mode, size
+and checksum — not just the three streams: **68 passed, 0 differed**. Three of
+those cases are new and are the bug itself, and the harness was probed in both
+directions: restoring the UTF-8 requirement on the patch file turns exactly
+those three red and nothing else. Six unit cases cover the same ground at the
+function level, and reintroducing a decode inside `bytes::lines` turns three of
+them red.
+
+**One regression the harness caught that nothing else would have.** Routing
+the strip-count error through `quote_glibc` printed `**** strip count 'abc' is
+not a number`; GNU prints it unquoted. GNU quotes an option *name*
+(`invalid option -- 'Q'`) and not this value, which is not a rule anyone would
+guess — §371 again, and the reason the reference is run rather than recalled.
+
+Measured, both sides, on the same two files:
+
+    $ patch -i u.diff orig.txt          # orig.txt line 2 holds byte 0xE9
+    patch: **** Can't open patch file u.diff : stream did not contain valid UTF-8
+    exit 2                                                        # ours
+
+    $ patch -i u.diff orig.txt
+    patching file orig.txt
+    exit 0, byte 0xE9 preserved                                   # GNU patch 2.7.6
+
+`patch` cannot apply a patch to a file that is not valid UTF-8, and cannot
+even *read* a patch file that is not — the 0xE9 above is in a context line, so
+the refusal happens before any target is opened. A single Latin-1 byte
+anywhere in a source file's comments is enough. `patch` is on the image.
+
+### This is the bug the argv finding was a symptom of
+
+Yesterday's entry (`B-FOUR-STAGED-UTILITIES-STILL-DIE-ON-A-LEGAL-FILENAME`)
+scoped this as an argv problem and proposed routing the four bins through
+`coreutils::getopt`. That scoping was too small, and the reason is worth
+keeping: I found the argv panic with a detector that only looks at argv, so
+the answer it gave was shaped like its question. Reading the downstream uses
+to plan the conversion is what turned it up — `target_file` flows into a
+`String` that comes from `fs::read_to_string`, which meant the `String` was
+never really about argv at all.
+
+Both faults are the same cause and the fix is one job, not two:
+
+| | Chokepoint | Symptom |
+|---|---|---|
+| 1 | `env::args()` at line 1054 | panic on a non-Unicode *filename* |
+| 2 | `fs::read_to_string` ×3 | refusal on non-UTF-8 *content*, the above |
+
+Chokepoint 2 is the larger of the two by any measure a user would apply: a
+non-Unicode filename is rare, a Latin-1 byte in a patched file is not.
+
+### The proper fix, and why it is not a boundary patch
+
+`patch` is `String`-typed through its spine, not just at its edges:
+`HunkLine::{Context,Remove,Add}(String)`, `FilePatch { old_path: String,
+new_path: String, header_lines: Vec<String> }`, and `apply_hunk(lines:
+&[String])` / `try_hunk_at` / `strip_path` / `parse_file_path` and ~11 more
+`&str` signatures. There is no encode/decode boundary to move, because the
+line *contents* are what must stay exact and they are carried the whole way.
+So the fix is to carry lines as `Vec<u8>`/`&[u8]` and keep the ASCII
+structural parsing (`@@`, `---`, `+++`, `+`/`-`/space) on byte literals.
+
+Per CLAUDE.md §7 this is what should have been written in the first place:
+*"Never force UTF-8 on filesystem paths, environment variables, or pipe
+data."* Patch content is file data, which is the same rule.
+
+### Reproduction
+
+    python -c "
+    open('orig.txt','wb').write(b'first line\ncaf\xe9 comment\nthird line\n')
+    open('u.diff','wb').write(b'--- orig.txt\n+++ orig.txt\n@@ -1,3 +1,3 @@\n first line\n caf\xe9 comment\n-third line\n+THIRD LINE\n')
+    "
+    patch -i u.diff orig.txt
+
+GNU exits 0 and leaves `THIRD LINE` with the 0xE9 untouched. Keep this as the
+acceptance case: it fails on the *patch* file, so it also covers chokepoint 1's
+sibling — a patch whose own `---` path is not UTF-8.
+
+### WITHDRAWN: the "GNU patch -Q exits 0" note that was here
+
+An earlier revision of this entry recorded that GNU `patch -Q` prints
+`patch: invalid option -- 'Q'` and **exits 0** where ours exits 2, flagged as
+wanting deliberate re-measurement. It has now been re-measured and **there is
+no such divergence** — GNU exits non-zero, same as us, and
+`scripts/patch-diff.sh` case `u.patch -p1 -Q` passes on both sides
+independently.
+
+The note was an artifact of the instrument, not an observation. See
+`TD-B-EVERY-EXIT-CODE-I-MEASURED-THROUGH-WSL-WAS-THE-SAME-ZERO`. Left in
+place rather than deleted because a withdrawn finding is worth more than a
+missing one: whoever reads this next would otherwise re-measure it.
+
+## TD-B-EVERY-EXIT-CODE-I-MEASURED-THROUGH-WSL-WAS-THE-SAME-ZERO (lane B, 2026-09-14)
+
+**Status:** instrument defect, understood; no code change needed
+
+Every exit status read with `$?` inside a `wsl -d Ubuntu -- bash -c '…'`
+payload comes back **0**, whatever actually happened. The control that
+settles it is one line:
+
+    $ wsl -d Ubuntu -- bash -c '... false; echo "false_rc=$?" ...'
+    false_rc=0          # `false` exits 1, by definition
+
+It is not the heredoc, and not a quoting slip in one probe: a script written
+inside WSL with a quoted delimiter and run as `bash /tmp/rc.sh` gives the same
+`false_rc=0`. Something in the layering between the Bash tool and WSL resolves
+`$?` before the inner shell ever sees it.
+
+### What it cost
+
+One false entry in this file — "GNU `patch -Q` exits 0" — now withdrawn above.
+It was recorded *with* a caveat that a one-sample exit code wants
+re-measuring, which is the only reason it did no damage. A GNU-abbreviation
+probe from the previous tick (`patch --dry-run --inp=…`, "exit 0") rests on
+the same broken reading and should not be relied on either.
+
+### The workaround, which is also the better habit
+
+Ask the shell the question directly instead of reading a variable:
+
+    if patch -Q </dev/null >/dev/null 2>&1; then echo zero; else echo NONZERO; fi
+
+`if` consumes the status where it is produced, so nothing can rewrite it in
+between. Run `false` and `true` alongside as controls in the same script —
+that is what caught this, and it costs two lines.
+
+### What was NOT affected, and why it is worth saying
+
+* **`scripts/patch-diff.sh` is sound.** It runs as a real script from Git Bash
+  and prints genuine non-zero codes (`ours (rc=2)`, `gnu (rc=2)`), so all 68
+  of its verdicts stand. The bug is specific to my ad-hoc one-liners.
+* **Every conclusion I drew from stdout stands**, because none of the ones
+  that mattered rested on the exit code: GNU applying the Latin-1 patch was
+  read off `patching file orig.txt` plus the resulting bytes, and GNU seeing
+  the `diff` difference was read off `2c2`.
+
+This is the same shape as `TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE`,
+one layer down: there the ad-hoc instrument over-reported, here it under-read.
+Both say the purpose-built harness is the thing to trust, and both were caught
+by running a control rather than by reasoning about the tool.
+
+## B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL (lane B, 2026-09-14)
+
+**Status:** FIXED 2026-09-14 · `userspace/coreutils/src/bin/diff.rs`
+
+**How it was closed.** Lines are `Vec<u8>` from `fs::read` to the writer:
+`FileContent::Text`, `compute_diff`/`lcs_diff`/`myers_diff`'s four slices and
+their `(Op, line)` result, `Hunk::lines`, `normalize_line`, `is_blank`. The
+renderers emit the line's own bytes through one `write_body_line` rather than
+`format!`, because GNU writes it raw and `diff -u | patch` reads it back.
+`normalize_line` folds with `to_ascii_lowercase`/`is_ascii_whitespace`, which
+the two measurements above showed is what GNU does — so `-i` and `-w` each
+shed a divergence as a side effect. `truncate_or_pad`, the only place a width
+is needed, still counts characters when the line is valid UTF-8 and falls back
+to bytes when it is not, so no line that aligned before moved.
+
+**Measured:** `scripts/diff-diff.sh` went from **43 passed / 64 differed** to
+**46 / 61** — three cases fixed, and `comm` over the two runs confirms
+**nothing newly differs**. Four unit cases were added, including a control
+asserting the *same* bad byte still compares equal; reintroducing the lossy
+decode turns the bug's case red and correctly leaves the control green.
+
+**The part worth keeping.** The three cases that went green are
+`diff bytes.txt bytes2.txt`, `diff -q bytes.txt bytes2.txt` and
+`diff base.txt bytes.txt`. **The harness already had those fixtures and was
+already failing them.** The bug was being reported on every run and was
+invisible because it sat among 64 other divergences — a harness with a large
+standing red count cannot tell anyone that something new broke. `diff` is now
+the tree's biggest such backlog at 61, which is an argument for baselining it
+the way `argv-utf8` and `raced-globals` are baselined, so the number that gets
+watched is *new* divergences rather than all of them.
+
+`diff` reports **no difference** between two files that differ, and exits 0.
+Measured, with `cmp` as the control:
+
+    $ cmp x.txt y.txt
+    x.txt y.txt differ: char 10, line 2
+
+    $ diff x.txt y.txt          # ours
+    $                           # nothing at all, exit 0
+
+    $ diff x.txt y.txt          # GNU diffutils
+    2c2
+    < cafM-i
+    ---
+    > cafM-^?
+
+The two files are `alpha/caf\351/gamma` and `alpha/caf\377/gamma`. Byte
+`0351` and byte `0377` are different bytes; neither is valid UTF-8 on its
+own.
+
+### Cause
+
+```rust
+// Convert to string. We use lossy conversion here only for the purpose of
+// displaying diff output; the comparison is byte-accurate via the line
+// strings.
+let text = String::from_utf8(data)
+    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+let lines: Vec<String> = text.lines().map(String::from).collect();
+```
+
+**The comment is wrong, and it is wrong in the specific way that hides the
+bug.** There is no byte-accurate path: `lines` *is* the lossy text, and the
+comparison runs on it. Every byte that is not valid UTF-8 becomes U+FFFD, so
+any two distinct bad bytes become the same character and compare equal.
+
+`from_utf8_lossy` is named in CLAUDE.md's self-review list — *"No
+`from_utf8_lossy` — that's silent data corruption"* — and this is exactly the
+failure it is named for. The comment reads as though someone had already
+thought about it, which is what makes it worse than no comment.
+
+### Why this is sharper than the `patch` bug fixed today
+
+`patch` **refused**: exit 2, a message, nothing written. Loud and safe.
+`diff` **answers wrongly and confidently**. Two consequences:
+
+* `diff expected actual && echo OK` — the idiom every test harness and build
+  script uses — passes when it should fail.
+* `diff -u` output is fed to `patch`. A diff of a file holding one Latin-1
+  byte emits a patch with U+FFFD in the context lines, which then fails to
+  match, or matches and writes the corruption in. Today's `patch` fix makes
+  `patch` byte-exact, so `diff` is now the weaker half of that pair.
+
+### The fix
+
+The same one `patch` just had: keep lines as `Vec<u8>`. `diff` already reads
+with `fs::read`, so the bytes are in hand and thrown away one line later —
+there is no I/O change needed, only the type. `FileContent::Text(Vec<String>)`
+becomes `Vec<Vec<u8>>`, and the hunk renderer writes the line rather than
+formatting it.
+
+One thing to settle first, noted while converting `patch`: GNU writes the
+operand **raw** into the `--- path` / `+++ path` header, so that header must
+be emitted as bytes. Quoting it would invent a format, and `patch` reads it
+back.
+
+`scripts/patch-diff.sh` gained a Latin-1 fixture today; `scripts/diff-*`
+should get the same pair of files, and the case above — two files differing
+only in a high byte — belongs in it as the regression, because it is the one
+that returns the wrong answer rather than an error.
+
+### The one question the conversion had to settle first, now measured
+
+`normalize_line` folds case with `str::to_lowercase`, which is Unicode-aware.
+Carrying lines as bytes means `to_ascii_lowercase` instead, so `-i` would stop
+folding `É`/`é`. That is a user-visible change and worth checking rather than
+assuming — so it was measured, with an ASCII pair as the control:
+
+| input pair | GNU `diff -i` says |
+|---|---|
+| `cafÉ` vs `café` (U+00C9 / U+00E9) | **DIFFERENT** — not folded |
+| `ABC` vs `abc` | SAME — folded |
+
+So GNU folds ASCII case and not Unicode case, which is what a byte-wise
+`tolower()` does. **`to_ascii_lowercase` is not a concession to the byte
+conversion — it is what GNU actually does**, and our `to_lowercase()` is a
+present-day divergence that the conversion removes. Nothing blocks the fix.
+
+`is_whitespace()` in the same function got the same treatment, with two
+controls so the probe is known to be sensitive in both directions:
+
+| input pair | GNU `diff -w` says |
+|---|---|
+| `a<U+00A0>b` vs `ab` | **DIFFERENT** — U+00A0 is not whitespace |
+| `a b` vs `ab` (control) | SAME — folded |
+| `a<TAB>b` vs `ab` (control) | SAME — folded |
+
+`is_ascii_whitespace` is therefore exactly GNU too. **Both of the conversion's
+semantic questions came back the same way**: the byte version is not a
+concession, it is closer to the reference than what is there now, and `-i` and
+`-w` each lose a divergence. Nothing about the `diff` fix is blocked on a
+judgement call.
+
+## TD-B-TWENTY-NINE-OF-THE-SEVENTY-TWO-BINS-ON-THE-IMAGE-DECODE-LOSSILY (lane B, 2026-09-14)
+
+**Status:** OPEN — a candidate list, deliberately not a defect list
+
+Cross-referencing `scripts/rootfs-bin-manifest.txt` against a grep for
+`from_utf8_lossy` in each binary's own source: **29 of the 72** Rust utilities
+on the image contain the construct CLAUDE.md names as silent data corruption.
+
+    awk 3   basename 2   cp 3    csplit 4   dd 1    df 4     diff 1
+    du 2    ed 1        env 1    expr 4     fetch 2 find 2   hostname 1
+    ln 2    mkfifo 1    nl 3     od 2       readlink 1       realpath 9
+    sed 20  split 6     stat 2   strings 3  tar 6   test 2   touch 1
+    tty 1   which 2
+
+### Why this is NOT "29 broken binaries", and I want to be exact about it
+
+A lossy decode is only a *defect* where the decoded value is then **compared,
+stored, or written**. That is what made `diff` wrong: it decoded lossily and
+then diffed the result, so two distinct bad bytes became one U+FFFD and
+compared equal. A lossy decode used only to put a name in a diagnostic is
+cosmetic and, on a name that is not text, arguably the right thing.
+
+This grep cannot tell those apart. It counts occurrences, and occurrences are
+not findings — `TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE`
+records this exact instrument being wrong by 5–20× three times in one day
+(9→1, 46,736→13, 45→2). The honest state is: **one confirmed defect (`diff`),
+28 other files worth reading**, and a prior expectation that well under half
+survive.
+
+`sed` at 20 and `realpath` at 9 are the two worth opening first — not because
+the count is high, but because both are fundamentally about transforming text
+and paths rather than printing them, so their lossy calls are the most likely
+to sit on a value path rather than a message path.
+
+### The instrument this actually wants
+
+A checker that classifies each `from_utf8_lossy` / `to_string_lossy` by what
+happens to its result:
+
+* flows into `==`, `contains`, a `match`, a sort key, a hash → **defect**;
+* flows into `fs::write`, `write_all`, a path passed to a syscall → **defect**;
+* flows only into `format!`/`diag!`/`eprintln!` → allowed, and should be
+  recorded as allowed so the count stops re-alarming whoever greps next.
+
+That is a dataflow question, not a pattern question, which is why the grep
+above is the wrong shape and why the number it produced should not be quoted
+as a defect count. Written down now so the *measurement* is not lost while the
+triage waits; the `diff` fix is the thing that comes first, since it is the one
+known to answer wrongly.
+
+## B-THE-DIFF-PATCH-PIPELINE-NOW-SURVIVES-A-BYTE-THAT-IS-NOT-UNICODE (lane B, 2026-09-14)
+
+**Status:** VERIFIED 2026-09-14 — the joint result of the two fixes above
+
+Neither entry above states the thing a user would actually care about, because
+neither fix alone delivers it. Measured end to end, with our own two binaries:
+
+    $ diff -u orig.txt new.txt > u.patch     # line 2 holds byte 0351
+    $ cat -v u.patch
+    --- orig.txt
+    +++ new.txt
+    @@ -1,3 +1,3 @@
+     alpha
+     cafM-i comment
+    -charlie
+    +CHARLIE
+    $ patch -i u.patch target.txt
+    $ cmp target.txt new.txt                 # IDENTICAL
+
+**Before today this pipeline was broken twice over, independently**, and each
+fault would have masked the other:
+
+| stage | what it did | class |
+|---|---|---|
+| `diff` | wrote U+FFFD into the patch in place of `0351` | silent corruption |
+| `patch` | refused to read the patch at all, exit 2 | loud refusal |
+
+Fixing only `patch` would have left `patch` faithfully applying a corrupted
+patch — a *worse* outcome than the refusal, because the corruption would then
+reach the file. That is worth stating plainly: the two fixes were found
+separately and are recorded separately, but shipping one without the other
+would have made the pipeline quieter rather than better.
+
+The round trip is the case to reach for when either file is touched again. It
+exercises both halves through their real entry points and its assertion is
+`cmp`, not a transcript, so it cannot pass on a right-looking message.
+
+## B-DIFF-CANNOT-SEE-A-MISSING-FINAL-NEWLINE (lane B, 2026-09-14)
+
+**Status:** FIXED 2026-09-14 · `userspace/coreutils/src/bin/diff.rs`
+
+**How it was closed**, following the design below almost exactly. The
+comparison marker is a newline pushed onto the normalised last line of
+whichever side lacks one — collision-free by construction — and the emitted
+lines are untouched, so it cost nothing in output. The output half rides on
+the line itself: `(Op, Vec<u8>)` became an `Edit` struct with a
+`no_final_newline` flag, set by one pass over the edit script that finds the
+last `Delete`-or-`Equal` for file A and the last `Insert`-or-`Equal` for B.
+
+**One thing the design did not anticipate, and it needed measuring.**
+Side-by-side prints **no** marker: GNU's `-y` on an unterminated file shows
+the line and nothing else, and simply omits the newline from its own last
+line of output. So that renderer deliberately does not bind the flag, with
+the measurement recorded where the `..` is.
+
+`FinalNewline` is an enum rather than a `bool` because the polarity has four
+call sites and getting it backwards produces another silent wrong answer
+rather than a compile error — which is exactly what the bug was. The first
+draft of `read_file` did name the variable backwards, so the concern was not
+hypothetical.
+
+**Measured:** `scripts/diff-diff.sh` 71 passed/36 differed → **75/32**, four
+cases fixed and `comm` confirming none newly differ. Five unit cases, three
+of them controls — both-unterminated is equal, both-terminated is equal, and
+an `Equal` line can be the last line of both files at once. Removing the
+comparison marker turns the bug's case red and leaves all three controls
+green.
+
+---
+
+Original report follows.
+
+`diff` reports two files as identical, **exit 0**, when one ends with a newline
+and the other does not:
+
+    $ diff base.txt nonl.txt          # ours
+    $                                 # nothing, exit 0
+
+    $ diff base.txt nonl.txt          # GNU
+    4c4
+    < delta
+    ---
+    > delta
+    \ No newline at end of file
+    exit 1
+
+`base.txt` is `alpha/bravo/charlie/delta` with a trailing newline and
+`nonl.txt` is the same four lines without one. They are different files —
+26 bytes against 25 — and we say they are the same.
+
+This is the **same class** as `B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL`,
+which was fixed today: a wrong answer rather than an error, and the idiom
+`diff expected actual && echo OK` passes when it should fail. It is NOT the
+same cause — that one was `from_utf8_lossy`; this one is that splitting a file
+into lines throws the terminator away, so both files yield the same four lines.
+Fixing the first did not touch it, and the harness case stayed red throughout.
+
+### The fix, worked out but not yet applied
+
+**The comparison half is small and provably safe.** `compute_diff` already
+builds `norm_a`/`norm_b` as comparison keys *separate* from the `orig_a`/`orig_b`
+it emits, which is exactly the seam needed. Give it the two
+"ends with a newline" flags and append a marker byte to the normalised **last**
+line of whichever side lacks one:
+
+* if neither ends with a newline, both get the marker and still compare equal —
+  correct;
+* if one does, only that side is marked and the last lines differ — correct;
+* the marker touches no emitted line, because output comes from `orig_*`.
+
+**Use `\n` itself as the marker.** A line produced by `split_lines` cannot
+contain a newline by construction, so the collision is not merely unlikely, it
+is impossible — no sentinel value to pick and no escaping to get wrong.
+
+**The output half is the plumbing.** GNU prints
+`\ No newline at end of file` after the line from the side that lacks it, so
+`print_normal` / `print_unified` / `print_context` each need the two flags and
+the two total line counts, and must recognise the final line of each side
+(`start + count - 1 == total - 1`). That is three renderers, mechanical, and is
+the reason this is written down rather than half-done: the comparison fix alone
+would turn a *wrong* answer into a *right answer with incomplete output*, which
+still leaves the harness case red and would read afterwards like an oversight
+rather than a decision.
+
+### Where it sits
+
+`scripts/diff-diff.sh` covers it as `diff base.txt nonl.txt` and three
+neighbours (`-u`, `-c`, `-q` of the same pair) — it has had the fixtures all
+along, like the byte cases did. Today's work took that harness from **43 passed
+/ 64 differed to 68 / 39**; this is the largest single wrong-answer left in the
+remainder.

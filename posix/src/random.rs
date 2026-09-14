@@ -682,6 +682,27 @@ pub extern "C" fn arc4random_uniform(upper_bound: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// Serialises the two tests that drive `GENERATION`.
+    ///
+    /// `GENERATION` is an `AtomicU32`, so this is not about a data race -- an
+    /// atomic cannot have one. It is about a test quietly ceasing to test its
+    /// subject. `test_generation_never_lands_on_zero_sentinel` stores
+    /// `u32::MAX` and then calls `reseed_after_fork()` specifically to drive
+    /// the wrap through zero; if the sibling test's own `reseed_after_fork()`
+    /// consumes that value first, the assertion still passes -- it only checks
+    /// the result is non-zero -- while the wrap path it exists for was never
+    /// reached. A test that can silently stop exercising its case is worse
+    /// than one that fails, because nothing reports it.
+    static GENERATION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Poison-tolerant, as elsewhere: one failure must not make its sibling
+    /// panic in `.unwrap()` and report two defects for one.
+    fn generation_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        GENERATION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     use super::*;
 
     // Note: the failure paths (`must_fill` aborting, `secure_bytes` returning
@@ -810,6 +831,7 @@ mod tests {
 
     #[test]
     fn test_reseed_after_fork_changes_the_stream() {
+        let _g = generation_test_guard();
         // Not a real fork — this asserts the mechanism: bumping the
         // generation must make the next draw come from a fresh key rather
         // than continuing the buffered keystream.
@@ -823,6 +845,7 @@ mod tests {
 
     #[test]
     fn test_generation_never_lands_on_zero_sentinel() {
+        let _g = generation_test_guard();
         // Walk the counter to just below the wrap and step over it.
         GENERATION.store(u32::MAX, Ordering::Relaxed);
         reseed_after_fork();

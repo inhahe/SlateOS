@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Path bar widget — combined breadcrumb display / text input with autocomplete.
 //!
 //! Operates in two modes:
@@ -1190,6 +1189,62 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: ch.to_string(),
         }
+    }
+
+    /// **Shift-selection, which was implemented and never tested.**
+    ///
+    /// `key_press_shift` existed with no caller -- the crate-level
+    /// `#![allow(dead_code)]` that hid the widget's unused-ness hid this too,
+    /// and removing it when the file explorer became the widget's first real
+    /// user is what surfaced it. Four call sites pass `event.modifiers.shift`
+    /// into the cursor moves and nothing checked that any of them extend a
+    /// selection.
+    #[test]
+    fn shift_and_a_cursor_key_select_what_it_moves_over() {
+        let mut bar = PathBar::new("/home/user");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        assert!(bar.is_editing());
+
+        // To the start, then select the lot on the way back.
+        bar.handle_key_event(&key_press(Key::Home));
+        assert_eq!(bar.selection_anchor, None, "Home alone selects nothing");
+        bar.handle_key_event(&key_press_shift(Key::End));
+        assert_eq!(
+            bar.selection_anchor,
+            Some(0),
+            "Shift+End did not anchor a selection at the start"
+        );
+
+        // Typing replaces the selection rather than inserting into it.
+        bar.handle_key_event(&key_press_with_text(Key::X, 'x'));
+        assert_eq!(bar.edit_text, "x", "the selection was not replaced");
+        assert_eq!(
+            bar.selection_anchor, None,
+            "the selection outlived the typing"
+        );
+    }
+
+    /// And an unshifted move collapses a selection instead of extending it.
+    #[test]
+    fn a_cursor_key_without_shift_drops_the_selection() {
+        let mut bar = PathBar::new("/home/user");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.handle_key_event(&key_press(Key::Home));
+        bar.handle_key_event(&key_press_shift(Key::End));
+        assert!(bar.selection_anchor.is_some());
+
+        bar.handle_key_event(&key_press(Key::Left));
+
+        assert_eq!(
+            bar.selection_anchor, None,
+            "the selection survived a plain move"
+        );
+        bar.handle_key_event(&key_press_with_text(Key::X, 'x'));
+        assert!(
+            bar.edit_text.len() > 1,
+            "typing after a collapsed selection replaced the text anyway: {:?}",
+            bar.edit_text
+        );
     }
 
     fn key_press_ctrl(key: Key) -> KeyEvent {

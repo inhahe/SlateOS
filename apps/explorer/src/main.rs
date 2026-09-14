@@ -42,6 +42,8 @@ use guitk::wheel::Accumulator as WheelAccumulator;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
 use drives::DriveSet;
+use guitk::pathbar::{CompletionItem, PathBar, PathBarEvent};
+
 use dropzone::{
     DragModifiers, DropOperation, DropResult, DropZone, DropZoneEvent, DropZoneManager, Rect,
 };
@@ -525,7 +527,17 @@ pub struct ExplorerState {
     /// Selected entry indices.
     pub selected_indices: Vec<usize>,
     /// Address bar text (for editing).
-    pub address_text: String,
+    /// The address bar: breadcrumbs you can click, and a path you can type.
+    ///
+    /// `guitk::pathbar`, not a label. What was here was a `String` assigned
+    /// from `current_path` and never read from input, drawn inside a stroked
+    /// box that looks exactly like a text field -- so it promised editing and
+    /// could not do it, which is worse than a dead button because the
+    /// affordance itself is the claim. Meanwhile the toolkit's path bar, 1,945
+    /// lines and 44 tests with breadcrumbs, edit mode and autocomplete, had no
+    /// users at all. Same defect as the taskbar drawing its own clock beside
+    /// an unused `calendar::ClockDisplay`; see design-decisions 469.
+    pub pathbar: PathBar,
     /// Whether address bar is being edited.
     pub address_editing: bool,
     /// Transient result of the last user-initiated operation.
@@ -643,7 +655,7 @@ impl ExplorerState {
             show_hidden: false,
             clipboard: None,
             selected_indices: Vec::new(),
-            address_text: start_path.to_string_lossy().to_string(),
+            pathbar: PathBar::new(&start_path.to_string_lossy()),
             address_editing: false,
             status_message: String::new(),
             operations: Vec::new(),
@@ -685,7 +697,7 @@ impl ExplorerState {
         }
         self.history_forward.clear();
         self.current_path = path.to_path_buf();
-        self.address_text = self.current_path.to_string_lossy().to_string();
+        self.pathbar.set_path(&self.current_path.to_string_lossy());
         self.selected_indices.clear();
         // The previous directory's operation result no longer applies here.
         self.status_message.clear();
@@ -697,7 +709,7 @@ impl ExplorerState {
         if let Some(prev) = self.history_back.pop_back() {
             self.history_forward.push_back(self.current_path.clone());
             self.current_path = prev;
-            self.address_text = self.current_path.to_string_lossy().to_string();
+            self.pathbar.set_path(&self.current_path.to_string_lossy());
             self.selected_indices.clear();
             self.status_message.clear();
             self.load_directory();
@@ -709,7 +721,7 @@ impl ExplorerState {
         if let Some(next) = self.history_forward.pop_back() {
             self.history_back.push_back(self.current_path.clone());
             self.current_path = next;
-            self.address_text = self.current_path.to_string_lossy().to_string();
+            self.pathbar.set_path(&self.current_path.to_string_lossy());
             self.selected_indices.clear();
             self.status_message.clear();
             self.load_directory();
@@ -2201,27 +2213,95 @@ impl ExplorerState {
         }
     }
 
-    fn render_address_bar(&self, tree: &mut RenderTree) {
-        let bar_y = 36.0;
-        let bar_h = 28.0;
-        let w = self.window_width as f32;
+    /// Where the address bar is drawn.
+    ///
+    /// One function, asked by the painter and by the click handler, for the
+    /// reason `toolbar_layout` is: a widget that receives clicks somewhere
+    /// other than where it is painted is a widget that ignores them.
+    fn address_bar_rect(&self) -> Rect {
+        Rect::new(0.0, ADDRESS_BAR_Y, self.window_width as f32, ADDRESS_BAR_H)
+    }
 
-        tree.fill_rect(0.0, bar_y, w, bar_h, self.palette.base);
-        tree.stroke_rect(
-            4.0,
-            bar_y + 2.0,
-            w - 8.0,
-            bar_h - 4.0,
-            self.palette.surface1,
-            1.0,
+    fn render_address_bar(&mut self, tree: &mut RenderTree) {
+        let rect = self.address_bar_rect();
+        // Copied out before the widget borrows `self` mutably: `Palette` is
+        // `Copy`, so this costs nothing and keeps the two borrows apart.
+        let palette = self.palette;
+        // The widget draws in its own space, from (0, 0) to its own size, and
+        // knows nothing about where it lives. `PushTranslate` is what the
+        // renderer honours, so extending the command list inside one places
+        // the whole widget without it having to be told.
+        tree.translate(rect.x, rect.y);
+        let commands = self.pathbar.render(
+            &palette,
+            rect.width.max(0.0) as u32,
+            rect.height.max(0.0) as u32,
         );
-        tree.text(
-            12.0,
-            bar_y + 7.0,
-            &self.address_text,
-            self.palette.text,
-            13.0,
-        );
+        tree.commands.extend(commands);
+        tree.untranslate();
+    }
+
+    /// Hand an event to the address bar and act on what it says.
+    ///
+    /// Answers whether the widget took it.
+    fn route_to_pathbar(&mut self, taken: EventResult) -> bool {
+        let events = self.pathbar.drain_events();
+        for event in events {
+            match event {
+                PathBarEvent::Navigate(path) => {
+                    let target = PathBuf::from(&path);
+                    if target.is_dir() {
+                        self.navigate_to(&target);
+                    } else {
+                        // Marked rather than navigated-to-and-failed: the
+                        // widget stays in edit mode with what was typed still
+                        // there, so a mistyped path can be corrected instead
+                        // of retyped.
+                        self.pathbar.set_path_valid(false);
+                        self.status_message = format!("No such folder: {path}");
+                    }
+                }
+                PathBarEvent::RequestAutoComplete { prefix } => {
+                    let items = Self::completions_for(&prefix);
+                    self.pathbar.set_completions(items);
+                }
+                // Nothing outside the widget depends on which mode it is in.
+                PathBarEvent::EditModeEntered | PathBarEvent::EditModeExited => {}
+            }
+        }
+        taken == EventResult::Consumed
+    }
+
+    /// What could complete `prefix`, read from the filesystem.
+    ///
+    /// The widget deliberately does no I/O of its own -- it asks, and the host
+    /// answers -- so that it can be tested without a disk.
+    fn completions_for(prefix: &str) -> Vec<CompletionItem> {
+        let (dir, partial) = match prefix.rsplit_once('/') {
+            Some((dir, partial)) => (if dir.is_empty() { "/" } else { dir }, partial),
+            None => (".", prefix),
+        };
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut items: Vec<CompletionItem> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.starts_with(partial) {
+                    return None;
+                }
+                Some(CompletionItem {
+                    is_directory: entry.file_type().is_ok_and(|t| t.is_dir()),
+                    name,
+                })
+            })
+            .collect();
+        // Sorted, because `read_dir` is in whatever order the filesystem
+        // keeps and a list that reorders itself between two keystrokes is a
+        // list you cannot aim at.
+        items.sort_by(|a, b| a.name.cmp(&b.name));
+        items
     }
 
     fn render_sidebar(&self, tree: &mut RenderTree, zones: &mut DropZoneManager) {
@@ -2953,6 +3033,11 @@ const OPERATION_SLICE: std::time::Duration = std::time::Duration::from_millis(8)
 /// How often the loop comes back while an operation is running.
 const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// Where the address bar starts, directly under the toolbar.
+const ADDRESS_BAR_Y: f32 = 36.0;
+/// And how tall it is.
+const ADDRESS_BAR_H: f32 = 28.0;
+
 /// The toolbar's left margin, and the size and spacing of its buttons.
 const TOOLBAR_PAD: f32 = 8.0;
 /// The side of a square toolbar button.
@@ -3228,6 +3313,18 @@ impl ExplorerState {
         if let Some(button) = Self::toolbar_button_at(x, y) {
             return self.press_toolbar_button(button);
         }
+        let address = self.address_bar_rect();
+        if address.contains(x, y) {
+            // Translated into the widget's own space, the way the drop zones
+            // convert a screen point: the widget's hit tests are in the
+            // coordinates it drew in.
+            let taken = self.pathbar.handle_mouse_event(&MouseEvent {
+                x: x - address.x,
+                y: y - address.y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            return self.route_to_pathbar(taken);
+        }
         if let Some(index) = self.dropzone.find_file_row(x, y) {
             self.select_single(index);
             return true;
@@ -3279,6 +3376,21 @@ impl ExplorerState {
     /// would be worse than one that does nothing. See
     /// `TD-C-EXPLORER-HAS-NO-EDITING-KEYS`.
     fn handle_key(&mut self, k: &KeyEvent) -> bool {
+        // The address bar first, while it is being edited -- and for the one
+        // chord that *starts* editing. Routing only on `is_editing` would have
+        // made `Ctrl+L` unreachable: the widget documents it as working
+        // "regardless of current mode", and the only way into that mode from
+        // the keyboard is the chord the guard would have withheld.
+        //
+        // Not unconditional: a widget that swallowed keys whenever it was
+        // merely *visible* would take the arrow keys the file list needs.
+        let starts_editing = k.modifiers.ctrl && k.key == Key::L;
+        if self.pathbar.is_editing() || starts_editing {
+            let taken = self.pathbar.handle_key_event(k);
+            if self.route_to_pathbar(taken) {
+                return true;
+            }
+        }
         let ctrl = k.modifiers.ctrl;
         match k.key {
             Key::A if ctrl => {
@@ -4126,6 +4238,164 @@ mod tests {
             state.clipboard.is_some(),
             "a paste that changed nothing should leave the clipboard usable"
         );
+    }
+
+    // ---- the address bar ---------------------------------------------
+    //
+    // It was a `String` assigned from `current_path` and never read from
+    // input, drawn inside a stroked box that looks exactly like a text field.
+    // `guitk::pathbar` -- 1,945 lines and 44 tests, with breadcrumbs, edit
+    // mode and autocomplete -- had no users at all.
+
+    /// Click the middle of the address bar.
+    fn press_address_bar(state: &mut ExplorerState) {
+        let rect = state.address_bar_rect();
+        send(
+            state,
+            &Event::Mouse(MouseEvent {
+                x: rect.x + rect.width / 2.0,
+                y: rect.y + rect.height / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    /// Type one character into whatever has the keyboard.
+    fn type_char(state: &mut ExplorerState, ch: char) {
+        send(
+            state,
+            &Event::Key(KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: ch.to_string(),
+            }),
+        );
+    }
+
+    #[test]
+    fn clicking_the_address_bar_starts_editing_it() {
+        let scratch = temp_dir("addr_click");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        assert!(!state.pathbar.is_editing());
+
+        press_address_bar(&mut state);
+
+        assert!(
+            state.pathbar.is_editing(),
+            "the address bar ignored a click on itself"
+        );
+    }
+
+    /// **`Ctrl+L` reaches the widget that documents it.**
+    ///
+    /// The first version of the routing only fed the path bar keys while it
+    /// was *already* editing -- which made `Ctrl+L` unreachable, since the
+    /// only way into that mode from the keyboard is the chord the guard
+    /// withheld. A shortcut a widget documents and nothing can press is the
+    /// same defect as a button with no click band.
+    #[test]
+    fn ctrl_l_puts_the_caret_in_the_address_bar() {
+        let scratch = temp_dir("addr_ctrl_l");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        send(&mut state, &ctrl_key(Key::L));
+
+        assert!(
+            state.pathbar.is_editing(),
+            "Ctrl+L did not reach the path bar"
+        );
+    }
+
+    /// Typing a folder and pressing Enter goes there.
+    #[test]
+    fn typing_a_path_navigates_to_it() {
+        let scratch = temp_dir("addr_type");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root);
+
+        press_address_bar(&mut state);
+        // Edit mode starts with the current path and the caret at its end, so
+        // this appends. A forward slash rather than the host's separator: it
+        // is what the widget's own path model uses, and every platform this
+        // runs on accepts it.
+        for ch in "/sub".chars() {
+            type_char(&mut state, ch);
+        }
+        send(&mut state, &key(Key::Enter));
+
+        assert_eq!(
+            state.current_path.canonicalize().ok(),
+            root.join("sub").canonicalize().ok(),
+            "Enter in the address bar did not navigate"
+        );
+    }
+
+    /// **A folder that is not there is said so, not navigated to.**
+    ///
+    /// And the typed text stays, so a mistyped path can be corrected rather
+    /// than retyped.
+    #[test]
+    fn a_path_that_does_not_exist_is_reported_rather_than_opened() {
+        let scratch = temp_dir("addr_bad");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+
+        press_address_bar(&mut state);
+        for ch in "/no-such-folder".chars() {
+            type_char(&mut state, ch);
+        }
+        send(&mut state, &key(Key::Enter));
+
+        assert_eq!(state.current_path, root, "it navigated into thin air");
+        assert!(
+            state.status_bar_text().contains("No such folder"),
+            "nothing was said about it: {:?}",
+            state.status_bar_text()
+        );
+    }
+
+    /// Navigating any other way keeps the address bar in step.
+    #[test]
+    fn the_address_bar_follows_the_listing() {
+        let scratch = temp_dir("addr_follow");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).expect("mkdir");
+        let mut state = state_at(&root);
+
+        state.navigate_to(&root.join("sub"));
+
+        assert!(
+            state.pathbar.current_path().contains("sub"),
+            "the address bar still shows the old folder: {:?}",
+            state.pathbar.current_path()
+        );
+    }
+
+    /// Completions are read off the disk, sorted, and filtered by the prefix.
+    #[test]
+    fn completions_come_from_the_filesystem_in_a_stable_order() {
+        let scratch = temp_dir("addr_complete");
+        let root = scratch.dir().to_path_buf();
+        for name in ["apples", "apricots", "bananas"] {
+            fs::create_dir(root.join(name)).expect("mkdir");
+        }
+        write(&root.join("apple.txt"), "x");
+
+        let prefix = format!("{}/ap", root.to_string_lossy().replace('\\', "/"));
+        let items = ExplorerState::completions_for(&prefix);
+
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["apple.txt", "apples", "apricots"],
+            "the completions are wrong or out of order"
+        );
+        assert!(!items[0].is_directory, "apple.txt is not a folder");
+        assert!(items[1].is_directory, "apples is");
     }
 
     // ---- the toolbar -------------------------------------------------

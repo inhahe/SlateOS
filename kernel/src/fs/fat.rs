@@ -709,6 +709,36 @@ impl FatDirEntry {
         self.attr & ATTR_VOLUME_ID != 0
     }
 
+    /// Render one 8.3 field as text, escaping it when the bytes are not UTF-8.
+    ///
+    /// A-Q12 / `design-decisions.md` 935. The old rendering substituted a constant
+    /// -- `????????` for the base, `???` for the extension -- which is the same
+    /// text for *every* undecodable name, so two different files displayed
+    /// identically and only the first was reachable. `escape_octal` is injective:
+    /// distinct bytes stay distinct, and `unescape_octal` recovers them.
+    ///
+    /// Octal rather than the hex of A-Q12's example, because `fs::escape` already
+    /// does octal everywhere else in this tree (Linux `mangle()` semantics), and a
+    /// second escape dialect inside one filesystem is worse than either alone.
+    ///
+    /// Padding is trimmed from the raw bytes *before* escaping: a field is space
+    /// padded to its full width, and escaping the padding would turn a short name
+    /// into a wall of visible characters.
+    fn field_text(bytes: &[u8]) -> String {
+        let end = bytes.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
+        let field = bytes.get(..end).unwrap_or(bytes);
+        if let Ok(text) = core::str::from_utf8(field) {
+            // Decodable, so keep the text -- but a literal backslash still has to
+            // be escaped, or the output is not injective after all: a file really
+            // named `\351SUME.TXT` would render identically to the escaped form of
+            // an undecodable `0xE9 53 55 4D 45` name, which is the very collision
+            // this change exists to end, reintroduced in a rarer form. Escaping
+            // only the *undecodable* names is not enough; `\351` in the output must
+            // be able to mean exactly one thing.
+            return text.replace('\\', "\\134");
+        }
+        crate::fs::escape::escape_octal(field, &[])
+    }
     /// Return the display name, preferring the long filename if available.
     ///
     /// Falls back to the 8.3 short name: `"HELLO   TXT"` → `"HELLO.TXT"`.
@@ -719,19 +749,15 @@ impl FatDirEntry {
         }
 
         // Fall back to 8.3 short name.
-        let base = core::str::from_utf8(&self.name[..8])
-            .unwrap_or("????????")
-            .trim_end();
-        let ext = core::str::from_utf8(&self.name[8..11])
-            .unwrap_or("???")
-            .trim_end();
+        let base = Self::field_text(&self.name[..8]);
+        let ext = Self::field_text(&self.name[8..11]);
 
         if self.is_volume_label() || self.is_directory() || ext.is_empty() {
-            String::from(base)
+            base
         } else {
-            let mut s = String::from(base);
+            let mut s = base;
             s.push('.');
-            s.push_str(ext);
+            s.push_str(&ext);
             s
         }
     }
@@ -756,19 +782,15 @@ impl FatDirEntry {
 
     /// Return the 8.3 short name as a string (for matching purposes).
     fn short_name(&self) -> String {
-        let base = core::str::from_utf8(&self.name[..8])
-            .unwrap_or("????????")
-            .trim_end();
-        let ext = core::str::from_utf8(&self.name[8..11])
-            .unwrap_or("???")
-            .trim_end();
+        let base = Self::field_text(&self.name[..8]);
+        let ext = Self::field_text(&self.name[8..11]);
 
         if self.is_volume_label() || self.is_directory() || ext.is_empty() {
-            String::from(base)
+            base
         } else {
-            let mut s = String::from(base);
+            let mut s = base;
             s.push('.');
-            s.push_str(ext);
+            s.push_str(&ext);
             s
         }
     }
@@ -6299,24 +6321,35 @@ pub fn format_self_test() -> KernelResult<()> {
                 serial_println!("[fat]   FAIL: an ASCII 8.3 name reported as undecodable");
                 return Err(KernelError::IoError);
             }
-            // The collision itself. Reported rather than asserted: if the
-            // placeholder ever changes so distinct names stop colliding, this
-            // should say so, not fail -- a test that breaks when the underlying
-            // problem is FIXED is a test that gets deleted for the wrong reason.
-            if a.display_name() == b.display_name() {
+            // A-Q12 / design-decisions 935 inverted what this asserts. It used to
+            // report the collision, deliberately without failing, so that fixing
+            // the underlying problem would not break the test. The problem is now
+            // fixed -- undecodable names render as reversible escapes -- so the
+            // property worth pinning is the opposite one, and it is asserted.
+            let (an, bn) = (a.display_name(), b.display_name());
+            if an == bn {
                 serial_println!(
-                    "[fat]   short-name guard: two distinct undecodable names both render {:?}, \
-                     and neither is compared in a lookup: OK",
-                    a.display_name()
+                    "[fat]   FAIL: two distinct undecodable 8.3 names both render {:?}",
+                    an
                 );
-            } else {
-                serial_println!(
-                    "[fat]   short-name guard: OK ({:?} vs {:?} no longer collide -- the guard \
-                     is still correct but no longer load-bearing)",
-                    a.display_name(),
-                    b.display_name()
-                );
+                return Err(KernelError::IoError);
             }
+            // Injective in the direction that matters: the rendering has to carry
+            // the byte that differs, not merely differ somewhere.
+            if !an.contains("\\351") || !bn.contains("\\357") {
+                serial_println!(
+                    "[fat]   FAIL: escapes do not name the differing byte ({:?} vs {:?})",
+                    an,
+                    bn
+                );
+                return Err(KernelError::IoError);
+            }
+            serial_println!(
+                "[fat]   short-name escaping: two undecodable names render {:?} and {:?}, \
+                 distinct and reversible: OK",
+                an,
+                bn
+            );
             Ok(())
         }
         case()?;

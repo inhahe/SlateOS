@@ -4894,7 +4894,10 @@ impl DesktopShell {
             return;
         };
         let mut menu = guitk::menu::ContextMenu::new(items);
-        menu.show(rect.x, rect.y);
+        // The real screen, not the toolkit's assumed one: this menu opens
+        // from the taskbar at the bottom edge, which is exactly where a wrong
+        // viewport puts the rows off the display.
+        menu.show(rect.x, rect.y, self.viewport());
         self.tray_overflow_menu = Some((menu, keys));
     }
 
@@ -5178,6 +5181,21 @@ impl DesktopShell {
             x += slot;
         }
         rects
+    }
+
+    /// The display, as the toolkit's placement code wants it.
+    ///
+    /// One conversion in one place. `screen_width`/`screen_height` are `u32`
+    /// public fields and every other reader spells the cast itself; a popup
+    /// placed against a *differently* rounded screen than the one the taskbar
+    /// is laid out on would be off by a fraction at the edge, which is the
+    /// edge that matters.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a display dimension is exact in f32 for every size hardware produces"
+    )]
+    fn viewport(&self) -> (f32, f32) {
+        (self.screen_width as f32, self.screen_height as f32)
     }
 
     /// Where the overflow chevron is drawn, if there is one.
@@ -5940,7 +5958,7 @@ impl DesktopShell {
             Self::desktop_menu_items()
         };
         self.desktop_menu = ContextMenu::new(items);
-        self.desktop_menu.show(x, y);
+        self.desktop_menu.show(x, y, self.viewport());
     }
 
     /// Begin dragging the widget under `(x, y)`, if there is one.
@@ -9806,6 +9824,41 @@ mod overview_wiring_tests {
             narrow.ordered_tray_icons().len()
         );
         assert!(narrow.tray_width() < narrow.taskbar_rect().w);
+    }
+
+    /// The overflow list fits a screen smaller than the tests' usual one.
+    ///
+    /// **This is the test that catches a whole family, and it is here because
+    /// the family caught me.** The overflow menu shipped this morning, tested
+    /// only at 1920x1080 -- and `guitk::menu` placed every popup against a
+    /// hardcoded 1920x1080 of its own. The assertions and the code under test
+    /// were reading the same number, so they agreed with each other and with
+    /// no display but one. Measured at 1024x768 before the fix, this menu was
+    /// capped to a 1080px panel, placed at y=0, and drawn to y=1080: 312
+    /// pixels past the bottom, with every row below 768 unreachable.
+    ///
+    /// The taskbar is the worst place for it, because a popup opening from
+    /// the bottom edge is the case the flip exists for.
+    #[test]
+    fn the_overflow_list_fits_a_screen_shorter_than_the_default() {
+        let mut s = DesktopShell::new(1024, 768);
+        let flood: Vec<_> = (1..=80).map(|i| tray_icon(i, "X", "x")).collect();
+        s.apply_tray_icons(flood);
+        let chevron = s.tray_overflow_rect().expect("overflowing");
+        s.handle_mouse(&MouseEvent {
+            x: chevron.x + chevron.w / 2.0,
+            y: chevron.y + chevron.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        let tree = s.render_tray_overflow().expect("menu is up");
+        let mut lowest: f32 = 0.0;
+        for c in &tree.commands {
+            if let RenderCommand::FillRect { y, height, .. } = c {
+                lowest = lowest.max(y + height);
+            }
+        }
+        eprintln!("screen height 768; menu extends to y={lowest}");
+        assert!(lowest <= 768.0, "menu runs {lowest} past a 768px screen");
     }
 
     /// The glyphs the tray is drawing, left to right.

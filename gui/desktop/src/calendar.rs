@@ -954,6 +954,28 @@ fn local_secs(utc_timestamp: u64, tz: &Tz) -> u64 {
     u64::try_from(shifted).unwrap_or(0)
 }
 
+/// The local wall clock at an instant: `(hour, minute, weekday)`, Sunday 0.
+///
+/// For anything scheduled against a *clock reading* rather than against an
+/// elapsed duration -- quiet hours and the focus-assist schedule rules are the
+/// callers. They compare against what the user set on a panel that says
+/// "22:00", so they need the number the user would read off the taskbar, in
+/// the taskbar's zone.
+///
+/// It is here, beside the clock, rather than in the shell, because this is
+/// where the zone shift and the civil-date arithmetic already live. The shell
+/// writing its own `secs % 86_400` is the exact bug
+/// [`ClockDisplay::format_time`] documents -- a desktop that changed its
+/// behaviour five hours early while the clock beside it read correctly.
+pub fn local_clock_reading(utc_timestamp: u64, tz: &Tz) -> (u8, u8, u8) {
+    let (date, hour, min, _) = timestamp_parts(local_secs(utc_timestamp, tz));
+    (
+        u8::try_from(hour).unwrap_or(0),
+        u8::try_from(min).unwrap_or(0),
+        u8::try_from(date.weekday().index()).unwrap_or(0),
+    )
+}
+
 impl ClockDisplay {
     /// A clock showing nothing but the time of day.
     ///

@@ -2073,6 +2073,56 @@ fn a_release_over_the_taskbar_is_not_mistaken_for_a_press() {
 
 // ---- the frame clock ----
 
+/// Quiet hours bound the park all by themselves.
+///
+/// The pair below is a test and its control. Without the control the first
+/// would pass on a desktop whose taskbar clock happened to be arming a wake-up
+/// every minute anyway -- proving that *something* bounded the park, which was
+/// never in doubt, rather than that the schedule did.
+#[test]
+fn quiet_hours_alone_give_the_loop_something_to_park_within() {
+    let (mut session, _desktop) = session();
+    assert!(
+        session.shell().widgets.next_due_in(0).is_none(),
+        "a widget is due, so this would be bounded with or without a schedule"
+    );
+    session.shell_mut().notif.settings.quiet_hours.enabled = true;
+    // What `load_appearance` does at the end of login. Called here rather than
+    // through `load_appearance` itself, which would read the developer's own
+    // configuration directory and answer differently on every machine.
+    session.arm_next_frame();
+
+    // The harness hangs up once neither side has anything left to say, so this
+    // returns after one park rather than looping.
+    session.run().expect("the shell's own loop");
+
+    let asked = &session.events_mut().connection().transport().asked;
+    assert!(
+        asked.iter().flatten().next().is_some(),
+        "the loop parked unbounded with quiet hours set, so it would sleep \
+         through the moment they start: {asked:?}"
+    );
+}
+
+/// The control: with nothing scheduled, the desktop parks with no bound at all.
+///
+/// This is design-decisions 812 stated as a test. It is also what makes the
+/// test above mean something.
+#[test]
+fn an_unscheduled_desktop_parks_with_no_bound_at_all() {
+    let (mut session, _desktop) = session();
+    assert!(!session.shell().notif.settings.quiet_hours.enabled);
+    session.arm_next_frame();
+
+    session.run().expect("the shell's own loop");
+
+    let asked = &session.events_mut().connection().transport().asked;
+    assert!(
+        asked.iter().flatten().next().is_none(),
+        "an idle desktop registered a wake-up: {asked:?}"
+    );
+}
+
 #[test]
 fn the_shell_s_park_is_bounded_by_a_wake_up_it_registered() {
     // The shell drives the loop by hand — `pump`, then park — so it has its own

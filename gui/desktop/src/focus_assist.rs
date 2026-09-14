@@ -343,6 +343,44 @@ impl FocusAssistManager {
         self.auto_rules.push(rule);
     }
 
+    /// Adopt the user's quiet hours as *the* schedule rule.
+    ///
+    /// Replaces any schedule rule rather than adding one. This is called every
+    /// time `notifications.yaml` changes, and an add would leave the previous
+    /// hours in the list behind the new ones -- still firing, with nothing on
+    /// screen to say why the desktop went quiet at a time the user had just
+    /// changed away from.
+    ///
+    /// Quiet hours are [`FocusMode::PriorityOnly`]: the user asked for nothing
+    /// *ordinary* to interrupt, not for nothing at all. A rule they set once,
+    /// months ago, must not swallow the notification that matters.
+    ///
+    /// A schedule that runs on no day installs nothing. It cannot come from
+    /// the file -- `NotifSettings::read_from` reads an empty day list as "the
+    /// user did not say" -- but it can be assigned in code, and it must not
+    /// reach [`AutoRule::Schedule`], whose empty `days` means *every* day.
+    /// Passing it through would turn "never" into "always", which is the worst
+    /// possible way to be wrong about a switch that silences a computer.
+    pub fn set_quiet_hours(&mut self, quiet: &notifsettings::QuietHours) {
+        self.auto_rules
+            .retain(|rule| !matches!(rule, AutoRule::Schedule { .. }));
+        let days: Vec<u8> = quiet
+            .days
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .filter_map(|(i, _)| u8::try_from(i).ok())
+            .collect();
+        if !quiet.enabled || days.is_empty() {
+            return;
+        }
+        self.auto_rules.push(AutoRule::Schedule {
+            window: quiet.window,
+            days,
+            mode: FocusMode::PriorityOnly,
+        });
+    }
+
     /// Remove an auto rule by index.
     pub fn remove_auto_rule(&mut self, index: usize) -> bool {
         if index < self.auto_rules.len() {

@@ -1159,6 +1159,14 @@ pub struct DesktopShell {
     /// process, so "has it changed" is a question the shell has to be able to
     /// ask again, not something it learns once at login.
     notif_watch: config::Watcher,
+    /// When an automatic schedule may take effect again, if the user has just
+    /// switched it off from inside one.
+    ///
+    /// A wall-clock instant rather than a countdown: the desktop parks for
+    /// hours at a time, and a countdown would have to be decremented by
+    /// something, which is the per-minute wake-up this whole path exists to
+    /// avoid. See `snooze_schedule_if_it_would_resume`.
+    schedule_snooze: Option<u64>,
     /// The rules with the document they came from.
     ///
     /// Needed because a save splices into the document that was read, so that
@@ -1591,6 +1599,7 @@ impl DesktopShell {
             widgets_dirty: false,
             appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
             notif_watch: config::Watcher::new(notifsettings::CONFIG_NAME),
+            schedule_snooze: None,
             notif: notifsettings::NotifFile::new(),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
@@ -1784,6 +1793,12 @@ impl DesktopShell {
     /// caller repaints on: the taskbar shows whether focus assist is on.
     pub fn evaluate_schedules(&mut self, utc_secs: u64) -> bool {
         let before = self.focus.effective_mode();
+        // A snooze ends at the schedule's own next boundary, which is the
+        // instant the loop is already awake for -- see `next_schedule_change`.
+        if self.schedule_snooze.is_some_and(|until| utc_secs >= until) {
+            self.schedule_snooze = None;
+        }
+        self.focus.auto_suppressed = self.schedule_snooze.is_some();
         // With no rules at all the answer cannot depend on the time, so the
         // zone lookup and the civil-date arithmetic below are skipped -- this
         // runs on every tick and quiet hours ship switched off, so the
@@ -6048,8 +6063,69 @@ impl DesktopShell {
             // the switch was showing that mode, so it is the one it turns off.
             _ => FocusMode::Off,
         };
-        self.focus.set_mode(mode);
+        self.set_focus_mode_by_hand(mode);
         self.sync_quick_settings();
+    }
+
+    /// Set the focus mode *as a user action*.
+    ///
+    /// Not the same as assigning [`FocusAssistManager::manual_mode`], and the
+    /// difference is the whole of `snooze_schedule_if_it_would_resume` below:
+    /// a person turning this off means "leave me alone about this until it
+    /// would have changed anyway", which the manager cannot express because it
+    /// has no clock. Every door a *person* comes through -- the quick
+    /// settings switches today, a hotkey or a menu item tomorrow -- belongs
+    /// here rather than on the field, so that a later one cannot quietly get
+    /// the lesser behaviour.
+    pub fn set_focus_mode_by_hand(&mut self, mode: focus_assist::FocusMode) {
+        self.focus.set_mode(mode);
+        if mode == focus_assist::FocusMode::Off {
+            self.snooze_schedule_if_it_would_resume(Self::unix_now());
+        }
+    }
+
+    /// Hold a schedule off for the rest of its period, if one is why focus
+    /// assist is on.
+    ///
+    /// The user has just pressed a switch labelled "off". Turning off a
+    /// *manual* mode is enough on its own; turning off a *scheduled* one is
+    /// not, because clearing the manual override hands the decision straight
+    /// back to the schedule, which is still inside its window and switches
+    /// everything on again before the next frame. See
+    /// [`FocusAssistManager::auto_suppressed`].
+    ///
+    /// Asks the rules whether one is in force rather than inferring it from
+    /// the mode: "focus assist is on and there is a schedule" is not the same
+    /// claim as "the schedule is why", and the difference is a manual mode set
+    /// at noon that would otherwise arm a snooze against a schedule that was
+    /// not going to fire for ten hours.
+    fn snooze_schedule_if_it_would_resume(&mut self, utc_secs: u64) {
+        let (hour, minute, weekday) = self.clock_reading_at(utc_secs);
+        let in_force = self
+            .focus
+            .auto_rules
+            .iter()
+            .any(|rule| rule.is_schedule_active(hour, minute, weekday));
+        if !in_force {
+            return;
+        }
+        self.schedule_snooze = self
+            .next_schedule_change(utc_secs)
+            .map(|d| utc_secs.saturating_add(d.as_secs()));
+        // Applied now rather than at the next tick. `auto_active` still holds
+        // the last evaluation's answer and `effective_mode` reads it, so
+        // without this the switch the user has just pressed redraws as on and
+        // the desktop stays quiet until something else happens to tick the
+        // loop -- which on an idle desktop at two in the morning is nothing.
+        self.evaluate_schedules(utc_secs);
+    }
+
+    /// Seconds since the epoch, or 0 on a clock set before it.
+    fn unix_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 
     /// Menu item ids. Stable numbers rather than positions, so inserting an
@@ -12949,6 +13025,112 @@ mod quiet_hours_wiring_tests {
             "the desktop stayed quiet after the switch was turned off"
         );
         assert_eq!(shell.focus.effective_mode(), FocusMode::Off);
+    }
+
+    // ----- turning it off by hand ---------------------------------------
+
+    /// **A switch labelled "off" has to turn it off.**
+    ///
+    /// `set_mode(Off)` clears the manual override, which hands the decision
+    /// straight back to the schedule -- still inside its window, so it
+    /// switches everything on again before the next frame. The switch then
+    /// reads on, and no sequence of presses changes it.
+    ///
+    /// The window here is built from the clock the *code* reads, an hour
+    /// either side of it, rather than from a named hour: this door takes the
+    /// real time, and a test that said 23:00 would only exercise it at night.
+    /// Every day is selected so that the hour-before-midnight case, where the
+    /// window belongs to yesterday, needs no special handling.
+    #[test]
+    fn switching_focus_assist_off_during_quiet_hours_does_not_snap_back() {
+        let mut shell = shell();
+        let now = DesktopShell::unix_now();
+        let (hour, _, _) = shell.clock_reading_at(now);
+        let quiet = QuietHours {
+            enabled: true,
+            window: daywindow::DailyWindow::from_hm((hour + 23) % 24, 0, (hour + 1) % 24, 0)
+                .expect("a real window"),
+            days: [true; 7],
+        };
+        shell.notif.settings.quiet_hours = quiet;
+        shell.focus.set_quiet_hours(&quiet);
+        shell.evaluate_schedules(now);
+        assert_eq!(
+            shell.focus.effective_mode(),
+            FocusMode::PriorityOnly,
+            "the window built around now was not in force"
+        );
+
+        shell.set_focus_mode_by_hand(FocusMode::Off);
+
+        assert_eq!(
+            shell.focus.effective_mode(),
+            FocusMode::Off,
+            "the schedule took over again the instant it was switched off"
+        );
+        // And it stays off when the loop next looks, which is where the old
+        // behaviour would have reappeared.
+        shell.evaluate_schedules(DesktopShell::unix_now());
+        assert_eq!(shell.focus.effective_mode(), FocusMode::Off, "it came back");
+    }
+
+    /// The snooze lasts exactly the rest of the period -- not longer.
+    #[test]
+    fn the_snooze_ends_when_the_schedule_would_have_ended() {
+        let mut shell = shell();
+        let mut quiet = QuietHours::default(); // 22:00-07:00, every day
+        quiet.enabled = true;
+        shell.notif.settings.quiet_hours = quiet;
+        shell.focus.set_quiet_hours(&quiet);
+
+        shell.evaluate_schedules(at(23, 0));
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+        shell.focus.set_mode(FocusMode::Off);
+        shell.snooze_schedule_if_it_would_resume(at(23, 0));
+
+        // Three in the morning: still the same night, still snoozed.
+        assert!(!shell.evaluate_schedules(at(27, 0)));
+        assert_eq!(shell.focus.effective_mode(), FocusMode::Off, "woke early");
+
+        // Seven o'clock, when the window closes anyway.
+        shell.evaluate_schedules(at(31, 0));
+        assert_eq!(shell.focus.effective_mode(), FocusMode::Off);
+
+        // And the *next* night is a new period, which the snooze must not
+        // have eaten.
+        assert!(
+            shell.evaluate_schedules(at(46, 0)),
+            "quiet hours never came back"
+        );
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+    }
+
+    /// Turning off a mode the user set by hand arms no snooze.
+    ///
+    /// "Focus assist is on and a schedule exists" is not the same claim as
+    /// "the schedule is why". Without the distinction, switching off a mode
+    /// set at noon would hold tonight's quiet hours off as well -- a setting
+    /// silently cancelled hours before it was due, by a press that had nothing
+    /// to do with it.
+    #[test]
+    fn turning_off_a_mode_set_by_hand_leaves_tonight_alone() {
+        let mut shell = shell();
+        let mut quiet = QuietHours::default();
+        quiet.enabled = true;
+        shell.notif.settings.quiet_hours = quiet;
+        shell.focus.set_quiet_hours(&quiet);
+
+        // Midday: the user switches focus assist on and off again.
+        shell.evaluate_schedules(at(12, 0));
+        shell.focus.set_mode(FocusMode::TotalSilence);
+        shell.focus.set_mode(FocusMode::Off);
+        shell.snooze_schedule_if_it_would_resume(at(12, 0));
+
+        assert!(
+            shell.evaluate_schedules(at(22, 0)),
+            "quiet hours did not start"
+        );
+        assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
     }
 
     // ----- the timer ----------------------------------------------------

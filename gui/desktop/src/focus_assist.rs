@@ -266,6 +266,21 @@ pub struct FocusAssistManager {
     pub app_overrides: Vec<AppNotifOverride>,
     /// Whether auto rules are enabled.
     pub auto_rules_enabled: bool,
+    /// Whether the automatic rules are being held off for now.
+    ///
+    /// Distinct from [`auto_rules_enabled`](Self::auto_rules_enabled), which is
+    /// the user's standing answer to "use schedules at all". This one is
+    /// temporary and is set by whoever owns a clock -- the shell -- when the
+    /// user switches focus assist **off** while a schedule is the reason it is
+    /// on. Without it the two controls fight and the user loses: `set_mode`
+    /// clears `manual_override`, the next tick re-evaluates the schedule, finds
+    /// the clock still inside quiet hours, and silences the desktop again. The
+    /// switch reads "off" and the desktop stays quiet, with no sequence of
+    /// presses that changes it.
+    ///
+    /// The shell clears it at the schedule's own next boundary, so a snooze
+    /// lasts exactly the rest of this period and not a minute longer.
+    pub auto_suppressed: bool,
     /// Show summary when focus assist deactivates.
     pub show_summary: bool,
     /// Number of suppressed notifications (for summary).
@@ -290,6 +305,7 @@ impl FocusAssistManager {
             auto_rules: Vec::new(),
             app_overrides: Vec::new(),
             auto_rules_enabled: true,
+            auto_suppressed: false,
             show_summary: true,
             suppressed_count: 0,
             auto_active: false,
@@ -453,7 +469,7 @@ impl FocusAssistManager {
 
     /// Evaluate auto rules given current time and system state.
     pub fn evaluate_auto_rules(&mut self, hour: u8, minute: u8, day_of_week: u8) {
-        if !self.auto_rules_enabled || self.manual_override {
+        if !self.auto_rules_enabled || self.manual_override || self.auto_suppressed {
             self.auto_active = false;
             return;
         }

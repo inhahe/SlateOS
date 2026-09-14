@@ -1577,15 +1577,8 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
         // Striped by *track* index, not by visible slot: the stripes belong
         // to the rows, so they no longer invert every time the list scrolls
         // past a row boundary.
-        let row_bg = if is_playing {
-            state.palette.surface0
-        } else if is_selected {
-            state.palette.surface1
-        } else if track_idx % 2 == 0 {
-            state.palette.base
-        } else {
-            Color::rgba(49, 50, 68, 80)
-        };
+        let row_bg =
+            track_row_background(&state.palette, is_playing, is_selected, track_idx % 2 == 0);
 
         tree.fill_rect(0.0, row_y, state.width, TRACK_ROW_HEIGHT, row_bg);
 
@@ -1732,15 +1725,8 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         let is_current = state.current_track_index == Some(track_idx);
         let is_selected = state.selected_index == Some(track_idx);
 
-        let row_bg = if is_current {
-            state.palette.surface0
-        } else if is_selected {
-            state.palette.surface1
-        } else if track_idx % 2 == 0 {
-            state.palette.base
-        } else {
-            Color::rgba(49, 50, 68, 80)
-        };
+        let row_bg =
+            track_row_background(&state.palette, is_current, is_selected, track_idx % 2 == 0);
 
         tree.fill_rect(0.0, row_y, state.width, TRACK_ROW_HEIGHT, row_bg);
 
@@ -2601,6 +2587,34 @@ fn format_time(secs: f32) -> String {
     guitk::duration::clock(u64::from(total))
 }
 
+/// The background of one track row.
+///
+/// Shared by the library list and the playlist list, which had a copy each --
+/// eight identical lines differing only in the name of the "this one is
+/// playing" flag. The stripe on alternate rows used to be `Color::rgba(49, 50,
+/// 68, 80)`, which is Mocha's `surface0` written out as a literal: under a
+/// light theme it drew dark bands between light rows. It is the same role now,
+/// at the same alpha, taken from whichever palette is in force.
+fn track_row_background(
+    palette: &Palette,
+    is_current: bool,
+    is_selected: bool,
+    even_row: bool,
+) -> Color {
+    if is_current {
+        palette.surface0
+    } else if is_selected {
+        palette.surface1
+    } else if even_row {
+        palette.base
+    } else {
+        Color {
+            a: 80,
+            ..palette.surface0
+        }
+    }
+}
+
 /// Generate a deterministic color from an album name (for album art placeholder).
 fn album_color(album: &str, p: &Palette) -> Color {
     let mut hash: u32 = 5381;
@@ -2822,29 +2836,52 @@ mod tests {
     use super::*;
 
     /// Every colour the music player draws comes from the user's palette.
+    ///
+    /// **All three tabs, playing and stopped, with a library loaded.** This
+    /// rendered one scene until 2026-09-14: a brand-new player with an *empty*
+    /// library on the default tab -- which drew no track rows and no album art
+    /// at all, while declaring the album-art colours below as derived. It was
+    /// excusing colours it was not looking at. See `known-issues.md`
+    /// `TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME`.
     #[test]
     fn every_colour_the_music_player_draws_comes_from_its_palette() {
         for light in [false, true] {
-            let mut app = PlayerState::new();
-            app.palette = Palette::for_mode(light);
-            let tree = render(&app);
-            assert!(
-                tree.commands.len() > 20,
-                "the sweep examined {} commands, which is not a render",
-                tree.commands.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                // The album-art placeholder is a hashed hue darkened to 180/255
-                // so the art reads as art rather than as a panel. It is derived
-                // from a role rather than being one.
-                &(0..9)
-                    .map(|i| album_color(&format!("a{i}"), &app.palette))
-                    .collect::<Vec<_>>(),
-                &format!("musicplayer (light={light})"),
-            );
+            for tab in [Tab::NowPlaying, Tab::Library, Tab::Playlists] {
+                for playing in [false, true] {
+                    let mut app = player_with_library(9);
+                    app.palette = Palette::for_mode(light);
+                    app.active_tab = tab;
+                    app.playing = playing;
+                    let tree = render(&app);
+                    assert!(
+                        tree.commands.len() > 20,
+                        "{tab:?} drew {} commands, which is not a render",
+                        tree.commands.len()
+                    );
+                    appearance::palette_check::assert_drawn_from(
+                        &app.palette,
+                        &tree.commands,
+                        // The album-art placeholder is a hashed hue darkened to
+                        // 180/255 so the art reads as art rather than as a
+                        // panel. Derived from a role rather than being one, and
+                        // keyed on what the library actually holds -- the old
+                        // list was hashed from names ("a0".."a8") that no track
+                        // in the test had, which cost nothing only because the
+                        // empty player it swept drew no album art at all.
+                        &album_colors_of(&app),
+                        &format!("musicplayer {tab:?} playing={playing} (light={light})"),
+                    );
+                }
+            }
         }
+    }
+
+    /// Every album-art colour this library can produce.
+    fn album_colors_of(app: &PlayerState) -> Vec<Color> {
+        app.library
+            .iter()
+            .map(|t| album_color(&t.album, &app.palette))
+            .collect()
     }
 
     // -- Wheel scrolling --

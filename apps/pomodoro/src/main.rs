@@ -1908,24 +1908,88 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    /// A timer with something behind it, so the screens that show a history
+    /// have rows to draw rather than an empty-state message.
+    fn with_a_history() -> PomodoroApp {
+        let mut app = PomodoroApp::new(800.0, 600.0, 0);
+        app.complete_phase(true);
+        app.update_daily_stats(25, 5);
+        app
+    }
+
     /// Every colour the timer draws comes from the user's palette.
+    ///
+    /// **Every screen, every timer state, every phase, both modes.** This
+    /// rendered one combination until 2026-09-14 -- the Timer screen, idle, in
+    /// its Work phase, with no history -- which left the Stats, Log and
+    /// Settings screens entirely unswept and reported success over all four.
+    /// See `known-issues.md`
+    /// `TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME`: the same
+    /// widening caught `apps/benchmark` and `apps/explorer` actually failing.
     #[test]
     fn every_colour_the_pomodoro_draws_comes_from_its_palette() {
         for light in [false, true] {
-            let mut app = PomodoroApp::new(800.0, 600.0, 0);
-            app.palette = Palette::for_mode(light);
+            for screen in Screen::ALL {
+                for state in [TimerState::Idle, TimerState::Running, TimerState::Paused] {
+                    for phase in [Phase::Work, Phase::ShortBreak, Phase::LongBreak] {
+                        let mut app = with_a_history();
+                        app.palette = Palette::for_mode(light);
+                        app.screen = screen;
+                        app.state = state;
+                        app.phase = phase;
+
+                        let tree = App::render(&mut app, 800.0, 600.0);
+                        assert!(
+                            tree.commands.len() > 20,
+                            "{screen:?}/{state:?}/{phase:?} drew {} commands, \
+                             which is not a render",
+                            tree.commands.len()
+                        );
+                        appearance::palette_check::assert_drawn_from(
+                            &app.palette,
+                            &tree.commands,
+                            &[],
+                            &format!(
+                                "pomodoro {screen:?}/{state:?}/{phase:?} (light={light})"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The four screens are four different pictures.
+    ///
+    /// Without this, a `screen` field that stopped being read would leave the
+    /// sweep above rendering the Timer screen seventy-two times and reporting
+    /// four screens' worth of coverage.
+    #[test]
+    fn each_pomodoro_screen_draws_something_the_others_do_not() {
+        let mut drawn: Vec<(Screen, String)> = Vec::new();
+        for screen in Screen::ALL {
+            let mut app = with_a_history();
+            app.screen = screen;
             let tree = App::render(&mut app, 800.0, 600.0);
+            let texts: String = tree
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
             assert!(
-                tree.commands.len() > 20,
-                "the sweep examined {} commands, which is not a render",
-                tree.commands.len()
+                !texts.is_empty(),
+                "{screen:?} drew no text at all, so this comparison is vacuous"
             );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                &[],
-                &format!("pomodoro (light={light})"),
-            );
+            for (other, seen) in &drawn {
+                assert_ne!(
+                    &texts, seen,
+                    "{screen:?} and {other:?} drew exactly the same words"
+                );
+            }
+            drawn.push((screen, texts));
         }
     }
 

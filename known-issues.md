@@ -143307,3 +143307,60 @@ grepping for `[rootfs] staged` and missing the fastpy block, which says
 other because it was all downstream of the same wrong assumption about where to
 look.** The comment in `_start` is genuinely stale and now says so, but the
 behaviour it appears to describe has not been true for a long time.
+
+
+## TD-B-REBUILDING-THE-LIBC-DOES-NOT-REBUILD-ANYTHING-THAT-LINKS-IT (lane B, 2026-09-13)
+
+**In short:** fix a bug in our C library, rebuild the library, rebuild the
+programs — and the programs still contain the bug. Cargo does not know that
+`toolchain/sysroot/lib/libc.a` is an input, so nothing that links it is out of
+date when it changes. The build says `Finished` and everything is stale.
+
+### Measured, not inferred
+
+After fixing `retrieve_initial_args` and rebuilding the sysroot (`libc.a` went
+from 2026-09-12 08:11 to 2026-09-13 20:57), I rebuilt the 70 binaries the image
+manifest names:
+
+| step | result |
+|---|---|
+| `rm` the 70 output binaries, then `cargo build` | **1.23 s**, 0 of 70 newer than `libc.a` |
+| `touch` the crate sources, then `cargo build` | 42 s, **70 of 70** newer |
+
+Deleting the outputs does not help, and that is the part that misleads. These
+files are **hardlinks** — `ls -la` shows a link count of 2 — into
+`target/.../release/deps/`. Removing `release/cp` removes one name for an
+inode that still exists under `deps/`, so cargo re-creates the link from its
+cache without running the linker, and the restored file keeps its **original
+mtime**. The obvious way to force a relink is therefore indistinguishable from
+having done nothing, right down to the timestamp.
+
+### Why it matters here more than in a normal Rust project
+
+Nothing else in this tree links a hand-built static archive. `libc.a` is built
+by `toolchain/build-sysroot.ps1`, **by hand**, outside cargo entirely — so the
+one artifact every userspace binary depends on is the one artifact cargo cannot
+see. A libc fix that is committed, tested and merged still ships nothing until
+someone happens to dirty each dependent crate.
+
+### What catches it
+
+The staleness check in the `create-ext4-rootfs.sh` staging block, which
+compares every staged binary against `libc.a` and warns when the binary is
+older. That check was written the same day as a matter of routine, copying the
+CMake one; this is what makes it load-bearing rather than decorative. Confirmed
+on real data: immediately after the sysroot rebuild, all 276 built binaries
+were older than `libc.a` and every one would have been reported.
+
+### The proper fix, not done here
+
+A `build.rs` in the crates that link the sysroot, emitting
+
+    cargo:rerun-if-changed=<path to sysroot>/lib/libc.a
+
+which is how cargo is told about an input it cannot infer. That is ~200 crates
+to touch, or one shared build-script crate they all depend on, and it wants
+thinking about rather than a quick loop — the archive path is set by the target
+JSON and the sysroot location is not currently exported to build scripts. Until
+then the rootfs warning is the backstop, and it only fires at image-build time,
+which is late but is at least before the bytes reach a disk.

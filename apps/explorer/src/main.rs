@@ -1029,6 +1029,37 @@ impl ExplorerState {
         self.pending.len()
     }
 
+    /// Stop the running operation and drop everything waiting behind it.
+    ///
+    /// One action rather than two, because it is one intent: a user pressing
+    /// Escape during a bulk copy means "stop", not "stop this one and then
+    /// watch the next of my own operations start by itself", which is what
+    /// cancelling only the running one would do.
+    ///
+    /// The two halves cost differently and the message says so. Cancelling the
+    /// *running* one leaves every file wholly moved or wholly not and keeps its
+    /// journal, so it can be resumed; dropping the *waiting* ones is free,
+    /// because nothing has been written for them at all.
+    ///
+    /// Answers whether there was anything to stop, so a caller cannot report a
+    /// cancellation that did not happen.
+    pub fn cancel_all_operations(&mut self) -> bool {
+        let waiting = self.pending.len();
+        self.pending.clear();
+        let stopped = self.cancel_operation();
+        if !stopped && waiting == 0 {
+            return false;
+        }
+        self.status_message = match (stopped, waiting) {
+            (true, 0) => "Stopping…".to_string(),
+            (true, 1) => "Stopping… — 1 waiting operation dropped".to_string(),
+            (true, n) => format!("Stopping… — {n} waiting operations dropped"),
+            (false, 1) => "1 waiting operation dropped".to_string(),
+            (false, n) => format!("{n} waiting operations dropped"),
+        };
+        true
+    }
+
     /// Drop a waiting operation. Free: it has written nothing.
     ///
     /// Answers whether there was one at that position, so a caller cannot
@@ -2940,6 +2971,17 @@ impl ExplorerState {
                 }
                 None => false,
             },
+            // Escape stops file work before it clears a selection. A user
+            // watching a copy they did not mean to start reaches for Escape,
+            // and there is nothing else on the keyboard that means "stop
+            // that"; a selection, by contrast, is cleared by clicking
+            // anywhere. It does not do both at once, either -- one key with
+            // two effects is how someone loses a selection they wanted while
+            // trying to stop a copy.
+            Key::Escape if self.operation.is_some() || !self.pending.is_empty() => {
+                self.cancel_all_operations();
+                true
+            }
             Key::Escape => {
                 if self.selected_indices.is_empty() {
                     return false;
@@ -3967,6 +4009,104 @@ mod tests {
             .filter(|n| root.join(format!("dst/f{n}.txt")).exists())
             .count();
         assert!(copied < 6, "cancelling copied everything anyway");
+    }
+
+    /// **Escape reaches the cancel.**
+    ///
+    /// `cancel_operation` and `cancel_queued` were written with no way to
+    /// press them: the ability to stop a copy existed in the model and
+    /// nothing on screen reached it, which is a dead control and the same
+    /// defect as a settings page for a setting nothing reads.
+    #[test]
+    fn escape_stops_a_running_copy() {
+        let scratch = temp_dir("esc_running");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+
+        assert!(
+            state.handle_event(&key(Key::Escape)),
+            "Escape was ignored while a copy was running"
+        );
+        assert!(
+            state.status_bar_text().starts_with("Stopping"),
+            "Escape said nothing: {:?}",
+            state.status_bar_text()
+        );
+
+        settle(&mut state);
+        let copied = (0..6)
+            .filter(|n| root.join(format!("dst/f{n}.txt")).exists())
+            .count();
+        assert!(copied < 6, "Escape copied everything anyway");
+    }
+
+    /// And it drops what was waiting behind it, which costs nothing.
+    #[test]
+    fn escape_drops_the_waiting_operations_too() {
+        let scratch = temp_dir("esc_waiting");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        write(&root.join("never.txt"), "x");
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("never.txt")]));
+        state.paste();
+        assert_eq!(state.queued_count(), 1);
+
+        send(&mut state, &key(Key::Escape));
+
+        assert_eq!(state.queued_count(), 0, "the queue survived Escape");
+        assert!(
+            state.status_bar_text().contains("dropped"),
+            "the dropped operations were not mentioned: {:?}",
+            state.status_bar_text()
+        );
+        settle(&mut state);
+        assert!(!root.join("dst/never.txt").exists());
+    }
+
+    /// **Escape does not also clear the selection.**
+    ///
+    /// One key with two effects is how a user loses a selection they wanted
+    /// while trying to stop a copy.
+    #[test]
+    fn escape_stopping_a_copy_leaves_the_selection_alone() {
+        let scratch = temp_dir("esc_selection");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.load_directory();
+        state.selected_indices = vec![0];
+        let selected_before = state.selected_indices.clone();
+        assert!(!selected_before.is_empty(), "nothing was selected to keep");
+
+        state.paste();
+        send(&mut state, &key(Key::Escape));
+
+        assert_eq!(
+            state.selected_indices, selected_before,
+            "stopping a copy also cleared the selection"
+        );
+        settle(&mut state);
+    }
+
+    /// With no file work in flight, Escape means what it always meant.
+    #[test]
+    fn escape_still_clears_the_selection_when_nothing_is_copying() {
+        let scratch = temp_dir("esc_plain");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "a");
+        let mut state = state_at(&root);
+        state.selected_indices = vec![0];
+
+        assert!(state.handle_event(&key(Key::Escape)));
+        assert!(
+            state.selected_indices.is_empty(),
+            "Escape stopped clearing the selection"
+        );
+        assert!(
+            !state.handle_event(&key(Key::Escape)),
+            "Escape with nothing to do must not claim the key"
+        );
     }
 
     /// And with nothing running, cancelling is a no-op that says so.

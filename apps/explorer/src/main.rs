@@ -25,6 +25,7 @@
 #![allow(clippy::duration_suboptimal_units)]
 
 mod columns;
+mod drives;
 mod dropzone;
 mod fileops;
 mod thumbs;

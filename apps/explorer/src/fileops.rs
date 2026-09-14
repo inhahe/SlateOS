@@ -713,17 +713,6 @@ pub fn resolve_rename(dest: &Path) -> PathBuf {
     parent.join(format!("{stem} (renamed){ext}"))
 }
 
-/// Determine whether two paths are on the same filesystem / device.
-///
-/// This is a best-effort heuristic. On the real OS we would compare device IDs
-/// from `stat`. Here we compare the root/prefix component as a proxy.
-pub fn same_device(a: &Path, b: &Path) -> bool {
-    // Compare the first component (mount point heuristic).
-    let root_a = a.components().next();
-    let root_b = b.components().next();
-    root_a == root_b
-}
-
 /// Determine whether `src` is newer than `dest` based on modification time.
 fn source_is_newer(src: &Path, dest: &Path) -> bool {
     let src_time = fs::metadata(src).ok().and_then(|m| m.modified().ok());
@@ -1551,9 +1540,10 @@ fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
 /// `fs::rename` cannot cross a mount point — it fails with `EXDEV`. The recycle
 /// bin lives under the user's home directory, so recycling anything from a
 /// separate data partition hit exactly that and simply reported an error.
-/// (`same_device` exists for this check but is a first-component heuristic;
-/// attempting the rename and reacting to its failure is both cheaper in the
-/// common case and correct in the cases the heuristic gets wrong.)
+/// ([`crate::drives::same_drive`] answers this properly now, but attempting
+/// the rename and reacting to its failure is still both cheaper in the common
+/// case and correct in the cases no resolver can settle -- a path whose device
+/// this machine cannot name is exactly a path whose rename might work.)
 fn move_path(src: &Path, dest: &Path) -> io::Result<()> {
     match fs::rename(src, dest) {
         Ok(()) => return Ok(()),
@@ -2422,15 +2412,26 @@ mod tests {
     }
 
     #[test]
-    fn same_device_detection() {
-        // Paths sharing the same root component should be same-device.
-        assert!(same_device(
-            Path::new("/home/user/a"),
-            Path::new("/home/user/b")
-        ));
-        // Different roots.
-        // Note: on Unix "/" is always the root, so this tests the prefix logic.
-        // On our OS different mount points would have different first components.
+    fn a_move_within_one_directory_does_not_need_a_device_check() {
+        // What used to be `same_device_detection`, which asserted that two
+        // paths under `/home/user` share a device "because they share a root
+        // component" -- and noted, in place of testing it, that "on our OS
+        // different mount points would have different first components". They
+        // would not: a mount point is a directory, not a prefix. The real
+        // question moved to `crate::drives`, which resolves it against the
+        // platform and says `None` when it cannot.
+        //
+        // What is left here is the claim `move_path` actually rests on, which
+        // is not about devices at all: a rename inside one directory works,
+        // and the fallback is never reached.
+        let scratch = temp_dir("move_same_dir");
+        let dir = scratch.dir().to_path_buf();
+        write_file(&dir.join("before.txt"), "contents");
+
+        move_path(&dir.join("before.txt"), &dir.join("after.txt")).expect("rename");
+
+        assert!(!dir.join("before.txt").exists());
+        assert_eq!(read_file(&dir.join("after.txt")), "contents");
     }
 
     // ----------------------------------------------------------------

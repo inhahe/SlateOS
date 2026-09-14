@@ -451,13 +451,9 @@ impl DropZoneManager {
             DropZone::None => return DropOperation::None,
         };
 
-        // Default: same device -> Move, different device -> Copy.
+        // Default: same drive -> Move, different drive -> Copy.
         if let Some(first_source) = sources.first() {
-            if same_device(first_source, target) {
-                DropOperation::Move
-            } else {
-                DropOperation::Copy
-            }
+            default_drop_operation(crate::drives::same_drive(first_source, target))
         } else {
             DropOperation::None
         }
@@ -529,14 +525,25 @@ impl DropZoneManager {
 // Path helpers
 // ============================================================================
 
-/// Best-effort same-device check by comparing the first path component.
+/// What a plain drag does, given whether the two ends share a drive.
 ///
-/// On the real OS this would compare device IDs from `stat`. Here we use
-/// the same heuristic as `fileops::same_device`.
-fn same_device(a: &Path, b: &Path) -> bool {
-    let root_a = a.components().next();
-    let root_b = b.components().next();
-    root_a == root_b
+/// The convention every desktop uses: a drag within one drive moves, a drag
+/// across drives copies. `Ctrl` overrides it, which is why this is only the
+/// default.
+///
+/// **`None` means Copy.** A drive this machine cannot name is not a reason to
+/// delete the user's file: a needless copy is a duplicate they can remove,
+/// while a needless move off a card reader is a photo that is no longer on the
+/// card. The cost of the two mistakes is not symmetric, so the unknown case is
+/// resolved towards the one that is recoverable. (`OperationQueue` reads the
+/// same `None` the other way round, and says so at its own call site -- see
+/// `crate::drives`.)
+fn default_drop_operation(same_drive: Option<bool>) -> DropOperation {
+    if same_drive == Some(true) {
+        DropOperation::Move
+    } else {
+        DropOperation::Copy
+    }
 }
 
 /// Check whether dropping `sources` into `target_dir` would create a nested
@@ -799,6 +806,8 @@ mod tests {
     )]
 
     use super::*;
+    use scratchdir::ScratchDir;
+    use std::fs;
 
     // ------------------------------------------------------------------
     // Rect hit testing
@@ -899,9 +908,18 @@ mod tests {
 
     #[test]
     fn operation_same_drive_default_is_move() {
-        let mgr = DropZoneManager::new(PathBuf::from("/home/user"));
+        // Real paths, not `/home/user`: the drive a path is on is a fact about
+        // the machine, and a path that does not exist has no drive to be on.
+        // This test used to pass against a *made-up* path because the check it
+        // rested on compared first components and never touched the disk --
+        // which is exactly the bug. See `crate::drives`.
+        let scratch = ScratchDir::new("dropzone_same_drive");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("file.txt"), "x").unwrap();
+
+        let mgr = DropZoneManager::new(root.clone());
         let op = mgr.determine_operation(
-            &[PathBuf::from("/home/user/file.txt")],
+            &[root.join("file.txt")],
             &DropZone::CurrentDirectory,
             DragModifiers::default(),
         );
@@ -972,16 +990,21 @@ mod tests {
 
     #[test]
     fn operation_folder_target() {
-        let mgr = DropZoneManager::new(PathBuf::from("/home/user"));
+        let scratch = ScratchDir::new("dropzone_folder_target");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("file.txt"), "x").unwrap();
+        fs::create_dir(root.join("Documents")).unwrap();
+
+        let mgr = DropZoneManager::new(root.clone());
         let op = mgr.determine_operation(
-            &[PathBuf::from("/home/user/file.txt")],
+            &[root.join("file.txt")],
             &DropZone::Folder {
-                path: PathBuf::from("/home/user/Documents"),
+                path: root.join("Documents"),
                 rect: Rect::new(0.0, 0.0, 100.0, 22.0),
             },
             DragModifiers::default(),
         );
-        // Same root component -> Move.
+        // One drive, so a drag inside it moves.
         assert_eq!(op, DropOperation::Move);
     }
 
@@ -1112,19 +1135,23 @@ mod tests {
 
     #[test]
     fn handle_drop_valid() {
-        let mut mgr = DropZoneManager::new(PathBuf::from("/home/user"));
+        let scratch = ScratchDir::new("dropzone_handle_drop");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("file.txt"), "x").unwrap();
+
+        let mut mgr = DropZoneManager::new(root.clone());
         mgr.set_list_area(Rect::new(200.0, 64.0, 700.0, 500.0));
 
         let result = mgr.handle_drop(
             400.0,
             200.0,
-            &[PathBuf::from("/home/user/file.txt")],
+            &[root.join("file.txt")],
             DragModifiers::default(),
         );
 
         assert!(result.valid);
         assert_eq!(result.operation, DropOperation::Move);
-        assert_eq!(result.target_dir, PathBuf::from("/home/user"));
+        assert_eq!(result.target_dir, root);
     }
 
     #[test]
@@ -1363,15 +1390,32 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn same_device_same_root() {
-        assert!(same_device(
-            Path::new("/home/user/a"),
-            Path::new("/home/other/b")
-        ));
+    fn a_drag_within_one_drive_moves_and_across_drives_copies() {
+        assert_eq!(default_drop_operation(Some(true)), DropOperation::Move);
+        assert_eq!(default_drop_operation(Some(false)), DropOperation::Copy);
+    }
+
+    /// **Not knowing must not cost the user a file.**
+    ///
+    /// This replaces `same_device_same_root`, which asserted that
+    /// `/home/user/a` and `/home/other/b` are one device because they share a
+    /// first component -- true of *every* pair of absolute paths on a
+    /// Unix-shaped filesystem, so on the OS this is written for the answer was
+    /// "Move" for every drag ever made, including one off a camera card.
+    #[test]
+    fn a_drag_whose_drives_are_unknown_copies_rather_than_moves() {
+        assert_eq!(default_drop_operation(None), DropOperation::Copy);
     }
 
     #[test]
-    fn same_device_both_empty() {
-        assert!(same_device(Path::new(""), Path::new("")));
+    fn an_empty_path_resolves_to_nothing_rather_than_to_everything() {
+        // It used to assert that two empty paths are the same device, which
+        // followed from comparing first components: neither has one, so they
+        // matched. An empty path names no file and therefore no drive.
+        assert_eq!(
+            crate::drives::same_drive(Path::new(""), Path::new("")),
+            None
+        );
+        assert_eq!(default_drop_operation(None), DropOperation::Copy);
     }
 }

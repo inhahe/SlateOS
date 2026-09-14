@@ -50,6 +50,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import selftestflag  # noqa: E402  (needs the path above)
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ROOTS = ("apps", "gui", "net", "net80211", "netproto", "pkg")
 
@@ -295,9 +298,13 @@ def counterpart(name):
     return []
 
 
-def main(argv):
-    listing = "--list" in argv
-    every = "--all" in argv
+def analyse():
+    """Everything the report is computed from.
+
+    Split out of `main` so the self-test can assert on verdicts rather than on
+    printed text. A gate whose self-test greps its own stdout passes when the
+    wording changes and fails when it does not, which is backwards.
+    """
     defs, prod_refs, test_refs, crate_prod_refs = scan()
 
     uncalled = []
@@ -325,7 +332,7 @@ def main(argv):
     for path, line, name, uses in uncalled:
         crate = crate_of(path)
         for other in counterpart(name):
-            # Both tests are needed and neither implies the other. The first
+            # Both tests are needed and neither implies the other.  # noqa: E501 The first
             # says this program *has* the other half; the second says this
             # program *uses* it outside its tests. A half defined here and
             # called only from another crate's production code would pass the
@@ -334,6 +341,26 @@ def main(argv):
             if here and crate_prod_refs[(crate, other)] > 1:
                 pairs.append((path, line, name, other, uses))
                 break
+
+    return uncalled, pairs
+
+
+def main(argv):
+    if selftestflag.wants_selftest(argv):
+        return self_test()
+    unknown = selftestflag.unknown_options(argv, known=("--list", "--all"))
+    if unknown:
+        # Lane A lost minutes to this exact silence: `--self-test` was accepted
+        # by an `in argv` test that nothing else checked, so the flag ran a
+        # live scan and exited 1 on a real finding, which reads precisely like
+        # a failing self-test. An option this script does not know is now an
+        # error rather than a scan.
+        print(f"unrecognised option(s): {' '.join(unknown)}", file=sys.stderr)
+        return 2
+
+    listing = "--list" in argv
+    every = "--all" in argv
+    uncalled, pairs = analyse()
 
     for path, line, name, other, uses in pairs:
         # States what was measured and stops. A gate that diagnoses past its
@@ -378,6 +405,122 @@ def main(argv):
         "counts as a use, so the half nobody calls compiles clean and passes."
     )
     return 0 if listing else 1
+
+
+def self_test():
+    """Check the scanner against four crates written for the purpose.
+
+    Every case here is a bug this script actually had on 2026-09-14, the day
+    after it was written, when its only finding on a clean tree was false and
+    it could not see the defect it was written from. Fixtures rather than the
+    live tree, because the live tree is expected to be clean: a check whose
+    only evidence is "it found nothing" cannot tell working from broken.
+    """
+    import tempfile
+
+    global ROOT, ROOTS
+
+    files = {
+        # 1. The true positive. `load_alpha` is tested and never called.
+        "apps/alpha/src/main.rs": """
+            pub fn save_alpha() {}
+            pub fn load_alpha() {}
+            fn wired() { save_alpha(); }
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn t() { load_alpha(); }
+            }
+            """,
+        # 2. Two programs sharing a suffix are not a pair. This was the only
+        #    thing the gate reported on a clean tree, and it was this.
+        "apps/beta/src/main.rs": """
+            pub fn export_beta() {}
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn t() { export_beta(); }
+            }
+            """,
+        "gui/gamma/src/lib.rs": """
+            pub fn load_beta() {}
+            fn wired() { load_beta(); }
+            """,
+        # 3. A comment naming the function is not a caller. Three sentences
+        #    about the last time `load_pinned` went missing were enough to
+        #    hide the next time.
+        "apps/delta/src/main.rs": """
+            // load_delta had no caller at all until today, see the notes.
+            pub fn load_delta() {}
+            /// Saves. See `load_delta` for the other half.
+            pub fn save_delta() {}
+            fn wired() { save_delta(); }
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn t() { load_delta(); }
+            }
+            """,
+        # 4. `#[cfg(test)] mod tests;` puts the attribute in the parent, so the
+        #    child file is wholly test code even though it says so nowhere.
+        "apps/epsilon/src/main.rs": """
+            pub fn save_eps() {}
+            pub fn load_eps() {}
+            fn wired() { save_eps(); }
+            #[cfg(test)]
+            mod tests;
+            """,
+        #    The call must sit in a plain helper, NOT under `#[test]`: an
+        #    attribute makes a span all by itself, so a `#[test]` here would
+        #    count as test code with or without the fix and prove nothing.
+        #    The first version of this fixture did exactly that and passed
+        #    against the bug.
+        "apps/epsilon/src/tests.rs": """
+            fn helper() { load_eps(); }
+            #[test]
+            fn t() { helper(); }
+            """,
+    }
+
+    expected = {"load_alpha", "load_delta", "load_eps"}
+    forbidden = {"export_beta"}
+
+    with tempfile.TemporaryDirectory(prefix="uncalled_selftest_") as tmp:
+        base = pathlib.Path(tmp)
+        for rel, body in files.items():
+            f = base / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            text = "\n".join(line[12:] for line in body.strip("\n").split("\n"))
+            f.write_text(text + "\n", encoding="utf-8")
+
+        saved = (ROOT, ROOTS)
+        ROOT, ROOTS = base, ("apps", "gui")
+        try:
+            _uncalled, pairs = analyse()
+        finally:
+            ROOT, ROOTS = saved
+
+    reported = {name for _p, _l, name, _o, _u in pairs}
+    problems = []
+    for want in sorted(expected):
+        if want not in reported:
+            problems.append(f"  MISSED  {want}: a real asymmetric pair went unreported")
+    for never in sorted(forbidden):
+        if never in reported:
+            problems.append(
+                f"  FALSE   {never}: paired with a function in another crate"
+            )
+
+    if problems:
+        print("check-tested-but-uncalled self-test FAILED:")
+        print("\n".join(problems))
+        print(f"  reported: {sorted(reported)}")
+        return 1
+    print(
+        f"ok: self-test passed ({len(expected)} asymmetric pairs found, "
+        f"{len(forbidden)} cross-crate false pair rejected)"
+    )
+    return 0
 
 
 if __name__ == "__main__":

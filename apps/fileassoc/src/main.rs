@@ -688,14 +688,43 @@ impl AssociationRegistry {
     pub fn read_from(&mut self, doc: &Document) -> Vec<AssocError> {
         let mut errors = Vec::new();
         for extension in doc.keys(&[ASSOCIATIONS_KEY]) {
-            let Some(app_id) = doc.get_str(&[ASSOCIATIONS_KEY, &extension]) else {
+            let Some(written) = doc.get_str(&[ASSOCIATIONS_KEY, &extension]) else {
                 continue;
             };
+            // A path is what `write_into` records. An id is accepted too, so a
+            // file written before 2026-09-14 still loads rather than silently
+            // losing every association in it -- the reader is where leniency
+            // belongs, and the next save rewrites it as a path.
+            let app_id = self
+                .app_id_for_exec(&written)
+                .unwrap_or_else(|| written.clone());
             if let Err(e) = self.set_default_app(&extension, &app_id) {
                 errors.push(e);
             }
         }
         errors
+    }
+
+    /// The id of the application installed at `exec_path`, if any.
+    #[must_use]
+    pub fn app_id_for_exec(&self, exec_path: &str) -> Option<String> {
+        self.apps
+            .values()
+            .find(|app| app.exec_path == exec_path)
+            .map(|app| app.id.clone())
+    }
+
+    /// What opens files with this extension, as a path a caller can run.
+    ///
+    /// The question every other program actually has -- the file manager wants
+    /// to start something, not to learn an id. Answered from the registry so
+    /// the caller needs no catalogue of its own.
+    #[must_use]
+    pub fn opener_path(&self, extension: &str) -> Option<&str> {
+        let assoc = self.associations.get(&extension.to_lowercase())?;
+        self.apps
+            .get(&assoc.app_id)
+            .map(|app| app.exec_path.as_str())
     }
 
     /// Fold the current associations into a configuration document.
@@ -711,7 +740,28 @@ impl AssociationRegistry {
             }
         }
         for (extension, assoc) in &self.associations {
-            doc.set_str(&[ASSOCIATIONS_KEY, extension], &assoc.app_id);
+            // The executable path, not the application id.
+            //
+            // An id is a name only this program can resolve -- the catalogue
+            // that maps `editor` to `/usr/bin/editor` lives in this binary, so
+            // a file saying `txt: editor` is unreadable to everyone else. The
+            // file manager needs to know what opens a `.txt` in order to open
+            // one, and a path it can hand to the kernel is an answer where an
+            // id is a question.
+            //
+            // This is the rule the taskbar's pinned apps already follow, for
+            // the same reason and in the same words: a pin is an executable
+            // path, and the name shown on it is looked up when it is drawn.
+            // Storing the name too would be a second copy of it, stale the
+            // first time the program is renamed.
+            //
+            // An association naming a program that has since been uninstalled
+            // reads back as "could not be restored", which is the case
+            // `read_from` already reports.
+            let Some(app) = self.apps.get(&assoc.app_id) else {
+                continue;
+            };
+            doc.set_str(&[ASSOCIATIONS_KEY, extension], &app.exec_path);
         }
     }
 
@@ -3646,6 +3696,44 @@ mod tests {
         }
     }
 
+    /// **What opens a `.mp3`, answered as something a caller can run.**
+    ///
+    /// The question every other program has. `apps/explorer` reads the same
+    /// answer out of the saved file without linking to this program, which is
+    /// the whole reason the file records a path.
+    #[test]
+    fn the_registry_answers_with_a_runnable_path() {
+        let mut reg = registry_over(&["mp3"]);
+        assert_eq!(reg.opener_path("mp3"), None, "nothing is associated yet");
+
+        reg.set_default_app("mp3", "app0")
+            .expect("a registered pair");
+
+        assert_eq!(reg.opener_path("mp3"), Some("/bin/app0"));
+        assert_eq!(reg.opener_path("MP3"), Some("/bin/app0"), "case");
+        assert_eq!(reg.opener_path("wav"), None, "nothing claims wav");
+    }
+
+    /// A file written before the format recorded paths still loads.
+    ///
+    /// The reader is where leniency belongs: refusing an older file would lose
+    /// every association in it, and the next save rewrites it as a path.
+    #[test]
+    fn a_file_written_with_ids_still_loads() {
+        let mut reg = registry_over(&["mp3"]);
+        let errors = reg.import_config(
+            "associations:
+  mp3: app0
+",
+        );
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(reg.opener_path("mp3"), Some("/bin/app0"));
+
+        // And it is written back as a path, so the leniency is needed once.
+        assert!(reg.export_config().contains("mp3: /bin/app0"));
+    }
+
     // -- Import/Export tests -------------------------------------------------
 
     #[test]
@@ -3659,7 +3747,9 @@ mod tests {
         let _ = reg.set_default_app("txt", "myapp");
         let config = reg.export_config();
         assert!(
-            config.contains("txt: myapp"),
+            // The path, not the id: the file is written for programs that do
+            // not have this registry to look an id up in.
+            config.contains("txt: /bin/myapp"),
             "the association is not in the exported document: {config}"
         );
         assert!(
@@ -3747,10 +3837,14 @@ mod tests {
                 FileType::new(ext, "application/octet-stream", "Thing"),
                 FileCategory::Documents,
             );
+            // A distinct binary per app. They all shared `/bin/app` until
+            // 2026-09-14, which no real system does and which made two
+            // applications indistinguishable the moment the association file
+            // started recording paths rather than ids.
             reg.register_app(AppInfo::new(
                 &format!("app{i}"),
                 "App",
-                "/bin/app",
+                &format!("/bin/app{i}"),
                 &[ext],
                 1,
             ));
@@ -4523,7 +4617,9 @@ mod tests {
         reg.write_into(&mut doc);
         assert_eq!(
             doc.get_str(&["associations", "mp3"]).as_deref(),
-            Some("app0")
+            // The path, because that is what another program can run. The id
+            // `app0` means nothing outside this registry.
+            Some("/bin/app0")
         );
 
         reg.clear_association("mp3")

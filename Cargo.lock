@@ -50,6 +50,7 @@ name = "ar"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "sysroot-dep",
 ]
 
 [[package]]
@@ -415,6 +416,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "sha2",
+ "sysroot-dep",
  "userspec",
  "utmpfile",
 ]
@@ -1510,6 +1512,7 @@ dependencies = [
  "deflate",
  "quoting",
  "scratchdir",
+ "sysroot-dep",
 ]
 
 [[package]]
@@ -2859,6 +2862,10 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
+
+[[package]]
+name = "sysroot-dep"
+version = "0.1.0"
 
 [[package]]
 name = "sysstat"

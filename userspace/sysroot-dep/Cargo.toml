@@ -1,0 +1,10 @@
+[package]
+name = "sysroot-dep"
+version = "0.1.0"
+edition = "2024"
+description = "Tell cargo that the hand-built sysroot libc.a is a build input"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -3,6 +3,12 @@ name = "ar"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS ar/ranlib/strip - archive and object file tools"
+[build-dependencies]
+# Tells cargo that the hand-built sysroot libc.a is an input, so a
+# libc rebuild relinks these binaries instead of silently leaving them
+# stale. See userspace/sysroot-dep.
+sysroot-dep = { path = "../sysroot-dep" }
+
 [dependencies]
 # It interpolates `name` into "ar: {}: no such member". That value is an
 # argv word, so it is whatever the user typed and not text this program

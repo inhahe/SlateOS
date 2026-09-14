@@ -143812,6 +143812,37 @@ were older than `libc.a` and every one would have been reported.
 
 ### The proper fix, not done here
 
+**FIXED 2026-09-14, and it was three crates rather than ~200.** The estimate
+below counted every crate under `userspace/`; what actually ships is the
+`scripts/rootfs-bin-manifest.txt` list, and **70 of its 72 binaries live in one
+crate** (`coreutils`). The other two are `ar` and `logrotate`. Measuring the
+scope before starting turned a change nobody wanted to make into one that took
+a tick.
+
+`userspace/sysroot-dep` holds the logic; each of the three crates has a
+three-line `build.rs` calling `sysroot_dep::emit()`. It is a
+**build-dependency**, not a normal one, and that is the whole design: a shared
+*library* crate would not work, because cargo would re-run ITS build script,
+find the output unchanged and leave the dependents alone. The
+`cargo:rerun-if-changed` has to be emitted by the build script of the crate
+whose rebuild it governs.
+
+`rerun-if-changed` alone is also not enough — it only re-runs the script. The
+script therefore emits `cargo:rustc-env=SYSROOT_LIBC_FINGERPRINT=<mtime>.<len>`
+so the crate's own compilation input changes when the archive does. Without
+that second half the fix is a no-op that looks correct.
+
+**Verified three ways**, because one direction would not have been enough:
+
+| | result |
+|---|---|
+| touch `libc.a`, rebuild | `cp` **relinks** (was: unchanged) |
+| rebuild again, touching nothing | `cp` unchanged, 0.75 s — it has not made every build rebuild the world |
+| touch `libc.a`, build for the **host** target | `cp.exe` unchanged — the host links its own libc and must not depend on this archive |
+
+The original proper-fix note follows; the part about ~200 crates is what was
+wrong with it.
+
 A `build.rs` in the crates that link the sysroot, emitting
 
     cargo:rerun-if-changed=<path to sysroot>/lib/libc.a

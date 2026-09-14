@@ -3559,7 +3559,7 @@ mod tests {
     /// and nothing said so. `E2BIG` is what POSIX spells for this.
     #[test]
     fn an_oversized_list_is_refused_not_truncated() {
-        let s = b"0123456789 ";
+        let s = b"0123456789\0";
         let ptrs: [*const u8; 5] = [
             s.as_ptr(),
             s.as_ptr(),

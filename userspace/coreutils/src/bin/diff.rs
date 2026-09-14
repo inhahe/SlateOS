@@ -395,7 +395,24 @@ fn parse_args(args: &[String]) -> ParseResult {
     }
 
     if positional.len() != 2 {
-        eprintln!("diff: requires exactly two file arguments");
+        // GNU's two wordings, measured on all three counts rather than
+        // inferred from two:
+        //
+        //     diff                       missing operand after 'diff'
+        //     diff x.txt                 missing operand after 'x.txt'
+        //     diff x.txt y.txt z.txt     extra operand 'z.txt'
+        //
+        // "after WHAT" is the last word on the command line, not the last
+        // operand -- which is why bare `diff` names the program itself. A rule
+        // derived from the one-operand case alone would have printed an empty
+        // name there. `cmp` in this crate already says both of these; this was
+        // the one bin still answering with a sentence of its own invention.
+        if let Some(extra) = positional.get(2) {
+            eprintln!("diff: extra operand {}", quoteaf_os(extra));
+        } else {
+            let last = args.last().map_or("diff", String::as_str);
+            eprintln!("diff: missing operand after {}", quoteaf_os(last));
+        }
         eprintln!("diff: Try 'diff --help' for more information.");
         process::exit(2);
     }

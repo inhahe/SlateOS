@@ -193,6 +193,32 @@ case "$msg" in
     *"OLDER than the sysroot libc.a"*) ok ;;
     *) bad "a binary older than libc.a must be reported, got: $msg" ;;
 esac
+# ...and REFUSED, not merely reported. It was a warning until 2026-09-14,
+# because cargo could not see libc.a as an input and so no command made a
+# stale binary fresh -- a gate nobody can satisfy is a gate that gets
+# bypassed. userspace/sysroot-dep fixed that, so the refusal is now
+# satisfiable and therefore right.
+case "$msg" in
+    *"refusing to build an image from stale binaries"*) ok ;;
+    *) bad "a stale binary must STOP the image, got: $msg" ;;
+esac
+# ALLOW_STALE_FIXTURES=1 downgrades it, the same knob and meaning as the spike
+# gates. Without this case the gate could be fatal-always, which would make an
+# escape hatch that is documented and does not work.
+# A FRESH STAGE FIRST. The block above already put /bin/ls on the previous
+# stage, and a second run over it reports the collision instead of the
+# staleness -- so without this reset the case passes or fails for the wrong
+# reason. It failed that way when first written.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ls"
+touch -d "2020-01-01" "$ROOT_DIR/target/x86_64-slateos/release/ls"
+touch "$SYSROOT_LIBC"
+msg="$(ALLOW_STALE_FIXTURES=1 eval "$SLATE_BLOCK" 2>&1)"
+case "$msg" in
+    *"packing them anyway"*) ok ;;
+    *) bad "ALLOW_STALE_FIXTURES=1 must downgrade the refusal, got: $msg" ;;
+esac
 rm -rf "$T"
 
 # 10. A listed name with nothing built is NAMED, not silently dropped -- an

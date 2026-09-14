@@ -6,5 +6,8 @@ description = "Tell cargo that the hand-built sysroot libc.a is a build input"
 
 [dependencies]
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+# The workspace's policy, not a private one. A crate that sets its own is
+# exactly what scripts/check-workspace-lints.py exists to catch, and it caught
+# this one on the first push.
+workspace = true

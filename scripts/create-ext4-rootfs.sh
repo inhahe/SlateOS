@@ -2084,11 +2084,37 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
     if [ "$SLATE_SKIPPED" -gt 0 ]; then
         echo "[rootfs]          ($SLATE_SKIPPED skipped, already present -- see the NOTEs above)"
     fi
+    # STALE IS NOW FATAL, and the reason it was only a warning has gone away.
+    #
+    # Until 2026-09-14 cargo could not see `libc.a` as an input at all -- it is
+    # built by toolchain/build-sysroot.ps1, outside cargo -- so after any
+    # sysroot rebuild EVERY binary was stale and there was no command that
+    # fixed it. Measured then: `rm` the outputs and rebuild took 1.23 s and
+    # left 0 of 70 newer, because the outputs are hardlinks into deps/ and
+    # cargo restores the name from cache, mtime and all. A gate nobody can
+    # satisfy is a gate that gets bypassed, so it warned.
+    #
+    # userspace/sysroot-dep fixed that: the three crates holding the image's
+    # binaries now declare the archive through a build script, and a libc
+    # rebuild relinks them. The command printed below genuinely works, so the
+    # warning can become what it should always have been -- a refusal.
+    #
+    # ALLOW_STALE_FIXTURES=1 downgrades it, the same knob and the same meaning
+    # as the spike gates above: "I know they are stale, pack anyway."
     if [ "$SLATE_STALE" -gt 0 ]; then
-        echo "[rootfs] WARNING: $SLATE_STALE of them are OLDER than the sysroot libc.a, so they link"
-        echo "[rootfs]          a stale libc and prove nothing about the current one. Rebuild:"
-        echo "[rootfs]            cd userspace/coreutils"
-        echo "[rootfs]            CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
+        echo "[rootfs] $SLATE_STALE of $SLATE_COUNT staged binaries are OLDER than the sysroot libc.a."
+        echo "[rootfs] They link a stale libc and prove nothing about the current one."
+        echo "[rootfs] Rebuild them:"
+        echo "[rootfs]   cd userspace/coreutils"
+        echo "[rootfs]   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
+        echo "[rootfs] and the same in userspace/ar and userspace/logrotate."
+        if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+            echo "[rootfs] NOTE: ALLOW_STALE_FIXTURES=1 — packing them anyway."
+        else
+            echo "[rootfs] ERROR: refusing to build an image from stale binaries."
+            echo "[rootfs]        Set ALLOW_STALE_FIXTURES=1 to pack them regardless."
+            exit 1
+        fi
     fi
     # A SIZE TRIPWIRE. This block is the largest single consumer of image bytes
     # and nothing else in this script accounts for free space at all. Running

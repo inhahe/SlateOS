@@ -76,7 +76,6 @@
     )
 )]
 
-pub mod a11y;
 pub mod about;
 pub mod animations;
 pub mod backup_settings;

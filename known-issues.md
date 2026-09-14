@@ -131746,15 +131746,82 @@ superseded.
 | `CursorSettings` | duplicates `AppearanceSettings::cursor_size`/`cursor_scheme`, and nothing draws a pointer at all (C-Q18) |
 | `AccessibilityConfig` | the parallel config this entry is named for |
 
-So the remainder splits cleanly. `AccessibilityConfig` and `CursorSettings` are
-**duplicates** and follow the precedent: the live definition is elsewhere, and
-these go once nothing needs them. The magnifier is **not** a duplicate -- it is
-the only implementation of a feature the roadmap lists as done, unreachable for
-the same reason `login_screen` and `blur` are, and it belongs with those in
-`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED` rather than being
-deleted as a stale copy. Deleting it would be the misreading of
-`design-decisions.md` 815 that entry warns about: a magnifier is the desktop
-showing you something, not a screen you open.
+**Deleted 2026-09-13 -- all 1 239 lines, magnifier included. The paragraph
+that used to stand here argued for keeping the magnifier, and it was wrong
+on its facts.** It is kept in outline because the argument was a good one
+and only the facts under it failed.
+
+It said the magnifier was *"not a duplicate -- the only implementation of a
+feature the roadmap lists as done"*, and that deleting it would misread
+`design-decisions.md` 815: a magnifier is the desktop showing you
+something, not a screen you open. Three things were checked before acting:
+
+1. **It is not the only implementation.** `apps/magnifier/src/main.rs` is
+   **5 769 lines**, has a real `fn main` running through `app::launch`, and
+   opens *"Screen Magnifier -- the accessibility zoom for SlateOS, in a real
+   window"*. It carries lens mode, docked modes, colour filters, a
+   crosshair, a ruler and a pixel colour readout.
+2. **It is not even the better one.** The dead `MagnifierShape` conflated
+   two concepts in one enum -- `Circle`, `Rectangle`, `DockedTop`,
+   `FullScreen` -- where the application separates `MagnifyMode` (with
+   `DockedBottom` as well) from `LensShape`. Every `MagnifierConfig` field
+   has an equivalent there.
+3. **It did not magnify anything.** Its own doc says so: *"The magnified
+   content itself is the compositor's; what is here is the frame around it
+   and the placeholder the content lands on."* It drew a lens outline and
+   crosshairs over an opaque rectangle. 131 lines of chrome for a
+   magnification that nothing performed.
+
+**The 815 argument survives the deletion and is recorded here instead,
+because it is a design question and not a reason to keep placeholder
+code.** It is genuinely unsettled where this feature ends up:
+
+| | |
+|---|---|
+| A lens the *shell* composites over everything | what 815 implies, and what the deleted code was the frame for |
+| A *window* that shows a magnified view | what `apps/magnifier` is, and what ships today |
+
+**Neither can magnify the screen, and both are blocked on the same missing
+thing.** `apps/magnifier`'s `sample_pixel` is labelled *"a stub for a
+compositor capture that does not exist yet"* and returns a procedural
+pattern; the shell copy left the content to a compositor that was never
+asked. Until the compositor can hand out screen contents, the question of
+*where* the magnifier lives cannot be answered by either codebase, and
+keeping the smaller one alive did not move it any closer.
+
+**Nothing else was lost, checked type by type.**
+
+| what was in it | where the live one is |
+|---|---|
+| `HighContrastTheme` | a `pub use` alias of `appearance::HighContrastScheme`, whose own docs are fuller and cite §816 |
+| `ColorFilter` | a `pub use` alias of `appearance::ColorFilter` |
+| `MagnifierConfig`, `MagnifierShape`, `Magnifier` | `apps/magnifier` |
+| `CursorSettings` | `AppearanceSettings::cursor_size` / `cursor_scheme` |
+| `AccessibilityConfig` | `appearance::AppearanceSettings` and `gui/inputsettings` |
+
+Deleting a file deletes its reasoning, so the prose was read before the
+code. Two passages were load-bearing -- why high contrast is exempt from
+palette conversion, and why the lens ink stopped being white. The first is
+already stated where the real type lives, with the §816 reference this copy
+lacked; the second is in this file.
+
+`cargo test -p desktop` goes from 2 954 to 2 922, which is exactly the 32
+tests that were in the file and nothing else.
+
+**What the deletion does lose the only record of, so it is written here.**
+Three fields had no live equivalent, confirmed by grep across `gui` and
+`apps`:
+
+| wanted | state |
+|---|---|
+| `screen_reader` | **no implementation anywhere** -- zero hits outside the deleted file |
+| `text_scale` | wanted as a *multiplier*; `FontSettings::ui_size` is absolute, which is a different control |
+| `visual_alerts` | a field of the same name exists in `apps/settings` and reaches nothing |
+
+That table is the record now, which is this entry's own standing rule: a
+dead field may go once what it recorded lives somewhere else, and somewhere
+else may be this file. `caret_width` and `focus_indicator` left the same
+way -- and both were *built* first, because this table had recorded them.
 
 **This is the unfinished remainder of a cleanup that already happened.**
 `TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`

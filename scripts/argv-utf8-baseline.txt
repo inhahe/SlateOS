@@ -106,7 +106,6 @@ userspace/lscpu/src/main.rs:argv-as-string
 userspace/lsirq/src/main.rs:argv-as-string
 userspace/lsmem/src/main.rs:argv-as-string
 userspace/lsmod/src/main.rs:argv-as-string
-userspace/lsns/src/main.rs:argv-as-string
 userspace/lsof/src/main.rs:argv-as-string
 userspace/lspci/src/main.rs:argv-as-string
 userspace/lsusb/src/main.rs:argv-as-string
@@ -169,7 +168,6 @@ userspace/tac/src/main.rs:argv-as-string
 userspace/tcpdump/src/main.rs:argv-as-string
 userspace/telnet/src/main.rs:argv-as-string
 userspace/thermald/src/main.rs:argv-as-string
-userspace/timeout/src/main.rs:argv-as-string
 userspace/top/src/main.rs:argv-as-string
 userspace/tput/src/main.rs:argv-as-string
 userspace/traceroute/src/main.rs:argv-as-string

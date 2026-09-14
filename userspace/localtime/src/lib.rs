@@ -191,6 +191,114 @@ impl Zone {
     pub fn local(&self, t: i64, nanos: u32) -> Tm {
         Tm::from_utc(t, nanos, self.lookup(t))
     }
+
+    /// The inverse of [`Zone::local`]: a civil local time to a UTC instant.
+    ///
+    /// This is `mktime`. It returns the instant *and* the normalised [`Tm`],
+    /// because a caller that hands in `2024-02-31` or `month: 13` needs to know
+    /// what that resolved to — which is the same reason C's `mktime` writes
+    /// back through its argument.
+    ///
+    /// # Why it iterates
+    ///
+    /// The offset depends on the instant and the instant depends on the offset.
+    /// So it starts from the UTC guess and applies the offset in force there,
+    /// repeating until it settles. Three rounds converge for every real zone,
+    /// because an offset change is never larger than a day and never happens
+    /// twice within one.
+    ///
+    /// A local time that a spring-forward skipped **does not exist**, and this
+    /// resolves it to a nearby instant rather than failing — which is what
+    /// glibc does with `tm_isdst = -1`. An ambiguous time in a fall-back hour
+    /// picks one of the two, likewise as glibc does.
+    ///
+    /// # Why it lives here
+    ///
+    /// `userspace/coreutils/src/bin/cal.rs` carried this, under a comment
+    /// saying "there is no inverse of `Zone::local` in the `localtime` crate,
+    /// so this is it". Three other files carry private copies of the
+    /// [`days_from_civil`] half alone. That is the same shape as the
+    /// duplication this crate was created to end — see the module docs, where
+    /// `unix_secs_to_datetime` is recorded as the fourth copy of the *forward*
+    /// arithmetic. This is the first copy of the reverse.
+    #[must_use]
+    pub fn epoch(&self, civil: &Civil) -> (i64, Tm) {
+        // Normalise the month first, so `days_from_civil` sees 1..=12 and any
+        // day-of-month overflow (31 February) is left for it to carry.
+        let year = civil
+            .year
+            .saturating_add((civil.month.saturating_sub(1)).div_euclid(12));
+        let month = (civil.month.saturating_sub(1))
+            .rem_euclid(12)
+            .saturating_add(1);
+
+        let days = days_from_civil(year, month, civil.day);
+        let local_secs = days
+            .saturating_mul(86_400)
+            .saturating_add(civil.hour.saturating_mul(3_600))
+            .saturating_add(civil.minute.saturating_mul(60))
+            .saturating_add(civil.second);
+
+        let mut t = local_secs;
+        for _ in 0..3 {
+            let off = i64::from(self.lookup(t).gmtoff);
+            let next = local_secs.saturating_sub(off);
+            if next == t {
+                break;
+            }
+            t = next;
+        }
+        (t, self.local(t, 0))
+    }
+}
+
+/// A civil (wall-clock) local time, with fields allowed **out of range**.
+///
+/// Out-of-range is the point: it is what lets a caller say "the 32nd of March"
+/// or "month 13" and have [`Zone::epoch`] carry it, which is how `date -d` and
+/// `cal` resolve `tomorrow` without special-casing month ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Civil {
+    pub year: i64,
+    /// 1..=12 nominally; outside that range it carries into the year.
+    pub month: i64,
+    pub day: i64,
+    pub hour: i64,
+    pub minute: i64,
+    pub second: i64,
+}
+
+/// Days since 1970-01-01 for a proleptic-Gregorian civil date.
+///
+/// Howard Hinnant's `days_from_civil`, which is what the C library's `mktime`
+/// computes by a longer road. It is exact for every year in `i64` and needs no
+/// table.
+///
+/// Note that `m` and `d` are *not* range-checked: this is the arithmetic half,
+/// and [`Zone::epoch`] is where normalisation happens.
+#[must_use]
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y.saturating_sub(1) } else { y };
+    // Hinnant writes this as `(y >= 0 ? y : y-399) / 400`, which is how you
+    // get a FLOOR division out of C's truncating one. `div_euclid` already
+    // floors, so the `-399` must NOT be carried over as well — doing both
+    // double-corrects and moves every date in a negative year by an era
+    // (y = -100 lands in era -2 instead of -1).
+    let era = y.div_euclid(400);
+    let yoe = y.saturating_sub(era.saturating_mul(400));
+    let mp = (m.saturating_add(9)).rem_euclid(12);
+    let doy = (mp.saturating_mul(153).saturating_add(2))
+        .div_euclid(5)
+        .saturating_add(d)
+        .saturating_sub(1);
+    let doe = yoe
+        .saturating_mul(365)
+        .saturating_add(yoe.div_euclid(4))
+        .saturating_sub(yoe.div_euclid(100))
+        .saturating_add(doy);
+    era.saturating_mul(146_097)
+        .saturating_add(doe)
+        .saturating_sub(719_468)
 }
 
 /// Build the path of the zoneinfo file `name` names, or `None` for a name that
@@ -974,6 +1082,107 @@ mod tests {
         let one_pm = utc_tm(13 * 3600);
         assert_eq!(fmt("%I %p", &one_pm), "01 PM");
         assert_eq!(fmt("%l %p", &one_pm), " 1 PM");
+    }
+
+    #[test]
+    fn days_from_civil_known_points() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+        assert_eq!(days_from_civil(1970, 1, 2), 1);
+        assert_eq!(days_from_civil(2000, 3, 1), 11017);
+        // A leap day, and the day either side of it.
+        assert_eq!(
+            days_from_civil(2024, 2, 29) - days_from_civil(2024, 2, 28),
+            1
+        );
+        assert_eq!(
+            days_from_civil(2024, 3, 1) - days_from_civil(2024, 2, 29),
+            1
+        );
+        // 1900 was NOT a leap year; 2000 was.
+        assert_eq!(
+            days_from_civil(1900, 3, 1) - days_from_civil(1900, 2, 28),
+            1
+        );
+        assert_eq!(
+            days_from_civil(2000, 3, 1) - days_from_civil(2000, 2, 28),
+            2
+        );
+    }
+
+    #[test]
+    fn days_from_civil_round_trips_against_the_forward_conversion() {
+        // The forward direction (`Tm::from_utc`) is already trusted -- it is
+        // what every timestamp in the tree is rendered through -- so it serves
+        // as the oracle for the inverse. Sweeping a range beats hand-picked
+        // points here: the error I actually made while writing this was in the
+        // ERA term, which only shows up in years far from 1970 and would have
+        // passed every plausible spot check around the epoch.
+        let utc = Zone::utc();
+        let mut day = -800_000i64; // well before year 0
+        while day < 800_000 {
+            let t = day.saturating_mul(86_400);
+            let tm = utc.local(t, 0);
+            assert_eq!(
+                days_from_civil(tm.year, i64::from(tm.month), i64::from(tm.day)),
+                day,
+                "round trip failed at day {day} ({}-{}-{})",
+                tm.year,
+                tm.month,
+                tm.day
+            );
+            day += 997; // a prime stride, so the sweep does not align to weeks,
+            // months or leap cycles
+        }
+    }
+
+    #[test]
+    fn zone_epoch_is_the_inverse_of_zone_local() {
+        let utc = Zone::utc();
+        for t in [0i64, 1, -1, 1_000_000_000, -1_000_000_000, 1_614_834_367] {
+            let tm = utc.local(t, 0);
+            let civil = Civil {
+                year: tm.year,
+                month: i64::from(tm.month),
+                day: i64::from(tm.day),
+                hour: i64::from(tm.hour),
+                minute: i64::from(tm.minute),
+                second: i64::from(tm.second),
+            };
+            assert_eq!(utc.epoch(&civil).0, t, "round trip failed for {t}");
+        }
+    }
+
+    #[test]
+    fn zone_epoch_normalises_out_of_range_fields() {
+        let utc = Zone::utc();
+        // The 32nd of March is the 1st of April, and month 13 is next January.
+        // This is the behaviour `date -d tomorrow` and `cal` rely on, so it is
+        // load-bearing rather than a curiosity.
+        let (_, tm) = utc.epoch(&Civil {
+            year: 2021,
+            month: 3,
+            day: 32,
+            ..Civil::default()
+        });
+        assert_eq!((tm.year, tm.month, tm.day), (2021, 4, 1));
+
+        let (_, tm) = utc.epoch(&Civil {
+            year: 2021,
+            month: 13,
+            day: 1,
+            ..Civil::default()
+        });
+        assert_eq!((tm.year, tm.month, tm.day), (2022, 1, 1));
+
+        // February 30th in a leap year is March 1st.
+        let (_, tm) = utc.epoch(&Civil {
+            year: 2024,
+            month: 2,
+            day: 30,
+            ..Civil::default()
+        });
+        assert_eq!((tm.year, tm.month, tm.day), (2024, 3, 1));
     }
 
     #[test]

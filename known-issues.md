@@ -657,6 +657,38 @@ does — rather than reading `/etc/resolv.conf`'s `search` line. The distinction
 matters beyond this program: the resolver's search list is for *completing
 queries*, not for naming this host.
 
+### BLOCKED, 2026-09-14 — our own libc does not implement `AI_CANONNAME`
+
+The fix above names a mechanism this project does not have.
+`posix/src/socket.rs:4589` says so outright, in the `getaddrinfo` result
+constructor:
+
+```rust
+// Always NULL: we do not implement AI_CANONNAME.  If it is ever
+// added, the name must live inside this same block (glibc does the
+// same) — `freeaddrinfo` frees the node and nothing else.
+ai_canonname: core::ptr::null_mut(),
+```
+
+So `getaddrinfo(…, AI_CANONNAME, …)` returns a node whose canonical name is
+`NULL`, and `hostname` would have nothing to read. **The prerequisite is in
+this lane** — `posix/**` is lane B's — so this is not a request to file, it is
+two pieces of work in order:
+
+1. implement `AI_CANONNAME` in `posix`, honouring the allocation constraint
+   the existing comment already states: the name must live inside the same
+   block as the node, because `freeaddrinfo` frees the node and nothing else;
+2. then change `hostname` to use it.
+
+**Scale, so the next reader knows what they are picking up:**
+`scripts/hostname-diff.sh` is **7 passed / 50 differed** — by ratio the worst
+harness in the tree, and the largest single family of those is this one cause.
+Doing (1) without (2) fixes nothing visible; doing (2) without (1) is
+impossible.
+
+Written down because the entry as it stood sends someone to `getaddrinfo` with
+a plausible plan and no warning that the call cannot answer.
+
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
 `userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through

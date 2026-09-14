@@ -52,7 +52,7 @@
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{Opt, Program, Takes};
-use coreutils::quote::{os_bytes, quote_os};
+use coreutils::quote::{os_bytes, quote_os, quotef_os};
 use coreutils::stdfd;
 use localtime::{Tm, Zone, strftime};
 use std::ffi::OsString;
@@ -106,7 +106,18 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
 /// reading: *"date: `--u` we say ambiguous, GNU resolves it; matches ['uct',
 /// 'utc', 'universal']: a missing ALIASES entry"*. The same shape as `rmdir`'s
 /// `--path`/`--parents`, which is the case that gate was written for.
-const ALIASES: &[(&str, &str)] = &[("uct", "utc"), ("universal", "utc")];
+const ALIASES: &[(&str, &str)] = &[
+    ("uct", "utc"),
+    ("universal", "utc"),
+    // `--rfc-822` and `--rfc-2822` are the obsolete spellings of `--rfc-email`
+    // and share its `val`, so `--rfc` has only TWO possibilities in GNU, not
+    // four. Measured: `date --rfc` answers
+    //     option '--rfc' is ambiguous; possibilities: '--rfc-email' '--rfc-3339'
+    // where a name-only table lists all four and is wrong in the same way
+    // `--u` was before the two rows above were added.
+    ("rfc-822", "rfc-email"),
+    ("rfc-2822", "rfc-email"),
+];
 
 /// GNU's default output, measured: `Sun Sep  9 01:46:40 UTC 2001`.
 const DEFAULT_FORMAT: &[u8] = b"%a %b %e %H:%M:%S %Z %Y";
@@ -340,10 +351,10 @@ fn resolve(when: &When) -> Result<(i64, u32), String> {
         When::Epoch(s) => Ok((*s, 0)),
         When::File(path) => {
             let meta = fs::metadata(path)
-                .map_err(|e| format!("date: {}: {}", quote_os(path), strerror(&e)))?;
+                .map_err(|e| format!("date: {}: {}", quotef_os(path), strerror(&e)))?;
             let mtime = meta
                 .modified()
-                .map_err(|e| format!("date: {}: {}", quote_os(path), strerror(&e)))?;
+                .map_err(|e| format!("date: {}: {}", quotef_os(path), strerror(&e)))?;
             match mtime.duration_since(UNIX_EPOCH) {
                 Ok(d) => {
                     let secs = i64::try_from(d.as_secs())
@@ -389,7 +400,18 @@ fn run_main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(m) => {
-            diag!("{}", m);
+            // `date: `, because every error reaching here came from
+            // `parse_args`/`parse_when` as a bare `Error::message()`, which is
+            // the sentence *without* the program name — `Program::report` is
+            // the thing that normally supplies it, and converting to `String`
+            // early skips it. Five harness cases were a missing prefix alone:
+            // `invalid option -- 'Q'` against GNU's `date: invalid option --
+            // 'Q'`, and the same for `--nosuchoption`, `--set`, `-r` and `-f`.
+            //
+            // Not applied at the `resolve` site below: those messages build
+            // their own prefix (`date: the system clock is before the epoch`),
+            // and adding one here would double it.
+            diag!("date: {}", m);
             return ExitCode::FAILURE;
         }
     };

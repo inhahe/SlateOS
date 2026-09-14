@@ -67275,7 +67275,44 @@ those presuppose the check runs. A dead instrument fails before either question
 is meaningful, and it is the only one of the four that costs nothing to rule
 out.
 
-**Where the four sit relative to each other.** A dead instrument cannot fire at
+**A fifth, found by lane C on 2026-09-14: the test performs the missing step
+itself.** Distinct from the four above, and the hardest to see, because scope,
+subject and assertion are all correct.
+
+`DesktopShell` wrote `shortcuts.yaml` on every rebind and never read it back, so
+a rebound key was lost at the next start. There was a test asserting exactly the
+property that was broken -- *the rebind must survive a restart* -- and it passed
+throughout. It built a fresh shell and called `fresh.load_shortcuts()` **by
+hand**. It simulated the restart by opening the door itself, then asserted the
+room was lit.
+
+Nothing about it is dishonest. It examines the right object, asks the right
+question, and its assertion is strong. What it does wrong is in its *setup*: it
+supplies the step production omits, so it measures the code's behaviour in a
+world the code never runs in.
+
+**Why "would this go red" does not catch it.** Break `load_shortcuts` and the
+test does go red -- it is a real test of a real function. The defect is not in
+the function under test but in the **caller that does not exist**, and no
+assertion about `load_shortcuts` can see an absent call in `ShellSession::start`.
+
+**The diagnostic:** ask what the test does *before* the assertion, and whether
+production does those things too. Every line of setup that production does not
+perform is a premise the test has quietly granted itself. For a persistence
+pair, the test must reach the state the way a user does -- restart the session --
+rather than by invoking the load directly.
+
+**Cheap mechanical proxy, since the above needs judgement:** an asymmetric pair,
+where `save_x` has production callers and `load_x` has callers only in tests.
+Lane C's `scripts/check-tested-but-uncalled.py` reports exactly that shape. Its
+first version reported **915** hits by asking the broader question "written and
+never read back", almost all of them library APIs with no consumer yet; narrowed
+to the asymmetric-pair shape it reports two, one of them a live data-loss bug.
+A gate answering 915 times is one nobody reads, which is its own way of being a
+check that cannot fire.
+
+**Where the four sit relative to each other.** A test that performs the missing step itself grants itself a premise;
+a dead instrument cannot fire at
 all; substitution fires correctly about the wrong subject; population blindness
 fires about the right subject with the wrong scope; property blindness has the
 scope right and asks too little. Test them in that order -- cheapest and most

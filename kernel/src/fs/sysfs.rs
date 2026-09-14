@@ -1975,6 +1975,85 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     skips.report("[sysfs]");
+    // --- /sys/devices/system: cpuid identity and memory totals ---
+    //
+    // Returns Err rather than asserting: a bare assert! panics, and a panic in
+    // a self-test halts the kernel, which is a worse outcome than the harness
+    // reporting a failed suite. The dispatch machinery exists to grade these.
+    {
+        // 1. Both children of devices/system are listed. `readdir` carries a
+        //    `_ => NotADirectory` wildcard, so a directory can classify and
+        //    stat correctly yet never appear in its parent -- which is what
+        //    this catches and the compiler cannot.
+        let sys_entries = fs.readdir(Path::new("/devices/system"))?;
+        for want in ["cpu", "memory"] {
+            if !sys_entries
+                .iter()
+                .any(|e| e.name.as_path().as_bytes() == want.as_bytes())
+            {
+                serial_println!("[sysfs]   FAIL: /devices/system does not list {want}");
+                return Err(KernelError::IoError);
+            }
+        }
+        let cpu_entries = fs.readdir(Path::new("/devices/system/cpu"))?;
+        if !cpu_entries
+            .iter()
+            .any(|e| e.name.as_path().as_bytes() == b"cpuid")
+        {
+            serial_println!("[sysfs]   FAIL: /devices/system/cpu does not list cpuid");
+            return Err(KernelError::IoError);
+        }
+
+        // 2. CPUID identity reads as a number.
+        let fam = fs.read_file(Path::new("/devices/system/cpu/cpuid/family"))?;
+        let fam_s = core::str::from_utf8(&fam).unwrap_or("").trim();
+        if fam_s.is_empty() || fam_s.parse::<u32>().is_err() {
+            serial_println!("[sysfs]   FAIL: cpuid/family is not a number: {fam_s:?}");
+            return Err(KernelError::IoError);
+        }
+
+        // 3. THE ONE THAT MATTERS. memory/total_kb must equal /proc/meminfo's
+        //    MemTotal. Both answer 'how much memory is there', and the whole
+        //    reason this tree was chosen over a second /sys/hardware one was
+        //    to avoid two kernel answers to a single question. The obvious
+        //    source, frame::stats().total_frames, counts non-usable holes and
+        //    would pass every other check here while disagreeing with procfs.
+        //    If someone later 'simplifies' gen_memory_file to use it, this
+        //    goes red -- which is the only reason the guarantee survives the
+        //    next person to read that function.
+        let ours = fs.read_file(Path::new("/devices/system/memory/total_kb"))?;
+        let ours_s = core::str::from_utf8(&ours).unwrap_or("").trim();
+        let meminfo = procfs.read_file(Path::new("/proc/meminfo"))?;
+        let meminfo_s = core::str::from_utf8(&meminfo).unwrap_or("");
+        let memtotal = meminfo_s
+            .lines()
+            .find(|l| l.starts_with("MemTotal:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or("");
+        if ours_s != memtotal || memtotal.is_empty() {
+            serial_println!(
+                "[sysfs]   FAIL: memory/total_kb = {ours_s:?} but /proc/meminfo \
+                 MemTotal = {memtotal:?} -- two kernel answers to one question"
+            );
+            return Err(KernelError::IoError);
+        }
+        serial_println!(
+            "[sysfs]   /devices/system/memory/total_kb == /proc/meminfo MemTotal ({memtotal} kB): OK"
+        );
+
+        // 4. cpufreq is absent ON PURPOSE -- no frequency source exists, and a
+        //    file reading 0 cannot be told from a real 0 MHz. Asserted so the
+        //    absence is a decision on record rather than something a later
+        //    reader fills in to be helpful.
+        if fs
+            .read_file(Path::new("/devices/system/cpu/cpu0/cpufreq/base_mhz"))
+            .is_ok()
+        {
+            serial_println!("[sysfs]   FAIL: cpufreq/base_mhz answered; it has no source");
+            return Err(KernelError::IoError);
+        }
+        serial_println!("[sysfs]   devices/system: cpuid + memory OK, cpufreq absent by design");
+    }
     serial_println!("[sysfs] Self-test passed{}.", skips.suffix());
     Ok(())
 }

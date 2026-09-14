@@ -632,6 +632,10 @@ pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
     const SETTLE_YIELDS: u32 = 8;
     /// Yields waited for the reader to reach `recv` before calling it a setup
     /// failure rather than a property failure.
+    /// Accept retries. `connect` is non-blocking, so the handshake completes
+    /// over several scheduler passes; netstack_client uses 16 for the same
+    /// reason and this allows more because the machine is busier here.
+    const ACCEPT_SPINS: u32 = 64;
     const START_YIELDS: u32 = 10_000;
 
     let me_ip = crate::net::interface::ip().0;
@@ -641,17 +645,83 @@ pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
 
     HOL_READER_IN_RECV.store(false, core::sync::atomic::Ordering::SeqCst);
 
-    let srv = create(2)?;
-    bind_stream(srv, PORT)?;
-    listen(srv, 2)?;
+    // Each step names itself on failure. The first run of this witness died
+    // with a bare `InternalError` and neither FAIL line below printed, because
+    // six setup calls used a plain `?` -- it took reading the source to learn
+    // which calls were even candidates.
+    macro_rules! step {
+        ($what:literal, $e:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(e) => {
+                    crate::serial_println!(
+                        "[netsock]   FAIL: head-of-line setup step {} failed: {:?}",
+                        $what,
+                        e
+                    );
+                    return Err(e);
+                }
+            }
+        };
+    }
+
+    let srv = step!("create(listener)", create(2));
+    step!("bind_stream", bind_stream(srv, PORT));
+    step!("listen", listen(srv, 2));
 
     // Two clients, two accepts: both accepted fds land on the listener's session.
-    let c1 = create(2)?;
-    connect(c1, &me_ip, PORT, true)?;
-    let (a1, _) = accept(srv)?;
-    let c2 = create(2)?;
-    connect(c2, &me_ip, PORT, true)?;
-    let (a2, _) = accept(srv)?;
+    //
+    // `connect` is non-blocking, so the handshake is not complete when it
+    // returns and `accept` must be retried while the stack pumps it. The first
+    // version accepted once and failed here -- `netstack_client`'s loopback
+    // test retries 16 times for the same reason, which is the precedent this
+    // now follows rather than rediscovering it in a second red boot.
+    fn accept_ready(srv: SocketHandle) -> KernelResult<SocketHandle> {
+        let mut last = KernelError::WouldBlock;
+        for _ in 0..ACCEPT_SPINS {
+            match accept(srv) {
+                Ok((h, _)) => return Ok(h),
+                Err(e) => {
+                    last = e;
+                    crate::sched::yield_now();
+                }
+            }
+        }
+        Err(last)
+    }
+
+    let c1 = step!("create(client 1)", create(2));
+    step!("connect(client 1)", connect(c1, &me_ip, PORT, true));
+    let a1 = match accept_ready(srv) {
+        Ok(h) => h,
+        Err(e) => {
+            close(c1);
+            close(srv);
+            crate::serial_println!(
+                "[netsock]   FAIL: first accept never became ready in {} spins: {:?}",
+                ACCEPT_SPINS,
+                e
+            );
+            return Err(e);
+        }
+    };
+    let c2 = step!("create(client 2)", create(2));
+    step!("connect(client 2)", connect(c2, &me_ip, PORT, true));
+    let a2 = match accept_ready(srv) {
+        Ok(h) => h,
+        Err(e) => {
+            close(a1);
+            close(c1);
+            close(c2);
+            close(srv);
+            crate::serial_println!(
+                "[netsock]   FAIL: second accept never became ready in {} spins: {:?}",
+                ACCEPT_SPINS,
+                e
+            );
+            return Err(e);
+        }
+    };
 
     crate::sched::spawn(b"hol-idle-reader", 16, hol_idle_reader, a1.raw(), 0)?;
 

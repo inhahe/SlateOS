@@ -99,7 +99,11 @@
 //!   kernel drops the per-thread exit-value entry eagerly (the self-unmap
 //!   path passes the `SYS_THREAD_EXIT` detached flag = 1), so a detached
 //!   thread leaks neither its stack nor a kernel map entry.
-//! - `pthread_cancel` accepted but never actually cancels a thread.
+//! - `pthread_cancel` returns `ENOSYS`. It does not pretend to cancel: a
+//!   caller is told the operation is unavailable rather than left believing
+//!   a thread is stopping. (This line read "accepted but never actually
+//!   cancels a thread" until 2026-09-13, which described the function before
+//!   it started refusing.)
 //! - Mutex is a spinlock (no futex-based blocking).
 //! - Condition variables use spin-yield (1ms intervals) watching a
 //!   generation counter.  Correct but not efficient.

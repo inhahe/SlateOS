@@ -143600,11 +143600,11 @@ caller asked for something, was told it got it, and did not.
 | `sysv_shm.rs` | `SHM_RDONLY` — accepted but unenforced | a read-only shared mapping is writable; a process that attached read-only can corrupt the segment |
 | ~~`sysv_msg.rs`~~ | ~~`MSG_COPY` — "treated as a normal receive"~~ | **FIXED 2026-09-13.** `MSG_COPY` is now a real peek: `msgtyp` is a 0-based queue index in `seq` order, `IPC_NOWAIT` is required and `MSG_EXCEPT` refused (it selects by type, so one call cannot mean both), and the message stays queued for whoever it was sent to |
 | `sysv_sem.rs` | `SEM_UNDO` — accepted but ignored | a process that dies holding a semaphore never releases it; everyone waiting deadlocks |
-| `pthread.rs` | `pthread_cancel` — "accepted but never actually cancels" | the caller believes a thread is stopping; it runs on |
+| ~~`pthread.rs`~~ | ~~`pthread_cancel`~~ | **NOT A DEFECT — row withdrawn.** The code is `pthread_cancel(_thread) -> i32 { errno::ENOSYS }`. It refuses, which is correct; only the module doc still said "accepted but never actually cancels" |
 | `sysv_shm.rs` | `SHM_REMAP`, `SHM_RND`, caller-supplied `shmaddr` | the segment lands somewhere other than where it was asked to |
-| `ioctl.rs` | `TIOCSWINSZ` on Console fds — "accepts (no-op)" | a resized terminal keeps reporting the old size |
+| ~~`ioctl.rs`~~ | ~~`TIOCSWINSZ` on Console fds~~ | **NOT A DEFECT — row withdrawn.** `handle_tiocswinsz` issues `SYS_PTY_SET_WINSIZE` for Console too (via `CTTY`). Its own function doc said so; the module's summary list did not |
 | `syslog.rs` | `openlog` facility ignored | entries are filed under the wrong facility |
-| `fts.rs` | `FTS_COMFOLLOW` partial; `FTS_LOGICAL` re-stat is a no-op | symlink traversal differs from what was requested |
+| `fts.rs` | `FTS_COMFOLLOW` partial; `FTS_LOGICAL` re-stat is a no-op | weakest of the set: `FTS_COMFOLLOW` **is** read (`fts.rs:952`), so this is a documented partial implementation rather than a flag ignored. Listed for completeness, not as a defect |
 
 `fcntl_ops.rs` is the one that matters most and is not fixable here. SQLite —
 which CPython links — uses POSIX advisory record locks as its **entire**
@@ -143612,6 +143612,36 @@ cross-process correctness mechanism. On a libc where `F_SETLK` always succeeds,
 two SQLite connections both believe they have the write lock and interleave
 writes into one file. It needs a kernel-side lock table keyed by inode, so it is
 filed as `requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`.
+
+### Correction — the survey caught its own disease
+
+**Two of the nine rows were wrong, and both for the reason the survey exists.**
+The sweep was built by grepping *documentation* — the `## Limitations` lists —
+and documentation is precisely the artifact this session has spent all day
+proving unreliable. I hunted stale comments with a method that trusted comments.
+
+- `pthread_cancel` does not accept-and-ignore. It is
+  `pthread_cancel(_thread) -> i32 { errno::ENOSYS }` — an honest refusal, and
+  the right answer.
+- `TIOCSWINSZ` is not a Console no-op. It issues `SYS_PTY_SET_WINSIZE` for
+  every terminal kind.
+
+In both cases the **function-level** doc was accurate and the **module-level**
+summary was stale. `handle_tiocswinsz`'s own doc even says the operation "now
+goes to the kernel rather than being swallowed here" — the word *now* marking a
+fix whose author updated the doc beside the code and not the list at the top of
+the file. Both module docs are corrected in the same change as this note.
+
+**So a Limitations list goes stale in both directions**, and the second is the
+one I walked into: it can describe a defect as a design note (the original
+finding, three instances), and it can describe a *fixed* defect as still
+present. The first misleads a user; the second misleads the reader who believes
+it — here, a survey row published with confidence.
+
+The six rows that survive were re-checked against code rather than prose: the
+flag's constant is defined and its only other occurrences are in tests. That is
+a weaker claim than reading the logic, but it is falsifiable, and it is what the
+remaining rows now rest on.
 
 ### Progress
 

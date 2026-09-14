@@ -322,6 +322,24 @@ const TRAY_BELL_WIDTH: f32 = 24.0;
 /// sideways.
 const TRAY_ICON_SLOT: f32 = 24.0;
 
+/// The most of the taskbar the application icons may occupy.
+///
+/// **Without this the taskbar is destroyable by any program that can connect.**
+/// Measured on a 1920-wide bar before the cap existed: eighty icons made
+/// `tray_width` 2167, so `tray_x` clamped to zero, the icon run covered the
+/// whole bar including the clock at x=1805, and every window button was
+/// computed at *zero* width -- no way to switch windows, on a shell whose only
+/// window switcher that is. Nothing rationed it: `MAX_TRAY_ICONS` is 4096 and
+/// a program picks its own ids.
+///
+/// A share of the bar rather than a fixed count, because the question is how
+/// much room the *taskbar* can spare and that is a width. A fixed twelve would
+/// still crowd a 1024-wide netbook and would waste two thirds of a 4K bar.
+const TRAY_ICON_SHARE: f32 = 0.25;
+
+/// The glyph for "there are more icons than fit".
+const TRAY_OVERFLOW_GLYPH: &str = "\u{2039}";
+
 /// A press on a tray icon, in flight.
 struct TrayDrag {
     /// Threshold and click-versus-drag bookkeeping.
@@ -590,6 +608,9 @@ pub enum Hit {
     Clock,
     /// The tray's notification bell, which opens the notification pane.
     NotificationBell,
+    /// The chevron at the left of the icon run, which lists the icons the
+    /// bar had no room for.
+    TrayOverflow,
     /// An application's tray icon, by its index in
     /// [`DesktopShell::tray_icons`].
     ///
@@ -1030,6 +1051,14 @@ pub struct DesktopShell {
     /// tray whose icons move when an unrelated program registers one is a tray
     /// where the user's muscle memory is wrong.
     tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// The popup listing icons the bar had no room for, and which icons
+    /// those were when it opened.
+    ///
+    /// The keys are captured with the menu rather than recomputed on
+    /// selection: between opening the list and picking from it a program can
+    /// exit, and re-deriving the list would hand row 3 to whoever moved up
+    /// into position 3.
+    tray_overflow_menu: Option<(guitk::menu::ContextMenu, Vec<tray_dnd::TrayIconKey>)>,
     /// A press that landed on a tray icon and has not been released.
     ///
     /// Held from press to release because until the release the shell does
@@ -1520,6 +1549,7 @@ impl DesktopShell {
             tray_icons: Vec::new(),
             tray_arrangement: tray_dnd::TrayIconArrangement::new(),
             tray_drag: None,
+            tray_overflow_menu: None,
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -2168,6 +2198,13 @@ impl DesktopShell {
                     return Hit::TrayIcon(index);
                 }
             }
+            // The chevron, if the run has one. After the icons only in source
+            // order; its slot is disjoint from theirs.
+            if let Some(rect) = self.tray_overflow_rect()
+                && rect.contains(x, y)
+            {
+                return Hit::TrayOverflow;
+            }
             // The slot is resolved to a window *here*, while the list that
             // produced the rectangle is still in hand — see
             // [`Hit::TaskbarButton`].
@@ -2264,6 +2301,21 @@ impl DesktopShell {
                     self.widgets_dirty = true;
                     return ShellAction::Consumed;
                 }
+                _ => return ShellAction::Consumed,
+            }
+        }
+        // The overflow list, ahead of everything below it for the same reason
+        // the desktop menu is: it is drawn over the bar, so a press either
+        // landed on it or dismissed it.
+        if self.tray_overflow_menu.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some((menu, _)) = self.tray_overflow_menu.as_mut() {
+                        menu.handle_mouse_move(event.x, event.y);
+                    }
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => return self.click_tray_overflow(event.x, event.y),
                 _ => return ShellAction::Consumed,
             }
         }
@@ -2514,6 +2566,14 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
+        // The chevron is the shell's own control, so unlike the icons beside
+        // it only the primary button opens it -- consistent with the clock and
+        // the bell, which are the other two things the shell owns in the tray.
+        if matches!(hit, Hit::TrayOverflow) && button == MouseButton::Left {
+            self.open_tray_overflow();
+            return ShellAction::Consumed;
+        }
+
         // A tray icon answers both buttons, so it is handled before the
         // primary-button gate below. Right-click is the tray's own gesture --
         // it is how every tray in existence opens an application's menu -- and
@@ -2590,13 +2650,16 @@ impl DesktopShell {
                 self.toggle_notifications();
                 ShellAction::Consumed
             }
-            // Handled above the primary-button gate, because a tray icon
-            // answers the right button too. Reaching here means the icon went
+            // Handled above the primary-button gate, along with the chevron
+            // beside it, because a tray icon answers the right button too. Reaching here means the icon went
             // away between the frame that drew it and the press; consumed
             // rather than passed on, because the user aimed at the tray and
             // letting the press fall through to whatever is behind it would
             // act on something they were not pointing at.
             Hit::TrayIcon(_) => ShellAction::Consumed,
+            // Likewise: opened above. Reaching here is a non-primary press on
+            // the chevron, which the shell owns and so swallows.
+            Hit::TrayOverflow => ShellAction::Consumed,
             Hit::CalendarControl(control) => {
                 self.calendar.apply(control);
                 ShellAction::Consumed
@@ -3415,6 +3478,29 @@ impl DesktopShell {
             return outcome;
         }
 
+        // The overflow list, on the same terms as the desktop menu below and
+        // ahead of it only because the two cannot both be open. Without this
+        // the list could be opened and then only used with the mouse, which
+        // for a popup whose entire purpose is to reach icons too small to see
+        // would be a strange place to require fine pointing.
+        if self.tray_overflow_menu.is_some() {
+            let outcome = match self
+                .tray_overflow_menu
+                .as_mut()
+                .map(|(menu, _)| menu.handle_key(key))
+            {
+                Some(Some(MenuAction::Selected(id))) => self.activate_overflow_row(id),
+                Some(Some(MenuAction::Closed)) => {
+                    self.tray_overflow_menu = None;
+                    HotkeyOutcome::consumed()
+                }
+                // The list moved its highlight, or ignored the key. Either way
+                // it stays open and the press goes no further.
+                _ => HotkeyOutcome::consumed(),
+            };
+            return outcome;
+        }
+
         // The desktop menu owns the keyboard while it is up, for the reason
         // every modal surface here does: arrows walk its rows, Enter chooses,
         // Escape closes, and none of those should also do whatever the global
@@ -4208,6 +4294,17 @@ impl DesktopShell {
         // it cannot see -- the defect `Palette::ink` exists to prevent -- and
         // on a taskbar the one pair this theme guarantees legible is the bar's
         // foreground on the bar.
+        // The chevron first, at the left of the run, so that a reader of this
+        // function meets the strip in the order it is drawn.
+        if let Some(rect) = self.tray_overflow_rect() {
+            tree.text(
+                rect.x,
+                tray_text_y,
+                TRAY_OVERFLOW_GLYPH,
+                self.theme.taskbar_fg,
+                self.font_size(TextRole::Glyph),
+            );
+        }
         for (rect, icon) in self.tray_icon_rects().iter().zip(self.ordered_tray_icons()) {
             tree.text(
                 rect.x,
@@ -4711,13 +4808,24 @@ impl DesktopShell {
     /// reads.
     #[must_use]
     pub fn ordered_tray_icons(&self) -> Vec<&guiremote::tray::TrayIcon> {
-        self.tray_arrangement
-            .ordered_keys()
-            .into_iter()
+        self.join_tray(
+            &self
+                .tray_arrangement
+                .visible_icons(self.tray_icon_capacity())
+                .iter()
+                .map(|slot| slot.key)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Resolve keys to the compositor's records of them, dropping any that
+    /// have since departed.
+    fn join_tray(&self, keys: &[tray_dnd::TrayIconKey]) -> Vec<&guiremote::tray::TrayIcon> {
+        keys.iter()
             .filter_map(|wanted| {
                 self.tray_icons
                     .iter()
-                    .find(|icon| tray_dnd::TrayIconKey::of(icon) == wanted)
+                    .find(|icon| tray_dnd::TrayIconKey::of(icon) == *wanted)
             })
             .collect()
     }
@@ -4741,6 +4849,107 @@ impl DesktopShell {
         self.tray_arrangement.sync(&icons);
         self.tray_icons = icons;
         true
+    }
+
+    /// Open the list of icons the bar had no room for.
+    ///
+    /// A menu rather than a second strip of icons. The strip is what ran out
+    /// of room in the first place, and a popup one can also read: the entries
+    /// carry the program's tooltip as their label, which is the only place in
+    /// this shell a tray icon's name is ever shown -- a 24-pixel glyph on a
+    /// bar has nowhere to put one.
+    fn open_tray_overflow(&mut self) {
+        // Opening a popup closes the others, as every other popup here does.
+        self.start_menu_open = false;
+        self.power_menu_open = false;
+        self.shortcut_card_open = false;
+        self.calendar.set_visible(false);
+        self.notifications.hide();
+
+        let hidden = self.overflowed_tray_icons();
+        if hidden.is_empty() {
+            return;
+        }
+        let mut keys = Vec::with_capacity(hidden.len());
+        let mut items = Vec::with_capacity(hidden.len());
+        for (index, icon) in hidden.iter().enumerate() {
+            keys.push(tray_dnd::TrayIconKey::of(icon));
+            items.push(guitk::menu::MenuItem::Action {
+                // The row's position, resolved against `keys` rather than
+                // against the live tray -- see the field's documentation.
+                id: index as u64,
+                label: if icon.tooltip.is_empty() {
+                    // A program that registered no tooltip still has to be
+                    // nameable, or its row is a blank line.
+                    icon.glyph.clone()
+                } else {
+                    icon.tooltip.clone()
+                },
+                shortcut: None,
+                icon: Some(icon.glyph.clone()),
+                enabled: true,
+                checked: None,
+            });
+        }
+        let Some(rect) = self.tray_overflow_rect() else {
+            return;
+        };
+        let mut menu = guitk::menu::ContextMenu::new(items);
+        menu.show(rect.x, rect.y);
+        self.tray_overflow_menu = Some((menu, keys));
+    }
+
+    /// A press while the overflow list is open.
+    fn click_tray_overflow(&mut self, x: f32, y: f32) -> ShellAction {
+        let Some((menu, _)) = self.tray_overflow_menu.as_mut() else {
+            return ShellAction::Consumed;
+        };
+        // A press that named no row: on the panel's own padding, or outside
+        // it. Either way the list closes, as the desktop menu does.
+        let Some(id) = menu.handle_click(x, y) else {
+            self.tray_overflow_menu = None;
+            return ShellAction::Consumed;
+        };
+        match self.take_overflow_row(id) {
+            Some(request) => ShellAction::Control(request),
+            None => ShellAction::Consumed,
+        }
+    }
+
+    /// Resolve a chosen row, closing the list either way.
+    ///
+    /// Shared by the pointer and the keyboard so that the two cannot come to
+    /// disagree about which program a row names -- the failure that would
+    /// produce is a click delivered to the wrong program, and it would show up
+    /// in only one of the two ways of choosing.
+    fn take_overflow_row(&mut self, id: guitk::menu::MenuItemId) -> Option<ShellRequest> {
+        let key = self
+            .tray_overflow_menu
+            .as_ref()
+            .and_then(|(_, keys)| usize::try_from(id).ok().and_then(|at| keys.get(at)))
+            .copied();
+        self.tray_overflow_menu = None;
+        let key = key?;
+        // The program may have exited while the list was open.
+        if !self
+            .tray_icons
+            .iter()
+            .any(|icon| tray_dnd::TrayIconKey::of(icon) == key)
+        {
+            return None;
+        }
+        Some(ShellRequest::ClickTrayIcon {
+            owner: key.owner,
+            id: key.id,
+            // A row in a list is a primary activation whatever button opened
+            // it, and only the primary button can open this one.
+            button: MouseButton::Left,
+        })
+    }
+
+    /// The keyboard's counterpart to [`click_tray_overflow`](Self::click_tray_overflow).
+    fn activate_overflow_row(&mut self, id: guitk::menu::MenuItemId) -> HotkeyOutcome {
+        HotkeyOutcome::ask(self.take_overflow_row(id))
     }
 
     /// Carry a pressed tray icon to `(x, y)`.
@@ -4769,8 +4978,20 @@ impl DesktopShell {
         let Some(key) = drag.source.pressed_icon() else {
             return false;
         };
+        // The boundary is measured over the icons *on the bar*, which are a
+        // filtered slice of the arrangement -- the user may have hidden one,
+        // and the rest may not fit. So it is turned into the name of the icon
+        // to land in front of before it crosses into the arrangement, where an
+        // index from the drawn run would mean a different place.
+        //
+        // Resolved against the shown list rather than the drawn one, so that
+        // a drop at the right-hand end of a run with a chevron lands in front
+        // of the first icon that did not fit, rather than at the very end
+        // behind all of them.
         let boundary = self.tray_drop_boundary(x);
-        self.tray_arrangement.move_to_boundary(key, boundary)
+        let shown = self.tray_arrangement.shown_keys();
+        let anchor = shown.get(boundary).copied();
+        self.tray_arrangement.move_before(key, anchor)
     }
 
     /// Release a pressed tray icon: either a reorder just ended, or the
@@ -4843,10 +5064,73 @@ impl DesktopShell {
         self.scale(TRAY_ICON_SLOT)
     }
 
+    /// How many slots the bar can spare for the application icons, chevron
+    /// included.
+    ///
+    /// Derived on every call rather than stored. It depends on the taskbar's
+    /// width and the display scale, both of which change without anything
+    /// touching the tray -- so a cached count is a flag someone has to
+    /// remember to refresh on resize, and forgetting is silent.
+    fn tray_slot_budget(&self) -> usize {
+        let slot = self.tray_icon_slot();
+        if slot <= 0.0 {
+            return 0;
+        }
+        let budget = self.taskbar_rect().w * TRAY_ICON_SHARE;
+        if budget < slot {
+            return 0;
+        }
+        // Truncating is the point: a slot that only half fits is a glyph drawn
+        // over the clock.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "guarded above: budget and slot are both positive and                       budget >= slot, and the quotient of two taskbar-sized                       lengths cannot approach usize's range"
+        )]
+        let slots = (budget / slot) as usize;
+        slots
+    }
+
+    /// How many application icons are actually drawn on the bar.
+    ///
+    /// When they all fit, all of them. When they do not, one slot goes to the
+    /// chevron that reaches the rest -- so the run is never silently truncated
+    /// into icons the user has no way to click.
+    fn tray_icon_capacity(&self) -> usize {
+        let budget = self.tray_slot_budget();
+        let shown = self.tray_arrangement.shown_keys().len();
+        if shown <= budget {
+            shown
+        } else {
+            budget.saturating_sub(1)
+        }
+    }
+
+    /// Whether some icon the user has not hidden has no room on the bar.
+    #[must_use]
+    pub fn tray_overflows(&self) -> bool {
+        self.tray_arrangement.shown_keys().len() > self.tray_icon_capacity()
+    }
+
+    /// The icons the bar has no room for, in order.
+    #[must_use]
+    pub fn overflowed_tray_icons(&self) -> Vec<&guiremote::tray::TrayIcon> {
+        self.join_tray(
+            &self
+                .tray_arrangement
+                .overflow_icons(self.tray_icon_capacity())
+                .iter()
+                .map(|slot| slot.key)
+                .collect::<Vec<_>>(),
+        )
+    }
+
     /// How much width the application icons take, padding included.
     fn app_tray_width(&self) -> f32 {
-        let count = self.tray_arrangement.icons.len();
-        if count == 0 {
+        let slots = self
+            .tray_icon_capacity()
+            .saturating_add(usize::from(self.tray_overflows()));
+        if slots == 0 {
             return 0.0;
         }
         let slot = self.tray_icon_slot();
@@ -4855,9 +5139,14 @@ impl DesktopShell {
         // icon: the icons sit as a run, which is what makes them read as one
         // region rather than four unrelated glyphs.
         //
-        // Counted from the arrangement, as the rectangles are, so that width
-        // and positions cannot disagree about how many icons there are.
-        slot.mul_add(count as f32, padding)
+        // Counted from the same place the rectangles are, so that width and
+        // positions cannot disagree about how many slots there are.
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "bounded by tray_slot_budget, which is a fraction of the                       taskbar measured in 24-pixel slots"
+        )]
+        let count = slots as f32;
+        slot.mul_add(count, padding)
     }
 
     /// Where each application icon is drawn, left to right.
@@ -4877,12 +5166,50 @@ impl DesktopShell {
             + self.layout_indicator_width()
             + padding * 4.0;
         let mut x = (bar.w - shell_items - self.app_tray_width() + padding).max(0.0);
-        let mut rects = Vec::with_capacity(self.tray_arrangement.icons.len());
-        for _ in &self.tray_arrangement.icons {
+        // The chevron, when there is one, sits at the *left* of the run: it is
+        // the edge the run grows from, so the icons that do fit keep the same
+        // position as icons appear and depart behind it.
+        if self.tray_overflows() {
+            x += slot;
+        }
+        let capacity = self.tray_icon_capacity();
+        let mut rects = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
             rects.push(Rect::new(x, bar.y, slot, bar.h));
             x += slot;
         }
         rects
+    }
+
+    /// Where the overflow chevron is drawn, if there is one.
+    ///
+    /// Immediately left of the first drawn icon, and derived from the same
+    /// run: `tray_icon_rects` already skipped a slot for it, so this reads
+    /// that slot back rather than recomputing the run's origin. Two
+    /// computations of one edge is how a button ends up one slot away from the
+    /// glyph that represents it.
+    #[must_use]
+    pub fn tray_overflow_rect(&self) -> Option<Rect> {
+        if !self.tray_overflows() {
+            return None;
+        }
+        let slot = self.tray_icon_slot();
+        let bar = self.taskbar_rect();
+        match self.tray_icon_rects().first() {
+            Some(first) => Some(Rect::new(first.x - slot, bar.y, slot, bar.h)),
+            // Every slot went to the chevron: the bar is too narrow for even
+            // one icon beside it. The run's origin is then the chevron's.
+            None => {
+                let padding = self.scale(TRAY_PADDING);
+                let shell_items = self.clock_width()
+                    + self.scale(TRAY_BELL_WIDTH)
+                    + self.desktop_indicator_width()
+                    + self.layout_indicator_width()
+                    + padding * 4.0;
+                let x = (bar.w - shell_items - self.app_tray_width() + padding).max(0.0);
+                Some(Rect::new(x, bar.y, slot, bar.h))
+            }
+        }
     }
 
     /// The notification bell's clickable area, immediately left of the clock.
@@ -5716,6 +6043,16 @@ impl DesktopShell {
         Some(tree)
     }
 
+    /// The overflow list's draw commands, empty when it is closed.
+    #[must_use]
+    pub fn render_tray_overflow(&self) -> Option<RenderTree> {
+        let (menu, _) = self.tray_overflow_menu.as_ref()?;
+        let mut tree = RenderTree::new();
+        tree.commands
+            .extend(menu.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
+    }
+
     /// The widget layer's draw commands, for the *background* surface.
     ///
     /// Separate from [`render_desktop_menu`](Self::render_desktop_menu)
@@ -5746,6 +6083,7 @@ impl DesktopShell {
     #[must_use]
     pub fn any_popup_open(&self) -> bool {
         self.desktop_menu.is_visible()
+            || self.tray_overflow_menu.is_some()
             || self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
@@ -5764,6 +6102,7 @@ impl DesktopShell {
     pub fn dismiss_popups(&mut self) -> bool {
         let any = self.any_popup_open();
         self.desktop_menu.hide();
+        self.tray_overflow_menu = None;
         self.start_menu_open = false;
         self.power_menu_open = false;
         self.calendar.set_visible(false);
@@ -8700,8 +9039,8 @@ mod window_manager_tests {
 mod overview_wiring_tests {
     use super::{
         DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, PathBuf,
-        RenderTree, ShellAction, ShellControlAction, ShellRequest, WindowId, WindowInfo,
-        WindowList, focus_assist, notif_pane, overview,
+        RenderTree, ShellAction, ShellControlAction, ShellRequest, TRAY_OVERFLOW_GLYPH, WindowId,
+        WindowInfo, WindowList, focus_assist, notif_pane, overview, tray_dnd,
     };
     use guitk::render::RenderCommand;
 
@@ -9289,6 +9628,185 @@ mod overview_wiring_tests {
             y,
             kind: guitk::event::MouseEventKind::Release(button),
         })
+    }
+
+    /// A tray icon for `owner`, so two programs can be told apart.
+    fn owned_tray_icon(owner: u64, id: u32, glyph: &str) -> guiremote::tray::TrayIcon {
+        guiremote::tray::TrayIcon {
+            owner,
+            id,
+            glyph: glyph.to_string(),
+            tooltip: format!("program {owner} icon {id}"),
+        }
+    }
+
+    /// A flood of tray icons cannot take the taskbar away from the user.
+    ///
+    /// Measured before the cap existed, on this exact fixture: `tray_width`
+    /// came to 2167 on a 1920-wide bar, so `tray_x` clamped to zero, the icon
+    /// run covered the clock at x=1805, and `taskbar_button_rect(0).w` was
+    /// *zero* -- no window buttons at all, on a shell whose only window
+    /// switcher that is. Any program that can connect could do it; nothing
+    /// rationed the strip.
+    #[test]
+    fn a_flood_of_tray_icons_cannot_crowd_out_the_window_buttons() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_window_list(&WindowList {
+            windows: vec![placed(1, "One", 0, (0, 0, 800, 600))],
+            ..WindowList::default()
+        });
+        let flood: Vec<_> = (1..=80).map(|i| tray_icon(i, "X", "x")).collect();
+        s.apply_tray_icons(flood);
+
+        let bar = s.taskbar_rect();
+        assert!(
+            s.tray_width() < bar.w,
+            "the tray claimed the whole bar: {} of {}",
+            s.tray_width(),
+            bar.w
+        );
+        assert!(
+            s.taskbar_button_rect(0).w > 0.0,
+            "the window buttons were squeezed to nothing"
+        );
+        let clock = s.clock_rect();
+        for rect in s.tray_icon_rects() {
+            assert!(
+                rect.x + rect.w <= clock.x + 0.5,
+                "an icon at {} runs into the clock at {}",
+                rect.x,
+                clock.x
+            );
+        }
+    }
+
+    /// Icons that do not fit are reachable, not merely absent.
+    ///
+    /// A cap on its own would be the defect this whole tray road is about --
+    /// a program with an icon nobody can click. The chevron is what makes the
+    /// cap honest.
+    #[test]
+    fn icons_that_do_not_fit_are_reachable_through_the_chevron() {
+        let mut s = DesktopShell::new(1920, 1080);
+        let flood: Vec<_> = (1..=80).map(|i| tray_icon(i, "X", "x")).collect();
+        s.apply_tray_icons(flood);
+
+        assert!(s.tray_overflows(), "80 icons must not all fit");
+        let chevron = s
+            .tray_overflow_rect()
+            .expect("an overflowing tray must show a chevron");
+        assert!(
+            s.tray_icon_rects()
+                .iter()
+                .all(|r| r.x >= chevron.x + chevron.w - 0.5),
+            "the chevron overlaps the icon run"
+        );
+
+        let drawn = s.ordered_tray_icons().len();
+        let hidden = s.overflowed_tray_icons().len();
+        assert_eq!(drawn + hidden, 80, "every icon is either drawn or listed");
+        assert!(drawn > 0 && hidden > 0);
+
+        // And the chevron is drawn, not merely computed.
+        let glyphs = s
+            .render_taskbar()
+            .commands
+            .iter()
+            .filter(
+                |c| matches!(c, RenderCommand::Text { text, .. } if text == TRAY_OVERFLOW_GLYPH),
+            )
+            .count();
+        assert_eq!(glyphs, 1, "the chevron was not painted");
+    }
+
+    /// Choosing a row from the overflow list clicks that program's icon.
+    ///
+    /// Driven from the keyboard, which is both the seam a test can reach
+    /// without the menu's private layout constants and a path that has to
+    /// work: a popup whose whole purpose is reaching icons too small to see
+    /// is a strange place to require fine pointing.
+    #[test]
+    fn choosing_from_the_overflow_list_clicks_the_icon_it_names() {
+        let mut s = DesktopShell::new(1920, 1080);
+        let flood: Vec<_> = (1..=80)
+            .map(|i| owned_tray_icon(u64::from(i), i, "X"))
+            .collect();
+        s.apply_tray_icons(flood);
+
+        let wanted = tray_dnd::TrayIconKey::of(s.overflowed_tray_icons()[1]);
+        let chevron = s.tray_overflow_rect().expect("overflowing");
+        s.handle_mouse(&MouseEvent {
+            x: chevron.x + chevron.w / 2.0,
+            y: chevron.y + chevron.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert!(
+            s.render_tray_overflow().is_some(),
+            "the chevron did not open a list"
+        );
+
+        // Down twice to the second row, then Enter.
+        drop(s.handle_hotkey(&key(Key::Down, Modifiers::default(), None)));
+        drop(s.handle_hotkey(&key(Key::Down, Modifiers::default(), None)));
+        let outcome = s.handle_hotkey(&key(Key::Enter, Modifiers::default(), None));
+
+        assert!(outcome.consumed);
+        match outcome.requests.as_slice() {
+            [ShellRequest::ClickTrayIcon { owner, id, .. }] => {
+                assert_eq!(
+                    (*owner, *id),
+                    (wanted.owner, wanted.id),
+                    "the wrong program was told its icon was clicked"
+                );
+            }
+            other => panic!("expected one ClickTrayIcon request, got {other:?}"),
+        }
+        assert!(
+            s.render_tray_overflow().is_none(),
+            "the list stayed open after a choice"
+        );
+    }
+
+    /// Escape closes the overflow list without clicking anything.
+    #[test]
+    fn escape_closes_the_overflow_list_without_choosing() {
+        let mut s = DesktopShell::new(1920, 1080);
+        let flood: Vec<_> = (1..=80).map(|i| tray_icon(i, "X", "x")).collect();
+        s.apply_tray_icons(flood);
+        let chevron = s.tray_overflow_rect().expect("overflowing");
+        s.handle_mouse(&MouseEvent {
+            x: chevron.x + chevron.w / 2.0,
+            y: chevron.y + chevron.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+
+        let outcome = s.handle_hotkey(&key(Key::Escape, Modifiers::default(), None));
+
+        assert!(outcome.consumed);
+        assert!(outcome.requests.is_empty(), "Escape clicked something");
+        assert!(s.render_tray_overflow().is_none(), "the list stayed open");
+    }
+
+    /// The bound is a width, so a narrow bar shows fewer icons than a wide one.
+    ///
+    /// The reason it is a share of the taskbar rather than a fixed count: a
+    /// fixed twelve would still crowd a 1024-wide netbook and would waste two
+    /// thirds of a 4K bar.
+    #[test]
+    fn a_narrower_screen_fits_fewer_tray_icons() {
+        let icons: Vec<_> = (1..=80).map(|i| tray_icon(i, "X", "x")).collect();
+        let mut wide = DesktopShell::new(3840, 2160);
+        wide.apply_tray_icons(icons.clone());
+        let mut narrow = DesktopShell::new(1024, 768);
+        narrow.apply_tray_icons(icons);
+
+        assert!(
+            wide.ordered_tray_icons().len() > narrow.ordered_tray_icons().len(),
+            "wide {} vs narrow {}",
+            wide.ordered_tray_icons().len(),
+            narrow.ordered_tray_icons().len()
+        );
+        assert!(narrow.tray_width() < narrow.taskbar_rect().w);
     }
 
     /// The glyphs the tray is drawing, left to right.

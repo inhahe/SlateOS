@@ -27,9 +27,6 @@ const TRAY_ICON_FORMAT: &str = "application/x-slateos-tray-icon";
 /// Custom data format for taskbar app data (app ID being dragged in).
 const TASKBAR_APP_FORMAT: &str = "application/x-slateos-taskbar-app";
 
-/// Maximum number of visible icons before overflow kicks in.
-const DEFAULT_MAX_VISIBLE: usize = 12;
-
 // ============================================================================
 // TrayDragSource
 // ============================================================================
@@ -390,25 +387,21 @@ impl TrayIconSlot {
 pub struct TrayIconArrangement {
     /// Ordered list of all icon slots.
     pub icons: Vec<TrayIconSlot>,
-    /// Maximum number of icons visible before overflow.
-    pub max_visible: usize,
 }
 
 impl TrayIconArrangement {
-    /// Create a new arrangement with no icons and the default max visible count.
+    /// Create a new arrangement with no icons.
+    ///
+    /// **How many icons fit is not stored here.** It is a property of the
+    /// taskbar's width and the display's scale, both of which change without
+    /// anything touching the tray -- so a cached count would be a flag someone
+    /// has to remember to update on resize, and the failure of forgetting is
+    /// silent: icons hidden behind a chevron that has room for them, or drawn
+    /// past the edge of the bar. The limit is passed in at the moment it is
+    /// used instead.
+    #[must_use]
     pub fn new() -> Self {
-        Self {
-            icons: Vec::new(),
-            max_visible: DEFAULT_MAX_VISIBLE,
-        }
-    }
-
-    /// Create a new arrangement with a custom max visible count.
-    pub fn with_max_visible(max_visible: usize) -> Self {
-        Self {
-            icons: Vec::new(),
-            max_visible,
-        }
+        Self { icons: Vec::new() }
     }
 
     /// Add an icon slot at the end of the arrangement.
@@ -475,6 +468,30 @@ impl TrayIconArrangement {
         true
     }
 
+    /// Move `key` so that it sits immediately before `before`, or to the very
+    /// end when `before` is `None`.
+    ///
+    /// **This, not an index, is what a drop should name.** A drop is computed
+    /// from the icons on the bar, and those are a *filtered* view of this list
+    /// -- the user may have hidden one, and the bar may not be wide enough for
+    /// the rest. An index into the drawn run therefore means nothing here, and
+    /// the translation between them is exactly the kind of arithmetic that is
+    /// correct until the first icon is hidden and then silently is not.
+    /// Naming the icon to land in front of needs no translation at all.
+    pub fn move_before(&mut self, key: TrayIconKey, before: Option<TrayIconKey>) -> bool {
+        let boundary = match before {
+            // Dropping an icon in front of itself is where it already is.
+            Some(anchor) if anchor == key => return false,
+            Some(anchor) => match self.icons.iter().position(|slot| slot.key == anchor) {
+                Some(at) => at,
+                // The anchor departed between the drag and the drop.
+                None => return false,
+            },
+            None => self.icons.len(),
+        };
+        self.move_to_boundary(key, boundary)
+    }
+
     /// The icons in the shell's order, whatever their visibility.
     ///
     /// This, not the compositor's list, is what the tray draws.
@@ -532,32 +549,49 @@ impl TrayIconArrangement {
         self.icons.retain(|s| s.key != key);
     }
 
-    /// Return the visible icons that fit in the tray bar (up to `max_visible`).
-    pub fn visible_icons(&self) -> Vec<&TrayIconSlot> {
+    /// Every icon the user has not hidden, in order.
+    ///
+    /// Not the same as what is drawn: the bar may not be wide enough for all
+    /// of them, which is what `limit` answers below.
+    #[must_use]
+    pub fn shown_keys(&self) -> Vec<TrayIconKey> {
         self.icons
             .iter()
             .filter(|s| s.visible)
-            .take(self.max_visible)
+            .map(|s| s.key)
             .collect()
     }
 
-    /// Return icons that are visible but don't fit in the tray bar (overflow).
-    pub fn overflow_icons(&self) -> Vec<&TrayIconSlot> {
+    /// Return the shown icons that fit, given how many the bar has room for.
+    #[must_use]
+    pub fn visible_icons(&self, limit: usize) -> Vec<&TrayIconSlot> {
         self.icons
             .iter()
             .filter(|s| s.visible)
-            .skip(self.max_visible)
+            .take(limit)
+            .collect()
+    }
+
+    /// Return icons the user has not hidden but the bar has no room for.
+    #[must_use]
+    pub fn overflow_icons(&self, limit: usize) -> Vec<&TrayIconSlot> {
+        self.icons
+            .iter()
+            .filter(|s| s.visible)
+            .skip(limit)
             .collect()
     }
 
     /// Return all hidden icons.
+    #[must_use]
     pub fn hidden_icons(&self) -> Vec<&TrayIconSlot> {
         self.icons.iter().filter(|s| !s.visible).collect()
     }
 
-    /// Whether there are overflow icons (more visible icons than max_visible).
-    pub fn has_overflow(&self) -> bool {
-        self.icons.iter().filter(|s| s.visible).count() > self.max_visible
+    /// Whether any shown icon has no room on the bar.
+    #[must_use]
+    pub fn has_overflow(&self, limit: usize) -> bool {
+        self.icons.iter().filter(|s| s.visible).count() > limit
     }
 
     /// Find an icon by key.
@@ -773,6 +807,11 @@ mod tests {
 
     fn key(id: u32) -> TrayIconKey {
         TrayIconKey { owner: OWNER, id }
+    }
+
+    /// The arrangement's order, as bare ids, for readable assertions.
+    fn ids(arr: &TrayIconArrangement) -> Vec<u32> {
+        arr.ordered_keys().iter().map(|k| k.id).collect()
     }
 
     // Helper to create a test slot.
@@ -1104,50 +1143,50 @@ mod tests {
         arr.add_icon(make_slot(1, true, false));
 
         assert!(arr.icons[0].visible);
-        assert_eq!(arr.visible_icons().len(), 1);
+        assert_eq!(arr.visible_icons(usize::MAX).len(), 1);
 
         arr.hide_icon(key(1));
         assert!(!arr.icons[0].visible);
-        assert_eq!(arr.visible_icons().len(), 0);
+        assert_eq!(arr.visible_icons(usize::MAX).len(), 0);
         assert_eq!(arr.hidden_icons().len(), 1);
 
         arr.show_icon(key(1));
         assert!(arr.icons[0].visible);
-        assert_eq!(arr.visible_icons().len(), 1);
+        assert_eq!(arr.visible_icons(usize::MAX).len(), 1);
     }
 
     #[test]
     fn arrangement_overflow() {
-        let mut arr = TrayIconArrangement::with_max_visible(3);
+        let mut arr = TrayIconArrangement::new();
         for i in 0..5 {
             arr.add_icon(make_slot(i, true, false));
         }
 
-        assert_eq!(arr.visible_icons().len(), 3);
-        assert_eq!(arr.overflow_icons().len(), 2);
-        assert!(arr.has_overflow());
+        assert_eq!(arr.visible_icons(3).len(), 3);
+        assert_eq!(arr.overflow_icons(3).len(), 2);
+        assert!(arr.has_overflow(3));
     }
 
     #[test]
     fn arrangement_no_overflow_when_within_limit() {
-        let mut arr = TrayIconArrangement::with_max_visible(10);
+        let mut arr = TrayIconArrangement::new();
         for i in 0..5 {
             arr.add_icon(make_slot(i, true, false));
         }
 
-        assert_eq!(arr.visible_icons().len(), 5);
-        assert!(arr.overflow_icons().is_empty());
-        assert!(!arr.has_overflow());
+        assert_eq!(arr.visible_icons(10).len(), 5);
+        assert!(arr.overflow_icons(10).is_empty());
+        assert!(!arr.has_overflow(10));
     }
 
     #[test]
     fn arrangement_hidden_icons_not_in_visible_or_overflow() {
-        let mut arr = TrayIconArrangement::with_max_visible(5);
+        let mut arr = TrayIconArrangement::new();
         arr.add_icon(make_slot(1, true, false));
         arr.add_icon(make_slot(2, false, false)); // hidden
         arr.add_icon(make_slot(3, true, false));
 
-        assert_eq!(arr.visible_icons().len(), 2);
+        assert_eq!(arr.visible_icons(5).len(), 2);
         assert_eq!(arr.hidden_icons().len(), 1);
         assert_eq!(arr.hidden_icons()[0].key.id, 2);
     }
@@ -1281,8 +1320,8 @@ mod tests {
 
         arr.hide_icon(key(1));
 
-        assert_eq!(arr.visible_icons().len(), 1);
-        assert_eq!(arr.visible_icons()[0].key.owner, OTHER);
+        assert_eq!(arr.visible_icons(usize::MAX).len(), 1);
+        assert_eq!(arr.visible_icons(usize::MAX)[0].key.owner, OTHER);
     }
 
     #[test]
@@ -1293,13 +1332,13 @@ mod tests {
         let mut arr = TrayIconArrangement::new();
         arr.sync(&[reported(OWNER, 1, "A")]);
         arr.hide_icon(key(1));
-        assert_eq!(arr.visible_icons().len(), 0);
+        assert_eq!(arr.visible_icons(usize::MAX).len(), 0);
 
         arr.sync(&[]);
         arr.sync(&[reported(OWNER, 1, "A")]);
 
         assert_eq!(
-            arr.visible_icons().len(),
+            arr.visible_icons(usize::MAX).len(),
             1,
             "the returning icon is shown, not still hidden"
         );
@@ -1350,6 +1389,70 @@ mod tests {
                 "moving {moved} to boundary {boundary} reported the wrong answer"
             );
         }
+    }
+
+    #[test]
+    fn a_drop_names_the_icon_it_lands_in_front_of() {
+        let mut arr = TrayIconArrangement::new();
+        for id in 1..=3 {
+            arr.add_icon(make_slot(id, true, false));
+        }
+
+        // Rightwards: 1 lands in front of 3.
+        assert!(arr.move_before(key(1), Some(key(3))));
+        assert_eq!(ids(&arr), vec![2, 1, 3]);
+
+        // Leftwards: 3 lands in front of 2.
+        assert!(arr.move_before(key(3), Some(key(2))));
+        assert_eq!(ids(&arr), vec![3, 2, 1]);
+
+        // To the end.
+        assert!(arr.move_before(key(3), None));
+        assert_eq!(ids(&arr), vec![2, 1, 3]);
+    }
+
+    #[test]
+    fn a_drop_in_front_of_itself_is_not_a_move() {
+        let mut arr = TrayIconArrangement::new();
+        for id in 1..=3 {
+            arr.add_icon(make_slot(id, true, false));
+        }
+        assert!(!arr.move_before(key(2), Some(key(2))));
+        assert_eq!(ids(&arr), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_drop_in_front_of_a_departed_icon_moves_nothing() {
+        let mut arr = TrayIconArrangement::new();
+        for id in 1..=3 {
+            arr.add_icon(make_slot(id, true, false));
+        }
+        // The anchor's program exited between the last motion and the release.
+        assert!(!arr.move_before(key(1), Some(key(9))));
+        assert_eq!(ids(&arr), vec![1, 2, 3]);
+    }
+
+    /// A hidden icon between two shown ones does not warp the drop.
+    ///
+    /// The case an index would get wrong. On the bar the user sees 1 then 3,
+    /// and drops 3 in front of 1; icon 2 is hidden and sits between them in
+    /// this list, so "drawn position 0" and "list position 0" are different
+    /// places.
+    #[test]
+    fn a_hidden_icon_does_not_shift_where_a_drop_lands() {
+        let mut arr = TrayIconArrangement::new();
+        arr.add_icon(make_slot(1, true, false));
+        arr.add_icon(make_slot(2, false, false));
+        arr.add_icon(make_slot(3, true, false));
+
+        assert!(arr.move_before(key(3), Some(key(1))));
+
+        assert_eq!(ids(&arr), vec![3, 1, 2]);
+        assert_eq!(
+            arr.shown_keys(),
+            vec![key(3), key(1)],
+            "the bar shows 3 then 1, which is what was asked for"
+        );
     }
 
     #[test]

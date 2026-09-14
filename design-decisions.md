@@ -67176,6 +67176,49 @@ carries a note that its comparison is unlike-for-unlike because ext4 does no
 versioning. With the default off, the ordinary write path *is* now comparable,
 so that note should be revisited rather than left standing.
 
+## 937. A check can be blind to a population or blind to a property, and they read the same
+
+**Date:** 2026-09-14 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+Named jointly with lane C, who supplied the first half. Recorded because 932
+says a fact that matters needs two witnesses, and this is *how* a witness turns
+out not to be one.
+
+**In short:** when a check passes and should not have, it failed in one of two
+ways, and the distinction tells you where to look. Either it never examined the
+thing (**population**), or it examined it and asked the wrong question about it
+(**property**). Both print the same word.
+
+**Population blindness** -- the check's scope excludes the defect.
+
+| instance | what it could not see |
+|---|---|
+| `check-ran-if` resolving a callee by bare name | 719 `fn self_test`; any of them could satisfy the marker |
+| `scripts/check-cfg-unix.py` vs the boot's `check_cfg_unix()` | 60 crates versus 415; the launcher was in neither lane's view |
+| `check-text-mode-writes` absent from the pre-push hook | every violation until someone spends a boot |
+| lane C: a gate enumerating crates by how they spell a call | crates that spell it otherwise |
+| lane C: eight theme guards rendering only an opening frame | every frame after the first |
+
+**Property blindness** -- the scope is right and the assertion is weaker than
+the claim. The FAT short-name witness is the clean example. Asserting that two
+undecodable names *differ* is true of a rendering that dropped the
+distinguishing byte entirely; the assertion has to be that `\351` and `\357`
+actually appear. One level down from a population miss, and harder to see,
+because the check really is looking at the right code.
+
+**Why the pairing is worth a section.** The remedies differ. A population miss
+is fixed by widening scope, and the fix is mechanical once named --
+`--all-targets`, resolve through the module path, scan every `.rs`. A property
+miss is not: widening scope does nothing, and the only route is to ask what a
+*wrong* implementation would still satisfy. Reaching for the first remedy
+against the second is how a check gets rewritten, re-run, and still believed.
+
+**The diagnostic that separates them:** describe an implementation that is
+clearly broken and check whether the test still passes. If yes and the code is
+in scope, it is a property miss. If the broken code is never compiled, read, or
+enumerated, it is a population miss. Asking *would this go red* rather than
+*did this go green* is the whole of it.
+
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 
 **Lane:** B

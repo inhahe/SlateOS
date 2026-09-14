@@ -108,14 +108,18 @@
 #      here ever built the libc for the target every binary links. 1.9 s warm.
 #
 #  41. Refuse a C symbol exported by BOTH `posix` and `toolchain/stubs`.
-#  42. Refuse a test suite that only passes in the order `cargo` happens to
-#      run it in. Alphabetical order is one sample of 20745! and the same
-#      sample forever, so an order-dependent test passes here indefinitely.
 #      Their archives are both linked into every userspace binary, and
 #      `--allow-multiple-definition` means the duplicate is not a link
 #      error -- the linker takes whichever it sees first, and `-lstubs`
 #      comes before `-lc`. Three stale stubs were shadowing real posix
 #      implementations when this was written.
+#  42. Refuse a test suite that only passes in the order `cargo` happens to
+#      run it in. Alphabetical order is one sample of 20745! and the same
+#      sample forever, so an order-dependent test passes here indefinitely.
+#  43. Refuse a lossy byte->text conversion that reaches a VALUE:
+#      `from_utf8_lossy` on a name, then used. A decoded name is one
+#      nobody can open, and `diff -r` already reported `No such file`
+#      for a file it had itself listed.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -739,6 +743,50 @@ if [ "$skip_toi" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 43: refuse a lossy byte->text conversion that reaches a VALUE.
+#
+# lossy-decode.py.
+#
+# `String::from_utf8_lossy` puts U+FFFD in place of every byte it cannot
+# decode. On this OS a file name may hold every byte but `/` and NUL, so a
+# decoded name is a name nobody can open. CLAUDE.md names the call outright.
+#
+# It has cost once already, in code nobody suspected: `diff_dirs` passed
+# `p1.to_string_lossy()` to `diff_files`, so `diff -r` decoded the names it
+# had just enumerated and then reported `No such file or directory` for a file
+# it had listed itself.
+#
+# The checker excludes test modules, `cfg(not(unix))` host-only halves, and
+# decodes that only reach a diagnostic -- 131 raw hits on the image come down
+# to six, and all six are audited-exempt in its IGNORE table WITH REASONS. So
+# the expected state is zero and any finding is new.
+#
+# Scoped to userspace/, which is where it looks. A lane-A or lane-C push that
+# does not touch it pays nothing.
+skip_lossy=0
+lossy="${repo_root:-.}/scripts/lossy-decode.py"
+[ -f "$lossy" ] || skip_lossy=1
+# No `pushed_shas` guard, for the same reason gate 42 has none: this runs once
+# against the working tree rather than looping over shas, so there is no loop
+# that could degrade to zero runs while `note_gate` recorded it as having run.
+touches userspace/ scripts/lossy-decode.py || skip_lossy=1
+note_gate lossy-decode "$skip_lossy"
+
+lossy_failed=0
+if [ "$skip_lossy" != "1" ]; then
+    # The checker before the check: a detector that has broken its own parsing
+    # reports a clean tree, not a broken one. This one earned the habit --
+    # its self-test caught an inline `/* */` that swallowed the rest of its
+    # line, which would have hidden every call after one.
+    if ! run_checker lossy-decode-selftest "$py" "$lossy" --selftest; then
+        echo "pre-push: lossy-decode.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
+        lossy_failed=1
+    elif ! run_checker lossy-decode "$py" "$lossy"; then
+        lossy_failed=1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # check-read-defaults.py -- a read whose failure is indistinguishable from an
 # empty file.
 #
@@ -1208,6 +1256,49 @@ To push anyway:
     ALLOW_ROADMAP_DONE=1 git push \$remote_name ...
 EOF
     exit 1
+fi
+
+if [ "$lossy_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a byte sequence is being decoded into text and
+then used.
+
+The line is named above. `String::from_utf8_lossy` and `to_string_lossy`
+replace every byte they cannot decode with U+FFFD, so what comes out is not
+the thing that went in. On this OS a file name may hold every byte except \`/\`
+and NUL, which makes a decoded name one nobody can open.
+
+This has happened here. `diff_dirs` passed \`p1.to_string_lossy()\` to
+\`diff_files\`, and \`diff -r\` then answered \`No such file or directory\` for a
+file it had itself just listed.
+
+What to do instead, in the order they usually apply:
+
+  * carry the bytes. \`&[u8]\` / \`OsString\` / \`&Path\` all the way to the
+    syscall; \`quoting::os_bytes\` and \`os_from_bytes\` are the boundary pair;
+  * if it is only being PRINTED, use \`quoting::quotef\`, which renders an
+    undecodable byte as an octal escape instead of destroying it;
+  * if it is genuinely safe — an ASCII constant, or a decode behind a guard
+    that admits only ASCII — add it to the IGNORE table in
+    scripts/lossy-decode.py WITH THE REASON. Not to a list that records only
+    that it exists: the table is anchored on the text of the line, so editing
+    the line re-opens the question.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/lossy-decode.py
+    python scripts/lossy-decode.py --show all    # including what it excused
+
+To push anyway:
+
+    ALLOW_LOSSY_DECODE=1 git push origin ...
+EOF
+    if [ "${ALLOW_LOSSY_DECODE:-0}" = "1" ]; then
+        echo "pre-push: ALLOW_LOSSY_DECODE=1 — continuing anyway." >&2
+    else
+        exit 1
+    fi
 fi
 
 if [ "$toi_failed" = "1" ]; then

@@ -38,6 +38,16 @@ about transforming text and paths". `realpath` has ZERO outside its tests and
 `sed` has one, in an error message. The bin that actually had the defect was
 `diff`.
 
+WHAT THE DEFAULT RUN DOES NOT COVER, learned by planting a probe in `cat.rs`
+and watching the checker not notice. The default scope is
+`scripts/rootfs-bin-manifest.txt`, which is what the IMAGE ships -- and that
+list deliberately omits the thirteen names fastpy's compiled utilities own
+(`cat`, `ls`, `grep`, `sort`, `wc` and the rest, per design-decisions.md 108).
+Their Rust implementations exist in this tree and are NOT scanned by default,
+because they are not on the image. `--all` covers them, along with every other
+crate under `userspace/`, and reports a much larger and wholly unaudited
+number.
+
     python scripts/lossy-decode.py                # the image's binaries
     python scripts/lossy-decode.py --all          # every crate under userspace
     python scripts/lossy-decode.py --selftest
@@ -62,6 +72,43 @@ DIAGNOSTIC = re.compile(
 )
 
 NL = chr(10)
+
+# Sites that ARE a lossy decode reaching a value, and are still correct. Each
+# is anchored on a substring of the line rather than a line number, so that
+# editing the line re-opens the question -- which is the point: the exemption
+# is for the code as audited, not for the file forever.
+#
+# This table records WHY. There is deliberately no baseline file recording
+# merely THAT, which is the split `scripts/raced-globals-baseline.txt` states
+# in its own header: "A genuine false positive belongs in the IGNORE table in
+# the script, which records *why*, not here, which records only *that*."
+#
+# Audited 2026-09-14, when the image's raw count of 131 came down to these six.
+IGNORE = (
+    ("stat", "from_utf8_lossy(TERSE_FILE)",
+     "TERSE_FILE is a const format string in this file; ASCII by construction"),
+    ("stat", "from_utf8_lossy(TERSE_FS)",
+     "TERSE_FS likewise"),
+    ("expr", "BigInt::from_str(&String::from_utf8_lossy(v))",
+     "guarded by looks_like_integer(v), which admits only ASCII digits and a "
+     "leading `-`, so the decode is provably lossless"),
+    ("od", "let typed = String::from_utf8_lossy(typed_bytes)",
+     "decoded only to MATCH a long-option name, all of which are ASCII; the "
+     "raw bytes are passed alongside and are what the diagnostic uses"),
+    ("split", "let shown = String::from_utf8_lossy(name)",
+     "`shown` reaches only println!/format!; the child's FILE= environment "
+     "variable is set from os_from_bytes(name) on the next line"),
+    ("strings", "let text = String::from_utf8_lossy(&bytes)",
+     "`text` reaches only STRINGS.usage(format!(...))"),
+)
+
+
+def ignored(name, text):
+    """Whether this site is in the audited-exempt table."""
+    for bin_name, anchor, _why in IGNORE:
+        if bin_name == name and anchor in text:
+            return True
+    return False
 
 
 def strip_comments(text):
@@ -223,8 +270,14 @@ def classify(lines, at):
     return "VALUE"
 
 
-def scan(path):
-    """Every lossy call in `path`, as `(line_number, kind, text)`."""
+def scan(path, name=None):
+    """Every lossy call in `path`, as `(line_number, kind, text)`.
+
+    A site in [`IGNORE`] is reported as `OK` rather than dropped, so that
+    `--show all` still shows it and an exemption cannot quietly cover a line
+    that has since changed -- the anchor stops matching and the site comes
+    back as a VALUE.
+    """
     raw = io.open(path, encoding="utf-8", errors="replace").read()
     prod, _ = production_part(raw)
     prod = strip_comments(prod)
@@ -232,7 +285,10 @@ def scan(path):
     found = []
     for i, line in enumerate(lines):
         if any(c in line for c in CALLS):
-            found.append((i + 1, classify(lines, i), line.strip()[:74]))
+            kind = classify(lines, i)
+            if kind == "VALUE" and name and ignored(name, line):
+                kind = "OK"
+            found.append((i + 1, kind, line.strip()[:74]))
     return found
 
 
@@ -390,27 +446,29 @@ def main():
     ap.add_argument("--selftest", "--self-test", dest="selftest", action="store_true")
     ap.add_argument("--all", action="store_true",
                     help="every .rs under userspace/, not just the image's binaries")
-    ap.add_argument("--show", choices=("value", "diag", "host", "all"), default="value")
+    ap.add_argument("--show", choices=("value", "diag", "host", "ok", "all"),
+                    default="value")
     args = ap.parse_args()
 
     if args.selftest:
         return selftest()
 
     targets = all_sources() if args.all else image_binaries()
-    totals = {"VALUE": 0, "DIAG": 0, "HOST": 0}
+    totals = {"VALUE": 0, "DIAG": 0, "HOST": 0, "OK": 0}
     per_bin = []
     for name, path in targets:
-        hits = scan(path)
+        hits = scan(path, name)
         if not hits:
             continue
-        counts = {"VALUE": 0, "DIAG": 0, "HOST": 0}
+        counts = {"VALUE": 0, "DIAG": 0, "HOST": 0, "OK": 0}
         for _, kind, _text in hits:
             counts[kind] += 1
             totals[kind] += 1
         per_bin.append((name, counts, hits))
 
     want = {"value": ("VALUE",), "diag": ("DIAG",), "host": ("HOST",),
-            "all": ("VALUE", "DIAG", "HOST")}[args.show]
+            "ok": ("OK",),
+            "all": ("VALUE", "DIAG", "HOST", "OK")}[args.show]
     per_bin.sort(key=lambda r: -sum(r[1][k] for k in want))
     for name, counts, hits in per_bin:
         if not sum(counts[k] for k in want):
@@ -420,15 +478,38 @@ def main():
             if kind in want:
                 print("    %-6s line %-5d %s" % (kind, ln, text))
 
+    # A SCAN THAT READ ALMOST NOTHING MUST NOT REPORT SUCCESS. Zero findings
+    # is the expected state here, so "clean" and "the manifest resolved to
+    # nothing" produce the same number -- and only this tells them apart. The
+    # sibling checkers carry the same guard for the same reason.
+    if len(targets) < 40:
+        print("lossy-decode: REFUSING -- only %d source file(s) found, which is "
+              "too few to conclude anything. Is the manifest readable?"
+              % len(targets), file=sys.stderr)
+        return 2
+
     print("")
-    print("VALUE %d   DIAG %d   HOST %d   (in %d file(s))"
-          % (totals["VALUE"], totals["DIAG"], totals["HOST"], len(per_bin)))
+    print("VALUE %d   DIAG %d   HOST %d   OK %d   (in %d file(s), %d scanned)"
+          % (totals["VALUE"], totals["DIAG"], totals["HOST"], totals["OK"],
+             len(per_bin), len(targets)))
     print("")
     print("VALUE is the only column that means 'silent corruption'. DIAG is a")
     print("name rendered into a message -- `quoting::quotef` is the better")
     print("answer there, but it is a display defect, not a data one. HOST is")
     print("the `cfg(not(unix))` half of a pair whose unix half the target")
-    print("compiles instead, so it never runs on SlateOS.")
+    print("compiles instead, so it never runs on SlateOS. OK is a VALUE site")
+    print("audited and exempted in the script's IGNORE table, which records")
+    print("why; edit the line and the anchor stops matching, so the exemption")
+    print("expires with the code it was granted for.")
+    if totals["VALUE"]:
+        print("", file=sys.stderr)
+        print("A VALUE site is a byte sequence being turned into text with "
+              "U+FFFD in place of whatever could not be decoded, and then "
+              "USED. On this OS a file name may hold every byte but `/` and "
+              "NUL, so that is a name nobody can open.", file=sys.stderr)
+        print("If it is genuinely safe -- an ASCII constant, a guarded "
+              "decode -- add it to IGNORE in the script WITH THE REASON, "
+              "not to a list that records only that it exists.", file=sys.stderr)
     return 1 if totals["VALUE"] else 0
 
 

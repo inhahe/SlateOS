@@ -1156,6 +1156,13 @@ pub struct DesktopShell {
     /// process, so "has it changed" is a question the shell has to be able to
     /// ask again, not something it learns once at login.
     notif_watch: config::Watcher,
+    /// The rules with the document they came from.
+    ///
+    /// Needed because a save splices into the document that was read, so that
+    /// a user's comments and any key a newer desktop wrote survive being
+    /// edited from here. `focus_assist::app_overrides` is the copy the
+    /// decision is made against; this is the copy that can be written back.
+    notif: notifsettings::NotifFile,
     /// Theme configuration, derived from [`appearance`](Self::appearance).
     ///
     /// Never assign to this directly: it would disagree with `appearance` at
@@ -1580,6 +1587,7 @@ impl DesktopShell {
             widgets_dirty: false,
             appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
             notif_watch: config::Watcher::new(notifsettings::CONFIG_NAME),
+            notif: notifsettings::NotifFile::new(),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
@@ -1709,7 +1717,8 @@ impl DesktopShell {
     /// default and a rule was something no user could set.
     pub fn load_notification_rules(&mut self) {
         if let Some(doc) = self.notif_watch.poll() {
-            self.focus.app_overrides = notifsettings::NotifSettings::read_from(&doc).apps;
+            self.notif = notifsettings::NotifFile::from_document(doc);
+            self.focus.app_overrides = self.notif.settings.apps.clone();
         }
     }
 
@@ -1727,12 +1736,88 @@ impl DesktopShell {
         let Some(doc) = self.notif_watch.poll() else {
             return false;
         };
-        let rules = notifsettings::NotifSettings::read_from(&doc).apps;
-        if rules == self.focus.app_overrides {
-            return false;
+        let file = notifsettings::NotifFile::from_document(doc);
+        let changed = file.settings.apps != self.focus.app_overrides;
+        if changed {
+            self.focus.app_overrides = file.settings.apps.clone();
         }
-        self.focus.app_overrides = rules;
-        true
+        // Adopted either way: the document is what a later save splices into,
+        // so keeping the old one would write back a file stripped of whatever
+        // comment or unknown key this read just brought in.
+        self.notif = file;
+        changed
+    }
+
+    /// Apply one per-app change the user made in the notification pane.
+    ///
+    /// Writes `notifications.yaml`, which is safe here and was not safe on the
+    /// path that *receives* a notification -- this runs because a person
+    /// clicked a switch. See
+    /// `TD-C-THE-NOTIFICATIONS-PAGE-HAS-NO-PROGRAMS-TO-LIST` for the version
+    /// that ran on the wrong path and what it cost.
+    ///
+    /// A failed write is reported and the change still applies to this
+    /// session: refusing a toggle because a disk is full would leave someone
+    /// unable to silence a program that is interrupting them, which is the one
+    /// moment they can least tolerate it.
+    fn apply_app_notification_setting(
+        &mut self,
+        app: &str,
+        setting: notif_pane::AppSettingKind,
+        value: notif_pane::SettingValue,
+    ) {
+        let mut rule = self
+            .notif
+            .settings
+            .apps
+            .iter()
+            .find(|r| r.app_name == app)
+            .cloned()
+            .unwrap_or_else(|| notifsettings::AppRule::new(app));
+        match (setting, value) {
+            // `Enabled` is the pane's word and `Silent` is the file's. One
+            // switch, two vocabularies, and the translation belongs here:
+            // `notifsettings` has no opinion about a pane and the pane has
+            // none about a focus mode.
+            //
+            // Switching back on restores `Normal` rather than whatever was
+            // there before, because the pane's switch carries no memory of it
+            // and inventing one here would be a third place storing a value.
+            (notif_pane::AppSettingKind::Enabled, notif_pane::SettingValue::Bool(on)) => {
+                rule.importance = if on {
+                    notifsettings::Importance::Normal
+                } else {
+                    notifsettings::Importance::Silent
+                };
+            }
+            (notif_pane::AppSettingKind::Sound, notif_pane::SettingValue::Bool(on)) => {
+                rule.sound = on;
+            }
+            (notif_pane::AppSettingKind::Banner, notif_pane::SettingValue::Bool(on)) => {
+                rule.banner = on;
+            }
+            // Not applied, and not an oversight. The pane's `Priority`
+            // carries `notif_pane::NotifPriority` -- Low/Normal/High/Urgent,
+            // the scale a *message* is drawn with -- and a rule's importance
+            // is Silent/Normal/Priority/Critical, the scale a *program* is
+            // trusted with. There is no honest mapping between them: "this
+            // notification is Urgent" and "this program may interrupt a focus
+            // mode" are different claims. The pane does not emit this today;
+            // if it grows a control that does, the control should speak
+            // `Importance` and this arm should go, rather than a conversion
+            // being invented here.
+            (notif_pane::AppSettingKind::Priority, _) => return,
+            // A kind paired with a value of the wrong shape. Ignored rather
+            // than guessed at: there is no reading of "the sound switch was
+            // set to Critical", and acting on half of it would write a rule
+            // nobody asked for.
+            _ => return,
+        }
+        self.notif.settings.set_rule(rule.clone());
+        self.focus.set_app_override(rule);
+        if let Err(err) = self.notif.save() {
+            eprintln!("desktop: could not save notifications.yaml: {err}");
+        }
     }
 
     /// Read the user's saved *input* settings and adopt the parts the shell
@@ -5789,14 +5874,22 @@ impl DesktopShell {
                         .and_then(|n| n.action.clone())
                         .or(launch);
                 }
-                // All four are already done by the time they are reported: the
-                // card is gone, the list is empty, the per-app setting is
-                // stored, the pane is closing. They are drained so the buffer
-                // stays bounded, and matched by name so that adding a variant
-                // is a compile error here rather than a silent no-op.
+                // The pane records the change in its own list and reports
+                // it. Until this arm existed the report went nowhere, so a
+                // user switching a program off in the notification pane was
+                // switching off a copy nothing consulted.
+                NotifPaneEvent::SettingChanged {
+                    app,
+                    setting,
+                    value,
+                } => self.apply_app_notification_setting(&app, setting, value),
+                // The other three are already done by the time they are
+                // reported: the card is gone, the list is empty, the pane is
+                // closing. They are drained so the buffer stays bounded, and
+                // matched by name so that adding a variant is a compile error
+                // here rather than a silent no-op.
                 NotifPaneEvent::NotificationDismissed(_)
                 | NotifPaneEvent::ClearAll
-                | NotifPaneEvent::SettingChanged { .. }
                 | NotifPaneEvent::Closed => {}
             }
         }
@@ -10305,6 +10398,88 @@ mod overview_wiring_tests {
             action: None,
             silent: false,
         }
+    }
+
+    /// Switching a program off in the notification pane silences it.
+    ///
+    /// The pane has had this switch all along and it wrote to a list of its
+    /// own that nothing consulted: the decision is `focus_assist`'s and the
+    /// file is `notifications.yaml`. So the control worked, looked like it
+    /// worked, and did nothing -- the most expensive kind of broken, because
+    /// there is nothing for a user to report.
+    ///
+    /// **What this covers and what it does not.** It exercises the shell's
+    /// half, from the event the pane reports to the decision and the file.
+    /// That the pane *emits* the event on a click is covered in `notif_pane`'s
+    /// own tests, which can reach the coordinates; the pane's layout constants
+    /// are private and recomputing them here would be asserting against a
+    /// second copy of them. The routing between the two is a match on the
+    /// event enum with no wildcard arm, so a new variant is a compile error
+    /// rather than a silent drop.
+    #[test]
+    fn switching_a_program_off_in_the_pane_actually_silences_it() {
+        appearance::config::testing::with_scratch_config("shell-pane-toggle", |_root| {
+            let mut s = shell();
+            assert!(
+                s.focus.should_show_notification("Chat"),
+                "Chat starts out able to notify"
+            );
+
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Enabled,
+                notif_pane::SettingValue::Bool(false),
+            );
+
+            assert!(
+                !s.focus.should_show_notification("Chat"),
+                "the switch did not reach the decision that suppresses"
+            );
+            assert!(
+                s.focus.should_show_notification("Mail"),
+                "switching Chat off silenced everything"
+            );
+
+            // And it reached the file, so the next login keeps it.
+            let saved = notifsettings::NotifFile::load();
+            assert_eq!(
+                saved.settings.rule_for("Chat").importance,
+                notifsettings::Importance::Silent,
+                "the choice was applied in memory and never written"
+            );
+        });
+    }
+
+    /// The pane's priority control is refused rather than mistranslated.
+    ///
+    /// `SettingValue::Priority` carries Low/Normal/High/Urgent -- how loud one
+    /// *message* is -- while a rule's importance is Silent/Normal/Priority/
+    /// Critical, how far a *program* gets. There is no honest mapping, so the
+    /// applier declines it. Asserted because "declines" and "has a bug" look
+    /// identical from outside, and the next person to add a priority control
+    /// should find this rather than a conversion someone invented.
+    #[test]
+    fn a_pane_priority_change_does_not_rewrite_a_rule() {
+        appearance::config::testing::with_scratch_config("shell-pane-prio", |_root| {
+            let mut s = shell();
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Enabled,
+                notif_pane::SettingValue::Bool(false),
+            );
+
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Priority,
+                notif_pane::SettingValue::Priority(notif_pane::NotifPriority::Urgent),
+            );
+
+            assert_eq!(
+                s.notif.settings.rule_for("Chat").importance,
+                notifsettings::Importance::Silent,
+                "a priority change overwrote the rule the user had set"
+            );
+        });
     }
 
     /// The glyphs the tray is drawing, left to right.

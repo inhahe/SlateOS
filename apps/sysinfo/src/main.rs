@@ -128,6 +128,40 @@ pub enum SysInfoCategory {
 }
 
 impl SysInfoCategory {
+    /// Every category, in tree order.
+    ///
+    /// Distinct from [`TREE_ROOT_ITEMS`], which is the four *roots*; this is
+    /// all twenty-one panes the right-hand side can show. Added so the theme
+    /// sweep can visit each one -- it used to render whichever category the
+    /// window opens on and no other, which is one pane in twenty-one.
+    ///
+    /// A variant missing from here is a pane the sweep never renders: a
+    /// coverage gap rather than a wrong answer, which is the failure mode to
+    /// prefer but is still worth knowing about.
+    pub const ALL: [Self; 21] = [
+        Self::SystemSummary,
+        Self::HardwareResources,
+        Self::HwIrqs,
+        Self::HwIoPorts,
+        Self::HwMemoryMap,
+        Self::HwDma,
+        Self::Components,
+        Self::CompCpu,
+        Self::CompMemory,
+        Self::CompStorage,
+        Self::CompDisplay,
+        Self::CompSound,
+        Self::CompNetwork,
+        Self::CompUsb,
+        Self::CompPci,
+        Self::SoftwareEnvironment,
+        Self::SwServices,
+        Self::SwProcesses,
+        Self::SwDrivers,
+        Self::SwEnvVars,
+        Self::SwStartupPrograms,
+    ];
+
     /// Display label for the category.
     pub fn label(self) -> &'static str {
         match self {
@@ -3145,26 +3179,33 @@ mod tests {
     /// literals, and text hardcoded on a themed fill.
     #[test]
     fn every_colour_the_sysinfo_window_draws_comes_from_its_palette() {
+        // Every category, not just the one the window opens on -- each is a
+        // different detail pane, and twenty of the twenty-one were never
+        // rendered here. See `known-issues.md`
+        // `TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME`.
         for light in [false, true] {
-            let mut app = SysInfoState::new();
-            app.palette = Palette::for_mode(light);
-            let tree = app.render_tree();
-            // Not a formality: a guard that sweeps an empty command list passes
-            // for the wrong reason, and this file's own `drawn_property_rows`
-            // exists because a helper filtered on the wrong property once
-            // already. A default `SysInfoState` draws its chrome, its sidebar
-            // and its detail pane, so the floor is generous and still real.
-            assert!(
-                tree.commands.len() > 50,
-                "the sweep examined only {} commands, which is not a render",
-                tree.commands.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                &[],
-                &format!("sysinfo (light={light})"),
-            );
+            for category in SysInfoCategory::ALL {
+                let mut app = SysInfoState::new();
+                app.palette = Palette::for_mode(light);
+                app.selected_category = category;
+                let tree = app.render_tree();
+                // Not a formality: a guard that sweeps an empty command list passes
+                // for the wrong reason, and this file's own `drawn_property_rows`
+                // exists because a helper filtered on the wrong property once
+                // already. A default `SysInfoState` draws its chrome, its sidebar
+                // and its detail pane, so the floor is generous and still real.
+                assert!(
+                    tree.commands.len() > 50,
+                    "the sweep examined only {} commands, which is not a render",
+                    tree.commands.len()
+                );
+                appearance::palette_check::assert_drawn_from(
+                    &app.palette,
+                    &tree.commands,
+                    &[],
+                    &format!("sysinfo {category:?} (light={light})"),
+                );
+            }
         }
     }
 

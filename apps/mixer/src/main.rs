@@ -1931,23 +1931,42 @@ mod tests {
     use super::*;
 
     /// Every colour the mixer draws comes from the user's palette.
+    ///
+    /// **Both device pickers, either selection, muted and not.** This rendered
+    /// one scene until 2026-09-14 -- the opening window, master selected, no
+    /// picker open, nothing muted. A picker is an overlay drawn over everything
+    /// else and a mute is a different colour on a column, so those were exactly
+    /// the surfaces not being looked at. See `known-issues.md`
+    /// `TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME`.
     #[test]
     fn every_colour_the_mixer_draws_comes_from_its_palette() {
         for light in [false, true] {
-            let mut app = MixerApp::new();
-            app.palette = Palette::for_mode(light);
-            let tree = app.render(900.0, 600.0);
-            assert!(
-                tree.commands.len() > 20,
-                "the sweep examined {} commands, which is not a render",
-                tree.commands.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                &[],
-                &format!("mixer (light={light})"),
-            );
+            for picker in [Picker::None, Picker::Output, Picker::Input] {
+                for selection in [Selection::Master, Selection::Stream(0)] {
+                    for muted in [false, true] {
+                        let mut app = MixerApp::new();
+                        app.palette = Palette::for_mode(light);
+                        app.picker = picker;
+                        app.selection = selection;
+                        app.master_muted = muted;
+
+                        let tree = app.render(900.0, 600.0);
+                        assert!(
+                            tree.commands.len() > 20,
+                            "{picker:?}/{selection:?} drew {} commands, which is not a render",
+                            tree.commands.len()
+                        );
+                        appearance::palette_check::assert_drawn_from(
+                            &app.palette,
+                            &tree.commands,
+                            &[],
+                            &format!(
+                                "mixer {picker:?}/{selection:?} muted={muted} (light={light})"
+                            ),
+                        );
+                    }
+                }
+            }
         }
     }
 

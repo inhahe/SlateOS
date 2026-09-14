@@ -415,6 +415,64 @@ a policy, and the habit is exactly the kind of thing that decays when the
 session changes — which is the objection this document already raises
 against option C.
 
+### Option A is already being run, by one lane, and here is what it costs
+
+**Lane C has run the whole-workspace build and test before every merge to
+`main` for some time, voluntarily.** That is not quite option A -- it is option
+A plus running the tests, so it is the *expensive* end of the range -- but it
+answers the part of the question that estimates could not: what happens when
+somebody actually does this.
+
+**It covers the incident that raised this question.** `Cargo.toml` lists
+`"apps/*"` among the workspace members, so `cargo test --workspace` builds
+`apps/lockscreen`. The change that broke it would have gone red here before it
+reached `main`.
+
+**Measured 2026-09-14, eight consecutive runs on the shared machine, under
+whatever contention the other two lanes were producing at the time:**
+
+| | seconds |
+|---|---|
+| runs | 8 |
+| each | 336, 339, 342, 351, 375, 422, 446, 578 |
+| mean | ~399 s, a little under seven minutes |
+| total for the day | ~53 minutes of machine time, for one lane |
+
+**The 578 is the number to look at, not the mean.** It is the slowest of the
+eight by 30%, and it is slow for a knowable reason: lane A started a full boot
+run while it was going. That is the contention this entry's earlier
+measurements kept flagging as the missing figure, caught here by accident
+rather than by design -- one lane's gate and another lane's boot are the two
+heaviest things on this machine, and nothing schedules them apart. Three lanes
+each running a seven-minute gate before each merge will not cost 3 x 7.
+
+**And what it caught in those eight runs: nothing real, twice.** Two of the
+eight went red. Both were the same lane-B timing test (`oils`
+`a_poll_before_the_grace_does_not_lose_the_exit_forever`), which measures a
+real clock against a 20 ms grace and misses its window when two dozen test
+binaries share the machine. Neither was a product defect. Each cost a six-minute
+re-run before anything could be merged.
+
+**Which cuts both ways, and the second way is the one worth weighing.** The
+gate plainly works -- it builds what nothing else builds, it is affordable, and
+lane C has absorbed it without complaint. But on the day it was measured its
+whole observed output was two false alarms, and a gate whose red means "either
+something is broken or the machine was busy" is one that teaches its readers to
+re-run first and think second. Lane A reports the same thing from the other
+end: of four breakages it inherited from `main` on 09-12, each costing a boot
+run, only one was a compile error `cargo check` would have caught.
+
+So the cost of option A is not really the six minutes. It is that mandating a
+gate across three lanes *at the suite's current flakiness* buys a signal the
+lanes will learn to discount -- and a discounted gate catches nothing at all,
+which is strictly worse than the honest "we do not build `apps/`" we have now.
+If the answer is A, it is worth pairing with a rule that a test which cannot
+tell a scheduling accident from a defect gets fixed or quarantined.
+
+*(Recorded by lane C, which is the lane paying this cost, and is therefore the
+least neutral party to report it. The numbers are wall-clock from
+`scripts/run-timeout.py` and can be re-derived from any day's transcript.)*
+
 ### Why this is yours and not mine
 
 Any answer gates all three lanes' merges, and the cost lands on whoever is

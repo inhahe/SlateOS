@@ -2605,23 +2605,50 @@ mod tests {
     use super::*;
 
     /// Every colour the speed test draws comes from the user's palette.
+    ///
+    /// **Every phase, with and without the server list open, in both modes.**
+    /// This rendered one scene until 2026-09-14: a brand-new window, idle, with
+    /// no test having run. A speed test spends almost none of its life in that
+    /// state -- the bars, the graph, the result panel and the failure message
+    /// are the program -- and none of them were swept. The `Error` arm in
+    /// particular is a place a red gets hardcoded, and no default render ever
+    /// reaches it. See `known-issues.md`
+    /// `TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME`.
     #[test]
     fn every_colour_the_speed_test_draws_comes_from_its_palette() {
+        let phases: [(&str, SpeedTestPhase); 6] = [
+            ("idle", SpeedTestPhase::Idle),
+            ("downloading", SpeedTestPhase::Testing(TestKind::Download)),
+            ("uploading", SpeedTestPhase::Testing(TestKind::Upload)),
+            ("latency", SpeedTestPhase::Testing(TestKind::Latency)),
+            ("complete", SpeedTestPhase::Complete),
+            (
+                "failed",
+                SpeedTestPhase::Error("the server refused the connection".to_string()),
+            ),
+        ];
         for light in [false, true] {
-            let mut app = SpeedTestUI::new();
-            app.palette = Palette::for_mode(light);
-            let tree = App::render(&mut app, 900.0, 640.0);
-            assert!(
-                tree.commands.len() > 20,
-                "the sweep examined {} commands, which is not a render",
-                tree.commands.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                &[],
-                &format!("speedtest (light={light})"),
-            );
+            for (name, phase) in &phases {
+                for dropdown in [false, true] {
+                    let mut app = SpeedTestUI::new();
+                    app.palette = Palette::for_mode(light);
+                    app.phase = phase.clone();
+                    app.server_dropdown_open = dropdown;
+
+                    let tree = App::render(&mut app, 900.0, 640.0);
+                    assert!(
+                        tree.commands.len() > 20,
+                        "{name}: the sweep examined {} commands, which is not a render",
+                        tree.commands.len()
+                    );
+                    appearance::palette_check::assert_drawn_from(
+                        &app.palette,
+                        &tree.commands,
+                        &[],
+                        &format!("speedtest {name} servers_open={dropdown} (light={light})"),
+                    );
+                }
+            }
         }
     }
 

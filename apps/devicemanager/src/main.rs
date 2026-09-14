@@ -3463,21 +3463,39 @@ mod tests {
     /// Every colour the device manager draws comes from the user's palette.
     #[test]
     fn every_colour_the_device_manager_draws_comes_from_its_palette() {
+        // Every properties tab, with a device selected and without, and with
+        // the search box focused. Until 2026-09-14 this rendered the opening
+        // window on its General tab with nothing selected -- so the Driver,
+        // Resources and Events tabs, and everything a selection reveals, were
+        // never looked at while the test reported success over all of them.
+        // See `known-issues.md`
+        // `TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME`.
         for light in [false, true] {
-            let mut state = DeviceManagerState::new();
-            state.palette = Palette::for_mode(light);
-            let cmds = render(&state);
-            assert!(
-                cmds.len() > 20,
-                "the sweep examined {} commands, which is not a render",
-                cmds.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &state.palette,
-                &cmds,
-                &[],
-                &format!("devicemanager (light={light})"),
-            );
+            for tab in PropertiesTab::all() {
+                for selected in [None, Some(0)] {
+                    for searching in [false, true] {
+                        let mut state = DeviceManagerState::new();
+                        state.palette = Palette::for_mode(light);
+                        state.active_tab = *tab;
+                        state.selected_tree_index = selected;
+                        state.search_focused = searching;
+                        let cmds = render(&state);
+                        assert!(
+                            cmds.len() > 20,
+                            "the sweep examined {} commands, which is not a render",
+                            cmds.len()
+                        );
+                        appearance::palette_check::assert_drawn_from(
+                            &state.palette,
+                            &cmds,
+                            &[],
+                            &format!(
+                                "devicemanager {tab:?} selected={selected:?} searching={searching} (light={light})"
+                            ),
+                        );
+                    }
+                }
+            }
         }
     }
     #[test]

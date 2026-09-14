@@ -108,6 +108,9 @@
 #      here ever built the libc for the target every binary links. 1.9 s warm.
 #
 #  41. Refuse a C symbol exported by BOTH `posix` and `toolchain/stubs`.
+#  42. Refuse a test suite that only passes in the order `cargo` happens to
+#      run it in. Alphabetical order is one sample of 20745! and the same
+#      sample forever, so an order-dependent test passes here indefinitely.
 #      Their archives are both linked into every userspace binary, and
 #      `--allow-multiple-definition` means the duplicate is not a link
 #      error -- the linker takes whichever it sees first, and `-lstubs`
@@ -695,7 +698,9 @@ if [ "$skip_raced" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# check-test-order-independence.py -- a suite that only passes in one order.
+# Gate 42: refuse a test suite that only passes in one order.
+#
+# check-test-order-independence.py.
 #
 # `cargo test` runs a crate's tests alphabetically, the same order on every
 # machine forever, so a test that only fails after some other test has run
@@ -713,9 +718,12 @@ fi
 skip_toi=0
 toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 [ -f "$toi" ] || skip_toi=1
+# No `pushed_shas` guard here, unlike the gates above, and its absence is the
+# point: those loop `for sha in $pushed_shas` and would run their checker zero
+# times on an empty list while `note_gate` recorded them as having run. This
+# gate runs the suite once against the working tree, so there is no loop to
+# degrade to nothing. `touches` alone decides whether it runs.
 touches posix/ scripts/check-test-order-independence.py || skip_toi=1
-# Nothing published is nothing to judge, as above.
-[ -n "${pushed_shas# }" ] || skip_toi=1
 note_gate test-order "$skip_toi"
 
 toi_failed=0

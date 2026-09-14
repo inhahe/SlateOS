@@ -129884,6 +129884,7 @@ so that destination became a running program rather than a library.
 | 3. a `TRAY` frame and a subscription | **done** — `guiremote::tray`, `SubscribeTrayIcons` 0x23, `route_tray_list` |
 | 4. drag, drop, pin, reorder (`tray_dnd.rs`) | **reorder done** — drag the row; pin and hide have no door yet |
 | 5. a click reaching the program that owns the icon | **done** — `ClickTrayIcon` 0x24, `Event::TrayIconClicked` 0x0C, `App::tray_icon_clicked` |
+| 6. the user being able to tell the icons apart | **done** — resting on one shows the `tooltip` its program registered, which the shell had been receiving and never displaying |
 
 Plus the two ends: `oswindow::EventLoop` has `watch_tray`, `set_tray_icon`,
 `remove_tray_icon` and `tray_icons`, and the shell subscribes, folds each

@@ -131738,6 +131738,33 @@ either: **a settings write does not belong on a path that runs in response
 to something a program did.** It belongs on a path that runs in response to
 something a *person* did.
 
+### Update, same day: something does create rules, and it is the right
+### something
+
+The notification pane's per-app switch now writes one. It always reported
+the change; the shell discarded the report. Applying it means a user who
+silences a program **where they notice it** — in the pane, on the
+notification that interrupted them — gets a rule in `notifications.yaml`,
+and the Settings page lists it.
+
+So the page is empty only for someone who has never touched the switch,
+and it fills with exactly the programs they have an opinion about rather
+than with every program that has ever spoken. That is arguably the better
+list: you set a rule where the problem is and review it in Settings.
+
+**This is the write that is safe.** It is the same file the rejected fix
+wrote, from the same process, and the difference is the whole point of the
+rule this entry states: a person clicked a switch, so a settings write is
+what should happen. The rejected version ran on the path that *receives* a
+notification, where the trigger is another program and a test suite posting
+notifications becomes a test suite writing configuration files.
+
+**So `SubscribeNotifiers` is no longer urgent, and may not be wanted.** The
+case for it was an empty page; the case against was always that the list of
+programs that notify you is not public. What is left is the narrower
+question of whether Settings should be able to add a rule for a program the
+user has not met yet — which is a feature request, not a defect, and one
+the answer above may make unnecessary.
 ### What the fix actually needs
 
 The list of programs that notify is *live desktop state*, like the window

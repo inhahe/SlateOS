@@ -3632,6 +3632,16 @@ impl DesktopShell {
             if self.bound_action(key) == Some(HotkeyAction::ToggleNotifications) {
                 return self.run_desktop_action(&HotkeyAction::ToggleNotifications);
             }
+            // Pull-on-use, like `sync_osd_screen` and `sync_snap_area` and for
+            // the same reason: `screen_height` is a public field anything may
+            // assign, so a push-on-resize scheme is one forgotten call site
+            // away from being wrong. The pane learns the height from every
+            // *mouse* event by itself; the keyboard path carries no geometry,
+            // and without this the arrow keys clamped against the pane's
+            // pre-first-render default of 1080 -- so on a shorter display the
+            // last notifications could not be reached by keyboard at all, and
+            // on a taller one the list scrolled past its own end.
+            self.sync_notification_screen();
             // Result deliberately discarded: consumed even when the pane had no
             // meaning for the key, because a press the overlay did not use is
             // not therefore the desktop's.
@@ -6313,6 +6323,21 @@ impl DesktopShell {
     fn sync_osd_screen(&mut self) {
         self.osd.screen_width = self.screen_width as f32;
         self.osd.screen_height = self.screen_height as f32;
+    }
+
+    /// Tell the notification pane how tall the screen is.
+    ///
+    /// The pane's own scroll bound is `content - viewport`, so a wrong
+    /// viewport is a wrong bound in both directions: too small a screen and
+    /// the rows past the fold are unreachable, too large and the list scrolls
+    /// into blank space past its own end.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a display dimension is exact in f32 for every size hardware produces"
+    )]
+    fn sync_notification_screen(&mut self) {
+        self.notifications
+            .set_screen_height(self.screen_height as f32);
     }
 
     /// Render the heads-up overlays, if any are showing.
@@ -10082,6 +10107,62 @@ mod overview_wiring_tests {
             }
         }
         assert!(plates > 0, "the tooltip drew no panel to check");
+    }
+
+    /// The keyboard can reach the last notification on a screen that is not
+    /// 1080 tall.
+    ///
+    /// The pane's scroll bound is `content - viewport`, and it learns the
+    /// viewport from every *mouse* event it receives. The keyboard path
+    /// carries no geometry, so until the shell started telling it, the arrows
+    /// clamped against the pane's pre-first-render default of 1080 -- and on
+    /// a 768px display that bound is 312 pixels short, which is the last few
+    /// notifications being unreachable without a mouse.
+    ///
+    /// The pane's own documentation predicted this exactly: *"a shell that
+    /// drives the pane from the keyboard alone should call it on resize"*.
+    /// Nothing called it.
+    ///
+    /// Asserted by reading the render tree rather than a scroll offset,
+    /// because "the last card is on screen" is the thing that was untrue and
+    /// a number would need its own interpretation.
+    #[test]
+    fn the_keyboard_reaches_the_last_notification_on_a_short_screen() {
+        let mut s = DesktopShell::new(1024, 768);
+        for i in 0..40u64 {
+            let _ = s.notify(notif_pane::Notification {
+                id: i,
+                app_name: "Desktop".to_owned(),
+                title: format!("Notice {i}"),
+                body: "body".to_owned(),
+                timestamp: 0,
+                priority: notif_pane::NotifPriority::Normal,
+                read: false,
+                action: None,
+                silent: false,
+            });
+        }
+        s.notifications.show();
+
+        let drawn = |s: &DesktopShell, want: &str| {
+            s.render_notifications().is_some_and(|t| {
+                t.commands
+                    .iter()
+                    .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == want))
+            })
+        };
+        // The newest is at the top, so the *oldest* is the one past the fold.
+        assert!(!drawn(&s, "Notice 0"), "the last card is already on screen");
+
+        // Keyboard only: no mouse event ever tells the pane the screen size.
+        for _ in 0..400 {
+            let _ = s.handle_hotkey(&key(Key::Down, Modifiers::default(), None));
+        }
+
+        assert!(
+            drawn(&s, "Notice 0"),
+            "the keyboard could not reach the last notification"
+        );
     }
 
     /// The glyphs the tray is drawing, left to right.

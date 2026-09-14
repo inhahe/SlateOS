@@ -734,15 +734,26 @@ defined in `paths.rs` and referenced by nothing else, and `getaddrinfo`
 resolves by numeric parse, then the DNS syscall. That reads like "`localhost`
 does not resolve", which would be far worse than an FQDN.
 
-It is not the case. `kernel/src/fs/nameservice.rs` holds the hosts table,
-`localhost` and `ip6-localhost` included, and the DNS syscall `getaddrinfo`
-calls goes there. The resolution that other systems do in libc against a file
-is done kernel-side here, so libc not reading `/etc/hosts` is the design rather
-than a gap.
+**That paragraph was right, and the "reassurance" that followed it here was
+wrong. See `B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER` below.**
 
-Recorded because the wrong version of that paragraph was one step away from
-being written, and "the C library never reads /etc/hosts" is exactly the sort
-of claim that is technically true, sounds severe, and misleads.
+What this entry said until 2026-09-14 was: *"It is not the case.
+`kernel/src/fs/nameservice.rs` holds the hosts table, `localhost` and
+`ip6-localhost` included, and the DNS syscall `getaddrinfo` calls goes there."*
+The first half is true — that table exists and has those entries. The second
+half is false: `sys_dns_resolve` calls **`crate::net::dns::resolve`**, which is
+a different module that never consults `fs::nameservice` at all.
+
+**The lesson, which is the reusable part.** I went looking for something that
+would explain `localhost` working, found a module named `nameservice` holding a
+hosts table with `localhost` in it, and stopped — the name matched the
+behaviour I was hoping to confirm. I never traced the call. Had I, the chain is
+two greps long: `sys_dns_resolve` → `net::dns::resolve` → the wire.
+**Finding a component that *would* explain the behaviour is not evidence that
+it is the component in use** — and it is more dangerous than finding nothing,
+because it ends the search with a false result instead of an open question. The
+alarming reading was correct and I talked myself out of it with a plausible
+mechanism, which is the worse of the two ways to be wrong here.
 
 **Corrected 2026-09-14: the paragraph above said "there is no
 `gethostbyname`". That was false** — it is `posix/src/socket.rs:3892`, and
@@ -756,6 +767,61 @@ false version was committed and pushed, and because the failure is a reusable
 one: **an absence proved by grepping for a signature is only as good as the
 modifiers in the pattern.** `unsafe`, `pub(crate)`, `async`, `const` and a
 line break after `fn` all defeat it. Grep for the bare name first, then narrow.
+
+## B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER (lane B, 2026-09-14) — OPEN, fix is lane A's
+
+`getaddrinfo("localhost", …)` and `gethostbyname("localhost")` send a DNS query
+over the network. There is no hosts-file lookup anywhere in the path, so on a
+machine with no DNS server — or one whose upstream declines to answer for
+`localhost`, which is the normal configuration — **`localhost` does not
+resolve.**
+
+**The call chain, which is the whole evidence:**
+
+| step | where | what it does |
+|---|---|---|
+| `getaddrinfo` | `posix/src/socket.rs` | `inet_pton` first; not numeric ⇒ `gethostbyname` |
+| `gethostbyname` | `posix/src/socket.rs:3892` | `syscall3(SYS_DNS_RESOLVE, …)` |
+| `sys_dns_resolve` | `kernel/src/syscall/handlers.rs:13793` | calls `crate::net::dns::resolve` |
+| `net::dns::resolve` | `kernel/src/net/dns.rs:1035` | container DNS, else `resolve_single` ⇒ **the wire** |
+
+`kernel/src/fs/nameservice.rs` *does* hold a hosts table with `localhost` and
+`ip6-localhost` in it. **Nothing in that chain reaches it.** It is a second,
+unused resolver; the syscall goes to `net::dns`, which contains no hosts table
+and no loopback special case (its only `localhost` is inside a test at
+`dns.rs:1775`). Checked for a shortcut on both sides and there is none:
+`resolve_single` has no hosts/loopback check, and `posix` has no `localhost`
+special case — the `loopback` hits there are `in6addr_loopback`, `IFF_LOOPBACK`
+and the `AI_PASSIVE` default, none of them on this path.
+
+**Why it matters beyond `localhost`.** Every name a normal system would answer
+from `/etc/hosts` — build-machine aliases, a pinned service name, an offline
+development host, the `127.0.1.1 <hostname>` line Debian writes — misses here
+and goes to the network instead. Two consequences worth separating:
+
+* **It fails** where the upstream has no answer, and the failure is a network
+  timeout rather than a prompt "no such host", so it is slow as well as wrong.
+* **It leaks.** Internal-only names get transmitted to whatever upstream
+  resolver is configured. A hosts file is often used precisely to keep a name
+  off the network.
+
+**Status of the evidence.** This is a code-read finding, not an observed one: I
+cannot boot the image from this lane. The chain above is four greps and I have
+stated each hop, so it should be cheap to confirm or refute — and refuting it
+is welcome, because *this entry's own predecessor claimed the opposite and was
+wrong.* See the correction in
+`B-POSIX-HOSTNAME-INVENTS-AN-FQDN` above for how that happened.
+
+**The fix is lane A's** (`kernel/**`), and is filed as
+`requests/b-a-sys-dns-resolve-never-consults-the-hosts-table.md`. Either
+`net::dns::resolve` consults `fs::nameservice` before going to the wire, or
+`sys_dns_resolve` does so before calling it. The first is better — it fixes
+in-kernel callers too — but that is lane A's call, not mine.
+
+**Not fixable in libc**, which is why this is a request rather than work:
+reading `/etc/hosts` from `posix` would need the file to exist in the image and
+would still leave in-kernel resolution wrong, and it would duplicate a table
+the kernel already has.
 
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 

@@ -144063,6 +144063,49 @@ worth more than one feature:
   10.0` to mean "inside the tab strip" and broke the moment it moved, which is
   the same defect in the tests.
 
+## TD-C-THE-DESKTOP-ICONS-ARE-DRAWN-AND-NOTHING-CAN-CLICK-THEM
+
+**Date:** 2026-09-14. **Lane:** C. **Created by this lane, the same day.**
+
+**In short:** the desktop now draws its icons -- This PC, Recycle Bin,
+Documents, Home -- and they are a picture. Clicking one does nothing, dragging
+one does nothing, double-clicking one opens nothing. They were not drawn at all
+before today, so this is a dead control **I introduced**, on the day I spent
+removing dead controls from the file manager, the editor and the taskbar.
+
+**Why it is filed rather than fixed on the spot.** The remaining work is a real
+change to `DesktopShell::handle_mouse`, not a line:
+
+* `Hit::Desktop => ShellAction::Pass` is the seam -- a press on bare desktop is
+  exactly where the icons now live -- but the layer needs **press, move, up and
+  double-click**, and a press that starts a `PendingDrag` with no matching
+  `handle_mouse_up` leaves the layer in a non-idle state permanently. Wiring
+  press alone would be worse than wiring none.
+* The shell collapses `Press` and `DoubleClick` into one match arm
+  (`gui/desktop/src/lib.rs`, the `MouseEventKind::Press(button) |
+  MouseEventKind::DoubleClick(button)` arm), so "activate" cannot be told from
+  "select" without separating them.
+* `DesktopIconLayer::handle_mouse_down` takes `ctrl_held`, and the shell's
+  pointer path tracks no modifier state at all. Ctrl-click to add to a
+  selection has nowhere to get its answer from today.
+
+**What works already**, so the gap is precisely this and no wider: positions
+persist and are restored (`read_positions`/`write_positions`, six tests, clamp
+proved by reintroduction), the layer is drawn between the wallpaper and the
+widgets, and every interaction is implemented and tested *inside* `icons.rs`.
+It is only the route from the compositor's pointer to that layer that is
+missing.
+
+**`IconEvent::Activate(_, IconAction::OpenPath(p))` should become
+`ShellAction::Launch(p)`** -- the shell already has that action and the session
+already queues launches from it, so the activation path is one mapping once the
+events arrive.
+
+**Do not delete `/proc/deskicons` yet.** A-Q8 orders this deliberately: lane C
+wires first, lane A deletes after. Positions reaching disk is not the same as a
+desktop the user can use, and until this entry closes the kernel tree is still
+the only path that does anything.
+
 ## TD-C-SYSTEM-INFORMATION-REPORTS-CORRUPT-HARDWARE-DATA-AS-ZEROS
 
 **Date:** 2026-09-14. **Lane:** C.

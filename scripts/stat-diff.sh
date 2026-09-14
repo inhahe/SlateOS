@@ -88,6 +88,21 @@ run_side() {
 #     %f after                             : 238861777
 #
 # So the capture files go on tmpfs, a different filesystem from the fixtures.
+#
+# THE SAME REASONING RULES OUT RUNNING THIS CONCURRENTLY WITH ANYTHING ELSE
+# THAT WRITES HERE, and that is not theoretical either. Running it three times
+# alongside `all-diff.sh` -- which runs ~70 harnesses, all of them creating and
+# deleting fixtures on this filesystem -- gave three different answers in a
+# row: 85 passed/0 differed, then 82/3, then 83/2. Every one of them looked
+# like a real verdict, and the middle one would have been recorded as a
+# regression that did not exist.
+#
+# Nothing here can defend against that: the free-block count IS the thing being
+# compared, and another process changing it between our run and GNU's is
+# indistinguishable from us reporting it wrongly. `all-diff.sh` serialises the
+# harnesses it runs, so the only way to hit this is to start a second one by
+# hand. Do not. If a number from this harness disagrees with a previous one,
+# check for a concurrent run before believing either.
 # The general form, which is the same shape as `env-diff.sh` having to keep its
 # own `PATH` out of the subject's environment: **a harness must not write to the
 # thing it measures.**

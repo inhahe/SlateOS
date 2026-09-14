@@ -233,6 +233,22 @@ IGNORE: dict[str, str] = {
     # `#[test]` body always runs with live TLS, so no test can reach it -- and a
     # thread that does is, as the comment there notes, the last one alive.
     "posix/src/perthread.rs:HOST_FALLBACK": "only reachable after thread-local teardown, which no #[test] body is",
+    # All seven `mbrtowc` tests pass their OWN `&mut state` -- a local
+    # `MbstateT::new()` -- so none of them touches the internal one. What the
+    # detector sees is the *function* referencing `INTERNAL_MBSTATE` for the
+    # `ps == NULL` case, which no test exercises. Checked argument by argument
+    # 2026-09-14: the only `null_mut()` among them, in
+    # `test_mbrtowc_null_s_resets_state`, is for `pwc` and `s`, not `ps`.
+    "posix/src/wchar.rs:INTERNAL_MBSTATE": "every mbrtowc test supplies its own mbstate; the internal one is only reached when ps is NULL, which none does",
+    # `if_nameindex` takes this buffer's address and never writes it; the name
+    # bytes are a compile-time initialiser. Four tests reach the function, none
+    # of them can change it.
+    "posix/src/socket.rs:IF_NAMEINDEX_NAMES": "only its address is taken; the contents are a compile-time initialiser",
+    # The one write is `entry.if_name = name_ptr`, where `name_ptr` is the
+    # address of a static -- a constant. Every caller stores the same value, so
+    # racing writers cannot disagree, the same reasoning as `ctype.rs:CACHED`
+    # above. Audited 2026-09-14.
+    "posix/src/socket.rs:IF_NAMEINDEX_TABLE": "the single write stores a constant address; every writer stores the same value",
     # `__cxa_allocate_exception` returns `addr_of_mut!(EXCEPTION_BUF)` and does
     # nothing else -- no write, not even a length check. All three tests that
     # reach it assert only `!ptr.is_null()`; none dereferences the pointer, let

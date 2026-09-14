@@ -11,10 +11,7 @@
 # records *why*, not here, which records only *that*.
 
 posix/src/random.rs:GENERATION
-posix/src/socket.rs:IF_NAMEINDEX_NAMES
-posix/src/socket.rs:IF_NAMEINDEX_TABLE
 posix/src/stdio.rs:COUNTER
 posix/src/stdio.rs:STATIC_BUF
-posix/src/wchar.rs:INTERNAL_MBSTATE
 userspace/authlib/src/lib.rs:FAKE_NOW_PAIR
 userspace/ping/src/main.rs:RUNNING

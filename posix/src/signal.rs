@@ -2052,22 +2052,48 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
 /// If `flag` is nonzero, system calls interrupted by `sig` will return
 /// -1 with `EINTR`.  If zero, system calls are automatically restarted.
 ///
-/// Stub: validates `sig` against the standard signal range, then
-/// returns 0.  Since our OS doesn't deliver signals, there is no
-/// SA_RESTART behavior to toggle once the validation passes.
+/// Implemented the way glibc implements it: a read-modify-write of the
+/// signal's existing action. The flag is not a separate setting — it **is**
+/// `SA_RESTART` seen from the other side, so `flag != 0` clears the bit and
+/// `flag == 0` sets it, leaving the installed handler and mask untouched.
+///
+/// This used to validate `sig` and return 0, ignoring `flag`, above a comment
+/// reading "Since our OS doesn't deliver signals, there is no SA_RESTART
+/// behavior to toggle". That stopped being true: `crt.rs` registers a signal
+/// trampoline so the kernel can deliver to installed handlers, `signal()`
+/// installs with `SA_RESTART`, and the kernel reads the flag. A caller asking
+/// for interruptible syscalls was being told yes and getting restartable ones.
 ///
 /// Errors (Linux-matching, via glibc's `siginterrupt` implementation
 /// which internally calls `sigaction`):
 /// * `EINVAL` — `sig` is not in `[1, NSIG)`, or is `SIGKILL` or
 ///   `SIGSTOP` (those two cannot have their action changed).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn siginterrupt(sig: i32, _flag: i32) -> i32 {
+pub extern "C" fn siginterrupt(sig: i32, flag: i32) -> i32 {
     if !(1..NSIG).contains(&sig) || sig == SIGKILL || sig == SIGSTOP {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // No signal delivery — nothing to configure.
-    0
+    let mut act = Sigaction {
+        sa_handler: SIG_DFL,
+        sa_mask: SigsetT::EMPTY,
+        sa_flags: 0,
+        sa_restorer: 0,
+    };
+    // SAFETY: `act` is a valid `Sigaction` to write through, and a null `act`
+    // argument makes this call a pure enquiry that stores nothing.
+    if unsafe { sigaction(sig, core::ptr::null(), &raw mut act) } < 0 {
+        return -1;
+    }
+    act.sa_flags = if flag == 0 {
+        act.sa_flags | SA_RESTART
+    } else {
+        act.sa_flags & !SA_RESTART
+    };
+    // SAFETY: `act` was filled in by the enquiry above and only its flags word
+    // has changed, so the handler and mask are written back unaltered. A null
+    // `oldact` discards a value we already hold.
+    unsafe { sigaction(sig, &raw const act, core::ptr::null_mut()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -3698,6 +3724,72 @@ mod tests {
     }
 
     // -- siginterrupt --
+
+    /// Read back the action currently installed for `sig`.
+    fn action_of(sig: i32) -> Sigaction {
+        let mut got = Sigaction {
+            sa_handler: SIG_DFL,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        // SAFETY: null `act` makes this a pure enquiry; `got` is valid.
+        unsafe {
+            sigaction(sig, core::ptr::null(), &raw mut got);
+        }
+        got
+    }
+
+    #[test]
+    fn siginterrupt_nonzero_clears_sa_restart_and_keeps_the_handler() {
+        // THE REGRESSION PIN. siginterrupt used to validate `sig` and return 0
+        // with the flag ignored, so a caller asking for interruptible syscalls
+        // was told yes and got restartable ones.
+        with_flags(SIGUSR1, SA_RESTART, || {
+            assert_eq!(siginterrupt(SIGUSR1, 1), 0);
+            let got = action_of(SIGUSR1);
+            assert_eq!(
+                got.sa_flags & SA_RESTART,
+                0,
+                "flag != 0 means interrupt, which is SA_RESTART cleared"
+            );
+            assert_eq!(
+                got.sa_handler, SIG_IGN,
+                "a read-modify-write must not drop the installed handler"
+            );
+        });
+    }
+
+    #[test]
+    fn siginterrupt_zero_sets_sa_restart_and_keeps_the_handler() {
+        with_flags(SIGUSR2, 0, || {
+            assert_eq!(siginterrupt(SIGUSR2, 0), 0);
+            let got = action_of(SIGUSR2);
+            assert_ne!(
+                got.sa_flags & SA_RESTART,
+                0,
+                "flag == 0 means restart, which is SA_RESTART set"
+            );
+            assert_eq!(got.sa_handler, SIG_IGN, "the handler must survive");
+        });
+    }
+
+    #[test]
+    fn siginterrupt_does_not_disturb_another_signal() {
+        // The read-modify-write is indexed by `sig`; getting that wrong would
+        // silently retune a signal the caller never named.
+        with_flags(SIGALRM, SA_RESTART, || {
+            with_flags(SIGVTALRM, SA_RESTART, || {
+                assert_eq!(siginterrupt(SIGALRM, 1), 0);
+                assert_eq!(action_of(SIGALRM).sa_flags & SA_RESTART, 0);
+                assert_ne!(
+                    action_of(SIGVTALRM).sa_flags & SA_RESTART,
+                    0,
+                    "only the named signal should change"
+                );
+            });
+        });
+    }
 
     #[test]
     fn test_siginterrupt_valid_signals_succeed() {

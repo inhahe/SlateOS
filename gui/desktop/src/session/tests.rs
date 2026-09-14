@@ -119,7 +119,7 @@ fn a_session_starts_with_what_was_saved() {
         assert_eq!(
             shell.hotkeys.conflicts_with(&chord),
             Some(&action),
-            "the rebound shortcut did not come back. The test in lib.rs that              asserts it survives a restart calls `load_shortcuts` by hand,              which is why nothing noticed the session never did."
+            "the rebound shortcut did not come back. The test in lib.rs that asserts it survives a restart calls `load_shortcuts` by hand, which is why nothing noticed the session never did."
         );
         assert!(
             shell.is_pinned(&exec),

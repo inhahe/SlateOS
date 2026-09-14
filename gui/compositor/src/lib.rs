@@ -5401,6 +5401,23 @@ impl Compositor {
         self.appearance.color_filter
     }
 
+    /// The per-channel gains that warm the screen, or `None` when night light
+    /// is off.
+    ///
+    /// Read by [`Server::show`] once per frame, beside
+    /// [`color_filter`](Self::color_filter) and for the same reason: this is
+    /// a transform of what finally reaches the display, not of what the
+    /// compositor draws.
+    ///
+    /// `None` rather than gains of `(1, 1, 1)` so that the common case is a
+    /// branch and not two million multiplications by one.
+    #[must_use]
+    pub fn night_light_gains(&self) -> Option<(f32, f32, f32)> {
+        self.appearance
+            .night_light
+            .then(|| appearance::night_light_gains(self.appearance.night_light_strength))
+    }
+
     /// How close together two title-bar clicks must be to maximize the window.
     ///
     /// Clamped to [`MIN_DOUBLE_CLICK_MS`]..=[`MAX_DOUBLE_CLICK_MS`].

@@ -37,50 +37,67 @@ const TASKBAR_APP_FORMAT: &str = "application/x-slateos-taskbar-app";
 /// a drag operation begins carrying the icon's ID and app name.
 /// Dropping outside the tray hides the icon; dropping on another
 /// tray position reorders; pressing Escape cancels.
-pub struct TrayDragSource {
+/// What the tray drags: an icon, named by its owner and id.
+///
+/// An alias rather than a distinct type, so the tray's twenty-odd call sites
+/// read exactly as they did while the model behind them became shared.
+pub type TrayDragSource = DragSource<TrayIconKey>;
+
+/// The press-and-move bookkeeping behind any drag-to-reorder.
+///
+/// Generic over what is being dragged, because two things in this shell are:
+/// tray icons and pinned taskbar buttons. The *logic* -- has a press started,
+/// has it moved far enough to be a drag rather than a click, what was pressed,
+/// was it cancelled -- has nothing to do with either, and a second copy of it
+/// would be the same fact modelled twice.
+///
+/// `K` is a *name*, never a slot. Both callers say so in their own words: a
+/// row can rearrange itself under the pointer mid-drag, and an index captured
+/// at press time would then refer to something else. A key does not move.
+pub struct DragSource<K> {
     /// Whether a mouse press has started (potential drag).
     press_active: bool,
     /// X coordinate of the initial press.
     press_x: f32,
     /// Y coordinate of the initial press.
     press_y: f32,
-    /// Which icon was pressed on.
-    press_icon: Option<TrayIconKey>,
+    /// Which item was pressed on.
+    press_key: Option<K>,
     /// Whether the drag threshold has been exceeded.
     drag_active: bool,
     /// Whether the icon should appear semi-transparent (drag in progress).
     pub show_ghost: bool,
-    /// The icon currently being dragged, if any.
-    pub dragging_icon: Option<TrayIconKey>,
+    /// The item currently being dragged, if any.
+    pub dragging_key: Option<K>,
     /// Whether the drag was cancelled via Escape.
     cancelled: bool,
 }
 
-impl TrayDragSource {
+impl<K: Clone + PartialEq> DragSource<K> {
     /// Create a new drag source with no active drag.
     pub fn new() -> Self {
         Self {
             press_active: false,
             press_x: 0.0,
             press_y: 0.0,
-            press_icon: None,
+            press_key: None,
             drag_active: false,
             show_ghost: false,
-            dragging_icon: None,
+            dragging_key: None,
             cancelled: false,
         }
     }
 
     /// Called when the user presses on a tray icon. Records the position
     /// for threshold checking.
-    pub fn on_press(&mut self, icon: TrayIconKey, x: f32, y: f32) {
+    pub fn on_press(&mut self, key: K, x: f32, y: f32) {
         self.press_active = true;
         self.press_x = x;
         self.press_y = y;
-        self.press_icon = Some(icon);
+        self.press_key = Some(key);
         self.drag_active = false;
         self.show_ghost = false;
-        self.dragging_icon = None;
+        self.dragging_key = None;
         self.cancelled = false;
     }
 
@@ -99,7 +116,7 @@ impl TrayDragSource {
         if dx * dx + dy * dy >= DRAG_THRESHOLD * DRAG_THRESHOLD {
             self.drag_active = true;
             self.show_ghost = true;
-            self.dragging_icon = self.press_icon;
+            self.dragging_key = self.press_key.clone();
             return true;
         }
         false
@@ -128,7 +145,7 @@ impl TrayDragSource {
         self.cancelled = true;
         self.drag_active = false;
         self.show_ghost = false;
-        self.dragging_icon = None;
+        self.dragging_key = None;
         self.press_active = false;
     }
 
@@ -139,7 +156,7 @@ impl TrayDragSource {
         self.press_active = false;
         self.drag_active = false;
         self.show_ghost = false;
-        self.dragging_icon = None;
+        self.dragging_key = None;
         self.cancelled = false;
         was_dragging
     }
@@ -149,10 +166,10 @@ impl TrayDragSource {
     /// A press that stays a click still needs to name its icon -- that is the
     /// click the owning program is told about -- so this is readable before
     /// the threshold is crossed, unlike
-    /// [`dragging_icon`](Self::dragging_icon).
+    /// [`dragging_key`](Self::dragging_key).
     #[must_use]
-    pub fn pressed_icon(&self) -> Option<TrayIconKey> {
-        self.press_icon
+    pub fn pressed_key(&self) -> Option<K> {
+        self.press_key.clone()
     }
 
     /// Whether a drag is currently in progress.
@@ -168,7 +185,7 @@ impl TrayDragSource {
     }
 }
 
-impl Default for TrayDragSource {
+impl<K: Clone + PartialEq> Default for DragSource<K> {
     fn default() -> Self {
         Self::new()
     }
@@ -846,7 +863,7 @@ mod tests {
         let activated = src.on_move(101.0, 201.0);
         assert!(!activated);
         assert!(!src.is_dragging());
-        assert!(src.dragging_icon.is_none());
+        assert!(src.dragging_key.is_none());
     }
 
     #[test]
@@ -858,7 +875,7 @@ mod tests {
         let activated = src.on_move(106.0, 200.0);
         assert!(activated);
         assert!(src.is_dragging());
-        assert_eq!(src.dragging_icon, Some(key(42)));
+        assert_eq!(src.dragging_key, Some(key(42)));
         assert!(src.show_ghost);
     }
 
@@ -886,7 +903,7 @@ mod tests {
         src.cancel();
         assert!(!src.is_dragging());
         assert!(!src.show_ghost);
-        assert!(src.dragging_icon.is_none());
+        assert!(src.dragging_key.is_none());
     }
 
     #[test]

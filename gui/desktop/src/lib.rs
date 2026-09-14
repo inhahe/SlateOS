@@ -1116,6 +1116,13 @@ pub struct DesktopShell {
     /// [`Hit::TaskbarPinned`] carries an index: the list is the authority, and
     /// a copy of a path here would be a second one to keep in step.
     pin_menu: Option<(guitk::menu::ContextMenu, PinTarget)>,
+    /// A pinned button being dragged along the bar.
+    ///
+    /// Keyed on the executable path rather than the slot, for the reason the
+    /// tray's drag is keyed on an icon's name: the row rearranges itself under
+    /// the pointer as the drag proceeds, so an index taken at press time
+    /// stops meaning the thing that was pressed.
+    pin_drag: Option<tray_dnd::DragSource<String>>,
     /// A press that landed on a tray icon and has not been released.
     ///
     /// Held from press to release because until the release the shell does
@@ -1640,6 +1647,7 @@ impl DesktopShell {
             tray_drag: None,
             tray_overflow_menu: None,
             pin_menu: None,
+            pin_drag: None,
             tray_tooltip: None,
             alt_tab_active: false,
             alt_tab_index: 0,
@@ -2774,6 +2782,19 @@ impl DesktopShell {
         // does not yet know what it is -- a click belongs to the program that
         // owns the icon, a drag belongs to the shell, and only the release
         // can tell them apart.
+        // A pinned button owns the pointer until the button comes up, the
+        // way a tray icon does and for the same reason: the press does not yet
+        // know whether it is a click or a drag.
+        if self.pin_drag.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.drag_pinned_to(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => return self.finish_pinned_press(),
+                _ => {}
+            }
+        }
         if self.tray_drag.is_some() {
             match event.kind {
                 MouseEventKind::Move => {
@@ -3141,15 +3162,16 @@ impl DesktopShell {
             // the *browsed* paths — see `RunDialog` — that cannot survive a
             // round trip through `String`, and those never pass through here.
             Hit::TaskbarPinned(index) => {
-                let path = self
-                    .taskbar
-                    .pinned_apps()
-                    .get(index)
-                    .map(|app| PathBuf::from(&app.exec_path));
-                // A pin whose index no longer exists is a list that changed
-                // under the press. Doing nothing is right: there is no
-                // second-best program to start.
-                path.map_or(ShellAction::Consumed, ShellAction::Launch)
+                // The press only takes hold; the *release* decides whether it
+                // was a click or a drag. Launching here would start the
+                // program every time the user began to rearrange the bar,
+                // which is the same reason the tray waits for the release.
+                if let Some(app) = self.taskbar.pinned_apps().get(index) {
+                    let mut source = tray_dnd::DragSource::default();
+                    source.on_press(app.exec_path.clone(), x, y);
+                    self.pin_drag = Some(source);
+                }
+                ShellAction::Consumed
             }
             Hit::StartMenuEntry(index) => {
                 let path = self
@@ -5720,7 +5742,7 @@ impl DesktopShell {
         if !drag.source.is_dragging() {
             return false;
         }
-        let Some(key) = drag.source.pressed_icon() else {
+        let Some(key) = drag.source.pressed_key() else {
             return false;
         };
         // The boundary is measured over the icons *on the bar*, which are a
@@ -5739,13 +5761,84 @@ impl DesktopShell {
         self.tray_arrangement.move_before(key, anchor)
     }
 
+    /// Move a pinned button along the bar. Answers whether anything moved.
+    fn drag_pinned_to(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = self.pin_drag.as_mut() else {
+            return false;
+        };
+        drag.on_move(x, y);
+        if !drag.is_dragging() {
+            return false;
+        }
+        let Some(exec) = drag.pressed_key() else {
+            return false;
+        };
+        let Some(from) = self.pinned_index_of(&exec) else {
+            // Unpinned from elsewhere while the drag was in flight. There is
+            // nothing left to move, and inventing a position for it would put
+            // a program back on the bar the user had just taken off.
+            return false;
+        };
+        let to = self.pinned_drop_boundary(x);
+        if to == from {
+            return false;
+        }
+        self.taskbar.reorder_pinned(from, to);
+        self.save_pinned();
+        true
+    }
+
+    /// Where in the pinned run a drop at `x` belongs.
+    ///
+    /// Measured against each button's *midpoint*, so a button dropped on the
+    /// left half of its neighbour goes before it and on the right half after
+    /// it. Clamped to the run: a drag past the last pinned button lands at the
+    /// end rather than among the window buttons, which are not the pinned
+    /// list's to rearrange.
+    fn pinned_drop_boundary(&self, x: f32) -> usize {
+        let count = self.taskbar.pinned_apps().len();
+        for index in 0..count {
+            let button = self.taskbar_button_rect(index);
+            if x < button.x + button.w / 2.0 {
+                return index;
+            }
+        }
+        count.saturating_sub(1)
+    }
+
+    /// Which pinned slot holds `exec`, if any.
+    fn pinned_index_of(&self, exec: &str) -> Option<usize> {
+        self.taskbar
+            .pinned_apps()
+            .iter()
+            .position(|app| app.exec_path == exec)
+    }
+
+    /// Release a pressed pinned button: a reorder just ended, or the program
+    /// is about to be started.
+    fn finish_pinned_press(&mut self) -> ShellAction {
+        let Some(mut drag) = self.pin_drag.take() else {
+            return ShellAction::Consumed;
+        };
+        let exec = drag.pressed_key();
+        // Read before `on_release`, which resets the source.
+        let was_drag = drag.on_release();
+        if was_drag {
+            // The row already rearranged itself on the way here.
+            return ShellAction::Consumed;
+        }
+        exec.map_or(ShellAction::Consumed, |exec| {
+            ShellAction::Launch(PathBuf::from(exec))
+        })
+    }
+
     /// Release a pressed tray icon: either a reorder just ended, or the
     /// program that owns the icon is about to hear about a click.
     fn finish_tray_press(&mut self) -> ShellAction {
         let Some(mut drag) = self.tray_drag.take() else {
             return ShellAction::Consumed;
         };
-        let key = drag.source.pressed_icon();
+        let key = drag.source.pressed_key();
         // Read before `on_release`, which resets the source.
         let was_drag = drag.source.on_release();
         if was_drag {
@@ -13612,8 +13705,8 @@ mod taskbar_pin_tests {
     //! `scripts/check-scratch-config.py` exists to refuse.
 
     use super::{
-        DesktopShell, Hit, Key, KeyEvent, Modifiers, MouseButton, ShellAction, TaskbarSlot,
-        WindowInfo, WindowList,
+        DesktopShell, Hit, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        ShellAction, TaskbarSlot, WindowInfo, WindowList,
     };
 
     /// A plain key press, as the compositor delivers one.
@@ -13661,19 +13754,38 @@ mod taskbar_pin_tests {
         });
     }
 
-    /// Pressing it starts the program.
+    /// A mouse event of a kind, at a point.
+    fn at(x: f32, y: f32, kind: MouseEventKind) -> MouseEvent {
+        MouseEvent { x, y, kind }
+    }
+
+    /// The middle of the `index`-th taskbar button.
+    fn button_centre(shell: &DesktopShell, index: usize) -> (f32, f32) {
+        let r = shell.taskbar_button_rect(index);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// **Releasing it starts the program**, and the press only takes hold.
+    ///
+    /// Launching on the press would start the program every time the user
+    /// began to rearrange the bar, which is why the tray waits for the release
+    /// too.
     #[test]
-    fn pressing_a_pinned_button_launches_the_program() {
+    fn releasing_a_pinned_button_launches_the_program() {
         with_scratch_config("shell-pin-launch", |_root| {
             let mut shell = shell();
             let (exec, name) = first_app(&shell);
             shell.pin_app(&exec, &name);
 
-            let button = shell.taskbar_button_rect(0);
-            let (cx, cy) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+            let (cx, cy) = button_centre(&shell, 0);
             assert_eq!(shell.hit_test(cx, cy), Hit::TaskbarPinned(0));
 
-            match shell.handle_press(cx, cy, MouseButton::Left) {
+            assert_eq!(
+                shell.handle_mouse(&at(cx, cy, MouseEventKind::Press(MouseButton::Left))),
+                ShellAction::Consumed,
+                "the press launched it before the release could say it was a click"
+            );
+            match shell.handle_mouse(&at(cx, cy, MouseEventKind::Release(MouseButton::Left))) {
                 ShellAction::Launch(path) => {
                     assert_eq!(path.to_string_lossy(), exec, "it started the wrong program");
                 }
@@ -13819,6 +13931,129 @@ mod taskbar_pin_tests {
             assert!(
                 shell.render_pin_menu().is_none(),
                 "a window's button offered to pin something"
+            );
+        });
+    }
+
+    /// **Dragging a pinned button moves it along the bar.**
+    ///
+    /// `reorder_pinned` is the third of the module's model methods the shell
+    /// now uses, and the drag is the same `DragSource` the tray uses -- one
+    /// model of "has this press become a drag yet", two things that drag.
+    #[test]
+    fn dragging_a_pinned_button_reorders_it() {
+        with_scratch_config("shell-pin-drag", |_root| {
+            let mut shell = shell();
+            let apps: Vec<(String, String)> = shell
+                .start_menu_entries()
+                .iter()
+                .take(3)
+                .map(|e| (e.executable_path.clone(), e.name.clone()))
+                .collect();
+            assert_eq!(apps.len(), 3, "three programs are needed to see a move");
+            for (exec, name) in &apps {
+                shell.pin_app(exec, name);
+            }
+            assert_eq!(shell.pinned_apps()[0].exec_path, apps[0].0);
+
+            // Take the first and drop it past the middle of the third.
+            let (from_x, from_y) = button_centre(&shell, 0);
+            let (to_x, _) = button_centre(&shell, 2);
+            shell.handle_mouse(&at(
+                from_x,
+                from_y,
+                MouseEventKind::Press(MouseButton::Left),
+            ));
+            shell.handle_mouse(&at(to_x + 4.0, from_y, MouseEventKind::Move));
+            shell.handle_mouse(&at(
+                to_x + 4.0,
+                from_y,
+                MouseEventKind::Release(MouseButton::Left),
+            ));
+
+            assert_ne!(
+                shell.pinned_apps()[0].exec_path,
+                apps[0].0,
+                "the dragged button did not move"
+            );
+            assert!(
+                shell.pinned_apps().iter().any(|a| a.exec_path == apps[0].0),
+                "the dragged button fell off the bar"
+            );
+            assert_eq!(
+                shell.pinned_apps().len(),
+                3,
+                "a drag changed how many there are"
+            );
+        });
+    }
+
+    /// A press that barely moves is still a click, not a drag.
+    #[test]
+    fn a_press_that_hardly_moves_still_launches() {
+        with_scratch_config("shell-pin-nudge", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+            let (cx, cy) = button_centre(&shell, 0);
+
+            shell.handle_mouse(&at(cx, cy, MouseEventKind::Press(MouseButton::Left)));
+            // One pixel: under any sane threshold, and the gesture a shaky
+            // hand makes while clicking.
+            shell.handle_mouse(&at(cx + 1.0, cy, MouseEventKind::Move));
+            let action = shell.handle_mouse(&at(
+                cx + 1.0,
+                cy,
+                MouseEventKind::Release(MouseButton::Left),
+            ));
+
+            assert!(
+                matches!(action, ShellAction::Launch(_)),
+                "a one-pixel wobble turned a click into a drag: {action:?}"
+            );
+        });
+    }
+
+    /// **A drag cannot push a pinned button in among the windows.**
+    ///
+    /// The window buttons are not the pinned list's to rearrange, and an index
+    /// past its end would be a position `reorder_pinned` has no slot for.
+    #[test]
+    fn dragging_past_the_last_pin_stays_in_the_pinned_run() {
+        with_scratch_config("shell-pin-clamp", |_root| {
+            let mut shell = shell();
+            let apps: Vec<(String, String)> = shell
+                .start_menu_entries()
+                .iter()
+                .take(2)
+                .map(|e| (e.executable_path.clone(), e.name.clone()))
+                .collect();
+            for (exec, name) in &apps {
+                shell.pin_app(exec, name);
+            }
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![WindowInfo::new(1, 1, "A window".to_string())],
+            ));
+
+            let (from_x, from_y) = button_centre(&shell, 0);
+            // Far to the right, over the window button and beyond.
+            let far = shell.taskbar_button_rect(2).x + 500.0;
+            shell.handle_mouse(&at(
+                from_x,
+                from_y,
+                MouseEventKind::Press(MouseButton::Left),
+            ));
+            shell.handle_mouse(&at(far, from_y, MouseEventKind::Move));
+            shell.handle_mouse(&at(far, from_y, MouseEventKind::Release(MouseButton::Left)));
+
+            assert_eq!(shell.pinned_apps().len(), 2, "a pin was lost off the end");
+            let slots = shell.taskbar_slots();
+            assert_eq!(slots[0], TaskbarSlot::Pinned(0));
+            assert_eq!(slots[1], TaskbarSlot::Pinned(1));
+            assert!(
+                matches!(slots[2], TaskbarSlot::Window(_)),
+                "the window moved"
             );
         });
     }

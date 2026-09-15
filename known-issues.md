@@ -149830,11 +149830,71 @@ again.
 | `unshare` | all 16 (`-m -u -i -n -p -U -C -T -f -r -S -G -R -w -h -V`) | all match |
 | `nsenter` | all 10 (`-a -t -F -G -S -V -W -r -w -h`) | all match |
 
-**Unchecked**, and where to go next: every other `userspace/` tool with a
-util-linux, coreutils or net-tools counterpart. The privilege tools were done
-first on the theory that a wrong flag there is worst; that theory is now
-partly tested and both came back clean, so the next pass should just be
-breadth.
+**SWEPT 2026-09-15 by `scripts/compare-short-options.py`: 84 crates compared
+against their references, 71 clear, 24 collisions in 13 tools.** 65 crates
+have no reference available on this machine and were not compared.
+
+    chpasswd   -s   --sha256        here, --sha-rounds      upstream
+    dmesg      -T   --human-time    here, --ctime           upstream
+    dmesg      -c   --clear         here, --read-clear      upstream
+    dmesg      -f   --follow        here, --facility        upstream
+    dmesg      -s   --search        here, --buffer-size     upstream
+    eject      -f   --force         here, --floppy          upstream
+    findmnt    -d   --fs-devno      here, --direction       upstream
+    findmnt    -t   --type          here, --types           upstream
+    flock      -E   --conflict-exit here, --conflict-exit-code upstream
+    getty      -h   --help          here, --flow-control    upstream
+    getty      -o   --long-hostname here, --login-options   upstream
+    hardlink   -X   --exclude       here, --respect-xattrs  upstream
+    hardlink   -o   --respect-owner here, --ignore-owner    upstream
+    hardlink   -p   --respect-perm  here, --ignore-mode     upstream
+    hardlink   -t   --respect-time  here, --ignore-time     upstream
+    hardlink   -x   --respect-xattr here, --exclude         upstream
+    last       -t   --time          here, --until           upstream
+    locale     -k   --keyword       here, --keyword-name    upstream
+    logrotate  -d   --dry-run       here, --debug           upstream
+    mkfs       -V   --version       here, --verbose         upstream
+    pstree     -g   --numeric-uid   here, --show-pgids      upstream
+    pstree     -h   --help          here, --highlight-all   upstream
+    pstree     -t   --threads       here, --thread-names    upstream
+    sysctl     -n   --values-only   here, --values          upstream
+
+**Each row is a claim to check, and the first sweep proves why.** It reported
+26, and its two most severe --
+
+    mount   -f   --force   here, --fake          upstream
+    mount   -l   --lazy    here, --show-labels   upstream
+
+-- were WRONG. `mount -f` upstream is "dry run; skip the mount(2) syscall",
+which reads as a safety flag that performs the action instead of simulating
+it, and it was the first thing I went to fix. Those arms are in the `umount`
+branch: `userspace/mount` is two programs, and umount(8) really does define
+`-f, --force` and `-l, --lazy`. Acting on the report wholesale would have
+turned two correct bindings into incorrect ones. The checker now compares
+against every personality a crate answers to and its self-test carries that
+case in both directions.
+
+**Ranked by what being wrong costs**, which is not the order above:
+
+1. `hardlink -x`/`-X` are SWAPPED with each other. Upstream `-x <regex>`
+   excludes files and `-X` respects xattrs; here `-X` excludes and `-x`
+   respects. So `hardlink -x '\.git' dir` consumes the regex as a positional
+   and links files the caller meant to exclude -- on a tool whose whole job
+   is to merge files into one inode, and which is not reversible by re-running
+   with the flag spelled right.
+2. `hardlink -p`/`-o`/`-t` are INVERTED: `--ignore-mode` upstream versus
+   `--respect-perm` here, and likewise for owner and time. Ours is the
+   conservative direction (fewer links), so a script written upstream gets
+   safer behaviour than it asked for rather than more dangerous -- worth
+   fixing, not urgent.
+3. `dmesg -c` is `--read-clear` upstream (print, THEN clear) and `--clear`
+   here. If ours clears without printing, `dmesg -c` discards the buffer the
+   caller was trying to read. Needs checking before it is believed.
+4. `getty -h` and `pstree -h` print help where upstream they are
+   `--flow-control` and `--highlight-all`. Surprising, but visibly so.
+5. The rest change output or units and fail loudly enough to notice.
+
+**Unchecked:** the 65 crates with no reference on this machine.
 
 **Two near-misses worth keeping.** `unshare` has no `-c` for
 `--map-current-user` where util-linux does, and our `blkid -c` has no

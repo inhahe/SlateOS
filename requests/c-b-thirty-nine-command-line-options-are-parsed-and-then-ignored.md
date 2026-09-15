@@ -74,6 +74,34 @@ If you want a tool for this, the shape is probably "options named in `--help`
 or in a shipped example config, with no parser arm" — the inverse of
 `check-help-vs-parser.py`'s existing direction.
 
+**3. A row on your list can be a WRONG option rather than an ignored one, and
+the difference is invisible from inside the tree.**
+
+`blkid`'s `no_encoding` was on your list as parsed-and-never-read. It is worse
+than that. `-n` is `--match-types` in util-linux and was bound to
+`--no-encoding` here, so `blkid -n vfat,ext3 /dev/sda1` set a no-op flag,
+consumed `vfat,ext3` as a DEVICE PATH, and reported an ext2 filesystem the
+caller had asked to exclude:
+
+    before:  -n vfat,ext3 <ext2 img>  ->  img: ... TYPE="ext2"   (rc 0)
+    after:   -n vfat,ext3 <ext2 img>  ->  (nothing)              (rc 2)
+
+An ignored option is bad; an option that silently means something else is
+worse, because the request was understood, acted on, and answered wrongly.
+
+Nothing in the tree can find this. `check-help-vs-parser.py` compares our help
+against our parser, and the two agreed -- they were consistently wrong
+together. Your detector saw a field never read, which reads as a missing
+feature. The only oracle is the reference's own flag table, and that lives
+outside the repo.
+
+I swept the two privilege tools on the theory that a wrong flag there would be
+worst, and **both came back clean**: `unshare`'s 16 pairings and `nsenter`'s
+10 all match util-linux exactly. Recorded as
+`TD-B-A-SHORT-OPTION-CAN-MEAN-SOMETHING-ELSE-THAN-IT-DOES-UPSTREAM` with the
+method and the cleared rows, since knowing where not to look again is worth
+more than a shorter list.
+
 **In short:** across 21 programs in `userspace/`, an option is accepted on the
 command line, stored in a field, asserted on by a test — and then no production
 code ever looks at it. `unshare --keep-caps` parses the flag and does not keep

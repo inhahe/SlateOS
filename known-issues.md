@@ -148053,7 +148053,7 @@ precisely when someone wants to know what hardware they have.
 None of the ten are fixed. They are listed here so that the next sweep starts
 from the self-declarations rather than from the names.
 
-## TD-C-SYSINFO-INVENTS-A-WHOLE-MACHINE-WHILE-THE-REAL-QUERY-LAYER-SITS-UNUSED
+## TD-C-SYSINFO-INVENTS-A-WHOLE-MACHINE-WHILE-THE-REAL-QUERY-LAYER-SITS-UNUSED -- FIXED 2026-09-15
 
 **In short:** the System Information app tells you your machine has a
 GenuineIntel processor, an Intel I225-V network adapter, Intel Wi-Fi 6E AX211
@@ -148175,3 +148175,52 @@ pinned by `hwquery`'s parser and its 33 tests — flat `key=value` files, one pe
 category, with the field names `SyscallProvider::field` looks up. A producer
 written against those tests cannot disagree with the consumer, which is the one
 piece of luck in this arrangement.
+
+**FIXED, and the correction above needs one of its own.**
+
+The application no longer invents anything: `main` queries
+`hwquery::SyscallProvider` directly, 642 lines of constants are gone, and the
+window says it cannot read the hardware. `hwquery` left the island ledger.
+`FallbackProvider` was deleted rather than wired — it dropped to `StubProvider`
+whenever the syscall path failed, which is every host without the tree, so its
+purpose in practice was to display hardware nobody had.
+
+**The `/sys/hardware` premise in the correction above was itself stale, and the
+decision it contradicted is lane C's own.** `design-decisions.md` §850, dated
+2026-09-14: hardware facts are served under `/sys/devices`, not a second
+`/sys/hardware` tree, because the kernel already publishes `core_id`,
+`physical_package_id` and cache geometry there. Lane A proposed that and
+withdrew their own first choice; **lane C made the final call**, and lane C then
+spent an hour writing a request asking lane A to build the tree §850 had
+retired.
+
+Two things in that request were wrong and the second was dangerous. It scoped
+the change as "thirteen constants and one macro", when the trees differ in
+*data model* — `/sys/devices` is scalar-per-file, `hwquery` read one
+`key=value` file — so the reader changes, not the constants. And it said *"take
+the tests as the specification, not my field list"*, which would have pointed a
+producer author at 33 green tests pinning the very format the decision moved
+away from. Written against them, a producer would have satisfied its consumer
+perfectly, contradicted `main`, and passed everything.
+
+**The general form, which lane A recorded as §937 in these words:** tests pin
+the format the consumer currently parses, which is only the specification if the
+format is not the thing under decision. Where a format has been decided
+against, its tests are the strongest available argument for keeping it — green,
+executable, and evidence of intent — and they are wrong. Pointing at them feels
+like rigour rather than inertia, and thirty-three of them are harder to argue
+with than one sentence in `design-decisions.md`.
+
+**The reader is rewritten** for `/sys/devices`, scalar-per-file: `cpuid/` for
+the CPUID leaf 1 identity, `present` for the logical count, `cpuN/topology/`
+for distinct `(socket, core)` pairs, `cpu0/cache/indexN/` for geometry. Four
+`CpuInfo` fields are `Option` and always `None` on this kernel — there is no
+brand or vendor (CPUID leaves 0 and 0x8000_0002..4 are not served) and no
+`cpufreq/` — and the panel says "Not reported by this system" rather than
+drawing an empty name or a stopped clock.
+
+**Still outstanding:** lane A serves `cpu` and `memory` today and has offered
+`block` and `net` next. Everything else the window lists — PCI, USB, sound,
+IRQs, I/O ports, the memory map, DMA — has no producer, and the window says so
+per category rather than as one banner, which is right: those are separate
+facts and will arrive separately.

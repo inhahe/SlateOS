@@ -528,41 +528,6 @@ impl NarratorVerbosity {
 // Update types
 // ============================================================================
 
-/// Status of an installed update.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UpdateStatus {
-    Installed,
-    Failed,
-    Pending,
-}
-
-impl UpdateStatus {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Installed => "Installed",
-            Self::Failed => "Failed",
-            Self::Pending => "Pending",
-        }
-    }
-
-    fn color(self, pal: &Palette) -> Color {
-        match self {
-            Self::Installed => pal.green,
-            Self::Failed => pal.red,
-            Self::Pending => pal.peach,
-        }
-    }
-}
-
-/// A historical update entry.
-#[derive(Clone, Debug)]
-pub struct UpdateEntry {
-    pub date: String,
-    pub kb_number: String,
-    pub description: String,
-    pub status: UpdateStatus,
-}
-
 // ============================================================================
 // Main application state
 // ============================================================================
@@ -687,16 +652,6 @@ pub struct SettingsState {
     /// Slow at 0.0, fast at 1.0. Range stated by [`SliderId::range`].
     pub narrator_rate: f32,
     pub narrator_verbosity: NarratorVerbosity,
-
-    // Update settings
-    pub os_version: String,
-    pub update_history: Vec<UpdateEntry>,
-    pub auto_update_enabled: bool,
-    pub active_hours_start: u8, // 0-23
-    pub active_hours_end: u8,   // 0-23
-    pub defer_feature_days: u16,
-    pub defer_quality_days: u16,
-    pub checking_for_updates: bool,
 
     // Dropdown state
     pub open_dropdown: Option<DropdownId>,
@@ -1271,41 +1226,6 @@ impl SettingsState {
             narrator_enabled: false,
             narrator_rate: 0.5,
             narrator_verbosity: NarratorVerbosity::Medium,
-
-            // Update defaults
-            os_version: "Slate OS 1.0.0 Build 2600".into(),
-            update_history: vec![
-                UpdateEntry {
-                    date: "2026-05-15".into(),
-                    kb_number: "KB5032100".into(),
-                    description: "Security update for kernel".into(),
-                    status: UpdateStatus::Installed,
-                },
-                UpdateEntry {
-                    date: "2026-05-10".into(),
-                    kb_number: "KB5031980".into(),
-                    description: "Cumulative update for .NET runtime".into(),
-                    status: UpdateStatus::Installed,
-                },
-                UpdateEntry {
-                    date: "2026-05-08".into(),
-                    kb_number: "KB5031875".into(),
-                    description: "Driver update for GPU".into(),
-                    status: UpdateStatus::Failed,
-                },
-                UpdateEntry {
-                    date: "2026-05-01".into(),
-                    kb_number: "KB5031700".into(),
-                    description: "Feature update: compositor improvements".into(),
-                    status: UpdateStatus::Installed,
-                },
-            ],
-            auto_update_enabled: true,
-            active_hours_start: 8,
-            active_hours_end: 22,
-            defer_feature_days: 0,
-            defer_quality_days: 0,
-            checking_for_updates: false,
 
             // Dropdown state
             open_dropdown: None,
@@ -2014,7 +1934,6 @@ enum ToggleId {
     MouseKeys,
     ReduceAnimations,
     ReduceTransparency,
-    AutoUpdate,
     /// Slide the taskbar out of the way when it is not in use.
     ///
     /// Unlike its neighbours here, the field behind this one lives in the
@@ -2208,8 +2127,6 @@ enum SliderId {
     NightLightTemperature,
     NarratorRate,
     TextSize,
-    DeferFeatureDays,
-    DeferQualityDays,
     /// How long the pointer has between two clicks for them to be one
     /// double click, in milliseconds.
     DoubleClickMs,
@@ -2224,12 +2141,10 @@ impl SliderId {
     /// a test walks it to check each one is draggable, the way
     /// [`DropdownId::FIXED`] does for dropdowns.
     #[cfg(test)]
-    const FIXED: [Self; 6] = [
+    const FIXED: [Self; 4] = [
         Self::NightLightTemperature,
         Self::NarratorRate,
         Self::TextSize,
-        Self::DeferFeatureDays,
-        Self::DeferQualityDays,
         Self::DoubleClickMs,
     ];
 
@@ -2250,8 +2165,6 @@ impl SliderId {
         match self {
             Self::NightLightTemperature | Self::NarratorRate => (0.0, 1.0),
             Self::TextSize => (50.0, 250.0),
-            Self::DeferFeatureDays => (0.0, 365.0),
-            Self::DeferQualityDays => (0.0, 30.0),
             #[allow(clippy::cast_precision_loss)]
             Self::DoubleClickMs => (MIN_DOUBLE_CLICK_MS as f32, MAX_DOUBLE_CLICK_MS as f32),
         }
@@ -2268,7 +2181,6 @@ impl SliderId {
         match self {
             Self::NightLightTemperature | Self::NarratorRate => None,
             Self::TextSize => Some(format!("{whole}%")),
-            Self::DeferFeatureDays | Self::DeferQualityDays => Some(format!("{whole} days")),
             // In milliseconds, the unit the setting is actually stored and
             // applied in, rather than as a "speed" the user would have to guess
             // the direction of. The ends are labelled Fast and Slow by the page.
@@ -2301,7 +2213,6 @@ enum AnchorId {
 /// See known-issues.md `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonId {
-    CheckForUpdates,
     /// Open the picker and choose a desktop picture.
     ChooseWallpaper,
     /// Go back to the plain background that follows the theme.
@@ -3265,7 +3176,7 @@ impl SettingsState {
     fn build_sound_page<S: PageSink>(&self, s: &mut S) {
         s.section("Output");
         s.note(
-            "Audio is not wired up yet: this system has no sound service and no way              to enumerate devices, so these settings would not reach anything.",
+            "Audio is not wired up yet: this system has no sound service and no way to enumerate devices, so these settings would not reach anything.",
             44.0,
         );
         s.unavailable_row("Output Device", "No devices detected");
@@ -3404,10 +3315,10 @@ impl SettingsState {
         s.note(
             match style {
                 SurfaceStyle::Borders => {
-                    "Outlined. A selected thing is outlined in the accent colour,                      which means the same everywhere it appears."
+                    "Outlined. A selected thing is outlined in the accent colour, which means the same everywhere it appears."
                 }
                 SurfaceStyle::Cards => {
-                    "Filled with a shade. Note that some text does not reach the                      4.5:1 contrast floor on the darker cards."
+                    "Filled with a shade. Note that some text does not reach the 4.5:1 contrast floor on the darker cards."
                 }
             },
             30.0,
@@ -3427,10 +3338,10 @@ impl SettingsState {
         s.note(
             match strip {
                 StripStyle::Filled => {
-                    "Shaded. A toolbar or status bar is a band of a different                      shade from the page, as it is today."
+                    "Shaded. A toolbar or status bar is a band of a different shade from the page, as it is today."
                 }
                 StripStyle::Separator => {
-                    "A line. The bar is the same colour as the page, with a                      hairline along the edge that faces the content."
+                    "A line. The bar is the same colour as the page, with a hairline along the edge that faces the content."
                 }
             },
             30.0,
@@ -4121,104 +4032,76 @@ impl SettingsState {
         }
     }
 
+    /// The System Updates page.
+    ///
+    /// Everything here is a statement that this system cannot update itself
+    /// yet, which is a change from what it used to say. It previously drew a
+    /// "Check for Updates" button whose entire handler was
+    /// `self.checking_for_updates = !self.checking_for_updates` -- it flipped
+    /// the label to "Checking..." and checked nothing -- beside the words
+    /// "Your device is up to date" in green, unconditionally, from code that
+    /// had never looked. Under it sat four invented history entries with
+    /// Windows-style KB numbers, one of them a *failed* GPU driver update,
+    /// and a "Cumulative update for .NET runtime" on a system with no .NET.
+    ///
+    /// The failed entry is the one that decided this. A fabricated success is
+    /// a lie about nothing; a fabricated failure sends someone looking for a
+    /// problem that never happened, on their own machine, with no way to find
+    /// out it was never real.
+    ///
+    /// There is no honest version of the old page available. An update needs
+    /// a source, and the two that exist -- `userspace/pkg` and
+    /// `kernel/src/fs/updatemgr.rs` -- are in other lanes with no service
+    /// between them and a GUI application. The same is true of the version
+    /// string: `os_version` read "Slate OS 1.0.0 Build 2600", and 2600 is
+    /// Windows XP's build number. Nothing in this tree reports an OS version
+    /// to a userspace program, so this page no longer claims one.
+    ///
+    /// Same treatment as the Sound page above and for the same reason, which
+    /// the Mouse page states plainly: a control that writes a value nothing
+    /// reads is worse than an absent control, because the absent one does not
+    /// claim the setting took effect.
     fn build_update_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
         match self.current_page {
             SettingsPage::Recovery => {
                 self.build_recovery_page(s);
                 return;
             }
             SettingsPage::Snapshots => {
-                Self::build_snapshots_page(s, pal);
+                Self::build_snapshots_page(s, &self.palette());
                 return;
             }
             _ => {} // SystemUpdates (default)
         }
 
-        s.section("System Information");
-        let version = self.os_version.clone();
-        s.draw(move |tree, x, y| {
-            fill_rounded(tree, x, y, 580.0, 60.0, pal.surface0, 8.0);
-            text_bold(tree, x + 16.0, y + 12.0, "Slate OS", pal.text, 16.0);
-            tree.text(x + 16.0, y + 36.0, &version, pal.subtext0, 13.0);
-        });
-        s.advance(72.0);
-
-        // The button's label changes while a check is running, and the label is
-        // what `button_width` measures — so the click band follows the wider
-        // "Check for Updates" down to the narrower "Checking...", rather than
-        // staying at whichever width happened to be hard-coded.
-        let checking = self.checking_for_updates;
-        let btn_label = if checking {
-            "Checking..."
-        } else {
-            "Check for Updates"
-        };
-        s.button_at(
-            0.0,
-            0.0,
-            btn_label,
-            pal.accent,
-            Some(RowHit::Press(ButtonId::CheckForUpdates)),
+        s.section("System Updates");
+        s.note(
+            "This system cannot update itself yet. There is no update service to ask, so nothing here could check, download or install anything, and this page will not say that it has.",
+            44.0,
         );
-        if !checking {
-            s.draw(|tree, x, y| {
-                tree.text(
-                    x + 160.0,
-                    y + 10.0,
-                    "Your device is up to date",
-                    pal.green,
-                    13.0,
-                );
-            });
-        }
-        s.advance(44.0);
+        s.unavailable_row("Last checked", "Never");
+        s.unavailable_row("Available updates", "Unknown");
+        s.gap();
+
+        s.section("System Information");
+        s.note(
+            "No component of this system reports a version number to a program yet, so none is shown here rather than one being invented.",
+            28.0,
+        );
         s.gap();
 
         s.section("Update Preferences");
-        s.toggle_row(
-            "Automatic updates",
-            ToggleId::AutoUpdate,
-            self.auto_update_enabled,
-        );
-        let hours_label = format!(
-            "{:02}:00 - {:02}:00",
-            self.active_hours_start, self.active_hours_end
-        );
-        s.value_row("Active hours (no restart)", &hours_label, pal.text);
-        s.gap();
-
-        s.section("Advanced");
-        self.slider(
-            s,
-            "Defer feature updates (days)",
-            SliderId::DeferFeatureDays,
-        );
-        self.slider(
-            s,
-            "Defer quality updates (days)",
-            SliderId::DeferQualityDays,
+        s.note(
+            "Automatic updates, active hours and deferral periods are settings for an updater that does not exist. They return when there is one to configure.",
+            44.0,
         );
         s.gap();
 
         s.section("Update History");
-        for entry in &self.update_history {
-            let (kb, desc, date) = (
-                entry.kb_number.clone(),
-                entry.description.clone(),
-                entry.date.clone(),
-            );
-            let (status_color, status_label) = (entry.status.color(pal), entry.status.label());
-            s.draw(move |tree, x, y| {
-                fill_rounded(tree, x, y, 580.0, 44.0, pal.surface0, 6.0);
-                tree.text(x + 12.0, y + 8.0, &kb, pal.text, 13.0);
-                tree.text(x + 120.0, y + 8.0, &desc, pal.subtext0, 12.0);
-                tree.text(x + 12.0, y + 26.0, &date, pal.subtext0, 11.0);
-                fill_rounded(tree, x + 490.0, y + 12.0, 72.0, 20.0, status_color, 4.0);
-                tree.text(x + 500.0, y + 15.0, status_label, pal.crust, 11.0);
-            });
-            s.advance(52.0);
-        }
+        s.note(
+            "Nothing has been installed by an updater, because there is no updater.",
+            28.0,
+        );
     }
 
     /// The Recovery sub-page: two cards, each with a button that has no state
@@ -5182,9 +5065,6 @@ impl SettingsState {
             RowHit::Select(SelectId::AccountPicture, idx) => {
                 self.set_current_account_picture(idx);
             }
-            RowHit::Press(ButtonId::CheckForUpdates) => {
-                self.checking_for_updates = !self.checking_for_updates;
-            }
             RowHit::Press(ButtonId::ChooseWallpaper) => self.open_wallpaper_dialog(),
             RowHit::Press(ButtonId::ClearWallpaper) => {
                 self.appearance.settings.wallpaper = None;
@@ -5253,8 +5133,6 @@ impl SettingsState {
             SliderId::NightLightTemperature => self.appearance.settings.night_light_strength,
             SliderId::NarratorRate => self.narrator_rate,
             SliderId::TextSize => f32::from(self.text_size_percent),
-            SliderId::DeferFeatureDays => f32::from(self.defer_feature_days),
-            SliderId::DeferQualityDays => f32::from(self.defer_quality_days),
             // Exact: the value is at most `MAX_DOUBLE_CLICK_MS`, far inside the
             // integers an `f32` represents without rounding.
             #[allow(clippy::cast_precision_loss)]
@@ -5301,8 +5179,6 @@ impl SettingsState {
             }
             SliderId::NarratorRate => self.narrator_rate = value,
             SliderId::TextSize => self.text_size_percent = round_u16(value),
-            SliderId::DeferFeatureDays => self.defer_feature_days = round_u16(value),
-            SliderId::DeferQualityDays => self.defer_quality_days = round_u16(value),
             // Through the model's setter, not by assignment: the clamp belongs
             // to whoever owns the file, and this way a track that ever grew
             // wider than the permitted range cannot store a value the
@@ -5351,7 +5227,6 @@ impl SettingsState {
             ToggleId::MouseKeys => &mut self.input.settings.accessibility.mouse.enabled,
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
-            ToggleId::AutoUpdate => &mut self.auto_update_enabled,
             ToggleId::TaskbarAutohide => &mut self.appearance.settings.taskbar_autohide,
         })
     }

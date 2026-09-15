@@ -449,33 +449,6 @@ pub struct UserAccount {
 // Privacy types
 // ============================================================================
 
-/// Per-app permission entry.
-#[derive(Clone, Debug)]
-pub struct AppPermission {
-    pub app_name: String,
-    pub allowed: bool,
-}
-
-/// Diagnostic data collection level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiagnosticLevel {
-    None,
-    Basic,
-    Full,
-}
-
-impl DiagnosticLevel {
-    const ALL: &[Self] = &[Self::None, Self::Basic, Self::Full];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Basic => "Basic",
-            Self::Full => "Full",
-        }
-    }
-}
-
 // ============================================================================
 // Accessibility types
 // ============================================================================
@@ -620,14 +593,6 @@ pub struct SettingsState {
     pub auto_login_enabled: bool,
 
     // Privacy settings
-    pub location_enabled: bool,
-    pub location_apps: Vec<AppPermission>,
-    pub camera_enabled: bool,
-    pub camera_apps: Vec<AppPermission>,
-    pub microphone_enabled: bool,
-    pub microphone_apps: Vec<AppPermission>,
-    pub background_apps: Vec<AppPermission>,
-    pub diagnostic_level: DiagnosticLevel,
 
     // Accessibility settings
     /// Range stated by [`SliderId::range`], not repeated here.
@@ -773,7 +738,6 @@ pub enum DropdownId {
     RefreshRate,
     Scale,
     IpConfig,
-    DiagnosticLevel,
     ColorFilter,
     CursorSize,
     NarratorVerbosity,
@@ -798,7 +762,7 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 12] = [
+    pub const FIXED: [Self; 11] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::WallpaperFit,
@@ -806,7 +770,6 @@ impl DropdownId {
         Self::RefreshRate,
         Self::Scale,
         Self::IpConfig,
-        Self::DiagnosticLevel,
         Self::ColorFilter,
         Self::CursorSize,
         Self::NarratorVerbosity,
@@ -1166,78 +1129,6 @@ impl SettingsState {
             auto_login_enabled: false,
 
             // Privacy defaults
-            location_enabled: true,
-            location_apps: vec![
-                AppPermission {
-                    app_name: "Maps".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Weather".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Camera".into(),
-                    allowed: false,
-                },
-                AppPermission {
-                    app_name: "Browser".into(),
-                    allowed: true,
-                },
-            ],
-            camera_enabled: true,
-            camera_apps: vec![
-                AppPermission {
-                    app_name: "Video Chat".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Browser".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Social Media".into(),
-                    allowed: false,
-                },
-            ],
-            microphone_enabled: true,
-            microphone_apps: vec![
-                AppPermission {
-                    app_name: "Video Chat".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Voice Recorder".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Browser".into(),
-                    allowed: false,
-                },
-            ],
-            background_apps: vec![
-                AppPermission {
-                    app_name: "Email".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Music Player".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Updater".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Social Media".into(),
-                    allowed: false,
-                },
-                AppPermission {
-                    app_name: "News Reader".into(),
-                    allowed: false,
-                },
-            ],
-            diagnostic_level: DiagnosticLevel::Basic,
 
             // Accessibility defaults
             text_size_percent: 100,
@@ -1951,15 +1842,6 @@ const BUTTON_HEIGHT: f32 = 32.0;
 /// How far below a row's top edge a button inside that row is drawn.
 const BUTTON_ROW_INSET_Y: f32 = 6.0;
 
-/// Which of a page's per-application permission lists a toggle belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PermissionKind {
-    Location,
-    Camera,
-    Microphone,
-    Background,
-}
-
 /// A boolean setting, named so a click can find its field without the click
 /// handler knowing where on the page the row was drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1967,11 +1849,6 @@ enum ToggleId {
     NightLight,
     ProxyEnabled,
     AutoLogin,
-    LocationEnabled,
-    CameraEnabled,
-    MicrophoneEnabled,
-    /// The per-app switch at `index` of `kind`'s list.
-    AppPermission(PermissionKind, usize),
     /// Whether the `n`-th program in the notification list makes a sound.
     NotifSound(usize),
     /// Whether it shows a banner rather than only appearing in the list.
@@ -2261,9 +2138,9 @@ enum AnchorId {
 /// A push button that does something when pressed.
 ///
 /// Only buttons with an effect are listed. The rest of the page's buttons —
-/// Change Password, Add/Remove Account, Clear Activity History, Go Back, Fresh
-/// Start — have no state behind them yet, so they register no click target
-/// rather than swallowing a click and doing nothing.
+/// Change Password, Add/Remove Account, Go Back, Fresh Start — have no state
+/// behind them yet, so they register no click target rather than swallowing a
+/// click and doing nothing.
 /// See known-issues.md `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonId {
@@ -2428,21 +2305,6 @@ trait PageSink {
                 render_toggle(tree, pal, cx, y + 12.0, on);
             },
         );
-    }
-
-    /// An indented per-application switch, as used by the permission lists.
-    /// Tighter than a full row, and its own label rather than a setting row's.
-    fn app_toggle_row(&mut self, label: &str, id: ToggleId, on: bool) {
-        let pal = &self.palette();
-        let height = ITEM_HEIGHT - 8.0;
-        let control_x = self.control_x();
-        let (x, y) = (self.x(), self.y());
-        self.hit_rect(x, y, ROW_HIT_WIDTH, height, RowHit::Toggle(id));
-        self.draw(|tree, x, y| {
-            tree.text(x + 16.0, y + 14.0, label, pal.subtext1, 13.0);
-            render_toggle(tree, pal, control_x, y + 12.0, on);
-        });
-        self.advance(height);
     }
 
     /// A row whose control is a draggable slider, plus whatever else the page
@@ -2660,21 +2522,6 @@ impl PageSink for AnchorSink {
         if self.found.is_none() && id == self.want {
             self.found = Some((x, y));
         }
-    }
-}
-
-/// The indented run of per-app switches beneath a permission's master toggle.
-///
-/// One function for all four lists, taking the list it is describing, so a
-/// click on a Camera row cannot resolve against the Location list's indices —
-/// which is what a per-list copy of this loop invites.
-fn build_permission_list<S: PageSink>(s: &mut S, kind: PermissionKind, apps: &[AppPermission]) {
-    for (idx, app) in apps.iter().enumerate() {
-        s.app_toggle_row(
-            &app.app_name,
-            ToggleId::AppPermission(kind, idx),
-            app.allowed,
-        );
     }
 }
 
@@ -3729,172 +3576,63 @@ impl SettingsState {
 
     // --- Privacy page ---
 
-    /// The Capabilities sub-page: a read-only summary of which apps hold
-    /// which permissions. Nothing on it is clickable, so it is pure drawing.
-    fn render_capabilities_summary(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let pal = &self.palette();
-        let mut y = start_y;
-        // App permissions summary sub-page
-        y = render_section_header(tree, pal, x, y, "App Permissions Summary");
-        tree.text(
-            x,
-            y + 4.0,
-            "Overview of which apps have access to sensitive resources:",
-            pal.subtext0,
-            13.0,
-        );
-        y += 32.0;
-
-        // Summary table header
-        text_bold(tree, x, y, "App", pal.text, 13.0);
-        text_bold(tree, x + 200.0, y, "Location", pal.text, 13.0);
-        text_bold(tree, x + 290.0, y, "Camera", pal.text, 13.0);
-        text_bold(tree, x + 370.0, y, "Mic", pal.text, 13.0);
-        text_bold(tree, x + 440.0, y, "Background", pal.text, 13.0);
-        y += 24.0;
-
-        // Divider
-        tree.push(RenderCommand::Line {
-            x1: x,
-            y1: y,
-            x2: x + 560.0,
-            y2: y,
-            color: pal.surface1,
-            width: 1.0,
-        });
-        y += 8.0;
-
-        // Build summary from all apps mentioned
-        let all_apps = [
-            "Maps",
-            "Weather",
-            "Camera",
-            "Browser",
-            "Video Chat",
-            "Social Media",
-            "Voice Recorder",
-            "Email",
-            "Music Player",
-        ];
-        for app_name in all_apps {
-            let loc = self.location_apps.iter().find(|a| a.app_name == app_name);
-            let cam = self.camera_apps.iter().find(|a| a.app_name == app_name);
-            let mic = self.microphone_apps.iter().find(|a| a.app_name == app_name);
-            let bg = self.background_apps.iter().find(|a| a.app_name == app_name);
-
-            tree.text(x, y + 4.0, app_name, pal.text, 12.0);
-
-            let check = "\u{2713}";
-            let cross = "\u{2717}";
-
-            // Location
-            if let Some(p) = loc {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 220.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-            // Camera
-            if let Some(p) = cam {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 310.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-            // Mic
-            if let Some(p) = mic {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 385.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-            // Background
-            if let Some(p) = bg {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 465.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-
-            y += 28.0;
-        }
-    }
-
     // --- Privacy page ---
 
+    /// The Permissions and Capabilities pages.
+    ///
+    /// Both say this system does not record per-application permissions, and
+    /// that is a statement about its architecture rather than about unfinished
+    /// work.
+    ///
+    /// What was here before: toggles for location, camera and microphone, each
+    /// revealing a list of applications with an allow switch, and a summary
+    /// table drawing a green tick or a red cross for nine named applications
+    /// across four permissions. Maps, Weather, Camera, Browser, Video Chat,
+    /// Social Media, Voice Recorder, Email, Music Player. None of those
+    /// programs exist in this tree, no component asks anything whether an
+    /// application may use a device, and every allow-or-deny state was written
+    /// into the source as a constant. A privacy page is the one screen where a
+    /// user is entitled to believe what it says, and this one told them a
+    /// browser had their camera.
+    ///
+    /// **Why this is not simply unbuilt.** `design.txt` specifies
+    /// capability-based security with no ambient authority: a program can use
+    /// a device because it holds an unforgeable handle to it, not because a
+    /// central table has its name ticked. So a per-application permission list
+    /// is not this system's model half-finished -- it is a different system's
+    /// model, borrowed. Building the page that was here would mean building a
+    /// permission store the kernel does not consult.
+    ///
+    /// `gui/desktop/src/privacy_settings.rs` holds a second copy of that same
+    /// borrowed model, with `is_allowed` and `revoke_all` and nothing calling
+    /// either. It is left alone here; see `known-issues.md`.
     fn build_privacy_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
-        if self.current_page == SettingsPage::Capabilities {
-            s.draw(|tree, x, y| self.render_capabilities_summary(tree, x, y));
-            return;
-        }
-
-        // Location access (default Permissions page)
-        s.section("Location");
-        s.toggle_row(
-            "Allow apps to access location",
-            ToggleId::LocationEnabled,
-            self.location_enabled,
+        s.section("App Permissions");
+        s.note(
+            "This system does not keep a list of which applications may use              the camera, the microphone or your location, and nothing here              could grant or withdraw such a permission.",
+            44.0,
         );
-        if self.location_enabled {
-            build_permission_list(s, PermissionKind::Location, &self.location_apps);
-        }
-        s.gap();
-
-        s.section("Camera");
-        s.toggle_row(
-            "Allow apps to access camera",
-            ToggleId::CameraEnabled,
-            self.camera_enabled,
+        s.note(
+            "That is by design rather than unfinished. A program here reaches              a device by holding a handle to it, which it can only have been              given -- there is no central table of names to tick, and nothing              has authority simply because of what it is called.",
+            44.0,
         );
-        if self.camera_enabled {
-            build_permission_list(s, PermissionKind::Camera, &self.camera_apps);
-        }
-        s.gap();
-
-        s.section("Microphone");
-        s.toggle_row(
-            "Allow apps to access microphone",
-            ToggleId::MicrophoneEnabled,
-            self.microphone_enabled,
-        );
-        if self.microphone_enabled {
-            build_permission_list(s, PermissionKind::Microphone, &self.microphone_apps);
-        }
-        s.gap();
-
-        s.section("Background Apps");
-        s.note("Choose which apps can run in the background:", 28.0);
-        build_permission_list(s, PermissionKind::Background, &self.background_apps);
+        s.unavailable_row("Location", "Not recorded per application");
+        s.unavailable_row("Camera", "Not recorded per application");
+        s.unavailable_row("Microphone", "Not recorded per application");
         s.gap();
 
         s.section("Diagnostics & Data");
-        s.dropdown_row(
-            "Diagnostic data collection",
-            DropdownId::DiagnosticLevel,
-            self.diagnostic_level.label(),
+        s.note(
+            "Nothing on this system collects diagnostic data, so there is no              collection level to choose.",
+            28.0,
         );
         s.gap();
 
         s.section("Activity History");
-        s.note("Clear your activity history stored on this device.", 28.0);
-        s.button_at(0.0, 0.0, "Clear Activity History", pal.red, None);
+        s.note(
+            "Nothing records an activity history, so there is none to clear.",
+            28.0,
+        );
     }
 
     // --- Accessibility page ---
@@ -4559,17 +4297,6 @@ impl SettingsState {
                 } else {
                     1
                 };
-                (items, sel)
-            }
-            DropdownId::DiagnosticLevel => {
-                let items: Vec<String> = DiagnosticLevel::ALL
-                    .iter()
-                    .map(|d| d.label().to_string())
-                    .collect();
-                let sel = DiagnosticLevel::ALL
-                    .iter()
-                    .position(|d| *d == self.diagnostic_level)
-                    .unwrap_or(0);
                 (items, sel)
             }
             DropdownId::ColorFilter => {
@@ -5257,18 +4984,6 @@ impl SettingsState {
             ToggleId::NightLight => &mut self.appearance.settings.night_light,
             ToggleId::ProxyEnabled => &mut self.proxy_enabled,
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
-            ToggleId::LocationEnabled => &mut self.location_enabled,
-            ToggleId::CameraEnabled => &mut self.camera_enabled,
-            ToggleId::MicrophoneEnabled => &mut self.microphone_enabled,
-            ToggleId::AppPermission(kind, index) => {
-                let list = match kind {
-                    PermissionKind::Location => &mut self.location_apps,
-                    PermissionKind::Camera => &mut self.camera_apps,
-                    PermissionKind::Microphone => &mut self.microphone_apps,
-                    PermissionKind::Background => &mut self.background_apps,
-                };
-                &mut list.get_mut(index)?.allowed
-            }
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
             ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
             ToggleId::QuietHours => &mut self.notif.settings.quiet_hours.enabled,
@@ -5409,11 +5124,6 @@ impl SettingsState {
                 } else {
                     IpConfigMode::Static
                 };
-            }
-            DropdownId::DiagnosticLevel => {
-                if let Some(level) = DiagnosticLevel::ALL.get(index) {
-                    self.diagnostic_level = *level;
-                }
             }
             DropdownId::ColorFilter => {
                 if let Some(filter) = ColorFilter::ALL.get(index) {
@@ -7049,7 +6759,6 @@ mod tests {
                 "+ Add Account",
                 "- Remove Account",
                 "Change Password",
-                "Clear Activity History",
                 "Go Back",
                 "Reset",
             ]
@@ -7866,35 +7575,6 @@ mod tests {
                 "the file names {written:?} rather than the picture chosen"
             );
         });
-    }
-
-    #[test]
-    fn test_every_per_app_permission_switch_is_clickable() {
-        // Only the Location list had a handler; Camera, Microphone and
-        // Background were drawn and inert.
-        let mut state = fully_expanded(SettingsPage::Permissions);
-        for kind in [
-            PermissionKind::Location,
-            PermissionKind::Camera,
-            PermissionKind::Microphone,
-            PermissionKind::Background,
-        ] {
-            let count = match kind {
-                PermissionKind::Location => state.location_apps.len(),
-                PermissionKind::Camera => state.camera_apps.len(),
-                PermissionKind::Microphone => state.microphone_apps.len(),
-                PermissionKind::Background => state.background_apps.len(),
-            };
-            assert!(count > 0, "{kind:?} has no apps to test with");
-            for idx in 0..count {
-                let id = ToggleId::AppPermission(kind, idx);
-                let before = *state.toggle_mut(id).expect("app exists");
-                let (cx, cy) = center_of(&state, RowHit::Toggle(id))
-                    .unwrap_or_else(|| panic!("{kind:?} app {idx} has no click target"));
-                state.handle_click(cx, cy);
-                assert_ne!(before, *state.toggle_mut(id).expect("app exists"));
-            }
-        }
     }
 
     // ---- Personalization: the shared appearance model ----

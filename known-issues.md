@@ -65683,6 +65683,52 @@ this crate's 86 binaries do not need linting at all; they need porting into 45
 new crates that inherit the workspace lints by construction. That is a further
 reason not to start here until B-Q7 lands. **B-Q7 landed on 2026-09-07** (§1005: coreutils is the one home), so that reason has expired — left in place rather than deleted because the paragraph above it is still the right way to think about the work, and only its last clause went stale.
 
+**Addendum 2026-09-15: the scope above was measured through a gate that
+under-reported it, and the corrected numbers are three times larger.**
+
+`check-workspace-lints.py` accepted a bare `#![deny(clippy::all)]` as coverage
+and left such crates out of its report entirely. This entry already said why
+that is wrong -- *"`ftpd` had a bare `#![deny(clippy::all)]`, which is the
+default group and excludes every lint named in CLAUDE.md"*, and *"Neither case
+gets `pedantic` or the four defensive lints, so the distinction does not affect
+the exposure"* -- but the gate was written the other way, and the gate is what
+anybody reads. Corrected in `213341d27`; the baseline went 89 -> 165.
+
+Measured under `userspace/`, `services/` and `init/` on the day of the fix:
+
+| | crates | lines |
+|---|---|---|
+| inherit `[workspace.lints]` | 56 | 129,654 |
+| bare `#![deny(clippy::all)]` only | **76** | **460,878** |
+| neither (what the gate reported) | 89 | 148,857 |
+
+So **62% of lane-B source under those roots** was outside the policy and
+outside the report. The gate was not merely undercounting: adding that one
+attribute to a listed crate removed it from the list while changing nothing
+about which lints run, so the ratchet could be satisfied by a no-op.
+
+**`userspace/coreutils` is the largest thing this hid** -- 83 binaries,
+197,806 lines, carrying only the bare attribute. The 2026-08-22 addendum above
+argued it should be promoted between stages 2 and 3, on the grounds that it is
+nearly every command a shell script runs and every one of them parses
+attacker-shaped input in the ordinary course of its job. That argument stands,
+and for a month the gate could not see the crate it was about.
+
+**Stage 2 is done, and its membership changed under this correction.** Network
+crates that parse socket bytes and are reachable by `cargo test -p`: `ntpd`
+(57 findings, fixed), `tcpdump` (133, fixed), `dhcpcd` (123, fixed). Not
+stage 2, checked rather than assumed: `ping` and `traceroute` open no socket
+and carry refusal markers, `nslookup` reads `/etc/resolv.conf`, `ss` only
+lists sockets, and `kill`/`pgrep`/`powerctl`/`service` use kernel IPC channels
+rather than network ones. `services/netstack` and `services/udpget` are not
+workspace members -- they target `x86_64-unknown-none`, `cargo test -p` cannot
+reach them, and their protocol logic is tested in the crates they delegate to
+(netproto 79 tests, netipc 41, netring 9).
+
+`dhcpcd` was only found because of this correction: it was in the invisible
+middle set, I read its absence from the baseline as coverage, and it was
+hiding an overflow that an RFC-conforming DHCP server triggers.
+
 **If never fixed:** no regression — the exposure is exactly what it has been
 since the crates were written. But the lints exist because this codebase has no
 human reviewer, and a check that runs over 32 of 2762 crates is not the safety

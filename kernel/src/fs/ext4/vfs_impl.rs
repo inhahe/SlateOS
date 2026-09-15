@@ -295,6 +295,22 @@ impl FileSystem for Ext4Fs {
                 if mode != file_type::S_IFREG {
                     return Err(KernelError::NotSupported);
                 }
+                // An immutable file cannot be overwritten. Checked HERE, on the
+                // inode this write already read, rather than in the VFS: the VFS
+                // write path holds no metadata, so a check there would cost a
+                // second lookup per write and open a TOCTOU window between the
+                // check and the write. This inode is the one the overwrite below
+                // uses.
+                //
+                // Until 2026-09-14 the bit was stored, reported through `stat`,
+                // written back when set, and enforced only by `access(W_OK)` --
+                // which a program that simply writes never calls. So `chattr +i`
+                // would have reported success and protected nothing. A
+                // protection that reports success without protecting is worse
+                // than an absent one: it gives a reason to rely on it.
+                if inode.i_flags & inode_flags::IMMUTABLE != 0 {
+                    return Err(KernelError::PermissionDenied);
+                }
 
                 // Crash-safe overwrite ordering:
                 // 1. Save old inode (holds extent tree pointing to old blocks)

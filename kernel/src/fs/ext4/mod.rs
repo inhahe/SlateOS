@@ -134,6 +134,50 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Try stat on the root.
+
+    // An immutable file must refuse a write. Until 2026-09-14 the bit was
+    // stored, reported and settable, and refused only by `access(W_OK)` --
+    // which a program that simply writes never calls, so `chattr +i` would
+    // have reported success and protected nothing.
+    //
+    // The clear-and-write-again step is the control, and it is what makes the
+    // denial mean something: without it this passes just as well on a
+    // filesystem where every write fails.
+    {
+        let owned = mount_path.join("immutable-selftest.tmp");
+        let path = owned.as_path();
+
+        crate::fs::Vfs::write_file(path, b"one")?;
+        crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::IMMUTABLE)?;
+
+        match crate::fs::Vfs::write_file(path, b"two") {
+            Err(crate::error::KernelError::PermissionDenied) => {}
+            other => {
+                serial_println!(
+                    "[ext4]   FAIL: writing an immutable file returned {:?}, want PermissionDenied",
+                    other.map(|()| "Ok")
+                );
+                let _ = crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE);
+                let _ = crate::fs::Vfs::remove(path);
+                return Err(crate::error::KernelError::IoError);
+            }
+        }
+
+        crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE)?;
+        if let Err(e) = crate::fs::Vfs::write_file(path, b"three") {
+            serial_println!(
+                "[ext4]   FAIL: clearing IMMUTABLE did not restore writes: {:?} -- so the denial above proved nothing",
+                e
+            );
+            let _ = crate::fs::Vfs::remove(path);
+            return Err(crate::error::KernelError::IoError);
+        }
+        crate::fs::Vfs::remove(path)?;
+        serial_println!(
+            "[ext4]   immutable: a write to an immutable file is refused, and allowed again once cleared: OK"
+        );
+    }
+
     let root_stat = crate::fs::Vfs::stat(&root)?;
     serial_println!(
         "[ext4]   Root stat: type={:?}, size={}",

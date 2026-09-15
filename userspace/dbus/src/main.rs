@@ -96,9 +96,10 @@ const SYSTEM_SOCKET: &str = "/var/run/dbus/system_bus_socket";
 const SESSION_SOCKET_DIR: &str = "/tmp/dbus-session";
 
 /// Config file paths.
-#[cfg(not(test))]
+///
+/// Ungated along with `run_dbus_daemon`, which needs them: they were
+/// `cfg(not(test))` only because its sole caller was.
 const SYSTEM_CONF: &str = "/etc/dbus-1/system.conf";
-#[cfg(not(test))]
 const SESSION_CONF: &str = "/etc/dbus-1/session.conf";
 
 /// Maximum message size (128 MiB, per spec).
@@ -3094,7 +3095,11 @@ fn run_dbus_monitor(args: &[String]) -> i32 {
 // ============================================================================
 
 /// Run the dbus-daemon functionality.
-#[cfg(not(test))]
+///
+/// NOT `#[cfg(not(test))]` any more. It was, so no test could call it -- which
+/// is how it came to print "bus listening at ...", write a pid file naming
+/// PID 1, and return 0 without creating a socket, with 132 tests passing. A
+/// function the suite cannot reach is a function nothing checks.
 fn run_dbus_daemon(args: &[String]) -> i32 {
     let mut bus_type = BusType::Session;
     let mut config_path: Option<String> = None;
@@ -3148,50 +3153,51 @@ fn run_dbus_daemon(args: &[String]) -> i32 {
         })
     };
 
-    // Create the daemon
-    let _daemon = BusDaemon::new(bus_type);
-
-    // Print address/pid if requested
-    if print_address {
-        println!("unix:path={}", config.listen_address);
-    }
-    if print_pid {
-        // In a real OS, we'd use getpid(). Use 1 as placeholder.
-        println!("1");
-    }
-
-    // Ensure socket directory exists
-    let socket_path = Path::new(&config.listen_address);
-    if let Some(parent) = socket_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    println!(
-        "dbus-daemon[1]: {bus_type} bus listening at {}",
+    // REFUSING, rather than announcing a bus nobody is serving.
+    //
+    // What this used to do, in order: construct a `BusDaemon` and bind it to
+    // `_daemon` -- discarding it, name registry, connection table, router and
+    // all -- then print
+    //
+    //     dbus-daemon[1]: system bus listening at /var/run/dbus/system_bus_socket
+    //     dbus-daemon[1]: ready
+    //
+    // write `/var/run/dbus/pid` containing "1", and return 0. No socket was
+    // ever created; only the directory above it. Both printed lines are
+    // claims, and both were false.
+    //
+    // The exit status is what makes it costly. An init script or unit that
+    // starts dbus-daemon sees success, marks the bus up, and starts
+    // everything that depends on it; those then fail to connect, and the
+    // failure is attributed to each client in turn rather than to the bus
+    // that never came up.
+    //
+    // THE PID FILE WAS THE WORST OF IT. "1" is init's PID, not this
+    // process's, so the documented way to stop the bus --
+    // `kill $(cat /var/run/dbus/pid)` -- signals PID 1. A file that names the
+    // wrong process is worse than no file, because the caller has no reason
+    // to doubt it.
+    //
+    // `--print-address` and `--print-pid` go too: an address nothing listens
+    // on is the same false claim in machine-readable form, and a script that
+    // reads it will hand it to clients.
+    //
+    // The bus implementation itself is real and tested -- NameRegistry,
+    // BusConnection, message routing, the policy parser. What is missing is
+    // the socket: creating it, accepting on it, authenticating, and pumping
+    // messages between the two. That is the day this refusal is deleted.
+    let _ = (print_address, print_pid, fork_mode);
+    eprintln!(
+        "dbus-daemon: cannot start the {bus_type} bus: this build has no socket \
+layer, so it cannot listen on {}",
         config.listen_address
     );
-    println!("dbus-daemon[1]: max_connections={}", config.max_connections);
-
-    if fork_mode {
-        println!("dbus-daemon[1]: forking to background (simulated)");
-    }
-
-    // In a real implementation, we'd create a Unix domain socket, accept
-    // connections, perform authentication, and route messages.
-    // The daemon object is ready to handle messages from connected clients.
-
-    // Write PID file for system bus
-    if bus_type == BusType::System {
-        let pid_dir = Path::new("/var/run/dbus");
-        let _ = fs::create_dir_all(pid_dir);
-        let _ = fs::write(pid_dir.join("pid"), "1\n");
-    }
-
-    // Event loop placeholder: in a real implementation this would use
-    // epoll/io_uring to accept connections and route messages.
-    println!("dbus-daemon[1]: ready");
-
-    0
+    eprintln!(
+        "dbus-daemon: the bus itself is implemented -- names, connections, routing \
+and policy -- but nothing accepts a connection, so no client could reach it."
+    );
+    eprintln!("dbus-daemon: refusing to report a bus that is not there.");
+    1
 }
 
 // ============================================================================
@@ -3269,6 +3275,57 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    /// The daemon refuses rather than announcing a bus nobody serves.
+    ///
+    /// It used to construct a `BusDaemon`, bind it to `_daemon` -- discarding
+    /// it -- then print "system bus listening at ..." and "ready", write
+    /// `/var/run/dbus/pid` containing "1", and return 0. No socket was ever
+    /// created.
+    ///
+    /// Exit status is the assertion that matters. An init script sees 0,
+    /// marks the bus up, and starts everything that depends on it; those fail
+    /// to connect and the blame lands on each client in turn.
+    #[test]
+    fn the_daemon_refuses_instead_of_claiming_to_listen() {
+        for argv in [
+            vec!["dbus-daemon".to_string(), "--system".to_string()],
+            vec!["dbus-daemon".to_string(), "--session".to_string()],
+            // `--print-address` and `--print-pid` are refused too: an address
+            // nothing listens on is the same false claim in a form a script
+            // will parse and hand to clients.
+            vec![
+                "dbus-daemon".to_string(),
+                "--session".to_string(),
+                "--print-address".to_string(),
+            ],
+        ] {
+            assert_eq!(
+                run_dbus_daemon(&argv),
+                1,
+                "{argv:?} must not report success"
+            );
+        }
+    }
+
+    /// The PID file is not written, and that is the point.
+    ///
+    /// It contained "1" -- init's PID, not the daemon's -- so the documented
+    /// way to stop the bus, `kill $(cat /var/run/dbus/pid)`, signalled PID 1.
+    /// A file naming the wrong process is worse than no file, because the
+    /// caller has no reason to doubt it.
+    #[test]
+    fn no_pid_file_is_written_for_a_bus_that_did_not_start() {
+        let pid_path = std::path::Path::new("/var/run/dbus/pid");
+        let before = std::fs::read_to_string(pid_path).ok();
+        let code = run_dbus_daemon(&["dbus-daemon".to_string(), "--system".to_string()]);
+        assert_eq!(code, 1);
+        assert_eq!(
+            std::fs::read_to_string(pid_path).ok(),
+            before,
+            "a refused start must not leave a pid file behind"
+        );
+    }
+
     use super::*;
 
     // --- Type system tests ---

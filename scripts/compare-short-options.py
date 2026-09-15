@@ -76,6 +76,15 @@ DISPATCH = re.compile(
 )
 DISPATCH_ARM = re.compile(r'"([a-z][a-z0-9_-]*)"\s*(?:\||=>)')
 
+# The third spelling: `match name { "lastlog" => Personality::Lastlog, .. }`.
+#
+# `userspace/last` is last, lastb and lastlog, and its scrutinee is called
+# plain `name` -- too generic to key on without collecting arms from every
+# unrelated match in the tree. The ARM is the specific part: a string literal
+# mapping to a `Personality::` variant says what it is with no ambiguity at
+# all, so this pattern can be exact rather than heuristic.
+PERSONALITY_ARM = re.compile(r'"([a-z][a-z0-9_-]*)"\s*=>\s*Personality::')
+
 
 def personalities(crate_name: str, source: str, cargo: str) -> list[str]:
     """Every program this one crate implements.
@@ -96,6 +105,11 @@ def personalities(crate_name: str, source: str, cargo: str) -> list[str]:
     the checker reported `-d`/`--fs-devno` as wrong. mountpoint(1) defines
     exactly that.
 
+    And a third: `userspace/last` is last, lastb and lastlog, matching on a
+    scrutinee called plain `name`. `-t`/`--time` was reported wrong; lastlog
+    defines `-t, --time DAYS` exactly. Three spellings of one idea, and each
+    was found by checking a finding rather than acting on it.
+
     So: collect every name the crate answers to, and treat a short option as
     mis-bound only if it disagrees with EVERY reference that defines it.
     """
@@ -104,6 +118,7 @@ def personalities(crate_name: str, source: str, cargo: str) -> list[str]:
     names.update(re.findall(r'^name\s*=\s*"([a-z][a-z0-9_-]*)"', cargo, re.M))
     for block in DISPATCH.findall(source):
         names.update(DISPATCH_ARM.findall(block))
+    names.update(PERSONALITY_ARM.findall(source))
     # Only plausible command names: this tree also writes `ends_with(".rs")`
     # and similar, which are suffixes rather than programs.
     return sorted(n for n in names if not n.startswith(".") and len(n) > 1)
@@ -297,6 +312,9 @@ def selftest() -> int:
         "    }\n}"
     )
     assert "mountpoint" in personalities("findmnt", dispatch, "")
+    # The `Personality::` arm form, whose scrutinee is too generic to key on.
+    enum_arms = '    match name {\n        "lastlog" => Personality::Lastlog,\n    }'
+    assert "lastlog" in personalities("last", enum_arms, "")
     # A match on something that is NOT the program name must contribute
     # nothing: extra personalities would excuse real collisions.
     other = (
@@ -306,7 +324,7 @@ def selftest() -> int:
         "    }\n}"
     )
     assert personalities("findmnt", other, "") == ["findmnt"]
-    cases += 4
+    cases += 5
 
     print(f"selftest: {cases}/{cases} cases pass")
     return 0

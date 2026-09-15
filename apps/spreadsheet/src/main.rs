@@ -64,9 +64,14 @@ const MAX_ROWS: usize = 999;
 /// worked example of the formula engine -- it claims nothing about anything
 /// outside this program, which is the `apps/ebook` case rather than the
 /// `apps/kanban` one. What it needed was a label and the warning below.
+///
+/// The second line used to read "this app has no filesystem access", which was
+/// true when written and false from the moment Ctrl+S opened a save dialog.
+/// See `apps/calendar`'s NO_EVENTS_LINES for the reasoning; found by
+/// `scripts/find-stale-admissions.py`, which exists because of it.
 const EXAMPLE_SHEET_LINES: [&str; 2] = [
     "Example sheet -- replace it with your own.",
-    "Nothing is saved between runs -- this app has no filesystem access, so anything you write here is gone when the window closes.",
+    "Nothing is saved automatically -- press Ctrl+S to write a CSV file, or anything you write here is gone when the window closes.",
 ];
 
 const DEFAULT_COL_WIDTH: f32 = 100.0;

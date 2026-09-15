@@ -64,13 +64,29 @@ CAPABILITY = re.compile(
 # next reader learns to skip.
 ADMITS = re.compile(
     r"cannot|can't|could not|couldn't|none can|no way to"
+    # `sound`, `camera`, `notification` and their kin were tried here as nouns
+    # and taken out again. "No camera" cleared `apps/camera`, and "No camera"
+    # is not an admission -- it is a label, and it reads as *you have no camera
+    # plugged in*, a statement about the user's hardware, when the truth is
+    # that nothing in the program can look. Widening vocabulary is how this
+    # check stops accusing honest code, and it is also how it starts excusing
+    # the exact defect it was written to find. Measure what a widening clears
+    # and read the difference before keeping it.
     r"|no .{0,30}(access|source|installed|available|configured|reader|driver|service)"
-    r"|nothing (was|is|has|here|can)|not (saved|kept|yet|able|connected|implemented|examined)"
+    r"|nothing (was|is|has|here|can|will)|not (saved|kept|yet|able|connected|implemented|examined)"
     r"|unavailable|unimplemented|under construction|has no |never (fetched|examined|contacted|sent)",
     re.I,
 )
 
-STRING_LIT = re.compile(r'"((?:[^"\\]|\\.)*)"')
+# Literals come from a real lexer, not from `re.findall('"(...)"')`.
+#
+# The naive version was wrong here in the direction that hides work: a single
+# quotation mark inside a `//` comment pairs with the next one in code, and the
+# three lines of source between them are returned as one "literal". If any
+# comment in the crate contained the word "cannot", the crate was counted as
+# admitting and skipped -- so this script quietly cleared crates it should have
+# reported, and nobody goes looking for what a tool did not print.
+from rustlex import live_code, string_literals
 
 
 def main():
@@ -89,21 +105,25 @@ def main():
             print(f"no such directory: {root}", file=sys.stderr)
             return 2
         for crate in sorted(p for p in base.iterdir() if (p / "src").is_dir()):
-            src = "".join(
-                f.read_text(encoding="utf-8", errors="replace")
+            # Test code is not the shipping program, so it goes -- via
+            # `rustlex.live_code`, per file. This used to concatenate the whole
+            # crate and truncate at the first `#[cfg(test)] mod tests` in the
+            # join, discarding every file that sorted after it. `apps/editor`
+            # is four files; `highlight.rs` sorts first, so `main.rs` -- the one
+            # holding the file dialog -- was thrown away and the crate was
+            # reported as reaching nothing outside the process. **The door
+            # model of this entire sweep appeared on the list of programs that
+            # have no door.**
+            prod = "".join(
+                live_code(f.read_text(encoding="utf-8", errors="replace"))[0]
                 for f in sorted((crate / "src").rglob("*.rs"))
             )
-            # Test code is not the shipping program.
-            prod = src
-            marker = "\n#[cfg(test)]\nmod tests"
-            if marker in prod:
-                prod = prod[: prod.index(marker)]
 
             if CAPABILITY.search(prod):
                 capable += 1
                 continue
 
-            said = [m.group(1) for m in STRING_LIT.finditer(prod) if ADMITS.search(m.group(1))]
+            said = [s for s in string_literals(prod) if ADMITS.search(s)]
             if said:
                 admitting += 1
                 continue

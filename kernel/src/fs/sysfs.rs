@@ -2739,6 +2739,50 @@ pub fn self_test() -> KernelResult<()> {
             );
         }
     }
+    // 8. THE ROUTE, not the implementation. Every check above calls
+    //    `SysFs` directly with a path relative to its own root, so all of
+    //    them would stay green if `/sys` stopped being mounted or the VFS
+    //    stopped translating paths into it -- the nodes would be correct and
+    //    unreachable, and nothing here would say so.
+    //
+    //    Lane C found that shape live on 2026-09-15: torrent's Ctrl+O never
+    //    worked because the handler returned before the `Key::O` arm, and
+    //    every test was green because they called `open_to_read()` directly
+    //    instead of pressing the key. Sixteen of twenty apps had a variant of
+    //    it. This is the same door, one layer down.
+    //
+    //    One read through `Vfs` at the real mounted path is enough to notice.
+    match crate::fs::Vfs::read_file("/sys/kernel/ostype") {
+        Ok(v) => {
+            let via_mount = core::str::from_utf8(&v).unwrap_or("").trim();
+            // Read into a binding first: `from_utf8_lossy` yields a `Cow`, and
+            // `.trim()` on it borrows a temporary that cannot outlive the
+            // statement. Comparing two `&str` needs no allocation either.
+            let direct_raw = fs
+                .read_file(Path::new("/kernel/ostype"))
+                .unwrap_or_default();
+            let direct = core::str::from_utf8(&direct_raw).unwrap_or("").trim();
+            if via_mount != direct || via_mount.is_empty() {
+                serial_println!(
+                    "[sysfs]   FAIL: /sys/kernel/ostype via the mount reads {via_mount:?} \
+                     but {direct:?} directly -- the tree is served but the route is wrong"
+                );
+                return Err(KernelError::IoError);
+            }
+            serial_println!(
+                "[sysfs]   the mounted route works: /sys/kernel/ostype through Vfs \
+                 matches SysFs directly ({via_mount}): OK"
+            );
+        }
+        Err(e) => {
+            serial_println!(
+                "[sysfs]   FAIL: /sys is not readable through Vfs ({e:?}), so every \
+                 check above was about a tree nothing can reach"
+            );
+            return Err(e);
+        }
+    }
+
     serial_println!("[sysfs] Self-test passed{}.", skips.suffix());
     Ok(())
 }

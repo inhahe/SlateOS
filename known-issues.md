@@ -150386,6 +150386,34 @@ Leaving the modal path to repeat the two calls is precisely how the two copies
 would drift, which is the lesson from the eleven hand-written intercepts one
 level down.
 
+### The abstraction then lost something too
+
+Worth recording beside the rest, because it is the same failure one level up
+and it was found the same way.
+
+`FilePicker::handle` returned `Picked::Handled` both when the dialog had
+consumed a keystroke and was still up, and when the dialog had **closed
+itself**. Twelve of the thirteen callers cannot tell those apart and do not
+need to. `apps/fileassoc` keeps an `ActiveDialog` enum beside the picker, so
+Escape closed the dialog, the caller was told only "handled", and that enum
+stayed on `ChooseFile` **with no picker on screen**.
+
+Its own cancel test caught it -- and that test exists because somebody had
+already noticed it would otherwise pass against a button that opened nothing:
+
+    // Without this the test passes when the button does nothing at all:
+    // "no picker is up" is what it asserts afterwards, and that is also
+    // true of a button that never opened one.
+
+`Picked::Cancelled` is a separate variant rather than folded into `Handled`,
+so that **a caller with parallel state is made to say what it does about
+cancellation** rather than inheriting a default that is wrong for it. The
+twelve with no such state write `Picked::Handled | Picked::Cancelled` and are
+right; the one that has it clears its enum, and its arm says why.
+
+A wrapper that answers a narrower question than its callers ask is not
+obviously wrong from inside the wrapper. Every one of its own tests passed.
+
 ### The transferable part
 
 **Collecting duplicated code is how you find out the copies disagree.** In the

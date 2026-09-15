@@ -149790,3 +149790,54 @@ three decks, which **stay** -- "the capital of France is Paris" is a true
 statement about the world, bundled as content -- while the silence scanner
 found the real defect. Where they overlap, the answer still has to be reasoned
 out per app.
+## TD-B-A-SHORT-OPTION-CAN-MEAN-SOMETHING-ELSE-THAN-IT-DOES-UPSTREAM -- OPEN 2026-09-15
+
+A defect class, not a single bug: a short option bound to the WRONG long
+option. The program accepts the flag, understands it as something else, and
+answers confidently. No existing gate can see it.
+
+**Found once, by accident.** `blkid -n` was bound to `--no-encoding` here and
+is `--match-types` in util-linux, so `blkid -n vfat,ext3 /dev/sda1` set a
+no-op flag, consumed `vfat,ext3` as a DEVICE PATH, and reported an ext2
+filesystem the caller had asked to exclude. Fixed 2026-09-15; the measurement
+and the repair are in that commit.
+
+**Why nothing catches it.** `check-help-vs-parser.py` compares our help text
+against our parser, and both were internally consistent -- the help said
+`-n, --no-encoding` and the parser agreed. `check-fields-written-never-read.py`
+saw only that `no_encoding` was never read, which reads as a missing feature.
+Every tool we own is self-consistent about a mapping that is wrong relative to
+the program it replaces. The only oracle is the REFERENCE's own flag table.
+
+**Method that works**, and it is cheap:
+
+    wsl -d Ubuntu -- bash -s <<'EOF'
+    <tool> --help | grep -E "^ +-[a-zA-Z],"
+    EOF
+    grep -oE '"-[A-Za-z]" \| "--[a-z-]+"' userspace/<tool>/src/main.rs | sort -u
+
+then compare the two pairings by eye. It needs the real tool, so it cannot be
+a pre-push gate on a machine without one -- which is why this is a tracked
+sweep rather than a check.
+
+**Checked so far -- 3 tools, 1 defect.** Cleared rows are recorded because a
+cleared list is worth more than a shorter one: it says where NOT to look
+again.
+
+| tool | pairings compared | result |
+|---|---|---|
+| `blkid` | `-c -d -n` | **`-n` WRONG** -- fixed 2026-09-15 |
+| `unshare` | all 16 (`-m -u -i -n -p -U -C -T -f -r -S -G -R -w -h -V`) | all match |
+| `nsenter` | all 10 (`-a -t -F -G -S -V -W -r -w -h`) | all match |
+
+**Unchecked**, and where to go next: every other `userspace/` tool with a
+util-linux, coreutils or net-tools counterpart. The privilege tools were done
+first on the theory that a wrong flag there is worst; that theory is now
+partly tested and both came back clean, so the next pass should just be
+breadth.
+
+**Two near-misses worth keeping.** `unshare` has no `-c` for
+`--map-current-user` where util-linux does, and our `blkid -c` has no
+`--cache-file` long form. Neither is a collision -- a missing spelling fails
+visibly with "unknown option" -- so they are a different and much milder
+class than the above.

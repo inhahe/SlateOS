@@ -203,6 +203,24 @@ fn read_u32_be(data: &[u8], offset: usize) -> u32 {
     ])
 }
 
+/// The transport-layer bytes following an IPv4 header, or `None` when the
+/// frame is shorter than the header it claims to have.
+///
+/// IHL is a FOUR-BIT FIELD READ OFF THE WIRE. `parse_ipv4` rejects a value
+/// below 5 and accepts up to 15, so a sender can declare a 60-byte IP header
+/// in a frame that `parse_ipv4` was willing to parse after only 20. The start
+/// of this slice is therefore attacker-chosen and can sit past the end.
+///
+/// This computation appeared three times. Two copies checked the length and
+/// one -- the live-capture path, the only one fed by a real network -- did
+/// not, and sliced `pkt_data[14 + ip_hdr_len..]` unconditionally. That is a
+/// panic on a malformed packet from anyone who can put a frame on the wire.
+/// It is one function now so the check cannot go missing from a fourth copy.
+fn transport_after_ipv4(packet: &[u8], link_hdr_len: usize, ihl: u8) -> Option<&[u8]> {
+    let ip_hdr_len = (ihl as usize).saturating_mul(4);
+    packet.get(link_hdr_len.saturating_add(ip_hdr_len)..)
+}
+
 fn parse_ethernet(data: &[u8]) -> Option<EthernetHeader> {
     if data.len() < 14 {
         return None;
@@ -696,11 +714,10 @@ fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) 
             };
 
             let ip_hdr_len = (ip.ihl as usize) * 4;
-            if payload.len() < ip_hdr_len {
-                println!("{}IP [truncated header]", ts_str);
+            let Some(transport) = transport_after_ipv4(payload, 0, ip.ihl) else {
+                println!("{ts_str}IP [truncated header]");
                 return;
-            }
-            let transport = &payload[ip_hdr_len..];
+            };
             let src = format_ip(ip.src_ip);
             let dst = format_ip(ip.dst_ip);
 
@@ -765,7 +782,7 @@ fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) 
                             icmp_type_name(icmp.icmp_type),
                             icmp.id,
                             icmp.seq,
-                            ip.total_length as usize - ip_hdr_len,
+                            (ip.total_length as usize).saturating_sub(ip_hdr_len),
                         );
                         if opts.verbose >= 1 {
                             print!(", cksum 0x{:04x}", icmp.checksum);
@@ -954,13 +971,9 @@ fn capture_live(
             if eth.ethertype == ETHER_IPV4 && pkt_data.len() > 14 {
                 let ip = parse_ipv4(&pkt_data[14..]);
                 let (sp, dp) = if let Some(ref ip) = ip {
-                    let ip_hdr_len = (ip.ihl as usize) * 4;
-                    let transport = &pkt_data[14 + ip_hdr_len..];
+                    let transport = transport_after_ipv4(pkt_data, 14, ip.ihl).unwrap_or(&[]);
                     match ip.protocol {
-                        PROTO_TCP if transport.len() >= 4 => {
-                            (read_u16_be(transport, 0), read_u16_be(transport, 2))
-                        }
-                        PROTO_UDP if transport.len() >= 4 => {
+                        PROTO_TCP | PROTO_UDP if transport.len() >= 4 => {
                             (read_u16_be(transport, 0), read_u16_be(transport, 2))
                         }
                         _ => (0, 0),
@@ -1087,9 +1100,8 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
             if eth.ethertype == ETHER_IPV4 && pkt_data.len() > 14 {
                 let ip = parse_ipv4(&pkt_data[14..]);
                 let (sp, dp) = if let Some(ref ip) = ip {
-                    let ip_hdr_len = (ip.ihl as usize) * 4;
-                    if pkt_data.len() > 14 + ip_hdr_len + 4 {
-                        let transport = &pkt_data[14 + ip_hdr_len..];
+                    let transport = transport_after_ipv4(pkt_data, 14, ip.ihl).unwrap_or(&[]);
+                    if transport.len() >= 4 {
                         match ip.protocol {
                             PROTO_TCP | PROTO_UDP => {
                                 (read_u16_be(transport, 0), read_u16_be(transport, 2))
@@ -1351,6 +1363,50 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+
+    /// A frame shorter than the IP header it DECLARES must not slice past
+    /// its end.
+    ///
+    /// IHL is a four-bit field off the wire. `parse_ipv4` is satisfied by 20
+    /// bytes but accepts an IHL of up to 15, i.e. a declared 60-byte header,
+    /// so the start of the transport slice is chosen by the sender and can
+    /// sit beyond the frame. The live-capture path computed
+    /// `&pkt_data[14 + ip_hdr_len..]` with no check and panicked on exactly
+    /// this input -- reachable by anyone able to put a frame on the wire.
+    ///
+    /// The other two copies of the computation did check, which is why this
+    /// is one function now.
+    #[test]
+    fn a_frame_shorter_than_its_declared_ip_header_has_no_transport() {
+        // 14 ethernet + 20 IP: the shortest frame `parse_ipv4` accepts.
+        let frame = [0u8; 34];
+
+        // IHL 5 -- a 20-byte header. The transport slice is empty, but it is
+        // in range, and empty is a different answer from absent.
+        assert_eq!(transport_after_ipv4(&frame, 14, 5), Some(&[][..]));
+
+        // IHL 15 -- a declared 60-byte header. 14 + 60 = 74, past the end of
+        // 34. This is the panic.
+        assert_eq!(transport_after_ipv4(&frame, 14, 15), None);
+
+        // A frame actually long enough for the declared header keeps working.
+        let long = [0u8; 80];
+        assert_eq!(
+            transport_after_ipv4(&long, 14, 15).map(<[u8]>::len),
+            Some(6)
+        );
+
+        // The decode path passes a link length of 0, because its `payload`
+        // already excludes the ethernet header.
+        assert_eq!(
+            transport_after_ipv4(&long, 0, 15).map(<[u8]>::len),
+            Some(20)
+        );
+
+        // IHL cannot exceed 15 in four bits, but the helper takes a u8 and
+        // must not wrap if one ever reaches it another way: 255 * 4 = 1020.
+        assert_eq!(transport_after_ipv4(&long, 14, 255), None);
+    }
     use super::*;
 
     #[test]

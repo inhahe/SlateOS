@@ -34,6 +34,11 @@ struct Config {
     shadow_file: PathBuf,
     show_help: bool,
     show_version: bool,
+    /// `-s, --sha-rounds <n>`: the SHA-crypt cost.
+    ///
+    /// `None` leaves the setting without a `rounds=` field, which is what
+    /// every entry this tool has ever written looks like.
+    sha_rounds: Option<u32>,
 }
 
 /// The hashing method, which is the libc's enum rather than one of ours.
@@ -61,8 +66,22 @@ impl Default for Config {
             shadow_file: PathBuf::from("/etc/shadow"),
             show_help: false,
             show_version: false,
+            sha_rounds: None,
         }
     }
+}
+
+/// The value that follows an option, as text.
+///
+/// Both callers want a number or a method name, neither of which can be
+/// non-UTF-8 -- so a value that does not decode is refused with the bytes
+/// shown rather than silently becoming the empty string. The parse loop uses
+/// `unwrap_or_default()` when matching OPTION NAMES, which is right there
+/// (undecodable bytes match no option), and wrong here.
+fn value_at<'a>(args: &'a [OsString], i: usize, need: &'static str) -> Result<&'a str, String> {
+    let raw = args.get(i).ok_or_else(|| need.to_string())?;
+    raw.to_str()
+        .ok_or_else(|| format!("{need}, and {} is not one", quoting::quoteaf_os(raw)))
 }
 
 fn parse_args(args: &[OsString]) -> Result<Config, String> {
@@ -81,7 +100,39 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
         match arg {
             "-e" | "--encrypted" => cfg.encrypted = true,
             "-m" | "--md5" => cfg.hash_method = HashMethod::Md5,
-            "-s" | "--sha256" => cfg.hash_method = HashMethod::Sha256,
+            // `-s` is `--sha-rounds <number>` in the shadow suite and
+            // CONSUMES AN ARGUMENT; the method is chosen with
+            // `-c, --crypt-method`. Bound here to `--sha256` as a flag, so
+            // `chpasswd -s 5000 < file` selected SHA-256 and left `5000` to
+            // be read as a positional -- the count silently discarded, and
+            // the method changed without being asked for.
+            "-s" | "--sha-rounds" => {
+                i += 1;
+                let text = value_at(args, i, "-s requires a number of rounds")?;
+                cfg.sha_rounds = Some(
+                    text.parse::<u32>()
+                        .map_err(|e| format!("-s requires a number of rounds: {text}: {e}"))?,
+                );
+            }
+            "-c" | "--crypt-method" => {
+                i += 1;
+                let text = value_at(args, i, "-c requires a method")?;
+                cfg.hash_method = match text.to_ascii_uppercase().as_str() {
+                    "MD5" => HashMethod::Md5,
+                    "SHA256" => HashMethod::Sha256,
+                    "SHA512" => HashMethod::Sha512,
+                    // NONE, DES and YESCRYPT are named by the shadow suite
+                    // and not implemented here. Refused rather than mapped
+                    // to something near it: a password stored under a
+                    // weaker scheme than the operator named is the one
+                    // outcome worse than failing.
+                    other => {
+                        return Err(format!(
+                            "-c {other}: unsupported crypt method (this build has MD5, SHA256, SHA512)"
+                        ));
+                    }
+                };
+            }
             "-S" | "--sha512" => cfg.hash_method = HashMethod::Sha512,
             "-h" | "--help" => cfg.show_help = true,
             "-V" | "--version" => cfg.show_version = true,
@@ -140,9 +191,20 @@ fn generate_salt(len: usize) -> Option<String> {
 /// Returns `None` if the libc rejects the setting — which cannot happen for
 /// a salt from [`generate_salt`], since that draws from crypt's own
 /// alphabet at the method's own maximum length.
-fn hash_password(password: &str, method: HashMethod, salt: &str) -> Option<String> {
+fn hash_password(
+    password: &str,
+    method: HashMethod,
+    salt: &str,
+    rounds: Option<u32>,
+) -> Option<String> {
     let mut setting_buf = posix::crypt::buf();
-    let setting = posix::crypt::setting_into(method, salt.as_bytes(), &mut setting_buf)?;
+    // `None` keeps the setting free of a `rounds=` field, which is what every
+    // entry this tool has written so far looks like -- so an unchanged
+    // invocation produces an unchanged entry.
+    let setting = match rounds {
+        Some(r) => posix::crypt::setting_rounds_into(method, r, salt.as_bytes(), &mut setting_buf)?,
+        None => posix::crypt::setting_into(method, salt.as_bytes(), &mut setting_buf)?,
+    };
     let mut hash_buf = posix::crypt::buf();
     Some(
         posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)?
@@ -154,9 +216,9 @@ fn hash_password(password: &str, method: HashMethod, salt: &str) -> Option<Strin
 /// caller changing a password needs.
 ///
 /// `None` means no password should be written; the callers report why.
-fn hash_new_password(password: &str, method: HashMethod) -> Option<String> {
+fn hash_new_password(password: &str, method: HashMethod, rounds: Option<u32>) -> Option<String> {
     let salt = generate_salt(method.salt_max())?;
-    hash_password(password, method, &salt)
+    hash_password(password, method, &salt, rounds)
 }
 
 /// Validate password strength
@@ -341,7 +403,7 @@ fn run_chpasswd(
                 errors += 1;
                 continue;
             }
-            let Some(hashed) = hash_new_password(password, cfg.hash_method) else {
+            let Some(hashed) = hash_new_password(password, cfg.hash_method, cfg.sha_rounds) else {
                 let _ = writeln!(
                     err_writer,
                     "chpasswd: {username}: cannot read `/dev/urandom', so no salt can be \
@@ -384,7 +446,8 @@ fn print_help() {
     println!("Options:");
     println!("  -e, --encrypted  Passwords are already encrypted");
     println!("  -m, --md5        Use MD5 hash method");
-    println!("  -s, --sha256     Use SHA-256 hash method");
+    println!("  -c, --crypt-method METHOD  MD5, SHA256 or SHA512");
+    println!("  -s, --sha-rounds N         Rounds for SHA-crypt");
     println!("  -S, --sha512     Use SHA-512 hash method (default)");
     println!("  -h, --help       Show this help");
     println!("  -V, --version    Show version");
@@ -472,9 +535,68 @@ mod tests {
         assert_eq!(cfg.hash_method, HashMethod::Md5);
     }
 
+    /// `-s` is a ROUNDS COUNT and takes an argument.
+    ///
+    /// It used to be a flag selecting SHA-256, so `chpasswd -s 5000 < file`
+    /// changed the hash method nobody had asked to change and left `5000` to
+    /// fall through as a positional. Two wrong outcomes from one letter.
+    #[test]
+    fn sha_rounds_takes_a_count_and_reaches_the_stored_entry() {
+        let cfg = parse_args(&argv(&["chpasswd", "-s", "9000"])).expect("-s parses");
+        assert_eq!(cfg.sha_rounds, Some(9000));
+        assert_eq!(
+            cfg.hash_method,
+            HashMethod::Sha512,
+            "-s must not change the method"
+        );
+
+        // The count is not merely stored: it appears in the entry, which is
+        // the only place it can be checked later.
+        let hashed = hash_password("pw", HashMethod::Sha512, "abcdefgh", Some(9000))
+            .expect("hashing with rounds");
+        assert!(
+            hashed.starts_with("$6$rounds=9000$"),
+            "the entry must state the cost it was produced at, got {hashed}"
+        );
+
+        // And without `-s` the entry has no rounds field at all, so an
+        // unchanged invocation still produces an unchanged entry.
+        let plain = hash_password("pw", HashMethod::Sha512, "abcdefgh", None).expect("plain");
+        assert!(plain.starts_with("$6$abcdefgh$"), "got {plain}");
+
+        // A non-numeric count is refused rather than silently defaulted.
+        assert!(parse_args(&argv(&["chpasswd", "-s", "lots"])).is_err());
+        assert!(parse_args(&argv(&["chpasswd", "-s"])).is_err());
+    }
+
+    /// `-c` selects the method, and refuses one it cannot honour.
+    #[test]
+    fn crypt_method_selects_or_refuses() {
+        for (name, want) in [
+            ("MD5", HashMethod::Md5),
+            ("sha256", HashMethod::Sha256),
+            ("SHA512", HashMethod::Sha512),
+        ] {
+            let cfg = parse_args(&argv(&["chpasswd", "-c", name])).expect("method parses");
+            assert_eq!(cfg.hash_method, want, "{name}");
+        }
+
+        // Named by the shadow suite, not implemented here. Refused rather
+        // than mapped to something near it: a password stored under a weaker
+        // scheme than the operator named is worse than a failure.
+        for name in ["NONE", "DES", "YESCRYPT"] {
+            let err =
+                parse_args(&argv(&["chpasswd", "-c", name])).expect_err("{name} must be refused");
+            assert!(err.contains("unsupported"), "{name}: {err}");
+        }
+    }
+
     #[test]
     fn test_parse_args_chpasswd_sha256() {
-        let args = argv(&["chpasswd", "-s"]);
+        // `-c SHA256`, not `-s`. The old form asserted that `-s` selected
+        // SHA-256 -- which is what made `chpasswd -s 5000` change the method
+        // and discard the count.
+        let args = argv(&["chpasswd", "-c", "SHA256"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.hash_method, HashMethod::Sha256);
     }
@@ -508,8 +630,8 @@ mod tests {
     #[test]
     fn test_hash_password_writes_standard_crypt_entries() {
         for method in [HashMethod::Sha512, HashMethod::Sha256, HashMethod::Md5] {
-            let hash =
-                hash_password("testpass", method, SALT).unwrap_or_else(|| panic!("{method:?}"));
+            let hash = hash_password("testpass", method, SALT, None)
+                .unwrap_or_else(|| panic!("{method:?}"));
             assert!(hash.starts_with(method.prefix()), "{method:?}: {hash}");
             assert_eq!(
                 posix::crypt::stored_method(hash.as_bytes()),
@@ -536,21 +658,21 @@ mod tests {
     #[test]
     fn test_hash_password_matches_a_published_vector() {
         assert_eq!(
-            hash_password("Hello world!", HashMethod::Sha512, "saltstring").as_deref(),
+            hash_password("Hello world!", HashMethod::Sha512, "saltstring", None).as_deref(),
             Some(
                 "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1"
             )
         );
         assert_eq!(
-            hash_password("Hello world!", HashMethod::Sha256, "saltstring").as_deref(),
+            hash_password("Hello world!", HashMethod::Sha256, "saltstring", None).as_deref(),
             Some("$5$saltstring$5B8vYYiY.CVt1RlTTf8KbXBH3hsxY/GNooZaBBGWEc5")
         );
     }
 
     #[test]
     fn test_hash_password_different() {
-        let h1 = hash_password("pass1", HashMethod::Sha512, SALT).expect("h1");
-        let h2 = hash_password("pass2", HashMethod::Sha512, SALT).expect("h2");
+        let h1 = hash_password("pass1", HashMethod::Sha512, SALT, None).expect("h1");
+        let h2 = hash_password("pass2", HashMethod::Sha512, SALT, None).expect("h2");
         assert_ne!(h1, h2);
     }
 
@@ -562,8 +684,8 @@ mod tests {
     /// identically.
     #[test]
     fn test_the_same_password_under_different_salts_differs() {
-        let a = hash_password("same", HashMethod::Sha512, "aaaaaaaaaaaaaaaa").expect("a");
-        let b = hash_password("same", HashMethod::Sha512, "bbbbbbbbbbbbbbbb").expect("b");
+        let a = hash_password("same", HashMethod::Sha512, "aaaaaaaaaaaaaaaa", None).expect("a");
+        let b = hash_password("same", HashMethod::Sha512, "bbbbbbbbbbbbbbbb", None).expect("b");
         assert_ne!(a, b);
     }
 
@@ -572,16 +694,22 @@ mod tests {
     /// itself.
     #[test]
     fn test_hash_password_refuses_a_salt_it_cannot_store() {
-        assert_eq!(hash_password("pw", HashMethod::Sha512, ""), None);
-        assert_eq!(hash_password("pw", HashMethod::Sha512, "has$dollar"), None);
+        assert_eq!(hash_password("pw", HashMethod::Sha512, "", None), None);
+        assert_eq!(
+            hash_password("pw", HashMethod::Sha512, "has$dollar", None),
+            None
+        );
         // 17 characters, one past SHA-crypt's maximum.
         assert_eq!(
-            hash_password("pw", HashMethod::Sha512, "abcdefghijklmnopq"),
+            hash_password("pw", HashMethod::Sha512, "abcdefghijklmnopq", None),
             None
         );
         // MD5 truncates at 8, so 9 is over for it and fine for SHA-512.
-        assert_eq!(hash_password("pw", HashMethod::Md5, "123456789"), None);
-        assert!(hash_password("pw", HashMethod::Sha512, "123456789").is_some());
+        assert_eq!(
+            hash_password("pw", HashMethod::Md5, "123456789", None),
+            None
+        );
+        assert!(hash_password("pw", HashMethod::Sha512, "123456789", None).is_some());
     }
 
     #[test]

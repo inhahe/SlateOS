@@ -351,8 +351,10 @@ def analyse():
     defs, prod_refs, test_refs, crate_prod_refs = scan()
 
     uncalled = []
+    ambiguous = 0
     for name, sites in sorted(defs.items()):
         if len(sites) != 1:
+            ambiguous += 1
             continue
         path, line = sites[0]
         if prod_refs[name] > 1 or test_refs[name] == 0:
@@ -385,7 +387,7 @@ def analyse():
                 pairs.append((path, line, name, other, uses))
                 break
 
-    return uncalled, pairs
+    return uncalled, pairs, ambiguous
 
 
 def main(argv):
@@ -411,7 +413,7 @@ def main(argv):
         ROOTS = every_root()
     scope = "the whole tree" if ROOTS is not LANE_C_ROOTS else "lane C's trees"
 
-    uncalled, pairs = analyse()
+    uncalled, pairs, ambiguous = analyse()
 
     for path, line, name, other, uses in pairs:
         # States what was measured and stops. A gate that diagnoses past its
@@ -446,6 +448,23 @@ def main(argv):
         print(
             f"ok: no half of a save/load pair is missing its caller, "
             f"in {len(ROOTS)} director(ies) of {scope}"
+        )
+        # WHY THIS NUMBER IS PRINTED RATHER THAN BURIED.
+        #
+        # A name defined in two crates cannot have a reference attributed to
+        # either, so it is skipped. That conservatism is right, and it has a
+        # consequence that is not obvious: *widening* the scan narrows what it
+        # can see. `--all-lanes` over 38 directories reported 1010 functions
+        # called only by their own tests; lane C's 10 directories reported
+        # 1073. Thirty-eight directories saw less than ten, because adding
+        # `userspace/` made sixty-odd lane C names ambiguous.
+        #
+        # So `--all-lanes` is not a thorough mode, it is a different one, and
+        # a reader who assumes otherwise will take a quieter answer for a
+        # cleaner tree. Printing the count is what makes that visible.
+        print(
+            f"   ({ambiguous} name(s) skipped: defined in more than one place, "
+            f"so no reference can be attributed to either)"
         )
         if not every:
             print(
@@ -550,7 +569,7 @@ def self_test():
         saved = (ROOT, ROOTS)
         ROOT, ROOTS = base, ("apps", "gui")
         try:
-            _uncalled, pairs = analyse()
+            _uncalled, pairs, _ambiguous = analyse()
         finally:
             ROOT, ROOTS = saved
 

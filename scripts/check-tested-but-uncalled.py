@@ -54,7 +54,31 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import selftestflag  # noqa: E402  (needs the path above)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-ROOTS = ("apps", "gui", "net", "net80211", "netproto", "pkg")
+# Lane C's ten directories, per `scripts/which-lane.py`. It listed six until
+# 2026-09-14: `netipc`, `netring`, `aes` and `hmac` were simply missing, so the
+# gate reported "no half of a save/load pair is missing its caller" while never
+# having opened four of the trees that sentence covered.
+#
+# That is the same defect it exists to catch, in the tool itself: a clean
+# verdict over a population the checker cannot enumerate. Nothing distinguishes
+# "looked and found nothing" from "did not look" in the output, which is why
+# the summary below now names the scope it examined.
+LANE_C_ROOTS = (
+    "apps",
+    "gui",
+    "net",
+    "netipc",
+    "netproto",
+    "netring",
+    "net80211",
+    "aes",
+    "hmac",
+    "pkg",
+)
+ROOTS = LANE_C_ROOTS
+
+# Directories that are build output or not Rust at all.
+NOT_SOURCE = {"target", "build", "scripts", "requests", "toolchain", "limine"}
 
 # A definition we can attribute. `pub` or not -- a private fn called only by its
 # own tests is the same defect, and in a single-file crate it is the common one.
@@ -158,6 +182,25 @@ def external_test_files():
             found.add(stem.with_suffix(".rs"))
             found.add(stem / "mod.rs")
     return found
+
+
+def every_root():
+    """Every top-level directory with Rust in it, for `--all-lanes`.
+
+    The default scope is lane C's own trees because that is the lane that owns
+    this script and a gate should refuse the push of whoever can fix the
+    finding. A missing door in `services/` is just as real, though, and lane B
+    cannot see it from here -- so the scope is a flag rather than a constant.
+    """
+    roots = []
+    for child in sorted(ROOT.iterdir()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        if child.name in NOT_SOURCE:
+            continue
+        if next(child.rglob("*.rs"), None) is not None:
+            roots.append(child.name)
+    return tuple(roots)
 
 
 def rust_files():
@@ -348,7 +391,9 @@ def analyse():
 def main(argv):
     if selftestflag.wants_selftest(argv):
         return self_test()
-    unknown = selftestflag.unknown_options(argv, known=("--list", "--all"))
+    unknown = selftestflag.unknown_options(
+        argv, known=("--list", "--all", "--all-lanes")
+    )
     if unknown:
         # Lane A lost minutes to this exact silence: `--self-test` was accepted
         # by an `in argv` test that nothing else checked, so the flag ran a
@@ -360,6 +405,12 @@ def main(argv):
 
     listing = "--list" in argv
     every = "--all" in argv
+
+    global ROOTS
+    if "--all-lanes" in argv:
+        ROOTS = every_root()
+    scope = "the whole tree" if ROOTS is not LANE_C_ROOTS else "lane C's trees"
+
     uncalled, pairs = analyse()
 
     for path, line, name, other, uses in pairs:
@@ -392,7 +443,10 @@ def main(argv):
         print(f"-- {len(uncalled)} called only by their own tests (--all).")
 
     if not pairs:
-        print("ok: no half of a save/load pair is missing its caller")
+        print(
+            f"ok: no half of a save/load pair is missing its caller, "
+            f"in {len(ROOTS)} director(ies) of {scope}"
+        )
         if not every:
             print(
                 f"   ({len(uncalled)} functions are called only by their own "

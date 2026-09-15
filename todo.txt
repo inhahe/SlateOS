@@ -4787,6 +4787,34 @@ the next person to run these will see the same rows.
   care about heap availability at that point. That is the work; serving the
   file afterwards is trivial.
 
+  ALL NINE CATEGORIES NOW RESOLVED, and only two are work:
+
+    served      block, memmap (plus cpu/cpuid and system/memory earlier)
+    duplicate   irqs    -> /proc/interrupts (procfs::gen_interrupts)
+                display -> procfs, via fs::monitors
+                usb     -> procfs, via devhotplug::procfs_content()
+    no source   dma     -- nothing in kernel/src mentions a DMA channel at
+                           all, so a node would be invented outright
+    blocked     net     -- InterfaceInfo has no name field; eth0 would be
+                           fabricated. Operator decision, unchanged.
+    open        sound   -- ac97::is_available/status_info is real but covers
+                           ONE device; enumerating cards needs a registry
+                           that does not exist yet
+                drivers -- two files mention anything resembling a registry;
+                           check for a real source before building
+
+  CHECKED AND CLEARED: devhotplug seeds NO devices, unlike dmevent whose
+  init_defaults shipped three invented ones. It is event-driven only
+  (device_arrived_usb / device_removed_usb) and its procfs content is
+  therefore empty until something reports. Same family, opposite verdict --
+  worth recording because the family is what made it worth checking.
+
+  The pattern across the six non-work categories: three were already answered
+  by /proc, which is where Linux puts them too. The useful question for a new
+  /sys node turned out not to be "is there data" but "is this already
+  answered somewhere", and asking it second cost nothing while asking it
+  first would have saved the memmap detour entirely.
+
   display is DELIBERATELY NOT SERVED, for the same reason as irqs below.
   `fs::monitors` already backs a procfs file -- `procfs.rs:8223` reads
   `monitors::stats()`, `desktop_bounds()` and `list_monitors()` -- and the

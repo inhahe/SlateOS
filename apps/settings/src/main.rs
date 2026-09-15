@@ -6524,6 +6524,43 @@ mod tests {
         );
     }
 
+    /// **Remove actually removes it, and the removal reaches the file.**
+    ///
+    /// The other two Remove tests check only that the button is *drawn* when
+    /// there is a picture and not when there is none. A button that is drawn,
+    /// clickable and does nothing would pass both of them -- which is the
+    /// shape of half the defects found in this tree today, so it is not a
+    /// hypothetical worth leaving open in my own change.
+    #[test]
+    fn removing_the_wallpaper_reaches_the_file_the_desktop_reads() {
+        with_scratch_config("settings-wallpaper-remove", |root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+
+            let (cx, cy) = center_of(&state, RowHit::Press(ButtonId::ClearWallpaper))
+                .expect("the page draws no Remove button");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            assert_eq!(
+                state.appearance.settings.wallpaper, None,
+                "the press did not clear the picture"
+            );
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "removing should have written {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(
+                saved.wallpaper, None,
+                "the desktop will still be showing a picture the user removed"
+            );
+        });
+    }
+
     /// **Choosing a fit reaches `appearance.yaml`.**
     ///
     /// Through the dropdown a user would use, and read back off disk rather

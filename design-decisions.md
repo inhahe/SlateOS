@@ -67161,6 +67161,26 @@ process that failed, a self-test's own assertion that it ran -- each is the
 defendant testifying. The independent witness is the one that would still be
 right if the subject were broken: the file's length, the artifact's mtime,
 `/proc/meminfo` computed by a different path, the environment query.
+
+**A third way independence fails, found on 2026-09-15 and not by me: the two
+witnesses share one broken input.** Neither is the defendant, so the direction
+rule above does not catch it. `scripts/check-gated-selftests.py` records that a
+2026-08-31 audit concluded all six gated self-test sites run on this host, and
+that it was wrong about the FAT site -- which declared `format_self_test`'s
+banner rather than its own. That suite is dispatched unconditionally, so the
+banner is on every boot. In the checker's own words: *"the audit and this gate
+were reading the same mislabelled marker, which is why they agreed."*
+
+A hand audit and an automated gate is exactly the pair this section recommends
+-- different authors, different mechanisms, different days -- and the agreement
+was still worthless, because independence is a property of the *inputs*, not of
+the instruments. Two witnesses reading one wrong label are one witness.
+
+The practical form: before counting agreement as confirmation, ask what the two
+witnesses read, not who wrote them. If the answer is the same field, the same
+marker, or the same cached artifact, there is one witness and it has not been
+checked. The cheapest tell here was that the agreement was *perfect* on a
+question where partial disagreement was likely.
 ## 933. Desktop icon layout is not a kernel concern; `fs::deskicons` goes
 
 **Date:** 2026-09-12 · **Decided by:** Operator · **Lane:** A
@@ -67637,6 +67657,29 @@ for a convention on the grounds that it works on everything we have. That is
 the same sentence as "we cannot currently distinguish this from correct", said
 approvingly. Neither lane found this by testing; both found it by reading a
 unit definition and noticing it was historical rather than described.
+
+**Lane B generalised this into §1022, *the two faces of a gate that cannot go
+red*, and the pair should be read together.** Face one is a report that
+overclaims what it computed (`check-help-vs-parser` printed "advertised but
+never *read*" over a count of options never *parsed*, so it could not fail in
+the way its label promised). Face two is a fixture that cannot reach the code
+(`boot-test.sh` attaches no FAT disk, so an `openat2` arm sat unreachable for
+six weeks while its test passed honestly on `memfs`). The mode above is what
+face two degenerates to when the unreachable population is *hardware* instead
+of a fixture. Face one has a false sentence in it and one careful reader fixes
+it forever; face two has none, which is why the remedy is an inventory rather
+than a correction.
+
+**Said carefully, because the first draft of this got it wrong and lane B
+published the error before I caught it.** "No false sentence" does not mean
+nobody noticed. `check-gated-selftests.py` had recorded the FAT fixture gap,
+correctly, with a termination condition -- *this entry ends the day the harness
+attaches a FAT-formatted vda*. The gap was known at the level of "a FAT suite
+is skipped"; what nobody drew from it was "therefore every FAT-only arm in the
+VFS is unexercised", which is a different and much larger statement about code
+that has no banner of its own and so appears in no never-ran report. Face two
+is not an absence of vigilance. It is a true, recorded fact whose consequences
+reach further than the question it was recorded under.
 
 ## 938. An artifact that was true when it was written does not say when it stopped being true
 

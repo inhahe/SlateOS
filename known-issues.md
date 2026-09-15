@@ -149364,12 +149364,45 @@ The bug has been present since the mode stamp landed (`759607e04`, 2026-07-22)
 and the test case that catches it since `295bde6a4` (2026-08-30). Both sat green
 for six weeks because the fixture cannot reach them.
 
-So every FAT write path — create, unlink, rename, timestamps, the short-name
-guard — is exercised by nothing gated. `fat.rs` says so out loud in a comment
-above `self_test_datetime` ("the boot test mounts an in-memory root ... so
-`init` fails and the whole suite is skipped"), which means this was known,
-written down next to the code, and still did not reach anyone: the note explains
-why one suite was extracted, not that a filesystem is ungated.
+So every FAT write path -- create, unlink, rename, timestamps, the short-name
+guard -- is exercised by nothing gated.
+
+**CORRECTION, same day, and it inverts the interesting half of this entry.**
+The first draft of the paragraph above went on to say the gap had been written
+down beside the code and reached nobody. That is wrong, and wrong in the
+direction that flatters the finder. `scripts/check-gated-selftests.py` exists
+precisely to catch a self-test that never runs, it caught this one, and the
+allowlist entry is explicit and carries its own termination condition:
+
+> `"[fat] Running self-test..."`: *A FAT filesystem on vda. The boot test
+> mounts an in-memory root and attaches vda as a raw swap disk, so
+> ``fs::fat::init("vda")`` returns an error there and the suite is skipped; it
+> runs on a real FAT boot.* **This entry ends the day the harness attaches a
+> FAT-formatted vda.**
+
+So the mechanism existed, fired, was answered honestly, and asked in writing
+for the exact fix this entry proposes -- months before I noticed. I claimed
+there was no sentence to find. The sentence was there and it named the remedy.
+
+**What survives, and it is narrower and sharper.** A never-ran gate catches
+suites that do not run. It cannot catch a suite that *does* run against a
+fixture that cannot reach the interesting arm. `openat2`'s self-test ran on
+every boot and passed honestly -- on `memfs`. Case (e) tested the mode stamp
+against a filesystem that stores modes, so it could only ever pass; no banner
+is missing, so no never-ran gate can see it. The allowlist reasons about one
+suite's *banner*, not about which code paths the fixture leaves unreachable,
+and the consequence for unrelated code -- `openat2`, and both `mkdir` routes --
+was never drawn from it. The gap was known at the level of "a FAT suite is
+skipped" and not at "therefore every FAT-only arm in the VFS is unexercised".
+
+**The specimen in that file is better than either of my findings.** A
+2026-08-31 audit concluded all six gated sites run on this host. It was wrong
+about FAT because the FAT site declared `format_self_test`'s banner rather than
+its own, and that suite is dispatched unconditionally -- so, in the checker's
+own words, *"the audit and this gate were reading the same mislabelled marker,
+which is why they agreed."* Two independent instruments concurring because they
+shared one broken input. That is 932's direction rule with a corpse attached,
+and it was recorded on 2026-09-12 without my help.
 
 **Why I am not fixing the gap in the same change.** Attaching a FAT disk to
 `boot-test.sh` changes what mounts at `/` for every self-test in the run, so a
@@ -149386,6 +149419,10 @@ had picked for an unrelated reason, and my first instinct was to treat the
 failure as a regression in my own merge. It is neither: the tree is unchanged
 and the canonical gate is still green. A defect that only a non-canonical
 fixture can see is indistinguishable from "no defect" to everyone reading the
-gate — the eighth mode of §937 (correct on every instance that exists) with the
-population being *fixtures* rather than hardware.
+gate. That still holds for the *bug*, which no green gate could have shown.
+It does NOT hold for the coverage gap, which was seen, recorded and given an
+exit condition; see the correction above. The eighth mode of §937 applies to
+the arm, not to the fixture: `openat2`'s stamp was correct on every root the
+harness could mount, and the population it could not mount was the one that
+mattered.
 

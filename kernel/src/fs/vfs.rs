@@ -2830,7 +2830,23 @@ impl Vfs {
         // requested mode differs.
         let perm = mode & 0o1777;
         if perm != Self::DEFAULT_DIR_MODE {
-            Self::set_permissions(&path, perm)?;
+            match Self::set_permissions(&path, perm) {
+                Ok(()) => {}
+                // `NotSupported` only, and for the same reason the open
+                // path tolerates it (see `handle.rs`, `open_resolved`): a
+                // filesystem with no permission model must not turn a
+                // directory that WAS created into a reported failure with
+                // the directory left behind. FAT stores no mode bits and
+                // answers `NotSupported`; Linux's vfat likewise ignores the
+                // mode and lets the mount's umask govern.
+                //
+                // Any other error still fails the call: on a filesystem
+                // that can store a mode, failing to stamp one is a real
+                // failure, and 639's agreement not to silently discard a
+                // permission bit the caller asked for holds in full.
+                Err(KernelError::NotSupported) => {}
+                Err(e) => return Err(e),
+            }
         }
         // Charge quota for new inode.
         super::quota::charge_inode(0, 0);
@@ -3915,7 +3931,23 @@ impl Vfs {
                 // guard is that a name lookup is what an attacker gets to
                 // answer. Under this lock the two are the same operation, so
                 // the no-follow form costs nothing and asserts more.
-                guard.set_permissions_no_follow(&child_rel, perm)?;
+                match guard.set_permissions_no_follow(&child_rel, perm) {
+                    Ok(()) => {}
+                    // `NotSupported` only, and for the same reason the open
+                    // path tolerates it (see `handle.rs`, `open_resolved`): a
+                    // filesystem with no permission model must not turn a
+                    // directory that WAS created into a reported failure with
+                    // the directory left behind. FAT stores no mode bits and
+                    // answers `NotSupported`; Linux's vfat likewise ignores the
+                    // mode and lets the mount's umask govern.
+                    //
+                    // Any other error still fails the call: on a filesystem
+                    // that can store a mode, failing to stamp one is a real
+                    // failure, and 639's agreement not to silently discard a
+                    // permission bit the caller asked for holds in full.
+                    Err(KernelError::NotSupported) => {}
+                    Err(e) => return Err(e),
+                }
             }
         }
 

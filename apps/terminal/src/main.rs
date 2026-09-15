@@ -390,12 +390,25 @@ pub struct Cell {
     pub ch: char,
     /// Visual attributes for this cell.
     pub attrs: CellAttrs,
+    /// The second half of a double-width character that starts in the cell to
+    /// the left.
+    ///
+    /// The grid stays a rectangle of cells -- a wide character occupies two of
+    /// them rather than one cell of a different size -- because every other
+    /// operation here (erase, insert, scroll, select) is written in columns
+    /// and would need a second model otherwise.
+    ///
+    /// `ch` is a space in a continuation, so the renderer already skips it and
+    /// needs no change. The flag exists for the *text* path: without it,
+    /// copying a line of Chinese would yield a space after every character.
+    pub continuation: bool,
 }
 
 impl Default for Cell {
     fn default() -> Self {
         Self {
             ch: ' ',
+            continuation: false,
             attrs: CellAttrs::default(),
         }
     }
@@ -1002,22 +1015,69 @@ impl TerminalState {
             }
         }
 
+        // How many columns this character is entitled to.
+        //
+        // Every layout decision in this system is made from `charwidth`'s
+        // table, and until 2026-09-14 this function advanced by exactly one
+        // column for every character -- so 182,712 codepoints that the table
+        // calls two cells wide got one, and 2,362 zero-width marks got one
+        // they should not have. `ls` reserves two columns for a Chinese
+        // character; the terminal drew it in one; every column after it on the
+        // line was off by one and the next glyph was painted over the half
+        // that was never allocated. See
+        // `requests/b-c-the-terminal-gives-every-character-one-cell.md`.
+        //
+        // `None` is `wcwidth`'s -1 and means a control character, which should
+        // not reach here -- the parser handles those. One column is the safe
+        // reading if one does: it is what this function did for everything
+        // before, so an unexpected input cannot be made worse by the change.
+        let width = charwidth::char_width(ch).unwrap_or(1);
+
+        // A combining mark attaches to what it follows rather than taking a
+        // cell of its own. It is *not* written: doing so would replace the
+        // base character with the accent. Drawing the two together is the font
+        // layer's problem and is not what this request is about.
+        if width == 0 {
+            return;
+        }
+
+        // A double-width character at the last column does not fit. Wrapping
+        // first is what every terminal does, and the alternative -- splitting
+        // it across the margin -- is not representable in a grid of cells.
+        if width == 2 && self.cursor_col.saturating_add(1) >= cols && self.auto_wrap {
+            self.cursor_col = 0;
+            self.index_down();
+        }
+
         // Write the character to the cell
         if let Some(line) = self.screen.get_mut(self.cursor_row)
             && let Some(cell) = line.cells.get_mut(self.cursor_col)
         {
             cell.ch = ch;
             cell.attrs = self.current_attrs;
+            cell.continuation = false;
+        }
+        if width == 2
+            && let Some(line) = self.screen.get_mut(self.cursor_row)
+            && let Some(cell) = line.cells.get_mut(self.cursor_col.saturating_add(1))
+        {
+            // A space, so the renderer skips it with no change; the flag is
+            // what stops the text path yielding a space after every wide
+            // character.
+            cell.ch = ' ';
+            cell.attrs = self.current_attrs;
+            cell.continuation = true;
         }
 
         // Advance cursor
-        if self.cursor_col >= cols.saturating_sub(1) {
+        let last = cols.saturating_sub(1);
+        if self.cursor_col.saturating_add(width) > last {
             if self.auto_wrap {
                 self.pending_wrap = true;
             }
-            // Cursor stays at the right margin
+            self.cursor_col = last;
         } else {
-            self.cursor_col = self.cursor_col.saturating_add(1);
+            self.cursor_col = self.cursor_col.saturating_add(width);
         }
     }
 
@@ -2338,6 +2398,12 @@ impl TerminalState {
 
             for col in col_start..col_end.min(line.cells.len()) {
                 if let Some(cell) = line.cells.get(col) {
+                    if cell.continuation {
+                        // The second half of a wide character. Its `ch` is a
+                        // space; emitting it would put one after every CJK
+                        // character in copied text.
+                        continue;
+                    }
                     result.push(cell.ch);
                 }
             }
@@ -3050,6 +3116,88 @@ mod tests {
     /// stays dark on a light desktop is the defect; a terminal whose red is
     /// not red is a worse one, since a program that prints colour 1 expects
     /// red on every terminal ever made.
+    /// **A double-width character occupies two cells.**
+    ///
+    /// `put_char` advanced by exactly one column for every character, so the
+    /// 182,712 codepoints `charwidth` calls wide got one cell: `ls` reserves
+    /// two columns for a Chinese character, the terminal drew it in one, and
+    /// every column after it on the line was off by one.
+    #[test]
+    fn a_wide_character_takes_two_columns() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        let before = t.cursor_col;
+        t.put_char('\u{4E2D}'); // CJK, two cells
+
+        assert_eq!(
+            t.cursor_col,
+            before + 2,
+            "a wide character advanced the cursor like a narrow one"
+        );
+        let line = &t.screen[t.cursor_row];
+        assert_eq!(line.cells[before].ch, '\u{4E2D}');
+        assert!(
+            line.cells[before + 1].continuation,
+            "the second cell was left for the next character to paint over"
+        );
+    }
+
+    /// **A combining mark takes no cell and does not replace what it follows.**
+    #[test]
+    fn a_combining_mark_takes_no_column() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.put_char('e');
+        let after_e = t.cursor_col;
+        t.put_char('\u{0301}'); // combining acute
+
+        assert_eq!(t.cursor_col, after_e, "a zero-width mark took a column");
+        assert_eq!(
+            t.screen[t.cursor_row].cells[after_e - 1].ch,
+            'e',
+            "the mark replaced the letter it belongs to"
+        );
+    }
+
+    /// **Copied text does not gain a space after every wide character.**
+    ///
+    /// The continuation cell holds a space so the renderer skips it unchanged;
+    /// the flag is what the text path reads.
+    #[test]
+    fn copying_a_wide_character_yields_one_character() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        for ch in "\u{4E2D}\u{6587}".chars() {
+            t.put_char(ch);
+        }
+        t.selection_start(0.0, 0.0);
+        t.selection_extend(8.4 * 100.0, 0.0);
+        let copied = t.get_selection_text().expect("something was selected");
+        assert!(
+            copied.starts_with("\u{4E2D}\u{6587}"),
+            "copied text was {copied:?}"
+        );
+    }
+
+    /// A wide character that will not fit at the margin wraps rather than
+    /// being split across it, which a grid of cells cannot represent.
+    #[test]
+    fn a_wide_character_wraps_rather_than_straddling_the_margin() {
+        let mut t = TerminalState::new(TerminalConfig {
+            cols: 10,
+            rows: 5,
+            ..TerminalConfig::default()
+        });
+        for _ in 0..9 {
+            t.put_char('a');
+        }
+        assert_eq!(t.cursor_col, 9, "the fixture is not at the last column");
+        let row = t.cursor_row;
+
+        t.put_char('\u{4E2D}');
+
+        assert_eq!(t.cursor_row, row + 1, "the wide character did not wrap");
+        assert_eq!(t.screen[row + 1].cells[0].ch, '\u{4E2D}');
+        assert!(t.screen[row + 1].cells[1].continuation);
+    }
+
     #[test]
     fn the_chrome_follows_the_theme_and_the_ansi_table_does_not() {
         let dark = ColorScheme::from_palette(&Palette::for_mode(false));

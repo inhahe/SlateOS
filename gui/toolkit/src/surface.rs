@@ -116,9 +116,18 @@ pub fn logical_rect(cmd: &crate::render::RenderCommand) -> Option<(f32, f32, f32
 /// ```
 ///
 /// sees nothing once that box becomes an outline, and -- worse -- keeps
-/// passing if every assertion it feeds is over the resulting empty set. That
-/// is not hypothetical: `privacy_settings` passed vacuously for exactly this
-/// reason. Written through this function the same test matches either shape.
+/// passing if every assertion it feeds is over the resulting empty set.
+///
+/// That is not hypothetical. The desktop's `privacy_settings` module passed
+/// vacuously for exactly this reason: its tests matched `FillRect`, the boxes
+/// became outlines, every assertion ran over an empty set, and the suite went
+/// on reporting success. The module was deleted on 2026-09-15 under
+/// `design-decisions.md` 853 -- a per-application permission table is not this
+/// system's model -- so the example no longer has a file to point at, and is
+/// written out here instead. An example deleted in silence is how a rule
+/// becomes folklore.
+///
+/// Written through this function the same test matches either shape.
 #[must_use]
 pub fn painted_rect(cmd: &crate::render::RenderCommand) -> Option<(f32, f32, f32, f32, Color)> {
     let color = match *cmd {

@@ -2536,6 +2536,166 @@ mod tests {
     }
     use super::*;
 
+    // -- The directory walk --
+    //
+    // Added with the walk itself rather than after it. The rewrite that gave
+    // `apps/sysinfo` its reader deleted three tests and added none, and for one
+    // commit that file had fewer tests and more untested code; this is that
+    // lesson applied on the same day.
+
+    /// A scratch directory unique to one test, removed when it is done.
+    ///
+    /// Unique per call because the suite runs in parallel: a fixed name let two
+    /// tests delete each other's files in `apps/benchmark` earlier today, and
+    /// there the symptom was a measurement that silently came back as nothing.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "slateos-filesearch-{tag}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+
+        fn file(&self, name: &str, contents: &str) {
+            std::fs::write(self.0.join(name), contents).expect("scratch file");
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // Best effort: a leaked scratch directory is untidy, and panicking
+            // in a `Drop` during an already-failing test would hide the real
+            // failure behind an abort.
+            drop(std::fs::remove_dir_all(&self.0));
+        }
+    }
+
+    /// Files on disk become entries that the search can find.
+    ///
+    /// The whole point of the change: before it, `index.add` was called only by
+    /// tests and by `populate_sample_index`, so no file the user had could ever
+    /// appear in a result.
+    #[test]
+    fn a_folder_on_disk_becomes_something_searchable() {
+        let scratch = Scratch::new("basic");
+        scratch.file("alpha.txt", "one");
+        scratch.file("beta.rs", "two");
+        scratch.file("gamma.txt", "three");
+
+        let mut app = FileSearchApp::new();
+        app.index_directory(&scratch.0);
+
+        assert_eq!(app.index.entries.len(), 3, "{}", app.status_message);
+
+        app.criteria = SearchCriteria::new("alpha");
+        app.execute_search();
+        assert_eq!(app.results.len(), 1, "searching for alpha found nothing");
+
+        let found = app
+            .index
+            .entries
+            .get(*app.results.first().expect("a result"))
+            .expect("an entry");
+        assert_eq!(found.name, "alpha.txt");
+        assert!(found.size > 0, "the size did not come from the file");
+    }
+
+    /// A glob reaches the real names, not just the literal ones.
+    #[test]
+    fn a_glob_matches_what_is_on_disk() {
+        let scratch = Scratch::new("glob");
+        scratch.file("alpha.txt", "one");
+        scratch.file("beta.rs", "two");
+        scratch.file("gamma.txt", "three");
+
+        let mut app = FileSearchApp::new();
+        app.index_directory(&scratch.0);
+        let hits = app.index.search_glob("*.txt");
+        assert_eq!(hits.len(), 2, "glob found {} of 2", hits.len());
+    }
+
+    /// Indexing a second folder replaces the first rather than adding to it.
+    ///
+    /// A search tool reporting a file from a folder you are no longer looking
+    /// at is worse than one reporting nothing: the path looks real, because it
+    /// is, and nothing on screen says it is from somewhere else.
+    #[test]
+    fn a_second_folder_replaces_the_first() {
+        let first = Scratch::new("first");
+        first.file("only-in-first.txt", "x");
+        let second = Scratch::new("second");
+        second.file("only-in-second.txt", "y");
+
+        let mut app = FileSearchApp::new();
+        app.index_directory(&first.0);
+        app.index_directory(&second.0);
+
+        let names: Vec<&str> = app.index.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"only-in-second.txt"),
+            "the second folder was not indexed: {names:?}"
+        );
+        assert!(
+            !names.contains(&"only-in-first.txt"),
+            "the first folder's files survived: {names:?}"
+        );
+    }
+
+    /// An unreadable folder reports rather than looking like an empty one.
+    #[test]
+    fn a_folder_that_is_not_there_is_reported_as_zero_rather_than_ignored() {
+        let mut app = FileSearchApp::new();
+        let missing = std::env::temp_dir().join("slateos-filesearch-no-such-dir");
+        app.index_directory(&missing);
+        assert!(app.index.entries.is_empty());
+        assert!(
+            app.status_message.contains("0 entries"),
+            "said {:?}",
+            app.status_message
+        );
+    }
+
+    /// The status line says when the index was truncated.
+    ///
+    /// "No results" from a search tool reads as "no such file", so a cap that
+    /// did not announce itself would turn a partial index into a confident
+    /// wrong answer.
+    #[test]
+    fn a_truncated_index_says_so() {
+        let quiet = describe_index_pass("/tmp/x", 10, 0, false);
+        assert!(!quiet.contains("limit"), "said {quiet:?}");
+
+        let capped = describe_index_pass("/tmp/x", MAX_INDEXED, 0, true);
+        assert!(
+            capped.contains(&MAX_INDEXED.to_string()),
+            "a truncated pass did not name the limit: {capped:?}"
+        );
+    }
+
+    /// Names that are not text are counted, not hidden.
+    ///
+    /// They cannot be matched -- `globmatch::glob_match` takes `&str` -- so
+    /// they are skipped, and a file search that silently omits files is worse
+    /// than one that says it did.
+    #[test]
+    fn skipped_names_are_reported() {
+        let silent = describe_index_pass("/tmp/x", 5, 0, false);
+        assert!(!silent.contains("skipped"), "said {silent:?}");
+
+        let noisy = describe_index_pass("/tmp/x", 5, 2, false);
+        assert!(
+            noisy.contains('2') && noisy.contains("not text"),
+            "the skipped count is not explained: {noisy:?}"
+        );
+    }
+
     // Glob matching tests
     #[test]
     fn test_glob_star() {

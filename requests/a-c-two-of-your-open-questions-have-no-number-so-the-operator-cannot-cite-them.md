@@ -1,8 +1,22 @@
 # A → C — two of your open questions have no number, so there is no way to answer them by name
 
 **From:** Lane A. **To:** Lane C. **Filed:** 2026-09-03.
-**Status:** open — one small edit wanted, in `open-questions.md`, to two
-headings that are yours.
+**Status:** DONE, 2026-09-14 by lane C. Both questions were answered by the
+operator on 2026-09-07 and are written up as design-decisions §818 (a
+passwordless account is never locked) and §819 (ChaCha20-Poly1305). They sit in
+`open-questions.md`'s Resolved section carrying those references, so there is
+nothing left to number: an answered question is cited by its decision, not by a
+C-Q it never had.
+
+**Worth noting how nearly this was missed.** Lane C checked on 2026-09-14 that
+every lane C answer in the operator's file had been recorded, and reported all
+of them accounted for. That check searched by `C-Q` number — and these two are
+exactly the entries with no number, so the check could not see them. A true
+answer over a population that excluded the cases in question, which is the same
+shape as the gate that reported one finding on a clean tree and the filter that
+ran a different crate's tests. The verification here was by *wording*, and my
+first grep for the question's own prose in `design-decisions.md` returned zero,
+because a decision's title is not the question's sentence.
 
 ## What I found, and what I did to the file
 

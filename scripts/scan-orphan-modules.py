@@ -424,6 +424,52 @@ BASELINE_HEADER = """\
 # write, or `--check` refusing a baseline that differs from what `--pin` would
 # produce.
 #
+# DONE, 2026-09-14: it happened a third time and `--pin` now refuses outright
+# rather than merging, for the reason recorded at the refusal itself -- merging
+# means guessing where a stranger's paragraph belongs, and a merge that guesses
+# wrong loses it a second way.  The paragraph above is left as written rather
+# than rewritten in hindsight, because the prediction and its outcome are worth
+# more together than a tidy sentence claiming the problem was always handled.
+#
+# It then happened a FOURTH time, on 2026-09-15, and the refusal caught it --
+# against the lane that had written the refusal the day before.  That is the
+# strongest argument available for preferring a mechanism to an instruction:
+# this comment had been read, extended and then disobeyed by the same person.
+# An instruction competes for attention with everything else in the file it
+# lives in; a refusal does not need to be noticed to work.
+#
+# MOVED HERE 2026-09-15 from the generated file, which is where it was
+# originally written -- the fourth time that has happened, and the first
+# time the refusal added for the third caught it before the prose was lost.
+# It caught the lane that wrote the refusal. That is the argument for the
+# mechanism over the instruction: the comment saying prose lives in the
+# script has been read, written and then disobeyed by the same person.
+#
+# ONE ENTRY ON THIS LIST IS NOT A DEBT, and it costs a reader several minutes
+# to find that out, so it is written down here instead.
+#
+# `gui/compositor/src/server.rs` is the live display server. `Server::bind` is
+# called by `gui/compositor/src/main.rs:273`, the compositor binds a socket
+# with it, and `apps/editor` runs a genuine one on a thread in its tests.
+# Nothing about it is unreached.
+#
+# It is reported anyway, and the mechanism is worth knowing because it is a
+# cost of a deliberate choice made the same day. The scan drops from its
+# evidence any name shared with a `main.rs`'s public items or with any enum
+# variant -- added 2026-09-14, after `apps/fileassoc` declaring its own
+# `FileCategory` falsely cleared the toolkit's file-type registry. `Server` is
+# an enum variant in `apps/ircclient`, `apps/vpnmanager` and `userspace/ntpd`,
+# so the name is poisoned; `ServerStats` and `Disconnect` appear only in
+# `lib.rs`'s re-export, which is discounted as bare. The module is then left
+# resting on `mod server;` alone, and is reported.
+#
+# That conservatism is still right -- a false island costs a reader minutes, a
+# false clearance hides a whole subsystem -- but it is not free, and this is
+# what the bill looks like. Do not try to "pay off" this line: there is
+# nothing to wire, and deleting it would make `--check` report a new island
+# and red the boot.
+#
+#
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
 # wired up or it does not land.  When you connect one, delete its line

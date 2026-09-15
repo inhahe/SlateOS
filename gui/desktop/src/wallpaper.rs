@@ -690,6 +690,19 @@ impl WallpaperManager {
     /// The caller is responsible for populating image paths via
     /// [`populate_slideshow_paths`](Self::populate_slideshow_paths) after
     /// calling this, since the wallpaper manager does not perform I/O.
+    /// Change how the current picture is placed, without re-reading it.
+    ///
+    /// Separate from [`set_image`](Self::set_image) because the fit is applied
+    /// at *draw* time -- `get_render_commands` hands it to
+    /// `compute_image_rect` -- so changing it needs no new pixels.
+    /// `set_image` issues a fresh image id, and the caller that uploads pixels
+    /// re-reads and re-inflates any id it has not seen, so a user trying each
+    /// of the six fits to see which they like would decode the same
+    /// photograph six times.
+    pub fn set_fit(&mut self, fit: ImageFit) {
+        self.config.fit = fit;
+    }
+
     pub fn set_slideshow(&mut self, directory: &str, interval_secs: u64, shuffle: bool) {
         self.config.mode = WallpaperMode::Slideshow;
         self.config.slideshow_dir = directory.to_string();

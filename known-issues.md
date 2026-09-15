@@ -76243,6 +76243,26 @@ named on the command line, and GNU reserves 2 for the latter.
 
 ### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
 
+> **Measured 2026-09-12, and it dwarfs the 626 this is blocked on.** Our own
+> terminal (`apps/terminal`) has **no notion of character width at all**: it
+> advances the cursor one column for every character, unconditionally, and does
+> not depend on `charwidth`. So table and screen disagree about **185,074**
+> characters — 182,712 the table calls two cells wide and the terminal draws in
+> one, and 2,362 zero-width marks given a cell of their own.
+>
+> That is every one of the 20,992 Chinese characters, all 11,172 Korean
+> syllables, the Japanese kana, the fullwidth forms and the 80 emoticon emoji.
+> In the other direction, 1,281 combining marks — the accent in a decomposed
+> `é` — take a cell where every layout calculation reserved none.
+>
+> **Consequence for B-Q8:** on SlateOS, *both* candidate tables are wrong
+> against our own screen for 296 times more characters than they disagree with
+> each other about. Choosing between them is still right for matching upstream
+> byte-for-byte, which is what the harnesses measure, but it is not what makes
+> our screens correct. The renderer is filed to lane C as
+> `requests/b-c-the-terminal-gives-every-character-one-cell.md`; the two do not
+> block each other.
+
 **What it is.** `userspace/charwidth` holds the system's only table of terminal
 column widths, and it was generated and verified against **bash 5.2.37**, which
 gets its widths from glibc's `wcwidth`. Coreutils **9.5** does not use glibc's

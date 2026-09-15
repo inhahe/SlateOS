@@ -69,6 +69,27 @@ WHAT IT CANNOT SEE, stated plainly:
     `std::net` to parse an address, which is not network access -- the same
     blind spot `find-stale-admissions` documents, and for the same reason.
 
+THE FOUR IT STILL REPORTS, so nobody investigates them twice. All four are
+correct code, read against the source on 2026-09-15:
+
+  * `apps/terminal` [process] -- "terminated by {s:?}". A `Display` impl for an
+    exit-status enum. It describes how a child process ended; it does not claim
+    this program ended it. The vocabulary cannot tell a report of someone
+    else's act from a claim about one's own.
+  * `apps/tmux` [process] -- "Killed session: {name}". A tmux session here is
+    one of the app's own panes in its own `Vec`, and it really is removed. The
+    `process` kind assumes the object is external, and this one is not.
+  * `apps/vpnmanager` [network] -- "Connected to {name}", twice. The *success*
+    text handed to `report()` beside a `connect()` that can only fail on this
+    system. Unreachable rather than false, and it is the sentence that becomes
+    correct the day a tunnel exists.
+
+Narrowing the vocabulary to silence any of these was considered and rejected,
+for the reason `find-stale-admissions` gives about its own three: **narrowing
+to silence a true-by-the-rules entry is how a check starts missing real ones.**
+Rewording the source to satisfy a checker is the same mistake from the other
+end, and is exactly what the report-only design exists to avoid.
+
 Report-only, no --check mode, like the rest of the set.
 
 Usage:  python scripts/find-claimed-acts.py [--roots=apps,gui]

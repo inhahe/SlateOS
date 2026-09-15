@@ -226,6 +226,36 @@ fn busiest_irq_on_cpu(stats: &[IrqStat], cpu: u32, banned_irqs: &[u32]) -> Optio
         .map(|s| s.irq)
 }
 
+/// Options accepted whose underlying feature does not exist here.
+///
+/// Unlike most of this file, these are not "parsed and ignored by an
+/// oversight": each names a capability this build genuinely lacks.
+///
+///   * `--hintpolicy` decides how to treat the kernel's affinity hints, and
+///     nothing here reads `/proc/irq/<N>/affinity_hint`, so there is no hint
+///     for a policy to apply to.
+///   * `--powerthresh` is the load below which irqbalance consolidates
+///     interrupts to let CPUs idle, and there is no power-save mode.
+///   * `--deepidle` tunes that same absent mode.
+///
+/// Reported rather than refused: the balancing this tool DOES do is correct
+/// and useful, and refusing to start because a power-save knob was set would
+/// withhold working behaviour to protest a missing extra. Only what was
+/// actually asked for is named, so a plain invocation says nothing.
+fn unsupported_features(opts: &BalanceOpts) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if opts.hint_policy != HintPolicy::Ignore {
+        out.push("--hintpolicy");
+    }
+    if opts.power_thresh.is_some() {
+        out.push("--powerthresh");
+    }
+    if opts.deep_idle {
+        out.push("--deepidle");
+    }
+    out
+}
+
 fn balance_once(opts: &BalanceOpts) -> Vec<(u32, u64)> {
     let stats = read_irq_stats();
     if stats.is_empty() {
@@ -279,9 +309,19 @@ fn balance_once(opts: &BalanceOpts) -> Vec<(u32, u64)> {
 /// Parse options, or name the first one we do not recognise.
 ///
 /// Returns `Err` rather than exiting so the refusal can be tested without
-/// running the binary -- which matters here: two orphaned test processes
-/// have held a lock on `irqbalance.exe` since 13:06, so it cannot be built
-/// on the windows target at all right now.
+/// running the binary.
+///
+/// That rationale stands on its own. The sentence that used to follow it did
+/// not: it said two orphaned test processes had held a lock on
+/// `irqbalance.exe` "since 13:06, so it cannot be built on the windows target
+/// at all right now". That was true when written on 2026-09-11 and is not now
+/// -- no such process exists, the stale artifact has been removed, and the
+/// crate builds and tests clean.
+///
+/// A comment that states a transient fact in the present tense becomes a
+/// false statement the moment the condition clears, and nothing makes it
+/// speak up. Design rationale belongs in the source; the state of the
+/// machine does not.
 fn parse_args(args: &[String]) -> Result<BalanceOpts, String> {
     let mut opts = BalanceOpts {
         oneshot: false,
@@ -405,6 +445,18 @@ fn main() {
         }
     };
 
+    let unsupported = unsupported_features(&opts);
+    if !unsupported.is_empty() {
+        eprintln!(
+            "irqbalance: these options are accepted but have no effect: {}",
+            unsupported.join(", ")
+        );
+        eprintln!(
+            "irqbalance: this build reads no affinity hints and has no power-save mode, \
+so there is nothing for them to govern. Balancing itself is unaffected."
+        );
+    }
+
     if opts.oneshot {
         let migrations = balance_once(&opts);
         if opts.debug && migrations.is_empty() {
@@ -453,6 +505,33 @@ mod tests {
     }
 
     /// The tail of a `/proc/interrupts` line, as it really looks.
+    /// Options whose feature is absent are named; the rest say nothing.
+    #[test]
+    fn unsupported_features_names_only_what_was_asked_for() {
+        let plain = parse_args(&["--oneshot".to_string()]).expect("parses");
+        assert!(
+            unsupported_features(&plain).is_empty(),
+            "a plain invocation must not warn"
+        );
+
+        // `--hintpolicy ignore` is the DEFAULT, so asking for it explicitly
+        // asks for what already happens and must stay silent. This is the
+        // case a naive `is_some()` check would get wrong.
+        let ignore = parse_args(&["--hintpolicy=ignore".to_string()]).expect("parses");
+        assert!(unsupported_features(&ignore).is_empty());
+
+        let asked = parse_args(&[
+            "--hintpolicy=exact".to_string(),
+            "--powerthresh=50".to_string(),
+            "--deepidle".to_string(),
+        ])
+        .expect("parses");
+        assert_eq!(
+            unsupported_features(&asked),
+            vec!["--hintpolicy", "--powerthresh", "--deepidle"]
+        );
+    }
+
     /// An unrecognised option is refused, not ignored.
     ///
     /// `_ => {}` used to swallow it, and because option parsing is followed

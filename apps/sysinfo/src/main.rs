@@ -32,7 +32,7 @@ use guitk::style::CornerRadii;
 use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Constants — layout dimensions
@@ -652,6 +652,13 @@ pub struct SysInfoState {
     pub cpu_info: Option<CpuInfo>,
     /// As [`SysInfoApp::cpu_info`], for memory.
     pub memory_info: Option<MemoryInfo>,
+    /// How long the machine has been up, re-read on every tick.
+    ///
+    /// `None` when `/proc/uptime` cannot be read, which is what the Summary
+    /// then says. It used to be the string "4h 23m 17s" -- a number that was
+    /// the same on every machine and at every moment, including the moment
+    /// after you watched it for a minute.
+    pub uptime: Option<Duration>,
     pub disks: Vec<DiskInfo>,
     pub network_adapters: Vec<NetworkAdapterInfo>,
     /// As [`SysInfoApp::cpu_info`], for the display.
@@ -740,6 +747,7 @@ impl SysInfoState {
             status_message: String::from("Ready"),
             cpu_info: provider.query_cpu().ok(),
             memory_info: provider.query_memory().ok(),
+            uptime: provider.query_uptime().ok(),
             disks: provider.query_storage().unwrap_or_default(),
             network_adapters: provider.query_network().unwrap_or_default(),
             display_info: provider.query_display().ok(),
@@ -819,6 +827,53 @@ impl SysInfoState {
     const NOT_REPORTED: &'static str = "Not reported by this system";
 
     /// Render an optional value, or say it was not reported.
+    /// An uptime as days, hours, minutes and seconds.
+    ///
+    /// Days are included because a machine that has been up for four days read
+    /// `100h 0m 0s` in `apps/vpnmanager` until somebody noticed; the same
+    /// arithmetic with the same missing field is how that happens twice.
+    fn uptime_text(up: Option<Duration>) -> String {
+        let Some(up) = up else {
+            return Self::NOT_REPORTED.to_string();
+        };
+        let secs = up.as_secs();
+        let (d, h, m, s) = (
+            secs / 86_400,
+            (secs / 3_600) % 24,
+            (secs / 60) % 60,
+            secs % 60,
+        );
+        if d > 0 {
+            format!("{d}d {h}h {m}m {s}s")
+        } else {
+            format!("{h}h {m}m {s}s")
+        }
+    }
+
+    /// When the machine booted: now, less how long it has been up.
+    ///
+    /// Two readings that can each be absent, and the answer needs both. The
+    /// string this replaced was "2026-05-17 08:14:02 UTC", fixed, so a machine
+    /// booted this morning reported a boot four months ago.
+    fn boot_time_text(up: Option<Duration>) -> String {
+        let Some(up) = up else {
+            return Self::NOT_REPORTED.to_string();
+        };
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return Self::NOT_REPORTED.to_string();
+        };
+        let Some(boot) = now.as_secs().checked_sub(up.as_secs()) else {
+            // An uptime longer than the epoch means one of the two readings is
+            // wrong, and there is no way to tell which.
+            return Self::NOT_REPORTED.to_string();
+        };
+        let t = civildate::unix_to_datetime(i64::try_from(boot).unwrap_or(0));
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+            t.year, t.month, t.day, t.hour, t.minute, t.second
+        )
+    }
+
     fn or_absent(value: Option<&str>) -> String {
         value.map_or_else(|| Self::NOT_REPORTED.to_string(), ToString::to_string)
     }
@@ -871,10 +926,16 @@ impl SysInfoState {
                     mem.available_mb as f64 / 1024.0
                 ),
             ),
-            Property::new("Total Virtual Memory", "65536 MiB (64.0 GiB)"),
+            // A commit limit is what "total virtual memory" names, and
+            // `procinfo::MemInfo` documents `commit_limit_kib` as never
+            // published by this kernel. The figure here was 65536 MiB on every
+            // machine.
+            Property::new("Total Virtual Memory", Self::NOT_REPORTED),
+            // A design constant, not a measurement: `design.txt` specifies
+            // 16 KiB pages and the whole memory subsystem is built on it.
             Property::new("Page Size", "16 KiB"),
-            Property::new("System Uptime", "4h 23m 17s"),
-            Property::new("Boot Time", "2026-05-17 08:14:02 UTC"),
+            Property::new("System Uptime", &Self::uptime_text(self.uptime)),
+            Property::new("Boot Time", &Self::boot_time_text(self.uptime)),
             Property::new("Architecture", "x86_64"),
         ]
     }
@@ -1633,7 +1694,35 @@ impl SysInfoState {
                 self.window_height = *height as f32;
                 EventResult::Consumed
             }
+            // The arm `tick_interval` promised. Re-reads the two figures that
+            // age: the uptime, and the memory the machine has left.
+            //
+            // The CPU is not re-read. Its model, family and cache geometry do
+            // not change while a window is open, and polling them once a
+            // second would be spending a `/sys` walk to confirm a constant.
+            Event::Tick { .. } => {
+                self.refresh_ageing_figures();
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
+        }
+    }
+
+    /// Re-read the figures that change while the window is open.
+    ///
+    /// A failed read leaves the previous value rather than blanking the row:
+    /// `/proc` can be briefly unreadable, and a Summary that empties itself
+    /// for one tick and fills back in is harder to read than one that holds.
+    /// The first read is in `new`, so a value only ever goes missing here if
+    /// it was missing to begin with.
+    pub fn refresh_ageing_figures(&mut self) {
+        use hwquery::HardwareProvider;
+        let provider = hwquery::SyscallProvider::new();
+        if let Ok(up) = provider.query_uptime() {
+            self.uptime = Some(up);
+        }
+        if let Ok(mem) = provider.query_memory() {
+            self.memory_info = Some(mem);
         }
     }
 
@@ -2378,17 +2467,24 @@ impl App for SysInfoState {
         (self.window_width as u32, self.window_height as u32)
     }
 
-    /// No clock, and the reason is that there is nothing to read.
+    /// A second, because the uptime it draws is now read from `/proc`.
     ///
-    /// Some of what this app displays genuinely ages — uptime, available
-    /// memory, free disk space. None of it is *read* from anywhere: uptime is
-    /// the string "4h 23m 17s" and the memory figures are integer literals, so
-    /// a tick would redraw constants on a timer. When a source exists this
-    /// returns its poll interval and `handle_event` grows a `Tick` arm that
-    /// re-reads. See known-issues.md ->
-    /// TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES.
+    /// This returned `None`, and said why: *"Some of what this app displays
+    /// genuinely ages — uptime, available memory, free disk space. None of it
+    /// is read from anywhere ... When a source exists this returns its poll
+    /// interval and `handle_event` grows a `Tick` arm that re-reads."*
+    ///
+    /// The source exists. **An uptime that is read once and then drawn forever
+    /// is worse than a constant**, because a constant is at least obviously
+    /// not a clock: a figure that was true when the window opened and is
+    /// wrong by however long it has been open is the frozen-clock defect this
+    /// project has now found in five other windows.
+    ///
+    /// One second, because that is the resolution `/proc/uptime` reports and
+    /// there is nothing to gain from asking more often than the number can
+    /// change.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        Some(Duration::from_secs(1))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -2445,13 +2541,55 @@ mod tests {
     // The compositor wiring
     // ------------------------------------------------------------------
 
+    /// The app asks for a clock, because the uptime it draws is now read.
+    ///
+    /// This asserted `None`, under the reason that "some of what this app
+    /// shows genuinely ages, but none of it is read from anywhere, so a tick
+    /// would redraw constants on a timer". True when written, and the
+    /// condition it named has since been met: the uptime comes from
+    /// `/proc/uptime`. **A figure read once and drawn forever is worse than a
+    /// constant** -- a constant is at least obviously not a clock.
     #[test]
-    fn the_app_asks_for_no_clock_because_it_has_nothing_to_re_read() {
-        // Deliberate, and the opposite call from `sysmonitor`: some of what
-        // this app shows genuinely ages, but none of it is read from anywhere,
-        // so a tick would redraw constants on a timer.
+    fn the_app_asks_for_a_clock_because_the_uptime_is_read() {
         let app = SysInfoState::new();
-        assert_eq!(app.tick_interval(), None);
+        assert_eq!(app.tick_interval(), Some(Duration::from_secs(1)));
+    }
+
+    /// A tick re-reads rather than being accepted and ignored.
+    ///
+    /// Consuming `Tick` without re-reading is the frozen clock with extra
+    /// steps, and it is what five other windows in this tree were doing.
+    #[test]
+    fn a_tick_re_reads_the_figures_that_age() {
+        let mut app = SysInfoState::new();
+        app.uptime = None;
+        app.memory_info = None;
+
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 1000 }),
+            EventResult::Consumed
+        );
+
+        // On this host `/proc` is absent, so the read fails and the previous
+        // value is kept -- which is the documented behaviour and is what makes
+        // the assertion below the honest one to write. What is pinned is that
+        // the tick reached `refresh_ageing_figures` at all: with no arm it
+        // would have returned `Ignored`.
+        let provider_can_read = {
+            use hwquery::HardwareProvider;
+            hwquery::SyscallProvider::new().query_uptime().is_ok()
+        };
+        assert_eq!(
+            app.uptime.is_some(),
+            provider_can_read,
+            "the tick did not re-read: uptime is {:?} while the provider {} read one",
+            app.uptime,
+            if provider_can_read {
+                "could"
+            } else {
+                "could not"
+            }
+        );
     }
 
     #[test]

@@ -21,6 +21,9 @@ safeio = { path = "../safeio" }
 # window -- and until today it was not among this app's dependencies.
 procinfo = { path = "../../procinfo" }
 
+# Unix seconds to a UTC calendar date, for the boot time.
+civildate = { path = "../../civildate" }
+
 [dev-dependencies]
 # `appearance::palette_check`, the sweep that proves this crate draws from the
 # user's palette rather than from colours of its own. Behind a feature because

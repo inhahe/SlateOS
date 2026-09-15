@@ -2877,6 +2877,7 @@ name = "sysinfo-app"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "civildate",
  "guitk",
  "oswindow",
  "procinfo",

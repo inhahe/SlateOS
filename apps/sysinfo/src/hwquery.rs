@@ -187,6 +187,12 @@ pub trait HardwareProvider {
     fn query_drivers(&self) -> Result<Vec<DriverInfo>, HwQueryError>;
     /// Query environment variables.
     fn query_env_vars(&self) -> Result<Vec<(String, String)>, HwQueryError>;
+    /// How long the machine has been up.
+    ///
+    /// A `Duration` rather than a formatted string, because the caller is the
+    /// only one that knows how much room it has to draw it in -- and because a
+    /// provider that returned "4h 23m 17s" is exactly what this replaced.
+    fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError>;
     /// Query startup programs.
     fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError>;
     /// Human-readable name of this provider.
@@ -853,6 +859,18 @@ impl HardwareProvider for SyscallProvider {
     /// `procexplorer` makes, for the same reason, and the reason it is worth
     /// repeating here is that **0.0 is also what an invented value would look
     /// like if nobody had thought about it.**
+    /// Read `/proc/uptime`.
+    fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError> {
+        self.procfs()
+            .uptime()
+            .ok()
+            .flatten()
+            .map(|u| u.up)
+            .ok_or_else(|| HwQueryError::NotAvailable {
+                path: self.rooted("/proc/uptime"),
+            })
+    }
+
     fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> {
         let fs = self.procfs();
         let pids = fs.process_ids().map_err(|_| HwQueryError::NotAvailable {
@@ -1183,6 +1201,11 @@ impl HardwareProvider for StubProvider {
                 start_type: "Automatic".to_string(),
             },
         ])
+    }
+
+    /// A fixed hour, so a test that formats an uptime has something to format.
+    fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError> {
+        Ok(std::time::Duration::from_hours(1))
     }
 
     fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> {

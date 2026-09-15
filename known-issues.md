@@ -84,7 +84,7 @@ terminator before comparing — and the formatter has to emit the
 and context output alike. Upstream diffutils carries a flag per side for exactly
 this.
 
-## TD-B-HARDLINK-MERGES-ON-CONTENT-ALONE-AND-ALL-FIVE-RESPECT-FLAGS-ARE-INERT — 2026-09-15 — OPEN
+## TD-B-HARDLINK-MERGES-ON-CONTENT-ALONE-AND-ALL-FIVE-RESPECT-FLAGS-ARE-INERT — 2026-09-15 — FIXED same day
 
 **In short:** `hardlink` decides two files are the same from their **contents
 only**. Every flag that exists to narrow that — `-f/--respect-name`,
@@ -110,6 +110,21 @@ too early to be correct.
 commit's claim is "a failed link no longer destroys the duplicate", and
 widening it to "and the right files are chosen" would make one commit answer
 two questions. The destructive window was the urgent half.
+
+**FIXED in the commit after it.** `FileInfo` now records real `mtime`, `mode`,
+`uid` and `gid` as `Option`s, and `may_link` consults them before any pair is
+merged. The four `_`-prefixed fields it replaces were hardcoded to `0` with
+the comment "Platform-dependent, simulated" -- **and that is why wiring the
+flags to them would have been worse than leaving them inert.** A zero standing
+in for a real mode compares equal to every other zero, so every pair would have
+passed every check and the flags would have looked implemented while preventing
+nothing.
+
+So an attribute this build cannot read is an `Err`, never a match:
+`--respect-perm` on a platform with no mode bits refuses the merge rather than
+permitting it. `--respect-xattr` always refuses, because there is no
+`getxattr` to call. `--respect-name` compares the BASENAME, not the path --
+deduplicating identical files across directories is the point of the tool.
 
 **Where it lives:** `userspace/hardlink/src/main.rs` — `HardlinkOpts`'s five
 `respect_*` fields, `files_identical`, and the grouping in `deduplicate`.

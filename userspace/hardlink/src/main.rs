@@ -51,14 +51,116 @@ enum Method {
 struct FileInfo {
     path: String,
     size: u64,
-    /// Inode number (platform-dependent, for future same-device dedup).
-    _inode: u64,
-    /// Device number (for cross-device detection).
-    _dev: u64,
-    /// Modification time (for --respect-time).
-    _mtime: u64,
-    /// File mode (for --respect-perm).
-    _mode: u32,
+    /// Modification time in whole seconds, for `--respect-time`.
+    ///
+    /// `None` where the platform does not report one. Every one of these was
+    /// previously a `_`-prefixed field hardcoded to `0` with the comment
+    /// "Platform-dependent, simulated" -- documented for the flag it serves,
+    /// carrying a fabricated value, and read by nothing. A zero that stands in
+    /// for a real mtime compares EQUAL to every other zero, so had the flags
+    /// ever been wired to these fields they would have permitted every merge.
+    mtime: Option<u64>,
+    /// Permission bits, for `--respect-perm`.
+    mode: Option<u32>,
+    /// Owner, for `--respect-owner`.
+    uid: Option<u32>,
+    /// Group, for `--respect-owner`.
+    gid: Option<u32>,
+}
+
+/// Read the metadata the respect flags compare.
+///
+/// `None` means "this platform does not tell us", which is deliberately NOT
+/// the same as "they differ" or "they match": a flag whose metadata is
+/// unavailable refuses rather than silently permitting the merge. Silently
+/// permitting is what the hardcoded zeros would have done.
+fn file_meta(md: &fs::Metadata) -> (Option<u64>, Option<u32>, Option<u32>, Option<u32>) {
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (mtime, Some(md.mode()), Some(md.uid()), Some(md.gid()))
+    }
+    #[cfg(not(unix))]
+    {
+        // The dev host. Modes and owners are not comparable here, so the
+        // flags that need them refuse rather than pass.
+        (mtime, None, None, None)
+    }
+}
+
+/// The final path component, which is what `--respect-name` compares.
+fn base_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Whether `opts` permits these two files to be merged.
+///
+/// `Err` is "this build cannot answer", not "no". It is returned rather than
+/// swallowed because the alternative -- treating an unanswerable comparison as
+/// permission -- is exactly the defect these flags were added to prevent, and
+/// hardlink's merge is destructive.
+fn may_link(a: &FileInfo, b: &FileInfo, opts: &HardlinkOpts) -> Result<bool, String> {
+    if opts.respect_name && base_name(&a.path) != base_name(&b.path) {
+        return Ok(false);
+    }
+
+    // Extended attributes are not readable from this build at all -- there is
+    // no `getxattr` to call -- so the answer is "cannot tell", never "they
+    // match". Refusing here rather than at parse time keeps every
+    // unanswerable comparison on one path, and means the flag still parses for
+    // a script that passes it unconditionally.
+    if opts.respect_xattr {
+        return Err(
+            "--respect-xattr: this build cannot read extended attributes, so it cannot honour the flag"
+                .to_string(),
+        );
+    }
+
+    let checks: [(bool, Option<u64>, Option<u64>, &str); 4] = [
+        (opts.respect_time, a.mtime, b.mtime, "--respect-time"),
+        (
+            opts.respect_perm,
+            a.mode.map(u64::from),
+            b.mode.map(u64::from),
+            "--respect-perm",
+        ),
+        (
+            opts.respect_owner,
+            a.uid.map(u64::from),
+            b.uid.map(u64::from),
+            "--respect-owner",
+        ),
+        (
+            opts.respect_owner,
+            a.gid.map(u64::from),
+            b.gid.map(u64::from),
+            "--respect-owner",
+        ),
+    ];
+
+    for (wanted, lhs, rhs, flag) in checks {
+        if !wanted {
+            continue;
+        }
+        match (lhs, rhs) {
+            (Some(x), Some(y)) if x == y => {}
+            (Some(_), Some(_)) => return Ok(false),
+            _ => {
+                return Err(format!(
+                    "{flag}: this build cannot read that attribute, so it \
+cannot honour the flag"
+                ));
+            }
+        }
+    }
+
+    Ok(true)
 }
 
 // ============================================================================
@@ -233,13 +335,14 @@ fn scan_directory(dir: &str, opts: &HardlinkOpts, files: &mut Vec<FileInfo>) {
                 continue;
             }
 
+            let (mtime, mode, uid, gid) = file_meta(&metadata);
             files.push(FileInfo {
                 path: path_str,
                 size,
-                _inode: 0, // Platform-dependent, simulated.
-                _dev: 0,
-                _mtime: 0,
-                _mode: 0,
+                mtime,
+                mode,
+                uid,
+                gid,
             });
         }
     }
@@ -313,6 +416,22 @@ fn deduplicate(opts: &HardlinkOpts) -> Stats {
                 // Verify content match.
                 if !files_identical(master_path, dup_path) {
                     continue;
+                }
+
+                // ...and that the caller allows THESE two to be merged.
+                // Content equality is not sufficient: two files can hold the
+                // same bytes and differ in owner or mode, and merging them
+                // collapses both onto the master's.
+                match may_link(&files[master_idx], &files[dup_idx], opts) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(why) => {
+                        if !opts.quiet {
+                            eprintln!("hardlink: {why}");
+                        }
+                        stats.errors += 1;
+                        continue;
+                    }
                 }
 
                 stats.duplicates_found += 1;
@@ -473,6 +592,98 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------- may_link / the respect flags ----------------
+
+    fn info(path: &str) -> FileInfo {
+        FileInfo {
+            path: path.to_string(),
+            size: 10,
+            mtime: Some(1_000),
+            mode: Some(0o644),
+            uid: Some(1000),
+            gid: Some(1000),
+        }
+    }
+
+    /// With no respect flag, content equality is the whole test -- which is
+    /// the behaviour that shipped, and is correct only when nobody asked for
+    /// more.
+    #[test]
+    fn without_a_respect_flag_anything_may_link() {
+        let o = opts_for_test();
+        assert_eq!(may_link(&info("/a/x"), &info("/b/y"), &o), Ok(true));
+    }
+
+    /// `--respect-name` compares the final component, not the whole path:
+    /// deduplicating identical files across directories is the point of the
+    /// tool, and requiring equal paths would permit nothing at all.
+    #[test]
+    fn respect_name_compares_the_basename_not_the_path() {
+        let mut o = opts_for_test();
+        o.respect_name = true;
+        assert_eq!(
+            may_link(&info("/a/same.txt"), &info("/b/same.txt"), &o),
+            Ok(true),
+            "same name in different directories still links"
+        );
+        assert_eq!(
+            may_link(&info("/a/one.txt"), &info("/a/two.txt"), &o),
+            Ok(false)
+        );
+    }
+
+    /// Each attribute flag refuses a pair that differs in exactly that
+    /// attribute, and permits one that does not.
+    #[test]
+    fn each_respect_flag_refuses_its_own_difference() {
+        type SetFlag = fn(&mut HardlinkOpts);
+        type MakeDiffer = fn(&mut FileInfo);
+        let cases: [(SetFlag, MakeDiffer); 4] = [
+            (|o| o.respect_time = true, |f| f.mtime = Some(2_000)),
+            (|o| o.respect_perm = true, |f| f.mode = Some(0o600)),
+            (|o| o.respect_owner = true, |f| f.uid = Some(0)),
+            (|o| o.respect_owner = true, |f| f.gid = Some(0)),
+        ];
+        for (set, differ) in cases {
+            let mut o = opts_for_test();
+            set(&mut o);
+
+            let a = info("/a/x");
+            assert_eq!(may_link(&a, &info("/b/x"), &o), Ok(true), "identical");
+
+            let mut b = info("/b/x");
+            differ(&mut b);
+            assert_eq!(may_link(&a, &b, &o), Ok(false), "differing");
+        }
+    }
+
+    /// **The property the hardcoded zeros would have destroyed.** An attribute
+    /// this build cannot read is an ERROR, not a match. Had the flags been
+    /// wired to the old `_mode: 0` fields, every file would have compared
+    /// equal to every other and every merge would have been permitted -- the
+    /// flag would have looked implemented and prevented nothing.
+    #[test]
+    fn an_unreadable_attribute_refuses_rather_than_permits() {
+        let mut o = opts_for_test();
+        o.respect_perm = true;
+
+        let mut a = info("/a/x");
+        let mut b = info("/b/x");
+        a.mode = None;
+        b.mode = None;
+
+        let r = may_link(&a, &b, &o);
+        assert!(r.is_err(), "unknown must not read as equal: {r:?}");
+    }
+
+    /// `--respect-xattr` cannot be honoured at all, so it always refuses.
+    #[test]
+    fn respect_xattr_always_refuses() {
+        let mut o = opts_for_test();
+        o.respect_xattr = true;
+        assert!(may_link(&info("/a/x"), &info("/a/x"), &o).is_err());
+    }
 
     // ---------------- link_over ----------------
 

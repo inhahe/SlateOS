@@ -1161,7 +1161,9 @@ impl RenamerApp {
             renames: self
                 .files
                 .iter()
-                .filter(|f| f.selected && f.original_name != f.new_name && !f.conflict)
+                .filter(|f| {
+                    f.renameable && f.selected && f.original_name != f.new_name && !f.conflict
+                })
                 .map(|f| (f.original_name.clone(), f.new_name.clone()))
                 .collect(),
             operations: self
@@ -1217,7 +1219,22 @@ impl RenamerApp {
         let mut done = 0usize;
         let mut failures = Vec::new();
         for step in plan {
-            let from = folder.join(&step.from);
+            // The source is the name **as the filesystem gave it**, not its
+            // text form. For every file this will rename the two are equal --
+            // `renameable` is exactly the test that they are -- but building
+            // the path from the text is how they stop being equal the first
+            // time that guard is loosened, and the failure would be silent on
+            // every name that round-trips.
+            //
+            // A step whose `from` names no file is a temporary this plan
+            // invented to break a cycle; those names are this code's own and
+            // are exact as text.
+            let from_raw = self
+                .files
+                .iter()
+                .find(|f| f.original_name == step.from)
+                .map_or_else(|| OsString::from(&step.from), |f| f.raw_name.clone());
+            let from = folder.join(&from_raw);
             let to = folder.join(&step.to);
             match std::fs::rename(&from, &to) {
                 Ok(()) => {
@@ -1350,7 +1367,7 @@ impl RenamerApp {
     fn rename_count(&self) -> usize {
         self.files
             .iter()
-            .filter(|f| f.selected && f.original_name != f.new_name && !f.conflict)
+            .filter(|f| f.renameable && f.selected && f.original_name != f.new_name && !f.conflict)
             .count()
     }
 
@@ -1360,9 +1377,16 @@ impl RenamerApp {
     }
 
     /// Select or deselect all files.
+    ///
+    /// Selecting skips the files that cannot be renamed; deselecting does not
+    /// need to. **`renameable` was applied once, at construction, as the
+    /// entry's initial `selected` value** -- so Ctrl+A ticked every file in
+    /// the list including the ones whose names are not text, and Space toggled
+    /// them individually. A guard that only holds until the user touches
+    /// something is not a guard.
     fn select_all(&mut self, selected: bool) {
         for file in &mut self.files {
-            file.selected = selected;
+            file.selected = selected && file.renameable;
         }
     }
 
@@ -1611,6 +1635,15 @@ impl RenamerApp {
         let Some(file) = self.files.get_mut(self.selected_file) else {
             return EventResult::Ignored;
         };
+        if !file.renameable {
+            // Said rather than ignored: a tick that silently refuses to appear
+            // reads as a broken key.
+            let name = file.original_name.clone();
+            self.status_message = format!(
+                "{name} cannot be renamed: its name is not text, so no rule can transform it"
+            );
+            return EventResult::Consumed;
+        }
         file.selected = !file.selected;
         EventResult::Consumed
     }
@@ -3919,6 +3952,117 @@ mod tests {
             "the display name should be the lossy one: {:?}",
             entry.original_name
         );
+    }
+
+    /// A name that is not text cannot be ticked, by any route.
+    ///
+    /// **This is the hole boot gate 52 pointed at.** The gate refuses a field
+    /// that production writes and only a test reads, and `raw_name` was one:
+    /// the rename built its source path from `original_name`, the *text* form.
+    /// That was harmless only because `renameable` was applied once, at
+    /// construction, as the entry's initial `selected` value -- and Ctrl+A set
+    /// `selected = true` on every file regardless, while Space toggled them
+    /// one at a time.
+    ///
+    /// So a user could tick a file whose name is not valid UTF-8 and press
+    /// Enter, and the rename would be attempted against the lossy form --
+    /// `to_string_lossy` having replaced the offending bytes with U+FFFD,
+    /// which is a **different name**. The dead field was the symptom; a guard
+    /// that stopped holding the moment the user touched anything was the
+    /// defect.
+    #[test]
+    fn a_name_that_is_not_text_cannot_be_selected_by_any_route() {
+        let mut app = RenamerApp::new();
+        app.files.push(FileEntry::from_os_name(&not_text(), 10, 0));
+        app.files.push(FileEntry::new("plain.txt", 10, 0));
+        app.apply_operations();
+
+        assert!(
+            !app.files[0].renameable,
+            "control: the fixture must not be text"
+        );
+        assert!(
+            !app.files[0].selected,
+            "an unrenameable file starts unticked"
+        );
+
+        // Ctrl+A.
+        app.select_all(true);
+        assert!(
+            !app.files[0].selected,
+            "select-all ticked a file whose name no rule can transform"
+        );
+        assert!(app.files[1].selected, "and left the ordinary file alone");
+
+        // Space, on the unrenameable row.
+        app.selected_file = 0;
+        assert_eq!(app.toggle_selected_file(), EventResult::Consumed);
+        assert!(!app.files[0].selected, "Space ticked it");
+        assert!(
+            app.status_message.contains("not text"),
+            "refused silently, which reads as a broken key: {}",
+            app.status_message
+        );
+    }
+
+    /// Even if something ticks it, the rename does not pick it up.
+    ///
+    /// The guard is applied again where the cost is. Two checks for one rule
+    /// is usually worth avoiding; here the second is what stands between a
+    /// lossy name and `fs::rename`.
+    ///
+    /// **This asserts the decision, not a file on disk, and the first version
+    /// asserted the wrong one.** It checked that the folder afterwards held
+    /// only the renamed ordinary file -- which is true whether or not the
+    /// unrenameable one was attempted, because a rename of a name NTFS cannot
+    /// store fails either way and leaves the folder looking identical. The
+    /// sabotage run said so: dropping the `renameable` check from the filter
+    /// left it green. What can be checked on any host is which files the
+    /// program decided to rename.
+    #[test]
+    fn an_unrenameable_file_is_not_renamed_even_if_it_is_selected() {
+        let mut app = RenamerApp::new();
+        app.files.push(FileEntry::new("plain.txt", 10, 0));
+        app.files.push(FileEntry::from_os_name(&not_text(), 10, 0));
+
+        // Reach past every control and set the bit directly, which is what a
+        // future edit to a selection path would do by accident.
+        app.files[1].selected = true;
+        app.files[0].new_name = String::from("plain-renamed.txt");
+        app.files[1].new_name = String::from("renamed.txt");
+
+        assert_eq!(
+            app.rename_count(),
+            1,
+            "the unrenameable file was counted as something to rename"
+        );
+
+        let queued: Vec<String> = app
+            .files
+            .iter()
+            .filter(|f| f.renameable && f.selected && f.original_name != f.new_name && !f.conflict)
+            .map(|f| f.new_name.clone())
+            .collect();
+        assert_eq!(
+            queued,
+            vec!["plain-renamed.txt"],
+            "only the file whose name is text is queued"
+        );
+    }
+
+    /// A fixture name that cannot be represented as a `String`.
+    fn not_text() -> OsString {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            // An unpaired surrogate: valid UTF-16, no UTF-8 encoding.
+            OsString::from_wide(&[0x0066, 0xD800, 0x0074])
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![b'f', 0xFF, b't'])
+        }
     }
 
     /// A scratch directory of this test's own, emptied first.

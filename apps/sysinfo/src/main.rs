@@ -32,7 +32,7 @@ use guitk::style::CornerRadii;
 use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Constants — layout dimensions
@@ -652,6 +652,13 @@ pub struct SysInfoState {
     pub cpu_info: Option<CpuInfo>,
     /// As [`SysInfoApp::cpu_info`], for memory.
     pub memory_info: Option<MemoryInfo>,
+    /// How long the machine has been up, re-read on every tick.
+    ///
+    /// `None` when `/proc/uptime` cannot be read, which is what the Summary
+    /// then says. It used to be the string "4h 23m 17s" -- a number that was
+    /// the same on every machine and at every moment, including the moment
+    /// after you watched it for a minute.
+    pub uptime: Option<Duration>,
     pub disks: Vec<DiskInfo>,
     pub network_adapters: Vec<NetworkAdapterInfo>,
     /// As [`SysInfoApp::cpu_info`], for the display.
@@ -687,11 +694,35 @@ impl SysInfoState {
     /// It would also pass any test that only checked the app was using
     /// `hwquery`.
     ///
-    /// Every query is expected to fail at present: nothing in `kernel/`,
-    /// `services/` or `userspace/` produces `/sys/hardware/*`. That is the
-    /// point rather than a defect here -- the window says it cannot read the
-    /// hardware, which is true, and it starts reporting real values on the day
-    /// a producer appears, with no change to this file.
+    /// **The paragraph that stood here was a promise, and it was wrong by
+    /// 2026-09-15.** It said every query was expected to fail because nothing
+    /// produced `/sys/hardware/*`, that this was the point rather than a
+    /// defect, and that the window would start reporting real values "on the
+    /// day a producer appears, with no change to this file".
+    ///
+    /// No producer of `/sys/hardware` ever appeared and none is coming. The
+    /// kernel serves `/sys/devices/...`, `/sys/fs/` and `/sys/params/`, and
+    /// lane A has recorded that `irqs` and `display` in particular will *never*
+    /// be served there, because `/proc/interrupts` and `/proc/monitors` already
+    /// publish them and a second kernel answer to one question is what §850
+    /// exists to prevent. Each category moved by hand instead, so "with no
+    /// change to this file" was the least accurate part.
+    ///
+    /// Where each category reads from now:
+    ///
+    /// | category | source |
+    /// |---|---|
+    /// | CPU, memory | `/sys/devices/system/{cpu,memory}` (§850) |
+    /// | storage | `/sys/devices/block/<name>/` |
+    /// | network, processes | `/proc/net/dev`, `/proc/<pid>/stat` |
+    /// | IRQs, display | `/proc/{interrupts,monitors}` — **published, not yet read here** |
+    /// | PCI, USB, sound, I/O ports, DMA, memory map, drivers, services, startup | nothing publishes these |
+    ///
+    /// The last row is the honest "cannot read", and is expected to stay that
+    /// way. The row above it is the outstanding work, and it needs parsers in
+    /// `procinfo` rather than here -- see
+    /// `known-issues.md` →
+    /// `TD-C-APPS-SYSINFO-WAITS-ON-A-FILESYSTEM-TREE-THAT-DOES-NOT-EXIST`.
     pub fn new() -> Self {
         use hwquery::HardwareProvider;
         let provider = hwquery::SyscallProvider::new();
@@ -716,6 +747,7 @@ impl SysInfoState {
             status_message: String::from("Ready"),
             cpu_info: provider.query_cpu().ok(),
             memory_info: provider.query_memory().ok(),
+            uptime: provider.query_uptime().ok(),
             disks: provider.query_storage().unwrap_or_default(),
             network_adapters: provider.query_network().unwrap_or_default(),
             display_info: provider.query_display().ok(),
@@ -795,6 +827,53 @@ impl SysInfoState {
     const NOT_REPORTED: &'static str = "Not reported by this system";
 
     /// Render an optional value, or say it was not reported.
+    /// An uptime as days, hours, minutes and seconds.
+    ///
+    /// Days are included because a machine that has been up for four days read
+    /// `100h 0m 0s` in `apps/vpnmanager` until somebody noticed; the same
+    /// arithmetic with the same missing field is how that happens twice.
+    fn uptime_text(up: Option<Duration>) -> String {
+        let Some(up) = up else {
+            return Self::NOT_REPORTED.to_string();
+        };
+        let secs = up.as_secs();
+        let (d, h, m, s) = (
+            secs / 86_400,
+            (secs / 3_600) % 24,
+            (secs / 60) % 60,
+            secs % 60,
+        );
+        if d > 0 {
+            format!("{d}d {h}h {m}m {s}s")
+        } else {
+            format!("{h}h {m}m {s}s")
+        }
+    }
+
+    /// When the machine booted: now, less how long it has been up.
+    ///
+    /// Two readings that can each be absent, and the answer needs both. The
+    /// string this replaced was "2026-05-17 08:14:02 UTC", fixed, so a machine
+    /// booted this morning reported a boot four months ago.
+    fn boot_time_text(up: Option<Duration>) -> String {
+        let Some(up) = up else {
+            return Self::NOT_REPORTED.to_string();
+        };
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return Self::NOT_REPORTED.to_string();
+        };
+        let Some(boot) = now.as_secs().checked_sub(up.as_secs()) else {
+            // An uptime longer than the epoch means one of the two readings is
+            // wrong, and there is no way to tell which.
+            return Self::NOT_REPORTED.to_string();
+        };
+        let t = civildate::unix_to_datetime(i64::try_from(boot).unwrap_or(0));
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+            t.year, t.month, t.day, t.hour, t.minute, t.second
+        )
+    }
+
     fn or_absent(value: Option<&str>) -> String {
         value.map_or_else(|| Self::NOT_REPORTED.to_string(), ToString::to_string)
     }
@@ -847,10 +926,16 @@ impl SysInfoState {
                     mem.available_mb as f64 / 1024.0
                 ),
             ),
-            Property::new("Total Virtual Memory", "65536 MiB (64.0 GiB)"),
+            // A commit limit is what "total virtual memory" names, and
+            // `procinfo::MemInfo` documents `commit_limit_kib` as never
+            // published by this kernel. The figure here was 65536 MiB on every
+            // machine.
+            Property::new("Total Virtual Memory", Self::NOT_REPORTED),
+            // A design constant, not a measurement: `design.txt` specifies
+            // 16 KiB pages and the whole memory subsystem is built on it.
             Property::new("Page Size", "16 KiB"),
-            Property::new("System Uptime", "4h 23m 17s"),
-            Property::new("Boot Time", "2026-05-17 08:14:02 UTC"),
+            Property::new("System Uptime", &Self::uptime_text(self.uptime)),
+            Property::new("Boot Time", &Self::boot_time_text(self.uptime)),
             Property::new("Architecture", "x86_64"),
         ]
     }
@@ -1609,7 +1694,35 @@ impl SysInfoState {
                 self.window_height = *height as f32;
                 EventResult::Consumed
             }
+            // The arm `tick_interval` promised. Re-reads the two figures that
+            // age: the uptime, and the memory the machine has left.
+            //
+            // The CPU is not re-read. Its model, family and cache geometry do
+            // not change while a window is open, and polling them once a
+            // second would be spending a `/sys` walk to confirm a constant.
+            Event::Tick { .. } => {
+                self.refresh_ageing_figures();
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
+        }
+    }
+
+    /// Re-read the figures that change while the window is open.
+    ///
+    /// A failed read leaves the previous value rather than blanking the row:
+    /// `/proc` can be briefly unreadable, and a Summary that empties itself
+    /// for one tick and fills back in is harder to read than one that holds.
+    /// The first read is in `new`, so a value only ever goes missing here if
+    /// it was missing to begin with.
+    pub fn refresh_ageing_figures(&mut self) {
+        use hwquery::HardwareProvider;
+        let provider = hwquery::SyscallProvider::new();
+        if let Ok(up) = provider.query_uptime() {
+            self.uptime = Some(up);
+        }
+        if let Ok(mem) = provider.query_memory() {
+            self.memory_info = Some(mem);
         }
     }
 
@@ -2354,17 +2467,24 @@ impl App for SysInfoState {
         (self.window_width as u32, self.window_height as u32)
     }
 
-    /// No clock, and the reason is that there is nothing to read.
+    /// A second, because the uptime it draws is now read from `/proc`.
     ///
-    /// Some of what this app displays genuinely ages — uptime, available
-    /// memory, free disk space. None of it is *read* from anywhere: uptime is
-    /// the string "4h 23m 17s" and the memory figures are integer literals, so
-    /// a tick would redraw constants on a timer. When a source exists this
-    /// returns its poll interval and `handle_event` grows a `Tick` arm that
-    /// re-reads. See known-issues.md ->
-    /// TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES.
+    /// This returned `None`, and said why: *"Some of what this app displays
+    /// genuinely ages — uptime, available memory, free disk space. None of it
+    /// is read from anywhere ... When a source exists this returns its poll
+    /// interval and `handle_event` grows a `Tick` arm that re-reads."*
+    ///
+    /// The source exists. **An uptime that is read once and then drawn forever
+    /// is worse than a constant**, because a constant is at least obviously
+    /// not a clock: a figure that was true when the window opened and is
+    /// wrong by however long it has been open is the frozen-clock defect this
+    /// project has now found in five other windows.
+    ///
+    /// One second, because that is the resolution `/proc/uptime` reports and
+    /// there is nothing to gain from asking more often than the number can
+    /// change.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        Some(Duration::from_secs(1))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -2402,11 +2522,17 @@ mod tests {
     // *is* the failure report, and rewriting it as a `match` would only bury
     // the message. CLAUDE.md scopes the defensive panic lints to non-test code
     // for exactly this reason.
+    // `float_cmp` joins them for one assertion: that `cpu_percent` is exactly
+    // 0.0, which is not an approximation of a measurement but the *absence* of
+    // one. An epsilon comparison there would assert something weaker than what
+    // actually holds, and the value it guards against is a rate invented from
+    // a single sample.
     #![allow(
         clippy::expect_used,
         clippy::unwrap_used,
         clippy::indexing_slicing,
-        clippy::panic
+        clippy::panic,
+        clippy::float_cmp
     )]
 
     use super::*;
@@ -2415,13 +2541,55 @@ mod tests {
     // The compositor wiring
     // ------------------------------------------------------------------
 
+    /// The app asks for a clock, because the uptime it draws is now read.
+    ///
+    /// This asserted `None`, under the reason that "some of what this app
+    /// shows genuinely ages, but none of it is read from anywhere, so a tick
+    /// would redraw constants on a timer". True when written, and the
+    /// condition it named has since been met: the uptime comes from
+    /// `/proc/uptime`. **A figure read once and drawn forever is worse than a
+    /// constant** -- a constant is at least obviously not a clock.
     #[test]
-    fn the_app_asks_for_no_clock_because_it_has_nothing_to_re_read() {
-        // Deliberate, and the opposite call from `sysmonitor`: some of what
-        // this app shows genuinely ages, but none of it is read from anywhere,
-        // so a tick would redraw constants on a timer.
+    fn the_app_asks_for_a_clock_because_the_uptime_is_read() {
         let app = SysInfoState::new();
-        assert_eq!(app.tick_interval(), None);
+        assert_eq!(app.tick_interval(), Some(Duration::from_secs(1)));
+    }
+
+    /// A tick re-reads rather than being accepted and ignored.
+    ///
+    /// Consuming `Tick` without re-reading is the frozen clock with extra
+    /// steps, and it is what five other windows in this tree were doing.
+    #[test]
+    fn a_tick_re_reads_the_figures_that_age() {
+        let mut app = SysInfoState::new();
+        app.uptime = None;
+        app.memory_info = None;
+
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 1000 }),
+            EventResult::Consumed
+        );
+
+        // On this host `/proc` is absent, so the read fails and the previous
+        // value is kept -- which is the documented behaviour and is what makes
+        // the assertion below the honest one to write. What is pinned is that
+        // the tick reached `refresh_ageing_figures` at all: with no arm it
+        // would have returned `Ignored`.
+        let provider_can_read = {
+            use hwquery::HardwareProvider;
+            hwquery::SyscallProvider::new().query_uptime().is_ok()
+        };
+        assert_eq!(
+            app.uptime.is_some(),
+            provider_can_read,
+            "the tick did not re-read: uptime is {:?} while the provider {} read one",
+            app.uptime,
+            if provider_can_read {
+                "could"
+            } else {
+                "could not"
+            }
+        );
     }
 
     #[test]
@@ -2751,6 +2919,255 @@ mod tests {
             y,
             kind: MouseEventKind::Move,
         })
+    }
+
+    /// The disks the kernel publishes are read, and nothing else is invented.
+    ///
+    /// `query_storage` read `/sys/hardware/block`, **a path this kernel has
+    /// never served**, and parsed `part0_`-prefixed keys out of it. Lane A
+    /// publishes `/sys/devices/block/<name>/{sector_count,sector_size,
+    /// read_only}` as scalar files, so the Storage category reported "cannot
+    /// read" on a machine whose disks were there the whole time.
+    ///
+    /// Capacity multiplies the two names that are read rather than assuming
+    /// 512-byte sectors -- lane A's own comment gives the reason, and it is
+    /// the sharpest kind: every device here is 512 today, **which is the
+    /// condition that lets a 512-assumption ship unnoticed.** The fixture
+    /// below uses 4096 so the assumption cannot pass.
+    #[test]
+    fn the_disks_the_kernel_publishes_are_read() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-block-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("sys/devices/block");
+        std::fs::create_dir_all(base.join("vda")).expect("fixture");
+        std::fs::create_dir_all(base.join("vdb")).expect("fixture");
+
+        std::fs::write(base.join("vda/sector_count"), b"2048\n").unwrap();
+        std::fs::write(base.join("vda/sector_size"), b"4096\n").unwrap();
+        std::fs::write(base.join("vda/read_only"), b"0\n").unwrap();
+
+        std::fs::write(base.join("vdb/sector_count"), b"100\n").unwrap();
+        std::fs::write(base.join("vdb/sector_size"), b"512\n").unwrap();
+        std::fs::write(base.join("vdb/read_only"), b"1\n").unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        let mut disks = {
+            use hwquery::HardwareProvider;
+            provider
+                .query_storage()
+                .expect("the fixture tree is readable")
+        };
+        disks.sort_by(|a, b| a.model.cmp(&b.model));
+
+        assert_eq!(disks.len(), 2, "one entry per device directory");
+
+        let vda = disks.first().expect("vda");
+        assert_eq!(vda.model, "vda");
+        assert_eq!(
+            vda.capacity_bytes,
+            2048 * 4096,
+            "capacity is sector_count times the device's own sector_size"
+        );
+        assert!(
+            vda.smart_status.is_empty(),
+            "a writable disk is not annotated"
+        );
+
+        let vdb = disks.get(1).expect("vdb");
+        assert_eq!(vdb.capacity_bytes, 100 * 512);
+        assert_eq!(vdb.smart_status, "read-only");
+
+        for d in &disks {
+            assert!(d.partitions.is_empty(), "invented a partition table");
+            assert!(d.serial.is_empty(), "invented a serial number");
+            assert!(d.interface.is_empty(), "invented an interface");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A device that vanishes between the listing and the read is skipped.
+    #[test]
+    fn a_block_device_with_no_scalars_is_skipped_not_fatal() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-block-gone-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("sys/devices/block");
+        std::fs::create_dir_all(base.join("vda")).expect("fixture");
+        // A directory with no files: the shape of a device unregistered while
+        // the list was being walked.
+        std::fs::create_dir_all(base.join("gone")).expect("fixture");
+        std::fs::write(base.join("vda/sector_count"), b"8\n").unwrap();
+        std::fs::write(base.join("vda/sector_size"), b"512\n").unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let disks = provider.query_storage().expect("readable");
+
+        assert_eq!(disks.len(), 1, "the half-gone device is skipped, not fatal");
+        assert_eq!(disks.first().expect("vda").model, "vda");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no such tree at all, it says so rather than reporting no disks.
+    ///
+    /// **Absent is not empty.** "This machine has no disks" and "I could not
+    /// look" are different answers, and only one of them is ever true here.
+    #[test]
+    fn an_absent_block_tree_is_an_error_not_an_empty_list() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-block-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        assert!(
+            provider.query_storage().is_err(),
+            "an unreadable tree reported as an empty disk list"
+        );
+    }
+
+    /// The interfaces come from `/proc/net/dev`, with nothing filled in around them.
+    ///
+    /// `query_network` read `/sys/hardware/net`, which the kernel has never
+    /// served. `/proc/net/dev` is published and carries the names and the
+    /// traffic counters.
+    ///
+    /// The empty fields are the point of the test as much as the full ones. A
+    /// MAC address, an IPv4 lease, a gateway, a DNS server, a link speed and a
+    /// duplex mode are published by nothing in this tree, and lane A declined
+    /// to add a `/sys/devices/net/` in the same words: the kernel's
+    /// `InterfaceInfo` "has no name field, so both would be invented". **A row
+    /// carrying a plausible 192.168.1.x is worse than one carrying a blank**,
+    /// because the blank is legible as absent.
+    #[test]
+    fn the_network_interfaces_are_read_and_nothing_is_filled_in_around_them() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-net-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc/net")).expect("fixture");
+        std::fs::write(
+            root.join("proc/net/dev"),
+            b"Inter-|   Receive                    |  Transmit\n\
+             face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets\n\
+                lo:    1234       9    0    0    0     0          0         0     5678      11\n\
+              eth0:  900000     700    0    0    0     0          0         0   400000     300\n",
+        )
+        .unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let mut adapters = provider.query_network().expect("the fixture is readable");
+        adapters.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(adapters.len(), 2, "one row per interface");
+        let eth0 = adapters.first().expect("eth0");
+        assert_eq!(eth0.name, "eth0");
+        assert_eq!(eth0.bytes_received, 900_000, "rx is the receive column");
+        assert_eq!(eth0.bytes_sent, 400_000, "tx is the transmit column");
+
+        for a in &adapters {
+            assert!(a.mac_address.is_empty(), "invented a MAC address");
+            assert!(a.ipv4.is_empty(), "invented an address lease");
+            assert!(a.gateway.is_empty(), "invented a gateway");
+            assert!(a.dns.is_empty(), "invented a resolver");
+            assert_eq!(a.speed_mbps, 0, "invented a link speed");
+            assert!(a.duplex.is_empty(), "invented a duplex mode");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no `/proc/net/dev`, it says so rather than reporting no interfaces.
+    #[test]
+    fn an_absent_net_dev_is_an_error_not_an_empty_list() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-net-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        assert!(
+            provider.query_network().is_err(),
+            "an unreadable /proc/net/dev reported as a machine with no interfaces"
+        );
+    }
+
+    /// The running processes are read from `/proc`, not invented.
+    ///
+    /// `query_processes` read `/sys/proc` -- a path with no producer and no
+    /// precedent; Linux has never put a process list under `/sys`. This is the
+    /// third window in the tree to read `/proc/<pid>/stat` and the third to do
+    /// it through `procinfo`, after `apps/procexplorer` and
+    /// `apps/sysmonitor` earlier today.
+    #[test]
+    fn the_running_processes_are_read_from_proc() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-proc-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc/41")).expect("fixture");
+        // A directory with no `stat`: a process that exited while the list was
+        // being walked.
+        std::fs::create_dir_all(root.join("proc/42")).expect("fixture");
+        std::fs::write(
+            root.join("proc/41/stat"),
+            b"41 (shell) R 1 41 41 0 -1 0 0 0 0 0 200 50 0 0 20 0 8 0 900 \
+              4096000 300 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+        )
+        .unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let procs = provider.query_processes().expect("the fixture is readable");
+
+        assert_eq!(
+            procs.len(),
+            1,
+            "the half-gone process is skipped, not fatal"
+        );
+        let p = procs.first().expect("one process");
+        assert_eq!(p.pid, 41);
+        assert_eq!(p.name, "shell");
+        assert_eq!(
+            p.memory_kb,
+            300 * procinfo::PAGE_SIZE_KIB,
+            "resident pages become KiB through the shared page size"
+        );
+        assert_eq!(
+            p.cpu_percent, 0.0,
+            "a rate needs two samples of a counter and this query has one"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no `/proc`, it says so rather than reporting no processes.
+    #[test]
+    fn an_absent_proc_is_an_error_not_an_empty_process_list() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-proc-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        assert!(
+            provider.query_processes().is_err(),
+            "an unreadable /proc reported as a machine running nothing"
+        );
     }
 
     fn ctrl(key: Key) -> Event {

@@ -11,12 +11,15 @@
 
 use crate::{
     CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
-    MemoryMapEntry, NetworkAdapterInfo, PartitionInfo, PciDeviceInfo, ProcessEntry, ServiceInfo,
-    SoundInfo, StartupEntry, UsbDeviceInfo,
+    MemoryMapEntry, NetworkAdapterInfo, PciDeviceInfo, ProcessEntry, ServiceInfo, SoundInfo,
+    StartupEntry, UsbDeviceInfo,
 };
-// Only `StubProvider` builds these, and it is `#[cfg(test)]`.
+// Only `StubProvider` builds these, and it is `#[cfg(test)]`. `PartitionInfo`
+// joined them when `query_storage` stopped inventing partitions: the kernel
+// publishes no partition table under `/sys/devices/block`, so the real
+// provider has none to build.
 #[cfg(test)]
-use crate::MemorySlot;
+use crate::{MemorySlot, PartitionInfo};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -102,10 +105,20 @@ const SYSDEV_CPU: &str = "/sys/devices/system/cpu";
 const SYSDEV_CPUID: &str = "/sys/devices/system/cpu/cpuid";
 /// System memory: `total_kb` and `available_kb`, one per file.
 const SYSDEV_MEMORY: &str = "/sys/devices/system/memory";
-/// Block devices directory.
-const SYSFS_BLOCK: &str = sysfs!("/block");
-/// Network interfaces directory.
-const SYSFS_NET: &str = sysfs!("/net");
+/// Block devices: `/sys/devices/block/<name>/{sector_count,sector_size,read_only}`.
+///
+/// `/sys/devices`, not `/sys/hardware`, for the reason §850 gives and that
+/// `SYSDEV_CPU` above already follows. This constant used to name
+/// `/sys/hardware/block`, **a path the kernel has never served**, so the
+/// Storage category reported "cannot read" on a machine whose disks were
+/// published the whole time.
+///
+/// A directory of scalar files, one value per file -- not the `key=value`
+/// file the older constants below still name.
+const SYSDEV_BLOCK: &str = "/sys/devices/block";
+// `/sys/hardware/net` is gone with the query that read it. Interfaces come
+// from `/proc/net/dev`, and lane A has declined to serve a `/sys/devices/net/`
+// because the kernel's `InterfaceInfo` carries no name to key it on.
 /// PCI devices directory.
 const SYSFS_PCI: &str = sysfs!("/pci");
 /// USB devices directory.
@@ -124,8 +137,9 @@ const SYSFS_MEMMAP: &str = sysfs!("/memmap");
 const SYSFS_DMA: &str = sysfs!("/dma");
 /// Running services.
 const SYSFS_SERVICES: &str = "/sys/services";
-/// Process list.
-const SYSFS_PROC: &str = "/sys/proc";
+// No constant for the process list: it comes from `/proc`, which is where
+// processes have always been. This named `/sys/proc`, a path with no producer
+// and no precedent -- Linux has never put a process list under `/sys`.
 /// Loaded drivers.
 const SYSFS_DRIVERS: &str = "/sys/drivers";
 /// Startup programs.
@@ -173,6 +187,12 @@ pub trait HardwareProvider {
     fn query_drivers(&self) -> Result<Vec<DriverInfo>, HwQueryError>;
     /// Query environment variables.
     fn query_env_vars(&self) -> Result<Vec<(String, String)>, HwQueryError>;
+    /// How long the machine has been up.
+    ///
+    /// A `Duration` rather than a formatted string, because the caller is the
+    /// only one that knows how much room it has to draw it in -- and because a
+    /// provider that returned "4h 23m 17s" is exactly what this replaced.
+    fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError>;
     /// Query startup programs.
     fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError>;
     /// Human-readable name of this provider.
@@ -197,6 +217,15 @@ pub trait HardwareProvider {
 pub struct SyscallProvider {
     /// Cache of file contents from sysfs reads.
     file_cache: HashMap<String, String>,
+    /// Prefixed to every path read, empty in a shipping build.
+    ///
+    /// The same seam `procinfo::ProcFs::at` provides, and for the same reason:
+    /// the constants here are absolute, so without it nothing that *lists* a
+    /// directory can be tested at all. `query_storage` reads the real
+    /// `/sys/devices/block` through `read_dir`, which the file cache cannot
+    /// stand in for -- a cache of file contents has no answer to "what is in
+    /// this directory".
+    root: String,
 }
 
 impl Default for SyscallProvider {
@@ -206,10 +235,35 @@ impl Default for SyscallProvider {
 }
 
 impl SyscallProvider {
+    /// A provider reading under `root` instead of `/`. **Tests only.**
+    #[cfg(test)]
+    pub fn at(root: &str) -> Self {
+        Self {
+            file_cache: HashMap::new(),
+            root: root.to_string(),
+        }
+    }
+
+    /// `path` as this provider should actually open it.
+    fn rooted(&self, path: &str) -> String {
+        format!("{}{path}", self.root)
+    }
+
+    /// The kernel's `/proc`, under the same root.
+    ///
+    /// A reader rather than a parser here: `procinfo` exists so that the two
+    /// system-information programs in this tree do not grow two parsers of
+    /// `/proc/meminfo` between them, and its module docs name this window by
+    /// name as one of the two.
+    fn procfs(&self) -> procinfo::ProcFs {
+        procinfo::ProcFs::at(self.rooted("/proc"))
+    }
+
     /// Create a new syscall-based provider.
     pub fn new() -> Self {
         Self {
             file_cache: HashMap::new(),
+            root: String::new(),
         }
     }
 
@@ -268,12 +322,13 @@ impl SyscallProvider {
             return Ok(cached.clone());
         }
 
-        // Attempt a real filesystem read
-        match std::fs::read_to_string(path) {
+        // Attempt a real filesystem read. The error names the path actually
+        // opened rather than the logical one, so a reader can go and look at
+        // it.
+        let opened = self.rooted(path);
+        match std::fs::read_to_string(&opened) {
             Ok(content) => Ok(content),
-            Err(_) => Err(HwQueryError::NotAvailable {
-                path: path.to_string(),
-            }),
+            Err(_) => Err(HwQueryError::NotAvailable { path: opened }),
         }
     }
 
@@ -509,81 +564,102 @@ impl HardwareProvider for SyscallProvider {
         })
     }
 
+    /// Read the registered block devices from `/sys/devices/block`.
+    ///
+    /// Capacity is `sector_count * sector_size`, and both names are read
+    /// rather than one assumed. Lane A's producer says why in
+    /// `kernel/src/fs/sysfs.rs`: Linux's `size` is in 512-byte units whatever
+    /// the device's real sector size is, so a reader that multiplied it by
+    /// `sector_size` would be wrong on any device that is not 512 -- and every
+    /// device here is 512 today, **which is the condition that lets that bug
+    /// ship unnoticed.**
+    ///
+    /// Three fields stay empty rather than being filled with something
+    /// plausible. The model string, the serial number and SMART health are
+    /// SMBIOS and ATA facts that nothing in this tree reads; the device's own
+    /// name is what there is, and it is put in `model` because that is the
+    /// column the window draws. **Partitions are empty for the same reason**
+    /// -- the kernel publishes no partition table here, and the previous
+    /// implementation read `part0_`-prefixed keys out of a file that does not
+    /// exist.
     fn query_storage(&self) -> Result<Vec<DiskInfo>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_BLOCK)?;
-        let mut disks = Vec::new();
+        let base_dir = self.rooted(SYSDEV_BLOCK);
+        let dir = std::fs::read_dir(&base_dir).map_err(|_| HwQueryError::NotAvailable {
+            path: base_dir.clone(),
+        })?;
 
-        for entry in &entries {
-            // Parse partitions from sub-entries
-            let mut partitions = Vec::new();
-            for i in 0..16 {
-                let prefix = format!("part{i}_");
-                if let Some(label) = entry.get(&format!("{prefix}label")) {
-                    partitions.push(PartitionInfo {
-                        label: label.clone(),
-                        filesystem: entry
-                            .get(&format!("{prefix}fs"))
-                            .cloned()
-                            .unwrap_or_default(),
-                        // Raw byte counts, not gigabytes. The node used to
-                        // publish `capacity_gb` as a float, which forced every
-                        // reader to guess whether the producer had divided by
-                        // 1000 or 1024 — and the display code guessed wrong.
-                        // Linux's `/sys/block/*/size` is a sector count for the
-                        // same reason: a kernel interface should report the
-                        // quantity, and leave scaling to whoever formats it.
-                        capacity_bytes: Self::field(entry, &format!("{prefix}capacity_bytes"), 0)?,
-                        used_bytes: Self::field(entry, &format!("{prefix}used_bytes"), 0)?,
-                        free_bytes: Self::field(entry, &format!("{prefix}free_bytes"), 0)?,
-                        mount_point: entry
-                            .get(&format!("{prefix}mount"))
-                            .cloned()
-                            .unwrap_or_default(),
-                    });
-                }
-            }
+        let mut disks = Vec::new();
+        for entry in dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let base = format!("{SYSDEV_BLOCK}/{name}");
+            // A device unregistered between the listing and the read is
+            // skipped rather than failing the whole query: the same race a
+            // process list has, and the same answer.
+            let (Ok(sector_count), Ok(sector_size)) = (
+                self.read_num::<u64>(&format!("{base}/sector_count")),
+                self.read_num::<u64>(&format!("{base}/sector_size")),
+            ) else {
+                continue;
+            };
+            let read_only = self
+                .read_num::<u8>(&format!("{base}/read_only"))
+                .unwrap_or(0);
 
             disks.push(DiskInfo {
-                model: entry
-                    .get("model")
-                    .cloned()
-                    .unwrap_or_else(|| "Unknown Disk".to_string()),
-                capacity_bytes: Self::field(entry, "capacity_bytes", 0)?,
-                interface: entry.get("interface").cloned().unwrap_or_default(),
-                serial: entry.get("serial").cloned().unwrap_or_default(),
-                smart_status: entry
-                    .get("smart_status")
-                    .cloned()
-                    .unwrap_or_else(|| "Unknown".to_string()),
-                partitions,
+                model: name,
+                capacity_bytes: sector_count.saturating_mul(sector_size),
+                interface: String::new(),
+                serial: String::new(),
+                smart_status: if read_only == 1 {
+                    String::from("read-only")
+                } else {
+                    String::new()
+                },
+                partitions: Vec::new(),
             });
         }
-
         Ok(disks)
     }
 
+    /// Read the network interfaces from `/proc/net/dev`.
+    ///
+    /// This read `/sys/hardware/net`, which the kernel has never served, so
+    /// the category reported "cannot read". `/proc/net/dev` is published and
+    /// gives the interface names and their traffic counters.
+    ///
+    /// **Everything else stays empty, and that is deliberate.** A MAC address,
+    /// an IPv4 lease, a gateway, a DNS server, a link speed and a duplex mode
+    /// are not published by anything in this tree. Lane A declined to add a
+    /// `/sys/devices/net/` for the same reason, in their own words: the
+    /// kernel's `InterfaceInfo` "has no name field, so both would be
+    /// invented". An adapter row with a plausible `192.168.1.x` in it is worse
+    /// than one with a blank, because the blank is legible as absent.
     fn query_network(&self) -> Result<Vec<NetworkAdapterInfo>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_NET)?;
-        let mut adapters = Vec::new();
+        let devices = self.procfs().net_devices().ok().flatten().ok_or_else(|| {
+            HwQueryError::NotAvailable {
+                path: self.rooted("/proc/net/dev"),
+            }
+        })?;
 
-        for entry in &entries {
-            adapters.push(NetworkAdapterInfo {
-                name: entry.get("name").cloned().unwrap_or_default(),
-                adapter_type: entry.get("type").cloned().unwrap_or_default(),
-                mac_address: entry.get("mac").cloned().unwrap_or_default(),
-                ipv4: entry.get("ipv4").cloned().unwrap_or_default(),
-                ipv6: entry.get("ipv6").cloned().unwrap_or_default(),
-                subnet: entry.get("subnet").cloned().unwrap_or_default(),
-                gateway: entry.get("gateway").cloned().unwrap_or_default(),
-                dns: entry.get("dns").cloned().unwrap_or_default(),
-                speed_mbps: Self::field(entry, "speed_mbps", 0)?,
-                duplex: entry.get("duplex").cloned().unwrap_or_default(),
-                bytes_sent: Self::field(entry, "bytes_sent", 0)?,
-                bytes_received: Self::field(entry, "bytes_received", 0)?,
-            });
-        }
-
-        Ok(adapters)
+        Ok(devices
+            .iter()
+            .map(|d| NetworkAdapterInfo {
+                // The name is the one field `/proc/net/dev` keys on, and it is
+                // bytes there; it becomes text only to be drawn.
+                name: String::from_utf8_lossy(&d.name).into_owned(),
+                adapter_type: String::new(),
+                mac_address: String::new(),
+                ipv4: String::new(),
+                ipv6: String::new(),
+                subnet: String::new(),
+                gateway: String::new(),
+                dns: String::new(),
+                speed_mbps: 0,
+                duplex: String::new(),
+                bytes_sent: d.tx_bytes.unwrap_or(0),
+                bytes_received: d.rx_bytes.unwrap_or(0),
+            })
+            .collect())
     }
 
     fn query_display(&self) -> Result<DisplayInfo, HwQueryError> {
@@ -769,19 +845,53 @@ impl HardwareProvider for SyscallProvider {
         Ok(services)
     }
 
-    fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_PROC)?;
-        let mut procs = Vec::new();
+    /// Read the running processes from `/proc`.
+    ///
+    /// The third window in this tree to read the same files, and the third to
+    /// do it through `procinfo` rather than growing its own parser --
+    /// `apps/procexplorer` and `apps/sysmonitor` were wired to it earlier
+    /// today. Two parsers of `/proc/<pid>/stat` in one repository is the
+    /// arrangement where a kernel change fixes one window and not the others
+    /// and nobody notices, because all of them still produce numbers.
+    ///
+    /// `cpu_percent` stays 0.0. A percentage is a rate, and a rate needs two
+    /// samples of a counter; this query has one. The same decision
+    /// `procexplorer` makes, for the same reason, and the reason it is worth
+    /// repeating here is that **0.0 is also what an invented value would look
+    /// like if nobody had thought about it.**
+    /// Read `/proc/uptime`.
+    fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError> {
+        self.procfs()
+            .uptime()
+            .ok()
+            .flatten()
+            .map(|u| u.up)
+            .ok_or_else(|| HwQueryError::NotAvailable {
+                path: self.rooted("/proc/uptime"),
+            })
+    }
 
-        for entry in &entries {
+    fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> {
+        let fs = self.procfs();
+        let pids = fs.process_ids().map_err(|_| HwQueryError::NotAvailable {
+            path: self.rooted("/proc"),
+        })?;
+
+        let mut procs = Vec::with_capacity(pids.len());
+        for pid in pids {
+            // A process that exits between the listing and the read is the
+            // normal case, not an error: racing with the thing being measured
+            // is what a process list is.
+            let Ok(Some(stat)) = fs.process_stat(pid) else {
+                continue;
+            };
             procs.push(ProcessEntry {
-                pid: Self::field(entry, "pid", 0)?,
-                name: entry.get("name").cloned().unwrap_or_default(),
-                memory_kb: Self::field(entry, "memory_kb", 0)?,
-                cpu_percent: Self::field(entry, "cpu_percent", 0.0)?,
+                pid: u32::try_from(stat.pid).unwrap_or(u32::MAX),
+                name: String::from_utf8_lossy(&stat.comm).into_owned(),
+                memory_kb: stat.rss_kib(),
+                cpu_percent: 0.0,
             });
         }
-
         Ok(procs)
     }
 
@@ -1091,6 +1201,11 @@ impl HardwareProvider for StubProvider {
                 start_type: "Automatic".to_string(),
             },
         ])
+    }
+
+    /// A fixed hour, so a test that formats an uptime has something to format.
+    fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError> {
+        Ok(std::time::Duration::from_hours(1))
     }
 
     fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> {

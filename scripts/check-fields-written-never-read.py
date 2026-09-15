@@ -359,7 +359,7 @@ def self_test():
             f = base / rel
             f.parent.mkdir(parents=True, exist_ok=True)
             text = "\n".join(line[12:] for line in body.strip("\n").split("\n"))
-            f.write_text(text + "\n", encoding="utf-8")
+            f.write_text(text + "\n", encoding="utf-8", newline="")
         found = set(detect(roots=("apps",), root=base))
 
     problems = []

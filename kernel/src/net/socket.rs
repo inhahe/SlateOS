@@ -697,21 +697,33 @@ pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
         Err(e) => {
             close(c1);
             close(srv);
-            // Not a head-of-line failure: the property is UNTESTED, not
-            // broken. `accept` answers `unknown listener` because the daemon
-            // holds one RingSession and resets its listener table whenever a
-            // second socket's ring appears -- so `create(c1)` above destroyed
-            // the listener `listen(srv)` had just registered. Filed as A-Q15.
+            // SKIPPED, and the skip checks its own excuse every boot rather
+            // than recording a decision that could outlive its reason.
             //
-            // Reporting that as "accepted connections are serialising again"
-            // would name the wrong defect and block every merge on an operator
-            // decision. Skip loudly instead: `check-boot-skips` requires an
-            // allowlisted reason, so this stays visible on every boot.
+            // `InternalError` is what `accept` returns when the daemon answers
+            // "unknown listener" -- which happens because `create(c1)` above
+            // destroyed the listener `listen(srv)` had just registered: the
+            // daemon holds one RingSession and resets its listener table when a
+            // second socket's ring appears (A-Q15). The precondition this
+            // witness needs -- one program holding a listener AND an accepted
+            // connection at once -- does not exist on this system, so the
+            // property is UNTESTED, not broken. Reporting "serialising again"
+            // would name a defect that is not there.
+            //
+            // Any OTHER error is not that condition and still fails, and the
+            // day A-Q15 lands `accept` succeeds and the assertion runs. Nobody
+            // has to remember to unskip this.
+            if e == KernelError::InternalError {
+                crate::serial_println!(
+                    "[netsock]   head-of-line: SKIPPED -- accept says unknown listener; net::socket cannot hold two sockets at once (A-Q15)"
+                );
+                return Ok(None);
+            }
             crate::serial_println!(
-                "[netsock]   head-of-line: SKIPPED -- net::socket cannot hold two sockets at once (A-Q15): {:?}",
+                "[netsock]   FAIL: first accept failed with an error that is NOT the A-Q15 condition: {:?}",
                 e
             );
-            return Ok(None);
+            return Err(e);
         }
     };
     let c2 = step!("create(client 2)", create(2));

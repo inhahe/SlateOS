@@ -1259,12 +1259,16 @@ pub fn run_graphics_benchmark() -> CategoryResult {
     let mut cat = CategoryResult::new("Graphics");
 
     let fill_rate = simulate_fill_rate();
-    cat.sub_tests
-        .push(SubTestResult::new("Fill Rate", fill_rate, "Mpix/s", false));
+    cat.sub_tests.push(SubTestResult::new(
+        "Software Fill",
+        fill_rate,
+        "Mpix/s",
+        false,
+    ));
 
     let text_render = simulate_text_rendering();
     cat.sub_tests.push(SubTestResult::new(
-        "Text Rendering",
+        "Text Shaping",
         text_render,
         "glyphs/s",
         false,
@@ -1272,7 +1276,7 @@ pub fn run_graphics_benchmark() -> CategoryResult {
 
     let composite = simulate_composite_ops();
     cat.sub_tests.push(SubTestResult::new(
-        "Composite Operations",
+        "Software Compositing",
         composite,
         "ops/s",
         false,
@@ -1288,46 +1292,86 @@ pub fn run_graphics_benchmark() -> CategoryResult {
     cat
 }
 
+/// Software fill rate, in megapixels per second.
+///
+/// A 1920x1080 buffer filled with a solid colour. This is the processor doing
+/// the work, and the name on the panel says so: nothing here can reach a GPU,
+/// and a number labelled "Fill Rate" under a heading called "Graphics" would
+/// be read as one. The old version filled the same buffer and returned 2,100
+/// whatever happened.
 fn simulate_fill_rate() -> f64 {
-    // Simulate pixel fill work.
-    let pixels = 1920 * 1080;
-    let mut buf = vec![0u32; pixels];
-    for (i, pixel) in buf.iter_mut().enumerate() {
-        *pixel = (i as u32) | 0xFF00_0000;
-    }
-    let sample = buf.get(pixels / 2).copied().unwrap_or(0);
-    let base = 2100.0;
-    if sample > 0 { base + 30.0 } else { base }
+    const WIDTH: usize = 1920;
+    const HEIGHT: usize = 1080;
+    const PIXELS: usize = WIDTH * HEIGHT;
+    let mut buf = vec![0_u32; PIXELS];
+    let secs = seconds(|| {
+        buf.fill(0xFF00_3366);
+        buf.first().copied().unwrap_or(0)
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let megapixels = PIXELS as f64 / 1_000_000.0;
+    rate(megapixels, secs)
 }
 
+/// Text shaping, in glyphs per second.
+///
+/// This measures the real path -- `guitk::text::measure` is what every widget
+/// in this system asks for a string's width, so the number is about the text
+/// stack the desktop actually uses rather than about a stand-in.
+///
+/// **Every string is different, on purpose.** Shaping the same string over and
+/// over would measure the shaper's cache and report a figure several times too
+/// good; the defect would be invisible because the number would still respond
+/// to the machine. That is lane B's probe applied to the input rather than the
+/// output: vary it, or you are measuring the wrong thing.
 fn simulate_text_rendering() -> f64 {
-    // Simulate glyph rasterization work.
-    let glyph_count = 10_000;
-    let mut total_area: u64 = 0;
-    for i in 0..glyph_count {
-        let w: u64 = 8u64.wrapping_add(i % 12);
-        let h: u64 = 12u64.wrapping_add(i % 8);
-        total_area = total_area.wrapping_add(w.wrapping_mul(h));
-    }
-    let base = 520000.0;
-    if total_area > 0 { base + 5000.0 } else { base }
+    const LINES: usize = 150;
+    let corpus: Vec<String> = (0..LINES)
+        .map(|i| format!("The quick brown fox jumps over the lazy dog {i} times"))
+        .collect();
+    let glyphs: usize = corpus.iter().map(|line| line.chars().count()).sum();
+    let secs = seconds(|| {
+        let mut total = 0.0_f32;
+        for line in &corpus {
+            total += guitk::text::measure(line, 14.0, FontWeightHint::Regular);
+        }
+        total
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let count = glyphs as f64;
+    rate(count, secs)
 }
 
+/// Software alpha compositing, in operations per second.
+///
+/// One operation is one source-over blend of a pixel: the arithmetic a
+/// compositor does for every overlapping window. Done on the processor, and
+/// named for that.
 fn simulate_composite_ops() -> f64 {
-    // Simulate alpha-composite blending.
-    let ops = 5000;
-    let mut result: u32 = 0;
-    for i in 0u32..ops {
-        let src_a = i.wrapping_mul(7) & 0xFF;
-        let dst = i.wrapping_mul(13) & 0xFF;
-        // Simple alpha blend: src_a * src + (255 - src_a) * dst / 255.
-        let blended = (src_a.wrapping_mul(i & 0xFF))
-            .wrapping_add((255u32.wrapping_sub(src_a)).wrapping_mul(dst))
-            / 255;
-        result = result.wrapping_add(blended);
-    }
-    let base = 105000.0;
-    if result > 0 { base + 2000.0 } else { base }
+    // A 960x540 region rather than a whole screen: still a realistic
+    // frame's worth of blending, and a quarter of the cost in a debug
+    // build, where this crate's tests run it for real.
+    const PIXELS: usize = 960 * 540;
+    let src = vec![0x8022_4466_u32; PIXELS];
+    let mut dst = vec![0xFF11_2233_u32; PIXELS];
+    let secs = seconds(|| {
+        for (d, s) in dst.iter_mut().zip(src.iter()) {
+            let alpha = (*s >> 24) & 0xFF;
+            let inv = 255_u32.saturating_sub(alpha);
+            let mut out = 0_u32;
+            for shift in [0_u32, 8, 16] {
+                let sc = (*s >> shift) & 0xFF;
+                let dc = (*d >> shift) & 0xFF;
+                let blended = (sc.wrapping_mul(alpha).wrapping_add(dc.wrapping_mul(inv))) / 255;
+                out |= (blended & 0xFF) << shift;
+            }
+            *d = out | 0xFF00_0000;
+        }
+        dst.first().copied().unwrap_or(0)
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let ops = PIXELS as f64;
+    rate(ops, secs)
 }
 
 /// Run all benchmarks and produce a complete result.
@@ -3377,6 +3421,37 @@ mod tests {
             "the absent test pulled the average to {}",
             cat.composite_score
         );
+    }
+
+    /// The graphics scores are measured, and named for what they measure.
+    ///
+    /// Nothing in this application can reach a GPU. The rows used to read
+    /// "Fill Rate", "Text Rendering" and "Composite Operations" under a
+    /// heading called "Graphics", which is how a software number gets read as
+    /// a hardware one. They say "Software" or "Shaping" now, and the names are
+    /// asserted here rather than left to a reviewer, because the honesty of
+    /// this category lives entirely in its labels.
+    #[test]
+    fn the_graphics_scores_are_measured_and_say_they_are_software() {
+        let cat = run_graphics_benchmark();
+        let names: Vec<&str> = cat.sub_tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Software Fill", "Text Shaping", "Software Compositing"]
+        );
+        for test in &cat.sub_tests {
+            let score = test
+                .score
+                .unwrap_or_else(|| panic!("{} reported no measurement", test.name));
+            assert!(score > 0.0, "{} scored {score}", test.name);
+            for fabricated in [2100.0, 2130.0, 520_000.0, 525_000.0] {
+                assert!(
+                    (score - fabricated).abs() > 0.001,
+                    "{} scored {score}, one of the constants this replaced",
+                    test.name
+                );
+            }
+        }
     }
 
     /// A clock that did not move reports nothing, not everything.

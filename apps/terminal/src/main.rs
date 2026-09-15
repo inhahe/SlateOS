@@ -1049,6 +1049,14 @@ impl TerminalState {
             self.index_down();
         }
 
+        // Whatever was here, this write ends it being half of something.
+        let row = self.cursor_row;
+        let col = self.cursor_col;
+        self.break_pair_at(row, col);
+        if width == 2 {
+            self.break_pair_at(row, col.saturating_add(1));
+        }
+
         // Write the character to the cell
         if let Some(line) = self.screen.get_mut(self.cursor_row)
             && let Some(cell) = line.cells.get_mut(self.cursor_col)
@@ -1219,9 +1227,58 @@ impl TerminalState {
         self.blink_ms = 0;
     }
 
+    /// Break any double-width pair that `col` is part of, so that writing
+    /// there cannot leave half a character behind.
+    ///
+    /// Two directions, and both happen. Writing onto the *second* half orphans
+    /// the lead, which would keep drawing as a wide glyph over a cell that now
+    /// holds something else. Writing onto the *first* half orphans the
+    /// continuation, which would swallow the character to its right by drawing
+    /// nothing where that character should be.
+    ///
+    /// Clearing to a space rather than to the incoming attributes: the cell
+    /// being vacated is not the cell being written, and giving it the new
+    /// character's colours would tint a blank the user never typed.
+    fn break_pair_at(&mut self, row: usize, col: usize) {
+        let Some(line) = self.screen.get_mut(row) else {
+            return;
+        };
+        if line.cells.get(col).is_some_and(|c| c.continuation) {
+            if let Some(lead) = col.checked_sub(1)
+                && let Some(cell) = line.cells.get_mut(lead)
+            {
+                cell.ch = ' ';
+                cell.continuation = false;
+            }
+            return;
+        }
+        let after = col.saturating_add(1);
+        if line.cells.get(after).is_some_and(|c| c.continuation)
+            && let Some(cell) = line.cells.get_mut(after)
+        {
+            cell.ch = ' ';
+            cell.continuation = false;
+        }
+    }
+
     fn backspace(&mut self) {
         self.pending_wrap = false;
         if self.cursor_col > 0 {
+            self.cursor_col = self.cursor_col.saturating_sub(1);
+        }
+        // Landing on the second half of a wide character means the cursor is
+        // inside one character, which no further operation has a sensible
+        // reading of. Step onto its lead, so backspacing over a wide character
+        // moves past the whole of it -- which is what the one-unit rule in
+        // `requests/b-c-the-terminal-gives-every-character-one-cell.md` asks
+        // for and what a user pressing backspace expects.
+        if self
+            .screen
+            .get(self.cursor_row)
+            .and_then(|l| l.cells.get(self.cursor_col))
+            .is_some_and(|c| c.continuation)
+            && self.cursor_col > 0
+        {
             self.cursor_col = self.cursor_col.saturating_sub(1);
         }
     }
@@ -3173,6 +3230,70 @@ mod tests {
         assert!(
             copied.starts_with("\u{4E2D}\u{6587}"),
             "copied text was {copied:?}"
+        );
+    }
+
+    /// **Overwriting half of a wide character does not leave the other half.**
+    ///
+    /// Both directions. Writing onto the second half would orphan the lead,
+    /// which keeps drawing as a wide glyph over a cell that now holds
+    /// something else; writing onto the first half would orphan the
+    /// continuation, which swallows the character to its right by drawing
+    /// nothing where it should be.
+    #[test]
+    fn overwriting_half_a_wide_character_clears_the_other_half() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.put_char('\u{4E2D}');
+
+        // Back onto the lead and write a narrow character over it.
+        t.cursor_col = 0;
+        t.put_char('x');
+
+        let line = &t.screen[t.cursor_row];
+        assert_eq!(line.cells[0].ch, 'x');
+        assert!(
+            !line.cells[1].continuation,
+            "the continuation outlived the character it belonged to"
+        );
+        assert_eq!(
+            line.cells[1].ch, ' ',
+            "the orphaned half still shows something"
+        );
+    }
+
+    /// Writing onto the *second* half clears the lead, so no wide glyph is
+    /// left painting over a cell it no longer owns.
+    #[test]
+    fn writing_onto_a_continuation_clears_its_lead() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.put_char('\u{4E2D}');
+
+        t.cursor_col = 1;
+        t.put_char('x');
+
+        let line = &t.screen[t.cursor_row];
+        assert_eq!(line.cells[1].ch, 'x');
+        assert_eq!(
+            line.cells[0].ch, ' ',
+            "the lead of a broken pair is still drawn as a wide character"
+        );
+    }
+
+    /// **Backspace over a wide character moves past the whole of it.**
+    ///
+    /// Landing on the second half leaves the cursor inside one character,
+    /// which no later operation has a sensible reading of.
+    #[test]
+    fn backspace_steps_over_a_whole_wide_character() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.put_char('\u{4E2D}');
+        assert_eq!(t.cursor_col, 2);
+
+        t.feed(b"\x08");
+
+        assert_eq!(
+            t.cursor_col, 0,
+            "backspace left the cursor inside the wide character"
         );
     }
 

@@ -1126,6 +1126,33 @@ choice of web browser, because it has no way to find out what browsers are
 installed — so that screen shows a placeholder. The question is which list
 should become the one everybody reads.
 
+**Added 2026-09-14, and it changes what is being asked.** This is not one
+duplicated list, it is the fourth example of one shape found in a single day,
+and the others are larger:
+
+| the idea | how many implementations | connected? |
+|---|---|---|
+| which programs are installed | 4 | none to any other |
+| the clipboard | **15** private ones, plus a service | the service has no clients at all |
+| which programs start at login | 3 | nothing launches any of them |
+| the ICMP echo header | 2 | the unused one is in a crate the user already depends on |
+
+Each was found by asking *what reads this?* and getting "nothing" — never by
+looking for a missing feature, because nothing is missing: every copy works.
+Details in `known-issues.md` under
+`TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO`,
+`TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`, and
+`requests/c-a-the-icmp-wire-format-is-written-twice...`.
+
+**Why that is worth your time rather than noise in this entry:** a decision
+about *one* list is a small call about app registries. If the same answer would
+settle the other three, it is worth making it as a rule — "a thing the whole
+system shares lives in one place, and that place is X" — rather than four
+times, differently, by whoever touches each one next. If you would rather
+answer only the narrow question, that is fine and the options below are
+unchanged; this note exists so the choice is yours rather than made by the
+entry's framing.
+
 **The four lists**, with what each knows:
 
 | where | holds | who can read it |

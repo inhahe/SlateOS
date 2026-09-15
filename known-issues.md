@@ -140888,10 +140888,31 @@ first time passes have outnumbered differences.
 | `--no-backup-if-mismatch` | suppresses `<target>.orig` on a failed hunk, and **only** that — the reject is still written, because a reject is the failure report rather than a backup |
 | `-d DIR` / `--directory=DIR` | chdir before the patch file is opened |
 
-**`-N/--forward` and `-F/--fuzz` are IMPLEMENTED** as of 2026-09-15, with
-`-l/--ignore-whitespace`. What is still accepted and inert is `-f/--force` and
-`-Z/--set-utc`: `-f` differs from the default only where GNU would otherwise
-prompt, `-Z` only in the timestamps it sets.
+**`-l/--ignore-whitespace`, `-N/--forward`, `-F/--fuzz` and `-f/--force` are
+all IMPLEMENTED** as of 2026-09-15. Only `-Z/--set-utc` is still accepted and
+inert.
+
+**The claim this paragraph used to make about `-f` was false**, and it is the
+clearest example in this file of how an inert option gets justified. It said
+`-f` "differs from the default only where GNU would otherwise prompt". What it
+actually does, measured on an already-applied patch:
+
+| | without `-f` | with `-f` |
+|---|---|---|
+| message | `Reversed (or previously applied) patch detected!` | `Hunk #1 FAILED at 1.` |
+| count | `1 out of 1 hunk ignored` | `1 out of 1 hunk FAILED` |
+| exit status | **0** | **1** |
+
+A script reading the status gets the opposite answer. The prompt was the least
+of it. The original claim was not careless — it was measured, on cases that
+could not tell the two behaviours apart, which is the failure this whole entry
+keeps circling.
+
+`-Z` is the last one, and the honest statement about it is narrower than the
+others were: it sets mtimes from the patch header, no observable difference
+turned up on the cases here, **and `patch-diff.sh` snapshots mode, content and
+size but not mtime — so it could not have seen one.** That is a reason to be
+careful about calling it harmless rather than a reason to call it done.
 
 The wording this replaces said that accepting an inert option was "correct
 today and incomplete rather than wrong". **That argument should not be made

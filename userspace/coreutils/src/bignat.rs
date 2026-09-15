@@ -36,6 +36,14 @@
 //! numbers reached here are small enough that `u64 * u64 -> u128` costs more
 //! than the halved limb count saves.
 
+use core::num::NonZeroU32;
+
+/// The decimal grouping radix, non-zero in the type so `divmod_small` needs
+/// no runtime check for it.
+const BILLION: NonZeroU32 = match NonZeroU32::new(1_000_000_000) {
+    Some(v) => v,
+    None => unreachable!(),
+};
 use std::cmp::Ordering;
 
 /// A non-negative integer of unbounded size.
@@ -202,19 +210,29 @@ impl Nat {
             if a == 0 {
                 continue;
             }
+            // The window starting at `i` IS the `out[i + j]` the inner loop
+            // used to compute, and `zip` stops at the shorter of the two, so
+            // the index that had to be checked no longer exists. `out` is
+            // sized `self + other`, so the window always outruns `other`.
+            let Some(window) = out.get_mut(i..) else {
+                break;
+            };
             let mut carry: u64 = 0;
-            for (j, &b) in other.limbs.iter().enumerate() {
-                let at = i + j;
-                let p = u64::from(a) * u64::from(b) + u64::from(out[at]) + carry;
-                out[at] = low(p);
+            for (slot, &b) in window.iter_mut().zip(other.limbs.iter()) {
+                // Widened to u64 first: (2^32-1)^2 + 2*(2^32-1) < 2^64, so
+                // the product plus the running limb plus the carry cannot
+                // overflow the accumulator.
+                let p = u64::from(a) * u64::from(b) + u64::from(*slot) + carry;
+                *slot = low(p);
                 carry = p >> 32;
             }
-            let mut at = i + other.limbs.len();
-            while carry != 0 {
-                let s = u64::from(out[at]) + carry;
-                out[at] = low(s);
+            for slot in window.iter_mut().skip(other.limbs.len()) {
+                if carry == 0 {
+                    break;
+                }
+                let s = u64::from(*slot) + carry;
+                *slot = low(s);
                 carry = s >> 32;
-                at += 1;
             }
         }
         let mut n = Nat { limbs: out };
@@ -272,7 +290,10 @@ impl Nat {
             return Nat::zero();
         }
         let part = bits % 32;
-        let kept = &self.limbs[whole..];
+        // `whole < self.limbs.len()` from the early return above.
+        let Some(kept) = self.limbs.get(whole..) else {
+            return Nat::zero();
+        };
         let mut out = Vec::with_capacity(kept.len());
         if part == 0 {
             out.extend_from_slice(kept);
@@ -300,14 +321,17 @@ impl Nat {
     /// # Panics
     ///
     /// If `d` is zero.
-    pub fn divmod_small(&self, d: u32) -> (Self, u32) {
-        assert!(d != 0, "divide by zero");
+    pub fn divmod_small(&self, d: NonZeroU32) -> (Self, u32) {
+        let d = u64::from(d.get());
         let mut out = vec![0u32; self.limbs.len()];
         let mut rem: u64 = 0;
-        for i in (0..self.limbs.len()).rev() {
-            let cur = (rem << 32) | u64::from(self.limbs[i]);
-            out[i] = low(cur / u64::from(d));
-            rem = cur % u64::from(d);
+        // Walking both from the top. The `out[i]` this replaces was only
+        // safe because `out` was built at `self.limbs.len()`; zipping says
+        // that instead of relying on it.
+        for (slot, &limb) in out.iter_mut().rev().zip(self.limbs.iter().rev()) {
+            let cur = (rem << 32) | u64::from(limb);
+            *slot = low(cur / d);
+            rem = cur % d;
         }
         let mut n = Nat { limbs: out };
         n.trim();
@@ -325,6 +349,42 @@ impl Nat {
     ///
     /// If `d` is zero. Every call site divides by a power of ten or of two, so
     /// a zero divisor would be a bug in this file rather than bad input.
+    // `indexing_slicing` is allowed HERE and nowhere else in this module.
+    // Three reasons, each of which can be checked against the code:
+    //
+    // 1. THE BOUNDS ARE THE ALGORITHM'S, not this code's. `un` is resized to
+    //    `m + n + 1` and `j` runs `0..=m`, so `un[j + n]` is its last element
+    //    and every other index sits below that. `vn` has exactly `n` limbs
+    //    and `i` runs `0..n`.
+    //
+    // 2. THEY CANNOT BE MADE PROVABLE. `n` is a runtime value, so no slice
+    //    type can carry "length at least n + 1" -- a window taken with
+    //    `get_mut(j..)` still needs `window[n]`. The zip that removed exactly
+    //    these indices from `mul` works there because the iteration is
+    //    bounded by the shorter of two slices; here the offsets are not a
+    //    traversal.
+    //
+    // 3. `get()` WOULD BE WORSE HERE, which is the part worth arguing. Its
+    //    fallback must be some limb value, and a wrong limb in a division
+    //    kernel is a wrong quotient -- a number that satisfies no invariant
+    //    and looks entirely ordinary. An out-of-range index panics at the
+    //    point of the error instead. Trading a loud impossible failure for a
+    //    quiet possible wrong answer is the wrong direction for code that
+    //    `seq`, `printf`, `expr` and `bc` all compute through.
+    //
+    // WHAT CHECKS IT. All three paths through this function are exercised,
+    // each demonstrated by a probe rather than assumed: the ordinary one, D3's
+    // estimate correction (`long_division_corrects_an_estimate_of_a_whole_limb`)
+    // and D6's add-back (`long_division_exercises_the_add_back`). On top of
+    // those, `long_division_identity_holds_beyond_u128` checks `q*d + r == n`
+    // and `r < d` from 5 to 21 limbs, which is what an off-by-one in any of
+    // these indices breaks.
+    //
+    // This allow was CONSIDERED AND REFUSED earlier on 2026-09-15, when D3
+    // and D6 were reached by no test at all. The justification is the
+    // coverage; it could not be written before the coverage existed. See
+    // `TD-B-BIGNAT-ADD-BACK-IS-UNREACHED-BY-ANY-TEST`.
+    #[allow(clippy::indexing_slicing)]
     pub fn divmod(&self, d: &Self) -> (Self, Self) {
         assert!(!d.is_zero(), "divide by zero");
         if self.cmp(d) == Ordering::Less {
@@ -332,7 +392,14 @@ impl Nat {
         }
         let n = d.limbs.len();
         if n == 1 {
-            let (q, r) = self.divmod_small(d.limbs[0]);
+            // `d` is non-zero by the assertion above and has exactly one
+            // limb here, so that limb cannot be zero. The `else` is
+            // unreachable and returns the honest answer for a zero divisor
+            // rather than inventing one.
+            let Some(small) = d.limbs.first().copied().and_then(NonZeroU32::new) else {
+                return (Nat::zero(), self.clone());
+            };
+            let (q, r) = self.divmod_small(small);
             return (q, Nat::from_u64(u64::from(r)));
         }
 
@@ -392,7 +459,8 @@ impl Nat {
         let mut quotient = Nat { limbs: q };
         quotient.trim();
         let mut remainder = Nat {
-            limbs: un[..n].to_vec(),
+            // `un` was resized to `m + n + 1`, so the first `n` are there.
+            limbs: un.get(..n).unwrap_or(&un).to_vec(),
         };
         remainder.trim();
         (quotient, remainder.shr(s))
@@ -441,7 +509,7 @@ impl Nat {
         let mut groups: Vec<u32> = Vec::new();
         let mut rest = self.clone();
         while !rest.is_zero() {
-            let (q, r) = rest.divmod_small(1_000_000_000);
+            let (q, r) = rest.divmod_small(BILLION);
             groups.push(r);
             rest = q;
         }
@@ -456,7 +524,7 @@ impl Nat {
             if which == 0 {
                 // The top group is the only one written without leading zeros.
                 let lead = buf.iter().position(|&c| c != b'0').unwrap_or(8);
-                out.extend_from_slice(&buf[lead..]);
+                out.extend_from_slice(buf.get(lead..).unwrap_or_default());
             } else {
                 out.extend_from_slice(&buf);
             }
@@ -621,7 +689,10 @@ mod tests {
     fn small_division_matches_u128() {
         let n = dec(&u128::MAX.to_string());
         for d in [1u32, 2, 3, 10, 1_000_000_000, u32::MAX] {
-            let (q, r) = n.divmod_small(d);
+            // `divmod_small` takes the non-zero type now, so the divisors
+            // this loop can express are exactly the ones it accepts.
+            let nz = NonZeroU32::new(d).expect("the list has no zero");
+            let (q, r) = n.divmod_small(nz);
             assert_eq!(text(&q), (u128::MAX / u128::from(d)).to_string(), "d={d}");
             assert_eq!(u128::from(r), u128::MAX % u128::from(d), "d={d}");
         }

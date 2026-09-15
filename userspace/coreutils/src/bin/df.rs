@@ -60,6 +60,11 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+// Placed here, above the first attribute, deliberately: inserting an import
+// directly under `#[cfg(not(unix))]` silently put it INSIDE that cfg and left
+// `use coreutils::diag;` without one.
+use core::num::NonZeroU64;
+
 #[cfg(not(unix))]
 use coreutils::diag;
 use coreutils::errmsg::strerror;
@@ -226,6 +231,15 @@ const FIELDS: &[FieldSpec] = &[
 /// unit test `all_args_matches_table` holds the two in step.
 const ALL_ARGS: &str = "source,fstype,itotal,iused,iavail,ipcent,size,used,avail,pcent,file,target";
 
+/// `FIELDS`' first row, resolved at compile time so the lookup below needs
+/// no index. `FIELDS` is a non-empty literal, so the `None` arm is a BUILD
+/// error rather than a run-time panic -- if someone empties the table, this
+/// stops compiling instead of returning something wrong.
+const FIRST_FIELD: &FieldSpec = match FIELDS.first() {
+    Some(f) => f,
+    None => panic!("FIELDS is a non-empty literal"),
+};
+
 impl Field {
     /// The [`FIELDS`] row for this field.
     ///
@@ -238,7 +252,7 @@ impl Field {
             .find(|s| s.field == self)
             // Unreachable; see above. Returning the first row rather than
             // panicking keeps `clippy::unwrap_used` honest.
-            .unwrap_or(&FIELDS[0])
+            .unwrap_or(FIRST_FIELD)
     }
 
     /// Resolve one `--output` name. `None` is upstream's "not a field".
@@ -334,16 +348,30 @@ fn unescape_tab(str: &[u8]) -> Vec<u8> {
     while i < str.len() {
         // `i + 4 < len` upstream, where `len` counts the NUL — so the escape
         // may end at the last byte, but all four bytes must be present.
-        let escape = str.get(i..i.saturating_add(4)).filter(|w| {
+        // `first_chunk` after `get` hands back a `&[u8; 4]`, so the four
+        // reads below are checked when this compiles rather than resting on
+        // the `get` above them.
+        let escape = str.get(i..).and_then(<[u8]>::first_chunk::<4>).filter(|w| {
             w[0] == b'\\' && (b'0'..=b'3').contains(&w[1]) && is_octal(w[2]) && is_octal(w[3])
         });
         if let Some(w) = escape {
-            // Cannot overflow: the largest is `\377` = 255.
-            out.push((w[1] - b'0') * 64 + (w[2] - b'0') * 8 + (w[3] - b'0'));
+            // Cannot overflow, and the filter above is why: the leading digit
+            // is at most 3 and the other two at most 7, so the largest value
+            // is `\377` = 3*64 + 7*8 + 7 = 255, which is exactly a `u8`.
+            let hi = w[1].saturating_sub(b'0');
+            let mid = w[2].saturating_sub(b'0');
+            let lo = w[3].saturating_sub(b'0');
+            out.push(
+                hi.saturating_mul(64)
+                    .saturating_add(mid.saturating_mul(8))
+                    .saturating_add(lo),
+            );
             i = i.saturating_add(4);
-        } else {
-            out.push(str[i]);
+        } else if let Some(&b) = str.get(i) {
+            out.push(b);
             i = i.saturating_add(1);
+        } else {
+            break;
         }
     }
     out
@@ -435,10 +463,11 @@ fn me_remote(devname: &[u8], fstype: &[u8]) -> bool {
 /// attacker-controlled, but this same shape of table can be a real file on
 /// disk, and a `u64` overflow there would be a panic in a debug build.
 fn scan_uint(text: &[u8]) -> Option<(u64, &[u8])> {
-    let rest = text
-        .iter()
-        .position(|b| !b.is_ascii_whitespace())
-        .map_or(&text[text.len()..], |n| &text[n..]);
+    let rest = match text.iter().position(|b| !b.is_ascii_whitespace()) {
+        Some(n) => text.get(n..).unwrap_or_default(),
+        // All whitespace: the empty tail, which is what `&text[len..]` was.
+        None => &[],
+    };
     let digits = rest
         .iter()
         .position(|b| !b.is_ascii_digit())
@@ -446,11 +475,17 @@ fn scan_uint(text: &[u8]) -> Option<(u64, &[u8])> {
     if digits == 0 {
         return None;
     }
+    // `digits` came from `position`, so the split is in range; saying it
+    // with `split_at_checked` means the two halves below need no bound.
+    let (number, tail) = rest.split_at_checked(digits)?;
     let mut value: u64 = 0;
-    for &b in &rest[..digits] {
-        value = value.saturating_mul(10).saturating_add(u64::from(b - b'0'));
+    for &b in number {
+        // Exact: every byte here passed `is_ascii_digit`.
+        value = value
+            .saturating_mul(10)
+            .saturating_add(u64::from(b.saturating_sub(b'0')));
     }
-    Some((value, &rest[digits..]))
+    Some((value, tail))
 }
 
 /// gnulib's `terminate_at_blank`: split at the next **space**.
@@ -460,7 +495,10 @@ fn scan_uint(text: &[u8]) -> Option<(u64, &[u8])> {
 /// split a field the kernel considers whole.
 fn split_at_blank(text: &[u8]) -> Option<(&[u8], &[u8])> {
     let at = text.iter().position(|&b| b == b' ')?;
-    Some((&text[..at], &text[at.saturating_add(1)..]))
+    // `split_at_checked` then dropping the space is the same two slices,
+    // with the bound carried by the operation instead of asserted beside it.
+    let (head, rest) = text.split_at_checked(at)?;
+    Some((head, rest.get(1..).unwrap_or_default()))
 }
 
 /// The first offset at which `needle` occurs in `haystack`.
@@ -516,7 +554,9 @@ fn parse_mountinfo(text: &[u8]) -> Vec<MountEntry> {
         let Some(dash) = find(rest, b" - ") else {
             continue;
         };
-        let after = &rest[dash.saturating_add(3)..];
+        let Some(after) = rest.get(dash.saturating_add(3)..) else {
+            continue;
+        };
         let Some((fstype, rest)) = split_at_blank(after) else {
             continue;
         };
@@ -562,9 +602,10 @@ fn parse_mounts(text: &[u8]) -> Vec<MountEntry> {
         }
         let mut field = || -> Vec<u8> {
             let at = rest.iter().position(|&b| b == b' ' || b == b'\t');
-            let (this, next) = match at {
-                Some(at) => (&rest[..at], skip_blanks(&rest[at.saturating_add(1)..])),
-                None => (rest, &rest[rest.len()..]),
+            let (this, next) = match at.and_then(|a| rest.split_at_checked(a)) {
+                // Drop the separator itself, then the run of blanks after it.
+                Some((head, tail)) => (head, skip_blanks(tail.get(1..).unwrap_or_default())),
+                None => (rest, &[][..]),
             };
             rest = next;
             decode_name(this)
@@ -595,7 +636,7 @@ fn skip_blanks(text: &[u8]) -> &[u8] {
         .iter()
         .position(|&b| b != b' ' && b != b'\t')
         .unwrap_or(text.len());
-    &text[at..]
+    text.get(at..).unwrap_or_default()
 }
 
 fn trim_end_blanks(text: &[u8]) -> &[u8] {
@@ -603,7 +644,7 @@ fn trim_end_blanks(text: &[u8]) -> &[u8] {
     while end > 0 && matches!(text.get(end.saturating_sub(1)), Some(b' ' | b'\t')) {
         end = end.saturating_sub(1);
     }
-    &text[..end]
+    text.get(..end).unwrap_or(text)
 }
 
 /// glibc's `decode_name`: the four escapes `getmntent` understands.
@@ -636,7 +677,10 @@ fn decode_name(buf: &[u8]) -> Vec<u8> {
                 i = i.saturating_add(2);
             }
             _ => {
-                out.push(buf[i]);
+                let Some(&b) = buf.get(i) else {
+                    break;
+                };
+                out.push(b);
                 i = i.saturating_add(1);
             }
         }
@@ -670,7 +714,10 @@ fn hasmntopt(opts: &[u8], opt: &[u8]) -> bool {
         };
         let skip = at.saturating_add(comma).saturating_add(1);
         base = base.saturating_add(skip);
-        rest = &rest[skip..];
+        let Some(next) = rest.get(skip..) else {
+            return false;
+        };
+        rest = next;
     }
     false
 }
@@ -885,7 +932,7 @@ fn parent_of(path: &[u8]) -> Option<Vec<u8>> {
     if at == 0 {
         Some(b"/".to_vec())
     } else {
-        Some(path[..at].to_vec())
+        Some(path.get(..at).unwrap_or_default().to_vec())
     }
 }
 
@@ -1150,7 +1197,10 @@ fn percent(v: &FieldValues) -> Option<f64> {
         && (sum < v.used) == v.negate_available
     {
         let u100 = v.used.saturating_mul(100);
-        let pct = u100 / sum + u64::from(!u100.is_multiple_of(sum));
+        // `sum != 0` is in the condition above; `NonZeroU64` carries it to
+        // the division instead of leaving it three lines away.
+        let sum_nz = NonZeroU64::new(sum)?;
+        let pct = (u100 / sum_nz).saturating_add(u64::from(!u100.is_multiple_of(sum)));
         return Some(pct as f64);
     }
     let u = if v.negate_used {
@@ -1191,10 +1241,13 @@ fn percent(v: &FieldValues) -> Option<f64> {
 /// hex-or-dash bytes) because being wrong costs a `canonicalize` call, not a
 /// wrong answer.
 fn has_uuid_suffix(s: &[u8]) -> bool {
-    s.len() > 36
-        && s[s.len() - 36..]
-            .iter()
-            .all(|b| *b == b'-' || b.is_ascii_hexdigit())
+    // `checked_sub` rather than `len() - 36` under a `len() > 36` guard:
+    // the suffix and the test that it exists become one operation.
+    s.len()
+        .checked_sub(36)
+        .filter(|_| s.len() > 36)
+        .and_then(|at| s.get(at..))
+        .is_some_and(|tail| tail.iter().all(|b| *b == b'-' || b.is_ascii_hexdigit()))
 }
 
 // ------------------------------------------------------------------- cells ---
@@ -1230,16 +1283,22 @@ fn replace_invalid_chars(cell: &[u8]) -> Vec<u8> {
     while let Some(mb) = next_mb(rest) {
         match mb {
             Mb::Char(c, n) if !c.is_control() => {
-                out.extend_from_slice(&rest[..n]);
-                rest = &rest[n..];
+                let Some((head, tail)) = rest.split_at_checked(n) else {
+                    break;
+                };
+                out.extend_from_slice(head);
+                rest = tail;
             }
             Mb::Char(_, n) => {
                 out.push(b'?');
-                rest = &rest[n..];
+                let Some(tail) = rest.get(n..) else {
+                    break;
+                };
+                rest = tail;
             }
             Mb::Invalid | Mb::Incomplete => {
                 out.push(b'?');
-                rest = &rest[1..];
+                rest = rest.get(1..).unwrap_or_default();
             }
         }
     }
@@ -1264,11 +1323,14 @@ fn mbswidth(cell: &[u8]) -> usize {
                 // gnulib's flags-of-zero path turns into 1 — except for a
                 // control character, which it counts as 0.
                 width = width.saturating_add(char_width(c).unwrap_or(usize::from(!c.is_control())));
-                rest = &rest[n..];
+                let Some(tail) = rest.get(n..) else {
+                    break;
+                };
+                rest = tail;
             }
             Mb::Invalid => {
                 width = width.saturating_add(1);
-                rest = &rest[1..];
+                rest = rest.get(1..).unwrap_or_default();
             }
             Mb::Incomplete => {
                 width = width.saturating_add(1);

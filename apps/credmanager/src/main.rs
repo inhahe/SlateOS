@@ -7339,7 +7339,10 @@ mod tests {
         state.clipboard.copy("hunter2", state.now);
         state.last_copied = Some("Password".to_string());
 
-        let first = state.clipboard.remaining(state.now).expect("holding nothing");
+        let first = state
+            .clipboard
+            .remaining(state.now)
+            .expect("holding nothing");
         let later = state
             .clipboard
             .remaining(state.now + 3)

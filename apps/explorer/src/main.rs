@@ -4388,8 +4388,14 @@ mod tests {
     fn a_running_copy_says_how_much_longer() {
         let line = line_for(125.0);
         assert!(line.contains("2m 5s left"), "{line:?}");
-        assert!(line.contains("holiday.png"), "the file is still named: {line:?}");
-        assert!(line.contains("3 of 9"), "the count is still there: {line:?}");
+        assert!(
+            line.contains("holiday.png"),
+            "the file is still named: {line:?}"
+        );
+        assert!(
+            line.contains("3 of 9"),
+            "the count is still there: {line:?}"
+        );
     }
 
     #[test]
@@ -4408,7 +4414,10 @@ mod tests {
     fn an_unknown_estimate_is_not_shown_as_zero() {
         let line = line_for(0.0);
         assert!(!line.contains("left"), "{line:?}");
-        assert!(line.contains("3 of 9"), "the rest of the line survives: {line:?}");
+        assert!(
+            line.contains("3 of 9"),
+            "the rest of the line survives: {line:?}"
+        );
     }
 
     /// Over a day is a number nobody acts on, and it is usually a throughput

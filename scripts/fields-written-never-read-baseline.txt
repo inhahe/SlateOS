@@ -126,6 +126,12 @@ apps/netmanager/src/main.rs:diagnostics_running
 # worse than the omission. This is the fifth disconnected clipboard --
 # see TD-C-FIVE-CLIPBOARDS-AND-NONE-OF-THEM-IS-CONNECTED.
 apps/remotedesktop/src/main.rs:content_size_bytes
+# TRIAGED 2026-09-14, REAL and in lane C's own tree, not blocked.
+#   Set on every mouse Move over the seek bar (`preview_at(event.x)`) and
+#   cleared on leave, so the player computes which timestamp the pointer
+#   is over, continuously, and draws nothing. Hovering a video scrubber
+#   shows no time. The hover tracking is complete -- press, move, leave --
+#   and entirely invisible.
 apps/videoplayer/src/main.rs:seek_preview_position
 # TRIAGED 2026-09-14 -- THE SETTINGS-PANEL GROUP, and this is a checklist
 # for the design-decisions 815 port rather than a list of things to wire
@@ -153,6 +159,18 @@ apps/videoplayer/src/main.rs:seek_preview_position
 #
 gui/desktop/src/backup_settings.rs:last_backup_timestamp
 gui/desktop/src/bluetooth.rs:discoverable
+# TRIAGED 2026-09-14, REAL, and the SECOND instance today of one pattern.
+#   `record_invocation` sets `loading_timeout = self.response_time_avg_ms >
+#   200.0`, and `is_slow()` twelve lines below returns
+#   `self.response_time_avg_ms > 200.0`. The same predicate, cached in one
+#   place and computed live in the other; only the live one is used.
+#
+#   `apps/contacts` has the identical shape (`member_count` cached,
+#   `group_stats` recomputed, only the recomputed one drawn). Two in one
+#   sweep makes it a pattern worth naming: a cached copy of a predicate
+#   that has to be refreshed by hand is the stale half of a pair waiting
+#   to happen, and this gate finds them because the cache is what nobody
+#   reads. Fix in both cases is a deletion, keeping the live computation.
 gui/desktop/src/context_ext.rs:loading_timeout
 gui/desktop/src/lib.rs:shortcut_message
 gui/desktop/src/sound_settings.rs:volume_override

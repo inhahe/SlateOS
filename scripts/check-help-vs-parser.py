@@ -258,7 +258,22 @@ def main():
     print("  files with help text: %d" % total)
     print("  files that advertise something unparsed: %d" % len(liars))
     n = sum(len(m) for _f, m in liars)
-    print("  options advertised but never read: %d" % n)
+    # "never PARSED", not "never read". `recognised()` asks whether the option
+    # reaches the parser at all; it says nothing about whether the field the
+    # parser writes is ever looked at again. Those are different defects and
+    # this gate only sees the first.
+    #
+    # The label used to read "never read", and a zero on that line invited
+    # exactly the wrong conclusion: on 2026-09-15 this sweep reported 0 while
+    # `lscpu` alone had FIVE options that were parsed, stored and read by
+    # nothing -- `-e`, `-p`, `--hex`, `--online`, `--offline`. Six more had
+    # been fixed across `patch`, `curl`, `tee`, `pstree` and `gdb` in the same
+    # session. The check was right and its summary line was not.
+    print("  options advertised but never parsed: %d" % n)
+    print(
+        "  (parsed-but-never-read is a different defect this gate cannot see:"
+        " check-fields-written-never-read.py --advertised)"
+    )
     for f, missing in liars[:40]:
         print("  %s" % f.replace(os.sep, "/"))
         for o, line, where in missing[:6]:

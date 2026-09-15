@@ -147910,3 +147910,37 @@ believing it costs" needs a judgement per row, and it gets at the same thing —
 a promise in `--help` is the program telling the user what to believe. The GUI
 analogue is not `--help` but the window itself, and by that measure all 63 here
 are advertised, which is why the ordering here has to be by consequence.
+
+**THE CHECK WORKED IMMEDIATELY, AND FOUND A BETTER INSTRUMENT.**
+
+Applying the rule above to my own day — grep for the other things the refuted
+rationale covered — turned up something the name sweep had no way to see.
+`apps/photomanager`'s `seeded_library` carried the comment *"so the first window
+is not an empty grid"*. That sentence is not unique to it:
+
+* `apps/videoplayer` — *"Sample content, so the first window is not an empty
+  black rectangle."*
+* `apps/devicemanager`, `apps/netmanager`, `apps/partmanager`,
+  `apps/remotedesktop`, `apps/sysinfo`, `apps/vpnmanager` — all six declare it
+  in their **module-level `//!` documentation**, in near-identical words:
+  *"…through Slate OS syscalls; stubbed with representative data for initial
+  development."*
+* `apps/netscan`, `apps/speedtest`, `apps/procexplorer`, `apps/rssreader`,
+  `apps/sysmonitor` carry the same admission in other forms. Ten apps in total.
+
+**This is a better detector than the one that found the 63**, and it is worth
+saying why rather than just switching to it. A name grep asks whether somebody
+*happened to name a function candidly*; this asks whether the file *declares
+itself stubbed*. The second is evidence rather than a hint — the code is
+stating the fact, not hinting at it — and it cannot be evaded by renaming a
+function, which was lane B's whole objection to the 63 being treated as a
+count.
+
+**And it is exactly the `patch -l` shape at application scale.** Every one of
+these declares the stub in a module doc that only a maintainer reads, while the
+window shows the data as though it were the machine's. `apps/sysinfo` is the
+one I would look at first on that basis: a system information tool is read
+precisely when someone wants to know what hardware they have.
+
+None of the ten are fixed. They are listed here so that the next sweep starts
+from the self-declarations rather than from the names.

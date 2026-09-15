@@ -1879,6 +1879,19 @@ impl CleanupUI {
         });
     }
 
+    /// When a file was last touched, in words.
+    ///
+    /// Days rather than a date, because the decision is "is this stale?" and a
+    /// date makes the reader do the subtraction. Zero is "today" rather than
+    /// "0 days", which reads as a missing value.
+    fn age_text(days: u32) -> String {
+        match days {
+            0 => String::from("today"),
+            1 => String::from("yesterday"),
+            d => format!("{d} days ago"),
+        }
+    }
+
     fn render_file_preview(&self, tree: &mut RenderTree, lay: &Layout) {
         let (width, height) = (lay.width(), lay.height());
         let Some(cat) = self.preview_category else {
@@ -1927,6 +1940,29 @@ impl CleanupUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.6),
+                    overflow: TextOverflow::Ellipsis,
+                });
+
+                // How long since anyone touched it.
+                //
+                // `enumerate_entries` has measured this for every item since
+                // the scanner was written, into a field nothing drew. Size
+                // says how much you get back; age is the only thing on the row
+                // that speaks to whether you *want* it back, and it is the
+                // whole basis of the scheduled-cleanup rule ("only items older
+                // than N days") that this program also carries.
+                //
+                // Deleting is irreversible here -- `remove_dir_all` -- so a
+                // list that shows what a file costs and hides what it is
+                // risking is the wrong way round.
+                tree.push(RenderCommand::Text {
+                    x: width - 230.0,
+                    y,
+                    text: Self::age_text(item.last_accessed_days),
+                    color: self.palette.subtext0,
+                    font_size: FONT_SIZE_SMALL,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(100.0),
                     overflow: TextOverflow::Ellipsis,
                 });
 
@@ -3253,6 +3289,45 @@ mod tests {
         ui.show_preview(CleanupCategory::TempFiles);
         let cmds = ui.render(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert!(!cmds.is_empty());
+    }
+
+    /// **The preview says how long since each file was touched.**
+    ///
+    /// The scanner has measured it for every item since it was written, into a
+    /// field nothing drew. Size says how much you get back; age is the only
+    /// thing on the row that speaks to whether you want it back -- and what
+    /// this program does with the answer is `remove_dir_all`.
+    #[test]
+    fn the_file_preview_says_how_old_each_file_is() {
+        let mut ui = CleanupUI::new();
+        ui.scanner.set_items(vec![
+            CleanupItem::new("/tmp/a", CleanupCategory::TempFiles)
+                .with_size(100)
+                .with_last_accessed_days(45),
+        ]);
+        ui.show_preview(CleanupCategory::TempFiles);
+
+        let cmds = ui.render(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let texts: Vec<String> = cmds
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "45 days ago"),
+            "the age never reached the screen: {texts:?}"
+        );
+    }
+
+    /// Zero days is "today", not "0 days ago", which reads as a missing value.
+    #[test]
+    fn an_age_reads_as_words_at_the_edges() {
+        assert_eq!(CleanupUI::age_text(0), "today");
+        assert_eq!(CleanupUI::age_text(1), "yesterday");
+        assert_eq!(CleanupUI::age_text(2), "2 days ago");
     }
 
     #[test]

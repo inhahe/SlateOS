@@ -803,23 +803,37 @@ impl SysMonitorState {
             && let Some(&proc_idx) = self.visible_indices.get(sel)
             && let Some(proc) = self.processes.get(proc_idx)
         {
-            let pid = proc.pid;
-            let name = proc.name.clone();
-            // In production: sys_process_kill(pid)
-            self.status_message = format!("Killed process {name} (PID {pid})");
-            self.processes.remove(proc_idx);
-            self.rebuild_visible_list();
+            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "killed");
         }
+    }
+
+    /// Why a signal cannot be sent, named for the process it was aimed at.
+    ///
+    /// Three controls here reported the act and then **made the report come
+    /// true in the display**: Kill said "Killed process X" and removed the
+    /// row, Stop said "Stopped X" and set the row to Stopped. The window then
+    /// agreed with its own claim, so nothing in it could tell the user
+    /// otherwise -- the process vanished from the list exactly as it would
+    /// have if it had died.
+    ///
+    /// Sending a signal needs `kill(2)`, which is stateful and so reachable
+    /// only through the C ABI per `design-decisions.md` §768. That makes it
+    /// `libcall`'s to expose, and `libcall` is not in this lane's tree; see
+    /// `requests/c-b-a-process-manager-needs-a-way-to-send-a-signal.md`.
+    /// `apps/procexplorer` carries the same function for the same reason --
+    /// two windows onto the same missing syscall, not one shared helper,
+    /// because they share no crate.
+    fn cannot_signal(name: &str, pid: u32, verb: &str) -> String {
+        format!("{name} (PID {pid}) was not {verb}: nothing here can signal a process yet")
     }
 
     /// Stop (pause) the selected process.
     pub fn stop_selected(&mut self) {
         if let Some(sel) = self.selected_index
             && let Some(&proc_idx) = self.visible_indices.get(sel)
-            && let Some(proc) = self.processes.get_mut(proc_idx)
+            && let Some(proc) = self.processes.get(proc_idx)
         {
-            proc.status = ProcessStatus::Stopped;
-            self.status_message = format!("Stopped {} (PID {})", proc.name, proc.pid);
+            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "stopped");
         }
     }
 
@@ -827,10 +841,9 @@ impl SysMonitorState {
     pub fn continue_selected(&mut self) {
         if let Some(sel) = self.selected_index
             && let Some(&proc_idx) = self.visible_indices.get(sel)
-            && let Some(proc) = self.processes.get_mut(proc_idx)
+            && let Some(proc) = self.processes.get(proc_idx)
         {
-            proc.status = ProcessStatus::Running;
-            self.status_message = format!("Resumed {} (PID {})", proc.name, proc.pid);
+            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "resumed");
         }
     }
 
@@ -1176,17 +1189,14 @@ impl SysMonitorState {
                         .get(idx)
                         .map(|p| p.name.clone())
                         .unwrap_or_default();
-                    self.processes.remove(idx);
-                    self.rebuild_visible_list();
-                    self.status_message = format!("Killed {name} (PID {target_pid})");
+                    self.status_message = Self::cannot_signal(&name, target_pid, "killed");
                 }
             }
             ContextAction::Stop => {
                 if let Some(idx) = proc_idx
-                    && let Some(proc) = self.processes.get_mut(idx)
+                    && let Some(proc) = self.processes.get(idx)
                 {
-                    proc.status = ProcessStatus::Stopped;
-                    self.status_message = format!("Stopped {} (PID {target_pid})", proc.name);
+                    self.status_message = Self::cannot_signal(&proc.name, target_pid, "stopped");
                 }
             }
             ContextAction::Continue => {
@@ -3886,14 +3896,31 @@ mod tests {
         assert_eq!(s.sort_direction, SortDirection::Descending);
     }
 
+    /// Kill neither happens nor is claimed.
+    ///
+    /// This test used to read `assert_eq!(s.processes.len(), initial - 1)`.
+    /// **It pinned the fabrication**: the row was removed so the window would
+    /// agree with a status line saying "Killed process X", and the assertion
+    /// held that agreement in place. A test over a claim nothing performs
+    /// makes the defect look deliberate and protects it from being noticed.
     #[test]
     fn test_kill_selected() {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         let initial = s.processes.len();
+        assert!(initial > 0, "control: the fixture must hold processes");
         s.selected_index = Some(0);
         s.kill_selected();
-        assert_eq!(s.processes.len(), initial - 1);
+        assert_eq!(
+            s.processes.len(),
+            initial,
+            "the row was removed, which is what made the false claim consistent"
+        );
+        assert!(
+            s.status_message.contains("not killed"),
+            "should say what did not happen: {}",
+            s.status_message
+        );
     }
 
     #[test]
@@ -3901,11 +3928,18 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.selected_index = Some(0);
-        s.stop_selected();
         let proc_idx = s.visible_indices.first().copied().unwrap_or(0);
+        let was = s.processes.get(proc_idx).map(|p| p.status);
+        s.stop_selected();
         assert_eq!(
             s.processes.get(proc_idx).map(|p| p.status),
-            Some(ProcessStatus::Stopped)
+            was,
+            "the row was set to Stopped to match a claim nothing performed"
+        );
+        assert!(
+            s.status_message.contains("not stopped"),
+            "{}",
+            s.status_message
         );
     }
 
@@ -3914,12 +3948,27 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.selected_index = Some(0);
+        let proc_idx = s.visible_indices.first().copied().unwrap_or(0);
+        let was = s.processes.get(proc_idx).map(|p| p.status);
+        assert_eq!(
+            was,
+            Some(ProcessStatus::Running),
+            "control: the fixture's first process"
+        );
+
         s.stop_selected();
         s.continue_selected();
-        let proc_idx = s.visible_indices.first().copied().unwrap_or(0);
-        assert_eq!(
-            s.processes.get(proc_idx).map(|p| p.status),
-            Some(ProcessStatus::Running)
+
+        // This asserted `Some(Running)` after a stop-then-continue round trip.
+        // Once `stop_selected` no longer edits the row, that assertion held
+        // for a reason unrelated to what it tested: the demo's first process
+        // is Running to begin with, so it would have passed against two
+        // methods that did nothing at all.
+        assert_eq!(s.processes.get(proc_idx).map(|p| p.status), was);
+        assert!(
+            s.status_message.contains("not resumed"),
+            "{}",
+            s.status_message
         );
     }
 
@@ -4307,7 +4356,16 @@ mod tests {
         let initial = s.processes.len();
         let pid = s.processes.first().map(|p| p.pid).unwrap_or(0);
         s.execute_context_action(ContextAction::Kill, pid);
-        assert_eq!(s.processes.len(), initial - 1);
+        assert_eq!(
+            s.processes.len(),
+            initial,
+            "the context menu removed the row for a kill it did not perform"
+        );
+        assert!(
+            s.status_message.contains("not killed"),
+            "{}",
+            s.status_message
+        );
     }
 
     #[test]

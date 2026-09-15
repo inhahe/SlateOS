@@ -65,7 +65,7 @@
 #   `last_copied` (credmanager): FIXED 2026-09-14 -- the toolbar now says
 #   what was copied and counts down to the clipboard wipe.
 apps/archivemanager/src/main.rs:test_results
-# TRIAGED 2026-09-14, REAL, and the fix is a DELETION rather than a wire.
+# FIXED 2026-09-14 by deletion. Kept for the reasoning:
 #   `Store::refresh_group_counts` walks every contact to fill
 #   `group.member_count`, and it is called in production (once). Nothing
 #   reads it. The number the user sees comes from `Store::group_stats`,
@@ -83,7 +83,6 @@ apps/archivemanager/src/main.rs:test_results
 #   `group_stats`, which is always fresh and is the one already drawn. A
 #   cached count that has to be refreshed by hand is the stale half of a
 #   pair waiting to happen.
-apps/contacts/src/main.rs:member_count
 # TRIAGED 2026-09-14, SOUND. `affected_rows` duplicates a count that the
 # `message` field beside it already states in words -- every producer sets
 # both, as `QueryResult::success(&format!("{n} row(s) updated"))` with

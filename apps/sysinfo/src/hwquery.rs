@@ -1901,6 +1901,97 @@ mod tests {
 
     // -- CPU feature parsing --
 
+    // -- The /sys/devices reader --
+    //
+    // Three parsers were added with the reader and none of them had a test
+    // until this block. That is the gap worth naming: the rewrite deleted
+    // three tests for a format the tree no longer uses and added nothing, so
+    // for one commit the file had fewer tests and more untested code.
+
+    #[test]
+    fn a_cpu_range_counts_what_it_names() {
+        assert_eq!(SyscallProvider::count_range("0-7"), Some(8));
+        assert_eq!(SyscallProvider::count_range("0"), Some(1));
+        assert_eq!(SyscallProvider::count_range("0,2-3"), Some(3));
+        assert_eq!(SyscallProvider::count_range("0-0"), Some(1));
+        // Whitespace is real: these files end in a newline, and `read_scalar`
+        // trims the ends but not between the commas.
+        assert_eq!(SyscallProvider::count_range("0-3, 6-7"), Some(6));
+    }
+
+    /// An unreadable range is `None`, never a count.
+    ///
+    /// The distinction this is pinning: a machine with no CPUs is not a
+    /// possible answer, so a zero could only ever mean the parse failed. If
+    /// this returned 0 or 1 on nonsense, `query_cpu` would report a
+    /// single-core machine to anyone whose `present` file was malformed, and
+    /// nothing anywhere would say so.
+    #[test]
+    fn an_unreadable_cpu_range_is_absent_rather_than_a_count() {
+        assert_eq!(SyscallProvider::count_range(""), None);
+        assert_eq!(SyscallProvider::count_range("garbage"), None);
+        assert_eq!(SyscallProvider::count_range("3-1"), None);
+        assert_eq!(SyscallProvider::count_range("0-"), None);
+        assert_eq!(SyscallProvider::count_range("-7"), None);
+    }
+
+    /// Cache sizes carry their unit, and dropping it is a 1024x error.
+    #[test]
+    fn a_cache_size_is_read_with_its_suffix() {
+        assert_eq!(SyscallProvider::parse_cache_size_kb("32K"), Some(32));
+        assert_eq!(SyscallProvider::parse_cache_size_kb("32k"), Some(32));
+        assert_eq!(SyscallProvider::parse_cache_size_kb("8M"), Some(8192));
+        assert_eq!(SyscallProvider::parse_cache_size_kb("8m"), Some(8192));
+        // Linux writes the suffix; a bare number is already KiB by convention.
+        assert_eq!(SyscallProvider::parse_cache_size_kb("512"), Some(512));
+        assert_eq!(SyscallProvider::parse_cache_size_kb(" 256K "), Some(256));
+        assert_eq!(SyscallProvider::parse_cache_size_kb(""), None);
+        assert_eq!(SyscallProvider::parse_cache_size_kb("K"), None);
+        assert_eq!(SyscallProvider::parse_cache_size_kb("big"), None);
+    }
+
+    /// With no tree to read, the provider reports nothing rather than a
+    /// machine.
+    ///
+    /// This is the whole point of the change and it is testable *here*,
+    /// today, because `/sys/devices/system/cpu` does not exist on the host
+    /// this suite runs on — the same reason it does not exist on Slate OS
+    /// until lane A's producer lands. A `CpuInfo` full of zeroes would pass a
+    /// test asserting the call succeeded, which is what the deleted
+    /// `FallbackProvider` arranged and what its own test asserted.
+    #[test]
+    fn no_tree_means_no_reading_rather_than_an_empty_machine() {
+        let provider = SyscallProvider::new();
+        let cpu = provider.query_cpu();
+        assert!(
+            matches!(cpu, Err(HwQueryError::NotAvailable { .. })),
+            "expected NotAvailable with no /sys/devices, got {cpu:?}"
+        );
+        let memory = provider.query_memory();
+        assert!(
+            matches!(memory, Err(HwQueryError::NotAvailable { .. })),
+            "expected NotAvailable with no /sys/devices, got {memory:?}"
+        );
+    }
+
+    /// The error says which path it could not read.
+    ///
+    /// Not decoration: the window renders this path, so a user who sees
+    /// "Not available" can tell a missing kernel feature from a permissions
+    /// problem, and whoever implements the producer is told exactly what was
+    /// asked for.
+    #[test]
+    fn an_absence_names_the_path_it_could_not_read() {
+        let provider = SyscallProvider::new();
+        let Err(HwQueryError::NotAvailable { path }) = provider.query_cpu() else {
+            panic!("expected NotAvailable");
+        };
+        assert!(
+            path.contains("/sys/devices/system/cpu/cpuid/"),
+            "the error names {path:?}, which does not say what was asked for"
+        );
+    }
+
     // -- Key-value file parsing --
 
     #[test]

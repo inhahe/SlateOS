@@ -203,7 +203,18 @@ pub fn trace(
 /// Send a single traceroute probe and wait for a reply.
 fn send_probe(dst: Ipv4Addr, ttl: u8, timeout_polls: u32) -> ProbeResult {
     let seq = icmp::next_trace_seq();
-    let pkt = icmp::build_trace_echo_request(seq);
+    // Same failure shape the send path below already uses, reused rather than
+    // invented: a probe that could not be built is a probe that did not fly.
+    // Nothing is recorded for correlation either, since the early return is
+    // above `record_trace_probe` -- so no stale probe is left waiting.
+    let Ok(pkt) = icmp::build_trace_echo_request(seq) else {
+        return ProbeResult {
+            rtt_ns: 0,
+            addr: Ipv4Addr::UNSPECIFIED,
+            received: false,
+            reached_dst: false,
+        };
+    };
 
     // Record the probe for correlation.
     icmp::record_trace_probe(seq, ttl);
@@ -819,7 +830,7 @@ fn self_test_inner() -> KernelResult<()> {
     // --- Test 6: ICMP trace echo request construction ---
     {
         let seq = 42u16;
-        let pkt = icmp::build_trace_echo_request(seq);
+        let pkt = icmp::build_trace_echo_request(seq)?;
 
         // Type = 8 (Echo Request).
         assert!(*pkt.first().unwrap_or(&0) == 8, "type");

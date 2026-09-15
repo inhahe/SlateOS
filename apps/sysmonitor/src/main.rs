@@ -560,6 +560,12 @@ pub struct SysMonitorState {
 
     // -- Status --
     pub status_message: String,
+    /// Whether the last refresh could not read `/proc` at all.
+    ///
+    /// Shown rather than papered over. A system monitor that cannot see the
+    /// system must say so: the alternative is a window that looks exactly like
+    /// a working one, which is what this was until 2026-09-15.
+    pub proc_unreadable: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -619,6 +625,7 @@ impl SysMonitorState {
             refresh_interval: RefreshInterval::TwoSeconds,
             ms_since_refresh: 0,
             status_message: String::new(),
+            proc_unreadable: false,
         }
     }
 
@@ -626,11 +633,121 @@ impl SysMonitorState {
     // Data refresh
     // ========================================================================
 
-    /// Refresh all data from the OS.
+    /// A `/proc` state letter as this window's own status.
     ///
-    /// In production this calls `Slate OS` syscalls. The data vectors
-    /// are populated externally or via `load_demo_data()` for testing.
+    /// `D` -- uninterruptible sleep -- maps to `Sleeping` rather than gaining
+    /// a variant: to a user it is a process that is not running and cannot be
+    /// stopped, which is what `Sleeping` already means here. `T` and `t` are
+    /// both stopped, one by a signal and one by a debugger. The same mapping
+    /// `apps/procexplorer` makes, because it is a property of `/proc` rather
+    /// than of either window.
+    fn status_from_proc(state: u8) -> ProcessStatus {
+        match state {
+            b'R' => ProcessStatus::Running,
+            b'S' | b'D' => ProcessStatus::Sleeping,
+            b'T' | b't' => ProcessStatus::Stopped,
+            b'Z' => ProcessStatus::Zombie,
+            _ => ProcessStatus::Idle,
+        }
+    }
+
+    /// Every process `/proc` will admit to, or `None` if it cannot be read.
+    ///
+    /// Split out so a test can point it at a directory of fixture files with
+    /// `ProcFs::at`, which is the only way to test this without the machine's
+    /// own process list -- a list that changes between the two lines of an
+    /// assertion.
+    ///
+    /// `boot_uptime` is the system's uptime in seconds, needed because a
+    /// process's own age is *system uptime minus its start time*; `/proc` does
+    /// not publish the age directly.
+    fn read_processes(fs: &procinfo::ProcFs, boot_uptime: u64) -> Option<Vec<ProcessInfo>> {
+        let pids = fs.process_ids().ok()?;
+        let mut out = Vec::with_capacity(pids.len());
+        for pid in pids {
+            // A process that exits between the directory listing and the read
+            // is the normal case, not an error: racing with the thing being
+            // measured is what a process list *is*.
+            let Ok(Some(stat)) = fs.process_stat(pid) else {
+                continue;
+            };
+            let started_secs = stat.starttime_ticks / procinfo::TICKS_PER_SEC;
+            out.push(ProcessInfo {
+                pid: u32::try_from(stat.pid).unwrap_or(u32::MAX),
+                name: String::from_utf8_lossy(&stat.comm).into_owned(),
+                status: Self::status_from_proc(stat.state),
+                // Left at zero deliberately: a percentage needs two samples of
+                // the counter and this is one. Inventing a number here is the
+                // mistake this whole function exists to undo.
+                cpu_percent: 0.0,
+                memory_bytes: stat.rss_kib().saturating_mul(1024),
+                thread_count: u32::try_from(stat.num_threads).unwrap_or(0),
+                uptime_secs: boot_uptime.saturating_sub(started_secs),
+            });
+        }
+        Some(out)
+    }
+
+    /// Read the machine's own totals from the same `/proc`.
+    ///
+    /// Each field is left at its previous value when the kernel does not
+    /// publish it, rather than zeroed: `MemInfo`'s fields are individually
+    /// optional, and a zero drawn in a bar chart is a measurement of nothing
+    /// that reads as a measurement of zero.
+    fn read_system(&mut self, fs: &procinfo::ProcFs) {
+        if let Ok(Some(mem)) = fs.memory() {
+            let kib = |v: Option<u64>| v.unwrap_or(0).saturating_mul(1024);
+            self.system_info.total_memory = kib(mem.total_kib);
+            self.system_info.free_memory = kib(mem.free_kib);
+            self.system_info.cached_memory = kib(mem.cached_kib);
+            self.system_info.buffers = kib(mem.buffers_kib);
+            self.system_info.used_memory = mem.used_kib().unwrap_or(0).saturating_mul(1024);
+            self.system_info.swap_total = kib(mem.swap_total_kib);
+            self.system_info.swap_used = mem.swap_used_kib().unwrap_or(0).saturating_mul(1024);
+        }
+        if let Ok(Some(load)) = fs.load_average() {
+            self.system_info.load_avg = [load.one as f32, load.five as f32, load.fifteen as f32];
+        }
+        if let Ok(Some(up)) = fs.uptime() {
+            self.system_info.uptime_secs = up.up.as_secs();
+        }
+        if let Ok(Some(cpu)) = fs.cpu()
+            && let Some(model) = cpu.model
+        {
+            self.system_info.cpu_model = String::from_utf8_lossy(&model).into_owned();
+        }
+        if let Ok(Some(name)) = fs.hostname() {
+            self.system_info.hostname = String::from_utf8_lossy(&name).trim().to_string();
+        }
+        if let Ok(Some(version)) = fs.version() {
+            // `/proc/version` is one long sentence; the kernel release is its
+            // third word. Taking the whole line would fill a field the layout
+            // gives twenty characters to.
+            let text = String::from_utf8_lossy(&version).into_owned();
+            if let Some(release) = text.split_whitespace().nth(2) {
+                self.system_info.kernel_version = release.to_string();
+            }
+        }
+    }
+
+    /// Re-read the machine: its processes, and its memory, load and uptime.
+    ///
+    /// The comment here said "in production this calls Slate OS syscalls. The
+    /// data vectors are populated externally or via `load_demo_data()` for
+    /// testing". Both halves were true and together they meant the window
+    /// showed an invented machine on every host: `main` called
+    /// `load_demo_data` and `refresh` read nothing at all.
     pub fn refresh(&mut self) {
+        let fs = procinfo::ProcFs::new();
+        // Read first: a process's age is derived from it.
+        self.read_system(&fs);
+        if let Some(processes) = Self::read_processes(&fs, self.system_info.uptime_secs) {
+            self.processes = processes;
+            self.proc_unreadable = false;
+        } else {
+            self.proc_unreadable = true;
+        }
+
         self.rebuild_visible_list();
         self.update_histories();
         self.check_alerts();
@@ -775,6 +892,15 @@ impl SysMonitorState {
 
     /// Update status bar text.
     fn update_status(&mut self) {
+        if self.proc_unreadable && self.processes.is_empty() {
+            self.status_message = format!(
+                "Cannot read {} -- nothing here is a measurement of this machine",
+                procinfo::ProcFs::new().root().display()
+            );
+            self.system_info.process_count = 0;
+            self.system_info.running_count = 0;
+            return;
+        }
         let total = self.processes.len();
         let running = self
             .processes
@@ -803,23 +929,37 @@ impl SysMonitorState {
             && let Some(&proc_idx) = self.visible_indices.get(sel)
             && let Some(proc) = self.processes.get(proc_idx)
         {
-            let pid = proc.pid;
-            let name = proc.name.clone();
-            // In production: sys_process_kill(pid)
-            self.status_message = format!("Killed process {name} (PID {pid})");
-            self.processes.remove(proc_idx);
-            self.rebuild_visible_list();
+            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "killed");
         }
+    }
+
+    /// Why a signal cannot be sent, named for the process it was aimed at.
+    ///
+    /// Three controls here reported the act and then **made the report come
+    /// true in the display**: Kill said "Killed process X" and removed the
+    /// row, Stop said "Stopped X" and set the row to Stopped. The window then
+    /// agreed with its own claim, so nothing in it could tell the user
+    /// otherwise -- the process vanished from the list exactly as it would
+    /// have if it had died.
+    ///
+    /// Sending a signal needs `kill(2)`, which is stateful and so reachable
+    /// only through the C ABI per `design-decisions.md` §768. That makes it
+    /// `libcall`'s to expose, and `libcall` is not in this lane's tree; see
+    /// `requests/c-b-a-process-manager-needs-a-way-to-send-a-signal.md`.
+    /// `apps/procexplorer` carries the same function for the same reason --
+    /// two windows onto the same missing syscall, not one shared helper,
+    /// because they share no crate.
+    fn cannot_signal(name: &str, pid: u32, verb: &str) -> String {
+        format!("{name} (PID {pid}) was not {verb}: nothing here can signal a process yet")
     }
 
     /// Stop (pause) the selected process.
     pub fn stop_selected(&mut self) {
         if let Some(sel) = self.selected_index
             && let Some(&proc_idx) = self.visible_indices.get(sel)
-            && let Some(proc) = self.processes.get_mut(proc_idx)
+            && let Some(proc) = self.processes.get(proc_idx)
         {
-            proc.status = ProcessStatus::Stopped;
-            self.status_message = format!("Stopped {} (PID {})", proc.name, proc.pid);
+            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "stopped");
         }
     }
 
@@ -827,10 +967,9 @@ impl SysMonitorState {
     pub fn continue_selected(&mut self) {
         if let Some(sel) = self.selected_index
             && let Some(&proc_idx) = self.visible_indices.get(sel)
-            && let Some(proc) = self.processes.get_mut(proc_idx)
+            && let Some(proc) = self.processes.get(proc_idx)
         {
-            proc.status = ProcessStatus::Running;
-            self.status_message = format!("Resumed {} (PID {})", proc.name, proc.pid);
+            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "resumed");
         }
     }
 
@@ -1176,17 +1315,14 @@ impl SysMonitorState {
                         .get(idx)
                         .map(|p| p.name.clone())
                         .unwrap_or_default();
-                    self.processes.remove(idx);
-                    self.rebuild_visible_list();
-                    self.status_message = format!("Killed {name} (PID {target_pid})");
+                    self.status_message = Self::cannot_signal(&name, target_pid, "killed");
                 }
             }
             ContextAction::Stop => {
                 if let Some(idx) = proc_idx
-                    && let Some(proc) = self.processes.get_mut(idx)
+                    && let Some(proc) = self.processes.get(idx)
                 {
-                    proc.status = ProcessStatus::Stopped;
-                    self.status_message = format!("Stopped {} (PID {target_pid})", proc.name);
+                    self.status_message = Self::cannot_signal(&proc.name, target_pid, "stopped");
                 }
             }
             ContextAction::Continue => {
@@ -2805,6 +2941,12 @@ impl SysMonitorState {
     // ========================================================================
 
     /// Populate with sample data for UI testing.
+    /// Fill the window with an invented machine. **Tests only.**
+    ///
+    /// This ran at startup until 2026-09-15. Besides fifteen processes it set
+    /// the memory totals, the CPU percentage and the load averages -- an
+    /// entire plausible machine, none of it this one.
+    #[cfg(test)]
     pub fn load_demo_data(&mut self) {
         self.system_info = SystemInfo {
             hostname: "slateos-desktop".to_string(),
@@ -3186,6 +3328,8 @@ fn render_dashed_hline(tree: &mut RenderTree, x: f32, y: f32, total_w: f32, colo
 // ============================================================================
 
 /// Create a demo `ProcessInfo`.
+/// Build one invented process. **Tests only**; see `load_demo_data`.
+#[cfg(test)]
 fn make_demo_process(
     pid: u32,
     name: &str,
@@ -3303,10 +3447,10 @@ impl App for SysMonitorState {
 
 fn main() -> ExitCode {
     let mut monitor = SysMonitorState::new();
-    // Until a real process source exists this is what there is to show. It is
-    // loaded here rather than in `new` so that the moment a source arrives,
-    // this is the one line that changes.
-    monitor.load_demo_data();
+    // The comment that stood here said "until a real process source exists
+    // this is what there is to show ... the moment a source arrives, this is
+    // the one line that changes". `procinfo` is that source and this is that
+    // line.
     monitor.refresh();
     app::launch("sysmonitor", &mut monitor)
 }
@@ -3317,7 +3461,17 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+    // `float_cmp` because the figures asserted below are parsed from a fixture
+    // this test wrote: "0.50" becomes exactly 0.5, and an epsilon comparison
+    // would assert something weaker than the equality that actually holds.
+    // The rest are the usual three -- a test that panics loudly is pointing at
+    // the line that failed, which is the diagnosis.
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::float_cmp
+    )]
 
     // ------------------------------------------------------------------
     // The clock
@@ -3886,14 +4040,155 @@ mod tests {
         assert_eq!(s.sort_direction, SortDirection::Descending);
     }
 
+    /// Kill neither happens nor is claimed.
+    ///
+    /// This test used to read `assert_eq!(s.processes.len(), initial - 1)`.
+    /// **It pinned the fabrication**: the row was removed so the window would
+    /// agree with a status line saying "Killed process X", and the assertion
+    /// held that agreement in place. A test over a claim nothing performs
+    /// makes the defect look deliberate and protects it from being noticed.
+    /// The window reads the processes `/proc` has.
+    ///
+    /// Against a fixture directory rather than the machine's own `/proc`: a
+    /// real process list changes between the two lines of an assertion.
+    /// `ProcFs::at` exists for exactly this.
+    #[test]
+    fn the_monitor_reads_the_processes_proc_has() {
+        let dir = std::env::temp_dir().join(format!(
+            "sysmonitor-proc-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("41")).unwrap();
+        std::fs::create_dir_all(dir.join("42")).unwrap();
+
+        // 41: running, 300 resident pages, 8 threads, started 900 ticks after
+        // boot. 42 has a directory and no `stat` -- a process that exited
+        // while the list was being walked.
+        std::fs::write(
+            dir.join("41/stat"),
+            b"41 (shell) R 1 41 41 0 -1 0 0 0 0 0 200 50 0 0 20 0 8 0 900 \
+              4096000 300 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+        )
+        .unwrap();
+
+        let fs = procinfo::ProcFs::at(&dir);
+        let found = SysMonitorState::read_processes(&fs, 1000).expect("readable");
+
+        assert_eq!(
+            found.len(),
+            1,
+            "the half-gone process is skipped, not fatal"
+        );
+        let p = found.first().expect("one process");
+        assert_eq!(p.pid, 41);
+        assert_eq!(p.name, "shell");
+        assert_eq!(p.status, ProcessStatus::Running);
+        assert_eq!(p.thread_count, 8);
+        assert_eq!(
+            p.memory_bytes,
+            300 * procinfo::PAGE_SIZE_KIB * 1024,
+            "resident pages become bytes through the shared page size"
+        );
+        assert_eq!(
+            p.uptime_secs, 991,
+            "a process's age is the system's uptime less its start time"
+        );
+        assert_eq!(
+            p.cpu_percent, 0.0,
+            "a percentage needs two samples; this is one"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Memory, load, uptime and the machine's names are read, not invented.
+    #[test]
+    fn the_system_figures_are_read_and_not_invented() {
+        let dir =
+            std::env::temp_dir().join(format!("sysmonitor-sys-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meminfo"),
+            b"MemTotal:       2048 kB\nMemFree:         512 kB\nCached:          256 kB\n\
+              Buffers:         128 kB\nSwapTotal:      1024 kB\nSwapFree:        768 kB\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("loadavg"), b"0.50 0.25 0.10 1/99 1234\n").unwrap();
+        std::fs::write(dir.join("uptime"), b"1234.50 5678.00\n").unwrap();
+        // `/proc/sys/kernel/hostname`, not `/proc/hostname`. The first
+        // fixture wrote the latter and this test caught it -- which is
+        // what a fixture that asserts a value is for.
+        std::fs::create_dir_all(dir.join("sys/kernel")).unwrap();
+        std::fs::write(dir.join("sys/kernel/hostname"), b"slate-test\n").unwrap();
+        std::fs::write(dir.join("version"), b"Linux version 6.9.1-slate (gcc)\n").unwrap();
+
+        let mut s = SysMonitorState::new();
+        s.read_system(&procinfo::ProcFs::at(&dir));
+
+        assert_eq!(s.system_info.total_memory, 2048 * 1024);
+        assert_eq!(s.system_info.free_memory, 512 * 1024);
+        assert_eq!(s.system_info.cached_memory, 256 * 1024);
+        assert_eq!(s.system_info.buffers, 128 * 1024);
+        assert_eq!(s.system_info.swap_used, (1024 - 768) * 1024);
+        assert_eq!(s.system_info.load_avg, [0.5, 0.25, 0.10]);
+        assert_eq!(s.system_info.uptime_secs, 1234);
+        assert_eq!(s.system_info.hostname, "slate-test");
+        assert_eq!(
+            s.system_info.kernel_version, "6.9.1-slate",
+            "the release is the third word of /proc/version, not the whole line"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no `/proc` to read, the window says so rather than inventing one.
+    #[test]
+    fn an_unreadable_proc_is_reported_and_not_filled_in() {
+        let mut s = SysMonitorState::new();
+        let dir = std::env::temp_dir().join(format!(
+            "sysmonitor-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            SysMonitorState::read_processes(&procinfo::ProcFs::at(&dir), 0).is_none(),
+            "control: the fixture directory must not be readable as a /proc"
+        );
+
+        s.proc_unreadable = true;
+        s.update_status();
+
+        assert!(s.processes.is_empty(), "invented a process list");
+        assert_eq!(s.system_info.total_memory, 0, "invented a memory size");
+        assert!(
+            s.status_message.contains("Cannot read"),
+            "should say it cannot read: {}",
+            s.status_message
+        );
+    }
+
     #[test]
     fn test_kill_selected() {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         let initial = s.processes.len();
+        assert!(initial > 0, "control: the fixture must hold processes");
         s.selected_index = Some(0);
         s.kill_selected();
-        assert_eq!(s.processes.len(), initial - 1);
+        assert_eq!(
+            s.processes.len(),
+            initial,
+            "the row was removed, which is what made the false claim consistent"
+        );
+        assert!(
+            s.status_message.contains("not killed"),
+            "should say what did not happen: {}",
+            s.status_message
+        );
     }
 
     #[test]
@@ -3901,11 +4196,18 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.selected_index = Some(0);
-        s.stop_selected();
         let proc_idx = s.visible_indices.first().copied().unwrap_or(0);
+        let was = s.processes.get(proc_idx).map(|p| p.status);
+        s.stop_selected();
         assert_eq!(
             s.processes.get(proc_idx).map(|p| p.status),
-            Some(ProcessStatus::Stopped)
+            was,
+            "the row was set to Stopped to match a claim nothing performed"
+        );
+        assert!(
+            s.status_message.contains("not stopped"),
+            "{}",
+            s.status_message
         );
     }
 
@@ -3914,12 +4216,27 @@ mod tests {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.selected_index = Some(0);
+        let proc_idx = s.visible_indices.first().copied().unwrap_or(0);
+        let was = s.processes.get(proc_idx).map(|p| p.status);
+        assert_eq!(
+            was,
+            Some(ProcessStatus::Running),
+            "control: the fixture's first process"
+        );
+
         s.stop_selected();
         s.continue_selected();
-        let proc_idx = s.visible_indices.first().copied().unwrap_or(0);
-        assert_eq!(
-            s.processes.get(proc_idx).map(|p| p.status),
-            Some(ProcessStatus::Running)
+
+        // This asserted `Some(Running)` after a stop-then-continue round trip.
+        // Once `stop_selected` no longer edits the row, that assertion held
+        // for a reason unrelated to what it tested: the demo's first process
+        // is Running to begin with, so it would have passed against two
+        // methods that did nothing at all.
+        assert_eq!(s.processes.get(proc_idx).map(|p| p.status), was);
+        assert!(
+            s.status_message.contains("not resumed"),
+            "{}",
+            s.status_message
         );
     }
 
@@ -4307,7 +4624,16 @@ mod tests {
         let initial = s.processes.len();
         let pid = s.processes.first().map(|p| p.pid).unwrap_or(0);
         s.execute_context_action(ContextAction::Kill, pid);
-        assert_eq!(s.processes.len(), initial - 1);
+        assert_eq!(
+            s.processes.len(),
+            initial,
+            "the context menu removed the row for a kill it did not perform"
+        );
+        assert!(
+            s.status_message.contains("not killed"),
+            "{}",
+            s.status_message
+        );
     }
 
     #[test]

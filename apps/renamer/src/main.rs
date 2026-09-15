@@ -37,6 +37,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
+use guitk::dialog::{FileDialog, FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -44,6 +45,8 @@ use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -367,10 +370,24 @@ enum ExtensionOp {
 /// A file entry in the rename list.
 #[derive(Debug, Clone)]
 struct FileEntry {
-    /// Original full path.
-    original_path: String,
-    /// Original filename (without path).
+    /// The name on disk, as the filesystem gave it.
+    ///
+    /// This is the key, and `original_name` is the text. Slate OS paths admit
+    /// every byte but `/` and NUL, so a name is not text: decoding it to UTF-8
+    /// is lossy and a lossy name is a *different* name. The full path is
+    /// `folder.join(raw_name)` -- derived, never stored, so there is one
+    /// statement of where a file is.
+    raw_name: OsString,
+    /// Original filename as text, for the rules and the display.
     original_name: String,
+    /// Whether this file's name survives the trip through `String`.
+    ///
+    /// Every rename rule reads text and writes text, so a name that is not
+    /// valid UTF-8 has no text form a rule could transform -- and renaming it
+    /// from a lossy one would write a name **nobody asked for** to the disk.
+    /// Such a file is listed, so the user can see it is there, and excluded
+    /// from every rename.
+    renameable: bool,
     /// New filename after all operations.
     new_name: String,
     /// File size in bytes.
@@ -391,7 +408,17 @@ struct FileEntry {
 }
 
 impl FileEntry {
-    fn new(path: &str, name: &str, size: u64, modified_ms: u64) -> Self {
+    /// **Tests only.** Production entries come from a directory listing, where
+    /// the name arrives as an `OsStr` and may not be text at all.
+    #[cfg(test)]
+    fn new(name: &str, size: u64, modified_ms: u64) -> Self {
+        Self::from_os_name(OsStr::new(name), size, modified_ms)
+    }
+
+    /// From a name as the filesystem gave it.
+    fn from_os_name(raw: &OsStr, size: u64, modified_ms: u64) -> Self {
+        let renameable = raw.to_str().is_some();
+        let name = raw.to_string_lossy().into_owned();
         // An extension is what follows the *last* dot, and only when there is
         // something before that dot. `rsplit('.').next()` does not say that:
         // the `len() < name.len()` guard it was paired with rejects a dotless
@@ -400,16 +427,21 @@ impl FileEntry {
         // swept up by a `bashrc` extension filter alongside real `x.bashrc`
         // files.
         let extension = name
+            .as_str()
             .rsplit_once('.')
             .filter(|(stem, _)| !stem.is_empty())
             .map_or("", |(_, ext)| ext)
             .to_string();
         Self {
-            original_path: path.to_string(),
-            original_name: name.to_string(),
-            new_name: name.to_string(),
+            raw_name: raw.to_os_string(),
+            original_name: name.clone(),
+            new_name: name,
+            renameable,
             size,
-            selected: true,
+            // A file whose name is not text cannot be renamed, so it does not
+            // start out ticked -- a Rename that silently skips half a ticked
+            // list is the same defect as one that claims to have renamed it.
+            selected: renameable,
             conflict: false,
             extension,
             modified_ms,
@@ -532,32 +564,6 @@ fn unused_temp_name(occupied: &BTreeSet<String>, counter: &mut usize) -> String 
         if !occupied.contains(&name) {
             return name;
         }
-    }
-}
-
-/// `path` with its last component replaced by `new_name`.
-///
-/// Structural, not textual: the directory part is whatever precedes the final
-/// separator, and only that final component is replaced. A substring
-/// `replace` would rewrite matching *directory* names too, which is how
-/// renaming `photos/photos.jpg` turns into `holiday.jpg/holiday.jpg`.
-///
-/// Slate OS uses `/`; `\` is accepted as well so a path picked up from a host
-/// filesystem during development does not silently become a single filename
-/// with backslashes in it.
-fn replace_file_name(path: &str, new_name: &str) -> String {
-    match path.rfind(['/', '\\']) {
-        // `sep + 1` is a byte index just past an ASCII separator, so it is
-        // always a char boundary.
-        Some(sep) => {
-            let mut out =
-                String::with_capacity(sep.saturating_add(1).saturating_add(new_name.len()));
-            out.push_str(&path[..=sep]);
-            out.push_str(new_name);
-            out
-        }
-        // A bare filename with no directory part is entirely the name.
-        None => new_name.to_string(),
     }
 }
 
@@ -858,6 +864,25 @@ struct RenameRecord {
 
 /// The batch file renamer application state.
 struct RenamerApp {
+    /// The folder being renamed in, once one has been chosen.
+    ///
+    /// `None` until then, and the list is empty. The app used to open with six
+    /// invented files -- `/home/user/photos/IMG_0001.JPG` and friends -- that
+    /// existed nowhere. A list of files the user does not recognise is bad on
+    /// its own; a Rename button that then reports having renamed them is how
+    /// somebody comes to believe their photos were reorganised.
+    folder: Option<PathBuf>,
+    /// The folder picker.
+    picker: FilePicker,
+    /// The size the last frame was drawn at.
+    ///
+    /// The app itself lays out from constants and ignores the size it is
+    /// handed, so it had nothing to store. The picker does need it: it hit-
+    /// tests clicks against the window it is drawn in, so a stale size sends
+    /// a click to the wrong row. Taken from `render` rather than from
+    /// `Resize`, because the first frame is drawn before any resize arrives.
+    last_width: f32,
+    last_height: f32,
     /// Files to rename.
     files: Vec<FileEntry>,
     /// Active rename operations (applied in order).
@@ -910,6 +935,10 @@ impl RenamerApp {
     fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            folder: None,
+            picker: FilePicker::default(),
+            last_width: WINDOW_WIDTH_PX as f32,
+            last_height: WINDOW_HEIGHT_PX as f32,
             files: Vec::new(),
             operations: Vec::new(),
             undo_stack: Vec::new(),
@@ -928,43 +957,105 @@ impl RenamerApp {
         }
     }
 
-    /// Add a file to the rename list.
-    fn add_file(&mut self, path: &str, name: &str, size: u64, modified: u64) {
+    /// Add a file to the rename list. **Tests only**; see `load_folder`.
+    #[cfg(test)]
+    fn add_file(&mut self, name: &str, size: u64, modified: u64) {
         if self.files.len() >= MAX_FILES {
             return;
         }
-        self.files.push(FileEntry::new(path, name, size, modified));
+        self.files.push(FileEntry::new(name, size, modified));
         self.apply_operations();
     }
 
-    /// Fill the list with the files a first run shows.
+    /// List `dir`, replacing whatever was loaded before, and say what is in it.
     ///
-    /// One method, so that when a file chooser exists this is the call that
-    /// changes. The names are deliberately the awkward ones a bulk renamer is
-    /// for: inconsistent separators, mixed case, a duplicate that will collide
-    /// under a lowercasing operation, and a space-padded name.
+    /// Directories are skipped: this program renames files, and listing a
+    /// folder it will then refuse to rename is worse than not listing it.
+    fn load_folder(&mut self, dir: &Path) -> String {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(err) => return format!("Could not read {}: {err}", dir.display()),
+        };
+
+        self.files.clear();
+        self.operations.clear();
+        // The stacks describe renames in the old folder. Undo across a folder
+        // change would look up names that are not here and silently do
+        // nothing, which reads exactly like an undo that failed.
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.selected_file = 0;
+        self.scroll_offset = 0.0;
+
+        let mut skipped_dirs = 0usize;
+        let mut unreadable = 0usize;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                unreadable = unreadable.saturating_add(1);
+                continue;
+            };
+            let meta = entry.metadata().ok();
+            if meta.as_ref().is_some_and(std::fs::Metadata::is_dir) {
+                skipped_dirs = skipped_dirs.saturating_add(1);
+                continue;
+            }
+            if self.files.len() >= MAX_FILES {
+                break;
+            }
+            let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+            let modified = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            self.files
+                .push(FileEntry::from_os_name(&entry.file_name(), size, modified));
+        }
+
+        // `read_dir` yields in whatever order the filesystem likes. Sorted
+        // by name, so the list reads the way a person expects and two runs
+        // over the same folder agree.
+        self.files
+            .sort_by(|a, b| a.original_name.cmp(&b.original_name));
+
+        self.folder = Some(dir.to_path_buf());
+        self.apply_operations();
+
+        let unrenameable = self.files.iter().filter(|f| !f.renameable).count();
+        let mut said = format!("{} file(s) in {}", self.files.len(), dir.display());
+        if skipped_dirs > 0 {
+            said.push_str(&format!(", {skipped_dirs} folder(s) skipped"));
+        }
+        if unrenameable > 0 {
+            said.push_str(&format!(
+                ", {unrenameable} whose names are not text and cannot be renamed"
+            ));
+        }
+        if unreadable > 0 {
+            said.push_str(&format!(", {unreadable} unreadable"));
+        }
+        said
+    }
+
+    /// Fill the list with an invented set of files. **Tests only.**
+    ///
+    /// This ran at startup until 2026-09-15, so the window opened showing six
+    /// files that existed nowhere -- and the Rename button then reported
+    /// having renamed them. The names are the awkward ones a bulk renamer is
+    /// for (inconsistent separators, mixed case, a duplicate that collides
+    /// under lowercasing, a space-padded name), which is why they are kept for
+    /// the tests of the rules themselves.
+    #[cfg(test)]
     fn seed_sample_files(&mut self) {
-        for (path, name, size) in [
-            (
-                "/home/user/photos/IMG_0001.JPG",
-                "IMG_0001.JPG",
-                2_400_000_u64,
-            ),
-            ("/home/user/photos/IMG_0002.JPG", "IMG_0002.JPG", 2_310_000),
-            ("/home/user/photos/img_0002.jpg", "img_0002.jpg", 2_290_000),
-            (
-                "/home/user/photos/Holiday Snap .png",
-                "Holiday Snap .png",
-                850_000,
-            ),
-            (
-                "/home/user/docs/report-final-FINAL.docx",
-                "report-final-FINAL.docx",
-                44_000,
-            ),
-            ("/home/user/docs/notes.txt", "notes.txt", 1_200),
+        for (name, size) in [
+            ("IMG_0001.JPG", 2_400_000_u64),
+            ("IMG_0002.JPG", 2_310_000),
+            ("img_0002.jpg", 2_290_000),
+            ("Holiday Snap .png", 850_000),
+            ("report-final-FINAL.docx", 44_000),
+            ("notes.txt", 1_200),
         ] {
-            self.add_file(path, name, size, 0);
+            self.add_file(name, size, 0);
         }
     }
 
@@ -1070,7 +1161,9 @@ impl RenamerApp {
             renames: self
                 .files
                 .iter()
-                .filter(|f| f.selected && f.original_name != f.new_name && !f.conflict)
+                .filter(|f| {
+                    f.renameable && f.selected && f.original_name != f.new_name && !f.conflict
+                })
                 .map(|f| (f.original_name.clone(), f.new_name.clone()))
                 .collect(),
             operations: self
@@ -1086,27 +1179,106 @@ impl RenamerApp {
             return;
         }
 
-        let count = record.renames.len();
-
-        // Ordered, so that when this is wired to `fs::rename` the steps can be
-        // performed straight through without one clobbering another. Applying
-        // them here in the same order keeps the preview honest about what the
-        // filesystem will actually do.
+        // Ordered so that no step overwrites a name a later step still
+        // needs; see `rename_plan`. The order matters to the filesystem, not
+        // to the preview, which is why it was built before there was one.
         let plan = rename_plan(&self.current_names(), &record.renames);
-        self.apply_plan(&plan);
+        let (done, failures) = self.perform(&plan);
 
-        self.undo_stack.push(record.clone());
-        if self.undo_stack.len() > MAX_UNDO {
-            self.undo_stack.remove(0);
+        if done > 0 {
+            self.undo_stack.push(record.clone());
+            if self.undo_stack.len() > MAX_UNDO {
+                self.undo_stack.remove(0);
+            }
+            self.redo_stack.clear();
+
+            self.history.push(record);
+            if self.history.len() > MAX_HISTORY {
+                self.history.remove(0);
+            }
         }
-        self.redo_stack.clear();
 
-        self.history.push(record);
-        if self.history.len() > MAX_HISTORY {
-            self.history.remove(0);
+        self.status_message = Self::describe(done, &failures);
+    }
+
+    /// Carry out `plan` against the filesystem, and update the list to match.
+    ///
+    /// Returns how many steps succeeded and what went wrong with the rest.
+    ///
+    /// **A step that fails does not stop the batch, and does not update the
+    /// entry either.** Stopping would leave the plan half-applied with no
+    /// record of where it stopped -- and the plan's whole purpose is that its
+    /// order is safe, so abandoning it midway is what creates the collision it
+    /// was built to avoid. Each entry is updated only if its own rename
+    /// succeeded, so the list continues to describe the directory.
+    fn perform(&mut self, plan: &[RenameStep]) -> (usize, Vec<String>) {
+        let Some(folder) = self.folder.clone() else {
+            return (0, vec!["no folder is open".to_string()]);
+        };
+
+        let mut done = 0usize;
+        let mut failures = Vec::new();
+        for step in plan {
+            // The source is the name **as the filesystem gave it**, not its
+            // text form. For every file this will rename the two are equal --
+            // `renameable` is exactly the test that they are -- but building
+            // the path from the text is how they stop being equal the first
+            // time that guard is loosened, and the failure would be silent on
+            // every name that round-trips.
+            //
+            // A step whose `from` names no file is a temporary this plan
+            // invented to break a cycle; those names are this code's own and
+            // are exact as text.
+            let from_raw = self
+                .files
+                .iter()
+                .find(|f| f.original_name == step.from)
+                .map_or_else(|| OsString::from(&step.from), |f| f.raw_name.clone());
+            let from = folder.join(&from_raw);
+            let to = folder.join(&step.to);
+            match std::fs::rename(&from, &to) {
+                Ok(()) => {
+                    done = done.saturating_add(1);
+                    if let Some(file) = self.files.iter_mut().find(|f| f.original_name == step.from)
+                    {
+                        file.original_name.clone_from(&step.to);
+                        file.raw_name = OsString::from(&step.to);
+                    }
+                }
+                Err(err) => failures.push(format!("{} -> {}: {err}", step.from, step.to)),
+            }
         }
 
-        self.status_message = format!("Renamed {count} files");
+        // Every file's preview should now show the name it actually has, or
+        // the next `detect_conflicts` compares against stale targets.
+        for file in &mut self.files {
+            file.new_name.clone_from(&file.original_name);
+        }
+        (done, failures)
+    }
+
+    /// What to say about a batch that partly worked.
+    ///
+    /// The worst error is reported, not the last one, and the count of
+    /// successes is reported beside it: "Renamed 3; 2 failed" is actionable
+    /// where either half alone is misleading.
+    fn describe(done: usize, failures: &[String]) -> String {
+        match (done, failures.first()) {
+            (0, None) => "Nothing to rename".to_string(),
+            (n, None) => format!("Renamed {n} file(s)"),
+            (0, Some(first)) => format!("Renamed nothing. {first}"),
+            (n, Some(first)) => {
+                format!("Renamed {n} file(s); {} failed. {first}", failures.len())
+            }
+        }
+    }
+
+    /// Choose a folder to work in.
+    fn open_folder(&mut self) {
+        self.picker.put_up(
+            FileDialog::select_folder().with_initial_path(FilePicker::default_start()),
+            false,
+        );
     }
 
     /// Undo the last rename operation.
@@ -1125,11 +1297,19 @@ impl RenamerApp {
                 .map(|(old, new)| (new.clone(), old.clone()))
                 .collect();
             let plan = rename_plan(&self.current_names(), &reversed);
-            self.apply_plan(&plan);
+            let (done, failures) = self.perform(&plan);
 
-            let count = record.renames.len();
-            self.redo_stack.push(record);
-            self.status_message = format!("Undid rename of {count} files");
+            // The record goes to the redo stack only if something was undone.
+            // Moving it regardless would offer to redo a rename that never
+            // came back, and the redo would then fail against names that are
+            // still in place.
+            if done > 0 {
+                self.redo_stack.push(record);
+            }
+            self.status_message = match Self::describe(done, &failures) {
+                m if done > 0 && failures.is_empty() => m.replace("Renamed", "Put back"),
+                m => m,
+            };
             self.apply_operations();
         }
     }
@@ -1138,11 +1318,15 @@ impl RenamerApp {
     fn redo(&mut self) {
         if let Some(record) = self.redo_stack.pop() {
             let plan = rename_plan(&self.current_names(), &record.renames);
-            self.apply_plan(&plan);
+            let (done, failures) = self.perform(&plan);
 
-            let count = record.renames.len();
-            self.undo_stack.push(record);
-            self.status_message = format!("Redid rename of {count} files");
+            if done > 0 {
+                self.undo_stack.push(record);
+            }
+            self.status_message = match Self::describe(done, &failures) {
+                m if done > 0 && failures.is_empty() => m.replace("Renamed", "Redid"),
+                m => m,
+            };
             self.apply_operations();
         }
     }
@@ -1150,26 +1334,6 @@ impl RenamerApp {
     /// The name every file in the list currently has on disk.
     fn current_names(&self) -> Vec<String> {
         self.files.iter().map(|f| f.original_name.clone()).collect()
-    }
-
-    /// Perform an ordered plan against the in-memory list.
-    ///
-    /// A step whose `from` names no file is skipped rather than ignored
-    /// silently at a distance: it means the list and the plan have diverged,
-    /// which cannot happen for a plan built from `current_names()` in the same
-    /// call, and is a bug if it ever does.
-    fn apply_plan(&mut self, plan: &[RenameStep]) {
-        for step in plan {
-            if let Some(file) = self.files.iter_mut().find(|f| f.original_name == step.from) {
-                file.original_path = replace_file_name(&file.original_path, &step.to);
-                file.original_name = step.to.clone();
-            }
-        }
-        // Every file's preview should now show the name it actually has, or
-        // the next `detect_conflicts` compares against stale targets.
-        for file in &mut self.files {
-            file.new_name = file.original_name.clone();
-        }
     }
 
     /// Get filtered files.
@@ -1203,7 +1367,7 @@ impl RenamerApp {
     fn rename_count(&self) -> usize {
         self.files
             .iter()
-            .filter(|f| f.selected && f.original_name != f.new_name && !f.conflict)
+            .filter(|f| f.renameable && f.selected && f.original_name != f.new_name && !f.conflict)
             .count()
     }
 
@@ -1213,9 +1377,16 @@ impl RenamerApp {
     }
 
     /// Select or deselect all files.
+    ///
+    /// Selecting skips the files that cannot be renamed; deselecting does not
+    /// need to. **`renameable` was applied once, at construction, as the
+    /// entry's initial `selected` value** -- so Ctrl+A ticked every file in
+    /// the list including the ones whose names are not text, and Space toggled
+    /// them individually. A guard that only holds until the user touches
+    /// something is not a guard.
     fn select_all(&mut self, selected: bool) {
         for file in &mut self.files {
-            file.selected = selected;
+            file.selected = selected && file.renameable;
         }
     }
 
@@ -1241,6 +1412,16 @@ impl RenamerApp {
 
     /// Route a compositor event into the app.
     fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up, or a folder name is
+        // typed into the search box behind it.
+        match self.picker.handle(event, self.last_width, self.last_height) {
+            Picked::Chose(path) => {
+                self.status_message = self.load_folder(&path);
+                return EventResult::Consumed;
+            }
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Resize { .. } => {
@@ -1320,6 +1501,10 @@ impl RenamerApp {
                     return EventResult::Consumed;
                 }
                 self.execute_rename();
+                EventResult::Consumed
+            }
+            Key::O if ctrl => {
+                self.open_folder();
                 EventResult::Consumed
             }
             Key::Z if ctrl => {
@@ -1450,6 +1635,15 @@ impl RenamerApp {
         let Some(file) = self.files.get_mut(self.selected_file) else {
             return EventResult::Ignored;
         };
+        if !file.renameable {
+            // Said rather than ignored: a tick that silently refuses to appear
+            // reads as a broken key.
+            let name = file.original_name.clone();
+            self.status_message = format!(
+                "{name} cannot be renamed: its name is not text, so no rule can transform it"
+            );
+            return EventResult::Consumed;
+        }
         file.selected = !file.selected;
         EventResult::Consumed
     }
@@ -2239,10 +2433,15 @@ impl App for RenamerApp {
         }
     }
 
-    fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
-        RenderTree {
-            commands: self.render_commands(),
-        }
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.last_width = width;
+        self.last_height = height;
+        let mut commands = self.render_commands();
+        // The picker last, so it draws over the file list rather than under
+        // it. A dialog that takes input and paints nothing is invisible and
+        // still swallowing keys.
+        commands.extend(self.picker.render(&self.palette, width, height));
+        RenderTree { commands }
     }
 }
 
@@ -2252,10 +2451,7 @@ const WINDOW_HEIGHT_PX: u32 = 750;
 
 fn main() -> ExitCode {
     let mut app = RenamerApp::new();
-    // Until a file chooser exists this is what there is to rename. Without it
-    // the window opens completely empty, with no key that could put anything
-    // in it — `add_file` has no caller outside the tests.
-    app.seed_sample_files();
+    app.status_message = "Ctrl+O to choose a folder".to_string();
     app::launch("renamer", &mut app)
 }
 
@@ -2844,7 +3040,7 @@ mod tests {
     #[test]
     fn test_app_add_file() {
         let mut app = RenamerApp::new();
-        app.add_file("/home/test.txt", "test.txt", 1024, 0);
+        app.add_file("test.txt", 1024, 0);
         assert_eq!(app.files.len(), 1);
         assert_eq!(app.files[0].original_name, "test.txt");
     }
@@ -2852,7 +3048,7 @@ mod tests {
     #[test]
     fn test_app_add_operation() {
         let mut app = RenamerApp::new();
-        app.add_file("/home/old.txt", "old.txt", 0, 0);
+        app.add_file("old.txt", 0, 0);
         app.add_operation(RenameOp::FindReplace {
             find: "old".into(),
             replace: "new".into(),
@@ -2865,7 +3061,7 @@ mod tests {
     #[test]
     fn test_app_operation_chain() {
         let mut app = RenamerApp::new();
-        app.add_file("/home/file.txt", "file.txt", 0, 0);
+        app.add_file("file.txt", 0, 0);
         app.add_operation(RenameOp::ChangeCase(CaseMode::Upper));
         app.add_operation(RenameOp::Insert {
             text: "prefix_".into(),
@@ -2877,8 +3073,8 @@ mod tests {
     #[test]
     fn test_app_conflict_detection() {
         let mut app = RenamerApp::new();
-        app.add_file("/a.txt", "a.txt", 0, 0);
-        app.add_file("/b.txt", "b.txt", 0, 0);
+        app.add_file("a.txt", 0, 0);
+        app.add_file("b.txt", 0, 0);
         // Rename both to the same name
         app.add_operation(RenameOp::FindReplace {
             find: "a".into(),
@@ -2898,7 +3094,7 @@ mod tests {
     #[test]
     fn test_app_remove_operation() {
         let mut app = RenamerApp::new();
-        app.add_file("/test.txt", "test.txt", 0, 0);
+        app.add_file("test.txt", 0, 0);
         app.add_operation(RenameOp::ChangeCase(CaseMode::Upper));
         assert_eq!(app.files[0].new_name, "TEST.txt");
         app.remove_operation(0);
@@ -2908,8 +3104,8 @@ mod tests {
     #[test]
     fn test_app_select_all() {
         let mut app = RenamerApp::new();
-        app.add_file("/a.txt", "a.txt", 0, 0);
-        app.add_file("/b.txt", "b.txt", 0, 0);
+        app.add_file("a.txt", 0, 0);
+        app.add_file("b.txt", 0, 0);
         app.select_all(false);
         assert!(app.files.iter().all(|f| !f.selected));
         app.select_all(true);
@@ -2919,8 +3115,8 @@ mod tests {
     #[test]
     fn test_app_rename_count() {
         let mut app = RenamerApp::new();
-        app.add_file("/a.txt", "a.txt", 0, 0);
-        app.add_file("/b.txt", "b.txt", 0, 0);
+        app.add_file("a.txt", 0, 0);
+        app.add_file("b.txt", 0, 0);
         assert_eq!(app.rename_count(), 0);
         app.add_operation(RenameOp::ChangeCase(CaseMode::Upper));
         assert_eq!(app.rename_count(), 2);
@@ -2929,7 +3125,7 @@ mod tests {
     #[test]
     fn test_app_clear_files() {
         let mut app = RenamerApp::new();
-        app.add_file("/a.txt", "a.txt", 0, 0);
+        app.add_file("a.txt", 0, 0);
         app.clear_files();
         assert!(app.files.is_empty());
     }
@@ -2937,7 +3133,7 @@ mod tests {
     #[test]
     fn test_app_clear_operations() {
         let mut app = RenamerApp::new();
-        app.add_file("/a.txt", "a.txt", 0, 0);
+        app.add_file("a.txt", 0, 0);
         app.add_operation(RenameOp::ChangeCase(CaseMode::Upper));
         app.clear_operations();
         assert!(app.operations.is_empty());
@@ -3059,8 +3255,7 @@ mod tests {
 
     #[test]
     fn test_app_execute_rename() {
-        let mut app = RenamerApp::new();
-        app.add_file("/old.txt", "old.txt", 100, 0);
+        let mut app = app_with(&["old.txt"]);
         app.add_operation(RenameOp::FindReplace {
             find: "old".into(),
             replace: "new".into(),
@@ -3070,12 +3265,43 @@ mod tests {
         app.execute_rename();
         assert_eq!(app.undo_stack.len(), 1);
         assert_eq!(app.history.len(), 1);
+        // The undo stack used to be pushed whether or not anything happened,
+        // which is what made an undo of nothing report "Undid rename of 1
+        // files". It is pushed now only because a file really moved:
+        assert_eq!(on_disk(&app), vec!["new.txt"]);
+    }
+
+    /// With no folder open, Rename does nothing and says so.
+    ///
+    /// The stacks must stay empty: an undo entry for a rename that did not
+    /// happen is an undo that reports success and restores nothing.
+    #[test]
+    fn renaming_with_no_folder_open_changes_nothing() {
+        let mut app = app_listing(&["old.txt"]);
+        preview(&mut app, &["new.txt"]);
+        app.execute_rename();
+
+        assert!(
+            app.undo_stack.is_empty(),
+            "queued an undo for a rename that did not happen"
+        );
+        assert!(app.history.is_empty());
+        assert_eq!(
+            names_of(&app),
+            vec!["old.txt"],
+            "the list moved without the files"
+        );
+        assert!(
+            !app.status_message.contains("Renamed 1"),
+            "claimed a rename with no folder open: {}",
+            app.status_message
+        );
     }
 
     #[test]
     fn test_move_operation() {
         let mut app = RenamerApp::new();
-        app.add_file("/test.txt", "test.txt", 0, 0);
+        app.add_file("test.txt", 0, 0);
         app.add_operation(RenameOp::ChangeCase(CaseMode::Upper));
         app.add_operation(RenameOp::Insert {
             text: "x".into(),
@@ -3131,9 +3357,9 @@ mod tests {
     #[test]
     fn test_filtered_files() {
         let mut app = RenamerApp::new();
-        app.add_file("/a.txt", "a.txt", 0, 0);
-        app.add_file("/b.jpg", "b.jpg", 0, 0);
-        app.add_file("/c.txt", "c.txt", 0, 0);
+        app.add_file("a.txt", 0, 0);
+        app.add_file("b.jpg", 0, 0);
+        app.add_file("c.txt", 0, 0);
 
         app.filter_extension = "txt".into();
         let filtered = app.filtered_files();
@@ -3143,9 +3369,9 @@ mod tests {
     #[test]
     fn test_search_filter() {
         let mut app = RenamerApp::new();
-        app.add_file("/alpha.txt", "alpha.txt", 0, 0);
-        app.add_file("/beta.txt", "beta.txt", 0, 0);
-        app.add_file("/gamma.txt", "gamma.txt", 0, 0);
+        app.add_file("alpha.txt", 0, 0);
+        app.add_file("beta.txt", 0, 0);
+        app.add_file("gamma.txt", 0, 0);
 
         app.search_text = "alpha".into();
         let filtered = app.filtered_files();
@@ -3168,7 +3394,7 @@ mod tests {
 
     #[test]
     fn an_extension_is_what_follows_the_last_dot() {
-        let ext = |name: &str| FileEntry::new("/p", name, 0, 0).extension;
+        let ext = |name: &str| FileEntry::new(name, 0, 0).extension;
         assert_eq!(ext("photo.jpg"), "jpg");
         assert_eq!(ext("archive.tar.gz"), "gz");
         // A dotless name has no extension -- it is not its own extension.
@@ -3182,8 +3408,8 @@ mod tests {
     #[test]
     fn a_dotfile_is_not_swept_up_by_an_extension_filter() {
         let mut app = RenamerApp::new();
-        app.add_file("/a/.bashrc", ".bashrc", 0, 0);
-        app.add_file("/a/backup.bashrc", "backup.bashrc", 0, 0);
+        app.add_file(".bashrc", 0, 0);
+        app.add_file("backup.bashrc", 0, 0);
         app.filter_extension = "bashrc".into();
         let filtered = app.filtered_files();
         assert_eq!(
@@ -3205,13 +3431,11 @@ mod tests {
     fn app_with_overlong_names() -> RenamerApp {
         let mut app = RenamerApp::new();
         app.add_file(
-            "/media/Season 1/ep.mkv",
             "A Very Long Show Name - Season 01 - Episode 07 - The One With The Long Title.mkv",
             1_234_567,
             0,
         );
         app.add_file(
-            "/media/Season 1/ep2.mkv",
             "A Very Long Show Name - Season 01 - Episode 08 - The One With The Other Title.mkv",
             2_345_678,
             0,
@@ -3335,7 +3559,7 @@ mod tests {
     #[test]
     fn a_short_name_is_drawn_verbatim() {
         let mut app = RenamerApp::new();
-        app.add_file("/a.txt", "notes.txt", 12, 0);
+        app.add_file("notes.txt", 12, 0);
         let mut cmds = Vec::new();
         app.render_file_list(&mut cmds);
         let originals = cells_in_column(&cmds, COL_ORIGINAL);
@@ -3543,12 +3767,365 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// An app holding `names`, all in `/photos`, all selected.
+    fn ctrl(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// The rename reaches the filesystem.
+    ///
+    /// The status line said "Renamed {count} files" while `apply_plan` edited
+    /// a `Vec<FileEntry>`; the crate contained no `std::fs` at all. **A person
+    /// told a batch rename succeeded may then look for their files under the
+    /// new names, or delete the copy they kept.**
+    #[test]
+    fn a_rename_moves_the_actual_files() {
+        let mut app = app_with(&["a.txt", "b.txt"]);
+        preview(&mut app, &["x.txt", "y.txt"]);
+        app.execute_rename();
+
+        assert_eq!(on_disk(&app), vec!["x.txt", "y.txt"]);
+        assert!(
+            app.status_message.starts_with("Renamed 2"),
+            "said: {}",
+            app.status_message
+        );
+    }
+
+    /// A rename that cannot happen is reported, not counted.
+    ///
+    /// The destination here is an existing *directory*, which `fs::rename`
+    /// refuses. The batch continues -- the plan's order is what makes it safe,
+    /// so abandoning it midway creates the collision it was built to avoid --
+    /// and the file that did move is counted separately from the one that did
+    /// not.
+    #[test]
+    fn a_failed_rename_is_reported_and_does_not_stop_the_batch() {
+        let mut app = app_with(&["a.txt", "b.txt"]);
+        let dir = app.folder.clone().expect("a folder");
+        std::fs::create_dir(dir.join("x.txt")).expect("a directory in the way");
+
+        preview(&mut app, &["x.txt", "y.txt"]);
+        app.execute_rename();
+
+        assert!(
+            dir.join("y.txt").is_file(),
+            "the second rename was abandoned because the first failed"
+        );
+        assert!(
+            dir.join("a.txt").is_file(),
+            "the file that could not move should still be under its own name"
+        );
+        assert!(
+            app.status_message.contains("1 file(s)") && app.status_message.contains("failed"),
+            "should count both halves, said: {}",
+            app.status_message
+        );
+    }
+
+    /// Undo puts the files back on disk, not just in the list.
+    ///
+    /// This is the more dangerous half of the same defect: an undo that
+    /// reports success and restores nothing leaves the user believing the
+    /// original names are recoverable when they are gone.
+    #[test]
+    fn undo_puts_the_files_back() {
+        let mut app = app_with(&["1.jpg", "2.jpg", "3.jpg"]);
+        preview(&mut app, &["2.jpg", "3.jpg", "4.jpg"]);
+        app.execute_rename();
+        assert_eq!(on_disk(&app), vec!["2.jpg", "3.jpg", "4.jpg"]);
+
+        app.undo();
+        assert_eq!(on_disk(&app), vec!["1.jpg", "2.jpg", "3.jpg"]);
+        assert!(
+            !app.status_message.contains("Renamed"),
+            "an undo is not a rename, said: {}",
+            app.status_message
+        );
+
+        app.redo();
+        assert_eq!(on_disk(&app), vec!["2.jpg", "3.jpg", "4.jpg"]);
+    }
+
+    /// Ctrl+O asks for a folder, and choosing one lists it.
+    #[test]
+    fn ctrl_o_opens_the_folder_picker() {
+        let dir = scratch("picked");
+        std::fs::write(dir.join("one.txt"), b"1").expect("fixture");
+        std::fs::write(dir.join("two.txt"), b"2").expect("fixture");
+
+        let mut app = RenamerApp::new();
+        assert!(
+            app.files.is_empty(),
+            "the window opens with nothing invented in it"
+        );
+
+        app.handle_event(&ctrl(Key::O));
+        assert!(app.picker.is_open(), "Ctrl+O should ask for a folder");
+
+        let said = app.load_folder(&dir);
+        assert_eq!(names_of(&app), vec!["one.txt", "two.txt"]);
+        assert!(said.contains("2 file(s)"), "said: {said}");
+    }
+
+    /// The open picker is drawn.
+    #[test]
+    fn the_open_picker_is_drawn() {
+        let mut app = RenamerApp::new();
+        let closed = app.render(1100.0, 750.0).commands.len();
+        app.handle_event(&ctrl(Key::O));
+        let own = app
+            .render(1100.0, 750.0)
+            .commands
+            .len()
+            .saturating_sub(closed);
+        assert!(
+            own > 0,
+            "the open picker contributed {own} commands; it is not being drawn"
+        );
+    }
+
+    /// Folders in the listing are not offered as files to rename.
+    #[test]
+    fn a_subfolder_is_not_listed_as_a_file() {
+        let dir = scratch("subfolder");
+        std::fs::write(dir.join("file.txt"), b"x").expect("fixture");
+        std::fs::create_dir(dir.join("subdir")).expect("fixture");
+
+        let mut app = RenamerApp::new();
+        let said = app.load_folder(&dir);
+        assert_eq!(names_of(&app), vec!["file.txt"]);
+        assert!(said.contains("1 folder(s) skipped"), "said: {said}");
+    }
+
+    /// A name that is not text is listed, and cannot be renamed.
+    ///
+    /// Every rule reads text and writes text, so a name that does not survive
+    /// the trip through `String` has no text form a rule could transform.
+    /// Renaming it from the lossy form would write a name **nobody asked for**
+    /// -- `to_string_lossy` replaces the bad bytes with U+FFFD, and that is a
+    /// different name, so the file would land somewhere the user never chose
+    /// and the original would be gone.
+    ///
+    /// The decision is tested rather than a file with such a name, because the
+    /// host filesystem here is NTFS, which will not store one: the fixture
+    /// that would demonstrate it cannot be created on the machine the tests
+    /// run on. What can be checked is that the decision is made from the raw
+    /// name and not from its text form.
+    #[test]
+    fn a_name_that_is_not_text_is_listed_but_not_renameable() {
+        #[cfg(windows)]
+        let raw: OsString = {
+            use std::os::windows::ffi::OsStringExt;
+            // An unpaired surrogate: valid UTF-16, no UTF-8 encoding.
+            OsString::from_wide(&[0x0066, 0xD800, 0x0074])
+        };
+        #[cfg(not(windows))]
+        let raw: OsString = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![b'f', 0xFF, b't'])
+        };
+        assert!(
+            raw.to_str().is_none(),
+            "control: the fixture must be unrepresentable as a `String`, or this asserts nothing"
+        );
+
+        let entry = FileEntry::from_os_name(&raw, 10, 0);
+        assert!(
+            !entry.renameable,
+            "a name that is not text was marked renameable"
+        );
+        assert!(
+            !entry.selected,
+            "an unrenameable file must not start out ticked"
+        );
+        assert_eq!(
+            entry.raw_name, raw,
+            "the key must stay the bytes the filesystem gave"
+        );
+        assert!(
+            entry.original_name.contains('\u{FFFD}'),
+            "the display name should be the lossy one: {:?}",
+            entry.original_name
+        );
+    }
+
+    /// A name that is not text cannot be ticked, by any route.
+    ///
+    /// **This is the hole boot gate 52 pointed at.** The gate refuses a field
+    /// that production writes and only a test reads, and `raw_name` was one:
+    /// the rename built its source path from `original_name`, the *text* form.
+    /// That was harmless only because `renameable` was applied once, at
+    /// construction, as the entry's initial `selected` value -- and Ctrl+A set
+    /// `selected = true` on every file regardless, while Space toggled them
+    /// one at a time.
+    ///
+    /// So a user could tick a file whose name is not valid UTF-8 and press
+    /// Enter, and the rename would be attempted against the lossy form --
+    /// `to_string_lossy` having replaced the offending bytes with U+FFFD,
+    /// which is a **different name**. The dead field was the symptom; a guard
+    /// that stopped holding the moment the user touched anything was the
+    /// defect.
+    #[test]
+    fn a_name_that_is_not_text_cannot_be_selected_by_any_route() {
+        let mut app = RenamerApp::new();
+        app.files.push(FileEntry::from_os_name(&not_text(), 10, 0));
+        app.files.push(FileEntry::new("plain.txt", 10, 0));
+        app.apply_operations();
+
+        assert!(
+            !app.files[0].renameable,
+            "control: the fixture must not be text"
+        );
+        assert!(
+            !app.files[0].selected,
+            "an unrenameable file starts unticked"
+        );
+
+        // Ctrl+A.
+        app.select_all(true);
+        assert!(
+            !app.files[0].selected,
+            "select-all ticked a file whose name no rule can transform"
+        );
+        assert!(app.files[1].selected, "and left the ordinary file alone");
+
+        // Space, on the unrenameable row.
+        app.selected_file = 0;
+        assert_eq!(app.toggle_selected_file(), EventResult::Consumed);
+        assert!(!app.files[0].selected, "Space ticked it");
+        assert!(
+            app.status_message.contains("not text"),
+            "refused silently, which reads as a broken key: {}",
+            app.status_message
+        );
+    }
+
+    /// Even if something ticks it, the rename does not pick it up.
+    ///
+    /// The guard is applied again where the cost is. Two checks for one rule
+    /// is usually worth avoiding; here the second is what stands between a
+    /// lossy name and `fs::rename`.
+    ///
+    /// **This asserts the decision, not a file on disk, and the first version
+    /// asserted the wrong one.** It checked that the folder afterwards held
+    /// only the renamed ordinary file -- which is true whether or not the
+    /// unrenameable one was attempted, because a rename of a name NTFS cannot
+    /// store fails either way and leaves the folder looking identical. The
+    /// sabotage run said so: dropping the `renameable` check from the filter
+    /// left it green. What can be checked on any host is which files the
+    /// program decided to rename.
+    #[test]
+    fn an_unrenameable_file_is_not_renamed_even_if_it_is_selected() {
+        let mut app = RenamerApp::new();
+        app.files.push(FileEntry::new("plain.txt", 10, 0));
+        app.files.push(FileEntry::from_os_name(&not_text(), 10, 0));
+
+        // Reach past every control and set the bit directly, which is what a
+        // future edit to a selection path would do by accident.
+        app.files[1].selected = true;
+        app.files[0].new_name = String::from("plain-renamed.txt");
+        app.files[1].new_name = String::from("renamed.txt");
+
+        assert_eq!(
+            app.rename_count(),
+            1,
+            "the unrenameable file was counted as something to rename"
+        );
+
+        let queued: Vec<String> = app
+            .files
+            .iter()
+            .filter(|f| f.renameable && f.selected && f.original_name != f.new_name && !f.conflict)
+            .map(|f| f.new_name.clone())
+            .collect();
+        assert_eq!(
+            queued,
+            vec!["plain-renamed.txt"],
+            "only the file whose name is text is queued"
+        );
+    }
+
+    /// A fixture name that cannot be represented as a `String`.
+    fn not_text() -> OsString {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            // An unpaired surrogate: valid UTF-16, no UTF-8 encoding.
+            OsString::from_wide(&[0x0066, 0xD800, 0x0074])
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![b'f', 0xFF, b't'])
+        }
+    }
+
+    /// A scratch directory of this test's own, emptied first.
+    ///
+    /// Unique per call: Rust runs tests on many threads, so a directory named
+    /// for the fixture alone would have two tests renaming each other's files
+    /// and failing in whichever order they happened to interleave.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("slateos-renamer-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// An app holding a real directory containing `names`.
+    ///
+    /// This used to call `add_file`, which put names in a `Vec` and no files
+    /// anywhere. **Every test below that calls `execute_rename` was therefore
+    /// checking a memory shuffle against a program whose status line said
+    /// "Renamed 6 files".** They are the same tests; what changed is that
+    /// there is now a directory for them to be right or wrong about.
     fn app_with(names: &[&str]) -> RenamerApp {
+        let dir = scratch("app");
+        for name in names {
+            std::fs::write(dir.join(name), name.as_bytes()).expect("fixture");
+        }
+        let mut app = RenamerApp::new();
+        let said = app.load_folder(&dir);
+        assert_eq!(
+            app.files.len(),
+            names.len(),
+            "the fixture did not load, or this test asserts nothing: {said}"
+        );
+        app
+    }
+
+    /// An app holding a list of names and no directory.
+    ///
+    /// For the tests of the pure parts -- the rules, the preview, conflict
+    /// detection -- which are functions of the names alone. Those do not need
+    /// a directory, and one of them **cannot have one on this host**: see
+    /// `a_case_only_rename_is_not_a_conflict`.
+    fn app_listing(names: &[&str]) -> RenamerApp {
         let mut app = RenamerApp::new();
         for name in names {
-            app.add_file(&format!("/photos/{name}"), name, 100, 0);
+            app.add_file(name, 100, 0);
         }
         app
+    }
+
+    /// Every filename actually in the app's folder, sorted.
+    fn on_disk(app: &RenamerApp) -> Vec<String> {
+        let dir = app.folder.clone().expect("a folder is open");
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("listing")
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+        names
     }
 
     /// Set each file's previewed new name directly, bypassing the rule chain,
@@ -3565,10 +4142,6 @@ mod tests {
         app.files.iter().map(|f| f.original_name.clone()).collect()
     }
 
-    fn paths_of(app: &RenamerApp) -> Vec<String> {
-        app.files.iter().map(|f| f.original_path.clone()).collect()
-    }
-
     fn conflicts_of(app: &RenamerApp) -> Vec<bool> {
         app.files.iter().map(|f| f.conflict).collect()
     }
@@ -3579,43 +4152,43 @@ mod tests {
         preview(&mut app, &["new.txt"]);
         app.execute_rename();
         assert_eq!(names_of(&app), vec!["new.txt"]);
-        // The path used to be left naming the old file, so a second rename in
-        // the same session would have been performed against a stale path.
-        assert_eq!(paths_of(&app), vec!["/photos/new.txt"]);
+        assert_eq!(
+            on_disk(&app),
+            vec!["new.txt"],
+            "the list and the folder disagree"
+        );
     }
 
+    /// A folder named after the file inside it keeps its own name.
+    ///
+    /// This replaces two tests of `replace_file_name`, a helper that did
+    /// string surgery on a stored path: `path.replace(old, new)` rewrote
+    /// *every* occurrence rather than the last component, so renaming
+    /// `/music/Nirvana/Nirvana` moved the file under a directory that does not
+    /// exist. **That defect cannot occur now and the helper is gone** -- the
+    /// path is `folder.join(name)` and only the name is ever replaced, so
+    /// there is no string in which a directory could be rewritten by accident.
+    ///
+    /// Checked against a real directory rather than against a string, because
+    /// what the old tests actually cared about was where the file ends up.
     #[test]
-    fn a_directory_that_shares_the_file_name_is_not_rewritten() {
-        // `path.replace(old, new)` rewrites *every* occurrence, not just the
-        // last component, so a directory whose name contains the file's name
-        // is renamed along with it -- leaving a path under a directory that
-        // does not exist. Two shapes this really takes: a folder named after
-        // the file it holds, and a folder whose name merely *contains* it.
-        assert_eq!(
-            replace_file_name("/music/Nirvana/Nirvana", "Nevermind"),
-            "/music/Nirvana/Nevermind"
-        );
-        assert_eq!(
-            replace_file_name("/report-archive/report", "summary"),
-            "/report-archive/summary"
-        );
+    fn renaming_a_file_never_touches_the_folder_holding_it() {
+        let dir = scratch("folder-name-collision").join("Nirvana");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::write(dir.join("Nirvana"), b"x").expect("fixture");
 
         let mut app = RenamerApp::new();
-        app.add_file("/music/Nirvana/Nirvana", "Nirvana", 100, 0);
-        app.add_file("/report-archive/report", "report", 100, 0);
-        preview(&mut app, &["Nevermind", "summary"]);
+        app.load_folder(&dir);
+        preview(&mut app, &["Nevermind"]);
         app.execute_rename();
-        assert_eq!(
-            paths_of(&app),
-            vec!["/music/Nirvana/Nevermind", "/report-archive/summary"]
-        );
-    }
 
-    #[test]
-    fn a_bare_name_and_a_backslash_path_both_replace_only_the_last_component() {
-        assert_eq!(replace_file_name("a.txt", "b.txt"), "b.txt");
-        assert_eq!(replace_file_name("d\\a.txt", "b.txt"), "d\\b.txt");
-        assert_eq!(replace_file_name("/", "b.txt"), "/b.txt");
+        assert!(
+            dir.join("Nevermind").is_file(),
+            "the file did not arrive: {}",
+            app.status_message
+        );
+        assert!(dir.is_dir(), "the folder holding it was renamed too");
+        assert!(!dir.join("Nirvana").exists(), "the old name is still there");
     }
 
     #[test]
@@ -3624,7 +4197,16 @@ mod tests {
         // `photo.jpg` and `PHOTO.jpg` are two different files. The old
         // `eq_ignore_ascii_case` comparison refused this rename as a
         // collision with a file it cannot in fact collide with.
-        let mut app = app_with(&["photo.JPG", "PHOTO.jpg"]);
+        //
+        // **This one keeps a list rather than a directory, and the reason is
+        // not convenience.** The tests run on Windows, whose filesystem is
+        // case-INSENSITIVE, so writing `photo.JPG` and `PHOTO.jpg` into a
+        // scratch directory produces *one* file -- the fixture guard in
+        // `app_with` caught exactly that. The rule under test is a property of
+        // the target filesystem, and the host cannot hold the fixture that
+        // would demonstrate it. Conflict detection is a function of the names
+        // alone, so a list is a complete fixture for it either way.
+        let mut app = app_listing(&["photo.JPG", "PHOTO.jpg"]);
         app.files[1].selected = false;
         preview(&mut app, &["photo.jpg", "PHOTO.jpg"]);
         assert_eq!(conflicts_of(&app), vec![false, false]);
@@ -3645,10 +4227,7 @@ mod tests {
 
         app.execute_rename();
         assert_eq!(names_of(&app), vec!["2.jpg", "3.jpg", "4.jpg"]);
-        assert_eq!(
-            paths_of(&app),
-            vec!["/photos/2.jpg", "/photos/3.jpg", "/photos/4.jpg"]
-        );
+        assert_eq!(on_disk(&app), vec!["2.jpg", "3.jpg", "4.jpg"]);
     }
 
     #[test]
@@ -3723,7 +4302,11 @@ mod tests {
 
         app.execute_rename();
         assert_eq!(names_of(&app), vec!["b.txt", "a.txt"]);
-        assert_eq!(paths_of(&app), vec!["/photos/b.txt", "/photos/a.txt"]);
+        assert_eq!(
+            on_disk(&app),
+            vec!["a.txt", "b.txt"],
+            "both names survive the swap"
+        );
     }
 
     #[test]
@@ -3772,7 +4355,7 @@ mod tests {
 
         app.undo();
         assert_eq!(names_of(&app), vec!["a.txt", "b.txt"]);
-        assert_eq!(paths_of(&app), vec!["/photos/a.txt", "/photos/b.txt"]);
+        assert_eq!(on_disk(&app), vec!["a.txt", "b.txt"]);
     }
 
     #[test]
@@ -3783,10 +4366,7 @@ mod tests {
 
         app.undo();
         assert_eq!(names_of(&app), vec!["1.jpg", "2.jpg", "3.jpg"]);
-        assert_eq!(
-            paths_of(&app),
-            vec!["/photos/1.jpg", "/photos/2.jpg", "/photos/3.jpg"]
-        );
+        assert_eq!(on_disk(&app), vec!["1.jpg", "2.jpg", "3.jpg"]);
 
         app.redo();
         assert_eq!(names_of(&app), vec!["2.jpg", "3.jpg", "4.jpg"]);

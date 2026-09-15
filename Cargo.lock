@@ -114,6 +114,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]
@@ -157,6 +158,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]
@@ -1310,6 +1312,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]
@@ -1759,6 +1762,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]
@@ -2873,8 +2877,11 @@ name = "sysinfo-app"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "civildate",
  "guitk",
  "oswindow",
+ "procinfo",
+ "safeio",
 ]
 
 [[package]]
@@ -2893,6 +2900,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "procinfo",
 ]
 
 [[package]]
@@ -3027,6 +3035,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]
@@ -3221,6 +3230,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
  "scratchdir",
 ]
 

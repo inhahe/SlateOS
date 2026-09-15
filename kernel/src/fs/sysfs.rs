@@ -21,6 +21,11 @@
 //! │   ├── pci/
 //! │   │   ├── BB:DD.F      PCI device info per BDF address
 //! │   │   └── ...
+//! │   ├── memmap/                       Firmware memory map, one dir per region
+//! │   │   └── <N>/                      Index into the bootloader's own list
+//! │   │       ├── start                 First byte, 0x%016x
+//! │   │       ├── end                   One past the last byte
+//! │   │       └── type                  Usable RAM, Reserved, ACPI NVS, ...
 //! │   ├── block/                        One per registered block device
 //! │   │   └── <name>/                   e.g. vda; absent if not registered
 //! │   │       ├── sector_count          Capacity in sectors (read-only)
@@ -160,6 +165,12 @@ enum SysPath<'a> {
     MemoryDir,
     /// A memory file: /sys/devices/system/memory/total_kb etc.
     MemoryFile(&'a str),
+    /// The devices/memmap/ directory.
+    MemmapDir,
+    /// One firmware memory-map region: /sys/devices/memmap/3/
+    MemmapRegion(usize),
+    /// A region file: /sys/devices/memmap/3/start etc.
+    MemmapFile(usize, &'a str),
     /// The devices/block/ directory.
     BlockDir,
     /// A block device directory: /sys/devices/block/vda/
@@ -212,6 +223,14 @@ const MEMORY_FILES: &[&str] = &["total_kb", "available_kb"];
 /// device here is 512 today, which is the condition that would let that bug
 /// ship unnoticed. Each of these three names means exactly one thing.
 const BLOCK_FILES: &[&str] = &["sector_count", "sector_size", "read_only"];
+
+/// Per-region files under `/sys/devices/memmap/<N>/`.
+///
+/// `start`/`end` rather than `start`/`size`, as Linux's
+/// `/sys/firmware/memmap/N/` does. Both are addresses, so unlike the block
+/// `size` in 939 there is no unit to misread, and the size is derivable --
+/// emitting it too would be a second answer to one question.
+const MEMMAP_FILES: &[&str] = &["start", "end", "type"];
 
 /// Per-CPU topology files in /sys/devices/system/cpu/cpuN/topology/.
 ///
@@ -408,6 +427,37 @@ fn classify_path(rel: &str) -> SysPath<'_> {
                         SysPath::PciDevice(tail)
                     } else {
                         SysPath::NotFound
+                    }
+                } else if second == "memmap" {
+                    if tail.is_empty() {
+                        SysPath::MemmapDir
+                    } else {
+                        let (idx_s, leaf) = match tail.find('/') {
+                            Some(pos) => {
+                                let (a, b) = tail.split_at(pos);
+                                (a, b.get(1..).unwrap_or(""))
+                            }
+                            None => (tail, ""),
+                        };
+                        // An index past the end has no directory at all, rather
+                        // than one reading zero -- a reader cannot tell a
+                        // zero-length region from a region that is not there.
+                        // `memlayout` exposes no count, so length comes from
+                        // the list itself. One clone per lookup, on a /sys path
+                        // only -- not a hot path.
+                        let n = crate::fs::memlayout::list_regions().len();
+                        match idx_s.parse::<usize>() {
+                            Ok(idx) if idx < n => {
+                                if leaf.is_empty() {
+                                    SysPath::MemmapRegion(idx)
+                                } else if !leaf.contains('/') && MEMMAP_FILES.contains(&leaf) {
+                                    SysPath::MemmapFile(idx, leaf)
+                                } else {
+                                    SysPath::NotFound
+                                }
+                            }
+                            _ => SysPath::NotFound,
+                        }
                     }
                 } else if second == "block" {
                     if tail.is_empty() {
@@ -660,6 +710,27 @@ fn gen_memory_file(name: &str) -> KernelResult<Vec<u8>> {
 "
     )
     .into_bytes())
+}
+
+/// One firmware memory-map fact, or `NotFound` if the index or name is unknown.
+///
+/// Hex, zero-padded to 16 digits, with `0x`. A memory map read as decimal is
+/// the kind of mistake nobody notices, because a decimal address still looks
+/// like an address.
+fn gen_memmap_file(idx: usize, name: &str) -> KernelResult<Vec<u8>> {
+    let regions = crate::fs::memlayout::list_regions();
+    let region = regions.get(idx).ok_or(KernelError::NotFound)?;
+    let text = match name {
+        "start" => format!("{:#018x}", region.start),
+        "end" => format!("{:#018x}", region.end()),
+        "type" => alloc::string::String::from(region.region_type.label()),
+        _ => return Err(KernelError::NotFound),
+    };
+    let mut out = text.into_bytes();
+    // 10 rather than an escape: no backslash reaches this file through a
+    // shell, which is a rule this tree has paid for repeatedly.
+    out.push(10);
+    Ok(out)
 }
 
 /// Whether a block device of this name is currently registered.
@@ -969,6 +1040,12 @@ impl FileSystem for SysFs {
                     },
                     DirEntry {
                         ino: 0,
+                        name: PathBuf::from("memmap"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    },
+                    DirEntry {
+                        ino: 0,
                         name: PathBuf::from("system"),
                         entry_type: EntryType::Directory,
                         size: 0,
@@ -1111,6 +1188,44 @@ impl FileSystem for SysFs {
                     .collect();
                 Ok(entries)
             }
+            // NOTE for whoever adds the next SysPath directory variant: this
+            // match ends in `_ => Err(NotADirectory)`, so a new directory
+            // compiles silently and then reports itself as not-a-directory at
+            // runtime. `cargo clippy` named the three matches that needed arms
+            // for memmap and could not name this one, because the catch-all
+            // absorbs it. Add the arm here by hand.
+            SysPath::MemmapDir => {
+                // One directory per region, numbered as the bootloader ordered
+                // them. Empty is a legitimate answer -- it would mean the
+                // firmware handed us no map, which is worth being able to see.
+                let entries = crate::fs::memlayout::list_regions()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| DirEntry {
+                        ino: 0,
+                        name: PathBuf::from(format!("{i}")),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    })
+                    .collect();
+                Ok(entries)
+            }
+            SysPath::MemmapRegion(idx) => {
+                // Same rule as MemoryDir and BlockDevice: list only what reads
+                // back, so no name is offered that a read would then refuse.
+                let entries = MEMMAP_FILES
+                    .iter()
+                    .filter_map(|name| {
+                        gen_memmap_file(idx, name).ok().map(|d| DirEntry {
+                            ino: 0,
+                            name: PathBuf::from(*name),
+                            entry_type: EntryType::File,
+                            size: d.len() as u64,
+                        })
+                    })
+                    .collect();
+                Ok(entries)
+            }
             SysPath::BlockDir => {
                 // Whatever is registered, in registration order. Empty is a
                 // legitimate answer: no disks were found.
@@ -1197,7 +1312,9 @@ impl FileSystem for SysFs {
             | SysPath::CpuidDir
             | SysPath::MemoryDir
             | SysPath::BlockDir
-            | SysPath::BlockDevice(_) => Err(KernelError::IsADirectory),
+            | SysPath::BlockDevice(_)
+            | SysPath::MemmapDir
+            | SysPath::MemmapRegion(_) => Err(KernelError::IsADirectory),
 
             SysPath::KernelFile(name) => gen_kernel_file(name),
             SysPath::ParamFile(name) => gen_param_file(name),
@@ -1210,6 +1327,7 @@ impl FileSystem for SysFs {
             SysPath::CpuidFile(name) => gen_cpuid_file(name),
             SysPath::MemoryFile(name) => gen_memory_file(name),
             SysPath::BlockFile(dev, name) => gen_block_file(dev, name),
+            SysPath::MemmapFile(idx, name) => gen_memmap_file(idx, name),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -1335,6 +1453,27 @@ impl FileSystem for SysFs {
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
+            SysPath::MemmapDir => Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("memmap"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::MemmapRegion(idx) => Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(format!("{idx}")),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::MemmapFile(idx, name) => {
+                let size = gen_memmap_file(idx, name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    ino: 0,
+                    name: PathBuf::from(name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
             SysPath::BlockDevice(dev) => Ok(DirEntry {
                 ino: 0,
                 name: PathBuf::from(dev),
@@ -1435,7 +1574,8 @@ impl FileSystem for SysFs {
             | SysPath::CpuCacheFile(_, _, _)
             | SysPath::CpuidFile(_)
             | SysPath::MemoryFile(_)
-            | SysPath::BlockFile(_, _) => {
+            | SysPath::BlockFile(_, _)
+            | SysPath::MemmapFile(_, _) => {
                 // Read-only files (we do not model runtime CPU hot-plug).
                 Err(KernelError::NotSupported)
             }
@@ -1452,7 +1592,9 @@ impl FileSystem for SysFs {
             | SysPath::CpuidDir
             | SysPath::MemoryDir
             | SysPath::BlockDir
-            | SysPath::BlockDevice(_) => Err(KernelError::IsADirectory),
+            | SysPath::BlockDevice(_)
+            | SysPath::MemmapDir
+            | SysPath::MemmapRegion(_) => Err(KernelError::IsADirectory),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -2342,6 +2484,79 @@ pub fn self_test() -> KernelResult<()> {
                  read_only matches blkdev::list_devices(), Linux's size/ro absent, \
                  unregistered name absent: OK",
                 devices.len()
+            );
+        }
+
+        // 6. The firmware memory map must agree with the snapshot it is
+        //    rendered from. Each field against its region, not merely parseable:
+        //    a shape check passes against a tree serving one region's addresses
+        //    under every index.
+        let regions = crate::fs::memlayout::list_regions();
+        let mm_entries = match fs.readdir(Path::new("/devices/memmap")) {
+            Ok(v) => v,
+            Err(e) => {
+                serial_println!("[sysfs]   FAIL: readdir /devices/memmap failed: {e:?}");
+                return Err(e);
+            }
+        };
+        if mm_entries.len() != regions.len() {
+            serial_println!(
+                "[sysfs]   FAIL: /devices/memmap lists {} region(s), memlayout has {}",
+                mm_entries.len(),
+                regions.len()
+            );
+            return Err(KernelError::IoError);
+        }
+        for (i, region) in regions.iter().enumerate() {
+            let want = [
+                ("start", alloc::format!("{:#018x}", region.start)),
+                ("end", alloc::format!("{:#018x}", region.end())),
+                (
+                    "type",
+                    alloc::string::String::from(region.region_type.label()),
+                ),
+            ];
+            for (leaf, expect) in &want {
+                let path = alloc::format!("/devices/memmap/{i}/{leaf}");
+                let got = match fs.read_file(Path::new(&path)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        serial_println!("[sysfs]   FAIL: read {path} failed: {e:?}");
+                        return Err(e);
+                    }
+                };
+                let got_s = core::str::from_utf8(&got).unwrap_or("").trim();
+                if got_s != expect.as_str() {
+                    serial_println!(
+                        "[sysfs]   FAIL: {path} reads {got_s:?}, memlayout says {expect:?}"
+                    );
+                    return Err(KernelError::IoError);
+                }
+            }
+        }
+
+        // The negative control, and for an INDEXED tree it is the one that
+        // matters: one past the end must not exist. Without it the suite cannot
+        // tell a bounds check from no bounds check, and an out-of-range index
+        // reading zeros is the same 'absence renders as a claim' failure as
+        // 0 partition(s) and devices: 0.
+        let past = alloc::format!("/devices/memmap/{}/start", regions.len());
+        if fs.read_file(Path::new(&past)).is_ok() {
+            serial_println!("[sysfs]   FAIL: {past} answered; it is one past the end");
+            return Err(KernelError::IoError);
+        }
+
+        if regions.is_empty() {
+            serial_println!(
+                "[sysfs]   devices/memmap: listed and empty, and one past the end is \
+                 absent: OK -- but the firmware handed us NO map, so the per-region \
+                 checks proved nothing this run"
+            );
+        } else {
+            serial_println!(
+                "[sysfs]   devices/memmap: {} region(s), every start/end/type matches \
+                 memlayout::list_regions(), one past the end absent: OK",
+                regions.len()
             );
         }
     }

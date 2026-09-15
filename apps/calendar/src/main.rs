@@ -3390,6 +3390,35 @@ mod tests {
     )]
 
     use super::*;
+    /// The picker is not merely open: it is DRAWN.
+    ///
+    /// `is_open()` returning true is not the same claim, and assuming it was
+    /// is how `apps/flashcards` shipped a dialog that took every keystroke and
+    /// painted nothing. Deleting the `picker.render` line in the renderer
+    /// leaves `is_open()` true and every other test green; this is the one
+    /// that notices.
+    #[test]
+    fn the_picker_is_drawn_when_it_is_open() {
+        let today = Date {
+            year: 2026,
+            month: 9,
+            day: 15,
+        };
+        let mut app = CalendarApp::new(1024.0, 768.0, today);
+        let before = app.frame(1024.0, 768.0).into_tree().commands.len();
+        app.open_file_dialog(true);
+        assert!(app.picker.is_open(), "no picker came up");
+        let after = app.frame(1024.0, 768.0).into_tree().commands.len();
+        let own = app.picker.render(&app.palette, 1024.0, 768.0).len();
+        assert!(
+            own > 0,
+            "the picker itself draws nothing, so this proves nothing"
+        );
+        assert!(
+            after >= before + own,
+            "the frame does not contain the picker's own {own} command(s) ({before} before, {after} after) -- something else grew instead"
+        );
+    }
 
     /// A calendar survives a write and a read.
     ///
@@ -3539,11 +3568,22 @@ mod tests {
                 "the window never said {line:?}"
             );
         }
+        // The cost AND the remedy. This used to require only "gone when the
+        // window closes", and that phrase survived the rewrite that added the
+        // door **by luck** -- it happens to still sit at the end of the new
+        // sentence. So this test never failed, never drew attention to
+        // itself, and never checked the half the banner had just gained. The
+        // fifth of this shape in the tree and the only one found by searching
+        // for the idiom rather than by a red test.
         assert!(
             NO_EVENTS_LINES
                 .iter()
                 .any(|l| l.contains("gone when the window closes")),
             "nothing warns that an event added today does not survive",
+        );
+        assert!(
+            NO_EVENTS_LINES.iter().any(|l| l.contains("Ctrl+S")),
+            "the warning does not say how to keep the event",
         );
     }
 

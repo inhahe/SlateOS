@@ -8,8 +8,40 @@ the two functions are not. Stated precisely because "the kernel now uses
 | asked for | state |
 |---|---|
 | `TYPE_ECHO_REPLY`, `TYPE_ECHO_REQUEST`, `HEADER_LEN` | **done** — `use netproto::icmp as wire;` at `icmp.rs:35`, ~20 sites repointed, all three local constants deleted |
-| `write_echo` (build a request) | **not done** — `build_echo_request` (:413) and `build_trace_echo_request` (:315) still encode by hand |
-| `reply_to` (request → reply) | **not done** — still inline in `process_icmp` |
+| `write_echo` (build a request) | **done** 2026-09-15 — both `build_echo_request` and `build_trace_echo_request` call it; no hand-rolled layout remains |
+| `reply_to` (request → reply) | **not done, and it is NOT a byte-identical swap** — see below |
+
+**`reply_to` turns out to change behaviour, and to fix a conformance bug doing
+it.** `netproto::icmp::reply_to` is `write_echo(out, false, id, seq, data)`, so
+it emits **code = 0**. The kernel's `send_echo_reply` copies the request's bytes
+and flips only byte 0, which means it **echoes the request's code byte back**.
+RFC 792 specifies Code = 0 for an Echo Reply, so the current kernel propagates a
+field it should zero.
+
+That makes the remaining adoption a small conformance fix rather than a
+refactor, and it deserves its own change with its own reasoning rather than
+riding along on a swap that was provably byte-identical. Filed here so the
+distinction is on record: `write_echo` could not change a packet, `reply_to`
+can.
+
+**It is TWO behaviour changes, not one** -- worth writing down before doing it,
+since only the first is obvious. `Echo::parse` also refuses a request whose
+code byte is non-zero (`if buf[1] != 0 { return None }`), because RFC 792
+specifies Code = 0 for echo. So adopting `reply_to` means:
+
+1. the reply's code becomes 0 instead of whatever the request carried; and
+2. a request with a non-zero code stops being answered at all, where today it
+   gets a reply with its malformed code echoed back.
+
+Both are RFC-correct and neither touches a well-formed ping, which always has
+code 0 -- so no real client changes behaviour. But (2) is a silent drop where
+there used to be a response, and that is the kind of change that should be
+chosen rather than inherited from a parser's strictness.
+
+`parse` also re-validates the checksum, which `process_icmp` has already done
+by then. Harmless, and worth noting so nobody later removes the outer check on
+the grounds that the parser covers it -- the outer one guards the paths that do
+not go through `reply_to`.
 
 One premise has also changed since filing, and it strengthens the case rather
 than weakening it: netproto's copy is no longer "an island nobody calls" —

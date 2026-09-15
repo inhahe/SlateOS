@@ -61231,8 +61231,18 @@ a work tree", while the same commands work fine in `os-lane-a/b/c`. The check is
 
 ### TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING — 2026-09-04 — OPEN
 
-**In short.** The bulk renamer can now be given files and rules, and can
-actually rename. What it still cannot do is add any rule that needs a *string*
+**Corrected 2026-09-15.** The paragraph below said the renamer "can actually
+rename". It could not: `apply_plan` edited a `Vec<FileEntry>` and the crate
+contained no `std::fs` at all, while the status line said "Renamed {count}
+files". The sentence was written to mean *the rename action is reachable from
+a key*, and what it says is that the program renames files. It is left visible
+rather than quietly edited, because the entry crediting a program with an act
+it cannot perform is the finding, and `scripts/find-overstated-records.py`
+exists now to catch the next one. The renamer does rename real files as of
+`TD-C-RENAMER-SAID-RENAMED-N-FILES-AND-RENAMED-NOTHING` below.
+
+~~**In short.** The bulk renamer can now be given files and rules, and can
+actually rename.~~ What it still cannot do is add any rule that needs a *string*
 typed in — find/replace, insert, remove-at, regex, replace-extension — because
 the app draws no text field anywhere.
 
@@ -151815,3 +151825,884 @@ something says otherwise.
 events into it is a separate piece of work; an empty, honest table is the
 correct state until then, and is now labelled as such rather than filled.
 
+
+## TD-C-A-TEST-THAT-PINS-WORDING-PASSES-UNTIL-THE-WORDING-IS-WRONG -- FIXED 2026-09-15
+
+**In short:** four apps had a test asserting that a warning message contained a
+particular phrase. Each of those phrases later became untrue, and every one of
+those tests went on passing — because the words were still there. The test was
+guarding the sentence rather than the thing the sentence was for. All four now
+assert the property instead.
+
+### The four
+
+| app | the phrase it pinned | what made it false |
+|---|---|---|
+| `contacts` | "Nothing is saved between runs" | a vCard door |
+| `diagram` | "gone when the window closes" | a save door |
+| `flashcards` | "review schedule resets" | a deck door that keeps schedules |
+| `mindmap` | "gone when the window closes" | an outline door |
+
+In each case the app gained a way to save, the banner had to change, and the
+assertion that was supposed to protect the banner **was the last thing to
+notice**. Three of the four were found only because the banner edit made the
+test fail; the fourth was found by reading the other three.
+
+### Why the shape is so easy to write
+
+The message is a constant a few lines above the test:
+
+```rust
+const NO_CONTACTS_LINES: [&str; 2] = [
+    "No contacts.",
+    "Nothing is saved between runs -- this app has no filesystem access, ...",
+];
+```
+
+so the literal is *right there*, and asserting on it feels like asserting on
+the thing. It is not. **A phrase is an implementation of a promise, and a test
+that pins the implementation cannot fail when the promise stops being kept.**
+
+It is worse than an untested banner, because it reads as coverage. Someone
+changing the wording sees a test named
+`the_window_says_what_it_cannot_do`, sees it pass, and concludes the window
+still says what it cannot do.
+
+### What to assert instead
+
+Ask what has to be true for the message to do its job, and assert that:
+
+```rust
+// before: the phrase
+assert!(LINES.iter().any(|l| l.contains("gone when the window closes")));
+
+// after: the property -- the reader must learn both halves
+assert!(LINES.iter().any(|l| l.contains("Ctrl+S")),
+        "the banner does not say how to keep the work");
+assert!(LINES.iter().any(|l| l.contains("not opened again")),
+        "the banner does not say the diagram cannot be reopened");
+```
+
+Those still match on substrings — there is no way to assert "this sentence is
+true" — but they match on the **load-bearing** part, the bit whose absence is
+the defect. Changing "press Ctrl+S" to "use Ctrl+S" keeps them green, which is
+right: that edit does not break the promise. Removing the remedy breaks them,
+which is also right.
+
+### A fifth, found by searching rather than by a red test
+
+`apps/calendar` pinned "gone when the window closes". It gained an iCalendar
+door hours before the other four were found, and its test **never failed** —
+because that phrase happens to still sit at the end of the rewritten sentence:
+
+    "Nothing is saved automatically -- press Ctrl+S to write an .ics file,
+     or an event added today is gone when the window closes."
+
+So the assertion survived by luck, drew no attention to itself, and never
+checked the half the banner had just gained. It is the most instructive of the
+five for exactly that reason: **the other four were found because they broke.
+This one could only be found by looking.** A test that pins a phrase does not
+reliably fail when the promise changes; whether it fails is an accident of
+which words the rewrite happened to keep.
+
+### Where else this shape lives, and why it is a checklist rather than a backlog
+
+Fifteen tests in `apps/` use the idiom `LINES.iter().any(|l| l.contains("..."))`
+against a banner constant. The eleven not listed above are **true today**:
+
+    alarmclock   "nothing will wake you"
+    clipmanager  "however much you copy"
+    credmanager  "Do not rely on it"
+    devicemanager "not because the machine has no devices"
+    email        "nothing was ever fetched"
+    filediff     "no left file and no right file"
+    finance      "no way to add an account"
+    logviewer    "not a quiet system"
+    mediaconvert "do not delete an original"
+    habits       "Nothing is saved between runs"
+    whiteboard   (drawings cannot be kept)
+
+Rewriting them now would be churn against assertions that are not yet wrong,
+and each rewrite risks weakening a check that currently works. They are left
+alone deliberately.
+
+What they are is a **list of the exact tests that will go stale on the day each
+of those apps gains the capability its banner denies** — which, for most of
+them, is the day it gets a door. `habits` is the clearest: its phrase is
+word-for-word the one `contacts` had, and `contacts` needed it rewritten within
+an hour of its vCard door landing.
+
+So the entry to act on is not "fix these fifteen". It is: **when adding a
+capability to an app, grep its tests for `contains(` before editing its banner**
+— the assertion that was supposed to protect the banner is the last thing that
+will tell you.
+
+### The general form, which is not about banners
+
+This is the same failure as a test that passes because its fixture had nothing
+to act on, and as a checker whose green result was computed over the wrong
+corpus. In all three the result is *true* and answers a question nobody asked:
+
+* the fixture had no selected item, so "nothing was deleted" held trivially;
+* the gate scanned `gui`/`apps`/`scripts`, so "no collapsed messages" said
+  nothing about `kernel/`;
+* the phrase was still in the constant, so "the window says it" held while the
+  window said something false.
+
+**Green is only as meaningful as the question it answers.** The check worth
+making on any passing assertion is: *what would have to change in the program
+for this to fail?* If the answer is "an edit that does not matter", the
+assertion is pinned to the wrong thing.
+
+## TD-C-A-SABOTAGE-THAT-DOES-NOT-SABOTAGE -- METHOD 2026-09-15
+
+**In short:** the only way to know a test would catch the bug it was written
+for is to introduce that bug and watch the test fail. Doing that is cheap and
+it caught real gaps repeatedly today. Doing it *wrong* is also easy, and twice
+today a broken sabotage reported a passing test as covered — or a covered test
+as broken. This records how to do it and the two ways it misleads.
+
+### Why it is not optional
+
+Three tests written this week passed for reasons unrelated to what they
+claimed:
+
+* `apps/podcast` — "playback did not start while the picker was up" held
+  because the fixture had no episode selected, so Space did nothing either way.
+* `apps/photomanager` — "the slideshow advanced" was measured on a counter that
+  a tick past the interval **resets to zero**, so the assertion was false at
+  exactly the moment the slideshow did move.
+* `apps/kanban` and seven others — `assert!(picker.is_open())` was assumed to
+  cover "the picker is drawn". It does not, and `apps/flashcards` shipped a
+  dialog that took every keystroke and painted nothing.
+
+None of those was found by reading. All three were found by breaking the
+program and noticing the test did not care.
+
+### The two ways the sabotage itself lies
+
+**1. A build error is not a red test.** Deleting a render call with a regex
+left `frame.extend(` dangling. The crate did not compile; a check looking for
+`test result: FAILED` saw no such line and reported *five* tests as failing to
+notice. They were fine. This is the second time this session — `apps/rssreader`
+cost three attempts for the same reason. Always distinguish "the test failed"
+from "the build failed"; they are different words in the output and mean
+opposite things about the test.
+
+**2. A sabotage that does not reach the code under test.** The first attempt at
+disabling a picker's drawing removed one app's render line, which says nothing
+about the other seven. **Sabotage the shared implementation instead**: making
+`FilePicker::render` return an empty `Vec` reddens every caller's test at once,
+cannot be confused with a compile failure, and is one edit to revert.
+
+### What makes an assertion resistant
+
+The `fileassoc` case is the sharpest. The test counted frame commands before
+and after opening the picker and asserted growth — and that app draws a
+**scrim** in the same arm, so the count grew whether or not the picker did. The
+assertion was satisfied by a neighbour's output.
+
+The repair is to assert the specific quantity rather than a proxy for it:
+
+```rust
+let own = app.picker.render(&app.palette, w, h).len();
+assert!(own > 0, "the picker itself draws nothing, so this proves nothing");
+assert!(after >= before + own, "...something else grew instead");
+```
+
+The first line is a **control**: it refuses to let the test pass when the thing
+it measures is trivially zero. Every test that has caught something this week
+has one, and every test that passed for the wrong reason lacked one.
+
+### The question to ask
+
+Before trusting a green test: **what would have to change in the program for
+this to fail?** If the answer is "an edit that does not matter", or "nothing I
+can name", the assertion is pinned to the wrong thing — and it is worse than no
+test, because it reads as coverage.
+
+Applied to the eight picker tests, seven happened to pass with the weaker form.
+They were strengthened anyway: *happening to* pass is the defect, not a
+mitigating circumstance.
+
+## TD-C-A-CORRECT-TOOL-ANSWERING-A-NARROWER-QUESTION -- METHOD 2026-09-15
+
+**In short:** four times in one day, a tool gave a true answer to a question
+slightly narrower than the one being asked, and the answer read as complete.
+Three were tools used carelessly. The fourth was `git log -- <path>` doing
+documented, deliberate, correct work — and that one is the reason this is an
+entry rather than a note, because there is nothing to fix in the tool and
+nothing in its output to notice.
+
+### The four
+
+| the question asked | what the tool answered | how it showed |
+|---|---|---|
+| "which apps route a file dialog?" | "which contain the string `fn apply_dialog_action`" | count was 11; it was 13 |
+| "is the tree free of collapsed messages?" | "are `gui`, `apps` and `scripts` free of them" | 382 files, none of them lane A's |
+| "does this test catch the bug?" | "did the build succeed" | a build error read as "the test did not notice" |
+| "what commits changed this file?" | "what is the simplest history explaining its content" | lane B's repair invisible |
+
+In all four the output is **true**. Nothing in any of them indicates the
+question was narrowed.
+
+### Why the last one is different, and worse
+
+The first three are mistakes with a fix: spell the grep better, name the
+corpus, distinguish a compile failure from a test failure. Someone reading the
+tool's configuration could have seen the gap.
+
+`git log -- <path>` has no gap to see. History simplification is a designed
+feature with a flag to turn it off, and it is answering a genuinely useful
+question — *how did this file come to look like this* — which is simply not the
+question "who changed it". When lane B and lane A both made the **byte-identical**
+repair to one line, the merge was TREESAME to one parent, and the default
+follows only that side. Lane B's commit vanished from the listing while
+remaining in the history.
+
+    git log --oneline origin/main -- deflate/src/lib.rs
+      5a7cf6796                                 <- one commit
+
+    git log --oneline --full-history origin/main -- deflate/src/lib.rs
+      ... 9159b3d30, 5a7cf6796                  <- both
+
+**A correct tool cannot warn you that you asked the wrong question.** That is
+the whole of it, and it is why "use better tools" is not the lesson.
+
+### What to do instead
+
+**Check content, not provenance, when the claim is "this is fixed."**
+`git show origin/main:<path>` answers what anyone actually depends on — the
+bytes in the tree they will build. Which commit produced them is a different
+and more fragile question, and in this incident the same person got the content
+check right and the provenance check wrong in one message about one file.
+
+`--full-history` when the question really is *who changed this*; plain `log`
+when it is *how did it get this way*.
+
+More generally, and this is the transferable part: before believing a tool's
+answer, say out loud what question it answers. Not what it is *for* — what it
+answers. `git log -- <path>` is *for* finding out about a file's history and it
+**answers** a narrower thing. The gap between those two sentences is where all
+four of these lived.
+
+## TD-C-THE-REFLEX-FROM-THIRTEEN-APPS-IS-WRONG-IN-THE-FOURTEENTH -- METHOD 2026-09-15
+
+**In short:** fourteen applications got the same feature this week — a file
+dialog — and in eight of them the thing that went wrong was **the habit formed
+by the previous ones**. Not carelessness: each mistake was the correct answer
+somewhere else, written confidently, and wrong here in a way that reads as
+consistency. The failure gets *more* likely as a sweep progresses, which is the
+opposite of what experience usually does.
+
+### The eight
+
+| app | the reflex | what was actually there |
+|---|---|---|
+| `kanban` | Ctrl+S saves | Ctrl+S was the search bar; a second `Key::S if ctrl` arm is unreachable |
+| `kanban` | `WINDOW_WIDTH` | `INITIAL_WIDTH`, and a `u32` |
+| `torrent` | `INITIAL_WIDTH` | `WINDOW_WIDTH` — the opposite guess, one app later |
+| `kanban` | `Card::new(id, title)` | `Card::new(title)`; ids come from one `Id` type, not per-kind newtypes |
+| `filesearch` | the picker is drawn in `render_commands` | it is drawn in the App-trait `render`, over the top |
+| `automator` | Ctrl+O opens | `handle_key` refuses **every** modified key, deliberately, with a comment |
+| `automator` | add `win_width`/`win_height` | the app already stores `self.size` in `render` |
+| eight apps | one opener name | `open_file_dialog`, `open_save_dialog`, `open_folder_dialog`, `open_transfer_dialog` |
+
+### Why it gets worse rather than better
+
+After ten conversions the pattern is genuinely known — the routing, the
+`Picked` arms, the truncation note, the `own > 0` control. That knowledge is
+real and it is what makes the eleventh fast. It is also exactly what stops the
+eleventh being *read*.
+
+The `torrent` case is the clearest: I had just been corrected on `kanban`'s
+constant name, and reached for the name `kanban` used, in an app that used the
+other one. The correction did not generalise because there was nothing to
+generalise — **the fact is per-app and there is no rule that predicts it.**
+
+### The two that are worth more than the rest
+
+`automator`'s modifier policy is the sharpest, because the reflex would not
+have failed loudly. A `Ctrl+O` binding there compiles, runs, and is silently
+discarded by a guard four hundred lines away that exists on purpose. Nothing
+would have said so. And it would have contradicted a written position rather
+than merely not working — which is worse, because the next reader would have
+found two parts of one file disagreeing and no way to tell which was intended.
+
+`filesearch` is the other: the test written like the other seven **failed
+against correct code**, which is the good outcome. It cost one diagnosis and
+taught where that app draws. The bad outcome is the same test passing for an
+unrelated reason, which is what `fileassoc`'s scrim did.
+
+### What actually works
+
+Not "be careful". Two concrete habits, both cheap:
+
+1. **Grep for the thing before using its name.** The constant, the opener, the
+   render entry, the key. Every one of the eight above was one `grep` away, and
+   the grep costs a second where the compile costs a minute and a wrong
+   *runtime* assumption costs a merge.
+2. **Read the app's own position before overriding it.** `automator`'s comment
+   said what it thought about modifiers. `kanban`'s search binding was visible
+   in its key table. Both were written down by somebody who had thought about
+   it, and in both cases the convention I was carrying was younger than the
+   position I was about to break.
+
+The general form: **a convention is evidence about the codebase you learned it
+in, and every app is a different codebase until you check.** The scanners in
+`scripts/` all carry a version of that warning in their docstrings; this is the
+same rule applied to the person rather than the tool.
+
+## TD-C-TWO-EXPORT-BUTTONS-THAT-COMPOSED-A-REPORT-AND-DROPPED-IT -- FIXED 2026-09-15
+
+**In short:** `apps/benchmark` and `apps/sysinfo` each had an Export button.
+Pressing either built the whole report in memory and then threw it away, so no
+file was ever written. sysinfo went further and printed "Exported system info
+to file" afterwards, and its Copy button printed "Value copied to clipboard"
+without copying anything. sysinfo's two toolbar buttons were worse still: they
+were drawn but never wired to the mouse at all, so clicking them did nothing
+whatsoever.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**The shape, in one line of source.** Both apps, at both call sites:
+
+```rust
+if !self.history.is_empty() {
+    let _report = self.export_report();   // composed, then dropped
+}
+EventResult::Consumed
+```
+
+`let _name = ...` is the discard that names what it discards, which is why it
+reads as deliberate. The `Consumed` is the part that makes it invisible: the
+framework is told the event was handled, so nothing downstream can notice that
+nothing happened.
+
+| control | claimed | did |
+|---|---|---|
+| benchmark Ctrl+E / Export button | nothing (silent) | built the report, dropped it |
+| benchmark Export with no history | nothing (silent) | nothing |
+| sysinfo Ctrl+E | "Exported system info to file" | built the report, dropped it |
+| sysinfo Ctrl+C | "Value copied to clipboard" | nothing |
+| sysinfo Export button (mouse) | nothing (silent) | nothing -- never hit-tested |
+| sysinfo Copy button (mouse) | nothing (silent) | nothing -- never hit-tested |
+
+**Why this is a recurrence and not a new finding.** `sysinfo` is an app already
+repaired once in this sweep, under
+`TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`: its fabricated hardware
+readings were removed and the entry closed. **That audit looked at what the app
+*displayed* and never at what its *controls claimed*.** The two are separate
+surfaces and a pass over one reads exactly like a pass over both -- the app was
+on a FIXED list while three of its controls were still lying. When an app is
+revisited, the question is which surface was audited last time, not whether it
+appears in the list.
+
+**The comment that was the tell.** sysinfo's clipboard handler was headed
+`// Ctrl+C = copy selected value (simulated)`. The word was right there, in the
+file, for however long it stood. **A note to the next programmer was standing in
+for a sentence addressed to the user** -- the parenthetical makes the code
+honest to a reader while the string it guards stays false to the person holding
+the machine. A `(simulated)` in a comment beside a user-visible claim is worth
+grepping for on its own.
+
+**The fix.** Both now route through `guitk::dialog::FilePicker` -- the same door
+seventeen applications share -- and write through `safeio::write_str_atomically`.
+The status lines report what was actually written (`Wrote N bytes to <path>`) or
+why it failed. sysinfo's clipboard message now says nothing here can reach the
+clipboard and names Ctrl+E, which does work: **a false denial is cheaper than a
+false promise but it is the same defect pointed the other way.** benchmark grew
+a `status_message` because its status bar derived its entire text from the
+progress phase, leaving an action nowhere to report a result -- which is part of
+how a discarded export stayed invisible. Exporting an empty history now says
+so instead of going quiet.
+
+sysinfo's toolbar geometry is now `SysInfoState::toolbar_layout()`, used by both
+the drawing and the hit-test, so a moved button cannot leave its clickable
+region behind. A test asserts the drawn label falls inside the rectangle the
+click tests.
+
+**Verified by sabotage**, six claims, each broken in turn with an edit that
+still compiles: the write silenced, the picker undrawn, the hit-test displaced,
+the picker made to swallow every event, the empty-history notice removed, and a
+`Tick` under an open picker. All six went red.
+
+---
+
+## TD-C-A-SCRATCH-BACKUP-KEYED-BY-BASENAME-OVERWROTE-THE-FILE-IT-WAS-PROTECTING
+
+**In short:** a throwaway verification script backed up two files before
+breaking them on purpose, then restored them afterwards. Both files were named
+`main.rs`, the backup was keyed by that name alone, so the second file's copy
+silently replaced the first's -- and the restore wrote one app's entire source
+over the other's. No error was raised at any point.
+
+**Date:** 2026-09-15. **Lane:** C. Not a defect in the OS; a hazard in the
+scripts written to work on it, recorded because the layout that causes it is
+this project's universal one.
+
+```python
+for f in ["apps/sysinfo/src/main.rs", "apps/benchmark/src/main.rs"]:
+    shutil.copy(f, backup / pathlib.Path(f).name)   # both are "main.rs"
+```
+
+Every application here is `apps/<name>/src/main.rs`. **Any sweep script that
+touches two apps and keys anything by file *name* aliases them**, and
+`shutil.copy` reports success on the collision. The failure is silent at write
+time and destructive at restore time, so the damage surfaces long after the
+line that caused it -- here, as a `grep` for a function that had been added
+minutes earlier returning nothing, in a file that had become another app.
+
+**What makes it recoverable is unrelated to the script:** the overwritten file
+was committed, so `git checkout --` brought it back, and the work lost was the
+uncommitted change the script existed to verify. That is the argument for
+committing before running a harness that writes to the tree, not for writing a
+better harness.
+
+**The fix in the rewritten harness:** back up by full relative path, refuse to
+start if two inputs are byte-identical, and assert the post-restore SHA-256 of
+every file matches the pre-run one before exiting. The last of these is the one
+that matters -- a restore that is not verified is not a restore, which is the
+same `**absent != empty**` reasoning that an export you cannot read back is not
+a backup.
+
+## TD-C-RENAMER-SAID-RENAMED-N-FILES-AND-RENAMED-NOTHING -- FIXED 2026-09-15
+
+**In short:** the bulk renamer opened showing six files that did not exist,
+let you build up rename rules against them, and when you pressed Rename it
+said "Renamed 6 files" and changed nothing on the disk. Undo said "Undid
+rename of 6 files" and also changed nothing. The program had no filesystem
+access of any kind. It now opens a real folder, renames real files, and says
+what actually happened to each.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**This is the `undelete`/`partmanager`/`netscan` family**, recorded under
+`TD-C-THE-THREE-TOOLS-THAT-REPORT-ACTS-THEY-DID-NOT-PERFORM`, and it was missed
+by that sweep for a reason worth keeping: **that sweep looked for fabricated
+readings, and the renamer's fabrication was its input list while its false
+claim was its status line.** A scanner looking for invented *data* finds a
+program that shows you numbers it made up. It does not find one whose invented
+data is a plausible list of filenames and whose lie is a past-tense verb.
+
+What believing it costs is the same as the other three, and in the same
+direction: a person told a batch rename **failed** looks for their files under
+the old names. One told it **succeeded** looks under the new ones, finds
+nothing, and may well conclude the files are lost -- or delete the copy they
+kept, the rename having "worked".
+
+| control | claimed | did |
+|---|---|---|
+| Enter (Rename) | "Renamed 6 files" | edited `Vec<FileEntry>` |
+| Ctrl+Z (Undo) | "Undid rename of 6 files" | edited `Vec<FileEntry>` |
+| Ctrl+Y (Redo) | "Redid rename of 6 files" | edited `Vec<FileEntry>` |
+| the file list | six files under `/home/user/...` | invented at startup by `seed_sample_files` |
+
+**The undo is the dangerous one and it nearly survived the fix.** Repairing
+`execute_rename` alone would have left the identical defect in `undo` and
+`redo`, which both called the same memory-only `apply_plan` -- and an undo that
+reports success while restoring nothing is worse than a rename that does
+nothing, because by then the files really have moved and the user has been told
+they are back.
+
+**What the fix did NOT have to build.** `rename_plan` was already there,
+already correct, and already tested: it orders a batch so no step overwrites a
+name a later step still needs, and parks a name under a temporary when a cycle
+makes that impossible. It was written against a comment reading "when this is
+wired to `fs::rename`". **The hard half was done and the easy half was
+missing** -- which is the stranded-serialiser shape, one level up: not a
+serialiser with no door, but an entire correct algorithm with no filesystem
+under it.
+
+**What changed:**
+
+* `Ctrl+O` opens a folder through `guitk::dialog::FileDialog::select_folder`.
+  Until one is chosen the list is empty and the status line says so. The six
+  invented files are now a `#[cfg(test)]` fixture, which is what they always
+  were in substance.
+* `perform` walks the plan calling `std::fs::rename`, updating each entry only
+  when its own rename succeeded, so the list keeps describing the directory.
+  A failure does not stop the batch: the plan's *order* is what makes it safe,
+  so abandoning it midway is what creates the collision it was built to avoid.
+* `describe` reports both halves -- "Renamed 3 file(s); 2 failed. a -> b: ..."
+  -- rather than a count that hides the failures or an error that hides the
+  successes.
+* Undo and redo go through the same `perform`, and push onto the opposite
+  stack **only if something actually moved**.
+* `FileEntry` is keyed by `raw_name: OsString`, the name as the filesystem gave
+  it, with the text form used for the rules and the display. A name that is not
+  valid UTF-8 is listed, marked unrenameable and left unticked, because every
+  rename rule reads text and writes text: renaming from a lossy form would
+  write a name **nobody asked for**, since `to_string_lossy` substitutes U+FFFD
+  and that is a different name.
+* `original_path: String` and its `replace_file_name` helper are gone. The path
+  is `folder.join(raw_name)`, derived, so the class of bug that helper existed
+  to fix -- `path.replace(old, new)` rewriting a *directory* whose name
+  contains the file's name -- cannot occur at all now.
+
+**The tests changed more than the code did, and that is the finding.**
+`app_with(&["a.txt", "b.txt"])` used to build a `Vec` of names and no files.
+Every test that called `execute_rename` was therefore checking a memory shuffle
+-- against a program whose status line said it had renamed things. They now
+build a real scratch directory, and `on_disk()` reads the folder back. Two
+consequences surfaced immediately:
+
+1. `test_app_execute_rename` went red, because with no folder open nothing is
+   renamed and nothing is pushed to the undo stack. **That is the defect, found
+   by its own test suite the moment the suite was made to touch a disk.**
+2. `a_case_only_rename_is_not_a_conflict` could not be given a real fixture at
+   all. It writes `photo.JPG` and `PHOTO.jpg`, and **the host these tests run
+   on is Windows, whose filesystem is case-insensitive**, so the two collapse
+   into one file. The rule under test is a property of the *target*
+   filesystem, which `design.txt` specifies as case-sensitive, and the host
+   cannot hold the fixture that would demonstrate it. It keeps a name list,
+   with the reason written at the test, because conflict detection is a
+   function of the names alone.
+
+The fixture guard -- `assert_eq!(app.files.len(), names.len(), "the fixture did
+not load, or this test asserts nothing")` -- is what turned (2) from a silently
+weaker test into a failure with an explanation. That is the same guard lane B
+found five copies of in `userspace/`, and it earned its place again here.
+
+**Verified by sabotage**, eight claims, each broken with an edit that still
+compiles: the rename silenced, a failure counted as a success, a non-text name
+treated as text, the picker undrawn, an undo queued for a rename that did not
+happen, and folders listed as files. All eight went red.
+
+## TD-C-TWO-PROCESS-MANAGERS-REPORTED-KILLING-PROCESSES-THEY-NEVER-TOUCHED -- FIXED 2026-09-15
+
+**In short:** the process explorer and the system monitor each had Kill, Pause
+and Resume buttons. Pressing Kill said "Killed process firefox (PID 4821)" and
+removed the row from the list. Nothing was signalled — neither program can send
+a signal at all. The process explorer additionally opened on six invented
+processes and an invented 8 GiB machine, even though it had been reading the
+real `/proc` since 2026-09-13.
+
+**Date:** 2026-09-15. **Lane:** C. Found by
+`scripts/find-claimed-acts.py`, written the same afternoon for this class.
+
+**Why this is the worst form the defect takes.** The claim was not merely
+false; **the program then made it come true in the display.** Kill removed the
+row, Pause set the row to Stopped. So the window agreed with its own status
+line — the process vanished from the list exactly as it would have if it had
+died — and *nothing inside the program could tell the user otherwise.* Every
+other fabrication in this sweep can in principle be caught by looking harder at
+the screen. This one cannot.
+
+What believing it costs: a person who thinks a runaway process is dead stops
+trying to kill it. The machine stays slow, and the reason has been removed
+from the list of suspects.
+
+| control | claimed | did |
+|---|---|---|
+| `procexplorer` Kill (toolbar + menu) | "Killed process X (PID n)" | removed the row |
+| `procexplorer` Pause / Resume (both routes) | "Paused X" / "Resumed X" | set the row's status |
+| `sysmonitor` Kill (toolbar + menu) | "Killed process X (PID n)" | removed the row |
+| `sysmonitor` Stop / Continue | "Stopped X" / "Resumed X" | set the row's status |
+
+**Two routes each, and that is the part worth remembering.** Both apps had the
+toolbar action *and* a right-click menu action, implemented separately, saying
+the same false thing two hundred lines apart. Repairing `kill_selected` alone
+left `ContextAction::Kill` untouched in both — and I did exactly that, and the
+scanner caught it on the re-run. **A defect found by reading one call site is
+a defect half-fixed by default.**
+
+**The tests were the other half, and they differed instructively.**
+`procexplorer` had *no* test for any of the three controls, which is part of
+why the claim survived. `sysmonitor` had four, and they were worse than none:
+
+```rust
+s.kill_selected();
+assert_eq!(s.processes.len(), initial - 1);
+```
+
+That assertion **pins the fabrication.** It does not test that a process was
+killed — nothing could, from in here — it tests that the row was removed, which
+is precisely the mechanism that made the lie self-consistent. A test over a
+claim nothing performs makes the defect look deliberate and protects it from
+the next reader. A fifth test, `test_continue_selected`, then passed
+*vacuously* once the repair landed: it stopped and continued a process that was
+already Running and asserted it was Running, so it would have held against two
+methods that did nothing whatever.
+
+**`procexplorer`'s invented machine, and the shape of how it survived.** Two
+changes, each defensible alone:
+
+* `refresh()` reads the real `/proc` through `procinfo`, and **keeps the
+  previous list when it cannot read** — right, because an explorer that empties
+  itself when `/proc` is briefly unavailable is worse than one that holds.
+* `main()` called `load_demo_data()` first, under a comment reading *"Until a
+  real process source exists this is what there is to show"*.
+
+Together: on every host without `/proc`, the invented list loaded first and the
+real reader then declined to replace it. **The careful reader was shadowed at
+startup by the thing it replaced**, and the comment saying why had been false
+for two days. `load_demo_data` set more than processes — 8 GiB of memory, 33%
+CPU, load `[1.23, 0.98, 0.87]`, 86472 seconds of uptime, and a table of network
+connections. An entire plausible machine, none of it this one.
+
+Startup now calls `refresh()`; the demo builders are `#[cfg(test)]`; memory,
+load and uptime are read from the same `ProcFs`; and when `/proc` cannot be
+read at all the status bar says so rather than leaving a window that looks like
+a working one.
+
+**What is still missing, and whose it is.** Sending a signal needs `kill(2)`,
+which is stateful and therefore reachable only through the C ABI per
+`design-decisions.md` §768 — `posix::signal::kill` as a Rust dependency is the
+route that looks right and resolves to a stub answering `-ENOSYS`. That makes
+it `libcall`'s to expose and `libcall` is lane B's:
+`requests/c-b-a-process-manager-needs-a-way-to-send-a-signal.md`. Until it is
+answered the three controls are honest and inert, which is the correct state
+for a control that cannot act.
+
+`/proc/net/tcp` is likewise parsed by nothing in this tree, so both Network
+tabs now show an empty list rather than invented sockets.
+
+**Still open here:** `sysmonitor` has no `procinfo` dependency and still
+invents its process list and system figures from `load_demo_data` at startup.
+Its *claims* are repaired; its *data* is not. That is the next commit, and it
+is the same edit `procexplorer` just took.
+
+**Verified by sabotage**, five claims, each broken with an edit that still
+compiles: the kill claimed again, the row removed to match it, an unreadable
+`/proc` passed over in silence, and the system figures left unread. All five
+went red.
+
+## TD-C-THE-VPN-MANAGER-REPORTED-CONNECTING-AND-KEPT-A-LOG-OF-SESSIONS-THAT-NEVER-HAPPENED -- FIXED 2026-09-15
+
+**In short:** clicking Connect in the VPN manager turned the profile green,
+said "Connected successfully", showed a local address of 10.8.0.2 and a latency
+of 42 ms, and started a session clock. No tunnel was established, because
+nothing in this operating system can establish one. The window also opened on a
+log of past sessions that never happened.
+
+**Date:** 2026-09-15. **Lane:** C. Found by
+`scripts/find-claimed-acts.py`.
+
+**This one has a consequence the others do not.** Every fabrication fixed in
+this sweep costs the user time or trust. This one costs them privacy: **a
+person who believes their traffic is inside a tunnel behaves as though it is.**
+That is the whole purpose of the program, and it is the one belief it could
+create falsely.
+
+The code said so itself:
+
+```rust
+// Simulate immediate connection success for UI purposes
+if let Some(conn) = self.connection_for_mut(pid) {
+    conn.status = ConnectionStatus::Connected;
+}
+self.add_log(&name, "Connected successfully", LogLevel::Info);
+```
+
+**Someone had already been here, and cleaned the wrong half.** `advance`
+carries a careful paragraph refusing to move the byte counters, because
+"traffic on a tunnel it is not carrying would be a number invented to look
+busy". The fabricated *readings* were removed and the *claim* was left
+standing — the same partial audit that left `apps/sysinfo` on a FIXED list
+with three lying controls, and the same shape as `apps/procexplorer`, where
+`refresh()` was wired to the real `/proc` and `main()` went on seeding invented
+processes. **A fabrication has two halves — the numbers and the sentence — and
+fixing either one leaves a program that still lies.**
+
+**There is no VPN in this tree and there is not going to be one soon.** `net/`
+holds `dns` and `httpclient`. There is no tunnel device, no WireGuard, no
+IPsec, nothing that could carry a packet through anything. So this is not
+"unfinished"; it is a capability the system does not have, which is why the
+new status is `Unavailable` rather than `Error`. **A status that invites the
+user to try again is its own small lie** when trying again cannot help.
+
+**What changed:**
+
+* `connect()` sets `ConnectionStatus::Unavailable`, logs a warning, and returns
+  `Err("No VPN client on this system: the profile was checked, but no tunnel
+  was established")`. `quick_connect` and `reconnect` delegate to it, so both
+  became honest without being touched.
+* The invented `local_ip = "10.8.0.2"` and `latency_ms = 42` are gone — an
+  address nothing assigned and a round trip nothing measured, drawn in the
+  details pane beside the real fields with no way to tell them apart.
+* The log starts empty. It had opened on "Connected to vpn.company.com",
+  "Assigned IP 10.8.0.2", "Handshake completed with peer", "Connection timed
+  out". **A log is where a user looks to find out what actually happened**,
+  which makes an invented one a fabricated account of their own machine rather
+  than decoration.
+* The export writes through `safeio::write_str_atomically` rather than
+  `fs::write`, which truncates the target before writing: an interrupted
+  export would have left neither the old profiles nor the new ones. It also
+  had no test at all — the one door this program has, unpinned.
+
+**Twenty-one tests went red at once, and that is the measurement worth
+keeping.** Every test of `disconnect`, the session statistics, the uptime clock
+and the status sort order reached its starting state by calling `connect` and
+unwrapping. **Twenty-four call sites asserted their own setup through the very
+claim that was false**, so the moment `connect` stopped pretending, most of the
+crate's connection suite collapsed. Nothing was wrong with those tests as tests
+— the machinery they cover is correct — but none of them could have caught this
+defect, because all of them depended on it.
+
+They now reach that state through `connected_for_testing`, a `#[cfg(test)]`
+method that places the state by hand. The name is the point: no production path
+calls it, and a reader of any test can see in one word that the connection was
+put there rather than arrived at.
+
+**A consequence worth stating plainly:** with nothing able to connect, the
+Reconnect button is conditional on a state the system cannot reach, so it
+cannot appear in a shipping build at all. That is honest rather than broken,
+and `reconnect_is_only_offered_once_there_is_a_connection_to_reconnect` now
+pins both halves — that Connect does not make it appear, and that a
+hand-placed connection does.
+
+**Still open, and it is the same app:** `sample_profiles()` is called from
+`VpnManager::new()`, so the window still opens on three invented profiles
+("Work VPN" at vpn.company.com, "Personal WG", "Travel VPN") that the user
+never created. Unlike the log, these are configuration rather than history, and
+unlike `procexplorer`'s seed they cannot be removed in one line — `new()` is
+used by all 210 tests, so the migration is a test-wide change of the same size
+as the one above. The next commit is that migration: `new()` opens empty,
+`with_sample_profiles()` becomes `#[cfg(test)]`, and the window says "no
+profiles yet — import one" the way `apps/renamer` says "Ctrl+O to choose a
+folder".
+
+**Verified by sabotage**, five claims, each broken with an edit that still
+compiles: the tunnel claimed again, the invented address restored, the invented
+latency restored. All five went red. The harness also reported honestly that
+**nothing pins the atomic write** — testing that needs fault injection this
+crate has no way to do, and the export test says so at the test rather than
+leaving the gap silent.
+
+## TD-C-THE-SYSTEM-MONITOR-NEVER-READ-THE-SYSTEM -- FIXED 2026-09-15
+
+**In short:** the system monitor showed fifteen processes, a memory total, a
+CPU percentage and load averages. All of it was written into the program by
+`load_demo_data` at startup. `refresh()` — the method whose name says it
+re-reads the machine — sorted the list it already had and read nothing at all.
+It now reads the real `/proc`, including the machine's hostname and kernel
+release, and says plainly when it cannot.
+
+**Date:** 2026-09-15. **Lane:** C. The other half of
+`TD-C-TWO-PROCESS-MANAGERS-REPORTED-KILLING-PROCESSES-THEY-NEVER-TOUCHED`,
+whose fix repaired this app's *claims* and left its *data*.
+
+**The comment was a promise, and this is it being kept.** `main` read:
+
+```rust
+// Until a real process source exists this is what there is to show. It is
+// loaded here rather than in `new` so that the moment a source arrives,
+// this is the one line that changes.
+monitor.load_demo_data();
+```
+
+That was honest and well-judged when written. `procinfo` — the shared `/proc`
+reader lane B built at lane C's request — had existed for days, so the source
+had arrived and nobody came back. **The value of a comment like that is
+entirely in someone returning to it**, and what makes that likely is not the
+comment; it is a check that notices. `apps/procexplorer` had the identical
+comment, also stale, found the same afternoon.
+
+**What is read now:** every process `/proc` admits to (pid, name, state,
+resident memory, thread count), plus memory totals, load averages, uptime, CPU
+model, hostname and kernel release. Two numbers are deliberately *not*
+produced:
+
+* `cpu_percent` stays 0.0. A percentage needs two samples of a counter and a
+  refresh has one. Inventing it is the mistake this whole change undoes.
+* A process's age is `system uptime − its start time`, because `/proc` does not
+  publish an age. That arithmetic is pinned by a test, and the sabotage run
+  confirmed that returning the start time instead goes red.
+
+**A fixture caught a wrong path, which is the point of asserting values.** The
+first version of the system test wrote `/proc/hostname`; `procinfo` reads
+`sys/kernel/hostname`. The test failed with `left: "" right: "slate-test"`
+rather than passing over a field that was never read.
+
+**One constant, one derivation.** `apps/procexplorer` defined its own
+`TICKS_PER_SECOND: u64 = 100` beside `procinfo::TICKS_PER_SEC`, which is the
+same fact about the same files written twice. It now uses `procinfo`'s. Two
+copies of a kernel constant is how one program keeps working across a change
+and the other quietly stops.
+
+**Verified by sabotage**, five claims, each broken with an edit that still
+compiles: the process list not read, a process's age reported as its start
+time, the system figures not read, the kernel release taken as the whole
+`/proc/version` line, and an unreadable `/proc` passed over in silence. All
+five went red.
+
+## TD-C-APPS-SYSINFO-WAITS-ON-A-FILESYSTEM-TREE-THAT-DOES-NOT-EXIST -- OPEN 2026-09-15
+
+**In short:** the graphical System Information window reads ten of its twelve
+categories from `/sys/hardware/...`. The kernel serves no `/sys/hardware` at
+all, and lane A has now decided that several of those nodes will never exist,
+because `/proc` already answers the same questions. So those categories will
+report "cannot read" forever, while the data sits in `/proc` — and the crate
+built specifically to read it for this app is not among the app's
+dependencies.
+
+**Date:** 2026-09-15. **Lane:** C. Not yet fixed; the work is scoped below.
+
+**How it got here, in three correct steps.**
+
+1. `apps/sysinfo` was given a real provider reading `/sys/hardware/*`, with an
+   honest comment: *"Every query is expected to fail at present: nothing in
+   `kernel/`, `services/` or `userspace/` produces `/sys/hardware/*`. That is
+   the point rather than a defect here — the window says it cannot read the
+   hardware, which is true, and it starts reporting real values on the day a
+   producer appears."* Correct when written.
+2. §850 then settled that the CPU and memory trees belong at `/sys/devices`,
+   not a parallel `/sys/hardware`, and those two were moved. They work.
+3. Lane A recorded on 2026-09-15 that `irqs` and `display` are **deliberately
+   not served**, because `/proc/interrupts` and `/proc/monitors` already
+   publish them and "a second kernel answer to one question" is what §850
+   exists to prevent.
+
+Every step is right. The consequence nobody was positioned to see is that the
+app's comment — *"it starts reporting real values on the day a producer
+appears"* — became a **promise that will not be kept**, for a growing number of
+its categories, and the app is the only place that sentence is written.
+
+**What the kernel actually serves** (`kernel/src/fs/sysfs.rs`):
+`/sys/devices/system/cpu/**`, `/sys/devices/system/memory/{total_kb,
+available_kb}`, `/sys/devices/block/<name>/*` (added 2026-09-15, dd-939),
+`/sys/fs/*`, `/sys/params/*`. No `/sys/hardware` node of any kind, and
+deliberately no `cpufreq/` or `net/` — "no frequency source, and
+`InterfaceInfo` has no name field, so both would be invented", which is the
+same discipline applied one level down.
+
+**What `/proc` publishes that these categories want:** `cpuinfo`, `meminfo`,
+`uptime`, `loadavg`, `version`, `sys/kernel/hostname`, `mounts`, `diskstats`,
+`net/dev`, `interrupts`, `monitors`, and the whole `<pid>/` tree.
+
+**`procinfo` parses nearly all of it already**, and exists for this app: its
+module docs say so by name — *"the two system-information programs in this
+tree — `userspace/sysinfo` (the CLI) and `apps/sysinfo` (the graphical one) —
+differ entirely in the second half and not at all in this one"* — and the
+request that produced it was filed by this lane. **`apps/sysinfo/Cargo.toml`
+does not list it.** `apps/procexplorer` and `apps/sysmonitor` both do, as of
+today.
+
+| category | source available now | in `procinfo`? |
+|---|---|---|
+| System summary, CPU, memory | `/proc/{cpuinfo,meminfo,uptime,loadavg,version}` | yes |
+| Storage | `/proc/mounts`, `/proc/diskstats`, `/sys/devices/block` | yes |
+| Network | `/proc/net/dev` | yes |
+| Processes | `/proc/<pid>/{stat,statm,cmdline}` | yes |
+| IRQs | `/proc/interrupts` | **no parser** |
+| Display | `/proc/monitors` | **no parser** |
+| PCI, USB, sound, I/O ports, DMA, memory map, drivers, services, startup | nothing publishes these | — |
+
+**The fix, in order:**
+
+1. Add `procinfo` to `apps/sysinfo` and serve the first four rows from it. That
+   is most of the window, and it is real data today.
+2. For IRQs and display, ask lane B for `ProcFs::interrupts()` and
+   `ProcFs::monitors()` rather than parsing them here — `procinfo` exists
+   precisely so two programs do not grow two parsers of one file, and
+   `userspace/` will want the same two.
+3. For the last row, keep saying it cannot be read, and **delete the
+   `/sys/hardware/*` constants that back them** so the next reader is not
+   waiting on a path that was decided against. The sentence about "the day a
+   producer appears" has to go with them: it is a promise this project has
+   declined to make.
+
+**Why this is filed rather than done:** it is the largest remaining item in
+this sweep and wants its own commits. Everything needed to start is above, and
+nothing about it is blocked.

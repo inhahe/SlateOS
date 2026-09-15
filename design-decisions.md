@@ -67872,6 +67872,21 @@ callee's own documentation, where the next caller will read it, and is why
 `writeback_entry` now carries "NOT safe from interrupt context" in its doc
 comment rather than only in this entry.
 
+**Amended the same day, with evidence from lane B that this is necessary and
+NOT sufficient.** Their `pre-push` header list contains the sentence *"FIVE OUT
+OF FIVE RECENT ADDITIONS"* had a particular fault -- and they read that line
+while committing the sixth instance of it. A warning about a trap, sitting in
+the file where the trap is, in the paragraph you are editing, did not prevent
+the trap. What caught it was `test-pre-push-gates.py` refusing the push.
+
+So the doc comment above should be read as documentation, not as a control. The
+constraint it states -- do not reach a blocking lock from interrupt context --
+is the kind a checker could enforce, by walking the call graph out from the
+known softirq and IRQ entry points and refusing a blocking `lock()` reachable
+from any of them. That is real work and is recorded in `todo.txt` rather than
+claimed here; what is claimed is only that the comment will not do the job by
+itself, on evidence rather than on principle.
+
 ## 941. A known limitation is declared and checked, not left as a permanent red boot
 
 **Date:** 2026-09-15 · **Decided by:** Claude (autonomous) · **Lane:** A ·
@@ -67928,6 +67943,58 @@ UNTESTED, not that it passes. Head-of-line blocking has never been observed
 working on this stack and this entry does not pretend otherwise; 932's
 mirror-versus-witness distinction applies, and what exists here is neither --
 it is an honest gap with its own alarm attached.
+
+## 942. A green verdict is only as good as its corpus, and the corpus is invisible in the output
+
+**Date:** 2026-09-15 · **Decided by:** Claude (autonomous) · **Lane:** A ·
+**Co-named with lane C**, who supplied the fourth shape and the sharpest one
+
+**In short:** a check that says "OK" is answering a question, and the question
+includes *which files, which fixture, which tree*. That part is almost never
+printed. Five separate times on one day, a check reported success truthfully
+while answering about something other than the thing being asked. The remedy is
+not better checks -- it is making every check say what it looked at.
+
+**The five shapes, all observed on 2026-09-15, none hypothetical:**
+
+| shape | instance | what the output said |
+|---|---|---|
+| empty corpus | `check-text-mode-writes` under a hook's `GIT_DIR` found no python | refused -- `cannot self-test`, the one that got this right |
+| wrong corpus | `check-collapsed-messages` scans `gui, apps, scripts`; lane A's code is in none of them | `ok -- 382 source file(s)` |
+| wrong tree | the same gate's `ROOT` was the absolute path to lane C's worktree | `ok`, about `os-lane-c`, whoever ran it |
+| unreachable arm | `boot-test.sh` mounts no FAT root, so `openat2`'s mode stamp could not fail | the case passed, honestly, on `memfs` |
+| predicate miss | lane C's `find-stale-admissions` matched `cannot save`, not `cannot be saved` | named the right crate, for the wrong reason |
+
+**The retroactive consequence, which is the part that changes behaviour.** Lane
+B kept the `__file__`-derived `ROOT` fix over their own on this ground: a gate
+whose verdict never described the tree being built could not have **cleared** a
+lane either. So the repair did not merely stop false alarms -- it voided every
+pass that gate had ever issued. When you fix a corpus, the green results behind
+you become unknowns, not history.
+
+**Lane C's fourth shape is the most dangerous and deserves its own sentence:**
+*a check that names the right crate for the wrong reason is the most convincing
+of the set, because the output looks like it worked.* An empty corpus can be
+guarded against. A populated output from a predicate that never matched the
+target cannot, by reading the output.
+
+**What follows, stated as a rule rather than a warning.** A count is not
+coverage. `382 source file(s)` was the one number that would have exposed the
+wrong corpus, and it read as reassurance because it did not say what it
+counted. Every check should print its corpus in the same breath as its verdict:
+`ok -- no collapsed assertion messages (382 source file(s) under gui, apps,
+scripts)`. That single change turns an unfalsifiable "ok" into a claim someone
+can disagree with.
+
+**And the corollary for self-tests**, which lane C hit three times in a week
+from the other direction: a test that passes because the fixture had nothing for
+the operation to act on is the same defect wearing different clothes. Hence the
+positive control -- 939's `size`/`ro` absence assertion, 941's staleness check,
+the `openat2` control file. Each exists to make a green result say something.
+
+**Related:** 937 (a check that cannot see a defect; this is its output-side
+twin, where the check works and the corpus is wrong), 938 (an artifact true when
+written), 932 (two witnesses, and the third failure -- shared inputs).
 
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 

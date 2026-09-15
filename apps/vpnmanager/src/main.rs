@@ -222,6 +222,23 @@ impl AuthMethod {
     }
 }
 
+/// Said whenever a connection is asked for.
+///
+/// The old path set `ConnectionStatus::Connected` under a comment reading
+/// `// Simulate immediate connection success for UI purposes`, logged
+/// "Connected successfully", and filled in a local IP of `10.8.0.2` and a
+/// latency of 42 ms. **Believing it is a privacy harm rather than an
+/// inconvenience**: a person who thinks their traffic is inside a tunnel
+/// behaves as though it is.
+///
+/// Someone had already been here. `advance` carries a paragraph refusing to
+/// move the byte counters, because "traffic on a tunnel it is not carrying
+/// would be a number invented to look busy" -- the fabricated *readings* were
+/// cleaned out and the *claim* was left standing. That is the same partial
+/// audit that left `apps/sysinfo` on a FIXED list with three lying controls.
+const UNAVAILABLE: &str =
+    "No VPN client on this system: the profile was checked, but no tunnel was established";
+
 /// Connection status of a VPN profile.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -230,6 +247,14 @@ pub enum ConnectionStatus {
     Connected,
     Reconnecting,
     Error(String),
+    /// No tunnel can be established on this system, so none was attempted.
+    ///
+    /// Distinct from `Error`, which reads as *this attempt failed and another
+    /// might not*. Nothing in this tree carries a VPN: `net/` holds `dns` and
+    /// `httpclient` and there is no tunnel device, no WireGuard, no IPsec.
+    /// **A status that invites the user to try again is its own small lie**
+    /// when trying again cannot help.
+    Unavailable,
 }
 
 impl ConnectionStatus {
@@ -241,6 +266,7 @@ impl ConnectionStatus {
             Self::Connected => "Connected",
             Self::Reconnecting => "Reconnecting...",
             Self::Error(_) => "Error",
+            Self::Unavailable => "No VPN on this system",
         }
     }
 
@@ -249,7 +275,9 @@ impl ConnectionStatus {
         match self {
             Self::Connected => pal.green,
             Self::Connecting | Self::Reconnecting => pal.yellow,
-            Self::Disconnected => pal.overlay0,
+            // Grey, not red: nothing went wrong, and a red light invites the
+            // user to look for the fault.
+            Self::Disconnected | Self::Unavailable => pal.overlay0,
             Self::Error(_) => pal.red,
         }
     }
@@ -625,11 +653,38 @@ pub struct VpnManager {
 }
 
 impl VpnManager {
-    /// Create a new VPN manager with sample data.
+    /// Create a new VPN manager, holding nothing.
+    ///
+    /// This used to call `sample_profiles()`, so the window opened on three
+    /// profiles the user never created -- "Work VPN" at vpn.company.com with a
+    /// certificate at /etc/vpn/work.crt, "Personal WG", "Travel VPN". Unlike
+    /// an invented log, which is a false *history*, these are false
+    /// *configuration*: they are what an Export would have written out, and
+    /// what a user would have edited believing they were correcting their own
+    /// settings.
     pub fn new() -> Self {
-        let profiles = sample_profiles();
+        Self::with_profiles(Vec::new())
+    }
+
+    /// A manager holding `profiles`. **Tests only**, besides `new`.
+    ///
+    /// All 142 constructions in the test module went through `new()` and so
+    /// depended on the invented profiles being there. Rather than give every
+    /// one of them its own fixture, they now say which they want: this, or an
+    /// empty `new()`.
+    #[cfg(test)]
+    fn with_sample_profiles() -> Self {
+        Self::with_profiles(sample_profiles())
+    }
+
+    fn with_profiles(profiles: Vec<VpnProfile>) -> Self {
         let connections = profiles.iter().map(|p| VpnConnection::new(p.id)).collect();
-        let log = sample_log();
+        // Empty. This was `sample_log()`, so the window opened on an invented
+        // history: "Connected to vpn.company.com", "Assigned IP 10.8.0.2",
+        // "Handshake completed with peer". **A log is where a user looks to
+        // find out what actually happened**, which makes an invented one a
+        // fabricated account of their own machine rather than decoration.
+        let log = VecDeque::new();
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             profiles,
@@ -747,30 +802,64 @@ impl VpnManager {
         let name = profile.name.clone();
         let server = profile.server_address.clone();
 
+        if let Some(conn) = self.connection_for_mut(pid) {
+            conn.status = ConnectionStatus::Unavailable;
+            // `remote_ip` is the address the user typed into the profile, so
+            // it stays. `local_ip` was the string "10.8.0.2" and `latency_ms`
+            // was 42 -- an address nothing assigned and a round trip nothing
+            // measured, both drawn in the details pane beside the real fields
+            // where there was no way to tell them apart.
+            conn.remote_ip = server.clone();
+            conn.local_ip.clear();
+            conn.latency_ms = 0;
+            conn.uptime_secs = 0;
+            conn.bytes_sent = 0;
+            conn.bytes_received = 0;
+            conn.connected_since = None;
+        }
+
+        self.add_log(&name, UNAVAILABLE, LogLevel::Warning);
+        Err(UNAVAILABLE.into())
+    }
+
+    /// Put a profile into the connected state **for a test**.
+    ///
+    /// Every test of `disconnect`, the statistics, the uptime clock and the
+    /// status sort order used to reach that state by calling `connect` and
+    /// unwrapping -- which is to say, twenty-four tests asserted their setup
+    /// through the very claim that was false. When `connect` stopped
+    /// pretending, all of them went red at once, and that is the clearest
+    /// statement available of how much of this crate's test suite rested on
+    /// it.
+    ///
+    /// The machinery they cover is real work and is kept: `disconnect` totals
+    /// a session correctly, `advance` carries sub-second remainders, and the
+    /// sort puts live profiles first. None of it is reachable in a shipping
+    /// build, because nothing can connect. **So the way in is named for what
+    /// it is** -- no production path calls this, and a reader of any test
+    /// below can see in one word that the state was placed there by hand
+    /// rather than arrived at.
+    #[cfg(test)]
+    fn connected_for_testing(&mut self, index: usize) -> Result<(), String> {
+        let profile = self.profiles.get(index).ok_or("Invalid profile index")?;
+        if !profile.enabled {
+            return Err("Profile is disabled".into());
+        }
+        let pid = profile.id;
+        let server = profile.server_address.clone();
         let ts = self.next_log_timestamp;
         if let Some(conn) = self.connection_for_mut(pid) {
             if conn.status == ConnectionStatus::Connected {
                 return Err("Already connected".into());
             }
-            conn.status = ConnectionStatus::Connecting;
-            conn.local_ip = String::from("10.8.0.2");
-            conn.remote_ip = server.clone();
-            conn.latency_ms = 42;
+            conn.status = ConnectionStatus::Connected;
+            conn.remote_ip = server;
             conn.uptime_secs = 0;
             conn.bytes_sent = 0;
             conn.bytes_received = 0;
             conn.connected_since = Some(ts);
         }
-
         self.last_connected_id = Some(pid);
-        self.add_log(&name, &format!("Connecting to {server}..."), LogLevel::Info);
-
-        // Simulate immediate connection success for UI purposes
-        if let Some(conn) = self.connection_for_mut(pid) {
-            conn.status = ConnectionStatus::Connected;
-        }
-        self.add_log(&name, "Connected successfully", LogLevel::Info);
-
         Ok(())
     }
 
@@ -1304,7 +1393,10 @@ fn status_sort_key(status: &ConnectionStatus) -> u8 {
         ConnectionStatus::Connected => 0,
         ConnectionStatus::Connecting | ConnectionStatus::Reconnecting => 1,
         ConnectionStatus::Error(_) => 2,
-        ConnectionStatus::Disconnected => 3,
+        // Below Error and above Disconnected: a profile the user just tried
+        // to bring up is worth seeing, and it is not a fault.
+        ConnectionStatus::Unavailable => 3,
+        ConnectionStatus::Disconnected => 4,
     }
 }
 
@@ -1410,6 +1502,11 @@ fn format_timestamp(ts: u64) -> String {
 // Sample Data
 // ============================================================================
 
+/// Three profiles nobody configured. **Tests only.**
+///
+/// Kept because the panels that display and edit a profile need one to act
+/// on, and those are properties of the panels rather than of the machine.
+#[cfg(test)]
 fn sample_profiles() -> Vec<VpnProfile> {
     let mut profiles = Vec::new();
 
@@ -1485,6 +1582,12 @@ fn sample_profiles() -> Vec<VpnProfile> {
     profiles
 }
 
+/// A log of sessions that never happened. **Tests only.**
+///
+/// Kept for the tests of the log panel itself -- scrolling, filtering by
+/// level, and the clear button all need entries to act on, and those are
+/// properties of the panel rather than of the machine.
+#[cfg(test)]
 fn sample_log() -> VecDeque<LogEntry> {
     let mut log = VecDeque::new();
     log.push_back(LogEntry {
@@ -2149,8 +2252,28 @@ fn render_detail_panel(frame: &mut Frame, app: &VpnManager, content_y: f32, cont
         corner_radii: CornerRadii::ZERO,
     });
 
-    if app.selected_profile.is_none() || app.profiles.is_empty() {
-        render_no_selection(frame, &app.palette, px, content_y, pw, content_h);
+    if app.profiles.is_empty() {
+        render_empty_state(
+            frame,
+            &app.palette,
+            px,
+            content_y,
+            pw,
+            content_h,
+            NO_PROFILES,
+        );
+        return;
+    }
+    if app.selected_profile.is_none() {
+        render_empty_state(
+            frame,
+            &app.palette,
+            px,
+            content_y,
+            pw,
+            content_h,
+            "Select a VPN profile",
+        );
         return;
     }
 
@@ -2241,16 +2364,37 @@ fn render_tab_bar(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
     }
 }
 
-fn render_no_selection(frame: &mut Frame, pal: &Palette, px: f32, py: f32, pw: f32, ph: f32) {
+/// Shown when the window holds no profiles at all.
+///
+/// Distinct from "Select a VPN profile", which is what stood here for both
+/// cases. With an empty list that sentence **instructs the user to do
+/// something impossible**: there is nothing in the sidebar to select. It read
+/// as an instruction only because the list was never empty -- `new()` seeded
+/// three invented profiles, so the branch that produced it could only be
+/// reached by deselecting.
+const NO_PROFILES: &str = "No profiles yet -- use Add to create one, or Import to load a file";
+
+fn render_empty_state(
+    frame: &mut Frame,
+    pal: &Palette,
+    px: f32,
+    py: f32,
+    pw: f32,
+    ph: f32,
+    text: &str,
+) {
+    // Centred on the measured width of the text rather than a constant 80.0,
+    // which was half the width of the one sentence this ever drew.
+    let half = text::measure(text, 16.0, FontWeightHint::Regular) / 2.0;
     frame.push(RenderCommand::Text {
-        x: px + pw / 2.0 - 80.0,
+        x: px + pw / 2.0 - half,
         y: py + ph / 2.0 - 10.0,
-        text: String::from("Select a VPN profile"),
+        text: String::from(text),
         font_size: 16.0,
         color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
-        max_width: None,
-        overflow: TextOverflow::Clip,
+        max_width: Some(pw),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -4184,7 +4328,11 @@ impl VpnManager {
             self.status_message = format!("Cannot create {}: {why}", dir.display());
             return Action::Redraw;
         }
-        self.status_message = match std::fs::write(path, self.export_all()) {
+        // `write_str_atomically`, not `fs::write`: this replaces a file of the
+        // user's own profiles, and `fs::write` truncates the target before it
+        // writes. An interrupted write would leave neither the old profiles
+        // nor the new ones.
+        self.status_message = match safeio::write_str_atomically(path, &self.export_all()) {
             Ok(()) => format!(
                 "Exported {} profiles to {}",
                 self.profiles.len(),
@@ -5382,7 +5530,7 @@ mod tests {
 
     #[test]
     fn long_profile_notes_are_wrapped_not_truncated() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.profiles[0].notes = LONG_NOTES.to_string();
         mgr.selected_profile = Some(0);
         let lines = notes_lines(&mgr);
@@ -5404,7 +5552,7 @@ mod tests {
 
     #[test]
     fn profile_notes_lines_do_not_sit_on_top_of_one_another() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.profiles[0].notes = LONG_NOTES.to_string();
         mgr.selected_profile = Some(0);
         let lines = notes_lines(&mgr);
@@ -5421,20 +5569,20 @@ mod tests {
 
     #[test]
     fn test_manager_new_has_profiles() {
-        let mgr = VpnManager::new();
+        let mgr = VpnManager::with_sample_profiles();
         assert!(!mgr.profiles.is_empty());
         assert_eq!(mgr.profiles.len(), mgr.connections.len());
     }
 
     #[test]
     fn test_manager_new_default_selection() {
-        let mgr = VpnManager::new();
+        let mgr = VpnManager::with_sample_profiles();
         assert_eq!(mgr.selected_profile, Some(0));
     }
 
     #[test]
     fn test_manager_add_profile() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.profiles.len();
         let p = VpnProfile::new(0, "New VPN", "new.vpn.com", VpnProtocol::SSTP);
         let id = mgr.add_profile(p).unwrap();
@@ -5445,14 +5593,14 @@ mod tests {
 
     #[test]
     fn test_manager_add_profile_invalid() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let p = VpnProfile::new(0, "", "server.com", VpnProtocol::PPTP);
         assert!(mgr.add_profile(p).is_err());
     }
 
     #[test]
     fn test_manager_remove_profile() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.profiles.len();
         let removed = mgr.remove_profile(0);
         assert!(removed.is_some());
@@ -5461,13 +5609,13 @@ mod tests {
 
     #[test]
     fn test_manager_remove_profile_out_of_bounds() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.remove_profile(999).is_none());
     }
 
     #[test]
     fn test_manager_remove_last_profile_clears_selection() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         while mgr.profiles.len() > 1 {
             mgr.remove_profile(0);
         }
@@ -5477,7 +5625,7 @@ mod tests {
 
     #[test]
     fn test_manager_update_profile() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let mut updated = mgr.profiles[0].clone();
         updated.name = String::from("Updated Name");
         assert!(mgr.update_profile(0, updated).is_ok());
@@ -5486,34 +5634,34 @@ mod tests {
 
     #[test]
     fn test_manager_update_profile_invalid_index() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let p = VpnProfile::new(1, "X", "1.2.3.4", VpnProtocol::PPTP);
         assert!(mgr.update_profile(999, p).is_err());
     }
 
     #[test]
     fn test_manager_selected() {
-        let mgr = VpnManager::new();
+        let mgr = VpnManager::with_sample_profiles();
         assert!(mgr.selected().is_some());
     }
 
     #[test]
     fn test_manager_selected_none() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.selected_profile = None;
         assert!(mgr.selected().is_none());
     }
 
     #[test]
     fn test_manager_select_profile() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.select_profile(2);
         assert_eq!(mgr.selected_profile, Some(2));
     }
 
     #[test]
     fn test_manager_select_profile_out_of_bounds() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let old = mgr.selected_profile;
         mgr.select_profile(999);
         assert_eq!(mgr.selected_profile, old);
@@ -5523,36 +5671,56 @@ mod tests {
 
     #[test]
     fn test_manager_connect() {
-        let mut mgr = VpnManager::new();
-        assert!(mgr.connect(0).is_ok());
+        let mut mgr = VpnManager::with_sample_profiles();
+        // This asserted `is_ok()` and a `Connected` status. Nothing in this
+        // tree carries a VPN -- `net/` holds `dns` and `httpclient`, and there
+        // is no tunnel device -- so what it pinned was the simulation.
+        let said = mgr
+            .connect(0)
+            .expect_err("nothing here can establish a tunnel");
+        assert!(said.contains("No VPN client"), "said: {said}");
+
         let conn = mgr.connection_for(mgr.profiles[0].id).unwrap();
-        assert_eq!(conn.status, ConnectionStatus::Connected);
+        assert_eq!(conn.status, ConnectionStatus::Unavailable);
+        assert!(
+            conn.local_ip.is_empty(),
+            "invented a local address: {}",
+            conn.local_ip
+        );
+        assert_eq!(conn.latency_ms, 0, "invented a round-trip time");
+        assert!(
+            conn.connected_since.is_none(),
+            "started a clock over no tunnel"
+        );
     }
 
     #[test]
     fn test_manager_connect_disabled_profile() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.profiles[0].enabled = false;
-        assert!(mgr.connect(0).is_err());
+        assert!(mgr.connected_for_testing(0).is_err());
     }
 
     #[test]
     fn test_manager_connect_already_connected() {
-        let mut mgr = VpnManager::new();
-        mgr.connect(0).unwrap();
-        assert!(mgr.connect(0).is_err());
+        let mut mgr = VpnManager::with_sample_profiles();
+        mgr.connected_for_testing(0).unwrap();
+        assert!(
+            mgr.connected_for_testing(0).is_err(),
+            "a second connection to a live profile is refused"
+        );
     }
 
     #[test]
     fn test_manager_connect_invalid_index() {
-        let mut mgr = VpnManager::new();
-        assert!(mgr.connect(999).is_err());
+        let mut mgr = VpnManager::with_sample_profiles();
+        assert!(mgr.connected_for_testing(999).is_err());
     }
 
     #[test]
     fn test_manager_disconnect() {
-        let mut mgr = VpnManager::new();
-        mgr.connect(0).unwrap();
+        let mut mgr = VpnManager::with_sample_profiles();
+        mgr.connected_for_testing(0).unwrap();
         assert!(mgr.disconnect(0).is_ok());
         let conn = mgr.connection_for(mgr.profiles[0].id).unwrap();
         assert_eq!(conn.status, ConnectionStatus::Disconnected);
@@ -5560,14 +5728,14 @@ mod tests {
 
     #[test]
     fn test_manager_disconnect_not_connected() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.disconnect(0).is_err());
     }
 
     #[test]
     fn test_manager_disconnect_accumulates_stats() {
-        let mut mgr = VpnManager::new();
-        mgr.connect(0).unwrap();
+        let mut mgr = VpnManager::with_sample_profiles();
+        mgr.connected_for_testing(0).unwrap();
         let pid = mgr.profiles[0].id;
         mgr.simulate_traffic(pid, 1000, 2000);
         let old_sent = mgr.profiles[0].total_bytes_sent;
@@ -5575,56 +5743,81 @@ mod tests {
         assert!(mgr.profiles[0].total_bytes_sent > old_sent);
     }
 
+    /// Reconnect drops the tunnel and then cannot raise it again.
+    ///
+    /// It asserted `is_ok()` and a `Connected` status, which held only because
+    /// `connect` pretended. `reconnect` delegates to `connect`, so it now
+    /// reports the same refusal -- and the profile is left `Unavailable`
+    /// rather than `Connected`, which is the honest outcome of dropping
+    /// something you cannot put back.
     #[test]
     fn test_manager_reconnect() {
-        let mut mgr = VpnManager::new();
-        mgr.connect(0).unwrap();
-        assert!(mgr.reconnect(0).is_ok());
+        let mut mgr = VpnManager::with_sample_profiles();
+        mgr.connected_for_testing(0).unwrap();
+
+        let said = mgr
+            .reconnect(0)
+            .expect_err("the tunnel cannot be raised again");
+        assert!(said.contains("No VPN client"), "said: {said}");
         let conn = mgr.connection_for(mgr.profiles[0].id).unwrap();
-        assert_eq!(conn.status, ConnectionStatus::Connected);
+        assert_eq!(conn.status, ConnectionStatus::Unavailable);
     }
 
     #[test]
     fn test_manager_quick_connect_no_previous() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.quick_connect().is_err());
     }
 
+    /// Quick Connect remembers the last profile and still cannot raise it.
+    ///
+    /// The remembering is the part worth keeping: it picks the right profile,
+    /// which is what this test is now about. Raising it is `connect`'s job and
+    /// `connect` refuses.
     #[test]
     fn test_manager_quick_connect_after_connect() {
-        let mut mgr = VpnManager::new();
-        mgr.connect(0).unwrap();
+        let mut mgr = VpnManager::with_sample_profiles();
+        mgr.connected_for_testing(0).unwrap();
         mgr.disconnect(0).unwrap();
-        assert!(mgr.quick_connect().is_ok());
+
+        let said = mgr
+            .quick_connect()
+            .expect_err("nothing here can establish a tunnel");
+        assert!(said.contains("No VPN client"), "said: {said}");
+        assert_eq!(
+            mgr.last_connected_id,
+            Some(mgr.profiles[0].id),
+            "the profile to reconnect to is still remembered"
+        );
     }
 
     #[test]
     fn test_manager_disconnect_all() {
-        let mut mgr = VpnManager::new();
-        mgr.connect(0).unwrap();
-        mgr.connect(1).unwrap();
+        let mut mgr = VpnManager::with_sample_profiles();
+        mgr.connected_for_testing(0).unwrap();
+        mgr.connected_for_testing(1).unwrap();
         mgr.disconnect_all();
         assert_eq!(mgr.active_count(), 0);
     }
 
     #[test]
     fn test_manager_active_count() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert_eq!(mgr.active_count(), 0);
-        mgr.connect(0).unwrap();
+        mgr.connected_for_testing(0).unwrap();
         assert_eq!(mgr.active_count(), 1);
-        mgr.connect(1).unwrap();
+        mgr.connected_for_testing(1).unwrap();
         assert_eq!(mgr.active_count(), 2);
     }
 
     #[test]
     fn test_manager_total_transfer() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let (s, r) = mgr.total_transfer();
         assert_eq!(s, 0);
         assert_eq!(r, 0);
 
-        mgr.connect(0).unwrap();
+        mgr.connected_for_testing(0).unwrap();
         let pid = mgr.profiles[0].id;
         mgr.simulate_traffic(pid, 500, 1000);
         let (s2, r2) = mgr.total_transfer();
@@ -5636,7 +5829,7 @@ mod tests {
 
     #[test]
     fn test_manager_sort_by_name() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.set_sort_order(SortOrder::Name);
         let names: Vec<String> = mgr.profiles.iter().map(|p| p.name.clone()).collect();
         let mut sorted = names.clone();
@@ -5646,7 +5839,7 @@ mod tests {
 
     #[test]
     fn test_manager_sort_by_protocol() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.set_sort_order(SortOrder::Protocol);
         let labels: Vec<&str> = mgr.profiles.iter().map(|p| p.protocol.label()).collect();
         let mut sorted = labels.clone();
@@ -5656,8 +5849,8 @@ mod tests {
 
     #[test]
     fn test_manager_sort_by_status() {
-        let mut mgr = VpnManager::new();
-        mgr.connect(0).unwrap();
+        let mut mgr = VpnManager::with_sample_profiles();
+        mgr.connected_for_testing(0).unwrap();
         mgr.set_sort_order(SortOrder::Status);
         // Connected profiles should be first
         let first_conn = mgr.connection_for(mgr.profiles[0].id).unwrap();
@@ -5668,7 +5861,7 @@ mod tests {
 
     #[test]
     fn test_toggle_kill_switch() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.profiles[0].kill_switch;
         mgr.toggle_kill_switch(0);
         assert_ne!(mgr.profiles[0].kill_switch, initial);
@@ -5678,7 +5871,7 @@ mod tests {
 
     #[test]
     fn test_toggle_global_kill_switch() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(!mgr.global_kill_switch);
         mgr.toggle_global_kill_switch();
         assert!(mgr.global_kill_switch);
@@ -5690,7 +5883,7 @@ mod tests {
 
     #[test]
     fn test_add_dns_override() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.profiles[0].dns_override.len();
         assert!(mgr.add_dns_override(0, "8.8.4.4").is_ok());
         assert_eq!(mgr.profiles[0].dns_override.len(), initial + 1);
@@ -5698,13 +5891,13 @@ mod tests {
 
     #[test]
     fn test_add_dns_override_invalid() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.add_dns_override(0, "not-an-ip").is_err());
     }
 
     #[test]
     fn test_add_dns_override_duplicate() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         if !mgr.profiles[0].dns_override.is_empty() {
             let existing = mgr.profiles[0].dns_override[0].clone();
             assert!(mgr.add_dns_override(0, &existing).is_err());
@@ -5713,7 +5906,7 @@ mod tests {
 
     #[test]
     fn test_remove_dns_override() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         if !mgr.profiles[0].dns_override.is_empty() {
             let initial = mgr.profiles[0].dns_override.len();
             assert!(mgr.remove_dns_override(0, 0).is_ok());
@@ -5723,7 +5916,7 @@ mod tests {
 
     #[test]
     fn test_remove_dns_override_out_of_bounds() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.remove_dns_override(0, 999).is_err());
     }
 
@@ -5731,32 +5924,32 @@ mod tests {
 
     #[test]
     fn test_add_allowed_ip() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.add_allowed_ip(0, "10.0.0.0/8").is_ok());
     }
 
     #[test]
     fn test_add_allowed_ip_plain() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.add_allowed_ip(0, "192.168.1.1").is_ok());
     }
 
     #[test]
     fn test_add_allowed_ip_invalid() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.add_allowed_ip(0, "garbage").is_err());
     }
 
     #[test]
     fn test_add_allowed_ip_duplicate() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.add_allowed_ip(0, "10.0.0.0/8").unwrap();
         assert!(mgr.add_allowed_ip(0, "10.0.0.0/8").is_err());
     }
 
     #[test]
     fn test_remove_allowed_ip() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.add_allowed_ip(0, "10.0.0.0/8").unwrap();
         let initial = mgr.profiles[0].allowed_ips.len();
         assert!(mgr.remove_allowed_ip(0, 0).is_ok());
@@ -5765,13 +5958,13 @@ mod tests {
 
     #[test]
     fn test_remove_allowed_ip_out_of_bounds() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.remove_allowed_ip(0, 999).is_err());
     }
 
     #[test]
     fn test_toggle_split_tunnel() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.profiles[0].split_tunnel;
         mgr.toggle_split_tunnel(0);
         assert_ne!(mgr.profiles[0].split_tunnel, initial);
@@ -5781,7 +5974,7 @@ mod tests {
 
     #[test]
     fn test_toggle_auto_connect() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.profiles[0].auto_connect;
         mgr.toggle_auto_connect(0);
         assert_ne!(mgr.profiles[0].auto_connect, initial);
@@ -5789,7 +5982,7 @@ mod tests {
 
     #[test]
     fn test_toggle_auto_reconnect() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.profiles[0].auto_reconnect;
         mgr.toggle_auto_reconnect(0);
         assert_ne!(mgr.profiles[0].auto_reconnect, initial);
@@ -5797,8 +5990,8 @@ mod tests {
 
     #[test]
     fn test_toggle_enabled_disconnects_active() {
-        let mut mgr = VpnManager::new();
-        mgr.connect(0).unwrap();
+        let mut mgr = VpnManager::with_sample_profiles();
+        mgr.connected_for_testing(0).unwrap();
         mgr.toggle_enabled(0);
         assert!(!mgr.profiles[0].enabled);
         let conn = mgr.connection_for(mgr.profiles[0].id).unwrap();
@@ -5809,7 +6002,7 @@ mod tests {
 
     #[test]
     fn test_set_tab() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.set_tab(DetailTab::Log);
         assert_eq!(mgr.current_tab, DetailTab::Log);
     }
@@ -5818,7 +6011,7 @@ mod tests {
 
     #[test]
     fn test_export_all() {
-        let mgr = VpnManager::new();
+        let mgr = VpnManager::with_sample_profiles();
         let exported = mgr.export_all();
         assert!(exported.contains("[VpnProfile]"));
         for profile in &mgr.profiles {
@@ -5828,7 +6021,7 @@ mod tests {
 
     #[test]
     fn test_import_profile() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let text = "[VpnProfile]\nname=Imported\nserver=import.vpn.com\nprotocol=SSTP\nport=443";
         let initial = mgr.profiles.len();
         let result = mgr.import_profile(text);
@@ -5838,21 +6031,21 @@ mod tests {
 
     #[test]
     fn test_import_profile_missing_name() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let text = "server=import.vpn.com\nprotocol=SSTP";
         assert!(mgr.import_profile(text).is_err());
     }
 
     #[test]
     fn test_import_profile_missing_server() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let text = "name=NoServer";
         assert!(mgr.import_profile(text).is_err());
     }
 
     #[test]
     fn test_import_roundtrip() {
-        let mgr = VpnManager::new();
+        let mgr = VpnManager::with_sample_profiles();
         let original = &mgr.profiles[0];
         let exported = original.export_text();
         let reimported = parse_profile_text(&exported, 999).unwrap();
@@ -5863,29 +6056,133 @@ mod tests {
         assert_eq!(reimported.auto_connect, original.auto_connect);
     }
 
+    /// The export reaches the disk, and reads back as the profiles that went in.
+    ///
+    /// `export_to` had no test at all: the one door this program has, and the
+    /// only thing it can genuinely do for a user, was unpinned. It writes
+    /// through `safeio::write_str_atomically` rather than `fs::write`, because
+    /// it replaces a file of the user's own profiles and `fs::write` truncates
+    /// the target before writing -- an interrupted write would leave neither
+    /// the old profiles nor the new ones. **That atomicity is not pinned
+    /// here**; it needs fault injection the crate has no way to do. What is
+    /// pinned is that the bytes a reader gets back are the bytes composed.
+    #[test]
+    fn the_export_reaches_the_disk_and_reads_back() {
+        let dir = std::env::temp_dir().join(format!(
+            "vpnmanager-export-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("profiles.conf");
+        let _ = std::fs::remove_file(&path);
+
+        let mut mgr = VpnManager::with_sample_profiles();
+        let expected = mgr.export_all();
+        mgr.export_to(&path);
+
+        let back = std::fs::read_to_string(&path).expect("the file it said it wrote");
+        assert_eq!(
+            back, expected,
+            "what was read back is not what was composed"
+        );
+        assert!(
+            mgr.status_message.starts_with("Exported "),
+            "said: {}",
+            mgr.status_message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new window holds no profiles, and does not pretend to.
+    ///
+    /// `new()` called `sample_profiles()`, so the window opened on three
+    /// profiles the user never created: "Work VPN" at vpn.company.com with a
+    /// certificate at /etc/vpn/work.crt, "Personal WG", "Travel VPN". Unlike
+    /// an invented *log*, which is a false history, these are false
+    /// *configuration* -- what an Export would have written out, and what a
+    /// user would have edited believing they were correcting their own
+    /// settings.
+    #[test]
+    fn a_new_window_holds_no_profiles() {
+        let app = VpnManager::new();
+        assert!(app.profiles.is_empty(), "invented profiles at startup");
+        assert!(app.connections.is_empty());
+        assert!(app.log.is_empty(), "invented a history of sessions");
+    }
+
+    /// With nothing to select, the window says so rather than saying "select".
+    ///
+    /// "Select a VPN profile" was drawn for both the empty list and the
+    /// nothing-selected case. With an empty list it **instructs the user to do
+    /// something impossible** -- there is nothing in the sidebar to select --
+    /// and it read as an instruction only because the list was never empty.
+    #[test]
+    fn an_empty_window_names_the_way_out_of_being_empty() {
+        let mut empty = VpnManager::new();
+        let drawn = drawn_text(&mut empty);
+        assert!(
+            drawn.iter().any(|t| t == NO_PROFILES),
+            "no empty-state message drawn: {drawn:?}"
+        );
+        assert!(
+            !drawn.iter().any(|t| t == "Select a VPN profile"),
+            "told the user to select from an empty list"
+        );
+
+        let mut some = VpnManager::with_sample_profiles();
+        some.selected_profile = None;
+        let drawn = drawn_text(&mut some);
+        assert!(
+            drawn.iter().any(|t| t == "Select a VPN profile"),
+            "with profiles present, selecting is the right instruction: {drawn:?}"
+        );
+    }
+
+    /// Every string the window draws, for the empty-state tests.
+    fn drawn_text(app: &mut VpnManager) -> Vec<String> {
+        app.render(1200.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     // --- Log tests ---
 
     #[test]
     fn test_log_grows_on_actions() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.log.len();
-        mgr.connect(0).unwrap();
+        // An attempt that is refused is still an action and still belongs in
+        // the log -- more so, since the log is where a user looks to find out
+        // why the tunnel never came up.
+        let _ = mgr.connect(0);
         assert!(mgr.log.len() > initial);
     }
 
     #[test]
     fn test_clear_log() {
-        let mut mgr = VpnManager::new();
-        assert!(!mgr.log.is_empty());
+        let mut mgr = VpnManager::with_sample_profiles();
+        // The log starts empty now, so the fixture is made by doing something
+        // that logs rather than by the window opening on an invented history.
+        mgr.log = sample_log();
+        assert!(
+            !mgr.log.is_empty(),
+            "control: there must be something to clear"
+        );
         mgr.clear_log();
         assert!(mgr.log.is_empty());
     }
 
     #[test]
     fn test_log_bounded() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         for i in 0..600 {
-            mgr.connect(0).unwrap_or(());
+            mgr.connected_for_testing(0).unwrap_or(());
             let _ = mgr.disconnect(0);
             let _ = i;
         }
@@ -5896,13 +6193,13 @@ mod tests {
 
     #[test]
     fn test_filtered_profiles_no_query() {
-        let mgr = VpnManager::new();
+        let mgr = VpnManager::with_sample_profiles();
         assert_eq!(mgr.filtered_profiles().len(), mgr.profiles.len());
     }
 
     #[test]
     fn test_filtered_profiles_name_match() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.search_query = String::from("Work");
         let filtered = mgr.filtered_profiles();
         assert!(!filtered.is_empty());
@@ -5918,7 +6215,7 @@ mod tests {
 
     #[test]
     fn test_filtered_profiles_protocol_match() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.search_query = String::from("WireGuard");
         let filtered = mgr.filtered_profiles();
         assert!(!filtered.is_empty());
@@ -5929,7 +6226,7 @@ mod tests {
 
     #[test]
     fn test_filtered_profiles_no_match() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.search_query = String::from("zzzznonexistent");
         assert!(mgr.filtered_profiles().is_empty());
     }
@@ -5938,7 +6235,7 @@ mod tests {
 
     #[test]
     fn test_start_add_profile_dialog() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.start_add_profile();
         assert!(mgr.show_add_dialog);
         assert!(mgr.editing_profile.is_some());
@@ -5947,7 +6244,7 @@ mod tests {
 
     #[test]
     fn test_start_edit_profile_dialog() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.start_edit_profile();
         assert!(mgr.show_add_dialog);
         let editing = mgr.editing_profile.as_ref().unwrap();
@@ -5956,7 +6253,7 @@ mod tests {
 
     #[test]
     fn test_cancel_edit() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.start_add_profile();
         mgr.cancel_edit();
         assert!(!mgr.show_add_dialog);
@@ -5965,7 +6262,7 @@ mod tests {
 
     #[test]
     fn test_confirm_edit_add() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.profiles.len();
         mgr.editing_profile = Some(VpnProfile::new(
             0,
@@ -5981,7 +6278,7 @@ mod tests {
 
     #[test]
     fn test_confirm_edit_update() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let mut edit = mgr.profiles[0].clone();
         edit.name = String::from("Edited Name");
         mgr.editing_profile = Some(edit);
@@ -5992,7 +6289,7 @@ mod tests {
 
     #[test]
     fn test_confirm_edit_no_profile() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         assert!(mgr.confirm_edit().is_err());
     }
 
@@ -6000,8 +6297,8 @@ mod tests {
 
     #[test]
     fn test_simulate_traffic_connected() {
-        let mut mgr = VpnManager::new();
-        mgr.connect(0).unwrap();
+        let mut mgr = VpnManager::with_sample_profiles();
+        mgr.connected_for_testing(0).unwrap();
         let pid = mgr.profiles[0].id;
         mgr.simulate_traffic(pid, 100, 200);
         let conn = mgr.connection_for(pid).unwrap();
@@ -6012,7 +6309,7 @@ mod tests {
 
     #[test]
     fn test_simulate_traffic_disconnected_no_effect() {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         let pid = mgr.profiles[0].id;
         mgr.simulate_traffic(pid, 100, 200);
         let conn = mgr.connection_for(pid).unwrap();
@@ -6024,14 +6321,14 @@ mod tests {
 
     #[test]
     fn test_render_app_produces_commands() {
-        let app = VpnManager::new();
+        let app = VpnManager::with_sample_profiles();
         let tree = render_app(&app);
         assert!(!tree.is_empty());
     }
 
     #[test]
     fn test_render_app_has_title() {
-        let app = VpnManager::new();
+        let app = VpnManager::with_sample_profiles();
         let tree = render_app(&app);
         let has_title = tree
             .commands
@@ -6042,7 +6339,7 @@ mod tests {
 
     #[test]
     fn test_render_app_has_profile_names() {
-        let app = VpnManager::new();
+        let app = VpnManager::with_sample_profiles();
         let tree = render_app(&app);
         let has_work = tree
             .commands
@@ -6053,7 +6350,7 @@ mod tests {
 
     #[test]
     fn test_render_app_different_tabs() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         for tab in DetailTab::all() {
             app.set_tab(*tab);
             let tree = render_app(&app);
@@ -6067,7 +6364,7 @@ mod tests {
 
     #[test]
     fn test_render_app_no_selection() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.selected_profile = None;
         let tree = render_app(&app);
         let has_placeholder = tree.commands.iter().any(
@@ -6078,7 +6375,7 @@ mod tests {
 
     #[test]
     fn test_render_app_with_dialog() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.start_add_profile();
         let tree = render_app(&app);
         let has_dialog_title = tree.commands.iter().any(
@@ -6089,8 +6386,8 @@ mod tests {
 
     #[test]
     fn test_render_app_connected_profile() {
-        let mut app = VpnManager::new();
-        app.connect(0).unwrap();
+        let mut app = VpnManager::with_sample_profiles();
+        app.connected_for_testing(0).unwrap();
         let tree = render_app(&app);
         let has_connected = tree
             .commands
@@ -6101,7 +6398,7 @@ mod tests {
 
     #[test]
     fn test_render_global_kill_switch_visible() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.toggle_global_kill_switch();
         let tree = render_app(&app);
         let has_ks = tree
@@ -6113,7 +6410,7 @@ mod tests {
 
     #[test]
     fn test_render_status_bar_shows_count() {
-        let app = VpnManager::new();
+        let app = VpnManager::with_sample_profiles();
         let tree = render_app(&app);
         let has_count = tree.commands.iter().any(
             |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("profiles")),
@@ -6211,7 +6508,7 @@ mod tests {
 
     #[test]
     fn test_connection_for_nonexistent() {
-        let mgr = VpnManager::new();
+        let mgr = VpnManager::with_sample_profiles();
         assert!(mgr.connection_for(99999).is_none());
     }
 
@@ -6222,7 +6519,7 @@ mod tests {
     /// without depending on a pixel position. The log renders newest first,
     /// so L{n-1} is the top row and L000 the last.
     fn mgr_with_log(n: usize) -> VpnManager {
-        let mut mgr = VpnManager::new();
+        let mut mgr = VpnManager::with_sample_profiles();
         mgr.log.clear();
         for i in 0..n {
             mgr.log.push_back(LogEntry {
@@ -6402,7 +6699,7 @@ mod tests {
 
     /// Enough profiles that the sidebar cannot show them all at once.
     fn crowded() -> VpnManager {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         for i in 0..12 {
             let profile = VpnProfile::new(
                 0,
@@ -6419,7 +6716,7 @@ mod tests {
 
     #[test]
     fn clicking_a_sidebar_row_selects_that_profile() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         assert!(app.profiles.len() >= 3, "needs rows to tell apart");
         app.select_profile(0);
 
@@ -6434,7 +6731,7 @@ mod tests {
 
     #[test]
     fn a_sidebar_row_is_clickable_across_its_whole_painted_band() {
-        let app = VpnManager::new();
+        let app = VpnManager::with_sample_profiles();
         let id = id_at(&app, 1);
         let rect = rect_of(&app, Target::Profile(id)).expect("row 1 is on screen");
 
@@ -6499,7 +6796,7 @@ mod tests {
 
     #[test]
     fn a_row_is_addressed_by_id_so_re_sorting_does_not_move_the_click() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.set_sort_order(SortOrder::Protocol);
 
         let ids: Vec<u32> = render_frame(&app, SIZE.0, SIZE.1)
@@ -6524,7 +6821,7 @@ mod tests {
 
     #[test]
     fn sorting_keeps_the_selection_on_the_profile_the_user_chose() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.set_sort_order(SortOrder::Name);
 
         let chosen = id_at(&app, 0);
@@ -6550,7 +6847,7 @@ mod tests {
 
     #[test]
     fn the_search_box_takes_the_keyboard_and_filters_as_it_is_typed() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         assert_eq!(
             click(&mut app, Target::Focus(Field::Search)),
             Action::Redraw
@@ -6591,7 +6888,7 @@ mod tests {
 
     #[test]
     fn every_toolbar_button_is_on_screen_and_none_overlap() {
-        let app = VpnManager::new();
+        let app = VpnManager::with_sample_profiles();
         let frame = render_frame(&app, SIZE.0, SIZE.1);
 
         let mut boxes: Vec<(&str, Rect)> = Vec::new();
@@ -6615,7 +6912,7 @@ mod tests {
 
     #[test]
     fn the_sort_control_cycles_through_every_order() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let start = app.sort_order;
 
         let mut seen = vec![start];
@@ -6637,7 +6934,7 @@ mod tests {
 
     #[test]
     fn the_global_kill_switch_badge_can_turn_itself_both_ways() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         assert!(!app.global_kill_switch);
 
         // The badge used to be drawn only while the switch was *on*, which left
@@ -6653,7 +6950,7 @@ mod tests {
 
     #[test]
     fn connect_says_why_it_refused() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let disabled = app
             .profiles
             .iter()
@@ -6675,28 +6972,43 @@ mod tests {
 
     #[test]
     fn connect_with_nothing_selected_asks_for_a_selection() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.selected_profile = None;
         assert_eq!(click(&mut app, Target::ConnectSelected), Action::Redraw);
         assert_eq!(app.status_message, "Select a profile first");
     }
 
+    /// The Connect button reports the refusal, and Disconnect still works.
+    ///
+    /// This asserted `status.is_active()` after a click, under the message
+    /// "Connect must actually connect the selected profile". It was a fair
+    /// demand and the program answered it by *pretending*: the assertion
+    /// pinned the simulation at the button, one layer above where
+    /// `test_manager_connect` pinned it at the method.
+    ///
+    /// Disconnect is exercised from a state placed by hand, because the only
+    /// way to reach a live connection is now to place one.
     #[test]
-    fn connect_then_disconnect_moves_the_selected_profile_and_says_so() {
-        let mut app = VpnManager::new();
+    fn connect_reports_the_refusal_and_disconnect_still_ends_a_session() {
+        let mut app = VpnManager::with_sample_profiles();
         let id = id_at(&app, 0);
         click(&mut app, Target::Profile(id));
 
         click(&mut app, Target::ConnectSelected);
         assert!(
-            app.connection_for(id)
+            !app.connection_for(id)
                 .expect("a connection row")
                 .status
                 .is_active(),
-            "Connect must actually connect the selected profile"
+            "the button reported a tunnel that does not exist"
         );
-        assert!(app.status_message.starts_with("Connected to "));
+        assert!(
+            app.status_message.contains("No VPN client"),
+            "said: {}",
+            app.status_message
+        );
 
+        app.connected_for_testing(0).expect("placed by hand");
         click(&mut app, Target::DisconnectSelected);
         assert!(
             !app.connection_for(id)
@@ -6711,7 +7023,7 @@ mod tests {
 
     #[test]
     fn clicking_a_tab_switches_the_panel() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         for tab in DetailTab::all() {
             if app.current_tab == *tab {
                 assert_eq!(
@@ -6737,7 +7049,7 @@ mod tests {
         ];
 
         for (target, read) in checks {
-            let mut app = VpnManager::new();
+            let mut app = VpnManager::with_sample_profiles();
             app.set_tab(DetailTab::Overview);
             app.select_profile(0);
             let before = read(app.selected().expect("a selection"));
@@ -6760,7 +7072,7 @@ mod tests {
 
     #[test]
     fn the_edit_button_opens_the_dialog_on_the_selected_profile() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(1);
         let name = app.selected().expect("a selection").name.clone();
 
@@ -6776,9 +7088,19 @@ mod tests {
         assert_eq!(app.focus, Some(Field::Name));
     }
 
+    /// Reconnect is offered only while something is up -- and nothing can be.
+    ///
+    /// The condition is right and is still tested, from a state placed by
+    /// hand. What changed is the middle step: this used to click Connect and
+    /// expect the button to appear, which worked only because Connect
+    /// pretended. **A consequence worth stating plainly: with nothing able to
+    /// connect, the Reconnect button cannot appear in a shipping build at
+    /// all.** That is honest rather than broken -- the control is conditional
+    /// on a state the system cannot reach -- and it is what the first half of
+    /// this test now pins.
     #[test]
     fn reconnect_is_only_offered_once_there_is_a_connection_to_reconnect() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(0);
         app.set_tab(DetailTab::Connection);
 
@@ -6788,17 +7110,30 @@ mod tests {
         );
 
         click(&mut app, Target::ConnectSelected);
-        assert!(rect_of(&app, Target::ReconnectSelected).is_some());
+        assert!(
+            rect_of(&app, Target::ReconnectSelected).is_none(),
+            "the Connect button produced a connection it cannot produce"
+        );
+
+        app.connected_for_testing(0).expect("placed by hand");
+        assert!(
+            rect_of(&app, Target::ReconnectSelected).is_some(),
+            "the button is conditional on a live connection, and there is one"
+        );
 
         click(&mut app, Target::ReconnectSelected);
-        assert!(app.status_message.starts_with("Reconnected to "));
+        assert!(
+            app.status_message.contains("No VPN client"),
+            "said: {}",
+            app.status_message
+        );
     }
 
     // --- Split tunnel tab ---
 
     #[test]
     fn the_split_tunnel_box_adds_a_range_and_empties_itself() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(0);
         app.set_tab(DetailTab::SplitTunnel);
         let before = app.selected().expect("a selection").allowed_ips.len();
@@ -6831,7 +7166,7 @@ mod tests {
 
     #[test]
     fn a_rejected_range_is_reported_and_left_in_the_box_to_fix() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(0);
         app.set_tab(DetailTab::SplitTunnel);
         let before = app.selected().expect("a selection").allowed_ips.len();
@@ -6853,7 +7188,7 @@ mod tests {
 
     #[test]
     fn the_add_range_button_says_the_box_is_empty_rather_than_doing_nothing() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(0);
         app.set_tab(DetailTab::SplitTunnel);
 
@@ -6863,7 +7198,7 @@ mod tests {
 
     #[test]
     fn removing_a_range_removes_the_one_that_was_clicked() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let index = app
             .profiles
             .iter()
@@ -6884,7 +7219,7 @@ mod tests {
 
     #[test]
     fn the_compression_row_is_only_offered_for_openvpn() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.set_tab(DetailTab::ProtocolConfig);
 
         let openvpn = app
@@ -6928,9 +7263,13 @@ mod tests {
 
     #[test]
     fn clearing_the_log_empties_it() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
+        app.log = sample_log();
         app.set_tab(DetailTab::Log);
-        assert!(!app.log.is_empty());
+        assert!(
+            !app.log.is_empty(),
+            "control: there must be something to clear"
+        );
 
         click(&mut app, Target::ClearLog);
         assert!(app.log.is_empty());
@@ -6942,7 +7281,7 @@ mod tests {
 
     #[test]
     fn the_dialog_swallows_clicks_meant_for_the_window_behind_it() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let add = rect_of(&app, Target::AddProfile).expect("the Add button");
         let (ax, ay) = add.centre();
         let before = app.profiles.len();
@@ -6962,7 +7301,7 @@ mod tests {
 
     #[test]
     fn typing_a_name_and_a_server_into_the_dialog_adds_a_profile() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let before = app.profiles.len();
 
         click(&mut app, Target::AddProfile);
@@ -6992,7 +7331,7 @@ mod tests {
 
     #[test]
     fn a_rejected_save_keeps_the_dialog_up_with_everything_typed_into_it() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let before = app.profiles.len();
 
         click(&mut app, Target::AddProfile);
@@ -7039,7 +7378,7 @@ mod tests {
 
     #[test]
     fn the_port_box_takes_digits_and_ignores_everything_else() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::AddProfile);
         click(&mut app, Target::Focus(Field::Port));
 
@@ -7062,7 +7401,7 @@ mod tests {
 
     #[test]
     fn the_port_box_saturates_rather_than_wrapping_back_to_a_working_port() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::AddProfile);
         click(&mut app, Target::Focus(Field::Port));
         for _ in 0..6 {
@@ -7079,7 +7418,7 @@ mod tests {
 
     #[test]
     fn cycling_the_protocol_moves_the_port_and_the_settings_with_it() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::AddProfile);
 
         let mut seen = Vec::new();
@@ -7107,7 +7446,7 @@ mod tests {
 
     #[test]
     fn cycling_the_auth_method_reaches_every_kind_and_wraps() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::AddProfile);
 
         let start = app
@@ -7145,7 +7484,7 @@ mod tests {
 
     #[test]
     fn cancel_closes_the_dialog_and_adds_nothing() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let before = app.profiles.len();
 
         click(&mut app, Target::AddProfile);
@@ -7168,7 +7507,7 @@ mod tests {
         ];
 
         for (target, read) in checks {
-            let mut app = VpnManager::new();
+            let mut app = VpnManager::with_sample_profiles();
             app.select_profile(0);
             let selected_before = read(app.selected().expect("a selection"));
             click(&mut app, Target::AddProfile);
@@ -7190,7 +7529,7 @@ mod tests {
 
     #[test]
     fn edit_loads_the_selected_profile_and_saving_updates_it_in_place() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(1);
         let id = app.selected().expect("a selection").id;
         let count = app.profiles.len();
@@ -7217,7 +7556,7 @@ mod tests {
 
     #[test]
     fn the_arrow_keys_walk_the_filtered_list_not_the_whole_one() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::Focus(Field::Search));
         type_str(&mut app, "vpn");
         app.handle_key(&press(Key::Escape));
@@ -7283,7 +7622,7 @@ mod tests {
 
     #[test]
     fn the_arrow_keys_walk_the_tab_strip_and_wrap_both_ways() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let tabs = DetailTab::all();
 
         app.set_tab(tabs[0]);
@@ -7304,7 +7643,7 @@ mod tests {
 
     #[test]
     fn escape_leaves_a_field_before_it_leaves_the_program() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::Focus(Field::Search));
 
         assert_eq!(app.handle_key(&press(Key::Escape)), Action::Redraw);
@@ -7318,7 +7657,7 @@ mod tests {
 
     #[test]
     fn escape_closes_the_dialog_rather_than_the_window() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::AddProfile);
         // The caret is in Name, so the first Escape only leaves the field.
         app.handle_key(&press(Key::Escape));
@@ -7335,7 +7674,7 @@ mod tests {
 
     #[test]
     fn the_arrow_keys_do_not_reach_past_an_open_dialog() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(0);
         click(&mut app, Target::AddProfile);
         app.focus = None;
@@ -7348,7 +7687,7 @@ mod tests {
 
     #[test]
     fn tab_walks_the_dialog_fields_in_a_ring() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::AddProfile);
 
         let ring = [Field::Name, Field::Server, Field::Port, Field::Mtu];
@@ -7363,7 +7702,7 @@ mod tests {
 
     #[test]
     fn a_dialog_field_cannot_hold_the_keyboard_while_the_dialog_is_closed() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         assert_eq!(app.focus_field(Field::Name), Action::None);
         assert_eq!(app.focus, None);
 
@@ -7378,7 +7717,7 @@ mod tests {
 
     #[test]
     fn enter_in_the_split_tunnel_box_commits_the_range() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(0);
         app.set_tab(DetailTab::SplitTunnel);
         click(&mut app, Target::Focus(Field::AllowedIp));
@@ -7397,7 +7736,7 @@ mod tests {
 
     #[test]
     fn clicking_the_background_puts_the_caret_away() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::Focus(Field::Search));
         assert_eq!(app.focus, Some(Field::Search));
 
@@ -7419,7 +7758,7 @@ mod tests {
 
     #[test]
     fn a_right_click_does_nothing_at_all() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(0);
         let id = id_at(&app, 2);
         let rect = rect_of(&app, Target::Profile(id)).expect("row 2");
@@ -7490,14 +7829,15 @@ mod tests {
 
     #[test]
     fn the_clock_runs_only_while_something_is_connected() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         assert_eq!(
             app.tick_interval(),
             None,
             "an app that ticks with nothing to age holds the desktop awake"
         );
 
-        app.connect(0).expect("sample profile 0 is enabled");
+        app.connected_for_testing(0)
+            .expect("sample profile 0 is enabled");
         assert_eq!(app.tick_interval(), Some(Duration::from_secs(1)));
 
         app.disconnect(0).expect("it was just connected");
@@ -7506,10 +7846,11 @@ mod tests {
 
     #[test]
     fn a_tick_ages_a_live_connection_and_leaves_a_dead_one_alone() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let live = id_at(&app, 0);
         let dead = id_at(&app, 1);
-        app.connect(0).expect("sample profile 0 is enabled");
+        app.connected_for_testing(0)
+            .expect("sample profile 0 is enabled");
 
         assert_eq!(
             app.handle_event(&Event::Tick { elapsed_ms: 3000 }, SIZE),
@@ -7526,9 +7867,10 @@ mod tests {
 
     #[test]
     fn sub_second_ticks_accumulate_instead_of_rounding_to_nothing() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let live = id_at(&app, 0);
-        app.connect(0).expect("sample profile 0 is enabled");
+        app.connected_for_testing(0)
+            .expect("sample profile 0 is enabled");
 
         for _ in 0..3 {
             assert!(!app.advance(250), "a quarter second is not a second yet");
@@ -7539,7 +7881,7 @@ mod tests {
 
     #[test]
     fn a_tick_with_nothing_connected_does_not_ask_for_a_repaint() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         assert_eq!(
             app.handle_event(&Event::Tick { elapsed_ms: 5000 }, SIZE),
             Action::None
@@ -7550,7 +7892,7 @@ mod tests {
 
     #[test]
     fn an_exported_file_splits_back_into_the_profiles_it_was_made_from() {
-        let app = VpnManager::new();
+        let app = VpnManager::with_sample_profiles();
         let text = app.export_all();
         let blocks = split_profile_blocks(&text);
         assert_eq!(
@@ -7559,7 +7901,7 @@ mod tests {
             "the whole file handed to `parse_profile_text` folds into one profile"
         );
 
-        let mut fresh = VpnManager::new();
+        let mut fresh = VpnManager::with_sample_profiles();
         fresh.profiles.clear();
         fresh.connections.clear();
         for block in &blocks {
@@ -7665,7 +8007,7 @@ mod tests {
         let dir = scratch.dir();
 
         // Export: the button opens a Save chooser, already carrying a name.
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let exported = app.profiles.len();
         app.activate(Target::Export);
         aim_picker(&mut app, dir);
@@ -7680,7 +8022,7 @@ mod tests {
         );
 
         // Import: a second window reads it back, picked by clicking the row.
-        let mut fresh = VpnManager::new();
+        let mut fresh = VpnManager::with_sample_profiles();
         fresh.profiles.clear();
         fresh.connections.clear();
         fresh.activate(Target::Import);
@@ -7722,7 +8064,7 @@ mod tests {
         // the default path on a fresh account.
         let nested = scratch.dir().join("config").join("vpn");
 
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.activate(Target::Export);
         aim_picker(&mut app, &nested);
         click_picker(&mut app, DialogTarget::Confirm);
@@ -7741,7 +8083,7 @@ mod tests {
         let scratch = scratchdir::ScratchDir::new("slate_vpnmanager_cancel");
         let dir = scratch.dir();
 
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.activate(Target::Export);
         aim_picker(&mut app, dir);
         click_picker(&mut app, DialogTarget::Cancel);
@@ -7755,7 +8097,7 @@ mod tests {
 
     #[test]
     fn escape_closes_the_chooser_rather_than_reaching_the_window() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.show_add_dialog = false;
         app.activate(Target::Import);
         assert!(app.picker.is_some());
@@ -7772,7 +8114,7 @@ mod tests {
 
     #[test]
     fn the_chooser_keeps_clicks_and_keys_off_the_window_behind_it() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(0);
         let tab_before = app.current_tab;
         let profiles_before = app.profiles.len();
@@ -7853,7 +8195,7 @@ mod tests {
 
     #[test]
     fn the_chooser_is_drawn_and_covers_what_is_under_it() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let plain = render_frame(&app, VpnManager::SIZE.0, VpnManager::SIZE.1);
         let (x, y) = plain
             .rect_of(|t| *t == Target::Export)
@@ -7890,13 +8232,14 @@ mod tests {
             }
         };
 
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         app.select_profile(0);
         note(&app, &mut seen);
 
         app.set_tab(DetailTab::Connection);
         note(&app, &mut seen);
-        app.connect(0).expect("sample profile 0 is enabled");
+        app.connected_for_testing(0)
+            .expect("sample profile 0 is enabled");
         note(&app, &mut seen);
 
         let split = app
@@ -7971,7 +8314,7 @@ mod tests {
 
     #[test]
     fn the_frame_balances_its_clips_in_every_state() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         for tab in DetailTab::all() {
             app.set_tab(*tab);
             assert!(
@@ -7988,7 +8331,7 @@ mod tests {
 
     #[test]
     fn the_window_is_drawn_at_the_size_it_is_handed_not_the_one_it_remembers() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         // The first frame goes out before any `Event::Resize`, so `render` has
         // to believe its arguments.
         let tree = app.render(1400.0, 900.0);
@@ -8010,7 +8353,7 @@ mod tests {
 
     #[test]
     fn a_window_smaller_than_the_layout_allows_still_draws_and_still_clicks() {
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
         let size = (320.0, 200.0);
         let tree = app.render(size.0, size.1);
         assert!(!tree.commands.is_empty());
@@ -8057,7 +8400,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = VpnManager::new();
+        let mut app = VpnManager::with_sample_profiles();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

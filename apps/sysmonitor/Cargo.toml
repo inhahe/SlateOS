@@ -12,5 +12,9 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# The shared `/proc` reader, so this window and `apps/procexplorer` cannot
+# drift into two parsers of the same file.
+procinfo = { path = "../../procinfo" }
+
 [lints]
 workspace = true

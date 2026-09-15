@@ -4527,6 +4527,129 @@
 
 ## Judgment Calls
 
+"Fixed" means fixed ON MAIN, and say which when telling another lane
+(lane A, 2026-09-15). Lane C's correction, adopted here because the same
+ambiguity is in everything I have said today.
+
+  I told lane C that deflate/src/lib.rs:2940 was fixed. True of MY TREE at
+  that moment, and not of main. Lane C relayed it to lane B as a statement
+  about main, in a report whose purpose was to let lane B decide whether to
+  widen a gate -- and lane B was about to widen it against a file still red on
+  main. They checked origin/main at 800df3ae3 themselves and found the gap
+  still there.
+
+  Nothing I said was false; the ambiguity did the damage. "Fixed" is two
+  different claims -- "in my tree" and "in the tree you will build" -- and only
+  the second is a fact about anything shared. Lane B notes this is the second
+  time in two days that something was reported fixed on a branch and read as
+  fixed on main.
+
+  The rule: when telling another lane something is fixed, check origin/main,
+  not the worktree and not the memory of having done it. If it is only on a
+  branch, say the branch. `git show origin/main:<path>` is the whole cost.
+
+  Why it mattered more than a stale line usually would, which is lane B's
+  point and worth keeping: deflate is in NO lane's glob list. Widening a
+  tree-wide gate while that file was red would have refused EVERY lane's push
+  for a file none of us owns -- so at the moment of widening it had no owner
+  and all three lanes depended on it.
+
+  Verified after the fact: origin/main carries the single-spaced message and
+  zero occurrences of the gap.
+
+  AND THE PROVENANCE HALF OF THAT CHECK WAS WRONG, which is the more useful
+  half of this entry. I ran
+
+      git log --oneline origin/main -- deflate/src/lib.rs
+
+  saw only 5a7cf6796 (mine), and told lane C that lane B's belief -- that they
+  had repaired the file in their widening commit -- was not what main showed.
+  Lane B was right and my check was answering a narrower question than it
+  looked like.
+
+  `git log -- <path>` applies HISTORY SIMPLIFICATION. Both branches made the
+  BYTE-IDENTICAL change to line 2940, so the merge is TREESAME to one parent
+  and git follows only that side, dropping the other commit entirely. It is
+  answering "what is the simplest history that explains this file's current
+  content", not "what commits changed this file". `--full-history` asks the
+  second, and shows 9159b3d30 -- lane B's widening -- with
+  `git show --stat` listing `deflate/src/lib.rs | 2 +-`.
+
+  So use --full-history whenever the question is WHO CHANGED THIS, and plain
+  log only when the question is HOW DID IT GET THIS WAY.
+
+  Lane C's refinement, which is the rule that would have got it right:
+  CHECKING CONTENT BEATS CHECKING PROVENANCE when the assertion is "this is
+  fixed". `git show origin/main:<path>` was correct here and the log was not,
+  because the fact anyone depends on is the file's bytes, not which commit
+  produced them.
+
+A gate for blocking locks reached from interrupt context (lane A, 2026-09-15).
+Deferred, with the justification supplied by lane B rather than by me.
+
+  Today's self-deadlock was the buffer-cache writeback softirq re-entering
+  blkdev's registry lock. I fixed it with try_with_device and put "NOT safe
+  from interrupt context" in writeback_entry's doc comment, and treated the
+  comment as the thing that stops it recurring.
+
+  Lane B's evidence says a comment will not. Their pre-push header list
+  contains the sentence "FIVE OUT OF FIVE RECENT ADDITIONS" had a given
+  fault, and they read that line while committing the sixth. A warning about
+  a trap, in the file where the trap is, in the paragraph being edited, did
+  not prevent the trap. test-pre-push-gates.py refusing the push is what
+  caught it -- theirs and, an hour later, mine.
+
+  So the enforceable version: walk the call graph outward from the known
+  interrupt entry points -- softirq::process_pending, the timer handler,
+  ktimer callbacks, irq dispatch -- and refuse a blocking `lock()` reachable
+  from any of them. try_lock is fine; the ones to catch are the blocking
+  acquisitions three frames down in another file, which is exactly how this
+  one hid.
+
+  Not started. It needs a call-graph walker over kernel/src and a baseline for
+  what is already reachable, and the baseline is the hard part -- most of it
+  will be legitimate, so the gate is only worth having if it can distinguish
+  a new reachable blocking lock from the existing set. Trigger: a second
+  deadlock of this shape, or anyone adding a caller to writeback_entry.
+
+check-collapsed-messages has never scanned lane A's code (lane A, 2026-09-15).
+Found while acting on a report from lane C, not by running the gate.
+
+  Line 196: `for top in ("gui", "apps", "scripts")`. That is it. The gate does
+  not look at kernel/, deflate/, bench/, netproto/, posix/, userspace/ or
+  services/. Every "check-collapsed-messages: ok (382 source files)" in my
+  post-merge sweep was a clean result over lane C's territory plus scripts --
+  structurally unable to say anything about my own lane. The 382 files were not
+  too few; they were the wrong 382.
+
+  Which is the same lesson as the hardcoded ROOT one directory over, and worth
+  keeping together: a green verdict is only as meaningful as the corpus it was
+  computed over, and the corpus is usually invisible in the output. That gate
+  printed a file COUNT, which is the one number that would have exposed it, and
+  I read it as reassurance rather than as a question.
+
+  Answered by hand: driving the module's own `repair` over kernel/, deflate/,
+  bench/ and netproto/ -- 820 files -- gives 5 findings, all in
+  kernel/src/mm/mod.rs, and all COLUMN-ALIGNED OUTPUT:
+
+      PCPU: hit={}% ({}/{})  refills={}  drains={}
+      Heap: slab={}/{}  large={}  failures={}
+
+  Those double spaces are separators, not gaps. So lane A has zero genuine
+  collapsed messages, and the five are the false-positive class lane C is
+  rewriting the predicate to exclude -- prose for a human versus a format for
+  a column, where the whitespace IS the payload.
+
+  Note for when lane C's wider version lands: it scans 3,995 files and will
+  start reporting these five in my tree. They must not be "fixed" -- rewriting
+  them would corrupt the alignment of printed output. If the predicate change
+  does not exclude output macros, these need a baseline entry with that reason.
+
+  Do NOT relocate that script to test a wider corpus. Copying it to /tmp makes
+  its __file__-derived ROOT resolve to the filesystem root, so it scans nothing
+  and says so -- which is the portability fix working exactly as intended, and
+  cost me one confused run. Load it with importlib from its real path instead.
+
 After any merge, sweep the stale-artifact checkers BEFORE launching a boot
 (lane A, 2026-09-15). Cost two full cycles today by skipping it once.
 
@@ -4537,7 +4660,25 @@ After any merge, sweep the stale-artifact checkers BEFORE launching a boot
 
   The sweep is seconds, not minutes:
 
-    python scripts/gen-script-index.py --check
+  ONLY TWO of these take --check. The rest reject it with rc=2 and
+  "unrecognized option", which reads as a failure and is not one. The correct
+  invocations, measured rather than assumed:
+
+    python scripts/gen-script-index.py --check        # --check REQUIRED, see below
+    python scripts/scan-orphan-modules.py --check     # --check required too
+    python scripts/check-collapsed-messages.py        # plain
+    python scripts/check-control-bytes.py             # plain
+    python scripts/check-gates-are-wired.py           # plain
+    python scripts/check-design-decisions-bands.py    # plain
+    python scripts/check-known-issues-index.py        # plain
+    python scripts/check-fields-written-never-read.py # plain
+
+  gen-script-index and scan-orphan-modules MUST have --check: without it the
+  first REWRITES the index and the second prints a report and exits 0. That is
+  the same trap from the other direction -- the flag is required for exactly
+  the two tools where omitting it hides the answer, and rejected by all six
+  where passing it hides the answer behind an rc=2 that looks like a finding.
+
 
   RUN EACH ONE PLAIN -- never `--check || <tool>`. I wrote the sweep as
   `python tool.py --check || python tool.py`, meaning "check, and if that is
@@ -4615,7 +4756,26 @@ the next person to run these will see the same rows.
   cpuid), memory, pci. Unserved: display, dma, ioports, irqs, memmap, net,
   sound, usb, drivers.
 
-  memmap is the most valuable and CANNOT be served yet. The physical memory
+  memmap is the most valuable and IS SERVABLE NOW -- the paragraph below was
+  wrong and is kept for the reason it was wrong.
+
+  CORRECTION 2026-09-15: `fs::memlayout` already snapshots the real Limine
+  memmap into kernel storage. `main.rs:717` calls
+  `populate_from_memmap(boot_info.memory_map)` immediately after
+  `mm::heap::init` at :665, with a comment saying exactly that -- "needs the
+  heap, just brought up". It exposes `list_regions`, `list_type`, `total_ram`
+  and a `MemRegion` with start/end/type, and unlike `dmevent` its
+  `init_defaults` seeds an EMPTY vector, so nothing there is invented.
+
+  I concluded otherwise after grepping `MemmapEntry` and `memmap` in
+  `limine.rs`, `acpi/mod.rs` and `boot.rs` -- the three files that pass the
+  borrowed slice around -- and never searching for a consumer that COPIES it.
+  Third negative asserted from too narrow a search in one day, after "the
+  harness attaches no disk" and "nobody asked which filesystems the gate
+  exercises". The pattern is identical each time: I searched where the thing
+  would be if it did not exist.
+
+  ORIGINAL, WRONG: The physical memory
   map is real and already parsed, but limine's response lives in
   bootloader-reclaimable memory and is only ever passed around as a borrowed
   &[&MemmapEntry] during boot (acpi::init, boot.rs). Nothing copies it into
@@ -4626,6 +4786,39 @@ the next person to run these will see the same rows.
   Prerequisite: snapshot the memmap at boot into kernel storage, which needs
   care about heap availability at that point. That is the work; serving the
   file afterwards is trivial.
+
+  display is DELIBERATELY NOT SERVED, for the same reason as irqs below.
+  `fs::monitors` already backs a procfs file -- `procfs.rs:8223` reads
+  `monitors::stats()`, `desktop_bounds()` and `list_monitors()` -- and the
+  underlying source is `console::framebuffer_info()`, a kernel-owned copy
+  rather than the limine response. A /sys/devices/display node would be a
+  second answer to a question /proc already answers.
+
+  CHECKED AND CLEARED while there, so nobody re-derives it:
+  `drm/driver.rs:144` reads
+  `console::framebuffer_info().unwrap_or((0, 0, 0, 0))`, which pattern-matches
+  as the fabrication class -- substituting zeros for an absent measurement. It
+  is not. `fb_addr == 0` is a SENTINEL meaning "no framebuffer", and
+  `LimineBackend` tests it at every use site (:161 alongside width and height,
+  :257, :360) before touching the pointer. The zeros never reach a reader as a
+  claim about hardware. The ranking promotes; only checking demotes.
+
+  irqs is DELIBERATELY NOT SERVED, and that closes the category rather than
+  leaving it as work. The data is real -- `fs::irqstat::irq_lines()` reads
+  `idt::vector_counts()`, filters vectors that never fired, and its module
+  already applies the shared-reading discipline from 932 in its own comments.
+  But `/proc/interrupts` ALREADY publishes it (`procfs::gen_interrupts` at
+  :1521, dispatched at :13957, fed by the same `irq_lines()`).
+
+  So a `/sys/devices/irqs` node would be a second kernel answer to one
+  question, which is what 850 exists to prevent and the exact argument used
+  for `system/memory/total_kb` -- where the self-test asserts it EQUALS
+  /proc/meminfo's MemTotal rather than computing its own total. Linux puts
+  interrupt counts in /proc/interrupts too, so a consumer looking for them
+  has a canonical place already.
+
+  For lane C's tree-walker: irqs will never appear under /sys/devices. Read
+  /proc/interrupts.
 
   net stays blocked on a naming decision, unchanged: InterfaceInfo has no name
   field, so eth0 would be invented. dma and sound have no evident real source

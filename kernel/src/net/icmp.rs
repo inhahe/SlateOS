@@ -312,23 +312,25 @@ pub fn trace_id() -> u16 {
 
 /// Build an ICMP echo request for traceroute (uses TRACEROUTE_ID).
 #[allow(clippy::arithmetic_side_effects)]
-pub fn build_trace_echo_request(seq: u16) -> Vec<u8> {
+pub fn build_trace_echo_request(seq: u16) -> KernelResult<Vec<u8>> {
     let payload = b"traceroute probe";
     let total = wire::HEADER_LEN + payload.len();
-    let mut pkt = Vec::with_capacity(total);
-
-    pkt.push(wire::TYPE_ECHO_REQUEST);
-    pkt.push(0);
-    pkt.extend_from_slice(&[0, 0]); // Checksum placeholder.
-    pkt.extend_from_slice(&TRACEROUTE_ID.to_be_bytes());
-    pkt.extend_from_slice(&seq.to_be_bytes());
-    pkt.extend_from_slice(payload);
-
-    let checksum = ipv4::ip_checksum(&pkt);
-    pkt[2] = (checksum >> 8) as u8;
-    pkt[3] = checksum as u8;
-
-    pkt
+    let mut pkt = alloc::vec![0u8; total];
+    // netproto's encoder rather than a second copy of the layout.
+    //
+    // Byte-identical to the hand-rolled version this replaces, by derivation
+    // and not by inspection: `ipv4::ip_checksum` is
+    // `finish(sum_bytes(0, d))` over `crate::net::checksum`, which is itself a
+    // thin wrapper around netproto's `accumulate`/`fold` -- the same two
+    // primitives `checksum::internet` composes. The swap therefore cannot
+    // change a byte on the wire, which matters because a wrong ICMP checksum
+    // is dropped by the peer and looks exactly like packet loss.
+    let Some(n) = wire::write_echo(&mut pkt, true, TRACEROUTE_ID, seq, payload) else {
+        // Unreachable, for the same reason as `build_echo_request`.
+        return Err(crate::error::KernelError::InvalidArgument);
+    };
+    pkt.truncate(n);
+    Ok(pkt)
 }
 
 /// Match a Time Exceeded ICMP error against our traceroute probes.
@@ -410,30 +412,27 @@ fn match_trace_echo_reply(from_ip: Ipv4Addr, id: u16, seq: u16) {
 
 /// Build an ICMP echo request.
 #[allow(clippy::arithmetic_side_effects)]
-fn build_echo_request(seq: u16) -> Vec<u8> {
+fn build_echo_request(seq: u16) -> KernelResult<Vec<u8>> {
     let payload = b"ping from kernel!";
     let total = wire::HEADER_LEN + payload.len();
-    let mut pkt = Vec::with_capacity(total);
-
-    // Type: Echo Request.
-    pkt.push(wire::TYPE_ECHO_REQUEST);
-    // Code: 0.
-    pkt.push(0);
-    // Checksum placeholder.
-    pkt.extend_from_slice(&[0, 0]);
-    // Identifier.
-    pkt.extend_from_slice(&PING_ID.to_be_bytes());
-    // Sequence number.
-    pkt.extend_from_slice(&seq.to_be_bytes());
-    // Payload.
-    pkt.extend_from_slice(payload);
-
-    // Compute checksum.
-    let checksum = ipv4::ip_checksum(&pkt);
-    pkt[2] = (checksum >> 8) as u8;
-    pkt[3] = checksum as u8;
-
-    pkt
+    let mut pkt = alloc::vec![0u8; total];
+    // netproto's encoder rather than a second copy of the layout.
+    //
+    // Byte-identical to the hand-rolled version this replaces, by derivation
+    // and not by inspection: `ipv4::ip_checksum` is
+    // `finish(sum_bytes(0, d))` over `crate::net::checksum`, which is itself a
+    // thin wrapper around netproto's `accumulate`/`fold` -- the same two
+    // primitives `checksum::internet` composes. The swap therefore cannot
+    // change a byte on the wire, which matters because a wrong ICMP checksum
+    // is dropped by the peer and looks exactly like packet loss.
+    let Some(n) = wire::write_echo(&mut pkt, true, PING_ID, seq, payload) else {
+        // Unreachable: `pkt` is exactly `HEADER_LEN + payload.len()`, which is
+        // what `write_echo` requires. Surfaced as an error rather than a short
+        // packet, because a half-built echo request reads as network loss.
+        return Err(crate::error::KernelError::InvalidArgument);
+    };
+    pkt.truncate(n);
+    Ok(pkt)
 }
 
 // ---------------------------------------------------------------------------
@@ -726,18 +725,56 @@ fn send_echo_reply(request_ip: &Ipv4Packet<'_>, ns_id: crate::netns::NetNsId) ->
         return Ok(());
     }
 
-    let mut reply = Vec::from(data);
-    // Change type to Echo Reply.
-    reply[0] = wire::TYPE_ECHO_REPLY;
-    // Recompute checksum.
-    reply[2] = 0;
-    reply[3] = 0;
-    let checksum = ipv4::ip_checksum(&reply);
-    reply[2] = (checksum >> 8) as u8;
-    reply[3] = checksum as u8;
+    // Parse and re-encode through netproto rather than mutating the request in
+    // place. This is the last half of lane C's duplication request, and unlike
+    // `write_echo` it CHANGES BEHAVIOUR -- twice, both chosen rather than
+    // inherited from the parser's strictness:
+    //
+    //  1. The reply's code is 0, per RFC 792. The old path copied the request's
+    //     bytes and flipped only byte 0, so a non-zero code was echoed back.
+    //  2. A request whose code is non-zero is now DROPPED rather than answered,
+    //     because `Echo::parse` refuses it. A well-formed ping always carries
+    //     code 0, so no real client changes behaviour -- only malformed ones,
+    //     which stop receiving a reply that told them their own bad byte.
+    //
+    // `parse` re-validates the checksum that `process_icmp` has already checked.
+    // Harmless, and the outer check must stay: it guards the paths that never
+    // reach here.
+    let Some(reply) = build_echo_reply(data)? else {
+        return Ok(());
+    };
 
     // Reply from the namespace the request arrived in.
     ipv4::send_ns(ns_id, request_ip.src, PROTO_ICMP, &reply)
+}
+
+/// Build the echo reply for a received echo request.
+///
+/// `Ok(None)` means the bytes are not a well-formed echo request and no reply
+/// should be sent. `Err` is reserved for the unreachable buffer case.
+///
+/// Separate from [`send_echo_reply`] so it can be tested WITHOUT a NIC: the
+/// send needs an interface, the construction does not. That split exists
+/// because this is where the behaviour changed, and `send_echo_reply` has
+/// exactly one caller -- the inbound packet path -- which no self-test drives.
+/// Without it the change would have shipped with nothing executing it.
+fn build_echo_reply(data: &[u8]) -> KernelResult<Option<Vec<u8>>> {
+    let Some(req) = wire::Echo::parse(data) else {
+        // Malformed echo -- wrong type, non-zero code, or a checksum that does
+        // not fold. Dropped silently, exactly as the length check above already
+        // does for a truncated one.
+        return Ok(None);
+    };
+    let total = wire::HEADER_LEN + req.data.len();
+    let mut reply = alloc::vec![0u8; total];
+    let Some(n) = wire::reply_to(&mut reply, &req) else {
+        // `reply_to` returns None only for a non-request or a buffer too small;
+        // `parse` established the first and `total` the second. Surfaced rather
+        // than sent short, because a reply with a zero checksum reads as loss.
+        return Err(crate::error::KernelError::InvalidArgument);
+    };
+    reply.truncate(n);
+    Ok(Some(reply))
 }
 
 // ---------------------------------------------------------------------------
@@ -753,7 +790,7 @@ fn send_echo_reply(request_ip: &Ipv4Packet<'_>, ns_id: crate::netns::NetNsId) ->
 /// Returns the sequence number used.
 pub fn ping(dst: Ipv4Addr) -> KernelResult<u16> {
     let seq = PING_SEQ.fetch_add(1, Ordering::Relaxed);
-    let pkt = build_echo_request(seq);
+    let pkt = build_echo_request(seq)?;
     record_outstanding(seq, dst);
     ipv4::send(dst, PROTO_ICMP, &pkt)?;
     Ok(seq)
@@ -821,6 +858,7 @@ pub fn self_test() -> KernelResult<()> {
     test_verify_checksum_valid()?;
     test_verify_checksum_invalid()?;
     test_build_trace_echo_request()?;
+    test_echo_reply_construction()?;
     test_ping_tracking()?;
     test_reason_strings()?;
 
@@ -830,7 +868,7 @@ pub fn self_test() -> KernelResult<()> {
 
 /// Test that build_echo_request produces a valid ICMP checksum.
 fn test_build_echo_request_checksum() -> KernelResult<()> {
-    let pkt = build_echo_request(42);
+    let pkt = build_echo_request(42)?;
 
     // Minimum size: 8 bytes header + payload "ping from kernel!" (17 bytes).
     if pkt.len() < wire::HEADER_LEN {
@@ -881,7 +919,7 @@ fn test_build_echo_request_checksum() -> KernelResult<()> {
 /// Test verify_checksum with a known-valid ICMP packet.
 fn test_verify_checksum_valid() -> KernelResult<()> {
     // Build a valid echo request and verify it passes.
-    let pkt = build_echo_request(100);
+    let pkt = build_echo_request(100)?;
     if !verify_checksum(&pkt) {
         crate::serial_println!("[icmp]   FAIL: valid packet rejected by verify_checksum");
         return Err(crate::error::KernelError::InternalError);
@@ -893,7 +931,7 @@ fn test_verify_checksum_valid() -> KernelResult<()> {
 
 /// Test verify_checksum rejects a corrupted ICMP packet.
 fn test_verify_checksum_invalid() -> KernelResult<()> {
-    let mut pkt = build_echo_request(200);
+    let mut pkt = build_echo_request(200)?;
 
     // Corrupt a payload byte.
     if let Some(b) = pkt.get_mut(10) {
@@ -909,9 +947,77 @@ fn test_verify_checksum_invalid() -> KernelResult<()> {
     Ok(())
 }
 
+/// The echo-reply construction, which is where 2026-09-15's behaviour change
+/// lives. Both halves are asserted:
+///
+///  * a well-formed request yields a reply whose code byte is 0 (RFC 792),
+///    where the old path copied the request's bytes and echoed its code;
+///  * a request with a non-zero code yields NO reply, where the old path
+///    answered it.
+fn test_echo_reply_construction() -> KernelResult<()> {
+    let mut req = alloc::vec![0u8; wire::HEADER_LEN + 4];
+    if wire::write_echo(&mut req, true, 0x1234, 9, &[1, 2, 3, 4]).is_none() {
+        crate::serial_println!("[icmp]   FAIL: could not build a request fixture");
+        return Err(crate::error::KernelError::InvalidArgument);
+    }
+    let Some(reply) = build_echo_reply(&req)? else {
+        crate::serial_println!("[icmp]   FAIL: a well-formed echo request produced no reply");
+        return Err(crate::error::KernelError::IoError);
+    };
+    if reply.first() != Some(&wire::TYPE_ECHO_REPLY) {
+        crate::serial_println!("[icmp]   FAIL: reply type is not Echo Reply");
+        return Err(crate::error::KernelError::IoError);
+    }
+    if reply.get(1) != Some(&0) {
+        crate::serial_println!(
+            "[icmp]   FAIL: reply code is {:?}, RFC 792 requires 0",
+            reply.get(1)
+        );
+        return Err(crate::error::KernelError::IoError);
+    }
+    if !verify_checksum(&reply) {
+        crate::serial_println!("[icmp]   FAIL: reply checksum does not fold");
+        return Err(crate::error::KernelError::IoError);
+    }
+
+    // The half that changed: a non-zero code is refused rather than echoed.
+    //
+    // The checksum is recomputed AFTER setting the code, so the only defect
+    // in this packet is the code byte. Skip that and `Echo::parse` refuses it
+    // for a bad checksum instead, and the case passes for the wrong reason --
+    // which is the predicate-miss shape from design-decisions 942.
+    let mut bad = req.clone();
+    if bad.len() < 4 {
+        return Err(crate::error::KernelError::InvalidArgument);
+    }
+    bad[1] = 3;
+    bad[2] = 0;
+    bad[3] = 0;
+    let csum = ipv4::ip_checksum(&bad);
+    bad[2] = (csum >> 8) as u8;
+    bad[3] = csum as u8;
+    if !verify_checksum(&bad) {
+        crate::serial_println!(
+            "[icmp]   FAIL: the fixture for the code case has a bad checksum, so a\
+             refusal below would not be attributable to the code byte"
+        );
+        return Err(crate::error::KernelError::IoError);
+    }
+    if build_echo_reply(&bad)?.is_some() {
+        crate::serial_println!(
+            "[icmp]   FAIL: an echo request with code 3 was answered; RFC 792 says\
+             code must be 0 and such a request is not a well-formed echo"
+        );
+        return Err(crate::error::KernelError::IoError);
+    }
+
+    crate::serial_println!("[icmp]   echo reply: code 0 on a good request, no reply to code 3: OK");
+    Ok(())
+}
+
 /// Test that build_trace_echo_request produces valid ICMP.
 fn test_build_trace_echo_request() -> KernelResult<()> {
-    let pkt = build_trace_echo_request(7);
+    let pkt = build_trace_echo_request(7)?;
 
     if pkt.len() < wire::HEADER_LEN {
         crate::serial_println!("[icmp]   FAIL: trace request too short");

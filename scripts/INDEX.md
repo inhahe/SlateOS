@@ -164,7 +164,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/extfloat-cases.py` | Generate cases for `scripts/extfloat-diff.sh`. |
 | `scripts/extfloat-diff.sh` | Differential test: our `coreutils::extfloat` against glibc's `strtold` and |
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
+| `scripts/find-claimed-acts.py` | Which programs tell the user they DID something they cannot do? |
 | `scripts/find-diff.sh` | Differential test: our find against GNU find. |
+| `scripts/find-overstated-records.py` | Which of our own documents credit a program with an act it cannot perform? |
 | `scripts/find-reachable-fixtures.py` | Which invented-data builders can a *shipping* build reach? |
 | `scripts/find-silent-incapacity.py` | Which programs cannot do the thing they are for, and do not say so? |
 | `scripts/find-stale-admissions.py` | Which programs still deny a capability they have since acquired? |
@@ -377,4 +379,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_367 scripts._
+_369 scripts._

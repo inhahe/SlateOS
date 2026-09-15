@@ -1037,6 +1037,7 @@ dependencies = [
 name = "guitk"
 version = "0.1.0"
 dependencies = [
+ "civildate",
  "osfont",
  "randrange",
  "textfind",

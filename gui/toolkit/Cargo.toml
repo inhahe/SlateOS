@@ -25,6 +25,17 @@ tzrules = { path = "../../tzrules" }
 # duplicated".
 randrange = { path = "../../randrange" }
 
+[dev-dependencies]
+# Not linked into the toolkit -- it is here so `tests/calendar_agreement.rs`
+# can hold this crate's calendar (`tzrules`, above) against the tree's other
+# one. `civildate` is the root crate lane B extracted; the kernel's
+# timekeeping, `optionalfile`, `at` and `hwclock` are on it, while every
+# widget reaches a date through `tzrules`. Two implementations of one idea is
+# the defect this tree keeps finding, and the two cannot simply be merged --
+# they differ deliberately on an out-of-range month. What must not differ is
+# the arithmetic under it, and until that test existed nothing said so.
+civildate = { path = "../../civildate" }
+
 [features]
 # Turns on `osfont`'s per-pass timing so that `text::shaping_cost`'s phase
 # breakdown has something to report. Off by default: it charges two clock

@@ -67264,6 +67264,34 @@ thing (**population**), or it examined it and asked the wrong question about it
 | lane C: a gate enumerating crates by how they spell a call | crates that spell it otherwise |
 | lane C: eight theme guards rendering only an opening frame | every frame after the first |
 
+**The sharpest population failure: searching by a key the defect is defined by
+lacking.** Not a wrong scope -- a scope that excludes the defective cases *by
+construction*, so the search cannot fail and the answer is always clean.
+
+Lane C, 2026-09-14, twice on one small task. They verified that every lane-C
+answer in the operator's file had been recorded in `design-decisions.md`, and
+reported all accounted for. The check searched by **`C-Q` number**. The two
+entries that had not been recorded were exactly the two that **have no number** --
+which was the defect being looked for. A true statement about a population that
+excluded the cases in question.
+
+Then verifying the same thing by hand, a grep for the question's own prose in
+`design-decisions.md` returned **zero**, because a decision's title is not the
+question's sentence. Two false negatives in a row, in opposite directions, on
+the same small task.
+
+**Why it is worse than an ordinary scope error.** A narrow scope can be widened
+once noticed, and a clean result from it still feels provisional. Here the key
+*is* the thing that is broken, so widening is not the remedy -- the search must
+be run over a population selected by something the defect cannot be defined by.
+"Every numbered question is recorded" and "every question is recorded" are
+different claims, and only the second was wanted.
+
+**Recognising it:** ask what a defective case would have to have in order to
+appear in the result set. If the answer is "the attribute whose absence makes it
+defective", the search is incapable of finding anything, and a clean result from
+it carries no information at all.
+
 **Property blindness** -- the scope is right and the assertion is weaker than
 the claim. The FAT short-name witness is the clean example. Asserting that two
 undecodable names *differ* is true of a rendering that dropped the

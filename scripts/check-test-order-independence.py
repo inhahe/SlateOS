@@ -73,10 +73,32 @@ PINNED_SEEDS = (1789357352031162400,)
 RANDOM_ORDERS = 2
 
 # The crates whose tests share process-global state and so can depend on order.
-# `posix` is the whole libc; the userspace crates are single-purpose binaries
-# whose tests rarely touch statics, and sweeping all 415 would cost minutes for
-# very little. Add a crate here the first time it grows a shared-state test.
-CRATES = ("posix",)
+# Sweeping all 415 would cost minutes for very little, so this is a list -- but
+# it is no longer a REMEMBERED list. `scripts/raced-globals.py --check` now
+# compares it against the crates it finds with a global reached by two or more
+# tests, and fails if one is missing. That cross-check exists because this
+# comment used to end "add a crate here the first time it grows a shared-state
+# test", and on 2026-09-14 `userspace/authlib` grew one, was serialised the
+# same day, and was not added. The rule survived; nobody executed it.
+#
+# Three fields, because two of them stopped being the same string once the
+# list grew past `posix`:
+#
+#   pkg    what `cargo test -p` wants. `authlib`, not `userspace/authlib`.
+#   dir    where the crate lives, for the self-test's existence check.
+#   extra  cargo arguments narrowing the run.
+#
+# `coreutils` is scoped to `--lib` and that is a measurement, not a shortcut:
+# its one qualifying global is `DIAGNOSTIC_LOST` in `src/stdfd.rs`, a lib
+# global with two lib tests, and raced-globals finds no shared state in any of
+# the 83 binaries. Unscoped it would build and shuffle all of them -- about
+# twenty minutes an order, an hour for the three -- to re-shuffle 353 lib
+# tests that take seventeen seconds.
+CRATES = (
+    ("posix", "posix", ()),
+    ("authlib", "userspace/authlib", ()),
+    ("coreutils", "userspace/coreutils", ("--lib",)),
+)
 
 HOST_TARGET = "x86_64-pc-windows-gnu"
 
@@ -97,14 +119,14 @@ def seeds_for_run():
     ]
 
 
-def run_seed(crate, seed, target):
+def run_seed(crate, seed, target, extra=()):
     """Run one crate's tests in the order `seed` picks.
 
     Returns `(ok, failing_test_names, raw_output)`.
     """
     cmd = [
         "cargo", "+nightly", "test", "-p", crate,
-        "--target", target, "--",
+        "--target", target, *extra, "--",
         "-Z", "unstable-options", "--shuffle-seed", str(seed),
     ]
     try:
@@ -185,9 +207,24 @@ def selftest():
        "a build failure must not be mistaken for a test run")
 
     # The crate list must be real, or this gate grades nothing.
-    for crate in CRATES:
-        ck(os.path.isdir(os.path.join(ROOT, crate)),
-           "crate directory should exist: " + crate)
+    for pkg, d, _extra in CRATES:
+        ck(os.path.isdir(os.path.join(ROOT, d)),
+           "crate directory should exist: " + d)
+        # And `pkg` must be what `-p` will match, which is NOT always the last
+        # component of `dir`. Reading it back from the manifest is the only
+        # way this stays true: a wrong name makes cargo answer "did not match
+        # any packages", which exits non-zero with no test result -- caught by
+        # run_seed's `ran` check as "the suite did not run", ten minutes into
+        # a push rather than here.
+        manifest = os.path.join(ROOT, d, "Cargo.toml")
+        declared = None
+        if os.path.isfile(manifest):
+            with open(manifest, encoding="utf-8", errors="replace") as fh:
+                m = re.search(r'^\s*name\s*=\s*"([^"]+)"', fh.read(), re.M)
+            declared = m.group(1) if m else None
+        ck(declared == pkg,
+           "package name for " + d + " should be " + pkg
+           + ", manifest says " + str(declared))
 
     print("selftest: " + str(checks - bad) + "/" + str(checks) + " cases pass")
     return 1 if bad else 0
@@ -200,7 +237,8 @@ def main():
     ap.add_argument("--selftest", "--self-test", dest="selftest",
                     action="store_true")
     ap.add_argument("--crate", action="append", default=None,
-                    help="crate to check (repeatable; defaults to " + ", ".join(CRATES) + ")")
+                    help="crate to check (repeatable; defaults to "
+                         + ", ".join(p for p, _d, _e in CRATES) + ")")
     ap.add_argument("--target", default=HOST_TARGET)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
@@ -208,17 +246,24 @@ def main():
     if args.selftest:
         return selftest()
 
-    crates = tuple(args.crate) if args.crate else CRATES
+    if args.crate:
+        # An explicit --crate names a package. Keep this list's narrowing
+        # arguments if it is one of ours, so `--crate coreutils` by hand is
+        # the same run the gate does rather than a silently larger one.
+        byname = {pkg: extra for pkg, _d, extra in CRATES}
+        crates = tuple((c, byname.get(c, ())) for c in args.crate)
+    else:
+        crates = tuple((pkg, extra) for pkg, _d, extra in CRATES)
     seeds = seeds_for_run()
     failed = []
-    for crate in crates:
+    for crate, extra in crates:
         for seed in seeds:
-            ok, failures, _out = run_seed(crate, seed, args.target)
+            ok, failures, _out = run_seed(crate, seed, args.target, extra)
             if ok:
                 if not args.quiet:
                     print("order-independence: " + crate + " seed " + str(seed) + " OK")
                 continue
-            failed.append((crate, seed, failures))
+            failed.append((crate, seed, failures, extra))
             print("", file=sys.stderr)
             print("check-test-order-independence: " + crate
                   + " FAILS in the order seed " + str(seed) + " produces:",
@@ -241,10 +286,11 @@ def main():
         print("  * buffered output left on a standard stream, which is what "
               "stdio.rs's StdStreamTestGuard exists to purge.", file=sys.stderr)
         print("", file=sys.stderr)
-        crate, seed, _ = failed[0]
+        crate, seed, _, extra = failed[0]
         print("Reproduce exactly -- the seed is a constant, so this is the same "
               "order on any machine:", file=sys.stderr)
         print("    cargo +nightly test -p " + crate + " --target " + args.target
+              + ("".join(" " + e for e in extra))
               + " -- -Z unstable-options --shuffle-seed " + str(seed),
               file=sys.stderr)
         return 1

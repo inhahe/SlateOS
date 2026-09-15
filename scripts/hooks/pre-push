@@ -746,7 +746,14 @@ toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 # times on an empty list while `note_gate` recorded them as having run. This
 # gate runs the suite once against the working tree, so there is no loop to
 # degrade to nothing. `touches` alone decides whether it runs.
-touches posix/ scripts/check-test-order-independence.py || skip_toi=1
+# All three crates in CRATES, or a push touching only one of them would
+# skip the gate entirely. The invocation is not scoped to the touched
+# crate: measured 2026-09-15, posix is ~150s of the ~230s total, authlib
+# ~27s and coreutils (--lib) ~51s, so a scoped run would save real time
+# on a coreutils-only push. Left unscoped because `touches` answers
+# yes/no rather than which, and a wrong answer there silently narrows
+# the gate -- the failure this whole gate family keeps producing.
+touches posix/ userspace/authlib/ userspace/coreutils/         scripts/check-test-order-independence.py || skip_toi=1
 note_gate test-order "$skip_toi"
 
 toi_failed=0

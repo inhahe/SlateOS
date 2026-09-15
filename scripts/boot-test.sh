@@ -5770,6 +5770,27 @@ check_variant_lists() {
         return 1
     fi
 
+    # An index of what each script asserts, searchable by the question you are
+    # asking rather than the filename you would have guessed. Three times on
+    # 2026-09-14 two lanes reasoned from first principles about a rule this tree
+    # already enforced. Generated, never hand-edited: --check refuses a stale
+    # copy, because a hand-maintained index is a document that rots.
+    echo "=== Checking that the script index is current ==="
+    if ! run_checker script-index-selftest "$py" "$PROJECT_ROOT/scripts/gen-script-index.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  gen-script-index.py no longer agrees" >&2
+        echo "with its own cases." >&2
+        return 1
+    fi
+    if ! run_checker script-index "$py" "$PROJECT_ROOT/scripts/gen-script-index.py" --check; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  scripts/INDEX.md does not match the" >&2
+        echo "scripts it describes, so searching it would answer about a tree" >&2
+        echo "that no longer exists.  Regenerate:" >&2
+        echo "    python scripts/gen-script-index.py" >&2
+        return 1
+    fi
+
     echo "=== Checking for a hardcoded lane-worktree path in a script ==="
     if ! run_checker foreign-worktree-selftest "$py" "$PROJECT_ROOT/scripts/check-foreign-worktree-paths.py" --self-test; then
         echo "" >&2

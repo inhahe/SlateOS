@@ -114,17 +114,19 @@ fn parse_args() -> Result<Options, String> {
     let mut end_of_opts = false;
 
     while i < args.len() {
-        let arg = &args[i];
+        let Some(arg) = args.get(i) else {
+            break;
+        };
 
         if end_of_opts || !arg.starts_with('-') {
             opts.files.push(arg.clone());
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         if arg == "--" {
             end_of_opts = true;
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -139,15 +141,18 @@ fn parse_args() -> Result<Options, String> {
                 "json" => opts.mode = OutputMode::Json,
                 _ => return Err(format!("unknown option: --{rest}")),
             }
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         // Short options (may be grouped, e.g. -bik).
-        let chars: Vec<char> = arg[1..].chars().collect();
+        let chars: Vec<char> = arg.get(1..).unwrap_or_default().chars().collect();
         let mut j = 0;
         while j < chars.len() {
-            match chars[j] {
+            let Some(&opt) = chars.get(j) else {
+                break;
+            };
+            match opt {
                 'h' => usage(),
                 'b' => opts.brief = true,
                 'i' => opts.mode = OutputMode::Mime,
@@ -157,11 +162,18 @@ fn parse_args() -> Result<Options, String> {
                 '0' => opts.nul_terminate = true,
                 'f' => {
                     // -f requires a value: remainder of this group or next arg.
-                    let namefile = if j + 1 < chars.len() {
-                        chars[j + 1..].iter().collect::<String>()
-                    } else if i + 1 < args.len() {
-                        i += 1;
-                        args[i].clone()
+                    // `get(..).filter(non-empty)` rather than `j + 1 <
+                    // chars.len()`: the slice from one-past-the-end is `Some`
+                    // and empty, which is not a filename.
+                    let rest_of_group = chars
+                        .get(j.saturating_add(1)..)
+                        .filter(|r| !r.is_empty())
+                        .map(|r| r.iter().collect::<String>());
+                    let namefile = if let Some(rest) = rest_of_group {
+                        rest
+                    } else if let Some(next) = args.get(i.saturating_add(1)) {
+                        i = i.saturating_add(1);
+                        next.clone()
                     } else {
                         return Err("option -f requires a filename".into());
                     };
@@ -173,9 +185,9 @@ fn parse_args() -> Result<Options, String> {
                 }
                 c => return Err(format!("unknown option: -{c}")),
             }
-            j += 1;
+            j = j.saturating_add(1);
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     if opts.files.is_empty() {
@@ -213,11 +225,14 @@ fn read_magic_bytes(path: &str) -> io::Result<Vec<u8>> {
         if total >= buf.len() {
             break;
         }
-        let n = file.read(&mut buf[total..])?;
+        let Some(rest) = buf.get_mut(total..) else {
+            break;
+        };
+        let n = file.read(rest)?;
         if n == 0 {
             break;
         }
-        total += n;
+        total = total.saturating_add(n);
     }
     buf.truncate(total);
     Ok(buf)
@@ -363,7 +378,7 @@ fn detect_pe(buf: &[u8]) -> Option<FileType> {
     }
 
     // COFF header starts at pe_offset + 4.
-    let coff_base = pe_offset + 4;
+    let coff_base = pe_offset.saturating_add(4);
     let machine = read_u16_le(buf, coff_base)?;
     let machine_str = match machine {
         0x8664 => "x86-64",
@@ -373,7 +388,7 @@ fn detect_pe(buf: &[u8]) -> Option<FileType> {
     };
 
     // Optional header magic at coff_base + 20.
-    let opt_magic = read_u16_le(buf, coff_base + 20).unwrap_or(0);
+    let opt_magic = read_u16_le(buf, coff_base.saturating_add(20)).unwrap_or(0);
     let pe_type = match opt_magic {
         0x10B => "PE32",
         0x20B => "PE32+",
@@ -381,7 +396,7 @@ fn detect_pe(buf: &[u8]) -> Option<FileType> {
     };
 
     // Check characteristics for DLL.
-    let characteristics = read_u16_le(buf, coff_base + 18).unwrap_or(0);
+    let characteristics = read_u16_le(buf, coff_base.saturating_add(18)).unwrap_or(0);
     let kind = if characteristics & 0x2000 != 0 {
         "DLL"
     } else {
@@ -402,11 +417,15 @@ fn detect_shebang(buf: &[u8]) -> Option<FileType> {
     }
     // Extract the first line (up to newline or end of buffer, max 256 bytes).
     let limit = buf.len().min(256);
-    let first_line_end = buf[..limit]
+    let first_line_end = buf
+        .get(..limit)
+        .unwrap_or(buf)
         .iter()
         .position(|&b| b == b'\n')
         .unwrap_or(limit);
-    let line = &buf[2..first_line_end];
+    // `starts_with(b"#!")` above guarantees `first_line_end >= 2`, so this
+    // range is always valid; `get` states that rather than relying on it.
+    let line = buf.get(2..first_line_end).unwrap_or_default();
 
     // Parse interpreter path.
     let line_str = core::str::from_utf8(line).unwrap_or("").trim();
@@ -450,8 +469,9 @@ fn detect_archive(buf: &[u8]) -> Option<FileType> {
         // Check for specific zip-based formats.
         if buf.len() >= 30 {
             let name_len = read_u16_le(buf, 26).unwrap_or(0) as usize;
-            if buf.len() >= 30 + name_len {
-                let name = &buf[30..30 + name_len];
+            // `get(30..)` then `get(..name_len)`: no addition, so a
+            // `name_len` near the top of its range cannot wrap the check.
+            if let Some(name) = buf.get(30..).and_then(|tail| tail.get(..name_len)) {
                 if name.starts_with(b"META-INF/") {
                     return Some(FileType {
                         description: "Java archive (JAR)".into(),
@@ -481,7 +501,7 @@ fn detect_archive(buf: &[u8]) -> Option<FileType> {
         });
     }
     // bzip2
-    if starts_with(buf, b"BZ") && buf.len() >= 3 && buf[2] == b'h' {
+    if starts_with(buf, b"BZ") && buf.get(2) == Some(&b'h') {
         return Some(FileType {
             description: "bzip2 compressed data".into(),
             mime: "application/x-bzip2".into(),
@@ -602,7 +622,7 @@ fn detect_image(buf: &[u8]) -> Option<FileType> {
 fn detect_svg(buf: &[u8]) -> Option<FileType> {
     // Only examine text-like content (first few KB).
     let limit = buf.len().min(4096);
-    let text = core::str::from_utf8(&buf[..limit]).ok()?;
+    let text = core::str::from_utf8(buf.get(..limit).unwrap_or(buf)).ok()?;
     let lower = text.to_ascii_lowercase();
     if lower.contains("<svg") {
         return Some(FileType {
@@ -620,7 +640,7 @@ fn detect_document(buf: &[u8]) -> Option<FileType> {
         let mut desc = String::from("PDF document");
         // Try to extract version from "%PDF-X.Y".
         if buf.len() >= 8
-            && let Ok(header) = core::str::from_utf8(&buf[..buf.len().min(16)])
+            && let Ok(header) = core::str::from_utf8(buf.get(..buf.len().min(16)).unwrap_or(buf))
             && let Some(ver) = header.strip_prefix("%PDF-")
         {
             let ver_end = ver
@@ -638,7 +658,7 @@ fn detect_document(buf: &[u8]) -> Option<FileType> {
 
     // HTML detection (case-insensitive).
     let limit = buf.len().min(1024);
-    if let Ok(text) = core::str::from_utf8(&buf[..limit]) {
+    if let Ok(text) = core::str::from_utf8(buf.get(..limit).unwrap_or(buf)) {
         let lower = text.trim_start().to_ascii_lowercase();
         if lower.starts_with("<!doctype html") || lower.starts_with("<html") {
             return Some(FileType {
@@ -683,7 +703,7 @@ fn detect_media(buf: &[u8]) -> Option<FileType> {
         });
     }
     // MP3 sync word
-    if buf.len() >= 2 && buf[0] == 0xFF && (buf[1] & 0xE0) == 0xE0 {
+    if buf.first() == Some(&0xFF) && buf.get(1).is_some_and(|b| (b & 0xE0) == 0xE0) {
         return Some(FileType {
             description: "MPEG ADTS audio data".into(),
             mime: "audio/mpeg".into(),
@@ -707,7 +727,7 @@ fn detect_media(buf: &[u8]) -> Option<FileType> {
     if has_at(buf, 4, b"ftyp") {
         // Read the brand at offset 8 (4 bytes).
         let brand = if buf.len() >= 12 {
-            core::str::from_utf8(&buf[8..12]).unwrap_or("")
+            core::str::from_utf8(buf.get(8..12).unwrap_or_default()).unwrap_or("")
         } else {
             ""
         };
@@ -799,7 +819,7 @@ fn detect_data(buf: &[u8]) -> Option<FileType> {
 fn detect_toml_heuristic(text: &str) -> bool {
     let mut has_section = false;
     let mut has_kvpair = false;
-    let mut lines_checked = 0;
+    let mut lines_checked: u32 = 0;
 
     for line in text.lines() {
         let trimmed = line.trim();
@@ -820,7 +840,7 @@ fn detect_toml_heuristic(text: &str) -> bool {
                 has_kvpair = true;
             }
         }
-        lines_checked += 1;
+        lines_checked = lines_checked.saturating_add(1);
         if lines_checked > 30 {
             break;
         }
@@ -903,7 +923,9 @@ fn classify_text(buf: &[u8]) -> TextKind {
     let mut i = 0;
 
     while i < buf.len() {
-        let b = buf[i];
+        let Some(&b) = buf.get(i) else {
+            break;
+        };
 
         // NUL byte is a strong binary indicator.
         if b == 0 {
@@ -926,27 +948,27 @@ fn classify_text(buf: &[u8]) -> TextKind {
                 0xF0..=0xF4 => 4,
                 _ => return TextKind::Iso8859, // Invalid UTF-8 lead byte.
             };
-            if i + seq_len > buf.len() {
+            if i.saturating_add(seq_len) > buf.len() {
                 // Incomplete sequence at buffer end -- tolerate, but note the
                 // high bytes.
                 break;
             }
             // Verify continuation bytes.
-            let mut valid = true;
-            for j in 1..seq_len {
-                if buf[i + j] & 0xC0 != 0x80 {
-                    valid = false;
-                    break;
-                }
-            }
+            // The bound above guarantees these are present; `get` states
+            // that rather than trusting it, and a missing byte reads as an
+            // invalid continuation, which is the safe direction.
+            let valid = (1..seq_len).all(|j| {
+                buf.get(i.saturating_add(j))
+                    .is_some_and(|c| c & 0xC0 == 0x80)
+            });
             if !valid {
                 return TextKind::Iso8859;
             }
-            i += seq_len;
+            i = i.saturating_add(seq_len);
             continue;
         }
 
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     if has_high_bytes {
@@ -1128,11 +1150,11 @@ fn emit_result(
             write!(out, "{{\"filename\":\"")?;
             write_json_escaped(out, path)?;
             write!(out, "\",")?;
-            if types.len() == 1 {
+            if let [only] = types {
                 write!(out, "\"type\":\"")?;
-                write_json_escaped(out, &types[0].description)?;
+                write_json_escaped(out, &only.description)?;
                 write!(out, "\",\"mime\":\"")?;
-                write_json_escaped(out, &types[0].mime)?;
+                write_json_escaped(out, &only.mime)?;
                 write!(out, "\"")?;
             } else {
                 write!(out, "\"types\":[")?;
@@ -1244,6 +1266,15 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+// CLAUDE.md: the five defensive lints are for production code and are allowed
+// in `#[cfg(test)]`, where panicking on bad data is the point of the test.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

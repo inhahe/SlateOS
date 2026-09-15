@@ -627,6 +627,158 @@ mod tests {
         }
     }
 
+    /// Step D6 -- the add-back. The estimate survives D3 still one too
+    /// large, the multiply-subtract goes negative, and the divisor has to be
+    /// added back in while the quotient limb is given up.
+    ///
+    /// THIS BRANCH USED TO BE REACHED BY NOTHING. A `panic!()` inside it left
+    /// all 23 tests passing, and deleting its `q[j] -= 1` did too.
+    ///
+    /// WHY IT IS HARD TO HIT, and why the obvious attempts fail. D3's
+    /// correction loop consults `v[n-2]` and `u[j+n-2]`, so for a TWO-limb
+    /// divisor it sees the whole of `v` and the estimate it leaves is exact:
+    /// D6 is unreachable for `n == 2` no matter what the operands are. That
+    /// is why Hacker's Delight's 2^95 / (2^63+1) vector -- which that book
+    /// labels an add-back case for its own `divmnu` -- only exercises D3
+    /// here. A THREE-limb divisor is the smallest that leaves a limb D3
+    /// cannot see.
+    ///
+    /// Found by enumerating the corners of that shape rather than by random
+    /// search: Knuth puts D6's probability near `2/b`, one division in two
+    /// billion, and 20,000 random hard-shaped divisions fired it zero times.
+    ///
+    /// The estimate here comes out as 4294967294 and the true digit is
+    /// 4294967293, so D6 gives back exactly one.
+    #[test]
+    fn long_division_exercises_the_add_back() {
+        // Checkable against `python -c "print(divmod(n, d))"`.
+        let n = dec("170141183381241069217422966122340155392");
+        let d = dec("39614081257132168801066942463");
+
+        let (q, r) = n.divmod(&d);
+
+        assert_eq!(text(&q), "4294967293", "quotient after the give-back");
+        assert_eq!(
+            text(&r),
+            "39614081238685424740242292733",
+            "remainder after the divisor was added back"
+        );
+        assert_eq!(r.cmp(&d), Ordering::Less, "remainder must be below divisor");
+        assert_eq!(text(&q.mul(&d).add(&r)), text(&n), "q*d + r == n");
+    }
+
+    /// Algorithm D's step D3, where the first estimate of a quotient limb
+    /// comes out as `b` itself and has to be walked back.
+    ///
+    /// `u = 2^95`, `v = 2^63 + 1`. At `j = 0` the estimate is
+    /// `0x8000_0000_0000_0000 / 0x8000_0000`, which is exactly `2^32` -- one
+    /// more than a limb can hold -- so the `qhat >> 32 != 0` arm of the
+    /// correction loop runs and brings it to `0xFFFF_FFFF`, which is right.
+    ///
+    /// MEASURED, not assumed: disabling the correction loop fails this test
+    /// and `long_division_identity_holds_beyond_u128`, and no other test in
+    /// this module. Before these two, D3's correction was dead as far as the
+    /// suite could tell.
+    ///
+    /// This is Hacker's Delight's `divmnu` vector, which that book gives as
+    /// an ADD-BACK case. It is not one here: after D3 the estimate is exact,
+    /// the multiply-subtract stays non-negative, and D6 never runs. See
+    /// `TD-B-BIGNAT-ADD-BACK-IS-UNREACHED-BY-ANY-TEST`.
+    #[test]
+    fn long_division_corrects_an_estimate_of_a_whole_limb() {
+        // 2^95 and 2^63 + 1, written out so the numbers are checkable
+        // against `python -c "print(2**95)"` rather than trusted.
+        let n = dec("39614081257132168796771975168");
+        let d = dec("9223372036854775809");
+
+        let (q, r) = n.divmod(&d);
+
+        // 2^32 - 1: the estimate overshoots to 2^32, which does not fit a
+        // limb, and the correction brings it back.
+        assert_eq!(text(&q), "4294967295", "quotient");
+        // 2^63 - 2^32 + 1
+        assert_eq!(text(&r), "9223372032559808513", "remainder");
+
+        assert_eq!(r.cmp(&d), Ordering::Less, "remainder must be below divisor");
+        assert_eq!(text(&q.mul(&d).add(&r)), text(&n), "q*d + r == n");
+    }
+
+    /// Algorithm D on operands far larger than `u128`, checked by its own
+    /// identity rather than against a reference.
+    ///
+    /// WHY THIS EXISTS. `divmod` is Knuth 4.2 Algorithm D, and its index
+    /// arithmetic -- `un[i + j]`, `un[j + n]`, `vn[n - 1]`, `q[j]` -- only
+    /// does anything interesting when the divisor has several limbs and the
+    /// dividend has many more. Every other division test here is written
+    /// against `u128`, so none of them reaches beyond FOUR limbs, and the
+    /// inner loops they exercise are the degenerate ones.
+    ///
+    /// `q * d + r == n` together with `r < d` pins the quotient and remainder
+    /// completely, and needs no second implementation -- which is precisely
+    /// why the `u128` tests could not go any bigger. An off-by-one in the
+    /// borrow loop breaks the identity even when the result still looks like
+    /// a plausible number.
+    ///
+    /// MEASURED: disabling D3's estimate-correction loop fails this test and
+    /// `long_division_corrects_an_estimate_of_a_whole_limb`, and nothing
+    /// else here. It does NOT reach D6, the add-back -- nothing does; see
+    /// `TD-B-BIGNAT-ADD-BACK-IS-UNREACHED-BY-ANY-TEST`.
+    #[test]
+    fn long_division_identity_holds_beyond_u128() {
+        // A tiny LCG, so the cases are many but reproducible. The value of
+        // the digits does not matter; the number of LIMBS does.
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut digits = |count: usize| -> String {
+            let mut s = String::with_capacity(count);
+            for i in 0..count {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let d = (seed >> 33) % 10;
+                // No leading zero, so the numeral really has `count` digits.
+                let d = if i == 0 && d == 0 { 7 } else { d };
+                s.push((b'0' + u8::try_from(d).unwrap_or(0)) as char);
+            }
+            s
+        };
+
+        // Dividend and divisor digit counts. 40 decimal digits is ~5 limbs,
+        // 200 is ~21: past `u128` in every case, and the last two make the
+        // quotient short, which is where the add-back step runs.
+        for &(nd, dd) in &[
+            (40usize, 9usize),
+            (80, 20),
+            (160, 41),
+            (200, 3),
+            (77, 76),
+            (128, 127),
+            (300, 150),
+        ] {
+            let n = dec(&digits(nd));
+            let d = dec(&digits(dd));
+            assert!(!d.is_zero(), "divisor must not be zero");
+
+            let (q, r) = n.divmod(&d);
+
+            // r < d, or the quotient was one too small.
+            assert_eq!(
+                r.cmp(&d),
+                Ordering::Less,
+                "remainder {} is not below divisor {} for {nd}/{dd} digits",
+                text(&r),
+                text(&d)
+            );
+
+            // q * d + r == n, or anything at all went wrong.
+            let back = q.mul(&d).add(&r);
+            assert_eq!(
+                text(&back),
+                text(&n),
+                "q*d + r did not reconstruct the dividend for {nd}/{dd} digits"
+            );
+        }
+    }
+
     #[test]
     fn long_division_matches_u128() {
         let cases: &[(u128, u128)] = &[

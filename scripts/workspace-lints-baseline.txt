@@ -55,7 +55,6 @@ userspace/chpasswd
 userspace/chroot
 userspace/column
 userspace/coredumpctl  # bare deny(clippy::all)
-userspace/coreutils  # bare deny(clippy::all)
 userspace/cpio
 userspace/cpupower  # bare deny(clippy::all)
 userspace/crond

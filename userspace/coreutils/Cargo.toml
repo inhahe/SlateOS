@@ -86,3 +86,6 @@ utmpfile = { path = "../../utmpfile" }
 # known-issues.md `B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS`.
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }
+
+[lints]
+workspace = true

@@ -130,6 +130,175 @@ program does not control.
 
 ---
 
+## TD-B-BIGNAT-ADD-BACK-IS-UNREACHED-BY-ANY-TEST — 2026-09-15 — FIXED same day
+
+**In short:** the big-number division in `coreutils` has a rare correction step
+that fixes up an answer which came out one too big. No test in the suite ever
+makes it run. Deleting the line that does the fixing leaves all 23 tests
+passing, so if that step is wrong, nothing here would say so.
+
+**Where.** `userspace/coreutils/src/bignat.rs`, `Nat::divmod` -- Knuth 4.2
+Algorithm D, step D6, the `if t < 0` branch that does `q[j] -= 1` and adds the
+divisor back into the running remainder.
+
+**How it was found, and it was not by looking for it.** I was about to put a
+narrow `#[allow(clippy::indexing_slicing)]` on `divmod`, justified by "the
+algorithm's loop bounds keep the indices in range, and the tests check the
+outcome". Before writing that I checked what the tests actually cover. Two
+probes:
+
+    delete `q[j] -= 1`            -> 23/23 tests still pass
+    put `panic!()` in the branch  -> 23/23 tests still pass
+
+The second is conclusive: the branch does not execute during the suite.
+
+**It is not reachable by chance, either.** Knuth puts the probability of
+needing D6 at about `2/b`, which for 32-bit limbs is one division in two
+billion. A search of 20,000 divisions shaped to be hard -- divisor's top limb
+in the upper half of its range, dividend one limb longer -- fired it zero
+times, which is what that probability predicts.
+
+**What the two new tests DO cover, measured rather than assumed.** Disabling
+D3's estimate-correction loop fails
+`long_division_corrects_an_estimate_of_a_whole_limb` and
+`long_division_identity_holds_beyond_u128`, and no other test in the module.
+So before those two, D3's correction was as untested as D6 is now. The
+`u128`-based tests cannot reach either: they cap at four limbs because they
+need a native reference to compare against.
+
+**A correction worth recording.** Hacker's Delight gives `u = 2^95`,
+`v = 2^63 + 1` as its `divmnu` ADD-BACK vector, and I added it under that
+name. It is not an add-back case for this implementation: after D3 walks the
+estimate back from `2^32` to `0xFFFF_FFFF`, the multiply-subtract stays
+non-negative and D6 never runs. The test is renamed to what it demonstrably
+exercises. Had the probe not been run, the suite would carry a test whose name
+claims coverage it does not have -- which is worse than the gap, because it
+stops anyone else looking.
+
+**FIXED** by `long_division_exercises_the_add_back`, and the reason the first
+attempt failed is the useful part.
+
+**D6 IS UNREACHABLE FOR A TWO-LIMB DIVISOR, for a structural reason.** D3's
+correction loop tests `qhat * v[n-2]` against `rhat * b + u[j+n-2]`. When
+`n == 2` those are `v[0]` and `u[j]` -- the whole of the divisor and the
+whole of the window -- so the estimate D3 leaves is exact and the
+multiply-subtract cannot go negative. No pair of two-limb operands can reach
+D6. That is why Hacker's Delight's `2^95 / (2^63 + 1)`, which that book gives
+as an add-back vector for its own `divmnu`, only exercises D3 here. **Three
+limbs is the smallest divisor that leaves a limb D3 cannot see.**
+
+**The vector**, found by enumerating the corners of that shape rather than by
+random search, since D6's probability is about `2/b`:
+
+    n = 170141183381241069217422966122340155392   (4 limbs)
+    d =          39614081257132168801066942463    (3 limbs)
+    estimate 4294967294, true digit 4294967293 -> D6 gives back exactly 1
+    q = 4294967293, r = 39614081238685424740242292733
+
+**Verified by the same two probes that found the gap**, now reversed:
+
+    panic!() inside the branch  -> 23 pass, ONLY this test fails
+    delete `q[j] -= 1`          -> 23 pass, ONLY this test fails
+
+The first says the test reaches D6; the second says it would notice if D6 were
+wrong. Nothing else in the module does either.
+
+**A method note worth keeping.** Before committing the vector I re-simulated
+`divmod` in Python -- normalisation, the real correction loop, the borrow
+arithmetic -- and checked it against the case whose answer was already
+measured: it predicted 0 firings for the Hacker's Delight vector and 1 for
+this one. A model that reproduces a result you have independently confirmed is
+worth believing about a result you have not. The first simulation, which
+clamped `qhat` to `b - 1` instead of decrementing, would have found nothing.
+
+**Where it lives:** `userspace/coreutils/src/bignat.rs`, `Nat::divmod`.
+
+---
+
+## TD-B-COREUTILS-HAS-913-DEFENSIVE-LINT-FINDINGS — 2026-09-15 — OPEN
+
+**In short:** the 83 commands in `userspace/coreutils` are now checked by the
+warnings that point at code which can crash on bad input. They report 913
+places worth looking at. Nothing is broken that was not broken yesterday --
+the checks were simply not running over this crate until today, and now they
+are, so the list is visible instead of hypothetical.
+
+**Why it was invisible.** `userspace/coreutils` carried a bare
+`#![deny(clippy::all)]` and no `[lints]` table. `clippy::all` is the default
+group: it excludes `pedantic` and all five of CLAUDE.md's defensive lints. The
+gate accepted that attribute as coverage until `213341d27`, so the largest
+crate in lane B -- 83 binaries, 197,806 lines -- was absent from the very
+report that exists to find it. See
+`TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
+
+**Enabling it surfaced exactly ONE deny-level error, and my first
+measurement missed it.** I ran `cargo clippy -p coreutils --all-targets
+--target x86_64-pc-windows-gnu`, got zero errors, and wrote that enabling
+"cannot break a build". The `coreutils-unix-half` pre-push gate then refused
+the push: `src/bin/date.rs:666` trips `clippy::question_mark`, which is
+deny-level through `clippy::all`.
+
+The gate's own diagnostic explains such differences as `cfg(unix)` code that a
+Windows-target build never type-checks -- but that is NOT what happened here.
+`date.rs` contains no `cfg(unix)` at all and the site is in plain
+`parse_date_spec`. The two builds run different clippies: mine cites
+`rust-clippy/rust-1.95.0`, the gate's cites `rust-clippy/main`. So "clippy
+clean" is a claim about a toolchain AND a target, and a measurement on one
+pair does not transfer to the other.
+
+Fixed in the same commit (the `if let ... else { return None }` became `?`,
+which is what the lint asks for and is simpler). The unix half then reports
+`clean (linux half checked)`.
+
+Every other finding is `warn`-level, joining the ~18,000 the workspace already
+carries by deliberate policy (see the clippy gate's comment in
+`scripts/boot-test.sh`). So the crate is subject to the policy from today, new
+code in it is checked from today, and the backlog is worked down after --
+rather than the crate staying outside the policy until someone finds a week.
+
+**Where the work is. 913 production findings across 48 targets**, of which
+756 sit in six of them. A further **276 are `#[cfg(test)]`-only** and want the
+allow list CLAUDE.md prescribes for test modules, not fixes.
+
+| Target | Production findings | Character |
+|---|---|---|
+| `lib` | 254 | mostly `extfloat.rs` and `bignat.rs` |
+| `bin "diff"` | 181 | index/offset arithmetic over two files |
+| `bin "cal"` | 148 | date arithmetic |
+| `bin "dd"` | 88 | block counts and seek offsets |
+| `bin "od"` | 50 | offsets into a byte dump |
+| `bin "df"` | 35 | size and percentage arithmetic |
+| everything else | 157 | across 42 targets, 1-16 each |
+
+**The first count of this was wrong and the correction is instructive.** I
+read the per-file totals out of clippy's output and got 1,306, because a
+finding inside a `#[cfg(test)]` module is reported against the file like any
+other -- and cargo lints each crate TWICE, once as `bin "x"` and once as
+`bin "x" test`, the second including the test module. `src/getopt.rs` is the
+clean example: all 25 of its findings are in its test module, and its
+production code has none. Counting by TARGET rather than by file, and dropping
+the `... test` twins, gives 913. The lesson generalises past this entry: in
+clippy output a file is not a unit of anything.
+
+**`extfloat.rs` and `bignat.rs` need a different answer from the rest, and it
+should be argued rather than assumed.** They implement arbitrary-precision
+arithmetic; `arithmetic_side_effects` firing on a bignum kernel is not the
+same finding as it firing on a packet parser, because deliberate wrapping and
+carry propagation is what the code is FOR. A narrow, module-level allow with a
+specific justification may be right there. That is a different thing from the
+crate-wide allow removed in `213341d27`, whose justification was "every site is
+gated" -- a claim nobody could check and which turned out to be false. Any
+allow added here must name what makes the module safe and be checkable against
+the module's own tests.
+
+**Do not fix these by making them `.unwrap_or(0)`.** A saturating or defaulted
+value in a command that reports a number to a script is how `wc` starts
+printing a plausible wrong count. The sites want reading, not a sweep.
+
+**Where it lives:** `userspace/coreutils/`, everything under `src/`.
+
+---
+
 ## TD-B-AUDITD-LOGGED-A-DAEMON-START-THAT-NEVER-HAPPENED — 2026-09-15 — FIXED by refusing
 
 **In short:** `auditd` wrote `DaemonStart … res=success` into the audit log and

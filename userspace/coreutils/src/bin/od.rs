@@ -27,6 +27,7 @@
 //! `invalid -w argument` diagnostic instead, and an allocation failure is
 //! reported as `memory exhausted` rather than aborting.
 
+use core::num::{NonZeroU64, NonZeroUsize};
 use coreutils::errmsg::strerror;
 use coreutils::extfloat::{self, ExtF80};
 use coreutils::getopt::{self, Program, Takes};
@@ -111,8 +112,11 @@ fn isprint(c: u8) -> bool {
 }
 
 fn gcd(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        let t = a % b;
+    // `NonZeroUsize` carries the `b != 0` that the loop condition was
+    // asserting, so `%` here is the one remainder that cannot divide by
+    // zero -- stated in the type rather than one line above the operation.
+    while let Some(nz) = core::num::NonZeroUsize::new(b) {
+        let t = a % nz;
         a = b;
         b = t;
     }
@@ -121,8 +125,23 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
 
 /// Least common multiple of every spec's datum size: the smallest line
 /// length at which every requested format lands on a whole number of fields.
-fn get_lcm(specs: &[Spec]) -> usize {
-    specs.iter().fold(1, |l, s| l / gcd(l, s.size) * s.size)
+///
+/// Non-zero by construction -- it starts at 1 and every datum size is
+/// non-zero -- and returning that fact is what lets the six divisions by
+/// this value elsewhere be divisions the compiler can check.
+fn get_lcm(specs: &[Spec]) -> NonZeroUsize {
+    specs.iter().fold(NonZeroUsize::MIN, |l, s| {
+        // Divide BEFORE multiplying: `gcd` divides `l` exactly, so no
+        // precision is lost, and the intermediate stays smaller. Saturating
+        // because a line width that does not fit in `usize` is not one this
+        // program could honour anyway.
+        let step = l
+            .get()
+            .checked_div(gcd(l.get(), s.size.get()))
+            .unwrap_or(1)
+            .saturating_mul(s.size.get());
+        NonZeroUsize::new(step).unwrap_or(NonZeroUsize::MIN)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +183,7 @@ impl From<getopt::Error> for Fail {
 
 /// Write one `od: …` diagnostic line to stderr as raw bytes.
 fn diagnose(body: &[u8]) {
-    let mut line = Vec::with_capacity(body.len() + 5);
+    let mut line = Vec::with_capacity(body.len().saturating_add(5));
     line.extend_from_slice(b"od: ");
     line.extend_from_slice(body);
     line.push(b'\n');
@@ -201,7 +220,12 @@ enum Format {
 #[derive(Clone, Copy, Debug)]
 struct Spec {
     fmt: Format,
-    size: usize,
+    /// The datum width in bytes. NON-ZERO: it comes from the `-t` letters,
+    /// which validate to 1|2|4|8 for integers and 4|8|16 for floats, and a
+    /// zero-byte datum has no meaning. Carried in the type because six
+    /// divisions in this file are by it, and each was otherwise an open
+    /// question the compiler could not close.
+    size: NonZeroUsize,
     field_width: usize,
     /// Filled in by `run()` once the line width is known.
     pad_width: usize,
@@ -317,8 +341,10 @@ fn simple_strtoi(s: &[u8]) -> Option<(usize, &[u8])> {
         if !c.is_ascii_digit() {
             break;
         }
-        sum = sum.checked_mul(10)?.checked_add(i32::from(c - b'0'))?;
-        at += 1;
+        sum = sum
+            .checked_mul(10)?
+            .checked_add(i32::from(c.saturating_sub(b'0')))?;
+        at = at.saturating_add(1);
     }
     Some((usize::try_from(sum).ok()?, s.get(at..).unwrap_or_default()))
 }
@@ -348,21 +374,25 @@ fn decode_one_format<'a>(s_orig: &[u8], s: &'a [u8]) -> Result<(Spec, &'a [u8]),
         b'd' | b'o' | b'u' | b'x' => {
             // C-type letters first; note upstream never validates that these
             // name a type that exists, because by construction they do.
-            let size = match rest.first().copied() {
-                Some(b'C') => {
-                    rest = &rest[1..];
+            // `split_first` rather than `first()` then `&rest[1..]`: the
+            // test and the advance were two statements that had to agree,
+            // and this is the one operation that cannot disagree with
+            // itself. Same substitution at the float sizes and the `z`.
+            let size = match rest.split_first() {
+                Some((b'C', tail)) => {
+                    rest = tail;
                     1
                 }
-                Some(b'S') => {
-                    rest = &rest[1..];
+                Some((b'S', tail)) => {
+                    rest = tail;
                     2
                 }
-                Some(b'I') => {
-                    rest = &rest[1..];
+                Some((b'I', tail)) => {
+                    rest = tail;
                     4
                 }
-                Some(b'L') => {
-                    rest = &rest[1..];
+                Some((b'L', tail)) => {
+                    rest = tail;
                     8
                 }
                 _ => {
@@ -399,17 +429,17 @@ fn decode_one_format<'a>(s_orig: &[u8], s: &'a [u8]) -> Result<(Spec, &'a [u8]),
             (fmt, size, width)
         }
         b'f' => {
-            let size = match rest.first().copied() {
-                Some(b'F') => {
-                    rest = &rest[1..];
+            let size = match rest.split_first() {
+                Some((b'F', tail)) => {
+                    rest = tail;
                     4
                 }
-                Some(b'D') => {
-                    rest = &rest[1..];
+                Some((b'D', tail)) => {
+                    rest = tail;
                     8
                 }
-                Some(b'L') => {
-                    rest = &rest[1..];
+                Some((b'L', tail)) => {
+                    rest = tail;
                     16
                 }
                 _ => {
@@ -449,15 +479,17 @@ fn decode_one_format<'a>(s_orig: &[u8], s: &'a [u8]) -> Result<(Spec, &'a [u8]),
     };
 
     // Exactly one optional `z` suffix.
-    let trailer = rest.first() == Some(&b'z');
-    if trailer {
-        rest = &rest[1..];
-    }
+    let trailer = if let Some((b'z', tail)) = rest.split_first() {
+        rest = tail;
+        true
+    } else {
+        false
+    };
 
     Ok((
         Spec {
             fmt,
-            size,
+            size: NonZeroUsize::new(size).ok_or_else(invalid_type_string)?,
             field_width,
             pad_width: 0,
             trailer,
@@ -644,7 +676,7 @@ fn short_options(
 ) -> Result<(), Fail> {
     let mut at = 1usize;
     while let Some(&c) = bytes.get(at) {
-        at += 1;
+        at = at.saturating_add(1);
         let takes = short_takes(c).ok_or_else(|| Fail::from(OD.invalid_option(c)))?;
         let rest = bytes.get(at..).unwrap_or_default();
         let value = match takes {
@@ -663,7 +695,7 @@ fn short_options(
                     let next = args
                         .get(*i)
                         .ok_or_else(|| Fail::from(OD.short_missing_argument(c)))?;
-                    *i += 1;
+                    *i = i.saturating_add(1);
                     Some(arg_bytes(next))
                 } else {
                     Some(rest.to_vec())
@@ -685,7 +717,7 @@ fn long_option(
     let (typed_bytes, inline) = match body.iter().position(|&c| c == b'=') {
         Some(p) => (
             body.get(..p).unwrap_or_default(),
-            Some(body.get(p + 1..).unwrap_or_default().to_vec()),
+            Some(body.get(p.saturating_add(1)..).unwrap_or_default().to_vec()),
         ),
         None => (body, None),
     };
@@ -705,7 +737,7 @@ fn long_option(
                 let next = args
                     .get(*i)
                     .ok_or_else(|| Fail::from(OD.long_missing_argument(resolved)))?;
-                *i += 1;
+                *i = i.saturating_add(1);
                 Some(arg_bytes(next))
             }
         },
@@ -742,7 +774,7 @@ fn parse_loop(
     let mut i = 0usize;
     let mut only_operands = false;
     while let Some(arg) = args.get(i) {
-        i += 1;
+        i = i.saturating_add(1);
         if only_operands || (posixly_correct && !operands.is_empty()) {
             operands.push(arg.clone());
             continue;
@@ -810,24 +842,27 @@ fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Parsed, Fail> 
 fn traditional_operands(draft: &mut Draft, operands: &mut Vec<OsString>) {
     let raw: Vec<Vec<u8>> = operands.iter().map(arg_bytes).collect();
     let traditional = draft.traditional;
-    match operands.len() {
-        1 => {
-            let leads_plus = raw[0].first() == Some(&b'+');
+    // Matching the SLICE rather than its length. The arms are the same three
+    // cases upstream's `switch (n_files)` has, but the operands are bound by
+    // the pattern instead of indexed after it, so `raw[1]` in the two-operand
+    // arm cannot outlive the arm that guarantees it.
+    match raw.as_slice() {
+        [first] => {
+            let leads_plus = first.first() == Some(&b'+');
             if let Some(o1) = (traditional || leads_plus)
-                .then(|| parse_old_offset(&raw[0]))
+                .then(|| parse_old_offset(first))
                 .flatten()
             {
                 draft.options.skip = o1;
                 operands.clear();
             }
         }
-        2 => {
-            let second = &raw[1];
+        [first, second] => {
             let eligible = traditional
                 || second.first() == Some(&b'+')
                 || second.first().is_some_and(u8::is_ascii_digit);
             if let Some(o2) = eligible.then(|| parse_old_offset(second)).flatten() {
-                if let Some(o1) = traditional.then(|| parse_old_offset(&raw[0])).flatten() {
+                if let Some(o1) = traditional.then(|| parse_old_offset(first)).flatten() {
                     draft.options.skip = o1;
                     draft.flag_pseudo_start = true;
                     draft.pseudo_start = o2;
@@ -838,10 +873,10 @@ fn traditional_operands(draft: &mut Draft, operands: &mut Vec<OsString>) {
                 }
             }
         }
-        3 => {
+        [_, second, third] => {
             if traditional
-                && let Some(o1) = parse_old_offset(&raw[1])
-                && let Some(o2) = parse_old_offset(&raw[2])
+                && let Some(o1) = parse_old_offset(second)
+                && let Some(o2) = parse_old_offset(third)
             {
                 draft.options.skip = o1;
                 draft.flag_pseudo_start = true;
@@ -987,7 +1022,7 @@ impl<W: Write> Sink<W> {
         while n > 0 {
             let take = n.min(SPACES.len());
             self.put(SPACES.get(..take).unwrap_or_default());
-            n -= take;
+            n = n.saturating_sub(take);
         }
     }
 
@@ -1000,7 +1035,13 @@ impl<W: Write> Sink<W> {
 
 fn digits(address: u64, base: u32, pad_len: usize) -> Vec<u8> {
     const ALPHABET: &[u8; 16] = b"0123456789abcdef";
-    let base = u64::from(base.max(2));
+    // `max(2)` is what makes this non-zero; `NonZeroU64` is what carries
+    // that to the `%` and `/` below instead of leaving them to a reader.
+    let Some(base) = NonZeroU64::new(u64::from(base.max(2))) else {
+        // Unreachable: `max(2)` cannot produce 0. Written as a branch rather
+        // than an assertion so the invariant is checked, not asserted.
+        return Vec::new();
+    };
     let mut out = Vec::with_capacity(pad_len.max(1));
     let mut a = address;
     loop {
@@ -1101,6 +1142,15 @@ fn render_g(precision: usize, v: ExtF80) -> String {
 /// available significand is short enough that a long precision only adds
 /// noise. NaN never compares equal to itself, so it always runs to the bound —
 /// which is fine, because `%g` spells it `nan` at every precision.
+// `clippy::float_cmp` fires on the `back == x` below and is wrong here.
+// This is the shortest-representation-that-round-trips search: print with
+// `prec` digits, parse it back, and stop at the first `prec` that recovers
+// the value EXACTLY. Exact equality is the question being asked. Clippy's
+// suggested `(back - x).abs() < error_margin` would accept a representation
+// that does not round-trip, which is the one thing this loop exists to
+// reject -- and `od` printing a float that does not read back as itself is
+// the defect, not the fix.
+#[allow(clippy::float_cmp)]
 fn ftoastr_f32(x: f32) -> String {
     let v = ExtF80::from_f32(x);
     let mut prec = if x.abs() < f32::MIN_POSITIVE { 1 } else { 6 };
@@ -1109,10 +1159,19 @@ fn ftoastr_f32(x: f32) -> String {
         if prec >= 9 || s.parse::<f32>().is_ok_and(|back| back == x) {
             return s;
         }
-        prec += 1;
+        prec = prec.saturating_add(1);
     }
 }
 
+// `clippy::float_cmp` fires on the `back == x` below and is wrong here.
+// This is the shortest-representation-that-round-trips search: print with
+// `prec` digits, parse it back, and stop at the first `prec` that recovers
+// the value EXACTLY. Exact equality is the question being asked. Clippy's
+// suggested `(back - x).abs() < error_margin` would accept a representation
+// that does not round-trip, which is the one thing this loop exists to
+// reject -- and `od` printing a float that does not read back as itself is
+// the defect, not the fix.
+#[allow(clippy::float_cmp)]
 fn ftoastr_f64(x: f64) -> String {
     let v = ExtF80::from_f64(x);
     let mut prec = if x.abs() < f64::MIN_POSITIVE { 1 } else { 15 };
@@ -1121,7 +1180,7 @@ fn ftoastr_f64(x: f64) -> String {
         if prec >= 17 || s.parse::<f64>().is_ok_and(|back| back == x) {
             return s;
         }
-        prec += 1;
+        prec = prec.saturating_add(1);
     }
 }
 
@@ -1155,14 +1214,14 @@ fn ftoastr_ext(bytes: &[u8]) -> String {
         if prec >= 21 || back.value.eq_value(v) {
             return s;
         }
-        prec += 1;
+        prec = prec.saturating_add(1);
     }
 }
 
 /// One datum, rendered exactly as the corresponding `printf` in upstream would.
 fn render_datum(spec: &Spec, datum: &[u8], swap: bool) -> String {
     let mut bytes = datum.to_vec();
-    if swap && spec.size > 1 {
+    if swap && spec.size.get() > 1 {
         bytes.reverse();
     }
     match spec.fmt {
@@ -1200,8 +1259,8 @@ fn render_datum(spec: &Spec, datum: &[u8], swap: bool) -> String {
         Format::Hexadecimal => format!("{:0>width$x}", unsigned(&bytes), width = spec.field_width),
         // `%*u`/`%*d`: no precision, so no zero fill.
         Format::UnsignedDecimal => unsigned(&bytes).to_string(),
-        Format::SignedDecimal => signed(&bytes, spec.size).to_string(),
-        Format::FloatingPoint => match spec.size {
+        Format::SignedDecimal => signed(&bytes, spec.size.get()).to_string(),
+        Format::FloatingPoint => match spec.size.get() {
             4 => ftoastr_f32(f32::from_le_bytes(four(&bytes))),
             8 => ftoastr_f64(f64::from_le_bytes(eight(&bytes))),
             _ => ftoastr_ext(&bytes),
@@ -1228,15 +1287,21 @@ fn print_fields<W: Write>(
     let mut at = 0usize;
     let mut i = fields;
     while i > blank {
-        let next_pad = spec.pad_width * (i - 1) / fields;
-        let adjusted = pad_remaining - next_pad + spec.field_width;
+        let next_pad = spec
+            .pad_width
+            .saturating_mul(i.saturating_sub(1))
+            .checked_div(fields)
+            .unwrap_or(0);
+        let adjusted = pad_remaining
+            .saturating_sub(next_pad)
+            .saturating_add(spec.field_width);
         let datum = block
-            .get(at..at.saturating_add(spec.size))
+            .get(at..at.saturating_add(spec.size.get()))
             .unwrap_or_default();
         sink.right(adjusted, render_datum(spec, datum, swap).as_bytes());
-        at = at.saturating_add(spec.size);
+        at = at.saturating_add(spec.size.get());
         pad_remaining = next_pad;
-        i -= 1;
+        i = i.saturating_sub(1);
     }
 }
 
@@ -1293,7 +1358,7 @@ impl Input {
             let Some(arg) = self.list.get(self.next).cloned() else {
                 return ok;
             };
-            self.next += 1;
+            self.next = self.next.saturating_add(1);
             let raw = arg_bytes(&arg);
             if raw.as_slice() == b"-" {
                 self.name = b"standard input".to_vec();
@@ -1373,7 +1438,7 @@ impl Input {
             if n == 0 {
                 break;
             }
-            got += n;
+            got = got.saturating_add(n);
         }
         got
     }
@@ -1387,8 +1452,8 @@ impl Input {
                 Some(dst) => self.fill(dst),
                 None => 0,
             };
-            let needed = n - got;
-            got += n_read;
+            let needed = n.saturating_sub(got);
+            got = got.saturating_add(n_read);
             if n_read == needed {
                 break;
             }
@@ -1448,7 +1513,7 @@ impl Input {
                 Some(dst) => self.fill(dst),
                 None => 0,
             };
-            n -= u64::try_from(got).unwrap_or(0);
+            n = n.saturating_sub(u64::try_from(got).unwrap_or(0));
             if got != want {
                 if self.pending.is_some() {
                     *ok = false;
@@ -1469,7 +1534,7 @@ impl Input {
         }
         while self.stream.is_some() {
             match self.regular_size() {
-                Some(len) if len < n => n -= len,
+                Some(len) if len < n => n = n.saturating_sub(len),
                 Some(_) => {
                     if self.seek_forward(n).is_err() {
                         // Fall back to reading: a seek that fails on a regular
@@ -1533,7 +1598,7 @@ fn write_block<W: Write>(
         state.prev_pair_equal = false;
         for (i, spec) in specs.iter().enumerate() {
             let fields_per_block = bytes_per_block / spec.size;
-            let blank_fields = (bytes_per_block - n_bytes) / spec.size;
+            let blank_fields = bytes_per_block.saturating_sub(n_bytes) / spec.size;
             if i == 0 {
                 format_address(sink, o, current_offset, 0);
             } else {
@@ -1546,7 +1611,11 @@ fn write_block<W: Write>(
                     .saturating_mul(blank_fields)
                     .checked_div(fields_per_block)
                     .unwrap_or(0);
-                sink.pad(blank_fields * spec.field_width + extra);
+                sink.pad(
+                    blank_fields
+                        .saturating_mul(spec.field_width)
+                        .saturating_add(extra),
+                );
                 sink.put(b"  >");
                 for &c in curr.get(..n_bytes).unwrap_or_default() {
                     sink.put(&[if isprint(c) { c } else { b'.' }]);
@@ -1567,7 +1636,10 @@ fn dump<W: Write>(
     specs: &[Spec],
     input: &mut Input,
     bytes_per_block: usize,
-    l_c_m: usize,
+    // Non-zero: it is the LCM of the datum sizes, which are themselves
+    // non-zero. Taken as the type so the round-up below is a division the
+    // compiler can check rather than one a comment promises.
+    l_c_m: NonZeroUsize,
 ) -> Option<bool> {
     let mut curr: Vec<u8> = Vec::new();
     let mut prev: Vec<u8> = Vec::new();
@@ -1590,7 +1662,7 @@ fn dump<W: Write>(
                 n_bytes_read = 0;
                 break;
             }
-            let remaining = o.end_offset - current_offset;
+            let remaining = o.end_offset.saturating_sub(current_offset);
             usize::try_from(remaining)
                 .unwrap_or(bytes_per_block)
                 .min(bytes_per_block)
@@ -1626,7 +1698,9 @@ fn dump<W: Write>(
     if n_bytes_read > 0 {
         // Zero-fill up to a whole number of the widest datum, so the last
         // partial line has something defined to render in its final field.
-        let bytes_to_write = l_c_m * n_bytes_read.div_ceil(l_c_m);
+        let bytes_to_write = l_c_m
+            .get()
+            .saturating_mul(n_bytes_read.div_ceil(l_c_m.get()));
         if let Some(tail) = curr.get_mut(n_bytes_read..bytes_to_write.min(bytes_per_block)) {
             tail.fill(0);
         }
@@ -1662,7 +1736,7 @@ fn dump_strings<W: Write>(sink: &mut Sink<W>, o: &Options, input: &mut Input) ->
         // Upstream's `tryline:` label, which the inner loops jump back to; the
         // limit test is inside it and so is retried on every restart.
         loop {
-            if o.limit && (o.end_offset < min || o.end_offset - min <= address) {
+            if o.limit && (o.end_offset < min || o.end_offset.saturating_sub(min) <= address) {
                 break 'line;
             }
             buf.clear();
@@ -1785,30 +1859,40 @@ fn run(o: &Options) -> ExitCode {
     let bytes_per_block = if o.width_specified {
         if o.desired_width != 0
             && o.desired_width
-                .is_multiple_of(u64::try_from(l_c_m).unwrap_or(1))
+                .is_multiple_of(u64::try_from(l_c_m.get()).unwrap_or(1))
         {
-            usize::try_from(o.desired_width).unwrap_or(l_c_m)
+            usize::try_from(o.desired_width).unwrap_or(l_c_m.get())
         } else {
             diagnose_str(&format!(
                 "warning: invalid width {}; using {l_c_m} instead",
                 o.desired_width
             ));
-            l_c_m
+            l_c_m.get()
         }
-    } else if l_c_m < DEFAULT_BYTES_PER_BLOCK {
-        l_c_m * (DEFAULT_BYTES_PER_BLOCK / l_c_m)
+    } else if l_c_m.get() < DEFAULT_BYTES_PER_BLOCK {
+        // `usize / NonZeroUsize` is a division the compiler can check, which
+        // is the whole reason `get_lcm` returns the non-zero type.
+        l_c_m.get().saturating_mul(DEFAULT_BYTES_PER_BLOCK / l_c_m)
     } else {
-        l_c_m
+        l_c_m.get()
     };
 
     // Every format's columns are stretched to the widest format's line, so a
     // multi-format dump keeps its columns aligned down the page.
     let mut width_per_block = 0usize;
     for s in &specs {
-        width_per_block = width_per_block.max((s.field_width + 1) * (bytes_per_block / s.size));
+        width_per_block = width_per_block.max(
+            s.field_width
+                .saturating_add(1)
+                .saturating_mul(bytes_per_block / s.size),
+        );
     }
     for s in &mut specs {
-        s.pad_width = width_per_block - s.field_width * (bytes_per_block / s.size);
+        // `width_per_block` is the max of `(field_width + 1) * fields` over
+        // every spec, and this is `field_width * fields` for one of them, so
+        // the subtraction cannot go below zero.
+        s.pad_width =
+            width_per_block.saturating_sub(s.field_width.saturating_mul(bytes_per_block / s.size));
     }
 
     if o.strings {
@@ -1964,7 +2048,16 @@ Binary prefixes can be used, too: KiB=K, MiB=M, and so on.
 // line, and a wrong `ftoastr` precision differs by one character in one field.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    // The round-trip search in the tests asks the same exact-equality
+    // question `ftoastr_f32`/`ftoastr_f64` do, for the same reason.
+    clippy::float_cmp
+)]
 mod tests {
     use super::*;
 
@@ -1983,25 +2076,31 @@ mod tests {
     #[test]
     fn default_sizes_follow_the_conversion() {
         // d/o/u/x default to sizeof(int); f defaults to sizeof(double).
-        assert_eq!(decode("d")[0].size, 4);
-        assert_eq!(decode("o")[0].size, 4);
-        assert_eq!(decode("u")[0].size, 4);
-        assert_eq!(decode("x")[0].size, 4);
-        assert_eq!(decode("f")[0].size, 8);
+        assert_eq!(decode("d")[0].size.get(), 4);
+        assert_eq!(decode("o")[0].size.get(), 4);
+        assert_eq!(decode("u")[0].size.get(), 4);
+        assert_eq!(decode("x")[0].size.get(), 4);
+        assert_eq!(decode("f")[0].size.get(), 8);
         // a and c are always one byte three columns wide.
-        assert_eq!((decode("a")[0].size, decode("a")[0].field_width), (1, 3));
-        assert_eq!((decode("c")[0].size, decode("c")[0].field_width), (1, 3));
+        assert_eq!(
+            (decode("a")[0].size.get(), decode("a")[0].field_width),
+            (1, 3)
+        );
+        assert_eq!(
+            (decode("c")[0].size.get(), decode("c")[0].field_width),
+            (1, 3)
+        );
     }
 
     #[test]
     fn size_letters_map_to_c_types() {
-        assert_eq!(decode("dC")[0].size, 1);
-        assert_eq!(decode("dS")[0].size, 2);
-        assert_eq!(decode("dI")[0].size, 4);
-        assert_eq!(decode("dL")[0].size, 8);
-        assert_eq!(decode("fF")[0].size, 4);
-        assert_eq!(decode("fD")[0].size, 8);
-        assert_eq!(decode("fL")[0].size, 16);
+        assert_eq!(decode("dC")[0].size.get(), 1);
+        assert_eq!(decode("dS")[0].size.get(), 2);
+        assert_eq!(decode("dI")[0].size.get(), 4);
+        assert_eq!(decode("dL")[0].size.get(), 8);
+        assert_eq!(decode("fF")[0].size.get(), 4);
+        assert_eq!(decode("fD")[0].size.get(), 8);
+        assert_eq!(decode("fL")[0].size.get(), 16);
     }
 
     #[test]
@@ -2022,7 +2121,7 @@ mod tests {
     fn several_specs_may_be_concatenated() {
         let specs = decode("x1c");
         assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].size, 1);
+        assert_eq!(specs[0].size.get(), 1);
         assert!(matches!(specs[0].fmt, Format::Hexadecimal));
         assert!(matches!(specs[1].fmt, Format::Character));
     }
@@ -2265,11 +2364,11 @@ mod tests {
 
     #[test]
     fn the_line_length_is_the_lcm_of_every_datum_size() {
-        assert_eq!(get_lcm(&decode("x1")), 1);
-        assert_eq!(get_lcm(&decode("x1x2")), 2);
-        assert_eq!(get_lcm(&decode("x2x4")), 4);
-        assert_eq!(get_lcm(&decode("x2fL")), 16);
+        assert_eq!(get_lcm(&decode("x1")).get(), 1);
+        assert_eq!(get_lcm(&decode("x1x2")).get(), 2);
+        assert_eq!(get_lcm(&decode("x2x4")).get(), 4);
+        assert_eq!(get_lcm(&decode("x2fL")).get(), 16);
         // A 4- and an 8-byte type still line up on 8, not 32.
-        assert_eq!(get_lcm(&decode("x4x8")), 8);
+        assert_eq!(get_lcm(&decode("x4x8")).get(), 8);
     }
 }

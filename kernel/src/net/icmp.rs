@@ -28,6 +28,11 @@
 //! Each outstanding ping records a timestamp.  When the reply arrives,
 //! the RTT is computed and reported.  Supports up to 16 concurrent
 //! outstanding pings.
+// The echo wire format lives in netproto, which this crate already depends on
+// and already uses for `checksum` and `ipv4`/`ipv6`. Aliased as `wire` so each
+// use says where the number's authority is, rather than reading like a local
+// constant in a file that is otherwise all policy.
+use netproto::icmp as wire;
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -44,11 +49,9 @@ use super::ipv4::{self, Ipv4Packet, PROTO_ICMP, PROTO_TCP};
 // ---------------------------------------------------------------------------
 
 /// Echo Reply.
-const ICMP_ECHO_REPLY: u8 = 0;
 /// Destination Unreachable.
 const ICMP_DEST_UNREACHABLE: u8 = 3;
 /// Echo Request.
-const ICMP_ECHO_REQUEST: u8 = 8;
 /// Redirect.
 const ICMP_REDIRECT: u8 = 5;
 /// Time Exceeded.
@@ -57,7 +60,6 @@ const ICMP_TIME_EXCEEDED: u8 = 11;
 const ICMP_PARAM_PROBLEM: u8 = 12;
 
 /// ICMP header size (type + code + checksum + id/seq or unused).
-const ICMP_HEADER_SIZE: usize = 8;
 
 // ---------------------------------------------------------------------------
 // ICMP error rate limiter (RFC 1812 §4.3.2.7)
@@ -316,10 +318,10 @@ pub fn trace_id() -> u16 {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn build_trace_echo_request(seq: u16) -> Vec<u8> {
     let payload = b"traceroute probe";
-    let total = ICMP_HEADER_SIZE + payload.len();
+    let total = wire::HEADER_LEN + payload.len();
     let mut pkt = Vec::with_capacity(total);
 
-    pkt.push(ICMP_ECHO_REQUEST);
+    pkt.push(wire::TYPE_ECHO_REQUEST);
     pkt.push(0);
     pkt.extend_from_slice(&[0, 0]); // Checksum placeholder.
     pkt.extend_from_slice(&TRACEROUTE_ID.to_be_bytes());
@@ -340,11 +342,11 @@ pub fn build_trace_echo_request(seq: u16) -> Vec<u8> {
 /// bytes 6-7 are the sequence number.
 fn match_trace_time_exceeded(icmp_data: &[u8], from_ip: Ipv4Addr) {
     // ICMP header (8 bytes) + original IP header (≥20 bytes) + 8 bytes original payload.
-    if icmp_data.len() < ICMP_HEADER_SIZE + 20 + 8 {
+    if icmp_data.len() < wire::HEADER_LEN + 20 + 8 {
         return;
     }
 
-    let orig_ip = &icmp_data[ICMP_HEADER_SIZE..];
+    let orig_ip = &icmp_data[wire::HEADER_LEN..];
     let ihl = (orig_ip[0] & 0x0F) as usize;
     if ihl < 5 {
         return;
@@ -363,7 +365,7 @@ fn match_trace_time_exceeded(icmp_data: &[u8], from_ip: Ipv4Addr) {
     };
 
     // Check type = Echo Request (8).
-    if orig_icmp[0] != ICMP_ECHO_REQUEST {
+    if orig_icmp[0] != wire::TYPE_ECHO_REQUEST {
         return;
     }
 
@@ -414,11 +416,11 @@ fn match_trace_echo_reply(from_ip: Ipv4Addr, id: u16, seq: u16) {
 #[allow(clippy::arithmetic_side_effects)]
 fn build_echo_request(seq: u16) -> Vec<u8> {
     let payload = b"ping from kernel!";
-    let total = ICMP_HEADER_SIZE + payload.len();
+    let total = wire::HEADER_LEN + payload.len();
     let mut pkt = Vec::with_capacity(total);
 
     // Type: Echo Request.
-    pkt.push(ICMP_ECHO_REQUEST);
+    pkt.push(wire::TYPE_ECHO_REQUEST);
     // Code: 0.
     pkt.push(0);
     // Checksum placeholder.
@@ -465,11 +467,11 @@ fn verify_checksum(data: &[u8]) -> bool {
 #[allow(clippy::arithmetic_side_effects)]
 fn notify_transport_error(icmp_data: &[u8], icmp_type: u8, icmp_code: u8) {
     // ICMP header is 8 bytes; original IP header starts at offset 8.
-    if icmp_data.len() < ICMP_HEADER_SIZE + 20 {
+    if icmp_data.len() < wire::HEADER_LEN + 20 {
         return; // Not enough data for the embedded IP header.
     }
 
-    let orig_ip = &icmp_data[ICMP_HEADER_SIZE..];
+    let orig_ip = &icmp_data[wire::HEADER_LEN..];
 
     // Validate it's IPv4 (version 4, IHL ≥ 5).
     let version = orig_ip[0] >> 4;
@@ -573,7 +575,7 @@ fn time_exceeded_reason(code: u8) -> &'static str {
 /// is answered from the container's namespace, not the root namespace).
 pub fn process_icmp(ip_packet: &Ipv4Packet<'_>, ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
-    if data.len() < ICMP_HEADER_SIZE {
+    if data.len() < wire::HEADER_LEN {
         return Ok(());
     }
 
@@ -590,10 +592,10 @@ pub fn process_icmp(ip_packet: &Ipv4Packet<'_>, ns_id: crate::netns::NetNsId) ->
     let code = data[1];
 
     match icmp_type {
-        ICMP_ECHO_REPLY => {
+        wire::TYPE_ECHO_REPLY => {
             handle_echo_reply(ip_packet, data);
         }
-        ICMP_ECHO_REQUEST => {
+        wire::TYPE_ECHO_REQUEST => {
             // Reply to echo requests (respond to pings directed at us).
             let our_ip = super::interface::ns_ip(ns_id);
             if !our_ip.is_unspecified() {
@@ -724,13 +726,13 @@ fn handle_echo_reply(ip_packet: &Ipv4Packet<'_>, data: &[u8]) {
 #[allow(clippy::arithmetic_side_effects)]
 fn send_echo_reply(request_ip: &Ipv4Packet<'_>, ns_id: crate::netns::NetNsId) -> KernelResult<()> {
     let data = request_ip.payload;
-    if data.len() < ICMP_HEADER_SIZE {
+    if data.len() < wire::HEADER_LEN {
         return Ok(());
     }
 
     let mut reply = Vec::from(data);
     // Change type to Echo Reply.
-    reply[0] = ICMP_ECHO_REPLY;
+    reply[0] = wire::TYPE_ECHO_REPLY;
     // Recompute checksum.
     reply[2] = 0;
     reply[3] = 0;
@@ -835,17 +837,17 @@ fn test_build_echo_request_checksum() -> KernelResult<()> {
     let pkt = build_echo_request(42);
 
     // Minimum size: 8 bytes header + payload "ping from kernel!" (17 bytes).
-    if pkt.len() < ICMP_HEADER_SIZE {
+    if pkt.len() < wire::HEADER_LEN {
         crate::serial_println!("[icmp]   FAIL: echo request too short ({})", pkt.len());
         return Err(crate::error::KernelError::InternalError);
     }
 
     // Type must be Echo Request (8).
-    if pkt[0] != ICMP_ECHO_REQUEST {
+    if pkt[0] != wire::TYPE_ECHO_REQUEST {
         crate::serial_println!(
             "[icmp]   FAIL: type = {}, expected {}",
             pkt[0],
-            ICMP_ECHO_REQUEST
+            wire::TYPE_ECHO_REQUEST
         );
         return Err(crate::error::KernelError::InternalError);
     }
@@ -915,13 +917,13 @@ fn test_verify_checksum_invalid() -> KernelResult<()> {
 fn test_build_trace_echo_request() -> KernelResult<()> {
     let pkt = build_trace_echo_request(7);
 
-    if pkt.len() < ICMP_HEADER_SIZE {
+    if pkt.len() < wire::HEADER_LEN {
         crate::serial_println!("[icmp]   FAIL: trace request too short");
         return Err(crate::error::KernelError::InternalError);
     }
 
     // Type must be Echo Request (8).
-    if pkt[0] != ICMP_ECHO_REQUEST {
+    if pkt[0] != wire::TYPE_ECHO_REQUEST {
         crate::serial_println!("[icmp]   FAIL: trace type = {}", pkt[0]);
         return Err(crate::error::KernelError::InternalError);
     }
@@ -1058,7 +1060,7 @@ pub fn send_port_unreachable(
     //   Unused (4 bytes, must be 0)
     //   Original IP header + first 8 bytes of triggering datagram
     let payload_len = orig_ip_hdr.len() + 8; // IP header + 8 bytes transport
-    let total = ICMP_HEADER_SIZE + payload_len;
+    let total = wire::HEADER_LEN + payload_len;
     let mut pkt = Vec::with_capacity(total);
 
     // Type: Destination Unreachable.

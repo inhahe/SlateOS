@@ -147953,9 +147953,27 @@ and an AMD Radeon RX 7900 XTX. It is describing no machine in particular — the
 values are written into `main.rs` as constants. Meanwhile a complete, layered
 hardware query module sits in the same crate with **no callers at all**.
 
-**Date:** 2026-09-15. **Lane:** C. First of the ten self-declared stubs, on the
-grounds that a system information tool is read precisely when someone wants to
-know what hardware they have.
+**Date:** 2026-09-15. **Lane:** C. First of the ten self-declared stubs on two
+independent grounds, which is why it is first rather than merely early.
+
+*Most harmful:* a system information tool is read precisely when someone wants
+to know what hardware they have, so a plausible invention there is worse than
+anywhere else on the list.
+
+*Cheapest:* it is the **only one of the ten whose real source already exists**.
+Checked rather than assumed — every other app on that list is a single
+`main.rs` with no sibling module at all, so `devicemanager`, `netmanager`,
+`partmanager`, `remotedesktop`, `vpnmanager`, `netscan`, `speedtest`,
+`sysmonitor` and `videoplayer` each need a data *source* built before there is
+anything to wire, and most of those are blocked on the OS not exposing the data
+yet. `procexplorer` does have a second module, `features.rs`, but it is an
+unreached *feature* set — a window picker, a blocking analyser, affinity
+control — not a provider, so it belongs to the island ledger's "a widget
+becomes reachable when an application draws it" category rather than to this
+one.
+
+So the ten are not one task repeated ten times. Nine are blocked on the system;
+one is a wiring.
 
 **The two halves.** `apps/sysinfo/src/main.rs` builds everything in its
 constructor: `populate_cpu`, `populate_memory`, `populate_storage`,

@@ -4527,6 +4527,34 @@
 
 ## Judgment Calls
 
+A gate for blocking locks reached from interrupt context (lane A, 2026-09-15).
+Deferred, with the justification supplied by lane B rather than by me.
+
+  Today's self-deadlock was the buffer-cache writeback softirq re-entering
+  blkdev's registry lock. I fixed it with try_with_device and put "NOT safe
+  from interrupt context" in writeback_entry's doc comment, and treated the
+  comment as the thing that stops it recurring.
+
+  Lane B's evidence says a comment will not. Their pre-push header list
+  contains the sentence "FIVE OUT OF FIVE RECENT ADDITIONS" had a given
+  fault, and they read that line while committing the sixth. A warning about
+  a trap, in the file where the trap is, in the paragraph being edited, did
+  not prevent the trap. test-pre-push-gates.py refusing the push is what
+  caught it -- theirs and, an hour later, mine.
+
+  So the enforceable version: walk the call graph outward from the known
+  interrupt entry points -- softirq::process_pending, the timer handler,
+  ktimer callbacks, irq dispatch -- and refuse a blocking `lock()` reachable
+  from any of them. try_lock is fine; the ones to catch are the blocking
+  acquisitions three frames down in another file, which is exactly how this
+  one hid.
+
+  Not started. It needs a call-graph walker over kernel/src and a baseline for
+  what is already reachable, and the baseline is the hard part -- most of it
+  will be legitimate, so the gate is only worth having if it can distinguish
+  a new reachable blocking lock from the existing set. Trigger: a second
+  deadlock of this shape, or anyone adding a caller to writeback_entry.
+
 check-collapsed-messages has never scanned lane A's code (lane A, 2026-09-15).
 Found while acting on a report from lane C, not by running the gate.
 
@@ -4671,7 +4699,26 @@ the next person to run these will see the same rows.
   cpuid), memory, pci. Unserved: display, dma, ioports, irqs, memmap, net,
   sound, usb, drivers.
 
-  memmap is the most valuable and CANNOT be served yet. The physical memory
+  memmap is the most valuable and IS SERVABLE NOW -- the paragraph below was
+  wrong and is kept for the reason it was wrong.
+
+  CORRECTION 2026-09-15: `fs::memlayout` already snapshots the real Limine
+  memmap into kernel storage. `main.rs:717` calls
+  `populate_from_memmap(boot_info.memory_map)` immediately after
+  `mm::heap::init` at :665, with a comment saying exactly that -- "needs the
+  heap, just brought up". It exposes `list_regions`, `list_type`, `total_ram`
+  and a `MemRegion` with start/end/type, and unlike `dmevent` its
+  `init_defaults` seeds an EMPTY vector, so nothing there is invented.
+
+  I concluded otherwise after grepping `MemmapEntry` and `memmap` in
+  `limine.rs`, `acpi/mod.rs` and `boot.rs` -- the three files that pass the
+  borrowed slice around -- and never searching for a consumer that COPIES it.
+  Third negative asserted from too narrow a search in one day, after "the
+  harness attaches no disk" and "nobody asked which filesystems the gate
+  exercises". The pattern is identical each time: I searched where the thing
+  would be if it did not exist.
+
+  ORIGINAL, WRONG: The physical memory
   map is real and already parsed, but limine's response lives in
   bootloader-reclaimable memory and is only ever passed around as a borrowed
   &[&MemmapEntry] during boot (acpi::init, boot.rs). Nothing copies it into

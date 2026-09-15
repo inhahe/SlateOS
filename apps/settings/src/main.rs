@@ -399,21 +399,6 @@ impl IpConfigMode {
 // Sound types
 // ============================================================================
 
-/// Audio device for output/input selection.
-#[derive(Clone, Debug)]
-pub struct AudioDevice {
-    pub name: String,
-    pub is_default: bool,
-}
-
-/// Per-application volume entry.
-#[derive(Clone, Debug)]
-pub struct AppVolume {
-    pub app_name: String,
-    pub volume: u8,
-    pub muted: bool,
-}
-
 // ============================================================================
 // Accounts types
 // ============================================================================
@@ -600,17 +585,6 @@ pub struct SettingsState {
     pub scale: ScalePercent,
     /// Warm at 0.0, cool at 1.0. Range stated by [`SliderId::range`].
     pub monitor_count: u8,
-
-    // Sound settings
-    pub output_devices: Vec<AudioDevice>,
-    pub output_device_index: usize,
-    pub output_volume: u8,
-    pub output_muted: bool,
-    pub input_devices: Vec<AudioDevice>,
-    pub input_device_index: usize,
-    pub input_volume: u8,
-    pub system_sounds_enabled: bool,
-    pub app_volumes: Vec<AppVolume>,
 
     // Personalization — the whole shared model, not a subset, and carrying
     // the file it was read from. These pages edit only some of the settings
@@ -838,8 +812,6 @@ pub enum DropdownId {
     Resolution,
     RefreshRate,
     Scale,
-    OutputDevice,
-    InputDevice,
     IpConfig,
     DiagnosticLevel,
     ColorFilter,
@@ -864,14 +836,12 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 13] = [
+    pub const FIXED: [Self; 11] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::Resolution,
         Self::RefreshRate,
         Self::Scale,
-        Self::OutputDevice,
-        Self::InputDevice,
         Self::IpConfig,
         Self::DiagnosticLevel,
         Self::ColorFilter,
@@ -1064,60 +1034,6 @@ impl SettingsState {
             refresh_rate_index: 1, // 60 Hz
             scale: ScalePercent::S100,
             monitor_count: 1,
-
-            // Sound defaults
-            output_devices: vec![
-                AudioDevice {
-                    name: "Speakers (Built-in)".into(),
-                    is_default: true,
-                },
-                AudioDevice {
-                    name: "HDMI Audio Output".into(),
-                    is_default: false,
-                },
-                AudioDevice {
-                    name: "Bluetooth Headphones".into(),
-                    is_default: false,
-                },
-            ],
-            output_device_index: 0,
-            output_volume: 75,
-            output_muted: false,
-            input_devices: vec![
-                AudioDevice {
-                    name: "Microphone (Built-in)".into(),
-                    is_default: true,
-                },
-                AudioDevice {
-                    name: "USB Microphone".into(),
-                    is_default: false,
-                },
-            ],
-            input_device_index: 0,
-            input_volume: 80,
-            system_sounds_enabled: true,
-            app_volumes: vec![
-                AppVolume {
-                    app_name: "System".into(),
-                    volume: 100,
-                    muted: false,
-                },
-                AppVolume {
-                    app_name: "Browser".into(),
-                    volume: 85,
-                    muted: false,
-                },
-                AppVolume {
-                    app_name: "Music Player".into(),
-                    volume: 60,
-                    muted: false,
-                },
-                AppVolume {
-                    app_name: "Video Player".into(),
-                    volume: 90,
-                    muted: false,
-                },
-            ],
 
             // Nothing has been written yet, so there is nothing to notify.
             appearance_dirty: false,
@@ -1587,23 +1503,16 @@ fn render_pill_row(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, items: 
     }
 }
 
-/// `value` rounded to the nearest `u8`.
+/// `value` rounded to the nearest `u16`.
 ///
 /// Callers pass a value already clamped to the slider's range, so the
-/// saturation below is belt-and-braces; it is written out because a float that
+/// saturation is belt-and-braces; it is written out because a float that
 /// escaped its range would otherwise wrap silently to the wrong end of the
-/// scale, and a volume that reads 3% when the handle is at the far right is
-/// worse than one that reads 100%.
-fn round_u8(value: f32) -> u8 {
-    // Float-to-integer `as` saturates at the bounds and maps NaN to 0 in Rust,
-    // which is exactly the behaviour wanted for a pointer-derived value.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    {
-        value.round().clamp(0.0, f32::from(u8::MAX)) as u8
-    }
-}
-
-/// `value` rounded to the nearest `u16`. See [`round_u8`].
+/// scale, and a text size that reads 50% with the handle at the far right is
+/// worse than one that reads 250%.
+///
+/// Had a `round_u8` beside it until 2026-09-14. Every one of its callers was a
+/// sound slider, and those went with the Sound page's controls.
 fn round_u16(value: f32) -> u16 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
@@ -2013,8 +1922,6 @@ enum PermissionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToggleId {
     NightLight,
-    OutputMuted,
-    SystemSounds,
     ProxyEnabled,
     AutoLogin,
     LocationEnabled,
@@ -2230,10 +2137,6 @@ enum SelectId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SliderId {
     NightLightTemperature,
-    OutputVolume,
-    InputVolume,
-    /// The volume of `app_volumes[index]`.
-    AppVolume(usize),
     NarratorRate,
     TextSize,
     DeferFeatureDays,
@@ -2244,17 +2147,16 @@ enum SliderId {
 }
 
 impl SliderId {
-    /// Every slider whose identity does not depend on a list index.
+    /// Every slider there is.
     ///
-    /// The per-application volumes are left out because how many of them there
-    /// are is state, not a constant; a test that wants those enumerates
-    /// `app_volumes` instead. Exists so a test can walk the rest and check each
-    /// one is draggable, the way [`DropdownId::FIXED`] does for dropdowns.
+    /// Named `FIXED` from when the per-application volumes were indexed and so
+    /// could not be listed as constants. They are gone -- the Sound page had no
+    /// consumer for any of them -- so this is now simply the complete set, and
+    /// a test walks it to check each one is draggable, the way
+    /// [`DropdownId::FIXED`] does for dropdowns.
     #[cfg(test)]
-    const FIXED: [Self; 8] = [
+    const FIXED: [Self; 6] = [
         Self::NightLightTemperature,
-        Self::OutputVolume,
-        Self::InputVolume,
         Self::NarratorRate,
         Self::TextSize,
         Self::DeferFeatureDays,
@@ -2278,7 +2180,6 @@ impl SliderId {
     fn range(self) -> (f32, f32) {
         match self {
             Self::NightLightTemperature | Self::NarratorRate => (0.0, 1.0),
-            Self::OutputVolume | Self::InputVolume | Self::AppVolume(_) => (0.0, 100.0),
             Self::TextSize => (50.0, 250.0),
             Self::DeferFeatureDays => (0.0, 365.0),
             Self::DeferQualityDays => (0.0, 30.0),
@@ -2297,9 +2198,7 @@ impl SliderId {
         let whole = round_u16(value);
         match self {
             Self::NightLightTemperature | Self::NarratorRate => None,
-            Self::OutputVolume | Self::InputVolume | Self::AppVolume(_) | Self::TextSize => {
-                Some(format!("{whole}%"))
-            }
+            Self::TextSize => Some(format!("{whole}%")),
             Self::DeferFeatureDays | Self::DeferQualityDays => Some(format!("{whole} days")),
             // In milliseconds, the unit the setting is actually stored and
             // applied in, rather than as a "speed" the user would have to guess
@@ -2444,6 +2343,26 @@ trait PageSink {
     /// be positioned against it. Only [`AnchorSink`] records this; the default
     /// ignores it, which is why it costs a draw or a hit-test nothing.
     fn anchor(&mut self, _id: AnchorId, _x: f32, _y: f32) {}
+
+    /// A row that shows what a setting will be, and cannot be used yet.
+    ///
+    /// Passes `None` for the hit band, so `row` registers no click at all: the
+    /// control is inert *by construction* rather than by a handler remembering
+    /// to refuse it. Two predicates for one state is how a control comes to
+    /// look disabled and act enabled, which this tree has already been bitten
+    /// by -- see the `can_clean` note in `apps/diskcleanup`.
+    ///
+    /// `subtext0` and not `overlay0`: `overlay0` is the separator/placeholder
+    /// role and is documented as not carrying text, excluded by name from the
+    /// palette's own WCAG floor (`every_role_a_user_reads_is_legible_on_the_
+    /// base_of_its_own_palette`). A greyed row is still a row somebody reads.
+    fn unavailable_row(&mut self, label: &str, value: &str) {
+        let pal = &self.palette();
+        let text = value.to_string();
+        self.row(label, None, ITEM_HEIGHT, move |tree, cx, y| {
+            tree.text(cx, y + 8.0, &text, pal.subtext0, 13.0);
+        });
+    }
 
     /// A row whose control is a closed dropdown button.
     fn dropdown_row(&mut self, label: &str, id: DropdownId, value: &str) {
@@ -3090,10 +3009,8 @@ impl SettingsState {
         extra: impl FnOnce(&mut RenderTree, f32, f32),
     ) {
         let pal = &self.palette();
-        let (Some(raw), Some(value)) = (self.slider_raw(id), self.slider_fraction(id)) else {
-            return;
-        };
-        let readout = id.readout(raw);
+        let readout = id.readout(self.slider_raw(id));
+        let value = self.slider_fraction(id);
         s.slider_row(label, id, value, move |tree, cx, y| {
             if let Some(readout) = &readout {
                 tree.text(
@@ -3227,51 +3144,61 @@ impl SettingsState {
 
     // --- Sound page ---
 
+    /// The Sound page: the shape of the settings, and none of them usable.
+    ///
+    /// Until 2026-09-14 this page offered an output device chooser, a volume
+    /// slider, a mute switch, an input device chooser, an input volume slider,
+    /// a system-sounds switch and a per-application volume section. Every one
+    /// of them worked on screen and reached nothing:
+    ///
+    /// * the two output devices and the input device were **written into the
+    ///   source as constants** -- "Speakers (Built-in)", "HDMI Audio Output".
+    ///   Nothing in this tree enumerates audio hardware, so the machine was
+    ///   never asked what it has;
+    /// * the four per-application entries were constants too -- "System",
+    ///   "Browser", "Music Player", "Video Player". There is no browser in
+    ///   this tree at all, and nothing was asked what is playing;
+    /// * `apps/mixer` reads no configuration and there is no audio service, so
+    ///   even a slider that persisted correctly would have nothing to persist
+    ///   *to*.
+    ///
+    /// So a user set their volume, closed the window, and nothing had
+    /// happened. See `TD-C-THE-SOUND-PAGE-INVENTS-ITS-DEVICES-AND-ITS-
+    /// APPLICATIONS`.
+    ///
+    /// **Why the rows are still drawn, rather than the page emptied.** The
+    /// Mouse page below omits what it cannot deliver, and that is right for one
+    /// slider among fifteen. A whole subsystem is a different case: an empty
+    /// page says "there is nothing here", which is less true and less useful
+    /// than "this is what will be here". The rows are inert by construction --
+    /// `unavailable_row` passes no hit band, so there is no handler that could
+    /// forget to refuse them.
+    ///
+    /// Each row gets its real control when audio gets a consumer, and not
+    /// before -- the same rule the Mouse page states, applied to a page that
+    /// had not been following it.
     fn build_sound_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
         s.section("Output");
-        let output_name = self
-            .output_devices
-            .get(self.output_device_index)
-            .map_or("None", |d| d.name.as_str());
-        s.dropdown_row("Output Device", DropdownId::OutputDevice, output_name);
-
-        self.slider(s, "Volume", SliderId::OutputVolume);
-        s.toggle_row("Mute", ToggleId::OutputMuted, self.output_muted);
+        s.note(
+            "Audio is not wired up yet: this system has no sound service and no way              to enumerate devices, so these settings would not reach anything.",
+            44.0,
+        );
+        s.unavailable_row("Output Device", "No devices detected");
+        s.unavailable_row("Volume", "Unavailable");
+        s.unavailable_row("Mute", "Unavailable");
         s.gap();
 
         s.section("Input");
-        let input_name = self
-            .input_devices
-            .get(self.input_device_index)
-            .map_or("None", |d| d.name.as_str());
-        s.dropdown_row("Input Device", DropdownId::InputDevice, input_name);
-
-        self.slider(s, "Input Volume", SliderId::InputVolume);
+        s.unavailable_row("Input Device", "No devices detected");
+        s.unavailable_row("Input Volume", "Unavailable");
         s.gap();
 
         s.section("System Sounds");
-        s.toggle_row(
-            "Enable System Sounds",
-            ToggleId::SystemSounds,
-            self.system_sounds_enabled,
-        );
+        s.unavailable_row("Enable System Sounds", "Unavailable");
         s.gap();
 
         s.section("Per-Application Volume");
-        for (index, app_vol) in self.app_volumes.iter().enumerate() {
-            let muted = app_vol.muted;
-            self.slider_with(
-                s,
-                &app_vol.app_name,
-                SliderId::AppVolume(index),
-                move |tree, cx, y| {
-                    if muted {
-                        tree.text(cx + SLIDER_WIDTH + 50.0, y + 14.0, "(muted)", pal.red, 11.0);
-                    }
-                },
-            );
-        }
+        s.note("Nothing is playing audio, and nothing here can ask.", 28.0);
     }
 
     // --- Mouse page ---
@@ -4531,16 +4458,6 @@ impl SettingsState {
                     at,
                 )
             }
-            DropdownId::OutputDevice => {
-                let items: Vec<String> =
-                    self.output_devices.iter().map(|d| d.name.clone()).collect();
-                (items, self.output_device_index)
-            }
-            DropdownId::InputDevice => {
-                let items: Vec<String> =
-                    self.input_devices.iter().map(|d| d.name.clone()).collect();
-                (items, self.input_device_index)
-            }
             DropdownId::IpConfig => {
                 let items = vec![
                     IpConfigMode::Dhcp.label().to_string(),
@@ -5149,16 +5066,16 @@ impl SettingsState {
 
     /// The current value of `id`, in the units the state stores it in.
     ///
-    /// `None` when the slider is a per-application volume whose index no longer
-    /// exists; the list is editable in principle and a stale index must not
-    /// panic.
-    fn slider_raw(&self, id: SliderId) -> Option<f32> {
-        Some(match id {
+    /// Returned an `Option` until 2026-09-14, for the per-application volumes:
+    /// their identity was a list index, the list was editable in principle, and
+    /// a stale index must not panic. Those sliders went with the Sound page's
+    /// controls, every remaining slider names a single field, and so there is
+    /// no longer a way for this to fail. An `Option` nothing can put `None` in
+    /// teaches its callers to handle a case that cannot arise.
+    fn slider_raw(&self, id: SliderId) -> f32 {
+        match id {
             SliderId::NightLightTemperature => self.appearance.settings.night_light_strength,
             SliderId::NarratorRate => self.narrator_rate,
-            SliderId::OutputVolume => f32::from(self.output_volume),
-            SliderId::InputVolume => f32::from(self.input_volume),
-            SliderId::AppVolume(index) => f32::from(self.app_volumes.get(index)?.volume),
             SliderId::TextSize => f32::from(self.text_size_percent),
             SliderId::DeferFeatureDays => f32::from(self.defer_feature_days),
             SliderId::DeferQualityDays => f32::from(self.defer_quality_days),
@@ -5166,7 +5083,7 @@ impl SettingsState {
             // integers an `f32` represents without rounding.
             #[allow(clippy::cast_precision_loss)]
             SliderId::DoubleClickMs => self.input.settings.mouse.double_click_ms as f32,
-        })
+        }
     }
 
     /// How far along its track `id`'s handle sits, 0.0–1.0.
@@ -5175,9 +5092,9 @@ impl SettingsState {
     /// pages used to spell out `(f32::from(self.text_size_percent) - 50.0) /
     /// 200.0` at the call site, which is a second copy of a range that
     /// [`SliderId::range`] already states.
-    fn slider_fraction(&self, id: SliderId) -> Option<f32> {
+    fn slider_fraction(&self, id: SliderId) -> f32 {
         let (lo, hi) = id.range();
-        Some(((self.slider_raw(id)? - lo) / (hi - lo)).clamp(0.0, 1.0))
+        ((self.slider_raw(id) - lo) / (hi - lo)).clamp(0.0, 1.0)
     }
 
     /// Set `id` from a position along its track, clamped to 0.0–1.0.
@@ -5207,13 +5124,6 @@ impl SettingsState {
                 self.appearance.settings.night_light_strength = value;
             }
             SliderId::NarratorRate => self.narrator_rate = value,
-            SliderId::OutputVolume => self.output_volume = round_u8(value),
-            SliderId::InputVolume => self.input_volume = round_u8(value),
-            SliderId::AppVolume(index) => {
-                if let Some(app) = self.app_volumes.get_mut(index) {
-                    app.volume = round_u8(value);
-                }
-            }
             SliderId::TextSize => self.text_size_percent = round_u16(value),
             SliderId::DeferFeatureDays => self.defer_feature_days = round_u16(value),
             SliderId::DeferQualityDays => self.defer_quality_days = round_u16(value),
@@ -5238,8 +5148,6 @@ impl SettingsState {
     fn toggle_mut(&mut self, id: ToggleId) -> Option<&mut bool> {
         Some(match id {
             ToggleId::NightLight => &mut self.appearance.settings.night_light,
-            ToggleId::OutputMuted => &mut self.output_muted,
-            ToggleId::SystemSounds => &mut self.system_sounds_enabled,
             ToggleId::ProxyEnabled => &mut self.proxy_enabled,
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
             ToggleId::LocationEnabled => &mut self.location_enabled,
@@ -5382,16 +5290,6 @@ impl SettingsState {
                     && let Some(rule) = self.notif.settings.apps.get_mut(app)
                 {
                     rule.importance = *chosen;
-                }
-            }
-            DropdownId::OutputDevice => {
-                if index < self.output_devices.len() {
-                    self.output_device_index = index;
-                }
-            }
-            DropdownId::InputDevice => {
-                if index < self.input_devices.len() {
-                    self.input_device_index = index;
                 }
             }
             DropdownId::IpConfig => {
@@ -6408,16 +6306,6 @@ mod tests {
     }
 
     #[test]
-    fn test_volume_bounds() {
-        let state = SettingsState::new();
-        assert!(state.output_volume <= 100);
-        assert!(state.input_volume <= 100);
-        for app in &state.app_volumes {
-            assert!(app.volume <= 100);
-        }
-    }
-
-    #[test]
     fn test_resolution_labels() {
         for res in RESOLUTIONS {
             let label = res.label();
@@ -7181,26 +7069,13 @@ mod tests {
 
     #[test]
     fn test_every_slider_has_a_page_that_draws_it_draggable() {
-        // All eight sliders painted correctly and none of them moved: the pages
+        // All the sliders painted correctly and none of them moved: the pages
         // registered no click band for a slider at all. Walking the enum is what
         // makes this catch the ninth as well.
         for id in SliderId::FIXED {
             assert!(
                 state_showing(RowHit::Slider(id)).is_some(),
                 "no page offers a grab band for {id:?}"
-            );
-        }
-        // The per-application volumes are indexed, so they are checked against
-        // the list the Sound page actually shows rather than a constant.
-        let state = fully_expanded(SettingsPage::Sound);
-        assert!(
-            !state.app_volumes.is_empty(),
-            "the Sound page has no per-app volumes to check"
-        );
-        for index in 0..state.app_volumes.len() {
-            assert!(
-                center_of(&state, RowHit::Slider(SliderId::AppVolume(index))).is_some(),
-                "per-app volume {index} has no grab band"
             );
         }
     }
@@ -7260,14 +7135,14 @@ mod tests {
                 drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
                 assert_eq!(
                     state.slider_raw(id),
-                    Some(hi),
+                    hi,
                     "{id:?} dragged to the right end did not reach its maximum"
                 );
 
                 drag(&mut state, track_x + SLIDER_WIDTH, cy, track_x);
                 assert_eq!(
                     state.slider_raw(id),
-                    Some(lo),
+                    lo,
                     "{id:?} dragged to the left end did not reach its minimum"
                 );
             }
@@ -7279,8 +7154,15 @@ mod tests {
         // The pointer routinely leaves the six-pixel bar mid-gesture. A drag
         // that stopped there — or that clamped to the wrong end — would make
         // the control unusable in exactly the way a user would first try it.
-        let id = SliderId::OutputVolume;
-        let mut state = state_showing(RowHit::Slider(id)).expect("Sound draws the volume slider");
+        // Was `OutputVolume`, until the Sound page's controls were removed for
+        // having no consumer. The test is about *slider mechanics*, not about
+        // volume, so it moved to another slider rather than being deleted with
+        // the page: `TextSize` spans 50..250, which gives the same round
+        // numbers to assert on -- midpoint 150, past-the-end 250, a quarter
+        // along 100.
+        let id = SliderId::TextSize;
+        let mut state =
+            state_showing(RowHit::Slider(id)).expect("a page draws the text-size slider");
         let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
         let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
 
@@ -7292,7 +7174,7 @@ mod tests {
             kind: MouseEventKind::Press(MouseButton::Left),
         }));
         assert_eq!(
-            state.output_volume, 50,
+            state.text_size_percent, 150,
             "the press did not jump to midpoint"
         );
         state.handle_event(&Event::Mouse(MouseEvent {
@@ -7301,7 +7183,7 @@ mod tests {
             kind: MouseEventKind::Move,
         }));
         assert_eq!(
-            state.output_volume, 100,
+            state.text_size_percent, 250,
             "the drag did not follow past the end"
         );
         state.handle_event(&Event::Mouse(MouseEvent {
@@ -7309,7 +7191,7 @@ mod tests {
             y: 10_000.0,
             kind: MouseEventKind::Move,
         }));
-        assert_eq!(state.output_volume, 25, "the drag stopped following");
+        assert_eq!(state.text_size_percent, 100, "the drag stopped following");
 
         // After release the pointer moves freely again.
         state.handle_event(&Event::Mouse(MouseEvent {
@@ -7322,7 +7204,10 @@ mod tests {
             y: cy,
             kind: MouseEventKind::Move,
         }));
-        assert_eq!(state.output_volume, 25, "a released slider still followed");
+        assert_eq!(
+            state.text_size_percent, 100,
+            "a released slider still followed"
+        );
     }
 
     #[test]
@@ -7347,9 +7232,7 @@ mod tests {
                         cy,
                         SLIDER_WIDTH.mul_add(wanted, track_x),
                     );
-                    let drawn = state
-                        .slider_fraction(id)
-                        .unwrap_or_else(|| panic!("{id:?} has no value"));
+                    let drawn = state.slider_fraction(id);
                     // Rounding to a whole percent or a whole day moves the
                     // handle by at most half a step, which is what this
                     // tolerance allows for.
@@ -7376,15 +7259,9 @@ mod tests {
         let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
 
         drag(&mut state, track_x, cy, track_x);
-        assert_eq!(
-            id.readout(state.slider_raw(id).unwrap()).as_deref(),
-            Some("50%")
-        );
+        assert_eq!(id.readout(state.slider_raw(id)).as_deref(), Some("50%"));
         drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
-        assert_eq!(
-            id.readout(state.slider_raw(id).unwrap()).as_deref(),
-            Some("250%")
-        );
+        assert_eq!(id.readout(state.slider_raw(id)).as_deref(), Some("250%"));
     }
 
     #[test]
@@ -7405,38 +7282,6 @@ mod tests {
             state.dragging.is_none(),
             "clicking the label started a drag"
         );
-    }
-
-    #[test]
-    fn test_dragging_one_per_app_volume_leaves_the_others_alone() {
-        // Indexed controls are where a shared handler goes wrong quietly: every
-        // row looks right, and the wrong application gets muted.
-        let id = SliderId::AppVolume(1);
-        let mut state = fully_expanded(SettingsPage::Sound);
-        assert!(
-            state.app_volumes.len() >= 2,
-            "need two apps to tell them apart"
-        );
-        let others: Vec<u8> = state
-            .app_volumes
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != 1)
-            .map(|(_, a)| a.volume)
-            .collect();
-        let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("app 1 has a band");
-        let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
-
-        drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
-        assert_eq!(state.app_volumes[1].volume, 100);
-        let after: Vec<u8> = state
-            .app_volumes
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != 1)
-            .map(|(_, a)| a.volume)
-            .collect();
-        assert_eq!(after, others, "dragging one app's volume moved another's");
     }
 
     #[test]
@@ -7768,7 +7613,7 @@ mod tests {
                 state.input.settings.mouse.double_click_ms,
                 MIN_DOUBLE_CLICK_MS
             );
-            assert_eq!(id.readout(state.slider_raw(id).unwrap()).as_deref(), {
+            assert_eq!(id.readout(state.slider_raw(id)).as_deref(), {
                 assert_eq!(MIN_DOUBLE_CLICK_MS, 100);
                 Some("100 ms")
             });
@@ -7778,7 +7623,7 @@ mod tests {
                 state.input.settings.mouse.double_click_ms,
                 MAX_DOUBLE_CLICK_MS
             );
-            assert_eq!(id.readout(state.slider_raw(id).unwrap()).as_deref(), {
+            assert_eq!(id.readout(state.slider_raw(id)).as_deref(), {
                 assert_eq!(MAX_DOUBLE_CLICK_MS, 2000);
                 Some("2000 ms")
             });

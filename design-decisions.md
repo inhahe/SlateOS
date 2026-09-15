@@ -67461,6 +67461,32 @@ enforcement points, and it read exactly like coverage. The shared tell is that
 **neither is visible in the test file** -- in both cases you have to change the
 production side to find out what the test was really standing on.
 
+**A test suite can be the strongest argument for a decision that has been
+reversed.** Lane C's formulation, 2026-09-14, and it sharpens the mode above:
+*tests pin the format the consumer currently parses, which is only the
+specification if the format is not the thing under decision.*
+
+They filed a request asking lane A to build `/sys/hardware/*`, whose central
+recommendation was **"take the tests as the specification, not my field list"** --
+normally excellent advice. Those 33 tests pin `parse_kv_file`, and `key=value`
+is exactly the layout `§850` had decided against the previous day, in a decision
+lane C themselves made. A producer written against them would have satisfied its
+consumer perfectly, contradicted a decision already on `main`, and passed every
+test.
+
+**Why it is the hardest version of a stale premise to resist.** A stale comment
+is only prose. A green test suite is *evidence of intent*, it is executable, and
+pointing at it feels like rigour rather than inertia. Handing it to whoever
+implements the other side is handing them a reason not to read the decision --
+and the more thorough the suite, the more persuasive the wrong format becomes.
+Thirty-three tests are harder to argue with than one sentence in
+`design-decisions.md`, and they are wrong.
+
+**The question that separates the cases:** is the format itself under decision?
+If not, the tests are the specification and re-deriving it from prose is waste.
+If it is, the tests describe the losing side, and their greenness is not
+evidence about anything except that the old shape was implemented carefully.
+
 **And the mirror image, which lane C caught twenty minutes later:** removing the
 network adapters killed three tests genuinely about adapters and **six more**
 that clicked an adapter row only as a *vehicle* for testing the shipped `run`

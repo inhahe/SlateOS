@@ -151576,6 +151576,54 @@ the defect. Changing "press Ctrl+S" to "use Ctrl+S" keeps them green, which is
 right: that edit does not break the promise. Removing the remedy breaks them,
 which is also right.
 
+### A fifth, found by searching rather than by a red test
+
+`apps/calendar` pinned "gone when the window closes". It gained an iCalendar
+door hours before the other four were found, and its test **never failed** —
+because that phrase happens to still sit at the end of the rewritten sentence:
+
+    "Nothing is saved automatically -- press Ctrl+S to write an .ics file,
+     or an event added today is gone when the window closes."
+
+So the assertion survived by luck, drew no attention to itself, and never
+checked the half the banner had just gained. It is the most instructive of the
+five for exactly that reason: **the other four were found because they broke.
+This one could only be found by looking.** A test that pins a phrase does not
+reliably fail when the promise changes; whether it fails is an accident of
+which words the rewrite happened to keep.
+
+### Where else this shape lives, and why it is a checklist rather than a backlog
+
+Fifteen tests in `apps/` use the idiom `LINES.iter().any(|l| l.contains("..."))`
+against a banner constant. The eleven not listed above are **true today**:
+
+    alarmclock   "nothing will wake you"
+    clipmanager  "however much you copy"
+    credmanager  "Do not rely on it"
+    devicemanager "not because the machine has no devices"
+    email        "nothing was ever fetched"
+    filediff     "no left file and no right file"
+    finance      "no way to add an account"
+    logviewer    "not a quiet system"
+    mediaconvert "do not delete an original"
+    habits       "Nothing is saved between runs"
+    whiteboard   (drawings cannot be kept)
+
+Rewriting them now would be churn against assertions that are not yet wrong,
+and each rewrite risks weakening a check that currently works. They are left
+alone deliberately.
+
+What they are is a **list of the exact tests that will go stale on the day each
+of those apps gains the capability its banner denies** — which, for most of
+them, is the day it gets a door. `habits` is the clearest: its phrase is
+word-for-word the one `contacts` had, and `contacts` needed it rewritten within
+an hour of its vCard door landing.
+
+So the entry to act on is not "fix these fifteen". It is: **when adding a
+capability to an app, grep its tests for `contains(` before editing its banner**
+— the assertion that was supposed to protect the banner is the last thing that
+will tell you.
+
 ### The general form, which is not about banners
 
 This is the same failure as a test that passes because its fixture had nothing

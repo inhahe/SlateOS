@@ -140888,16 +140888,38 @@ first time passes have outnumbered differences.
 | `--no-backup-if-mismatch` | suppresses `<target>.orig` on a failed hunk, and **only** that — the reject is still written, because a reject is the failure report rather than a backup |
 | `-d DIR` / `--directory=DIR` | chdir before the patch file is opened |
 
-**Accepted and currently inert — `-N/--forward`, `-f/--force`, `-F/--fuzz`,
-`-Z/--set-utc`.** This is the entry's most misreadable line, so: each was
-measured against GNU on the cases this tree exercises, and on those the
-behaviour coincides *exactly* with the default. `-F 3` differs only when a hunk
-would match at a fuzz distance, `-N` only when a patch is already applied, `-f`
-only where GNU would otherwise prompt, `-Z` only in the timestamps it sets.
+**`-N/--forward` and `-F/--fuzz` are IMPLEMENTED** as of 2026-09-15, with
+`-l/--ignore-whitespace`. What is still accepted and inert is `-f/--force` and
+`-Z/--set-utc`: `-f` differs from the default only where GNU would otherwise
+prompt, `-Z` only in the timestamps it sets.
 
-So accepting them is correct today and **incomplete rather than wrong** — but
-nine harness cases now pass without those behaviours existing, and a reader
-who sees `42 passed` must not conclude that fuzz matching works. It does not.
+The wording this replaces said that accepting an inert option was "correct
+today and incomplete rather than wrong". **That argument should not be made
+again without one qualification, and `-l` is why: `--help` ADVERTISED it.** Of
+the four places that option was written down, three said inert and the only one
+a user reads said it worked. An inert option is defensible exactly as long as
+nothing promises otherwise.
+
+**`-F` was not a gap at all — it was a DIVERGENCE**, and the sharpest thing in
+this entry. The constant governing hunk placement was called `max_fuzz` and
+meant *slide distance*: how far a hunk may move from the line its header names,
+while matching every line exactly. GNU's fuzz is a different mechanism
+entirely — ignore up to N **context** lines at each end of the hunk, default 2,
+never excusing a removed line. Two mechanisms, one name, and the name belonged
+to the one that did not exist. So this build refused hunks GNU applies at fuzz
+1, and `patch-diff.sh` was green throughout, because not one of its cases
+perturbed a context line: a harness agreeing with the reference on every case
+that cannot distinguish them.
+
+A hunk that applies with fuzz also leaves a `<target>.orig`, because
+`--backup-if-mismatch` is GNU's default and a fuzzy apply counts as a mismatch.
+An offset does too. A `-l` loose match does **not** — measured, and worth
+stating because it is the one inexact-looking case that writes no backup.
+
+Eight differential cases cover fuzz now, including the control that matters:
+a perturbed REMOVED line must still be refused at `-F 3`. Still open in the
+same family: an **offset** is neither reported (`Hunk #1 succeeded at 3 (offset
+1 line).`) nor does it write the `.orig` GNU writes for it.
 
 **Not implemented at all**, and each still costs its cases: `-o/--output`,
 `-l/--ignore-whitespace`, `-E/--remove-empty-files`, `-v` (which prints the

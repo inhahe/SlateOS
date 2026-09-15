@@ -144622,6 +144622,19 @@ starting conditions when the machine is busy.
 `userspace/oils/src/interp.rs:102674`, on the assertion *"the grace must NOT
 have passed yet"* -- a **premise** check, before it tests anything.
 
+**Measured 2026-09-14, and it is not occasional:**
+
+| run | result |
+|---|---|
+| `cargo test --workspace` | FAILED (1 of 1,499 in `oils`; 344 other crates green) |
+| `cargo test --workspace`, again | FAILED, same test, same assertion |
+| `cargo test -p oils` alone | **ok, 1,500 passed** |
+
+So it is reliable under workspace load and absent in isolation -- which is what
+the test's own comment predicts ("0 in 250 runs in isolation"). Lane C's
+changes cannot reach it: `oils` is `userspace/`, depends on nothing lane C
+touched, and the only coupling is total machine load.
+
 **Why.** The setup sets every job's `born_at` to `Instant::now()` and then
 calls `poll_jobs`, which compares `born_at.elapsed() >= JOB_EXIT_NOTICE_GRACE`
 (20 ms). The premise holds only if fewer than 20 ms pass between two adjacent

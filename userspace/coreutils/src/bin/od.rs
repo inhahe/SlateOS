@@ -111,8 +111,11 @@ fn isprint(c: u8) -> bool {
 }
 
 fn gcd(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        let t = a % b;
+    // `NonZeroUsize` carries the `b != 0` that the loop condition was
+    // asserting, so `%` here is the one remainder that cannot divide by
+    // zero -- stated in the type rather than one line above the operation.
+    while let Some(nz) = core::num::NonZeroUsize::new(b) {
+        let t = a % nz;
         a = b;
         b = t;
     }
@@ -348,21 +351,25 @@ fn decode_one_format<'a>(s_orig: &[u8], s: &'a [u8]) -> Result<(Spec, &'a [u8]),
         b'd' | b'o' | b'u' | b'x' => {
             // C-type letters first; note upstream never validates that these
             // name a type that exists, because by construction they do.
-            let size = match rest.first().copied() {
-                Some(b'C') => {
-                    rest = &rest[1..];
+            // `split_first` rather than `first()` then `&rest[1..]`: the
+            // test and the advance were two statements that had to agree,
+            // and this is the one operation that cannot disagree with
+            // itself. Same substitution at the float sizes and the `z`.
+            let size = match rest.split_first() {
+                Some((b'C', tail)) => {
+                    rest = tail;
                     1
                 }
-                Some(b'S') => {
-                    rest = &rest[1..];
+                Some((b'S', tail)) => {
+                    rest = tail;
                     2
                 }
-                Some(b'I') => {
-                    rest = &rest[1..];
+                Some((b'I', tail)) => {
+                    rest = tail;
                     4
                 }
-                Some(b'L') => {
-                    rest = &rest[1..];
+                Some((b'L', tail)) => {
+                    rest = tail;
                     8
                 }
                 _ => {
@@ -399,17 +406,17 @@ fn decode_one_format<'a>(s_orig: &[u8], s: &'a [u8]) -> Result<(Spec, &'a [u8]),
             (fmt, size, width)
         }
         b'f' => {
-            let size = match rest.first().copied() {
-                Some(b'F') => {
-                    rest = &rest[1..];
+            let size = match rest.split_first() {
+                Some((b'F', tail)) => {
+                    rest = tail;
                     4
                 }
-                Some(b'D') => {
-                    rest = &rest[1..];
+                Some((b'D', tail)) => {
+                    rest = tail;
                     8
                 }
-                Some(b'L') => {
-                    rest = &rest[1..];
+                Some((b'L', tail)) => {
+                    rest = tail;
                     16
                 }
                 _ => {
@@ -449,10 +456,12 @@ fn decode_one_format<'a>(s_orig: &[u8], s: &'a [u8]) -> Result<(Spec, &'a [u8]),
     };
 
     // Exactly one optional `z` suffix.
-    let trailer = rest.first() == Some(&b'z');
-    if trailer {
-        rest = &rest[1..];
-    }
+    let trailer = if let Some((b'z', tail)) = rest.split_first() {
+        rest = tail;
+        true
+    } else {
+        false
+    };
 
     Ok((
         Spec {
@@ -810,24 +819,27 @@ fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Parsed, Fail> 
 fn traditional_operands(draft: &mut Draft, operands: &mut Vec<OsString>) {
     let raw: Vec<Vec<u8>> = operands.iter().map(arg_bytes).collect();
     let traditional = draft.traditional;
-    match operands.len() {
-        1 => {
-            let leads_plus = raw[0].first() == Some(&b'+');
+    // Matching the SLICE rather than its length. The arms are the same three
+    // cases upstream's `switch (n_files)` has, but the operands are bound by
+    // the pattern instead of indexed after it, so `raw[1]` in the two-operand
+    // arm cannot outlive the arm that guarantees it.
+    match raw.as_slice() {
+        [first] => {
+            let leads_plus = first.first() == Some(&b'+');
             if let Some(o1) = (traditional || leads_plus)
-                .then(|| parse_old_offset(&raw[0]))
+                .then(|| parse_old_offset(first))
                 .flatten()
             {
                 draft.options.skip = o1;
                 operands.clear();
             }
         }
-        2 => {
-            let second = &raw[1];
+        [first, second] => {
             let eligible = traditional
                 || second.first() == Some(&b'+')
                 || second.first().is_some_and(u8::is_ascii_digit);
             if let Some(o2) = eligible.then(|| parse_old_offset(second)).flatten() {
-                if let Some(o1) = traditional.then(|| parse_old_offset(&raw[0])).flatten() {
+                if let Some(o1) = traditional.then(|| parse_old_offset(first)).flatten() {
                     draft.options.skip = o1;
                     draft.flag_pseudo_start = true;
                     draft.pseudo_start = o2;
@@ -838,10 +850,10 @@ fn traditional_operands(draft: &mut Draft, operands: &mut Vec<OsString>) {
                 }
             }
         }
-        3 => {
+        [_, second, third] => {
             if traditional
-                && let Some(o1) = parse_old_offset(&raw[1])
-                && let Some(o2) = parse_old_offset(&raw[2])
+                && let Some(o1) = parse_old_offset(second)
+                && let Some(o2) = parse_old_offset(third)
             {
                 draft.options.skip = o1;
                 draft.flag_pseudo_start = true;

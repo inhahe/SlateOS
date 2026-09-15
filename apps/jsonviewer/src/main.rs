@@ -4879,7 +4879,6 @@ mod tests {
             }
         }
     }
-    use super::*;
 
     // --- Parser tests ---
 

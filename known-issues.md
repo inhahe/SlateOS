@@ -149632,3 +149632,68 @@ the arm, not to the fixture: `openat2`'s stamp was correct on every root the
 harness could mount, and the population it could not mount was the one that
 mattered.
 
+
+## A-THE-WRITEBACK-SOFTIRQ-RE-ENTERS-THE-BLOCK-REGISTRY-LOCK-AND-SELF-DEADLOCKS (lane A, 2026-09-15) — **Status: FIXED**, pending a boot
+
+**Observed, not theorised.** A FAT/virtio boot panicked:
+
+```
+[sync] *** SELF-DEADLOCK *** lock '?' @ 0xffffffff82af3728 is already held by
+       task 0 on cpu 0 -- the same task that is now taking it
+panicked at kernel\src\sync.rs:981:5
+```
+
+The backtrace names the whole mechanism:
+
+```
+#19 blkdev::with_device            <- takes REGISTRY
+#18 fs::cache::read_sector_uncached
+#16 VirtioBlkDevice::read_sector   <- spins for the device, interrupts ENABLED
+#14 irq_common_dispatch            <- a timer tick lands mid-read
+#10 softirq::process_pending
+#8  fs::cache::try_flush_expired
+#7  BufferCacheInner::writeback_entry
+#6  blkdev::with_device            <- takes REGISTRY AGAIN
+#5  PreemptSpinMutex::lock -> spin -> stall -> panic
+```
+
+Process-context code holds the block registry across a real device read with
+interrupts enabled. A timer softirq lands, the buffer cache flushes an expired
+entry, and the writeback path takes the same lock on the same CPU.
+
+**The near miss is the interesting part: the file already knew.**
+`try_flush_expired` opens with `CACHE.try_lock()?` — deliberately non-blocking,
+precisely because it runs in interrupt context. The defensive treatment was
+applied to **one** of the two locks that path ends up taking. The second,
+`blkdev`'s `REGISTRY`, is reached *indirectly* through `writeback_entry`, three
+frames away and in another file, and nothing about the call site says
+"interrupt context". The author of the `try_lock` was right about the hazard and
+the analysis simply did not follow the call chain out of the function.
+
+**Fix.** `blkdev::try_with_device`, used by a `writeback_entry_try` that
+`try_flush_expired` calls instead of the blocking form. Backing off is free
+here: the entry stays dirty and the next tick retries it, and
+`try_flush_expired` already counts a failed writeback as "not flushed".
+
+`try_with_device` keeps three outcomes distinct — `Err(WouldBlock)`, `Ok(None)`
+(no such device) and `Ok(Some(r))` — rather than folding busy into `None`.
+Collapsing them would make a transient lock conflict indistinguishable from a
+missing disk, and in interrupt context those call for opposite responses.
+
+**Why it survived, and it is the same reason as the two before it.**
+`scripts/boot-test.sh` attaches no disk, so the root is `memfs`, which has no
+block device, no buffer cache writeback and no registry to re-enter. The
+deadlock cannot occur under the only harness that gates the tree. It is the
+**third** defect this configuration has surfaced today, and each became
+reachable only when the previous one was fixed:
+
+| # | defect | unblocked by |
+|---|---|---|
+| 1 | `openat2` create-then-report-failure on a permissionless fs | running a FAT root at all |
+| 2 | case (e) asserts a mode round-trip FAT cannot do, and misdiagnoses it as §639 | fixing 1 |
+| 3 | this self-deadlock | fixing 2 |
+
+That ordering is the argument for the second boot configuration, stated better
+than the original entry managed: a fixture does not reveal its defects in
+parallel. Each one hides the next, so the value of running it is not one bug —
+it is a queue of unknown length that nothing else will ever drain.

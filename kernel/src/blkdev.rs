@@ -349,6 +349,39 @@ where
     None
 }
 
+/// Like [`with_device`], but never blocks on the registry lock.
+///
+/// For callers that may run in **interrupt context**. The buffer cache's
+/// expiry writeback runs from a timer softirq, and a softirq that lands
+/// while process-context code is inside [`with_device`] -- which it can, the
+/// registry is held across a real device read with interrupts enabled -- would
+/// re-acquire this same lock on the same CPU and self-deadlock. That is not
+/// hypothetical: it panicked a FAT/virtio boot on 2026-09-15.
+///
+/// Three outcomes are kept distinct on purpose:
+///
+/// * `Err(WouldBlock)` -- the registry is busy; the caller should retry later.
+/// * `Ok(None)` -- there is no device of that name.
+/// * `Ok(Some(r))` -- `f` ran, and `r` is its result.
+///
+/// Collapsing the first two into `None` would let a transient lock conflict be
+/// recorded as a missing disk, and in interrupt context those call for
+/// opposite responses: one means try again next tick, the other means stop.
+pub fn try_with_device<F, R>(name: &str, f: F) -> KernelResult<Option<R>>
+where
+    F: FnOnce(&mut dyn BlockDevice) -> R,
+{
+    let Some(mut registry) = REGISTRY.try_lock() else {
+        return Err(KernelError::WouldBlock);
+    };
+    for entry in registry.iter_mut() {
+        if entry.name == name {
+            return Ok(Some(f(entry.device.as_mut())));
+        }
+    }
+    Ok(None)
+}
+
 /// Query whether the named device supports discard (TRIM/UNMAP).
 ///
 /// Returns `None` if no device with that name is registered, otherwise

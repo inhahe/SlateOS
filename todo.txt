@@ -4527,6 +4527,32 @@
 
 ## Judgment Calls
 
+Buffer-cache writeback belongs in a kernel thread, not a timer softirq
+(lane A, 2026-09-15). Deferred deliberately; design-decisions 940 names this
+as the correct long-term shape and takes the smaller fix instead.
+
+  What happened: `fs::cache::try_flush_expired` runs from the timer softirq and
+  reaches `blkdev`'s registry lock through `writeback_entry`. A tick landing
+  while process-context code held that lock re-entered it and self-deadlocked a
+  live boot. Fixed by backing off (`try_with_device`), which is free because the
+  entry stays dirty and the next tick retries.
+
+  Why a thread is the better shape: doing block I/O from interrupt context is
+  the root of it. Every lock that path touches has to be audited for
+  interrupt-safety forever, and the audit has to be redone whenever anything in
+  the call chain gains a lock -- which is exactly how this one was missed, three
+  frames away in another file. A thread turns a standing invariant that nobody
+  can see at the call site into ordinary process context.
+
+  Why not now: it needs a wakeup policy, a place in the scheduler, and a defined
+  behaviour when it falls behind the dirty-expiry deadline. That is a feature
+  with its own failure modes, not a bug fix, and landing it inside one would
+  have meant shipping both unvalidated.
+
+  Trigger to do it properly: a second interrupt-context caller needing block
+  I/O, or any measurement showing deferred flushes are actually piling up
+  (`writebacks` vs `dirty_count` in the cache stats would show it).
+
 check-design-decisions-bands.py advice is tree-local, and the LINE is the
 risky half (lane A, 2026-09-15). Not pursued, reasoning recorded so nobody
 re-derives it.

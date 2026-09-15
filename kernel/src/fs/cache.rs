@@ -429,7 +429,25 @@ impl BufferCacheInner {
     /// Calls `blkdev::with_device` while holding the cache lock.
     /// This is safe because the lock ordering is cache → blkdev.
     #[allow(clippy::arithmetic_side_effects)]
+    /// Write one dirty entry back. Blocks on the block registry.
+    ///
+    /// NOT safe from interrupt context -- use [`Self::writeback_entry_try`]
+    /// there, or a timer softirq landing inside a process-context device read
+    /// will re-enter the registry lock and self-deadlock.
     fn writeback_entry(&mut self, idx: usize) -> KernelResult<()> {
+        self.writeback_entry_inner(idx, true)
+    }
+
+    /// Write one dirty entry back, backing off if the registry is busy.
+    ///
+    /// For interrupt context. Returns `WouldBlock` rather than spinning; the
+    /// entry stays dirty and the next tick retries it, which is why nothing
+    /// is lost by declining.
+    fn writeback_entry_try(&mut self, idx: usize) -> KernelResult<()> {
+        self.writeback_entry_inner(idx, false)
+    }
+
+    fn writeback_entry_inner(&mut self, idx: usize, blocking: bool) -> KernelResult<()> {
         if !self.entries[idx].valid || !self.entries[idx].dirty {
             return Ok(());
         }
@@ -442,7 +460,14 @@ impl BufferCacheInner {
         let mut data = [0u8; SECTOR_SIZE];
         data.copy_from_slice(&self.entries[idx].data);
 
-        let result = blkdev::with_device(dev_name, |dev| dev.write_sector(lba, &data));
+        // In interrupt context the registry must not be waited on; see
+        // `blkdev::try_with_device`. `WouldBlock` leaves the entry dirty for
+        // the next tick, which is why returning early here loses nothing.
+        let result = if blocking {
+            blkdev::with_device(dev_name, |dev| dev.write_sector(lba, &data))
+        } else {
+            blkdev::try_with_device(dev_name, |dev| dev.write_sector(lba, &data))?
+        };
 
         match result {
             Some(Ok(())) => {
@@ -887,7 +912,7 @@ pub fn try_flush_expired() -> Option<usize> {
         if cache.entries[i].valid && cache.entries[i].dirty && cache.entries[i].dirty_since_ns > 0 {
             let age = now_ns.saturating_sub(cache.entries[i].dirty_since_ns);
             if age >= get_dirty_expire_ns() {
-                if cache.writeback_entry(i).is_ok() {
+                if cache.writeback_entry_try(i).is_ok() {
                     flushed = flushed.saturating_add(1);
                 }
             }

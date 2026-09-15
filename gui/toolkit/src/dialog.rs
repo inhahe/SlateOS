@@ -1974,9 +1974,20 @@ pub fn parent_of(path: impl AsRef<Path>) -> PathBuf {
 /// What [`FilePicker::handle`] did with an event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Picked {
-    /// The picker dealt with it. Redraw and do nothing else.
+    /// The picker dealt with it and is still up. Redraw, do nothing else.
     Handled,
-    /// The picker is closed and the user chose this path.
+    /// The picker has closed itself without choosing anything.
+    ///
+    /// A separate answer from [`Handled`](Self::Handled) because a caller with
+    /// dialog state of its own has to know. `apps/fileassoc` keeps an
+    /// `ActiveDialog` enum beside the picker; when Escape closed the dialog
+    /// and the caller was told only "handled", that enum stayed on
+    /// `ChooseFile` with no picker on screen. Its own test caught it.
+    ///
+    /// A caller that keeps no such state can write
+    /// `Picked::Handled | Picked::Cancelled` and be right.
+    Cancelled,
+    /// The picker has closed itself and the user chose this path.
     Chose(PathBuf),
     /// Not an event the picker wants. The caller may handle it.
     Ignored,
@@ -2004,7 +2015,9 @@ pub enum Picked {
 /// tests happen not to have a selected item, and a test asserting "playback
 /// did not start" passes in that state whether or not the intercept is there.
 /// One implementation with one test is worth ten chances to get that wrong.
-#[derive(Debug, Default)]
+// `Clone` because `FileDialog` is, and callers hold this inside state they
+// clone -- `apps/hexeditor` derives `Clone` on its whole editor.
+#[derive(Clone, Debug, Default)]
 pub struct FilePicker {
     dialog: Option<FileDialog>,
     saving: bool,
@@ -2077,6 +2090,43 @@ impl FilePicker {
         self.dialog = None;
     }
 
+    /// Point the open dialog at `path` and list what is in it.
+    ///
+    /// The two halves belong together, which is why this exists rather than
+    /// leaving callers to do it through [`dialog_mut`](Self::dialog_mut).
+    /// Navigating without re-listing leaves the dialog showing the previous
+    /// directory's contents under the new directory's name -- **a listing that
+    /// is wrong rather than empty**, which is the harder of the two to notice.
+    /// The `NavigatedTo` arm inside [`handle`](Self::handle) does the same
+    /// pair for the same reason.
+    ///
+    /// Does nothing when no dialog is up.
+    pub fn navigate_to(&mut self, path: impl AsRef<Path>) {
+        if let Some(dialog) = self.dialog.as_mut() {
+            dialog.navigate_to(path.as_ref());
+            dialog.set_entries(list_directory(path.as_ref()));
+        }
+    }
+
+    /// The dialog itself, or `None` when nothing is up.
+    ///
+    /// **This wrapper owns the routing, not the dialog.** The routing is the
+    /// part that was written out eleven times and got the same question wrong
+    /// nine of them; setting a filename, reading the entries and selecting one
+    /// are ordinary `FileDialog` operations with correct implementations
+    /// already. Re-exporting each through here would be a second API to keep
+    /// in step with the first, and the second one is always the one that
+    /// drifts.
+    #[must_use]
+    pub fn dialog(&self) -> Option<&FileDialog> {
+        self.dialog.as_ref()
+    }
+
+    /// The dialog itself, mutably. See [`dialog`](Self::dialog).
+    pub fn dialog_mut(&mut self) -> Option<&mut FileDialog> {
+        self.dialog.as_mut()
+    }
+
     /// Offer `event` to the dialog.
     ///
     /// Returns [`Picked::Ignored`] when no dialog is up, so a caller may call
@@ -2110,7 +2160,7 @@ impl FilePicker {
             DialogAction::None => Picked::Handled,
             DialogAction::Cancelled => {
                 self.dialog = None;
-                Picked::Handled
+                Picked::Cancelled
             }
             DialogAction::NavigatedTo(path) => {
                 if let Some(dialog) = self.dialog.as_mut() {
@@ -2280,7 +2330,7 @@ mod tests {
         picker.open_to_read();
         assert_eq!(
             picker.handle(&press(Key::Escape), 800.0, 600.0),
-            Picked::Handled
+            Picked::Cancelled
         );
         assert!(!picker.is_open(), "Escape left the dialog up");
     }

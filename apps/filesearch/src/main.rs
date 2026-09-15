@@ -52,7 +52,7 @@ use std::fmt;
 // search tools in this desktop gave different answers to the same pattern.
 // See the `globmatch` module docs.
 pub use globmatch::{glob_match, glob_match_chars};
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FileDialog, FilePicker, Picked};
 
 // ─── Simple Regex Engine ─────────────────────────────────────────────
 
@@ -962,13 +962,9 @@ pub struct FileSearchApp {
     pub status_message: String,
     pub is_searching: bool,
     pub search_time_ms: u64,
-    /// The folder picker, while one is up.
-    ///
-    /// The only route a real file has into this index. Until 2026-09-15 there
-    /// was none: `main` called `populate_sample_index` and the entire search
-    /// machinery -- by name, by glob, by regular expression, by category, with
-    /// sorting -- ran against records written into the source.
-    pub file_dialog: Option<FileDialog>,
+    /// The picker. Holds the dialog and the routing thirteen
+    /// applications used to write out by hand.
+    pub picker: FilePicker,
     /// How many entries the last index pass could not represent.
     ///
     /// A name on this system is bytes, not text: every byte but `/` and NUL is
@@ -1000,7 +996,7 @@ impl FileSearchApp {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             index: FileIndex::new(),
-            file_dialog: None,
+            picker: FilePicker::new(),
             skipped_unrepresentable: 0,
             criteria: SearchCriteria::new(""),
             results: Vec::new(),
@@ -1151,53 +1147,13 @@ impl FileSearchApp {
     /// the listing and hands it over, which is the convention `apps/fileassoc`
     /// and `apps/photomanager` follow.
     pub fn open_folder_dialog(&mut self) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = FileDialog::select_folder().with_initial_path(start);
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.file_dialog = Some(dialog);
-    }
-
-    fn handle_dialog_key(&mut self, key: &guitk::event::KeyEvent) -> EventResult {
-        if !key.pressed {
-            return EventResult::Ignored;
-        }
-        let action = match self.file_dialog.as_mut() {
-            Some(dialog) => dialog.handle_event(key, window_height()),
-            None => return EventResult::Ignored,
-        };
-        self.apply_dialog_action(action)
-    }
-
-    fn handle_dialog_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
-        let action = match self.file_dialog.as_mut() {
-            Some(dialog) => dialog.handle_mouse(mouse, window_width(), window_height()),
-            None => return EventResult::Ignored,
-        };
-        self.apply_dialog_action(action)
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
-        match action {
-            DialogAction::None => EventResult::Consumed,
-            DialogAction::Cancelled => {
-                self.file_dialog = None;
-                EventResult::Consumed
-            }
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-                EventResult::Consumed
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                self.index_directory(&path);
-                self.execute_search();
-                EventResult::Consumed
-            }
-        }
+        // `put_up` rather than `open_to_read`: this is the one caller that
+        // selects a FOLDER, and a named opener for a single caller would be
+        // API invented for symmetry.
+        self.picker.put_up(
+            FileDialog::select_folder().with_initial_path(FilePicker::default_start()),
+            false,
+        );
     }
 
     /// Walk `root` and put what is there into the index.
@@ -1265,9 +1221,23 @@ impl FileSearchApp {
     }
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up. A tick or a
+        // resize comes back as `Ignored` and falls through to its own arm
+        // below -- the guard arms this replaced had that property by
+        // construction, and it is why neither of these two ever stopped
+        // its application's clock.
+        match self.picker.handle(event, window_width(), window_height()) {
+            Picked::Chose(path) => {
+                self.index_directory(&path);
+                self.execute_search();
+                return EventResult::Consumed;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
-            Event::Key(key_ev) if self.file_dialog.is_some() => self.handle_dialog_key(key_ev),
-            Event::Mouse(mouse) if self.file_dialog.is_some() => self.handle_dialog_mouse(mouse),
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Resize { .. } => {
                 // The layout is computed from the size it is handed at render
@@ -2041,9 +2011,7 @@ impl App for FileSearchApp {
         let mut commands = self.render_commands(width, height);
         // Last, so it is on top -- the same order in which `handle_event`
         // gives it the click.
-        if let Some(dialog) = &self.file_dialog {
-            commands.extend(dialog.render(&self.palette, width, height));
-        }
+        commands.extend(self.picker.render(&self.palette, width, height));
         RenderTree { commands }
     }
 }

@@ -1591,9 +1591,17 @@ impl<T: Transport> ShellSession<T> {
         let wanted = self.shell.appearance.wallpaper.clone();
         match wanted.as_deref() {
             Some(path) => {
+                let fit = self.shell.appearance.wallpaper_fit;
                 if self.wallpaper.current_image_path() != Some(path) {
-                    self.wallpaper
-                        .set_image(path, crate::wallpaper::ImageFit::Fill);
+                    self.wallpaper.set_image(path, fit);
+                    self.dirty = true;
+                } else if self.wallpaper.config.fit != fit {
+                    // The picture has not changed, only where it sits. Through
+                    // `set_fit`, which does not issue a new image id: the fit
+                    // is applied when the wallpaper is drawn, so re-reading the
+                    // file to move it would decode a full-screen photograph to
+                    // learn nothing new about it.
+                    self.wallpaper.set_fit(fit);
                     self.dirty = true;
                 }
             }

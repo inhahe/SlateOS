@@ -163,10 +163,11 @@ apps/remotedesktop/src/main.rs:content_size_bytes
 #     the same as one that ran a second ago.
 #   sound_settings:output_device_id, volume_override -- per-app audio
 #     routing and volume, recorded and never applied.
-#   lib.rs:shortcut_message -- "Press the new keys, or Escape to cancel",
-#     "Unchanged", "That row is gone": the whole of the shortcut editor's
-#     feedback, composed and drawn nowhere, so rebinding a key is silent
-#     whether it worked or not.
+#   lib.rs:shortcut_message -- FIXED 2026-09-14. It is drawn on the shortcut
+#     card now. Kept here for the reason: the whole of the shortcut editor's
+#     feedback was composed and drawn nowhere, so rebinding a key was silent
+#     whether it worked or not -- including the case where it worked and could
+#     not be saved.
 #
 gui/desktop/src/backup_settings.rs:last_backup_timestamp
 gui/desktop/src/bluetooth.rs:discoverable
@@ -183,7 +184,6 @@ gui/desktop/src/bluetooth.rs:discoverable
 #   that has to be refreshed by hand is the stale half of a pair waiting
 #   to happen, and this gate finds them because the cache is what nobody
 #   reads. Fix in both cases is a deletion, keeping the live computation.
-gui/desktop/src/lib.rs:shortcut_message
 gui/desktop/src/sound_settings.rs:volume_override
 gui/desktop/src/sound_settings.rs:output_device_id
 gui/desktop/src/startup_settings.rs:last_run_at

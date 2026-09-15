@@ -152492,7 +152492,7 @@ today.
 this sweep and wants its own commits. Everything needed to start is above, and
 nothing about it is blocked.
 
-## TD-C-THE-MUSIC-PLAYER-PLAYS-NOTHING-AND-DRAWS-A-VISUALISER-OF-IT -- OPEN 2026-09-15
+## TD-C-THE-MUSIC-PLAYER-PLAYS-NOTHING-AND-DRAWS-A-VISUALISER-OF-IT -- FIXED 2026-09-15
 
 **In short:** press Play in the music player and the button changes to Pause,
 the elapsed time starts counting, the progress bar fills, and the Now Playing
@@ -152554,7 +152554,13 @@ that cannot play. Keep what is real and stop asserting what is not:
    a real and useful program, and that is what this becomes.
 4. The crate description stops promising audio playback.
 
-**Why it is filed rather than done:** the playing state is threaded through
+**Done in `12e3c7848`**, in the four steps below. The migration was smaller
+than expected: most tests set `playing` directly to exercise the advance
+machinery, and only the `toggle_play` ones pinned the user-facing claim -- the
+same split `apps/vpnmanager` had, where twenty-one tests reached a connected
+state through the claim itself and the machinery underneath was fine.
+
+**What was filed as the reason to defer:** the playing state is threaded through
 the window — row highlighting, the transport buttons, the tick, the
 visualiser — so it is its own commit with its own test migration, of the same
 size as `vpnmanager`'s twenty-one. Nothing about it is blocked, and the

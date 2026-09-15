@@ -19,6 +19,25 @@ Two found on the day this was written:
     only thing that ever read it was its own test, so the user watched a
     progress bar with no way to tell ten seconds from ten minutes.
 
+A third on 2026-09-15, and it argues for this gate at a different strength
+than the two above. `apps/renamer`'s `raw_name` held a filename as the
+filesystem gave it, beside an `original_name` holding its text form. The
+rename built its source path from the text. That was harmless, because
+`renameable` -- the test that the two forms are equal -- decided the entry's
+initial `selected` value, so nothing whose name was not text could be renamed.
+
+Except `select_all` set `selected` on every file and `toggle_selected_file`
+flipped it unconditionally, so Ctrl+A or Space could tick one anyway, and the
+rename would then be attempted against a name with U+FFFD substituted for the
+bytes that would not decode.
+
+**In the first two cases the dead field WAS the defect: work computed and
+thrown away. Here it was the tombstone of a guard that had stopped holding.**
+`renameable` was applied once, at construction, and nothing in the code said
+that its protection had a lifetime -- except that the field it protected had
+gone unread. That is the harder class to find by reading, and this gate is the
+only thing in the tree that points at it.
+
 WHAT IT REPORTS. A field declared outside a test module, assigned at least once
 in production, never read in production, and read at least once from a test.
 

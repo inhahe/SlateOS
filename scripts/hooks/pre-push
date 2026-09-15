@@ -133,6 +133,12 @@
 #      second while the boot test that used to catch it costs thirty-five
 #      minutes -- and the cost of catching it late lands on whichever lane
 #      merges next, not on whoever wrote it.
+#  46. Refuse a failing test in a crate `[workspace] exclude` keeps out of
+#      `cargo test --workspace`. Gate 40 above compiles those crates; this
+#      one runs the 188 tests in the four they link, which no command in
+#      this repository executed before 2026-09-15. Its subject list is read
+#      from the exclude list rather than written down, so the next crate
+#      anyone excludes is covered without anybody remembering to add it.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -5160,6 +5166,95 @@ missing futex, and deleting the stub alone would have removed it.
 
 To push anyway:
     ALLOW_DUPLICATE_EXPORTS=1 git push origin ...
+EOF
+    exit 1
+fi
+
+
+# ---------------------------------------------------------------------------
+# Gate 46 -- excluded-crate tests.  The 188 tests that no command ran.
+#
+# Gate 40 above compiles the six crates under services/ because they are not
+# workspace members and nothing else builds them.  Its comment is exact about
+# the half it covers: "Compiles, does not test: those crates have no
+# host-runnable tests."  Still true -- all six contain zero #[test].
+#
+# But gate 40 also triggers on netproto/, netipc/ and netring/, because
+# netstack links them.  Those three are excluded from the workspace too, and
+# unlike the services they are full of tests -- 79, 41 and 9, plus 59 in
+# tzrules.  On 2026-09-15 a grep of every .sh, .py, .ps1, .yml and .toml in
+# this repository for a `cargo test` naming any of the four returned ZERO
+# matches.  All 188 passed when finally run, which is the good case and also
+# the one that hides: nothing here would have said otherwise.
+#
+# scripts/untested-crates-baseline.txt is why this matters more than an
+# unrun suite usually would.  It excuses services/netstack -- 4,329 lines --
+# because "the protocol logic IS tested, in the shared crates it delegates
+# to".  That sentence was true about the tests existing and false about them
+# running, so the largest crate in this lane's bare-metal tree was resting on
+# a suite nothing executed.  This gate is what makes the sentence true.
+#
+# The subject list is READ FROM `[workspace] exclude`, not written down here.
+# Hardcoding the four would rebuild the same defect one level up: the next
+# crate anyone excludes would be invisible again, and the gate would keep
+# printing a clean verdict over a shrinking share of the tree.
+#
+# ~3 s for all four warm.
+# ---------------------------------------------------------------------------
+exclt="${repo_root:-.}/scripts/check-excluded-crate-tests.py"
+skip_exclt=0
+# Bypass: ALLOW_EXCLUDED_CRATE_TESTS=1 git push origin <branch>
+if [ "${ALLOW_EXCLUDED_CRATE_TESTS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_EXCLUDED_CRATE_TESTS=1 set -- skipping the excluded-crate-tests gate." >&2
+    skip_exclt=1
+fi
+[ -n "$py" ] || skip_exclt=1
+[ -f "$exclt" ] || skip_exclt=1
+# The four crates themselves, and Cargo.toml -- the exclude list is this
+# gate's input, so a push that edits it must re-run discovery.
+touches netproto/ netipc/ netring/ tzrules/ services/ Cargo.toml         scripts/check-excluded-crate-tests.py || skip_exclt=1
+note_gate excluded-crate-tests "$skip_exclt"
+
+exclt_failed=0
+if [ "$skip_exclt" != "1" ]; then
+    # The checker before its verdict.  Its silent failure is discovery
+    # returning nothing: it would then run zero tests and print a clean
+    # verdict, which is the exact shape of the defect it exists to catch.
+    # The script answers that with exit 2 rather than 0, and the self-test
+    # covers the parsing and expansion that feed it.
+    if ! run_checker excluded-crate-tests-selftest "$py" "$exclt" --selftest; then
+        echo "pre-push: check-excluded-crate-tests.py FAILED ITS OWN SELF-TEST -- its verdict is not trustworthy." >&2
+        exclt_failed=1
+    else
+        if ! run_checker excluded-crate-tests "$py" "$exclt"; then
+            exclt_failed=1
+        fi
+    fi
+fi
+
+if [ "$exclt_failed" != "0" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push -- a test in a workspace-excluded crate failed.
+
+Nothing else in this repository runs these.  They are not workspace members,
+so \`cargo test --workspace\` skips them and \`cargo test -p netproto\` answers
+"did not match any packages".  Before this gate existed, a break here waited
+for a rootfs rebuild or a boot to surface.
+
+Note which crate: netproto, netipc and netring are linked into BOTH
+services/netstack and the kernel, and tzrules into the libc and the shell, so
+one failure here is a claim about two halves of the system at once.
+
+Run one directly:
+    cargo test --manifest-path netproto/Cargo.toml \
+        --target x86_64-pc-windows-gnu --target-dir target
+
+An exit of 2 rather than 1 means discovery found nothing to run.  That is not
+a pass -- check \`[workspace] exclude\` in Cargo.toml and the paths under it.
+
+To push anyway:
+    ALLOW_EXCLUDED_CRATE_TESTS=1 git push origin ...
 EOF
     exit 1
 fi

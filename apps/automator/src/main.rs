@@ -4103,6 +4103,60 @@ mod tests {
     /// and both reachable -- through a text box inside this window. A round
     /// trip nobody can get anything out of: **a macro you spent ten minutes
     /// recording lived exactly as long as the window did.**
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event. This is
+    /// the half routing decides: with a dialog up, a keystroke belongs to the
+    /// dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_action_list() {
+        let mut app = AutomatorApp::new();
+        let id = app.new_macro("Clicks");
+        if let Some(m) = app.library.macros.iter_mut().find(|m| m.id == id) {
+            m.actions = vec![
+                TimedAction {
+                    delay_ms: 0,
+                    action: MacroAction::KeyPress {
+                        key_name: String::from("a"),
+                    },
+                },
+                TimedAction {
+                    delay_ms: 0,
+                    action: MacroAction::KeyPress {
+                        key_name: String::from("b"),
+                    },
+                },
+            ];
+        }
+        app.selected_action_idx = Some(0);
+        let before = app.selected_action_idx;
+
+        // Plain `O` opens the read picker: this app refuses modified keys on
+        // purpose, so its door is an unmodified letter.
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::O,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from("o"),
+        }));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Down,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert_eq!(
+            app.selected_action_idx, before,
+            "Down at the open dialog moved the action selection behind it"
+        );
+    }
+
     #[test]
     fn a_macro_survives_a_write_and_a_read() {
         let path = auto_dir().join("clicks.macro");

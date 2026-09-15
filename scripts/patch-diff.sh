@@ -84,6 +84,11 @@ printf 'start\n\tindented a b\nend\n'                     > "$proto/a/ws.txt"
 # trips the reversed/already-applied detection. This is the only shape `-N`
 # changes the answer for.
 printf 'alpha\nbravo\nCHANGED\ndelta\n'                   > "$proto/a/applied.txt"
+# Indented with TABS in the lines the hunk only uses as CONTEXT, against a
+# patch that spells them with spaces. ws.txt above cannot catch a context-line
+# rewrite, because the only line it differs on is the one the hunk changes
+# anyway -- a fixture that cannot distinguish the two answers.
+printf '\tctx one\nchangeme\n\tctx two\n'                 > "$proto/a/wsctx.txt"
 # A file the patches will not touch, so a side that rewrote the whole tree is
 # caught rather than merely a side that got one file wrong.
 printf 'untouched\n'                                    > "$proto/a/keep.txt"
@@ -121,6 +126,8 @@ cp "$proto/a/sub/deep.txt" "$mk/deep.txt"
 printf 'nested\nCHANGED\nhere\n'                        > "$mk/deep.new"
 # Four SPACES: what ws.patch's context line will say, against a target that
 # uses a tab.
+printf '    ctx one\nchangeme\n    ctx two\n'             > "$mk/wsctx.txt"
+printf '    ctx one\nCHANGED\n    ctx two\n'              > "$mk/wsctx.new"
 printf 'alpha\nbravo\ncharlie\ndelta\n'                   > "$mk/applied.old"
 printf 'alpha\nbravo\nCHANGED\ndelta\n'                   > "$mk/applied.new"
 printf 'start\n    indented a b\nend\n'                 > "$mk/ws.txt"
@@ -151,6 +158,8 @@ printf 'alpha\ncaf\351 comment\nCHANGED\ndelta\n'        > "$mk/latin1.new"
     ws.txt ws.new ) > "$patches/ws.patch" || true
 ( cd "$mk" && /usr/bin/diff -u --label x/a/applied.txt --label y/a/applied.txt \
     applied.old applied.new ) > "$patches/applied.patch" || true
+( cd "$mk" && /usr/bin/diff -u --label x/a/wsctx.txt --label y/a/wsctx.txt \
+    wsctx.txt wsctx.new ) > "$patches/wsctx.patch" || true
 ( cd "$mk" && /usr/bin/diff -u --label x/a/nonl.txt --label y/a/nonl.txt \
     nonl.txt nonl.new ) > "$patches/nonl.patch" || true
 # Two deep path components, so -p0, -p1 and -p2 all land somewhere different.
@@ -383,6 +392,11 @@ run_case u.patch -p1 --ignore-whitespace
 # parsed and then read by nothing. These three do not have that property: the
 # target is indented with a tab and the patch with four spaces.
 run_case ws.patch -p1 -l
+# `-l` must not REWRITE what it loosely matched. The context lines here are
+# tab-indented in the target and space-indented in the patch, and GNU leaves
+# the target's tabs alone -- only the line the hunk actually changes is
+# rewritten. Emitting the patch's spelling instead reindents the file silently.
+run_case wsctx.patch -p1 -l
 run_case ws.patch -p1 --ignore-whitespace
 # ...and without the flag the same patch must be refused, by both sides alike.
 # This is the half that fails if `-l` is ever wired on by default.

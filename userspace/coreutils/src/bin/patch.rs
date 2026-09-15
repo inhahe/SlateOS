@@ -1093,10 +1093,31 @@ fn apply_hunk(
         result.extend_from_slice(head);
     }
 
+    // A CONTEXT line is emitted as the FILE has it, NOT as the patch spells
+    // it. Under exact matching the two are the same bytes, which is why this
+    // went unnoticed for as long as exact matching was all there was. Under
+    // `-l` they are not: the patch may use four spaces where the file uses a
+    // tab, and both are "the same line". GNU keeps the file's -- measured, a
+    // tab-indented file patched with a space-indented patch comes back still
+    // indented with tabs, and only the line the hunk genuinely changes is
+    // rewritten.
+    //
+    // Emitting the patch's text instead silently reindents every context line
+    // the hunk covers, which is a whitespace rewrite nobody asked for and the
+    // diff would not show as a change of content.
+    let mut src = pos;
     for hl in &hunk.lines {
         match hl {
-            HunkLine::Context(s) | HunkLine::Add(s) => result.push(s.clone()),
-            HunkLine::Remove(_) => {} // skip removed lines
+            HunkLine::Context(s) => {
+                // `unwrap_or_else` cannot normally fire: the hunk matched
+                // here, so the line exists. It is the patch's text rather
+                // than a panic if a future caller ever matches past the end.
+                result.push(lines.get(src).cloned().unwrap_or_else(|| s.clone()));
+                src = src.saturating_add(1);
+            }
+            HunkLine::Add(s) => result.push(s.clone()),
+            // Skipped from the output, but it still consumed a file line.
+            HunkLine::Remove(_) => src = src.saturating_add(1),
         }
     }
 

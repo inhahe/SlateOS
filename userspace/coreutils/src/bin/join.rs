@@ -1437,7 +1437,9 @@ fn option_with_argument(
         b'j' => {
             if attached_at_2 && (value == b"1" || value == b"2") {
                 let which = usize::from(value == b"2");
-                parse.joption_count[which] = parse.joption_count[which].saturating_add(1);
+                if let Some(slot) = parse.joption_count.get_mut(which) {
+                    *slot = slot.saturating_add(1);
+                }
                 *current = if which == 1 {
                     Status::MightBeJ2Arg
                 } else {

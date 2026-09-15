@@ -1176,8 +1176,8 @@ fn move_all<O: Write, E: Write>(
         );
     }
 
-    let mut state = if sources.len() == 1 {
-        match rename_noreplace(Path::new(&sources[0]), last) {
+    let mut state = if let [only] = sources {
+        match rename_noreplace(Path::new(only), last) {
             Ok(()) => Renamed::Done,
             Err(e) => Renamed::Failed(e),
         }

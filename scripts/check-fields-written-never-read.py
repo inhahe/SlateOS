@@ -60,6 +60,13 @@ BASELINE = (
 FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:\s*[A-Za-z_&<(\[]")
 STRUCT = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Z]\w*)")
 ACCESS = re.compile(r"\.([a-z_][a-z0-9_]*)")
+# `let Self { title, completed_at, .. } = self;` reads every name it binds,
+# and not one of them is written `.field`. Without this, a struct that
+# serialises itself by destructuring looks like a struct nobody reads --
+# `apps/reminders` writes `completed_at` into its JSON exactly that way and was
+# reported as throwing it away.
+DESTRUCTURE_OPEN = re.compile(r"^\s*let\s+(?:Self|[A-Z]\w*)\s*\{")
+BOUND_NAME = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*,?\s*$")
 
 
 def detect(roots=rustscan.LANE_C_ROOTS, root=None):
@@ -71,8 +78,20 @@ def detect(roots=rustscan.LANE_C_ROOTS, root=None):
 
     for path, lines, inside in rustscan.scanned(roots, root):
         in_struct = False
+        in_destructure = False
         depth = 0
         for n, line in enumerate(lines):
+            # A destructuring pattern reads every field it names.
+            if in_destructure:
+                m = BOUND_NAME.match(line)
+                if m:
+                    reads[(m.group(1), inside[n])] += 1
+                if "}" in line:
+                    in_destructure = False
+                continue
+            if DESTRUCTURE_OPEN.match(line) and "=" not in line:
+                in_destructure = True
+                continue
             if STRUCT.search(line):
                 in_struct = "{" in line
                 depth = line.count("{") - line.count("}")
@@ -278,6 +297,29 @@ def self_test():
                 fn t() { let e = Eps::new(); assert_eq!(e.title, "x"); }
             }
             """,
+        # 7. A destructuring pattern reads every field it binds, and binds
+        #    them by bare name -- no `.field` anywhere. `apps/reminders`
+        #    serialises itself with `let Self { .., completed_at, .. } = self;`
+        #    and was reported as throwing the value away.
+        "apps/eta/src/main.rs": """
+            pub struct Eta {
+                pub kept: String,
+            }
+            impl Eta {
+                fn go(&mut self) { self.kept = "x".to_string(); }
+                fn to_json(&self) -> String {
+                    let Self {
+                        kept,
+                    } = self;
+                    format!("{kept}")
+                }
+            }
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn t() { let e = Eta::new(); assert_eq!(e.kept, "x"); }
+            }
+            """,
         # 6. A match guard reads the field. `=>` is not `=`, and reading it
         #    as one turns every rule expressed as a guard into a "write",
         #    which leaves the field with no reads and reports live logic as
@@ -309,7 +351,7 @@ def self_test():
     # and watching the self-test go red. The first version had only case 1,
     # passed, and was blind to both 4 and 5.
     expected = {"last_export", "caption", "title"}
-    forbidden = {"shown", "counted", "scratch", "broken"}
+    forbidden = {"shown", "counted", "scratch", "broken", "kept"}
 
     with tempfile.TemporaryDirectory(prefix="fieldscan_selftest_") as tmp:
         base = pathlib.Path(tmp)

@@ -20,6 +20,12 @@
 #
 # Format: <path>:<field name>, one per line. `#` starts a comment.
 #
+# `apps/reminders/src/main.rs:completed_at` was here and was a FALSE
+# POSITIVE. It is written into the program's JSON by
+# `let Self { .., completed_at, .. } = self;` -- a destructuring pattern
+# reads every field it binds, and binds them by bare name, so there is no
+# `.field` anywhere for a textual detector to see. Fixed, with a fixture.
+#
 # A line here that no longer matches anything is FATAL, not harmless: it
 # would silently suppress that field if it came back. Delete it when the
 # field is fixed.
@@ -82,7 +88,6 @@ apps/diskcleanup/src/main.rs:path_pattern
 apps/diskcleanup/src/main.rs:min_age_days
 apps/emojipicker/src/main.rs:last_selected
 apps/netmanager/src/main.rs:diagnostics_running
-apps/reminders/src/main.rs:completed_at
 apps/remotedesktop/src/main.rs:content_size_bytes
 apps/videoplayer/src/main.rs:seek_preview_position
 gui/desktop/src/backup_settings.rs:last_backup_timestamp

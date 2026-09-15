@@ -84,6 +84,40 @@ terminator before comparing — and the formatter has to emit the
 and context output alike. Upstream diffutils carries a flag per side for exactly
 this.
 
+## TD-B-GDB-ARGS-LOSES-AN-ARGUMENT-THAT-SPELLS-ONE-OF-GDBS-OWN — 2026-09-15 — OPEN
+
+**In short:** `gdb --args ./prog -q` quiets **gdb** instead of passing `-q` to
+the program. Anything after the program that happens to spell one of gdb's own
+short options is taken by gdb, which is the one case `--args` exists to
+prevent.
+
+**Why.** `parse_args_gdb` is a `match` over each argument, and the arms for
+gdb's own options (`-q`, `-v`, `-h`, `-x`) are tried before the branch that
+collects arguments for the program. Arm order decides ownership, and it is
+decided before anything knows whether `--args` has already been seen.
+
+**The fix** is to test `args.pass_args && args.binary_path.is_some()` FIRST, so
+that once a program has been named every remaining argument belongs to it
+whatever it spells. That is a change to the shape of the loop rather than to
+one arm, which is why it is not folded into the commit that made `--args`
+collect at all: that commit's claim is "the arguments are no longer silently
+dropped", and widening it to "and ownership is decided correctly" would make
+one commit answer two questions.
+
+**It is pinned, not merely noted.** `args_still_loses_an_argument_spelling_one_of_gdbs_own`
+asserts the current wrong behaviour on purpose, so whoever reorders the arms
+sees a red test and updates it deliberately instead of discovering later that
+something else depended on the old order.
+
+**Scope.** Undeliverable either way today: this build cannot run a program at
+all (`posix::ptrace` returns ENOSYS), so the arguments are reported rather than
+passed. The defect is in which of them get reported, and it becomes
+user-visible the moment ptrace lands.
+
+**Where it lives:** `userspace/gdb/src/main.rs`, `parse_args_gdb`.
+
+---
+
 ## TD-B-CURL-MAX-TIME-IS-CHECKED-BETWEEN-READS-NOT-DURING-ONE — 2026-09-15 — OPEN
 
 **In short:** `curl --max-time 30` now works, but only at read boundaries. A

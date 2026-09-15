@@ -3577,6 +3577,25 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
     let mut i = 1;
     while i < arg_ptrs.len() {
         let arg = arg_ptrs[i];
+
+        // OWNERSHIP IS DECIDED HERE, ahead of the match, and that position is
+        // the whole fix. The arms below claim `-q`, `-v`, `-h` and `-x` by
+        // spelling, and a match arm cannot ask whether the argument is even
+        // gdb's to claim -- so `gdb --args ./prog -q` quieted GDB and dropped
+        // `-q` from the program's argv. That is precisely the case `--args`
+        // exists to prevent, so the bug was in the one feature meant to cure
+        // it.
+        //
+        // Once a program has been named under `--args`, every remaining
+        // argument is the program's whatever it spells: `-q`, `--version`,
+        // `-x`, `--args` again, or a bare word. gdb's own options have to be
+        // given BEFORE the program, which is what real gdb requires too.
+        if args.pass_args && args.binary_path.is_some() {
+            args.inferior_args.push(arg.to_vec());
+            i += 1;
+            continue;
+        }
+
         match arg {
             b"--help" | b"-h" => {
                 args.show_help = true;
@@ -3600,21 +3619,10 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
                 if arg[0] != b'-' {
                     if args.binary_path.is_none() {
                         args.binary_path = Some(arg.to_vec());
-                    } else if args.pass_args {
-                        // Everything after the program is the program's, which
-                        // is what `--args` means. Without this branch they hit
-                        // the `if` above, find `binary_path` already set, and
-                        // fall off the end of the match.
-                        args.inferior_args.push(arg.to_vec());
                     }
-                } else if args.pass_args && args.binary_path.is_some() {
-                    // A DASHED argument after the program is the program's
-                    // too, and is the reason `--args` exists at all: `gdb
-                    // --args ./prog -q` must not read `-q` as gdb's own quiet
-                    // flag. It does not reach here -- `-q` matches an arm
-                    // above -- which is a separate defect recorded in
-                    // known-issues rather than fixed under cover of this one.
-                    args.inferior_args.push(arg.to_vec());
+                    // A second bare word WITHOUT `--args` is still ignored,
+                    // as it always was. With `--args` it never arrives here:
+                    // the ownership test at the top of the loop took it.
                 } else if arg != b"-" && args.unknown_option.is_none() {
                     // Was silently dropped, so `gdb --zzq` printed its banner
                     // and opened a debugger prompt. A non-dash argument is
@@ -3938,23 +3946,66 @@ mod tests {
         assert_eq!(a.binary_path.as_deref(), Some(&b"./prog"[..]));
     }
 
-    /// KNOWN WRONG, PINNED ON PURPOSE. An argument after the program that
-    /// happens to spell one of gdb's own short options is still eaten by
-    /// gdb: the match arm for `-q` is tried before the `--args` branch, so
-    /// `gdb --args ./prog -q` quiets gdb instead of passing `-q` along.
+    /// After `--args` names a program, every later argument is the PROGRAM'S,
+    /// whatever it spells. This replaces a test that pinned the opposite on
+    /// purpose (`args_still_loses_an_argument_spelling_one_of_gdbs_own`,
+    /// known-issues `TD-B-GDB-ARGS-LOSES-AN-ARGUMENT-THAT-SPELLS-ONE-OF-GDBS-OWN`).
     ///
-    /// Asserted rather than left undiscovered so that anyone who fixes the
-    /// arm ordering sees this test fail and updates it deliberately. See
-    /// known-issues.md
-    /// `TD-B-GDB-ARGS-LOSES-AN-ARGUMENT-THAT-SPELLS-ONE-OF-GDBS-OWN`.
+    /// Asserting the RULE and not the one symptom: the old defect was arm
+    /// ordering, so every option gdb spells was affected, and a test naming
+    /// only `-q` would pass again the moment somebody added a `-p` arm.
     #[test]
-    fn args_still_loses_an_argument_spelling_one_of_gdbs_own() {
+    fn args_hands_every_later_argument_to_the_program_whatever_it_spells() {
+        // The exact case from the tech-debt entry.
         let a = parse_gdb(&["gdb", "--args", "./prog", "-q"]);
-        assert!(a.quiet, "gdb took it (the defect)");
+        assert!(!a.quiet, "`-q` after the program is not gdb's");
+        assert_eq!(a.inferior_args, vec![b"-q".to_vec()]);
+        assert_eq!(a.binary_path.as_deref(), Some(&b"./prog"[..]));
+
+        // Every other arm gdb claims by spelling, including the option that
+        // starts this behaviour and an argument that takes a value. `-x`
+        // must NOT swallow `foo` as gdb's command file.
+        let a = parse_gdb(&[
+            "gdb",
+            "--args",
+            "./prog",
+            "--version",
+            "-x",
+            "foo",
+            "--args",
+            "-h",
+            "bare",
+        ]);
         assert!(
-            a.inferior_args.is_empty(),
-            "and the program never sees it (the defect)"
+            !a.show_version,
+            "`--version` after the program is not gdb's"
         );
+        assert!(!a.show_help, "`-h` after the program is not gdb's");
+        assert_eq!(a.command_file, None, "`-x` after the program is not gdb's");
+        assert_eq!(
+            a.inferior_args,
+            vec![
+                b"--version".to_vec(),
+                b"-x".to_vec(),
+                b"foo".to_vec(),
+                b"--args".to_vec(),
+                b"-h".to_vec(),
+                b"bare".to_vec(),
+            ]
+        );
+
+        // The control. gdb's own options still work BEFORE the program --
+        // without this the "fix" could be a parser that ignores `-q` always,
+        // and the assertions above would not notice.
+        let a = parse_gdb(&["gdb", "-q", "--args", "./prog", "-q"]);
+        assert!(a.quiet, "`-q` before `--args` is still gdb's");
+        assert_eq!(a.inferior_args, vec![b"-q".to_vec()]);
+
+        // And `--args` with no program yet claims nothing: the first bare
+        // word is the program, not an inferior argument.
+        let a = parse_gdb(&["gdb", "--args", "./prog"]);
+        assert_eq!(a.binary_path.as_deref(), Some(&b"./prog"[..]));
+        assert!(a.inferior_args.is_empty());
     }
 
     // ---- Helper ----

@@ -366,7 +366,7 @@ option loop, `refuse_unimplemented`, and `parse_cpu_range`.
 
 ---
 
-## TD-B-GDB-ARGS-LOSES-AN-ARGUMENT-THAT-SPELLS-ONE-OF-GDBS-OWN — 2026-09-15 — OPEN
+## TD-B-GDB-ARGS-LOSES-AN-ARGUMENT-THAT-SPELLS-ONE-OF-GDBS-OWN — 2026-09-15 — FIXED same day
 
 **In short:** `gdb --args ./prog -q` quiets **gdb** instead of passing `-q` to
 the program. Anything after the program that happens to spell one of gdb's own
@@ -386,10 +386,29 @@ collect at all: that commit's claim is "the arguments are no longer silently
 dropped", and widening it to "and ownership is decided correctly" would make
 one commit answer two questions.
 
-**It is pinned, not merely noted.** `args_still_loses_an_argument_spelling_one_of_gdbs_own`
-asserts the current wrong behaviour on purpose, so whoever reorders the arms
-sees a red test and updates it deliberately instead of discovering later that
-something else depended on the old order.
+**It was pinned, not merely noted**, and that is what made the fix safe:
+`args_still_loses_an_argument_spelling_one_of_gdbs_own` asserted the wrong
+behaviour on purpose, so the reorder could not happen by accident.
+
+**FIXED.** The ownership test now runs at the top of the loop, ahead of the
+match, so once `--args` has named a program every remaining argument is the
+program's whatever it spells. Both hand-rolled forwarding branches inside the
+`_` arm became unreachable and were deleted with it.
+
+The pinned test is replaced by
+`args_hands_every_later_argument_to_the_program_whatever_it_spells`, which
+asserts the RULE rather than the one symptom -- a test naming only `-q` would
+have started passing again the moment somebody added a `-p` arm. It covers
+`--version`, `-h`, `-x` (which must not swallow the next argument as gdb's
+command file), a second `--args`, and a bare word.
+
+It carries a control, and the control is the point: `gdb -q --args ./prog -q`
+must still quiet gdb from the FIRST `-q`. Without that assertion the suite
+would also pass against a parser that ignored `-q` everywhere, which is a
+different bug with the same green run.
+
+Two-probed: with the hoist removed the new test fails at its first assertion;
+with it restored, 128 pass and clippy is clean.
 
 **Scope.** Undeliverable either way today: this build cannot run a program at
 all (`posix::ptrace` returns ENOSYS), so the arguments are reported rather than

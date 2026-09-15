@@ -49,6 +49,8 @@ import pathlib
 import re
 import sys
 
+from rustlex import live_code, string_literals, strip_noise
+
 # Anything that reaches outside the process.
 CAPABILITY = re.compile(
     r"std::fs\b|std::net\b|std::process::Command|safeio::|FileDialog|list_directory"
@@ -77,17 +79,6 @@ ADMITS = re.compile(
     r"|unavailable|unimplemented|under construction|has no |never (fetched|examined|contacted|sent)",
     re.I,
 )
-
-# Literals come from a real lexer, not from `re.findall('"(...)"')`.
-#
-# The naive version was wrong here in the direction that hides work: a single
-# quotation mark inside a `//` comment pairs with the next one in code, and the
-# three lines of source between them are returned as one "literal". If any
-# comment in the crate contained the word "cannot", the crate was counted as
-# admitting and skipped -- so this script quietly cleared crates it should have
-# reported, and nobody goes looking for what a tool did not print.
-from rustlex import live_code, string_literals
-
 
 def main():
     roots = ["apps"]
@@ -119,10 +110,22 @@ def main():
                 for f in sorted((crate / "src").rglob("*.rs"))
             )
 
-            if CAPABILITY.search(prod):
+            # Looked for in CODE, not in the raw source. A crate whose
+            # module doc says it "contains no reference to `std::fs`" was
+            # counted as having std::fs -- and since a capable crate is
+            # skipped, the sentence denying the capability was what excused
+            # the crate from the check. `apps/undelete` is the case.
+            if CAPABILITY.search(strip_noise(prod)):
                 capable += 1
                 continue
 
+            # Literals come from the lexer, not from `re.findall('"(...)"')`.
+            # The naive version failed toward silence: one quotation mark in a
+            # `//` comment pairs with the next one in code, and the source
+            # between comes back as a "literal", so any comment containing the
+            # word "cannot" made a crate that admits nothing look like one that
+            # does -- and it was skipped. Nobody goes looking for what a tool
+            # did not print.
             said = [s for s in string_literals(prod) if ADMITS.search(s)]
             if said:
                 admitting += 1

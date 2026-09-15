@@ -354,48 +354,6 @@ impl ScalePercent {
 // Network types
 // ============================================================================
 
-/// Network adapter entry for the network page.
-#[derive(Clone, Debug)]
-pub struct NetworkAdapter {
-    pub name: String,
-    pub adapter_type: AdapterType,
-    pub connected: bool,
-    pub ip_address: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdapterType {
-    Ethernet,
-    WiFi,
-    Loopback,
-}
-
-impl AdapterType {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Ethernet => "Ethernet",
-            Self::WiFi => "Wi-Fi",
-            Self::Loopback => "Loopback",
-        }
-    }
-}
-
-/// IP configuration mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IpConfigMode {
-    Dhcp,
-    Static,
-}
-
-impl IpConfigMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Dhcp => "DHCP (Automatic)",
-            Self::Static => "Static",
-        }
-    }
-}
-
 // ============================================================================
 // Sound types
 // ============================================================================
@@ -576,16 +534,6 @@ pub struct SettingsState {
     input_dirty: bool,
 
     // Network
-    pub adapters: Vec<NetworkAdapter>,
-    pub selected_adapter: usize,
-    pub ip_config_mode: IpConfigMode,
-    pub static_ip: String,
-    pub static_gateway: String,
-    pub dns_primary: String,
-    pub dns_secondary: String,
-    pub proxy_enabled: bool,
-    pub proxy_address: String,
-    pub proxy_port: String,
 
     // Accounts settings
     pub user_accounts: Vec<UserAccount>,
@@ -737,7 +685,6 @@ pub enum DropdownId {
     Resolution,
     RefreshRate,
     Scale,
-    IpConfig,
     ColorFilter,
     CursorSize,
     NarratorVerbosity,
@@ -762,14 +709,13 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 11] = [
+    pub const FIXED: [Self; 10] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
         Self::Scale,
-        Self::IpConfig,
         Self::ColorFilter,
         Self::CursorSize,
         Self::NarratorVerbosity,
@@ -1093,35 +1039,6 @@ impl SettingsState {
             appearance: AppearanceFile::new(),
 
             // Network defaults
-            adapters: vec![
-                NetworkAdapter {
-                    name: "eth0".into(),
-                    adapter_type: AdapterType::Ethernet,
-                    connected: true,
-                    ip_address: "192.168.1.100".into(),
-                },
-                NetworkAdapter {
-                    name: "wlan0".into(),
-                    adapter_type: AdapterType::WiFi,
-                    connected: false,
-                    ip_address: String::new(),
-                },
-                NetworkAdapter {
-                    name: "lo".into(),
-                    adapter_type: AdapterType::Loopback,
-                    connected: true,
-                    ip_address: "127.0.0.1".into(),
-                },
-            ],
-            selected_adapter: 0,
-            ip_config_mode: IpConfigMode::Dhcp,
-            static_ip: "192.168.1.100".into(),
-            static_gateway: "192.168.1.1".into(),
-            dns_primary: "1.1.1.1".into(),
-            dns_secondary: "8.8.8.8".into(),
-            proxy_enabled: false,
-            proxy_address: String::new(),
-            proxy_port: String::new(),
 
             // Accounts: empty until `load_user_accounts` reads the database.
             user_accounts: Vec::new(),
@@ -1495,38 +1412,6 @@ fn render_disabled_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, 
     tree.text(x + 12.0, y + 8.0, label, pal.overlay0, 13.0);
 }
 
-/// Draw a read-only text field showing `value`, inset within a row at `y`.
-fn render_text_field(
-    tree: &mut RenderTree,
-    pal: &Palette,
-    x: f32,
-    y: f32,
-    value: &str,
-    width: f32,
-) {
-    let field_y = y + 6.0;
-    let field_h = 32.0;
-    fill_rounded(tree, x, field_y, width, field_h, pal.surface0, 6.0);
-    tree.push(RenderCommand::StrokeRect {
-        x,
-        y: field_y,
-        width,
-        height: field_h,
-        color: pal.overlay0,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(6.0),
-    });
-    text_clipped(
-        tree,
-        x + 8.0,
-        field_y + 8.0,
-        value,
-        pal.text,
-        13.0,
-        width - 16.0,
-    );
-}
-
 // --- Theme cards and colour swatches ---------------------------------------
 //
 // Grids rather than rows, so they get their geometry named here for the same
@@ -1847,7 +1732,6 @@ const BUTTON_ROW_INSET_Y: f32 = 6.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToggleId {
     NightLight,
-    ProxyEnabled,
     AutoLogin,
     /// Whether the `n`-th program in the notification list makes a sound.
     NotifSound(usize),
@@ -2040,7 +1924,6 @@ enum PillId {
 enum SelectId {
     ThemeMode,
     AccentColor,
-    Adapter,
     Account,
     PointerSize,
     AccountPicture,
@@ -2338,14 +2221,6 @@ trait PageSink {
     fn value_row(&mut self, label: &str, value: &str, color: Color) {
         self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
             tree.text(cx, y + 14.0, value, color, 13.0);
-        });
-    }
-
-    /// A row whose control is a read-only text field.
-    fn field_row(&mut self, label: &str, value: &str, width: f32) {
-        let pal = &self.palette();
-        self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
-            render_text_field(tree, pal, cx, y, value, width);
         });
     }
 
@@ -3374,80 +3249,65 @@ impl SettingsState {
 
     // --- Network status page ---
 
+    /// The Network Status page.
+    ///
+    /// It used to list three network adapters -- `eth0`, Ethernet, connected,
+    /// 192.168.1.100; `wlan0`, Wi-Fi, disconnected; `lo`, loopback,
+    /// 127.0.0.1 -- each with a green or grey dot for its link state. All
+    /// three were written into the source as constants. **This system cannot
+    /// enumerate its network interfaces**: there is no such call in `net/`,
+    /// which carries a DNS resolver and an HTTP client and nothing that asks
+    /// the kernel what hardware is present, and no service between a GUI
+    /// application and the kernel's own interfaces.
+    ///
+    /// A green dot beside a name and an address is the strongest claim a
+    /// status page can make -- it says "I looked, and this is what is there".
+    ///
+    /// The address fields went for a second reason, which outlasts the first.
+    /// Nothing reads them. `net/dns` does define a `ResolverConfig` and parse
+    /// `resolv.conf`, so the *format* exists, but no program in this tree
+    /// loads one -- so a nameserver typed here would be stored in this
+    /// window's memory until it closed. Same for the proxy, whose page below
+    /// says so in its own words.
     fn build_network_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
         s.section("Network Adapters");
-        let control_x = s.control_x();
-        for (idx, adapter) in self.adapters.iter().enumerate() {
-            let selected = idx == self.selected_adapter;
-            s.list_row(
-                SelectId::Adapter,
-                idx,
-                ITEM_HEIGHT,
-                ITEM_HEIGHT + 4.0,
-                move |tree, x, y| {
-                    let row_bg = if selected {
-                        pal.surface0
-                    } else {
-                        Color::TRANSPARENT
-                    };
-                    fill_rounded(tree, x - 8.0, y, 600.0, ITEM_HEIGHT, row_bg, 6.0);
-
-                    let status_color = if adapter.connected {
-                        pal.green
-                    } else {
-                        pal.overlay0
-                    };
-                    fill_rounded(tree, x, y + 18.0, 10.0, 10.0, status_color, 5.0);
-
-                    tree.text(x + 20.0, y + 8.0, &adapter.name, pal.text, 14.0);
-                    tree.text(
-                        x + 20.0,
-                        y + 26.0,
-                        adapter.adapter_type.label(),
-                        pal.subtext0,
-                        11.0,
-                    );
-
-                    let status_text = if adapter.connected {
-                        &adapter.ip_address
-                    } else {
-                        "Disconnected"
-                    };
-                    tree.text(control_x, y + 14.0, status_text, pal.subtext0, 13.0);
-                },
-            );
-        }
+        s.note(
+            "This system cannot list its network interfaces yet. Nothing here              can ask which are present, whether any is connected, or what              address it holds.",
+            44.0,
+        );
+        s.unavailable_row("Interfaces", "Cannot be listed");
         s.gap();
 
         s.section("IP Configuration");
-        s.dropdown_row("Mode", DropdownId::IpConfig, self.ip_config_mode.label());
-
-        if self.ip_config_mode == IpConfigMode::Static {
-            s.field_row("IP Address", &self.static_ip, 180.0);
-            s.field_row("Gateway", &self.static_gateway, 180.0);
-        }
+        s.note(
+            "There is no interface to configure, and nothing on this system              reads an address typed here.",
+            28.0,
+        );
+        s.unavailable_row("IPv4 address", "Unknown");
+        s.unavailable_row("Gateway", "Unknown");
         s.gap();
 
-        s.section("DNS Servers");
-        s.field_row("Primary DNS", &self.dns_primary, 180.0);
-        s.field_row("Secondary DNS", &self.dns_secondary, 180.0);
+        s.section("DNS");
+        s.note(
+            "No program on this system loads a resolver configuration, so a              nameserver set here would reach nothing. The format is defined --              `net/dns` parses `resolv.conf` -- but nothing reads the file.",
+            44.0,
+        );
+        s.unavailable_row("Preferred DNS", "Not configured");
+        s.unavailable_row("Alternate DNS", "Not configured");
     }
 
-    // --- Proxy page ---
-
+    /// The Proxy page.
+    ///
+    /// Empty of controls for the same reason as the page above: the address
+    /// and port were held in this window and read by nothing. `net/httpclient`
+    /// takes no proxy, so even a stored value would have had no consumer.
     fn build_proxy_page<S: PageSink>(&self, s: &mut S) {
-        s.section("Proxy Configuration");
-        s.toggle_row(
-            "Use Proxy Server",
-            ToggleId::ProxyEnabled,
-            self.proxy_enabled,
+        s.section("Proxy");
+        s.note(
+            "Nothing on this system routes through a proxy. `net/httpclient`              connects directly and takes no proxy setting, so an address              entered here would be read by nothing.",
+            44.0,
         );
-
-        if self.proxy_enabled {
-            s.field_row("Proxy Address", &self.proxy_address, 220.0);
-            s.field_row("Port", &self.proxy_port, 80.0);
-        }
+        s.unavailable_row("HTTP proxy", "Not supported");
     }
 
     // --- Accounts page ---
@@ -4287,18 +4147,6 @@ impl SettingsState {
                     .unwrap_or(0);
                 (items, current)
             }
-            DropdownId::IpConfig => {
-                let items = vec![
-                    IpConfigMode::Dhcp.label().to_string(),
-                    IpConfigMode::Static.label().to_string(),
-                ];
-                let sel = if self.ip_config_mode == IpConfigMode::Dhcp {
-                    0
-                } else {
-                    1
-                };
-                (items, sel)
-            }
             DropdownId::ColorFilter => {
                 let items: Vec<String> = ColorFilter::ALL
                     .iter()
@@ -4831,11 +4679,6 @@ impl SettingsState {
                     self.appearance.settings.accent_color = *accent;
                 }
             }
-            RowHit::Select(SelectId::Adapter, idx) => {
-                if idx < self.adapters.len() {
-                    self.selected_adapter = idx;
-                }
-            }
             RowHit::Select(SelectId::Account, idx) => {
                 if idx < self.user_accounts.len() {
                     self.selected_account = idx;
@@ -4982,7 +4825,6 @@ impl SettingsState {
     fn toggle_mut(&mut self, id: ToggleId) -> Option<&mut bool> {
         Some(match id {
             ToggleId::NightLight => &mut self.appearance.settings.night_light,
-            ToggleId::ProxyEnabled => &mut self.proxy_enabled,
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
             ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
@@ -5117,13 +4959,6 @@ impl SettingsState {
                 if let Some(fit) = appearance::ImageFit::ALL.get(index) {
                     self.appearance.settings.wallpaper_fit = *fit;
                 }
-            }
-            DropdownId::IpConfig => {
-                self.ip_config_mode = if index == 0 {
-                    IpConfigMode::Dhcp
-                } else {
-                    IpConfigMode::Static
-                };
             }
             DropdownId::ColorFilter => {
                 if let Some(filter) = ColorFilter::ALL.get(index) {
@@ -6187,26 +6022,6 @@ mod tests {
     }
 
     #[test]
-    fn test_network_adapter_selection() {
-        let mut state = SettingsState::new();
-        assert_eq!(state.selected_adapter, 0);
-        state.selected_adapter = 1;
-        state.current_page = SettingsPage::NetworkStatus;
-        let tree = state.render_tree();
-        assert!(!tree.is_empty());
-    }
-
-    #[test]
-    fn test_proxy_toggle() {
-        let mut state = SettingsState::new();
-        assert!(!state.proxy_enabled);
-        state.proxy_enabled = true;
-        state.current_page = SettingsPage::Proxy;
-        let tree = state.render_tree();
-        assert!(!tree.is_empty());
-    }
-
-    #[test]
     fn test_accent_color_selection() {
         let mut state = SettingsState::new();
         assert_eq!(state.appearance.settings.accent_color, AccentColor::Blue);
@@ -6223,17 +6038,6 @@ mod tests {
             assert!(label.contains('x'));
             assert!(!label.is_empty());
         }
-    }
-
-    #[test]
-    fn test_ip_config_mode_toggle() {
-        let mut state = SettingsState::new();
-        state.open_dropdown = Some(DropdownId::IpConfig);
-        state.apply_dropdown_selection(1); // Static
-        assert_eq!(state.ip_config_mode, IpConfigMode::Static);
-        state.open_dropdown = Some(DropdownId::IpConfig);
-        state.apply_dropdown_selection(0); // DHCP
-        assert_eq!(state.ip_config_mode, IpConfigMode::Dhcp);
     }
 
     #[test]
@@ -8811,7 +8615,10 @@ mod loop_tests {
     use oswindow::app::{App as _, drive, open};
 
     use super::tests::center_of;
-    use super::{EventResult, RowHit, SelectId, SettingsPage, SettingsState, SliderId, ThemeMode};
+    use super::{
+        AccountType, EventResult, RowHit, SelectId, SettingsPage, SettingsState, SliderId,
+        ThemeMode, UserAccount,
+    };
 
     /// A left click at a point, as the compositor would deliver it.
     fn click_at(x: f32, y: f32) -> Event {
@@ -8843,9 +8650,38 @@ mod loop_tests {
     /// written down, so a test aims at a control and not at a pixel: a layout
     /// change moves the target with it instead of silently making the click
     /// land on nothing while the test still passes.
+    /// A page with a real control on it, and where to click it.
+    ///
+    /// The accounts are installed here because `SettingsState::new` no longer
+    /// carries any -- they come from the system database via
+    /// `load_user_accounts`, which `main` calls. The tests below used to click
+    /// a *network adapter* row instead, and those are gone: this system cannot
+    /// enumerate its interfaces, so the three it listed were constants. An
+    /// account row is the same shape of control and is backed by something.
+    /// Two accounts, so a list row exists to click.
+    ///
+    /// `mod tests` has its own `account_fixture`; this is a second one rather
+    /// than a shared helper because these two modules deliberately share
+    /// nothing -- `mod tests` drives the model directly and this one drives the
+    /// shipped event loop, and a fixture reaching across would tie the two
+    /// together at exactly the seam that makes them worth having separately.
+    fn two_accounts() -> Vec<UserAccount> {
+        ["Ada", "Grace"]
+            .iter()
+            .map(|name| UserAccount {
+                name: (*name).to_string(),
+                account_type: AccountType::Standard,
+                last_login: "Never".to_string(),
+                is_current: false,
+                picture: 0,
+            })
+            .collect()
+    }
+
     fn control_on(page: SettingsPage, what: RowHit) -> (SettingsState, (f32, f32)) {
         let mut state = SettingsState::new();
         state.current_page = page;
+        state.user_accounts = two_accounts();
         let at = center_of(&state, what)
             .unwrap_or_else(|| panic!("{} has no click target for {what:?}", page.label()));
         (state, at)
@@ -8855,8 +8691,8 @@ mod loop_tests {
     fn settings_draws_once_at_startup_and_then_only_when_something_changed() {
         let (mut events, desktop) = testing::desktop();
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
         // Opened through the harness rather than by hand, so this one test
         // covers the whole path Settings actually ships: `open` asks on the
@@ -8880,7 +8716,7 @@ mod loop_tests {
 
         drive(&mut events, window, &mut state).expect("the loopback connection cannot fail");
 
-        assert_eq!(state.selected_adapter, 1, "the click reached the control");
+        assert_eq!(state.selected_account, 1, "the click reached the control");
         let drawn = desktop.borrow_mut().drawn();
         assert_eq!(
             drawn.len(),
@@ -8906,8 +8742,8 @@ mod loop_tests {
         assert_ne!(mine, theirs);
 
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
 
         {
@@ -8921,7 +8757,7 @@ mod loop_tests {
         drive(&mut events, mine, &mut state).unwrap();
 
         assert_eq!(
-            state.selected_adapter, 0,
+            state.selected_account, 0,
             "a click addressed to another window must not work this one's controls"
         );
         let drawn = desktop.borrow_mut().drawn();
@@ -8936,8 +8772,8 @@ mod loop_tests {
             .unwrap();
 
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
 
         {
@@ -8956,7 +8792,7 @@ mod loop_tests {
         drive(&mut events, window, &mut state).unwrap();
 
         assert_eq!(
-            state.selected_adapter, 0,
+            state.selected_account, 0,
             "the loop went on running after the window was closed"
         );
     }
@@ -9048,8 +8884,8 @@ mod loop_tests {
             // page, which is what makes "notify whenever an event was consumed"
             // the wrong rule.
             let (mut state, at) = control_on(
-                SettingsPage::NetworkStatus,
-                RowHit::Select(SelectId::Adapter, 1),
+                SettingsPage::UserAccounts,
+                RowHit::Select(SelectId::Account, 1),
             );
 
             {
@@ -9062,7 +8898,7 @@ mod loop_tests {
 
             drive(&mut events, window, &mut state).unwrap();
 
-            assert_eq!(state.selected_adapter, 1, "the click was consumed");
+            assert_eq!(state.selected_account, 1, "the click was consumed");
             let asked = desktop.borrow_mut().asked();
             assert!(
                 !asked.contains(&"ReloadAppearance"),
@@ -9335,8 +9171,8 @@ mod loop_tests {
     #[test]
     fn an_event_that_changes_a_control_asks_for_a_frame() {
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
         assert_eq!(
             state.on_event(&click_at(at.0, at.1)),

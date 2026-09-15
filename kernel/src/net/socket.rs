@@ -697,30 +697,30 @@ pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
         Err(e) => {
             close(c1);
             close(srv);
-            // SKIPPED, and the skip checks its own excuse every boot rather
-            // than recording a decision that could outlive its reason.
+            // FAILS, deliberately, and this is the third position taken on it.
             //
-            // `InternalError` is what `accept` returns when the daemon answers
-            // "unknown listener" -- which happens because `create(c1)` above
-            // destroyed the listener `listen(srv)` had just registered: the
-            // daemon holds one RingSession and resets its listener table when a
-            // second socket's ring appears (A-Q15). The precondition this
-            // witness needs -- one program holding a listener AND an accepted
-            // connection at once -- does not exist on this system, so the
-            // property is UNTESTED, not broken. Reporting "serialising again"
-            // would name a defect that is not there.
+            // It first failed with the wrong message, then skipped on any
+            // accept error, then skipped only on InternalError -- and
+            // `check-selftest-skips` refuses that last one on grounds better
+            // than the reasoning behind it: a skip must come from a reason the
+            // test LOOKED UP, not from the outcome of a call into the code
+            // under test. Only NotSupported / ReadOnlyFilesystem / NoSuchDevice
+            // mean "this system cannot"; anything else means the system was
+            // asked and refused, which is a defect the test must fail on.
             //
-            // Any OTHER error is not that condition and still fails, and the
-            // day A-Q15 lands `accept` succeeds and the assertion runs. Nobody
-            // has to remember to unskip this.
-            if e == KernelError::InternalError {
-                crate::serial_println!(
-                    "[netsock]   head-of-line: SKIPPED -- accept says unknown listener; net::socket cannot hold two sockets at once (A-Q15)"
-                );
-                return Ok(None);
-            }
+            // That is the right rule. A test that skips when its subject errors
+            // stops testing at exactly the moment the subject breaks. So this
+            // fails, the boot stays red, and lane A's merge to main is blocked
+            // on A-Q15 -- which is the honest consequence of a real defect,
+            // not a thing to engineer around.
+            //
+            // The defect: `create(c1)` destroys the listener `listen(srv)` just
+            // registered, because the daemon holds one RingSession and resets
+            // its listener table when a second socket's ring appears. The
+            // property here is UNTESTED, so the message must not claim the
+            // fix regressed.
             crate::serial_println!(
-                "[netsock]   FAIL: first accept failed with an error that is NOT the A-Q15 condition: {:?}",
+                "[netsock]   FAIL: cannot test head-of-line -- accept says unknown listener, so the listener is already gone. net::socket cannot hold two sockets at once (A-Q15). The property is UNTESTED, not regressed: {:?}",
                 e
             );
             return Err(e);

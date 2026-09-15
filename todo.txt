@@ -54219,6 +54219,18 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##     reverse" already names: retain the built vector in Linux-ABI PCB state.
 ##     Annotated in design-decisions S4, filed as
 ##     requests/b-a-the-auxv-blocker-in-section-4-has-expired.md (lane A's tree).
+##   * getrandom/credited-pool ("Revisit if we gain a hardware RNG driver ...
+##     or once the syscall3 ABI change lands and GRND_INSECURE can give callers
+##     a real escape hatch"): SECOND CONDITION FIRED, decision survives it.
+##     GRND_INSECURE is honoured and self-tested (dispatch.rs asserts a 32-byte
+##     draw succeeds in the UNCREDITED pool state); the syscall3 half landed
+##     2026-08-18. The hardware-RNG half has NOT fired: kernel/src/fs/hwrng.rs
+##     is entropy ACCOUNTING, not a driver, and the name alone would have been
+##     enough to call it fired wrongly. Revisit changes nothing in the decision;
+##     it changes the advice, so the companion rule is now recorded there: a
+##     caller that cannot wait passes GRND_INSECURE rather than substituting its
+##     own generator. Checked lane B's callers for that exact fallback: none.
+##     Annotated in design-decisions; no request needed, nothing to fix.
 ##   HOW THE SEARCH WAS SCOPED, for whoever resumes: "How to reverse" matches
 ##   ~130 entries and most describe how to UNDO a decision rather than a
 ##   condition that can expire. The ones that rot are those whose rationale

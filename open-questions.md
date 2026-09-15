@@ -988,6 +988,27 @@ interface. This is the pattern `known-issues.md` records as lesson 47, and the
 sharp version of it: the process explorer's *own source* quotes that lesson
 while this module sat beside it.
 
+**A worked example of option A's cost, measured 2026-09-14.** A sixth feature
+of this shape was wired that day, and it is offered here as evidence rather
+than as a decision: the desktop's wallpaper. `WallpaperManager` could already
+load a picture, crop or letterbox or tile or centre it, span it across
+monitors, tint it by time of day and rotate a folder of them — and `set_image`
+was called four times in the whole tree, all four in the shell's own tests.
+
+Wiring it end to end came to a setting in `appearance.yaml`, twelve lines in
+the shell to adopt it, a Settings page with a file picker, and eight tests.
+Under an hour, and it turned up a real bug on the way: the picker's file filter
+was given bare extensions where the toolkit documents glob patterns, so every
+directory would have listed as empty on first use.
+
+**Two caveats, because an example that flatters the option is not evidence.**
+The wallpaper is the *easy* shape — its interface is a settings row, and this
+tree already has settings rows. The five above need a menu item, a panel or a
+keystroke in applications that have none, which is the part this entry says is
+unclear and the part the wallpaper did not have to solve. And one of the five,
+the image viewer's video player, is not a row anywhere: it is a second mode for
+a whole window.
+
 **The options**
 
 **A. Wire them up.** *What changes:* the installer can set up a bootloader, the

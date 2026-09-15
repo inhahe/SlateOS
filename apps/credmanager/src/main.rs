@@ -3389,6 +3389,25 @@ fn take_toolbar(x: &mut f32, w: f32) -> Rect {
     r
 }
 
+/// What the window says about the vault not being kept.
+///
+/// The module doc has said this since the crate was written: "this crate has
+/// no persistence layer at all, so every launch opens an empty vault". It is
+/// tracked in known-issues, the `reopen` door is documented as the place a
+/// loader would come in, and the `allow` on it carries a reason. Everything
+/// about this app's handling of the gap is exemplary **except that none of it
+/// is on screen**, and the screen is what the user reads.
+///
+/// For a password manager that silence is the expensive kind. Somebody stores
+/// a credential, closes the window, and the account is the thing they lose --
+/// not a preference, not a layout, an account. Every other app in this sweep
+/// that keeps nothing costs the user their afternoon; this one can cost them
+/// access.
+const NOT_KEPT_LINES: [&str; 2] = [
+    "This vault is not saved anywhere.",
+    "There is no storage layer yet, so every entry is gone when the window closes. Do not rely on it.",
+];
+
 fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     let width = layout.window.w;
 
@@ -5857,6 +5876,34 @@ impl AppState {
         // Background
         draw_rect(&mut frame, 0.0, 0.0, w, h, self.palette.base, 0.0);
 
+        // After the background, or it would be painted over.
+        for (i, line) in NOT_KEPT_LINES.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+            let ty = 2.0 + i as f32 * 12.0;
+            let avail = (w - 16.0).max(0.0);
+            if avail <= 0.0 || ty + 12.0 > h {
+                break;
+            }
+            frame.push(RenderCommand::Text {
+                x: 8.0,
+                y: ty,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 11.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(avail),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         render_toolbar(&mut frame, self, &layout);
         render_sidebar(&mut frame, self, &layout);
         render_entry_list(&mut frame, self, &layout);
@@ -6490,6 +6537,49 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The window says the vault is not saved anywhere.
+    ///
+    /// This crate's handling of the gap was already exemplary in every place
+    /// except the one the user looks at. The module doc says "this crate has
+    /// no persistence layer at all, so every launch opens an empty vault"; the
+    /// `reopen` door is documented as where a loader would come in; its
+    /// `allow` carries a reason; `main` refuses to open at all if the key
+    /// derivation will not run.
+    ///
+    /// None of that is on screen, and for a password manager the silence is
+    /// the expensive kind. Somebody stores a credential, closes the window,
+    /// and what they lose is an account -- not a preference, not a layout.
+    #[test]
+    fn the_window_says_the_vault_is_not_saved() {
+        // `Vault::create` cannot run here: the test machine has no entropy
+        // source, on purpose, so `KdfParams::fresh` returns
+        // EntropyUnavailable. `unlocked_vault` is the cheap path the other
+        // tests use.
+        let state = AppState::new(unlocked_vault());
+
+        let texts: Vec<String> = state
+            .draw((1200.0, 800.0))
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NOT_KEPT_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NOT_KEPT_LINES
+                .iter()
+                .any(|l| l.contains("Do not rely on it")),
+            "nothing tells the user not to trust the vault with anything",
+        );
+    }
 
     /// A vault that can be written to, built the cheap way tests use.
     fn unlocked_vault() -> Vault {

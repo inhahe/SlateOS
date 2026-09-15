@@ -14,5 +14,10 @@ guitk = { path = "../../gui/toolkit" }
 # a painted rectangle that answered nothing. `oswindow` is the door.
 oswindow = { path = "../../gui/window" }
 
+# Ctrl+S writes through `safeio::write_str_atomically`, not `fs::write`, which
+# truncates the target before writing it. An exported address book may be the
+# only copy of numbers the user cannot reconstruct.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

@@ -119,6 +119,30 @@ quoting the original. Neither `unshare` nor `audit` was on the
 advertised-but-unread ranking, because in both the fields **are** read — by
 the simulation.
 
+### The sweep was then WIDENED, because three hits was a fact about the query
+
+That first grep matched two exact phrasings. Widening it to
+`simulat|in a real (daemon|implementation)|would (fork|run here|be done|actually)`
+matches **62 files**, not three — so "three hits" described what I asked, not
+what is there. (Lane A's rule, recorded in design-decisions §1022: a negative
+about a searchable corpus is a search, not an inference.)
+
+62 mentions are mostly benign, so the population that matters is the
+intersection with a real side effect — `Command::new`, `fs::remove_*`,
+`fs::write`, `fs::rename`, `execv`. Ranked by that, and **checked rather than
+assumed**, the security-critical head of the list came back clean:
+
+| checked | verdict |
+|---|---|
+| `sudo` | **already fixed.** Calls `authlib::identity::become_user` before spawning. Its own comment records the defect I was reconstructing: *"Until now sudo authorised the command … and then ran it as the caller."* My `setuid` grep missed it because the call goes through `authlib`. |
+| `su` | same shared helper, same ordering |
+| `authlib::identity::become_user` | correct, and documents its own remaining gap (supplementary groups from `userdb`) |
+| `firejail` | its "we simulate it" is `create_symlink` portability in a symlink-installer, not sandboxing |
+
+So the shape is real and rarer than the raw grep count suggests. What separates
+a defect from a benign mention is not the word "simulate" — it is whether a
+**consequential action happens anyway**, which no text search can answer.
+
 **Where it lives:** `userspace/audit/src/main.rs`, the `auditd` start path.
 
 ---

@@ -81,6 +81,19 @@ pub mod colors {
 // ============================================================================
 
 /// Font size for diff content display.
+/// What the window says instead of a comparison.
+///
+/// Three lines. The second is the one that separates this from a reader that
+/// ships with a sample document: the old fixture named its two sides
+/// `left.rs` and `right.rs`. **A filename is a claim that a file exists.**
+/// `apps/ebook` ships three books with titles and authors and keeps them,
+/// because a title claims nothing about a disk; a path does.
+const CANNOT_COMPARE_LINES: [&str; 3] = [
+    "This program cannot open files to compare.",
+    "It has no filesystem access, so nothing has been read -- there is no left file and no right file.",
+    "The diff engine itself is real and tested; what is missing is any way to give it two files.",
+];
+
 const CONTENT_FONT_SIZE: f32 = 13.0;
 
 /// Font size for UI elements (toolbar, status bar).
@@ -1326,6 +1339,12 @@ impl FileDiffApp {
     ///
     /// Two versions of the same short function, so that every kind of hunk the
     /// viewer draws — changed, added, unchanged — appears in the first frame.
+    /// Two short Rust files that differ, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `main` called it, so the window opened
+    /// on a comparison of `left.rs` against `right.rs` -- two paths nothing
+    /// had read, presented with a filename on each pane.
+    #[cfg(test)]
     pub fn load_sample_comparison(&mut self) {
         let left = "fn main() {\n    println!(\"Hello, world!\");\n    let x = 42;\n}\n";
         let right = "fn main() {\n    println!(\"Hello, Slate OS!\");\n    let x = 42;\n    let y = 100;\n}\n";
@@ -1350,6 +1369,32 @@ impl FileDiffApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // After the background, or it would be painted over. Keyed on there
+        // being nothing loaded, so it retires itself when a picker lands.
+        if self.diff.is_none() {
+            for (i, line) in CANNOT_COMPARE_LINES.iter().enumerate() {
+                tree.push(RenderCommand::Text {
+                    x: 10.0,
+                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                    y: 4.0 + i as f32 * 14.0,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 12.0 } else { 10.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(self.width - 20.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
 
         self.render_toolbar(&mut tree);
 
@@ -2673,8 +2718,8 @@ impl App for FileDiffApp {
 }
 
 fn main() -> ExitCode {
+    // Opens empty. It used to call `load_sample_comparison`.
     let mut app = FileDiffApp::new();
-    app.load_sample_comparison();
     app::launch("filediff", &mut app)
 }
 
@@ -2821,6 +2866,56 @@ mod tests {
     }
 
     use super::*;
+
+    /// A fresh window compares nothing, and says why.
+    ///
+    /// `main` called `load_sample_comparison`, so the window opened on a diff
+    /// of `left.rs` against `right.rs` with a filename over each pane.
+    ///
+    /// **A filename is a claim that a file exists.** That is what separates
+    /// this from `apps/ebook`, which ships three books and keeps them: a book
+    /// title claims nothing about a disk, and a path does. Same kind of
+    /// fixture by name, opposite answer, and the difference is only visible by
+    /// reading what the data asserts.
+    ///
+    /// The diff engine is real and stays fully tested. What is missing is any
+    /// way to give it two files -- this crate has no filesystem access and no
+    /// picker, so it is one of the 24 apps in the no-door list.
+    #[test]
+    fn a_fresh_window_compares_nothing_and_says_why() {
+        let app = FileDiffApp::new();
+        assert!(app.diff.is_none(), "a comparison appeared from nowhere");
+        assert!(
+            app.left_path.is_empty(),
+            "a left filename appeared from nowhere"
+        );
+        assert!(
+            app.right_path.is_empty(),
+            "a right filename appeared from nowhere"
+        );
+
+        let texts: Vec<String> = app
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_COMPARE_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_COMPARE_LINES
+                .iter()
+                .any(|l| l.contains("no left file and no right file")),
+            "nothing forecloses reading the empty panes as two empty files",
+        );
+    }
     use diffcore::myers_diff;
 
     // --- Myers diff tests ---

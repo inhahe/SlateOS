@@ -28,6 +28,7 @@ use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Personality detection
@@ -529,7 +530,7 @@ fn print_help(personality: Personality) {
             println!("  --nohostname              Don't show hostname in prompt");
             println!("  --erase-chars <char>      Additional erase character");
             println!("  --kill-chars <char>       Additional kill character");
-            println!("  --delay <msecs>           Delay before opening tty");
+            println!("      --delay <number>      sleep seconds before prompt");
             println!("  --nice <value>            Run with adjusted nice value");
             println!("  -h, --help                Show this help");
             println!("  -V, --version             Show version");
@@ -636,6 +637,18 @@ fn run_getty(
         writeln!(writer).map_err(|e| format!("write: {e}"))?;
     }
 
+    // Placed here because the reference says "before prompt", which is the
+    // only statement of placement I could measure -- agetty's source was not
+    // available to check whether it sleeps earlier, and guessing at that
+    // would be inventing a second fact after correcting the first.
+    //
+    // Tests do not reach this: none of them set `--delay`, and the pure
+    // `prompt_delay` above is what they assert on.
+    let delay = prompt_delay(cfg);
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
+    }
+
     // Show login prompt and read username
     loop {
         // Build prompt
@@ -684,6 +697,27 @@ fn run_getty(
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+/// How long to wait before showing the login prompt.
+///
+/// Split from the sleep itself on purpose: the SLEEP has nothing to get wrong
+/// and cannot be tested without measuring wall-clock time, which is how a
+/// suite acquires a test that fails on a loaded machine. How long it should
+/// be is the part that can be wrong, and this is testable with no clock at
+/// all.
+///
+/// SECONDS, not milliseconds. Measured against util-linux 2.39.3 rather than
+/// recalled -- `agetty --help` says:
+///
+///     --delay <number>       sleep seconds before prompt
+///
+/// This crate's own help said "Delay before opening tty" and its test used
+/// `--delay 500`, which reads as milliseconds. Both were invented: the option
+/// had never been implemented, so nothing ever contradicted the description.
+/// An unimplemented option cannot have its documentation checked by use.
+fn prompt_delay(cfg: &Config) -> Duration {
+    Duration::from_secs(u64::from(cfg.delay.unwrap_or(0)))
+}
 
 /// The diagnostic for a configuration this build cannot carry out, if any.
 ///
@@ -993,6 +1027,26 @@ mod tests {
         let args = argv(&["getty", "-c", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_reset);
+    }
+
+    /// `--delay` is seconds, and absent means no wait at all.
+    ///
+    /// Asserted on the pure decision rather than by timing a sleep: a test
+    /// that measures elapsed time is a test that fails on a busy machine,
+    /// which this suite has been bitten by before.
+    #[test]
+    fn delay_is_seconds_before_the_prompt() {
+        let args = argv(&["getty", "--delay", "5", "tty1"]);
+        let cfg = parse_args(&args).expect("--delay parses");
+        assert_eq!(prompt_delay(&cfg), Duration::from_secs(5));
+
+        let args = argv(&["getty", "tty1"]);
+        let cfg = parse_args(&args).expect("a plain getty parses");
+        assert_eq!(
+            prompt_delay(&cfg),
+            Duration::ZERO,
+            "no --delay must mean no wait, not a default one"
+        );
     }
 
     /// `--chroot` is refused; a config without it is not.

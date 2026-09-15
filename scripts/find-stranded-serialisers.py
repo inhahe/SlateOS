@@ -40,6 +40,29 @@ WHAT IT CANNOT SEE:
   * A format may be a bad idea even when implemented. Reaching it is not
     automatically an improvement.
 
+WHAT THE COUNT IS NOT. It is not a count of missing doors. Triaged on
+2026-09-15, the 38 it then reported fell into three groups of very different
+worth:
+
+  * **Formatters and parsers, about half.** `colorpicker::to_hex6(self) ->
+    String` is a colour as `#RRGGBB`; `mediaconvert::from_extension(ext: &str)`
+    is an enum parser; `chess::to_algebraic` is one move, not a game record;
+    `procexplorer::to_rwx` is permission bits as `rwxr-xr-x`;
+    `ircclient::to_wire` is a protocol line for a socket. None of them wants a
+    file and none of them is missing anything. They are here because the scan
+    keys on `to_*`/`from_*` with a byte-ish signature, which is the only thing
+    it can key on without reading the function.
+  * **Real serialisers over content that is not real yet** -- `netscan`,
+    `speedtest`, `credmanager`, `systemrestore`, `soundrecorder`. Each had its
+    fabricated data removed earlier in this sweep, so a door would export an
+    empty file. **A door for content that isn't real is worse than no door**,
+    and these are deliberately left.
+  * **Genuine missing doors**, which after `whiteboard`, `filediff`,
+    `musicplayer` and `slides` were fixed is a single-figure number.
+
+So read the list, do not count it. The signature printed beside each name is
+there to make that cheap.
+
 Report-only. The count is not a number to drive to zero -- some of these are
 one line of a format nobody needs -- but every entry is finished work that
 nobody can currently use, which is an unusual and cheap kind of lead.
@@ -86,16 +109,18 @@ def main():
                 doored += 1
                 continue
 
-            names = []
+            found = {}
             for m in SERIALISER.finditer(prod):
                 name, sig = m.group(1), m.group(2)
                 # The signature proves it moves text or bytes. A name cannot.
                 tail = prod[m.start() : m.start() + 400]
                 if BYTES.search(sig) or BYTES.search(tail.split("{", 1)[0]):
-                    names.append(name)
-            names = sorted(set(names))
-            if names:
-                stranded.append((crate.name, names))
+                    # Kept with the name, because the signature is what tells a
+                    # reader whether this is a door or a formatter, and the
+                    # name is what makes them look alike.
+                    found[name] = " ".join(m.group(0).split())[:78]
+            if found:
+                stranded.append((crate.name, found))
 
     total = sum(len(n) for _, n in stranded)
     print(
@@ -103,10 +128,14 @@ def main():
         f"across {len(stranded)} crate(s)\n"
         f"({doored} crates already have a door)\n"
     )
-    print("  READ THE FUNCTION before promising anyone a door: this cannot")
-    print("  tell a finished serialiser from a stub with the right shape.\n")
+    print("  READ THE SIGNATURE, printed beside each name. It is what tells a")
+    print("  door from a formatter, and the name is what makes them look alike:")
+    print("  `to_hex6(self) -> String` and `export_csv(&self) -> String` are the")
+    print("  same shape to this scan and nothing alike to a user.\n")
     for name, fns in sorted(stranded, key=lambda kv: (-len(kv[1]), kv[0])):
-        print(f"    {name:<18} {', '.join(fns)}")
+        print(f"    {name}")
+        for fn, sig in sorted(fns.items()):
+            print(f"      {fn:<24} {sig}")
     return 0
 
 

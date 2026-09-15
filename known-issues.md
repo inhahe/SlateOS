@@ -144495,6 +144495,26 @@ There is a picker, so it is not guesswork -- it is a `FileDialog::save()`, a
 field on the app, routing in `handle_event`, and somewhere to report the result,
 which that program currently has no status line for. Small, and open.
 
+**Sharper, and worse, checked 2026-09-14:** `apps/passwordgen` persists
+*nothing*. No `settingsfile`, no load, no save, no config file of any kind --
+the history exists for as long as the window is open and is gone when it
+closes. So `export_history` is not one of two ways out of that program, it is
+the only one, and it leads nowhere.
+
+**A correction about how this was found.** The gate's own line was wrong in its
+reasoning while right in its observation. It read "`export_history` is called
+1x, all from tests, while its counterpart `load_history` is called in
+production" -- and that counterpart is `gui/desktop`'s Run box remembering
+typed commands, a different program keeping different data. The gate paired
+them on a shared suffix across the whole workspace. It was the only thing it
+reported on a clean tree, so its false-positive rate that day was 100%.
+
+The observation survived the correction because it was checked separately, but
+it very nearly did not need to be: the obvious fix for the false finding was to
+wire passwordgen's export, watch the gate go green, and conclude the instrument
+worked. Scoping, comment-stripping and test-module fixes are in c9a190c77, with
+a self-test in 5a6249354 that encodes this case as a fixture.
+
 **Not urgent, and worth saying why:** the editor opens files perfectly well
 when something else chooses them -- the file explorer's double-click, a command
 line, a future "Open with". The missing piece is only the case where the editor

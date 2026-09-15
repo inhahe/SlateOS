@@ -147972,7 +147972,8 @@ independent grounds, which is why it is first rather than merely early.
 to know what hardware they have, so a plausible invention there is worse than
 anywhere else on the list.
 
-*Cheapest:* it is the **only one of the ten whose real source already exists**.
+*Cheapest — and this was wrong when I wrote it; see the correction below:* it
+is the only one of the ten whose real **client** already exists.
 Checked rather than assumed — every other app on that list is a single
 `main.rs` with no sibling module at all, so `devicemanager`, `netmanager`,
 `partmanager`, `remotedesktop`, `vpnmanager`, `netscan`, `speedtest`,
@@ -148045,3 +148046,36 @@ that described the defect has been re-read.** Every one of the six settings
 pages got this right because rewriting the page forced the comment to be
 rewritten with it. `benchmark` got it wrong because the stale claim lived in a
 module header twelve hundred lines away from anything I edited.
+
+**CORRECTION: `hwquery` is a client, and the interface it reads has no server.**
+
+Lane B asked the right question — is the query layer dead because it is broken,
+or dead because nobody connected it? — and the answer is neither. It is dead
+because **the thing it reads does not exist**.
+
+`SyscallProvider` reads `/sys/hardware/cpu`, `/sys/hardware/memory`,
+`/sys/hardware/block`, `/sys/hardware/net` and so on. Grepping `kernel/`,
+`services/` and `userspace/` for `sys/hardware` returns **nothing**. No
+component in this tree has ever produced those files. The module is 2,152 lines
+and 33 tests of a well-built client for an interface with no server, which is
+the same defect as the fifteen private clipboards and the service with no
+clients — inverted.
+
+So my "nine are blocked on the system; one is a wiring" was wrong, and wrong in
+the flattering direction: sysinfo is blocked too, just one layer further along
+than the other nine. What it has that they lack is the *client* half already
+written and tested, so when a producer appears the app needs no new parsing
+code.
+
+**The wiring is still worth doing now, and this is why.** Pointing `main` at
+`SyscallProvider` today produces an application that says it cannot read the
+hardware — which is true, and is better than one that says you own a Radeon RX
+7900 XTX. It also means that on the day `/sys/hardware` gains a producer the
+app starts working with no further change. The alternative, waiting, leaves the
+invented machine on screen for the whole of that wait.
+
+**What the producer needs**, for whoever writes it: the format is already
+pinned by `hwquery`'s parser and its 33 tests — flat `key=value` files, one per
+category, with the field names `SyscallProvider::field` looks up. A producer
+written against those tests cannot disagree with the consumer, which is the one
+piece of luck in this arrangement.

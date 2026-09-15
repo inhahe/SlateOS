@@ -41,6 +41,34 @@ OURS_B = re.compile(r'"(--[a-z0-9][a-z0-9-]*)"\s*\|\s*"(-[A-Za-z0-9])"')
 # the match rather than joining it.
 THEIRS = re.compile(r"(?:^|\s)(-[A-Za-z0-9]),\s+(--[a-z0-9][a-z0-9-]*)")
 
+# `progname.ends_with("umount")` and friends: how this tree spells "which
+# program am I being run as".
+PERSONALITY = re.compile(r'ends_with\("([a-z][a-z0-9_-]*)"\)')
+
+
+def personalities(crate_name: str, source: str, cargo: str) -> list[str]:
+    """Every program this one crate implements.
+
+    A MULTI-PERSONALITY CRATE WAS THIS CHECK'S FIRST FALSE POSITIVE, and the
+    correction is worth keeping. `userspace/mount` is both `mount` and
+    `umount`; comparing its whole source against `mount --help` reported
+    `-f` as `--force` here versus `--fake` upstream, and called it the most
+    severe finding of the sweep -- a dry-run flag that performs the action.
+
+    It was wrong. Those arms are in the `umount` branch, and umount(8) really
+    does define `-f, --force` and `-l, --lazy`. The binding was correct and
+    the checker was comparing it against the wrong program.
+
+    So: collect every name the crate answers to, and treat a short option as
+    mis-bound only if it disagrees with EVERY reference that defines it.
+    """
+    names = {crate_name}
+    names.update(PERSONALITY.findall(source))
+    names.update(re.findall(r'^name\s*=\s*"([a-z][a-z0-9_-]*)"', cargo, re.M))
+    # Only plausible command names: this tree also writes `ends_with(".rs")`
+    # and similar, which are suffixes rather than programs.
+    return sorted(n for n in names if not n.startswith(".") and len(n) > 1)
+
 
 def ours(source: str) -> dict[str, str]:
     """Short -> long, as this tree binds them."""
@@ -60,18 +88,21 @@ def theirs(help_text: str) -> dict[str, str]:
     return found
 
 
-def compare(mine: dict[str, str], ref: dict[str, str]) -> list[tuple[str, str, str]]:
-    """Shorts bound differently in the two. Only shorts present in BOTH.
+def compare(mine: dict[str, str], refs: list[dict[str, str]]) -> list[tuple[str, str, str]]:
+    """Shorts bound differently in ALL references that define them.
 
-    A short we do not have is a missing feature and a short they do not have
-    is an extension; neither can silently mean the wrong thing, because an
-    unknown option is refused out loud.
+    Only shorts present in both: a short we do not have is a missing feature
+    and a short they do not have is an extension, and neither can silently
+    mean the wrong thing, because an unknown option is refused out loud.
+
+    `refs` is a list because one crate may be several programs. A short that
+    matches ANY of them is correct for that personality and is not reported.
     """
     out = []
     for short, long in sorted(mine.items()):
-        other = ref.get(short)
-        if other is not None and other != long:
-            out.append((short, long, other))
+        defined = [r[short] for r in refs if short in r]
+        if defined and long not in defined:
+            out.append((short, long, "/".join(sorted(set(defined)))))
     return out
 
 
@@ -107,16 +138,35 @@ def selftest() -> int:
     # THE ONE THAT MATTERS: the real blkid regression must be reported.
     mine = {"-n": "--no-encoding", "-c": "--cache-file"}
     ref = {"-n": "--match-types", "-d": "--no-encoding", "-c": "--cache-file"}
-    assert compare(mine, ref) == [("-n", "--no-encoding", "--match-types")], (
+    assert compare(mine, [ref]) == [("-n", "--no-encoding", "--match-types")], (
         "the comparator failed to flag the blkid -n collision it exists for"
     )
     cases += 1
 
     # And it must NOT cry wolf on the cases that are fine.
-    assert compare({"-c": "--cache-file"}, ref) == [], "identical binding flagged"
-    assert compare({"-z": "--zeta"}, ref) == [], "a short they lack is not a collision"
-    assert compare({}, ref) == [], "no options, no findings"
+    assert compare({"-c": "--cache-file"}, [ref]) == [], "identical binding flagged"
+    assert compare({"-z": "--zeta"}, [ref]) == [], "a short they lack is not a collision"
+    assert compare({}, [ref]) == [], "no options, no findings"
     cases += 3
+
+    # THE FALSE POSITIVE THIS CHECK ACTUALLY PRODUCED. `userspace/mount` is
+    # both mount and umount; `-f` is `--fake` in one and `--force` in the
+    # other, and ours is umount's. Matching EITHER personality clears it.
+    mount_ref = {"-f": "--fake", "-l": "--show-labels"}
+    umount_ref = {"-f": "--force", "-l": "--lazy"}
+    assert compare({"-f": "--force"}, [mount_ref, umount_ref]) == [], (
+        "a binding correct for one personality must not be reported"
+    )
+    # ...but a binding wrong for BOTH still is.
+    assert compare({"-f": "--frobnicate"}, [mount_ref, umount_ref]) == [
+        ("-f", "--frobnicate", "--fake/--force")
+    ], "a binding wrong for every personality must still be reported"
+    cases += 2
+
+    # Personality extraction.
+    assert "umount" in personalities("mount", 'progname.ends_with("umount")', "")
+    assert personalities("ss", "", 'name = "sockstat"') == ["sockstat", "ss"]
+    cases += 2
 
     print(f"selftest: {cases}/{cases} cases pass")
     return 0
@@ -141,15 +191,22 @@ def main(argv: list[str]) -> int:
         main_rs = crate / "src" / "main.rs"
         if not main_rs.is_file():
             continue
-        mine = ours(main_rs.read_text(encoding="utf-8", errors="replace"))
+        source = main_rs.read_text(encoding="utf-8", errors="replace")
+        mine = ours(source)
         if not mine:
             continue
-        help_text = reference_help(crate.name)
-        if help_text is None:
+        cargo_path = crate / "Cargo.toml"
+        cargo = cargo_path.read_text(encoding="utf-8", errors="replace") if cargo_path.is_file() else ""
+        refs = []
+        for name in personalities(crate.name, source, cargo):
+            help_text = reference_help(name)
+            if help_text is not None:
+                refs.append(theirs(help_text))
+        if not refs:
             no_reference.append(crate.name)
             continue
         checked += 1
-        bad = compare(mine, theirs(help_text))
+        bad = compare(mine, refs)
         if bad:
             for short, long, other in bad:
                 findings.append((crate.name, short, long, other))

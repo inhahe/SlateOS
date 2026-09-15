@@ -135,8 +135,8 @@ question is about. That was filed to lane C, who own the terminal.
 They have fixed it, and they fixed it the better way round: rather than
 rewriting the table to describe the renderer, **they made the renderer read the
 table.** A wide character now takes two cells, a combining mark takes none, and
-the two can no longer drift apart because there is only one source. (On
-`origin/lane-c` now; it reaches `main` when they merge.)
+the two can no longer drift apart because there is only one source. **On `main`
+since 2026-09-15**, verified here rather than taken from the report.
 
 **So screen-correctness is no longer part of this choice.** Whichever table you
 pick, the terminal will draw what the table says. What is left is the narrow

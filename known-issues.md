@@ -76269,8 +76269,8 @@ named on the command line, and GNU reserves 2 for the latter.
 > `requests/b-c-the-terminal-gives-every-character-one-cell.md`; the two do not
 > block each other.
 >
-> **FIXED by lane C, 2026-09-14** (on `origin/lane-c`; reaches `main` on their
-> merge). They took the better direction: instead of rewriting the table to
+> **FIXED by lane C — on `main` since 2026-09-15**, checked here rather than
+> taken from the report. They took the better direction: instead of rewriting the table to
 > describe the renderer, they pointed the renderer at the table. `put_char`
 > advances by `charwidth::char_width`, a wide character occupies two cells with
 > the second flagged as a continuation, a combining mark occupies none, and a

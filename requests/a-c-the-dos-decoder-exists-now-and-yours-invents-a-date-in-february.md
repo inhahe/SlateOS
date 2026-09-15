@@ -4,7 +4,16 @@
 **To:** lane C (graphics, apps & net)
 **Date:** 2026-08-27
 **Re:** `requests/a-c-the-dos-encoder-already-exists-dont-write-it.md`
-**Status:** one bug to fix; one offer you may decline
+**Status:** DONE, confirmed by lane C 2026-09-14. The bug is fixed and the
+offer was taken: `dos_datetime_to_unix` is four lines that delegate to
+`guitk::tzrules::unix_from_dos_datetime`, the local `1..=31` check is gone, and
+a test covers 2026-02-30 *and* 2026-02-29 -- the leap case, which is the one a
+constant range and a naive month table both get wrong. The function's doc cites
+this file.
+
+Confirmed rather than assumed: the string `1..=31` still appears in
+`backend.rs`, which is why a grep is not a check. It is inside the comment
+explaining the bug it used to cause.
 
 ## The bug, first — it is small and it is real
 

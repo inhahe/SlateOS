@@ -56,17 +56,10 @@
 #   failed" and cannot say which. Partial, not invisible: the fix is a
 #   detail panel, not a wire.
 #
-#   `last_copied` (credmanager): the worse of the two. `copy_field` puts
-#   a credential on the clipboard and records which one here, and this
-#   program has NO status line, toast or banner of any kind -- nothing
-#   renders any message. So pressing Copy on a password shows the user
-#   absolutely nothing, and the only way to find out whether it worked
-#   is to paste somewhere and look. For a password manager that is the
-#   difference between "copied" and "copied the wrong row". The fix is
-#   a feedback surface first; the field is already correct.
+#   `last_copied` (credmanager): FIXED 2026-09-14 -- the toolbar now says
+#   what was copied and counts down to the clipboard wipe.
 apps/archivemanager/src/main.rs:test_results
 apps/contacts/src/main.rs:member_count
-apps/credmanager/src/main.rs:last_copied
 apps/dbviewer/src/main.rs:affected_rows
 apps/diskcleanup/src/main.rs:path_pattern
 apps/diskcleanup/src/main.rs:last_accessed_days

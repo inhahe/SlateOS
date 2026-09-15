@@ -10,6 +10,10 @@ guitk = { path = "../../gui/toolkit" }
 # program the desktop can open, rather than a struct with a `main` that returns.
 oswindow = { path = "../../gui/window" }
 
+# Export writes through `safeio::write_str_atomically`, not `fs::write`,
+# which truncates the target before writing it.
+safeio = { path = "../safeio" }
+
 [dev-dependencies]
 # `appearance::palette_check`.
 appearance = { path = "../../gui/appearance", features = ["testing"] }

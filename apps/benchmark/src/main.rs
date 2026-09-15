@@ -73,6 +73,7 @@ use std::process::ExitCode;
 
 use appearance::{Edge, Palette, Surface};
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::fold;
 use guitk::frame::Rect;
@@ -1626,6 +1627,14 @@ fn history_rows_top(content_top: f32, scroll: f32) -> f32 {
 
 /// The benchmark application UI state.
 pub struct BenchmarkApp {
+    /// The save picker, for the Export button.
+    pub picker: FilePicker,
+    /// What the last action did, shown in the status bar until the next run.
+    ///
+    /// The bar derived its whole text from `progress.phase`, so there was
+    /// nowhere for an action to report a result -- which is part of why
+    /// Export could throw its report away without the omission showing.
+    pub status_message: Option<String>,
     /// The user's colours, handed over by the framework (§822).
     pub palette: Palette,
     /// Current tab.
@@ -1668,6 +1677,8 @@ pub struct BenchmarkApp {
 impl BenchmarkApp {
     pub fn new() -> Self {
         Self {
+            picker: FilePicker::default(),
+            status_message: None,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: Tab::Overview,
             width: WINDOW_WIDTH,
@@ -1836,6 +1847,17 @@ impl BenchmarkApp {
 
     /// Handle a UI event.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up. `Picked::Ignored`
+        // covers `Tick` and `Resize`, so a benchmark keeps running and the
+        // window keeps resizing behind an open dialog.
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                self.status_message = Some(self.write_report(&path));
+                return EventResult::Consumed;
+            }
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key_event) if key_event.pressed => self.handle_key(key_event),
             Event::Mouse(mouse_event) => {
@@ -1899,9 +1921,7 @@ impl BenchmarkApp {
                 EventResult::Consumed
             }
             Key::E if key.modifiers.ctrl => {
-                if !self.history.is_empty() {
-                    let _report = self.export_report();
-                }
+                self.begin_export();
                 EventResult::Consumed
             }
             Key::Num1 => {
@@ -2023,9 +2043,7 @@ impl BenchmarkApp {
                 EventResult::Consumed
             }
             Some(Target::Export) => {
-                if !self.history.is_empty() {
-                    let _report = self.export_report();
-                }
+                self.begin_export();
                 EventResult::Consumed
             }
             Some(Target::ClearHistory) => {
@@ -2089,6 +2107,31 @@ impl BenchmarkApp {
     }
 
     /// Export a full report of the latest benchmark run.
+    /// Ask where to put the report.
+    ///
+    /// Both callers -- Ctrl+E and the Export button -- used to read
+    /// `if !self.history.is_empty() { let _report = self.export_report(); }`.
+    /// Two things were wrong with that. The report was built and dropped, so
+    /// the button did nothing; and with no history it did nothing *and said
+    /// nothing*, which is indistinguishable from a control that is broken.
+    pub fn begin_export(&mut self) {
+        if self.history.is_empty() {
+            self.status_message =
+                Some("Nothing to export yet -- press F5 to run a benchmark".to_string());
+            return;
+        }
+        self.picker.open_to_write("benchmark-report.txt");
+    }
+
+    /// Write the report to `path`, and say what happened.
+    pub fn write_report(&mut self, path: &std::path::Path) -> String {
+        let text = self.export_report();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!("Wrote {} bytes to {}", text.len(), path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
     pub fn export_report(&self) -> String {
         if let Some(latest) = self.history.latest() {
             let mut report = latest.to_text_report();
@@ -2115,7 +2158,10 @@ impl BenchmarkApp {
     /// the tests below drive the program with and what a caller holding a
     /// `BenchmarkApp` naturally reaches for.
     pub fn render(&self) -> RenderTree {
-        self.frame(self.width, self.height).into_tree()
+        let mut tree = self.frame(self.width, self.height).into_tree();
+        // Last, so it draws over the tabs rather than under them.
+        tree.extend(self.picker.render(&self.palette, self.width, self.height));
+        tree
     }
 
     /// Draw the whole window at `width` × `height`, recording as it goes where
@@ -3022,6 +3068,11 @@ impl BenchmarkApp {
                 self.progress.phase.label(),
                 self.progress.overall_progress() * 100.0
             )
+        } else if let Some(notice) = &self.status_message {
+            // Ranked below a live run so a stale notice cannot hide the
+            // progress of the thing happening now, and above the idle text so
+            // the result of an action survives until the next one.
+            notice.clone()
         } else if self.progress.phase.is_complete() {
             "Benchmark complete".into()
         } else {
@@ -4683,6 +4734,172 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         })
+    }
+
+    fn ctrl(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn bench_door_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("slateos-benchmark-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn app_with_history() -> BenchmarkApp {
+        let mut app = BenchmarkApp::new();
+        app.run_benchmark();
+        assert!(
+            !app.history.is_empty(),
+            "a run should leave a history entry"
+        );
+        app
+    }
+
+    /// The report reaches the disk.
+    ///
+    /// Both callers read `let _report = self.export_report();`. The report was
+    /// composed in full and dropped on the floor, by a button labelled
+    /// "Export (Ctrl+E)".
+    #[test]
+    fn the_exported_report_reaches_the_disk() {
+        let path = bench_door_dir().join("benchmark-report.txt");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = app_with_history();
+        let expected = app.export_report();
+        let said = app.write_report(&path);
+
+        let back = std::fs::read_to_string(&path).expect("the file the app said it wrote");
+        assert_eq!(
+            back, expected,
+            "what was read back is not what was composed"
+        );
+        assert!(said.contains("Wrote"), "said: {said}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Export asks where to put it, from either control.
+    #[test]
+    fn both_export_controls_open_the_picker() {
+        let mut app = app_with_history();
+        assert_eq!(app.handle_event(&ctrl(Key::E)), EventResult::Consumed);
+        assert!(app.picker.is_open(), "Ctrl+E did nothing");
+
+        let mut app = app_with_history();
+        let frame = app.frame(app.width, app.height);
+        let spot = frame
+            .rect_of(|t| *t == Target::Export)
+            .expect("the Export button is drawn and hit-tested");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: spot.x + spot.w / 2.0,
+            y: spot.y + spot.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(app.picker.is_open(), "the Export button did nothing");
+    }
+
+    /// With nothing to export, it says so rather than going quiet.
+    ///
+    /// The guard was `if !self.history.is_empty() { ... }` with no else, so a
+    /// fresh window's Export button was silent -- indistinguishable from one
+    /// that is broken, which by then it also was.
+    #[test]
+    fn exporting_an_empty_history_says_why_it_cannot() {
+        let mut app = BenchmarkApp::new();
+        assert!(app.history.is_empty());
+
+        app.handle_event(&ctrl(Key::E));
+        assert!(
+            !app.picker.is_open(),
+            "there is nothing to write; it should not ask for a destination"
+        );
+        let said = app.status_message.clone().unwrap_or_default();
+        assert!(
+            said.contains("F5"),
+            "should name the way forward, said: {said}"
+        );
+        assert!(
+            app.render().commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == &said
+            )),
+            "the notice is set but never drawn"
+        );
+    }
+
+    /// The clock keeps running under an open picker.
+    ///
+    /// Routing input to the picker and returning early is the shape
+    /// `find-swallowed-ticks.py` reports, and rightly: the same early return
+    /// that stops a keystroke reaching the tabs will stop a `Tick` reaching
+    /// the progress bar, freezing a running benchmark behind a dialog. It is
+    /// safe here only because `FilePicker::handle` answers `Ignored` for
+    /// `Tick`, and that is a fact about another crate -- so it is pinned here
+    /// rather than assumed.
+    #[test]
+    fn a_tick_reaches_the_app_under_an_open_picker() {
+        let mut app = app_with_history();
+        app.progress.phase = BenchPhase::RunningCpu;
+        app.handle_event(&ctrl(Key::E));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        let before = app.progress.elapsed_ms;
+        app.handle_event(&Event::Tick { elapsed_ms: 50 });
+        assert_eq!(
+            app.progress.elapsed_ms,
+            before + 50,
+            "the dialog swallowed the tick; a running benchmark would freeze behind it"
+        );
+    }
+
+    /// An open picker is drawn.
+    #[test]
+    fn the_open_picker_is_drawn() {
+        let mut app = app_with_history();
+        let closed = app.render().commands.len();
+        app.handle_event(&ctrl(Key::E));
+        let own = app.render().commands.len().saturating_sub(closed);
+        assert!(
+            own > 0,
+            "the open picker contributed {own} commands; it is not being drawn"
+        );
+    }
+
+    /// A live run outranks a stale notice in the status bar.
+    ///
+    /// Ranking the notice above the idle text is what makes it visible at all;
+    /// keeping it below a live run is what stops it hiding the thing happening
+    /// now. Both halves have to be pinned or the ordering is one edit from
+    /// being silently reversed.
+    #[test]
+    fn a_running_benchmark_outranks_an_older_notice() {
+        let mut app = BenchmarkApp::new();
+        app.handle_event(&ctrl(Key::E));
+        let notice = app.status_message.clone().expect("Ctrl+E leaves a notice");
+
+        let drawn = |app: &BenchmarkApp| {
+            app.render()
+                .commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == &notice))
+        };
+        assert!(drawn(&app), "the notice is set but never drawn while idle");
+
+        app.progress.phase = BenchPhase::RunningCpu;
+        assert!(
+            app.progress.phase.is_running(),
+            "control: the fixture must actually be running, or this asserts nothing"
+        );
+        assert!(
+            !drawn(&app),
+            "a stale notice is hiding the progress of a live run"
+        );
     }
 
     fn press(key: Key) -> Event {

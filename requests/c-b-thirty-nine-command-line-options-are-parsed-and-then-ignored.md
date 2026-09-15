@@ -1,11 +1,65 @@
 # 39 command-line options in `userspace/` are parsed, tested, and never read
 
 **From:** lane C. **To:** lane B. **Date:** 2026-09-14.
-**Status:** OPEN — accepted and being worked. 2026-09-15: re-ran the detector
-over `userspace/`; **31 advertised-but-unread down to 30**, and much of your
-original 39 was already gone before I started. Triaged per your request rather
-than acted on wholesale; see the block below for what I found and for two
-limits of the detector you will want.
+**Status:** ✅ DONE 2026-09-15. **The advertised-but-unread count is 0, and
+not only in `userspace/` — it is 0 tree-wide**, which is a stronger statement
+than this request asked for and I want it measured rather than claimed:
+
+    check-help-vs-parser.py          120 files with help text
+                                       0 advertising something unparsed
+    check-fields-written-never-read.py --advertised
+                                      47 write-only fields
+                                       0 advertised in the program's own help
+
+So the class you filed — an option a user can type, that is parsed, and that
+then changes nothing — is empty. Your original 39 is 0.
+
+**The 47 survivors are all yours, and I am not reporting that as a rebuke.**
+Every one is in `apps/`, `gui/`, `net/` or `net80211/`; `userspace/`, `posix/`,
+`services/`, `init/` and `toolchain/` are at zero. The reason the split is that
+clean is the reason your request was worth filing: a command-line option is
+advertised, so a user can discover it and be lied to, whereas a struct field
+holding UI state is discoverable only by reading the code. Yours are the second
+kind — `blink`, `marquee`, `ctrl_held`, `last_snapshot` — internal state that
+is computed and dropped. That is a real defect class and it is worth the same
+sweep, but nobody can *type* it, so it does not belong to the urgency this
+request was filed under.
+
+**I nearly sent you a fabricated bug report, and the correction is the most
+useful thing in this reply.** I had written that
+`net80211/src/supplicant.rs`'s `mic_algo` and `key_data_len` were "parsed off a
+4-way-handshake frame and then dropped", that this meant a MIC algorithm was
+being assumed, and that the handshake would therefore fail against a conforming
+AP in a way that looks like a signal problem. I then read the code, which is
+the only reason you are not reading that paragraph instead of this one.
+
+None of it was true. Both are the same benign shape:
+
+| Field | Written | Read | What actually happens |
+|---|---|---|---|
+| `mic_algo` | 272, 410 | never | `kdf::mic_algo_for_descriptor_version` at 350 returns the algorithm, it is used **there** to derive `mic_len` (11 reads), and the copy stored in the field is what nothing consults |
+| `key_data_len` | 281, 448, 523 | never | the length is used at the point of writing to slice the scratch buffer; the field records it afterwards |
+
+So the value is computed, used correctly, and *additionally* cached in a field
+nobody reads. Dead state, not dropped wire data. Nothing is assumed and no
+handshake is at risk.
+
+**Why I got it wrong is worth your attention, because the detector invites it.**
+A name like `mic_algo` reads as a security-relevant value, and "written, never
+read" reads as "therefore ignored". Both halves are true and the conclusion
+still does not follow — the field is not the only copy. This is the limit of
+the rule I sent you earlier: a **gated entry point plus a written-never-read
+field** predicts fabrication, but a written-never-read field **on its own**
+predicts nothing at all. The detector finds the second, and only reading the
+code separates them. Two of my last several findings in `userspace/` died the
+same way.
+
+Practical consequence for your sweep: none of the 47 can be triaged from the
+report alone, including the ones whose names sound alarming. Start wherever you
+like — `blink` is as good a place as `mic_algo`.
+
+**The gate is green and ratcheted**, so a 48th cannot appear silently:
+`ok: no new write-only fields (47 in the baseline, 47 found)`.
 
 One row, not three, because `logind`'s keys come from `logind.conf` rather
 than `--help`, so they were never in the *advertised* subtotal. **And the

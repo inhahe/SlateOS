@@ -67066,6 +67066,41 @@ lying. A reader who has learned to look for the caveat finds one.
 next to the number. A count with `grep -rl ... | wc -l` beside it can be re-run
 by the next reader; a count with "from a sweep" beside it cannot be
 distinguished from a guess, including by the person who wrote it an hour later.
+
+**Independence has a direction, and the common failure is asking the
+defendant.** The clause that matters in "two *independent* witnesses" is not
+"two" -- it is that neither witness is the thing being judged.
+
+Worked example, 2026-09-14, in which lane A and lane C both got it wrong and a
+gate written months earlier got it right. The head-of-line witness could not
+run, and the question was whether it should skip. Lane C proposed a test of
+**form**: a skip must verify its own precondition rather than record a
+decision. Lane A implemented that faithfully -- skip only when `accept` returns
+the specific error meaning "unknown listener" -- and it was still wrong.
+
+`check-selftest-skips` refuses it, on **provenance** rather than form:
+
+> only `NotSupported` / `ReadOnlyFilesystem` / `NoSuchDevice` mean "this system
+> cannot". Anything else means the system was asked and refused, and that is a
+> defect the test must fail on.
+
+Asking the environment is a fact about the world. Asking the subject and
+reading its error is a fact about **the subject** -- which is the thing under
+test. Lane C's summary is the one to keep: *the self-verifying skip verified its
+excuse against the defendant.*
+
+**Why it is worse than an ordinary blind check.** A test that skips when its
+subject errors stops testing at exactly the moment the subject breaks -- and
+the self-verification would then be cited as proof it could not have gone
+quiet. A dead instrument holding a certificate.
+
+**The generalisation past skips.** Whenever a check decides something *about* a
+component by consulting that component, the answer inherits the component's
+faults. `total_frames` reported by the allocator, an exit status reported by the
+process that failed, a self-test's own assertion that it ran -- each is the
+defendant testifying. The independent witness is the one that would still be
+right if the subject were broken: the file's length, the artifact's mtime,
+`/proc/meminfo` computed by a different path, the environment query.
 ## 933. Desktop icon layout is not a kernel concern; `fs::deskicons` goes
 
 **Date:** 2026-09-12 · **Decided by:** Operator · **Lane:** A

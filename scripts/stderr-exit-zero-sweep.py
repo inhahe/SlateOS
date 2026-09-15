@@ -93,6 +93,15 @@ EXPECTED_ZERO = {"true", "echo", "printf", "yes", "test", "[", "false"}
 #   so "details unknown" is a true statement and the line exists to say why.
 #   Exempted by name because the wording rule that would catch it also
 #   suppresses real failures -- see ANNOUNCES_A_FALLBACK.
+# `more` -- an unopenable operand is reported and the status stays 0, which
+#   is what util-linux does. Measured, with a working control in the same run:
+#   `more nosuch.txt` rc 0, `more plain nosuch` rc 0, `false` rc non-zero. The
+#   message is byte-identical on both sides, so the status was the whole of
+#   the difference. `scripts/more-diff.sh` compares stdout, stderr AND the
+#   exit status against GNU, and its note at line 186 records the same
+#   conclusion -- "util-linux's own choice and not an oversight of ours".
+#   Setting the status non-zero would be the more defensible behaviour and is
+#   not `more`'s; it cost 13 divergences when tried.
 # `ftp` -- the probe hands every program a *filename*, and ftp's operand is a
 #   *hostname*. So this measures what ftp does with a host that does not
 #   resolve, which is an ordinary interactive situation: BSD ftp reports it
@@ -104,6 +113,7 @@ EXPECTED_ZERO = {"true", "echo", "printf", "yes", "test", "[", "false"}
 #   it is a bad host, not a bad path.
 VERIFIED_ZERO = {
     "ed": "507-case differential against GNU ed 1.20.1 (scripts/ed-diff.sh)",
+    "more": "differential against util-linux 2.39.3 (scripts/more-diff.sh)",
     "hwinfo": "advisory about one section of an inventory that is still produced",
     "ftp": "probe mismatch: the operand is a hostname, not a file",
 }
@@ -267,6 +277,34 @@ def selftest():
     return 1 if bad else 0
 
 
+# Where a binary's source could live. A `-cli` wrapper and a plain tool both
+# sit at `<root>/<name>/src/`; coreutils keeps its commands as single files.
+_SOURCE_ROOTS = ("userspace", "gui", "apps", "services", "init", "net", "net80211")
+
+
+def newest_source_mtime(name):
+    """When the newest source that could have produced `name` was last written.
+
+    `None` when no source can be found, which is not the same as "up to date":
+    it means this sweep cannot tell, and the binary is probed anyway rather
+    than silently dropped.
+    """
+    newest = None
+    single = os.path.join("userspace", "coreutils", "src", "bin", name + ".rs")
+    if os.path.isfile(single):
+        newest = os.path.getmtime(single)
+    for root in _SOURCE_ROOTS:
+        d = os.path.join(root, name, "src")
+        if not os.path.isdir(d):
+            continue
+        for dirpath, _dirs, files in os.walk(d):
+            for f in files:
+                if f.endswith(".rs"):
+                    m = os.path.getmtime(os.path.join(dirpath, f))
+                    newest = m if newest is None else max(newest, m)
+    return newest
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(allow_abbrev=False)
     ap.add_argument("--dir", default="target/x86_64-pc-windows-gnu/debug")
@@ -285,12 +323,25 @@ def main(argv=None):
         return 2
 
     findings = []
+    stale = []
     skipped = 0
     unlaunchable = 0
     work = tempfile.mkdtemp(prefix="sezsweep-")
     try:
         for exe in exes:
             name = os.path.basename(exe)[: -len(".exe")]
+            # A BINARY OLDER THAN ITS SOURCE CANNOT BE GRADED. What the
+            # probe measures is the last build, and reporting that as a
+            # property of the program is how a fixed bug keeps being filed:
+            # `credentials` was reported here for an exit status lane C had
+            # corrected in 58c6f3a3c the day before, because the `.exe` on
+            # disk predated the fix by sixteen hours. Same defect lane C
+            # filed against check-libc-shape in
+            # `c-b-check-libc-shape-grades-a-build-artifact-without-checking-its-age.md`.
+            src = newest_source_mtime(name)
+            if src is not None and os.path.getmtime(exe) < src:
+                stale.append(name)
+                continue
             if name in SKIP or name in EXPECTED_ZERO or name in VERIFIED_ZERO:
                 skipped += 1
                 continue
@@ -324,7 +375,19 @@ def main(argv=None):
     print("  skipped:            %d (incl. %d verified-correct)"
           % (skipped, len(VERIFIED_ZERO)))
     print("  did not launch:     %d" % unlaunchable)
+    print("  older than source:  %d (not graded)" % len(stale))
     print("  REPORTED AND EXITED 0: %d" % len(findings))
+    if stale:
+        print()
+        print("  not graded, because the binary predates its own source:")
+        for name in stale[:12]:
+            print("    %s" % name)
+        if len(stale) > 12:
+            print("    ... and %d more" % (len(stale) - 12))
+        print()
+        print("  Rebuild before believing a result about these. What the probe")
+        print("  measures is the last build, and a finding about a stale one is")
+        print("  a finding about the build rather than about the program.")
     if findings:
         print()
         print("  said it failed, then told the shell it had not:")

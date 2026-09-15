@@ -286,6 +286,20 @@ IGNORE: dict[str, str] = {
     # would re-roll a stack canary another thread had already cached -- so this
     # entry records a fixed bug, not an excused one.
     "posix/src/crt.rs:AT_RANDOM_BYTES": "write-once behind a compare_exchange latch; losers wait rather than write",
+    # `scratch()`'s ticket dispenser, and the cleanest instance of this shape
+    # in the table. `N` appears exactly twice in the file -- the declaration
+    # and one `fetch_add` -- and the number it returns is consumed by the
+    # `format!` on the very next line, into the name of a directory the caller
+    # then owns alone. So it is not merely unobserved, as
+    # `stdio.rs:COUNTER` below argues from its assertions; it is
+    # *unobservable*: the value never leaves the expression that produced it,
+    # and no later edit to a test can make it leave without editing `scratch`.
+    #
+    # Three tests drive it, which is what the detector sees. They drive it in
+    # order to NOT race -- the function exists because a fixture-named
+    # directory had two tests renaming each other's files. Audited 2026-09-15
+    # against apps/renamer/src/main.rs:4075.
+    "apps/renamer/src/main.rs:N": "ticket dispenser; the number is consumed into a filename in the next expression and never escapes",
 }
 
 
@@ -1170,6 +1184,36 @@ fn b() { record([0; 3]); }
 """
     )
     expect("bodyless-fn/array-type", sorted(got.get("STATE", ([], []))[0]), ["a", "b"])
+
+    # The IGNORE table itself. Every entry in it is a reason this tool stays
+    # quiet, so the table is the one part of the checker whose failure mode is
+    # pure silence -- a typo in the key, or a `rsplit` that loses the path, and
+    # exemptions either stop applying (noisy, obvious) or start applying to
+    # everything (quiet, invisible). Only the second is dangerous, and only a
+    # case that checks a name is STILL reported can see it.
+    rule("ignore table applies, and stops where it says")
+    both = """
+static mut TESTS_RAN: bool = false;
+static mut CACHED: u32 = 0;
+fn ran() { unsafe { TESTS_RAN = true; } }
+fn cache() { unsafe { CACHED = 1; } }
+#[test]
+fn a() { ran(); cache(); }
+#[test]
+fn b() { ran(); cache(); }
+"""
+    # (a) A `*:` entry excuses the name wherever it appears.
+    expect("wildcard entry applies", "TESTS_RAN" in classify(both), False)
+    # (b) The control. `CACHED` is driven by the same two tests in the same
+    # text, and is keyed in the table to posix/src/ctype.rs -- a different
+    # file. If it were dropped here, (a) would prove nothing, because a filter
+    # that discarded everything would pass (a) too.
+    expect("a path-keyed entry does not reach another file",
+           sorted(classify(both).get("CACHED", ([], []))[0]), ["a", "b"])
+    # (c) ...and it IS dropped when the path does match, which is what the
+    # entry was written to do.
+    at_ctype = {n: u for n, _s, u, _r in analyse_text("posix/src/ctype.rs", both)}
+    expect("a path-keyed entry applies in its own file", "CACHED" in at_ctype, False)
 
     for f in failures:
         print(f"FAIL {f}", file=sys.stderr)

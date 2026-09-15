@@ -3925,6 +3925,51 @@ mod tests {
         }
     }
 
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event. This is
+    /// the half routing decides: with a dialog up, a keystroke belongs to the
+    /// dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_board() {
+        use oswindow::app::App as _;
+
+        let mut app = KanbanApp::new();
+        // Two things the fixture needs, both found by measuring rather than
+        // reading: a second board, because Down steps BETWEEN boards; and the
+        // board-list view, because that arm is inside `if app.view ==
+        // View::BoardList` and a new app opens on the board itself. Without
+        // either, Down cannot move and the assertion below holds whether or
+        // not the dialog took the key.
+        app.add_board("Second");
+        app.view = View::BoardList;
+        app.selected_column = 0;
+        assert!(
+            app.boards.len() > 1,
+            "control: the fixture needs more than one board to move between"
+        );
+
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        app.on_event(&Event::Key(KeyEvent {
+            key: Key::O,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::new(),
+        }));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.on_event(&Event::Key(press(Key::Down)));
+        assert_eq!(
+            app.selected_column, 0,
+            "Down at the open dialog moved the column behind it"
+        );
+    }
+
     #[test]
     fn the_board_list_can_actually_choose_a_board() {
         // `switch_board` had a test and no caller: Alt+4 showed every board and

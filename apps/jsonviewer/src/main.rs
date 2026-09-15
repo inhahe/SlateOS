@@ -4558,6 +4558,45 @@ mod tests {
     /// at the read cap was shown with nothing saying it was incomplete -- and
     /// a JSON file cut in half is invalid JSON, so the user would have met a
     /// parse error about their own file that was really about our cap.
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event -- and in
+    /// this crate that test called `handle_key` directly, one layer below the
+    /// routing. This is the half routing decides: with a dialog up, a
+    /// keystroke belongs to the dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_document() {
+        let mut app = app_with_sample();
+        let before = app.documents.len();
+
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::O,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::new(),
+        }));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        // Ctrl+N opens a new tab; at the dialog it is part of a filename.
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::N,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::new(),
+        }));
+        assert_eq!(
+            app.documents.len(),
+            before,
+            "Ctrl+N at the open dialog opened a tab behind it"
+        );
+    }
+
     #[test]
     fn the_status_bar_says_what_the_last_open_did() {
         let mut app = App::new();

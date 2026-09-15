@@ -3231,8 +3231,15 @@ mod tests {
         // versions of this test asserted `None == None` and passed with the
         // dialog doing nothing -- the scanner caught both, by cutting the
         // routing and staying green.
-        app.selected_node = Some(app.active_map_ref().root_id);
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
         let child = app.add_child_to_selected(String::from("a child"));
+        // **Back to the root.** `add_child_to_selected` selects the node it
+        // creates, so without this the selection is already the leaf and Down
+        // has nowhere further to go -- which is what the two previous versions
+        // of this fixture actually tested, and why the scanner kept saying the
+        // routing was unpinned while the test passed.
+        app.selected_node = Some(root);
         assert!(
             child.is_some(),
             "control: the fixture needs somewhere to move to"

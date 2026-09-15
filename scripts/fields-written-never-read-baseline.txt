@@ -110,6 +110,13 @@ apps/dbviewer/src/main.rs:affected_rows
 #   not wrong.
 apps/diskcleanup/src/main.rs:path_pattern
 apps/diskcleanup/src/main.rs:min_age_days
+# TRIAGED 2026-09-14, REAL and BLOCKED. See known-issues.md ->
+# TD-C-FOUR-CLIPBOARDS-AND-NONE-OF-THEM-IS-CONNECTED. `last_selected` holds
+# the tinted emoji the user picked and is documented "for clipboard / IPC
+# output"; there is no clipboard or IPC code in that program, no client
+# library for the clipboard service anywhere, and A-Q15 means a second
+# socket would kill the program's own window. So the emoji picker cannot
+# give you an emoji, and the field is the last correct step before a gap.
 apps/emojipicker/src/main.rs:last_selected
 apps/netmanager/src/main.rs:diagnostics_running
 apps/remotedesktop/src/main.rs:content_size_bytes

@@ -3799,12 +3799,26 @@ impl ExplorerState {
     /// disagreed, the user would click one file and open another.
     #[must_use]
     pub fn handle_event(&mut self, event: &Event) -> bool {
-        // A modal owns the input while it is up. Falling through to the
+        // A modal owns the INPUT while it is up. Falling through to the
         // listing as well is how a Delete confirmation also moves the
         // selection, so that confirming it acts on a different file than the
         // one the dialog named.
+        //
+        // **A tick is not input, and returning on one was a bug.** The arm
+        // below retires a batch of a running file operation, so a copy stopped
+        // making progress for as long as any confirmation was on screen --
+        // and `tick_interval` asks for the frame interval precisely because a
+        // file operation is "the thing the user is watching". The modal wants
+        // the tick too, for its fade, so both get it: the modal first, then
+        // the work behind it.
         if self.modal.is_some() {
-            return self.handle_modal_event(event);
+            let consumed = self.handle_modal_event(event);
+            if !matches!(event, Event::Tick { .. }) {
+                return consumed;
+            }
+            // `|`, not `||`: the operation must step even when the modal's
+            // fade already said there is something to draw.
+            return consumed | self.tick_work();
         }
         match event {
             Event::Mouse(m) => self.handle_mouse(m),
@@ -3820,14 +3834,7 @@ impl ExplorerState {
             // Each tick retires a batch. A tick that retires nothing has
             // nothing new to draw, and saying so is what stops the loop
             // repainting the whole window sixty times a second for no reason.
-            Event::Tick { .. } => {
-                // Both, not either: a copy running while thumbnails generate
-                // must not stop the thumbnails, and `||` would short-circuit
-                // past the second call rather than merely past its answer.
-                let stepped = self.step_operation();
-                let thumbed = self.pump_thumbnails_default() > 0;
-                stepped || thumbed
-            }
+            Event::Tick { .. } => self.tick_work(),
             // `SettingsChanged` is a different kind of "no" from its
             // neighbours here, and is grouped with them only because the
             // answer happens to coincide. The others are events this window
@@ -4166,6 +4173,21 @@ impl ExplorerState {
     }
 
     /// Feed one event to the open modal, and act if it has answered.
+    /// What one tick moves on: the running file operation, and the thumbnail
+    /// queue. Returns whether either produced something new to draw.
+    ///
+    /// Factored out of the `Event::Tick` arm so the modal path can call it
+    /// too. A modal takes the input while it is up; it must not take the
+    /// progress of work that was already running behind it.
+    fn tick_work(&mut self) -> bool {
+        // Both, not either: a copy running while thumbnails generate must not
+        // stop the thumbnails, and `||` would short-circuit past the second
+        // call rather than merely past its answer.
+        let stepped = self.step_operation();
+        let thumbed = self.pump_thumbnails_default() > 0;
+        stepped || thumbed
+    }
+
     fn handle_modal_event(&mut self, event: &Event) -> bool {
         let Some(modal) = self.modal.as_mut() else {
             return false;
@@ -6191,6 +6213,63 @@ mod tests {
         assert!(
             root.join("dst/extra.txt").exists(),
             "the queued operation never ran"
+        );
+    }
+
+    /// **A copy keeps running while a confirmation is on screen.**
+    ///
+    /// `handle_event` returned early for every event while a modal was up, so
+    /// `Event::Tick` never reached the arm that retires a batch. A paste
+    /// stopped making progress for as long as any Delete confirmation was
+    /// open, and `tick_interval` asks for the frame interval precisely because
+    /// a file operation is the thing the user is watching. Found by
+    /// `scripts/find-swallowed-ticks.py` -- never by hand, because explorer
+    /// routes through `self.modal` and no search for a dialog field reached
+    /// it.
+    ///
+    /// The control is the first half: it proves ticks DO finish this work, so
+    /// that "it finished" in the second half means something.
+    #[test]
+    fn a_copy_keeps_running_while_a_confirmation_is_on_screen() {
+        let scratch = temp_dir("tick_behind_modal");
+        let root = scratch.dir().to_path_buf();
+
+        // The control: no modal, ticks finish the paste.
+        let mut control = paste_of(&root, 6);
+        control.paste();
+        assert!(control.work_in_flight(), "nothing to make progress on");
+        settle(&mut control);
+        assert!(
+            !control.work_in_flight(),
+            "the control is broken: ticks do not finish this work here, so the assertion below would hold for the wrong reason"
+        );
+
+        // The case: the same paste, with a confirmation up throughout.
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        assert!(state.work_in_flight(), "nothing to make progress on");
+        // Put a modal up directly rather than through `ask_delete`, which
+        // returns true and opens nothing when the selection is empty -- the
+        // first version of this test asserted on that return value and got a
+        // pass with no modal on screen.
+        let mut dialog = AlertDialog::error("Could not finish", "something");
+        dialog.show();
+        state.modal = Some(Modal::Notice { dialog });
+        assert!(state.modal.is_some(), "no modal to test behind");
+
+        for _ in 0..100_000 {
+            if !state.work_in_flight() {
+                break;
+            }
+            let _ = state.handle_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        assert!(
+            !state.work_in_flight(),
+            "the copy stopped because a confirmation was on screen"
+        );
+        assert!(
+            state.modal.is_some(),
+            "the ticks dismissed the confirmation"
         );
     }
 

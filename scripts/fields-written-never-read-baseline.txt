@@ -126,13 +126,16 @@ apps/netmanager/src/main.rs:diagnostics_running
 # worse than the omission. This is the fifth disconnected clipboard --
 # see TD-C-FIVE-CLIPBOARDS-AND-NONE-OF-THEM-IS-CONNECTED.
 apps/remotedesktop/src/main.rs:content_size_bytes
-# TRIAGED 2026-09-14, REAL and in lane C's own tree, not blocked.
-#   Set on every mouse Move over the seek bar (`preview_at(event.x)`) and
-#   cleared on leave, so the player computes which timestamp the pointer
-#   is over, continuously, and draws nothing. Hovering a video scrubber
-#   shows no time. The hover tracking is complete -- press, move, leave --
-#   and entirely invisible.
-apps/videoplayer/src/main.rs:seek_preview_position
+# FIXED 2026-09-14 -- the label is drawn above the bar during a drag.
+# Kept for the reasoning, which is the useful part:
+#   Set on press, followed on every move, cleared on release -- a DRAG,
+#   not a hover; the first version of this note said hover and was wrong.
+#   Nothing draws it, and that is the missing half of a deliberate design:
+#   the press arm's own comment says the picture only moves when the drag
+#   is let go "so dragging across a film does not seek to every pixel of
+#   the way there". Not seeking continuously is only tolerable because the
+#   preview tells you where you are. Without it you drag blind and find
+#   out where you landed by arriving there.
 # TRIAGED 2026-09-14 -- THE SETTINGS-PANEL GROUP, and this is a checklist
 # for the design-decisions 815 port rather than a list of things to wire
 # where they stand. Fixing a panel that is about to be deleted is work done

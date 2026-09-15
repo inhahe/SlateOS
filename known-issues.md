@@ -148485,9 +148485,178 @@ and `hexeditor` caps a read at 16 MiB. Both say so when they bite. A silent cap
 turns a partial answer into a confident wrong one: "no results" reads as "no
 such file", and a truncated hex view lies about a specific address.
 
+*The app must agree that something changed.* `apps/jsonviewer` decides whether
+to redraw by comparing a `state_fingerprint()` before and after the key
+handler, because `handle_key` reports nothing. Opening the picker changes no
+*other* watched state, so until `file_dialog.is_some()` joined that tuple the
+dialog would have been invisible until something else moved — the same
+invisible-picker bug as `hexeditor`'s, reached by a completely different
+mechanism. **Step 6 of the list above is not sufficient on its own.** Before
+writing the picker, find out how the app decides to draw a frame: an
+`EventResult`, a dirty flag, a fingerprint, or nothing at all. Two of the four
+apps done so far needed something beyond "render it last", and they needed
+different things.
+
 *Names are bytes.* `guitk`'s `DirEntry` is deliberately `OsString`, and its own
 doc explains why — decoding lossily "could make it match one it should not". In
 `filesearch` that is the whole game, so non-UTF-8 names are **skipped and
 counted** rather than decoded, and the count is shown. `IndexEntry` holding
 `String` and `globmatch::glob_match` taking `&str` is the real limit; fixing it
 properly means byte-capable matching, which is its own task.
+
+**FOUR FOR FOUR ON THE FIXTURE POINT.**
+
+Every one of `photomanager`, `sysinfo`, `filesearch` and `jsonviewer` had tests
+resting on the invented production data, and in every case they went red
+together the moment it was removed — six, sixteen, sixteen and six of them.
+None of those tests said they depended on it; they read as self-contained and
+were not.
+
+The consistency is the finding. **Production fixture data is always
+load-bearing for tests that nobody recorded as depending on it**, because a
+test needs *something* to act on and the seeded data is there. So the red is
+not a complication of this work, it is the reliable second half of it, and
+budgeting for it is the difference between "delete the fixture" being a
+ten-minute job and a surprise.
+
+Worth adding: the failures are loud only when the data becomes **absent**
+rather than merely **different**. `apps/settings` surfaced because an account
+list became empty; had I replaced three invented accounts with three real ones,
+all six tests would have kept passing against whatever the machine happened to
+have, and I would have called it a clean migration. `apps/sysinfo` was the
+opposite and the better case: its fixture asserts its own precondition, so the
+sixteen failures named the problem — *"fixture's property table fits on screen:
+4 rows in 144 px"* — instead of passing vacuously.
+
+## TD-C-THE-RECOVERY-TOOL-REPORTED-FILES-IT-NEVER-RECOVERED -- FIXED 2026-09-15
+
+**In short:** `apps/undelete` told people who had lost data that their files
+had been recovered, with a byte count and a destination path, having written
+nothing anywhere. It is the worst defect found in this tree today and the only
+one that is acted upon at the moment someone is least able to check it.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**The flow, all of it read rather than inferred.**
+
+1. Someone opens a file-recovery tool, which means they have lost something.
+2. `UndeleteApp::new` called `simulated_partitions()` — three disks,
+   `/dev/sda1` at 500 GB, `/dev/sda2` at 1 TB, `/dev/sdb1` at 2 TB — on every
+   machine, whatever was attached.
+3. They scan. `RecycleBinReader::scan` was, in its entirety,
+   `self.entries = simulated_recycle_bin()`. The results list showed
+   `/home/user/Documents/report_q4.pdf` at 245,760 bytes and
+   `/home/user/Photos/vacation_001.jpg` at 3 MB.
+4. They select files and press Recover. `recover_selected` built a
+   `RecoveryResult` with `success: true` and
+   `bytes_recovered: file.file_size` — **both taken from the invented file's
+   own metadata** — for a destination nothing ever wrote to.
+5. The crate contains **no reference to `std::fs` or `safeio`**. There is no
+   code path in it that writes a byte to disk.
+
+The module doc advertised "Scans ext4 filesystem inode tables and directory
+entries for deleted files".
+
+**Why this one ranks above the rest.** Every other fabrication here costs time
+or trust and leaves the situation recoverable. This one closes the door: a
+person told recovery *failed* keeps looking, and a person told it *succeeded*
+stops — and then reformats the disk, because the data is safe elsewhere. The
+false success is worse than the false failure by the exact margin that matters.
+
+**The fix, and the half that was nearly missed.** The invented sources are gone
+and recovery reports an honest failure naming the reason. That much is
+straightforward. What was nearly missed is lane B's point: **"no recoverable
+files" and "cannot scan" are different sentences, and an empty list is read as
+the first.** An empty partition list claims you have no disks; an empty result
+list claims nothing of yours survives. Both are verdicts on the user's data
+that this program has not earned and cannot earn, so both screens now say
+outright that nothing has looked. `an_empty_recovery_screen_says_it_could_not_look`
+pins it.
+
+**Two smaller inventions found on the way out.** The failure message read
+"Data blocks partially overwritten" — a specific physical cause that was never
+established, which would send someone hunting a hardware fault they do not
+have. And `scan()` now does **nothing** rather than clearing: with no source to
+read, it learns nothing and therefore changes nothing, where clearing would
+assert the bin is empty, which is a claim it equally cannot make.
+
+**What is implementable, and is the obvious next step.** A recycle bin is an
+ordinary directory. Listing it needs `std::fs::read_dir` and restoring from it
+needs a rename — neither needs the raw block-device access the inode scanner
+and the signature carver do. So of the three sources this tool claims, one is
+reachable today and two are not, and the honest page should eventually say that
+per-source rather than as one banner.
+
+**Twenty-four tests were resting on the invented data** — the fifth application
+in a row where that was true. `test_engine_recovery` asserted that "at least
+some should succeed", and it was *correct about the behaviour*: the behaviour
+was the defect. A test holds a fabrication in place as firmly as it holds
+anything else.
+
+## TD-C-THE-THREE-TOOLS-THAT-REPORT-ACTS-THEY-DID-NOT-PERFORM -- FIXED 2026-09-15
+
+**In short:** three programs told the user that something had happened to their
+data when nothing had. A recovery tool reported files recovered, a partition
+manager reported formats and deletions applied, and a network scanner reported
+open ports on machines it never contacted. None of the three has any access to
+the thing it describes.
+
+**Date:** 2026-09-15. **Lane:** C. Ordered by what believing each one costs,
+which is the axis lane B proposed and which put all three above the twenty-odd
+settings pages fixed earlier the same day.
+
+| program | what it reported | what it had |
+|---|---|---|
+| `apps/undelete` | files recovered, with byte counts and destination paths | no `std::fs`, no `safeio` |
+| `apps/partmanager` | "Applied N operation(s) successfully" for queued formats and deletions | no `std::fs`, no `safeio` |
+| `apps/netscan` | hosts up, ports open, service banners | no `std::net`, no socket syscall |
+
+**What separates these from the rest.** Every other fabrication in this sweep
+cost time or trust and left the situation recoverable. These three are acted
+upon, and the action is often irreversible:
+
+* A person told recovery **failed** keeps looking. One told it **succeeded**
+  stops — and may reformat the disk, because the data is safe elsewhere.
+* A person told a format was **applied** believes a drive was wiped. That is
+  the belief someone acts on before selling or discarding it.
+* A person told a port is **closed** concludes their network is secure. The
+  tuned probabilities reported far more closed ports than open ones.
+
+In each case the false *success* is worse than the false failure, and by a
+margin that the usual "it is only a stub" reasoning does not cover.
+
+**`netscan` was the hardest to have caught and is worth studying.** It was not
+a constant list: each address had a 60% chance of being up, each port a
+probability tuned by service — 50% for SSH and HTTP, 25% for RDP and SMB — and
+a fabricated banner 40% of the time. **Two runs disagreed, which is exactly
+what a real scan does.** Repeating it could never expose it; a constant list
+would have been suspicious the second time. The randomness was what made the
+fiction survive, and a plausible distribution is a stronger disguise than a
+plausible value.
+
+**The fix in all three is the same, and half of it is easy to miss.** Remove
+the invented source, and report an honest failure — that part is
+straightforward. The other half is lane B's: **"no results" and "cannot look"
+are different sentences, and an empty list is read as the first.** An empty
+partition list claims the machine has no disks; an empty recovery list claims
+nothing survives; an empty scan claims the network is quiet. All three are
+verdicts these programs have not earned, so all three screens now say outright
+that nothing was examined.
+
+**Two smaller inventions surfaced inside the fixes.** `undelete`'s failure
+message read "Data blocks partially overwritten" — a physical cause never
+established, which would send someone hunting a hardware fault. And I first
+wrote `RecycleBinReader::scan` as a *clear*, which asserts the bin is empty;
+it is a no-op now, because with nothing to read it learns nothing and therefore
+changes nothing. The second was my own, made while fixing the first.
+
+**`partmanager` keeps its queue after a failed apply**, deliberately. Clearing
+it would leave a window indistinguishable from one where the work was done —
+nothing pending, nothing to see — and the queue is what the user needs if this
+ever gains the ability to apply it.
+
+**Twenty-four, forty and nine tests were resting on the invented data.** That
+is the fifth, sixth and seventh application in a row where removing the
+fabrication turned tests red. Several of those tests asserted the fabricated
+behaviour directly — `test_engine_recovery` required that "at least some should
+succeed" — and were correct about the behaviour. The behaviour was the defect.

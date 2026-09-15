@@ -67,7 +67,6 @@ const CORNER_RADIUS: f32 = 6.0;
 const SMALL_RADIUS: f32 = 4.0;
 
 const MAX_HISTORY_ENTRIES: usize = 50;
-const MAX_HOSTS_DISPLAY: usize = 256;
 /// Vertical space a truncated list keeps for its "N more" line.
 ///
 /// Reserved whether or not the line is drawn, so that how many rows fit does
@@ -1584,154 +1583,6 @@ fn sim_octet(rng: &mut SimRng, min: u8, max: u8) -> u8 {
     u8::try_from(drawn).unwrap_or(min)
 }
 
-/// Generate a simulated hostname for an IP.
-fn simulated_hostname(ip: Ipv4Addr, rng: &mut SimRng) -> Option<String> {
-    let prefixes = [
-        "desktop", "laptop", "server", "printer", "nas", "router", "switch", "camera", "phone",
-        "tablet", "tv", "iot",
-    ];
-    if rng.chance(0.7) {
-        let prefix = rng.choose(&prefixes).copied().unwrap_or("host");
-        Some(format!("{}-{}", prefix, ip.octets[3]))
-    } else {
-        None
-    }
-}
-
-/// Guess OS based on open ports.
-fn guess_os(ports: &[PortResult]) -> OsGuess {
-    let open_ports: Vec<u16> = ports
-        .iter()
-        .filter(|p| p.state == PortState::Open)
-        .map(|p| p.port)
-        .collect();
-
-    if open_ports.contains(&135) || open_ports.contains(&445) || open_ports.contains(&3389) {
-        return OsGuess::Windows;
-    }
-    if open_ports.contains(&548) {
-        return OsGuess::MacOS;
-    }
-    if open_ports.contains(&631) && open_ports.contains(&9100) {
-        return OsGuess::Printer;
-    }
-    if open_ports.contains(&179) || (open_ports.contains(&23) && open_ports.len() <= 3) {
-        return OsGuess::Router;
-    }
-    if open_ports.contains(&1883) || open_ports.contains(&8883) {
-        return OsGuess::IoTDevice;
-    }
-    if open_ports.contains(&22) || open_ports.contains(&111) {
-        return OsGuess::Linux;
-    }
-    if open_ports.is_empty() {
-        return OsGuess::Unknown;
-    }
-    OsGuess::Linux
-}
-
-/// Guess a vendor from a MAC address (simulated OUI lookup).
-fn guess_vendor(mac: &MacAddr) -> Option<String> {
-    let oui = [mac.bytes[0], mac.bytes[1], mac.bytes[2]];
-    match oui {
-        [0x00, 0x1A, _] => Some("Cisco Systems".to_string()),
-        [0x00, 0x50, 0x56] => Some("VMware".to_string()),
-        [0x08, 0x00, 0x27] => Some("Oracle VirtualBox".to_string()),
-        [0xDC, 0xA6, 0x32] => Some("Raspberry Pi".to_string()),
-        [0xB8, 0x27, 0xEB] => Some("Raspberry Pi".to_string()),
-        [0x00, 0x0C, 0x29] => Some("VMware".to_string()),
-        [0x00, 0x15, 0x5D] => Some("Microsoft Hyper-V".to_string()),
-        [0x00, 0x16, 0x3E] => Some("Xen Virtual".to_string()),
-        _ => None,
-    }
-}
-
-/// Simulate scanning a single host.
-fn simulate_host_scan(ip: Ipv4Addr, scan_ports: &[u16], rng: &mut SimRng) -> Option<HostResult> {
-    // Determine if host is "up" — give ~60% probability for simulated network
-    let is_up = rng.chance(0.6);
-    if !is_up {
-        return None;
-    }
-
-    let latency = 0.5 + rng.unit_f32() * 50.0;
-    let mac = MacAddr::from_ip_simulated(ip);
-    let hostname = simulated_hostname(ip, rng);
-    let ttl_val = if rng.chance(0.5) { 64u8 } else { 128u8 };
-    let vendor = guess_vendor(&mac);
-
-    let mut ports = Vec::new();
-    for port_ref in scan_ports {
-        let port_val = *port_ref;
-        // Probability of port being open depends on whether it is a "common" port
-        let open_prob = match port_val {
-            22 | 80 | 443 => 0.5,
-            21 | 25 | 53 | 110 | 143 | 993 | 995 => 0.3,
-            135 | 139 | 445 | 3389 => 0.25,
-            3306 | 5432 | 6379 | 27017 => 0.15,
-            8080 | 8443 | 9090 => 0.2,
-            _ => 0.05,
-        };
-
-        let state = if rng.chance(open_prob) {
-            PortState::Open
-        } else if rng.chance(0.1) {
-            PortState::Filtered
-        } else {
-            PortState::Closed
-        };
-
-        if state == PortState::Open || state == PortState::Filtered {
-            let service = lookup_service(port_val).map(|s| s.to_string());
-            let banner = if state == PortState::Open && rng.chance(0.4) {
-                Some(simulated_banner(port_val))
-            } else {
-                None
-            };
-            let response = latency + rng.unit_f32() * 10.0;
-            ports.push(PortResult {
-                port: port_val,
-                state,
-                service,
-                banner,
-                response_ms: response,
-            });
-        }
-    }
-
-    let os_guess = guess_os(&ports);
-
-    Some(HostResult {
-        ip,
-        hostname,
-        mac: Some(mac),
-        os_guess,
-        ports,
-        latency_ms: latency,
-        is_up: true,
-        ttl: ttl_val,
-        vendor,
-    })
-}
-
-/// Generate a simulated banner for a port.
-fn simulated_banner(port: u16) -> String {
-    match port {
-        22 => "SSH-2.0-OpenSSH_9.6".to_string(),
-        21 => "220 Welcome to FTP server".to_string(),
-        25 => "220 mail.example.com ESMTP".to_string(),
-        80 => "HTTP/1.1 200 OK\r\nServer: nginx/1.24".to_string(),
-        110 => "+OK POP3 server ready".to_string(),
-        143 => "* OK IMAP server ready".to_string(),
-        443 => "TLS 1.3 / HTTP/2".to_string(),
-        3306 => "5.7.42-MySQL Community Server".to_string(),
-        5432 => "PostgreSQL 16.1".to_string(),
-        6379 => "Redis v7.2.4".to_string(),
-        8080 => "HTTP/1.1 200 OK\r\nServer: Apache-Coyote".to_string(),
-        _ => format!("Service on port {}", port),
-    }
-}
-
 /// Simulate a traceroute to a destination IP.
 fn simulate_traceroute(dest: Ipv4Addr) -> Vec<TracerouteHop> {
     // The address seeds the route, so the same destination always traces the
@@ -2223,21 +2074,29 @@ impl NetScanApp {
 
         // Saturating: this is a seed, so any answer is as good as any other,
         // and the arithmetic should not be the thing that decides.
-        let mut rng = SimRng::new(
-            (ips.len() as u64)
-                .saturating_mul(31)
-                .saturating_add((scan_ports.len() as u64).saturating_mul(17)),
-        );
-        let mut hosts = Vec::new();
+        // The generator that fed the fabricated scan. Nothing draws from it
+        // now; it is left named so the removal is one line when the real
+        // scanner lands and this whole block goes.
+        let _rng_seed = (ips.len() as u64)
+            .saturating_mul(31)
+            .saturating_add((scan_ports.len() as u64).saturating_mul(17));
+        let hosts: Vec<HostResult> = Vec::new();
 
-        for ip in &ips {
-            if let Some(host) = simulate_host_scan(*ip, &scan_ports, &mut rng) {
-                hosts.push(host);
-            }
-            if hosts.len() >= MAX_HOSTS_DISPLAY {
-                break;
-            }
-        }
+        // No hosts. This crate has no network access at all -- no `std::net`,
+        // no socket syscall -- so nothing here has contacted anything.
+        //
+        // What was here until 2026-09-15 was worse than a constant list, and
+        // worse in a way that mattered: `simulate_host_scan` gave each address
+        // a 60% chance of being "up" and each port a tuned probability of
+        // being open -- 50% for SSH, HTTP and HTTPS, 25% for RDP and SMB, 15%
+        // for database ports -- with a fabricated service banner 40% of the
+        // time. Two runs disagreed, which is exactly what a real scan does, so
+        // repeating it could not expose it.
+        //
+        // The reported facts were security conclusions about machines on the
+        // user's network. A false *open* costs an afternoon; a false
+        // **closed** is someone deciding their network is secure, and this
+        // reported far more closed ports than open ones.
 
         let id = self.scan_id_counter;
         self.scan_id_counter = self.scan_id_counter.saturating_add(1);
@@ -4566,6 +4425,66 @@ fn main() -> ExitCode {
 // Tests (55+)
 // ============================================================================
 
+/// Kept for the real scanner, and used by the tests meanwhile.
+///
+/// `#[cfg(test)]` since 2026-09-15: the only production caller was the
+/// fabricated scan. A TTL and a MAC prefix are real evidence and this is
+/// real inference over them -- what was wrong was the numbers it was fed.
+#[cfg(test)]
+/// Guess OS based on open ports.
+fn guess_os(ports: &[PortResult]) -> OsGuess {
+    let open_ports: Vec<u16> = ports
+        .iter()
+        .filter(|p| p.state == PortState::Open)
+        .map(|p| p.port)
+        .collect();
+
+    if open_ports.contains(&135) || open_ports.contains(&445) || open_ports.contains(&3389) {
+        return OsGuess::Windows;
+    }
+    if open_ports.contains(&548) {
+        return OsGuess::MacOS;
+    }
+    if open_ports.contains(&631) && open_ports.contains(&9100) {
+        return OsGuess::Printer;
+    }
+    if open_ports.contains(&179) || (open_ports.contains(&23) && open_ports.len() <= 3) {
+        return OsGuess::Router;
+    }
+    if open_ports.contains(&1883) || open_ports.contains(&8883) {
+        return OsGuess::IoTDevice;
+    }
+    if open_ports.contains(&22) || open_ports.contains(&111) {
+        return OsGuess::Linux;
+    }
+    if open_ports.is_empty() {
+        return OsGuess::Unknown;
+    }
+    OsGuess::Linux
+}
+
+/// Kept for the real scanner, and used by the tests meanwhile.
+///
+/// `#[cfg(test)]` since 2026-09-15: the only production caller was the
+/// fabricated scan. A TTL and a MAC prefix are real evidence and this is
+/// real inference over them -- what was wrong was the numbers it was fed.
+#[cfg(test)]
+/// Guess a vendor from a MAC address (simulated OUI lookup).
+fn guess_vendor(mac: &MacAddr) -> Option<String> {
+    let oui = [mac.bytes[0], mac.bytes[1], mac.bytes[2]];
+    match oui {
+        [0x00, 0x1A, _] => Some("Cisco Systems".to_string()),
+        [0x00, 0x50, 0x56] => Some("VMware".to_string()),
+        [0x08, 0x00, 0x27] => Some("Oracle VirtualBox".to_string()),
+        [0xDC, 0xA6, 0x32] => Some("Raspberry Pi".to_string()),
+        [0xB8, 0x27, 0xEB] => Some("Raspberry Pi".to_string()),
+        [0x00, 0x0C, 0x29] => Some("VMware".to_string()),
+        [0x00, 0x15, 0x5D] => Some("Microsoft Hyper-V".to_string()),
+        [0x00, 0x16, 0x3E] => Some("Xen Virtual".to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // A test that indexes out of range should fail loudly and point at the line
@@ -4643,10 +4562,23 @@ mod tests {
         })
     }
 
+    /// An app showing more hosts than fit on one screen.
+    ///
+    /// The hosts come from the fixture now. This used to call `start_scan`,
+    /// which invented them -- each address 60% likely to be "up", each port
+    /// given a tuned probability of being open, with fabricated service
+    /// banners. `start_scan` reports no hosts since 2026-09-15 because nothing
+    /// in this crate has network access, so nine tests that were resting on
+    /// the invention went red together.
+    ///
+    /// The self-check below is kept and is why they failed legibly rather than
+    /// passing over an empty list: a scroll test against a list that fits on
+    /// screen passes no matter what the handler does.
     fn scanned_with_many_hosts() -> NetScanApp {
-        let mut app = NetScanApp::new();
-        app.config.target_input = String::from("192.168.1.0/24");
-        app.start_scan();
+        // Enough that the viewport, not the list length, decides a page --
+        // the paging test compares the scroll step against
+        // `results_visible_rows().count`, and a short list clamps that.
+        let app = app_with_hosts(60, 4);
         assert!(
             app.results.as_ref().is_some_and(|r| r.hosts.len() > 10),
             "the test needs more hosts than fit on one screen"
@@ -5514,12 +5446,23 @@ mod tests {
         assert!(!app.history.is_empty());
     }
 
+    /// A scan reports no hosts, because nothing here can reach the network.
+    ///
+    /// This asserted the opposite until 2026-09-15 and was correct about the
+    /// behaviour: `start_scan` invented hosts and open ports, with
+    /// probabilities tuned to look plausible -- 50% for SSH and HTTP, 25% for
+    /// RDP and SMB. Two runs disagreed, which is what a real scan does, so
+    /// repeating it could never have exposed it.
     #[test]
-    fn test_app_scan_populates_hosts() {
+    fn a_scan_reports_no_hosts_because_it_cannot_reach_the_network() {
         let mut app = NetScanApp::new();
         app.start_scan();
-        let result = app.results.as_ref().unwrap();
-        assert!(!result.hosts.is_empty());
+        let result = app.results.as_ref().expect("a scan result");
+        assert!(
+            result.hosts.is_empty(),
+            "the scan reported {} hosts and contacted nothing",
+            result.hosts.len()
+        );
     }
 
     #[test]
@@ -5593,8 +5536,9 @@ mod tests {
 
     #[test]
     fn test_app_select_host() {
-        let mut app = NetScanApp::new();
-        app.start_scan();
+        // The hosts come from the fixture: a scan reports none, because
+        // nothing in this crate can reach the network.
+        let mut app = app_with_hosts(3, 2);
         app.selected_host_idx = Some(0);
         assert!(app.selected_host().is_some());
     }

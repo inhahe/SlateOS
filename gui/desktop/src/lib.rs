@@ -111,7 +111,6 @@ pub mod overview;
 pub mod power;
 pub mod power_settings;
 pub mod print_manager;
-pub mod privacy_settings;
 pub mod resmon;
 pub mod run_dialog;
 pub mod screen_capture;

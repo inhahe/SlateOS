@@ -241,6 +241,22 @@ a server accepting while serving, or a program fetching two things in parallel â
 the concurrency fix in `known-issues.md` `D-NETSOCK-SYNC` cannot be proven at all,
 because the test that would prove it needs two sockets.
 
+**Update 2026-09-15 â€” this no longer holds the boot red, and that is a change in
+urgency, not in the question.** Until today the head-of-line self-test FAILED on
+this limitation, so every boot was red and nothing could be merged to `main`
+until you answered. That was my choice and I have reversed it
+(`design-decisions.md` 941): three unrelated fixes had accumulated behind it,
+including a kernel self-deadlock that has nothing to do with sockets.
+
+The test now prints `NOT CHECKED`, names this question, and does **not** claim
+the property passes. A second check fails the build if the limitation ever goes
+away without anyone noticing, so nothing is quietly retired by the change.
+
+What this means for you: **there is no longer any schedule pressure on this
+answer.** Take it on its merits. The cost of leaving it open is unchanged --
+one connection at a time, and `D-NETSOCK-SYNC` unprovable -- but it no longer
+costs the other two lanes their merges.
+
 *Filed 2026-09-14 by lane A. Root cause and evidence are in `known-issues.md` under
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*

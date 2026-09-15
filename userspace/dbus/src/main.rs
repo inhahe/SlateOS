@@ -27,8 +27,6 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::fs;
-#[cfg(not(test))]
-use std::io::{self, Write as IoWrite};
 use std::path::Path;
 
 // ============================================================================
@@ -2879,7 +2877,6 @@ fn extract_xml_attr(line: &str, attr: &str) -> Option<String> {
 // ============================================================================
 
 /// Parse command-line arguments for dbus-send.
-#[cfg(not(test))]
 struct SendArgs {
     system: bool,
     session: bool,
@@ -2891,7 +2888,6 @@ struct SendArgs {
     msg_type: u8,
 }
 
-#[cfg(not(test))]
 fn parse_send_args(args: &[String]) -> Result<SendArgs, String> {
     let mut sa = SendArgs {
         system: false,
@@ -2988,7 +2984,6 @@ fn parse_typed_value(s: &str) -> Option<DbusType> {
 }
 
 /// Run the dbus-send functionality.
-#[cfg(not(test))]
 fn run_dbus_send(args: &[String]) -> i32 {
     let sa = match parse_send_args(args) {
         Ok(a) => a,
@@ -3020,24 +3015,36 @@ fn run_dbus_send(args: &[String]) -> i32 {
     msg.body = sa.args;
     msg.signature = Some(msg.compute_signature());
 
-    // In a real implementation, we'd connect to the bus socket and send.
-    // For now, marshal and print the message.
+    // The message is MARSHALLED and then refused, which is the useful order:
+    // a malformed call still fails as a malformed call, and a well-formed one
+    // fails for the honest reason.
+    //
+    // What this used to do with `--print-reply`:
+    //
+    //     method call sender=:1.0 -> dest=org.foo serial=1 path=/bar ...
+    //     (message: 128 bytes on wire)
+    //
+    // and exit 0. No message went on any wire -- there is no socket layer --
+    // and no REPLY was printed either, despite the flag's name; that is the
+    // outgoing call echoed back in the shape of an observed one. Without the
+    // flag it wrote the marshalled bytes to stdout and also exited 0, so
+    // `dbus-send ... >/dev/null` reported a successful send having sent
+    // nothing.
+    //
+    // dbus-send exists to send. Reporting success is the one thing it must
+    // not do when it has not.
     match msg.marshal() {
         Ok(bytes) => {
-            if sa.print_reply {
-                println!(
-                    "method call sender=:1.0 -> dest={} serial=1 path={} interface={} member={}",
-                    sa.dest, sa.object_path, interface, member
-                );
-                for val in &msg.body {
-                    println!("   {val}");
-                }
-                println!("(message: {} bytes on wire)", bytes.len());
-            } else {
-                // Write raw bytes to stdout
-                let _ = io::stdout().write_all(&bytes);
-            }
-            0
+            eprintln!(
+                "dbus-send: cannot send: this build has no socket layer, so there is \
+no bus to connect to."
+            );
+            eprintln!(
+                "dbus-send: the message marshalled cleanly ({} bytes), so the call \
+itself is well-formed; nothing carried it.",
+                bytes.len()
+            );
+            1
         }
         Err(e) => {
             eprintln!("dbus-send: failed to marshal message: {e}");
@@ -3051,7 +3058,6 @@ fn run_dbus_send(args: &[String]) -> i32 {
 // ============================================================================
 
 /// Run the dbus-monitor functionality.
-#[cfg(not(test))]
 fn run_dbus_monitor(args: &[String]) -> i32 {
     let mut system = false;
     let mut rules = Vec::new();
@@ -3077,17 +3083,29 @@ fn run_dbus_monitor(args: &[String]) -> i32 {
     }
 
     let bus_type = if system { "system" } else { "session" };
-    println!("Monitoring {bus_type} bus traffic...");
+    // "Monitoring ... traffic" was a claim, and the parenthetical two lines
+    // below it -- "(In full implementation, would connect to bus and display
+    // messages)" -- was the truth. Both were printed, and the EXIT CODE
+    // agreed with the claim: 0, immediately, having monitored nothing.
+    //
+    // A caller that runs dbus-monitor expects it to block and stream. Exiting
+    // 0 at once looks like a bus with no traffic on it, which is a fact about
+    // the world rather than about this program, and the wrong one.
+    //
+    // The match rules are still parsed and reported, because a bad rule
+    // should still fail as a bad rule.
+    eprintln!("dbus-monitor: cannot monitor the {bus_type} bus: this build has no socket layer.");
     if !rules.is_empty() {
         for rule in &rules {
             println!("  match: {}", rule.to_rule_string());
         }
     }
-    println!("(In full implementation, would connect to bus and display messages)");
+    eprintln!(
+        "dbus-monitor: the match rules above parsed cleanly; there is nothing to \
+apply them to."
+    );
 
-    // In a real implementation, we'd connect to the bus, add match rules,
-    // and print incoming messages. For now, just show we parsed everything.
-    0
+    1
 }
 
 // ============================================================================
@@ -3275,6 +3293,63 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    /// `dbus-send` refuses instead of reporting a send that did not happen.
+    ///
+    /// With `--print-reply` it printed a line shaped like an observed method
+    /// call plus "(message: N bytes on wire)" and exited 0 -- no message went
+    /// on any wire, and no reply was printed either, despite the flag. Without
+    /// the flag it dumped the marshalled bytes to stdout and also exited 0, so
+    /// `dbus-send ... >/dev/null` reported a successful send having sent
+    /// nothing.
+    #[test]
+    fn dbus_send_refuses_rather_than_reporting_a_send() {
+        let well_formed = vec![
+            "dbus-send".to_string(),
+            "--session".to_string(),
+            "--dest=org.example.Foo".to_string(),
+            "/org/example/Foo".to_string(),
+            "org.example.Foo.Ping".to_string(),
+        ];
+        assert_eq!(run_dbus_send(&well_formed), 1, "a send that did not happen");
+
+        let mut with_reply = well_formed.clone();
+        with_reply.insert(1, "--print-reply".to_string());
+        assert_eq!(run_dbus_send(&with_reply), 1, "--print-reply has no reply");
+    }
+
+    /// A malformed call still fails as a malformed call.
+    ///
+    /// The refusal comes AFTER marshalling deliberately: if it came first,
+    /// every invocation would fail identically and the argument parsing --
+    /// which is real and tested -- would stop being exercised.
+    #[test]
+    fn dbus_send_still_rejects_a_call_it_cannot_build() {
+        // No object path or member at all.
+        assert_eq!(run_dbus_send(&["dbus-send".to_string()]), 1);
+    }
+
+    /// `dbus-monitor` refuses instead of claiming to monitor.
+    ///
+    /// It printed "Monitoring <type> bus traffic...", then admitted "(In full
+    /// implementation, would connect to bus and display messages)", and
+    /// returned 0. The claim and the admission were both printed and the exit
+    /// code agreed with the claim -- so a caller expecting it to block and
+    /// stream saw immediate success, which reads as a bus with no traffic on
+    /// it rather than a monitor that never attached.
+    #[test]
+    fn dbus_monitor_refuses_rather_than_claiming_to_monitor() {
+        assert_eq!(run_dbus_monitor(&["dbus-monitor".to_string()]), 1);
+        assert_eq!(
+            run_dbus_monitor(&["dbus-monitor".to_string(), "--system".to_string()]),
+            1
+        );
+        // A bad match rule still fails as a bad match rule, not as "no socket".
+        assert_eq!(
+            run_dbus_monitor(&["dbus-monitor".to_string(), "not a rule".to_string()]),
+            1
+        );
+    }
+
     /// The daemon refuses rather than announcing a bus nobody serves.
     ///
     /// It used to construct a `BusDaemon`, bind it to `_daemon` -- discarding

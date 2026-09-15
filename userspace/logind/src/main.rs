@@ -1656,6 +1656,18 @@ fn parse_config(content: &str) -> (DaemonConfig, Vec<&'static str>) {
                     }
                     true
                 }
+                // The one key here that ACTS. `max_sessions` is enforced in
+                // `Daemon::create_session` -- `if self.sessions.len() >=
+                // self.config.max_sessions` -- so this is the opposite defect
+                // to the nine above: a setting that works, which the config
+                // file could not reach because the parser had no arm for it
+                // and dropped it into `_`.
+                "NSessionsMax" => {
+                    if let Ok(v) = value.parse() {
+                        config.max_sessions = v;
+                    }
+                    true
+                }
                 _ => false,
             };
             if recognised
@@ -3487,6 +3499,26 @@ mod tests {
     }
 
     // --- Configuration parsing ---
+
+    /// `NSessionsMax` reaches the limit that `create_session` enforces.
+    ///
+    /// Not in `INERT_CONFIG_KEYS`, and the inert-key test proves that rather
+    /// than the comment asserting it: this key parses, takes effect, and does
+    /// NOT appear in the startup warning.
+    #[test]
+    fn nsessions_max_is_read_from_the_config_file() {
+        let (config, inert) = parse_config("[Login]\nNSessionsMax=3\n");
+        assert_eq!(config.max_sessions, 3);
+        assert!(
+            inert.is_empty(),
+            "NSessionsMax takes effect, so it must not be reported inert"
+        );
+
+        // A value that does not parse leaves the default rather than zeroing
+        // the limit -- a max_sessions of 0 would refuse every session.
+        let (config, _) = parse_config("[Login]\nNSessionsMax=lots\n");
+        assert_eq!(config.max_sessions, MAX_SESSIONS);
+    }
 
     /// Setting an inert key is reported; setting nothing is silent.
     #[test]

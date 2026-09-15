@@ -178,8 +178,8 @@ gui/desktop/src/lib.rs:shortcut_message
 gui/desktop/src/sound_settings.rs:volume_override
 gui/desktop/src/sound_settings.rs:output_device_id
 gui/desktop/src/startup_settings.rs:last_run_at
-# TRIAGED 2026-09-14, REAL and NOT blocked by the settings port -- this is
-# shell chrome, not a settings screen, so 815 does not touch it.
+# FIXED 2026-09-14 -- the dragged glyph is drawn at alpha 110. Kept for the
+# reasoning:
 #   `DragSource::show_ghost` is documented "whether the icon should appear
 #   semi-transparent (drag in progress)" and `dragging_key` says which one.
 #   Both are set when the drag threshold is crossed and cleared on drop or
@@ -194,8 +194,6 @@ gui/desktop/src/startup_settings.rs:last_run_at
 #   index so a row can rearrange mid-drag -- and none of it is visible.
 #   Fix: draw the icon named by `dragging_key` with `with_alpha` while
 #   `show_ghost`. Small, and in lane C's own tree.
-gui/desktop/src/tray_dnd.rs:show_ghost
-gui/desktop/src/tray_dnd.rs:dragging_key
 # TRIAGED 2026-09-14, SOUND. Both of these are library API with no
 # consumer yet, which is the island problem rather than this one.
 #

@@ -67036,6 +67036,36 @@ second witness fails loudly, while a missing one fails silently and indefinitely
 and a queue padded with ceremony trains people to skip it. This applies where a wrong
 answer is *invisible* — where the failure mode is a green report rather than an error.
 
+
+**The second clause fails differently from the first, and worse.** "A fact that
+matters gets two independent witnesses, **or the source says it has one**" --
+the common failure is not omitting the caveat, it is writing a caveat that
+describes a measurement nobody took.
+
+Lane C, 2026-09-14, on a count of duplicated clipboard implementations: reported
+**four** (the ones opened while tracing something else), then **five**, and in
+making it five wrote that the number now came *"from a sweep rather than from
+the ones I happened to open"*. No sweep had been run when that sentence was
+typed. A sweep run afterwards -- because the claim had been made -- returned
+**fifteen**.
+
+So an entry whose subject was "several complete implementations of one idea that
+nobody counted" reported a count three times without measuring, and once
+explicitly asserted it had. The prose was healthier than the work.
+
+Lane A did the same twice the same day: told lane C that a case had been added
+to 937 when it had not, and reported "docs are consistent" from a five-file
+sweep that omitted the two largest documents.
+
+**What distinguishes it from 938.** A stale artifact was true when written. This
+was never true -- and it is harder to catch, because the sentence that would
+normally prompt a check ("measured, not inferred") is the very sentence doing the
+lying. A reader who has learned to look for the caveat finds one.
+
+**The habit, since the rule alone demonstrably does not hold:** write the command
+next to the number. A count with `grep -rl ... | wc -l` beside it can be re-run
+by the next reader; a count with "from a sweep" beside it cannot be
+distinguished from a guess, including by the person who wrote it an hour later.
 ## 933. Desktop icon layout is not a kernel concern; `fs::deskicons` goes
 
 **Date:** 2026-09-12 · **Decided by:** Operator · **Lane:** A

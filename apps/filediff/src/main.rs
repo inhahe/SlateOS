@@ -31,9 +31,13 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
-use guitk::event::{
-    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use guitk::dialog::{FilePicker, Picked};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+// Only the tests build a modifier set by hand; the handlers read the one on
+// the event they were given. `MouseButton` went with it -- it had no reader at
+// all, in either build.
+#[cfg(test)]
+use guitk::event::Modifiers;
 #[allow(unused_imports)]
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
@@ -782,7 +786,33 @@ struct DiffLineParams<'a> {
 // ============================================================================
 
 /// Main application state.
+/// The most of a file this will read into a pane.
+///
+/// A diff is quadratic in the worst case and this program is handed arbitrary
+/// files; a four-gigabyte log is not something the window survives. When the
+/// cap bites the user is told, because a comparison of the first 8 MiB of two
+/// files is a different answer from a comparison of the files.
+const MAX_DIFF_BYTES: usize = 8 * 1024 * 1024;
+
+/// Which pane a file is being opened into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
 pub struct FileDiffApp {
+    /// The open picker.
+    ///
+    /// Until 2026-09-15 this program had no `std::fs` and no dialog: **a file
+    /// comparison tool that could not open a file.** `load_files` takes two
+    /// contents rather than two paths, so it is a setter, and its only caller
+    /// outside the tests built the two documents out of string literals.
+    pub picker: FilePicker,
+    /// Which pane the open picker will fill.
+    pub pending_side: Side,
+    /// What the last open did.
+    pub status_message: String,
     /// Width of the application window.
     pub width: f32,
     /// Height of the application window.
@@ -871,6 +901,9 @@ impl FileDiffApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: 1200.0,
             height: 800.0,
+            picker: FilePicker::default(),
+            pending_side: Side::Left,
+            status_message: String::from("Ctrl+O opens the left file, Ctrl+Shift+O the right"),
             left_path: String::new(),
             right_path: String::new(),
             left_content: String::new(),
@@ -1090,7 +1123,54 @@ impl FileDiffApp {
     }
 
     /// Handle events from the UI.
+    /// Ask for a file to put in one of the two panes.
+    pub fn open_into(&mut self, side: Side) {
+        self.pending_side = side;
+        self.picker.open_to_read();
+    }
+
+    /// Read `path` into `side`, and say what happened.
+    ///
+    /// Capped, because this program is handed arbitrary files and a diff of a
+    /// four-gigabyte log is not a thing a window survives. When the cap bites,
+    /// the note goes in front of everything else -- a reader told "these files
+    /// differ at line 40,000" about a file that was cut at line 39,999 has
+    /// been told something false.
+    pub fn read_into(&mut self, side: Side, path: &std::path::Path) -> String {
+        match safeio::read_to_string_capped(path, MAX_DIFF_BYTES) {
+            Ok(read) => {
+                let note = read.note(MAX_DIFF_BYTES);
+                let name = path.display().to_string();
+                match side {
+                    Side::Left => {
+                        self.left_path.clone_from(&name);
+                        self.left_content = read.text;
+                    }
+                    Side::Right => {
+                        self.right_path.clone_from(&name);
+                        self.right_content = read.text;
+                    }
+                }
+                self.dir_mode = false;
+                self.dir_compare = None;
+                self.recompute_diff();
+                format!("{note}Opened {name}")
+            }
+            Err(err) => format!("Could not read {}: {err}", path.display()),
+        }
+    }
+
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up.
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                let side = self.pending_side;
+                self.status_message = self.read_into(side, &path);
+                return EventResult::Consumed;
+            }
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Resize { width, height } => {
                 self.width = *width as f32;
@@ -1163,6 +1243,20 @@ impl FileDiffApp {
             }
             Key::F8 => {
                 self.next_change();
+                EventResult::Consumed
+            }
+            // Ctrl+O fills the left pane, Ctrl+Shift+O the right. Two keys
+            // rather than one dialog asking twice: a user comparing a file
+            // against a new version replaces one side and keeps the other,
+            // and being made to re-choose both is the commonest thing a diff
+            // tool gets wrong.
+            Key::O if key.modifiers.ctrl => {
+                let side = if key.modifiers.shift {
+                    Side::Right
+                } else {
+                    Side::Left
+                };
+                self.open_into(side);
                 EventResult::Consumed
             }
             Key::N if key.modifiers.ctrl => {
@@ -1434,6 +1528,9 @@ impl FileDiffApp {
         }
 
         self.render_status_bar(&mut tree);
+
+        // The picker last, so it draws over both panes rather than under them.
+        tree.extend(self.picker.render(&self.palette, self.width, self.height));
 
         tree
     }
@@ -3514,6 +3611,138 @@ mod tests {
         assert!(app.sync_scroll);
         assert_eq!(app.view_mode, ViewMode::SideBySide);
         assert!(app.scroll_left.abs() < f32::EPSILON);
+    }
+
+    // ---- The door ----
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("filediff-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn ctrl_key(k: Key, shift: bool) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// Two real files are read and compared.
+    ///
+    /// **This program could not open a file.** It had no `std::fs` and no
+    /// dialog; `load_files` takes two *contents* rather than two paths, so it
+    /// is a setter, and its only caller outside the tests built both documents
+    /// out of string literals. A file comparison tool whose files can only
+    /// come from its own source is a viewer for one fixed example.
+    #[test]
+    fn two_real_files_are_read_and_compared() {
+        let dir = scratch("read");
+        std::fs::write(dir.join("a.txt"), b"one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.join("b.txt"), b"one\nTWO\nthree\n").unwrap();
+
+        let mut app = FileDiffApp::new();
+        let said_left = app.read_into(Side::Left, &dir.join("a.txt"));
+        let said_right = app.read_into(Side::Right, &dir.join("b.txt"));
+
+        assert!(said_left.starts_with("Opened "), "said: {said_left}");
+        assert!(said_right.starts_with("Opened "), "said: {said_right}");
+        assert_eq!(app.left_content, "one\ntwo\nthree\n");
+        assert_eq!(app.right_content, "one\nTWO\nthree\n");
+        // One line differs, which a line diff reports as one deletion and one
+        // insertion rather than a modification.
+        assert_eq!(app.stats.deleted_lines, 1, "{:?}", app.stats);
+        assert_eq!(app.stats.inserted_lines, 1, "{:?}", app.stats);
+        assert_eq!(
+            app.stats.equal_lines, 2,
+            "the diff was not recomputed after the read: {:?}",
+            app.stats
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file longer than the cap is cut, and the cut is reported first.
+    ///
+    /// A reader told "these differ at line 40,000" about a file cut at line
+    /// 39,999 has been told something false, so the note goes in front of
+    /// whatever else the status line was going to say.
+    #[test]
+    fn a_file_past_the_cap_is_cut_and_says_so() {
+        let dir = scratch("cap");
+        let big = "x\n".repeat(MAX_DIFF_BYTES);
+        std::fs::write(dir.join("big.txt"), big.as_bytes()).unwrap();
+
+        let mut app = FileDiffApp::new();
+        let said = app.read_into(Side::Left, &dir.join("big.txt"));
+
+        assert!(
+            said.starts_with("INCOMPLETE ("),
+            "the cut must be said before anything else: {said}"
+        );
+        assert!(
+            app.left_content.len() <= MAX_DIFF_BYTES,
+            "read past the cap: {} bytes",
+            app.left_content.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that cannot be read is reported, not silently left empty.
+    #[test]
+    fn an_unreadable_file_is_reported() {
+        let dir = scratch("missing");
+        let mut app = FileDiffApp::new();
+        let said = app.read_into(Side::Left, &dir.join("no-such-file.txt"));
+
+        assert!(said.starts_with("Could not read "), "said: {said}");
+        assert!(
+            app.left_content.is_empty() && app.left_path.is_empty(),
+            "a failed read left a pane half-filled"
+        );
+    }
+
+    /// Ctrl+O fills the left pane and Ctrl+Shift+O the right.
+    #[test]
+    fn the_two_open_keys_aim_at_the_two_panes() {
+        let mut app = FileDiffApp::new();
+
+        app.handle_event(&ctrl_key(Key::O, false));
+        assert!(app.picker.is_open(), "Ctrl+O did not ask for a file");
+        assert_eq!(app.pending_side, Side::Left);
+        app.picker.close();
+
+        app.handle_event(&ctrl_key(Key::O, true));
+        assert!(app.picker.is_open());
+        assert_eq!(
+            app.pending_side,
+            Side::Right,
+            "Shift must aim at the other pane, or one of them can never be replaced"
+        );
+    }
+
+    /// The open picker is drawn.
+    #[test]
+    fn the_open_picker_is_drawn() {
+        let mut app = FileDiffApp::new();
+        let closed = app.render_tree().commands.len();
+        app.handle_event(&ctrl_key(Key::O, false));
+        let own = app.render_tree().commands.len().saturating_sub(closed);
+        assert!(
+            own > 0,
+            "the open picker contributed {own} commands; it is not being drawn"
+        );
     }
 
     #[test]

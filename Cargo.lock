@@ -821,6 +821,7 @@ dependencies = [
  "diffcore",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]

@@ -1109,13 +1109,19 @@ fn decimal_value(neg: bool, digits: &[u8], exp10: i64) -> (ExtF80, bool) {
             false,
         );
     };
-    let mut significant = &digits[lead..];
+    let mut significant = digits.get(lead..).unwrap_or_default();
     let mut exp10 = exp10;
     // Trailing zeros are exponent, not precision, and dropping them here keeps
-    // the big integers as small as the numeral allows.
-    while significant.len() > 1 && significant.last() == Some(&b'0') {
-        significant = &significant[..significant.len() - 1];
-        exp10 = exp10.saturating_add(1);
+    // the big integers as small as the numeral allows. `split_last` is the
+    // `len() > 1` test and the shortening in one operation.
+    while significant.len() > 1 {
+        match significant.split_last() {
+            Some((&b'0', head)) => {
+                significant = head;
+                exp10 = exp10.saturating_add(1);
+            }
+            _ => break,
+        }
     }
 
     let magnitude = exp10.saturating_add(significant.len() as i64);
@@ -1541,10 +1547,17 @@ fn round_digits(digits: &[u8], keep: usize) -> (Vec<u8>, bool) {
         out.resize(keep, b'0');
         return (out, false);
     }
-    let mut out = digits[..keep].to_vec();
-    let first_dropped = digits[keep];
-    let tail_nonzero = digits[keep + 1..].iter().any(|&c| c != b'0');
-    let last_kept_odd = out.last().is_some_and(|c| (c - b'0') % 2 == 1);
+    // `keep < digits.len()` from the early return above; `split_at_checked`
+    // and `split_first` say so to the compiler instead of to a reader.
+    let Some((head, rest)) = digits.split_at_checked(keep) else {
+        return (digits.to_vec(), false);
+    };
+    let mut out = head.to_vec();
+    let Some((&first_dropped, tail)) = rest.split_first() else {
+        return (out, false);
+    };
+    let tail_nonzero = tail.iter().any(|&c| c != b'0');
+    let last_kept_odd = out.last().is_some_and(|c| c.saturating_sub(b'0') % 2 == 1);
     let up = match first_dropped.cmp(&b'5') {
         Ordering::Greater => true,
         Ordering::Less => false,
@@ -1553,16 +1566,20 @@ fn round_digits(digits: &[u8], keep: usize) -> (Vec<u8>, bool) {
     if !up {
         return (out, false);
     }
-    for i in (0..out.len()).rev() {
-        if out[i] == b'9' {
-            out[i] = b'0';
+    // Carrying right-to-left. The flag replaces an early `return` so the
+    // loop can hold `out` mutably and still hand it back.
+    let mut carried = true;
+    for d in out.iter_mut().rev() {
+        if *d == b'9' {
+            *d = b'0';
         } else {
-            out[i] += 1;
-            return (out, false);
+            *d = d.saturating_add(1);
+            carried = false;
+            break;
         }
     }
     // Every digit was a nine: the value became a power of ten.
-    (out, true)
+    (out, carried)
 }
 
 /// `%f`.
@@ -1597,7 +1614,7 @@ fn significant(v: ExtF80) -> (Vec<u8>, i32) {
     let exp10 = i32::try_from(int_digits.len()).unwrap_or(i32::MAX)
         - 1
         - i32::try_from(lead).unwrap_or(i32::MAX);
-    let mut digits = all[lead..].to_vec();
+    let mut digits = all.get(lead..).unwrap_or_default().to_vec();
     while digits.len() > 1 && digits.last() == Some(&b'0') {
         digits.pop();
     }
@@ -1686,9 +1703,12 @@ fn hex_form(v: ExtF80, precision: Option<usize>, hash: bool, upper: bool) -> (St
             }
         }
         Some(p) if p < rest.len() => {
-            let kept = &rest[..p];
-            let first_dropped = hex_value(rest[p]);
-            let tail_nonzero = rest[p + 1..].iter().any(|&c| c != b'0');
+            // The guard above is what makes these in range; the split says it.
+            let (kept, dropped) = rest.split_at_checked(p).unwrap_or((&rest, &[]));
+            let (first_dropped, tail) = dropped
+                .split_first()
+                .map_or((0, &[][..]), |(&c, t)| (hex_value(c), t));
+            let tail_nonzero = tail.iter().any(|&c| c != b'0');
             let last_odd = kept
                 .last()
                 .map_or(lead % 2 == 1, |&c| hex_value(c) % 2 == 1);
@@ -1700,12 +1720,12 @@ fn hex_form(v: ExtF80, precision: Option<usize>, hash: bool, upper: bool) -> (St
             let mut kept = kept.to_vec();
             if up {
                 let mut carry = true;
-                for i in (0..kept.len()).rev() {
-                    let d = hex_value(kept[i]) + 1;
+                for c in kept.iter_mut().rev() {
+                    let d = hex_value(*c).saturating_add(1);
                     if d == 16 {
-                        kept[i] = b'0';
+                        *c = b'0';
                     } else {
-                        kept[i] = hex_digit(d, upper);
+                        *c = hex_digit(d, upper);
                         carry = false;
                         break;
                     }
@@ -1744,7 +1764,9 @@ fn hex_digit(v: u32, upper: bool) -> u8 {
     } else {
         b"0123456789abcdef"
     };
-    table[(v & 0xf) as usize]
+    // `v & 0xf` is at most 15 and the table is 16 long, so the fallback
+    // cannot be taken; `get` is what makes that checkable.
+    table.get((v & 0xf) as usize).copied().unwrap_or(b'0')
 }
 
 fn hex_value(c: u8) -> u32 {

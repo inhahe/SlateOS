@@ -2573,6 +2573,76 @@ fn a_window_animation_runs_off_the_same_clock() {
 /// *nothing in this repository chose its bytes* — and a copy inherits the bytes
 /// without inheriting the property, then goes stale the first time the fixture
 /// is regenerated. The pictures are 9x7; see `gui/imagecodec/tests/data/`.
+/// **The wallpaper a user chose is the one the desktop shows.**
+///
+/// `WallpaperManager` could crop, tile, tint and rotate pictures long before
+/// this test existed, and `set_image` was called four times in the tree -- all
+/// four in this file. Nothing in production had ever set a wallpaper, because
+/// `appearance.yaml` had nowhere to name one. This drives the real path: write
+/// the setting, load the appearance, and ask the manager what it is holding.
+#[test]
+fn a_wallpaper_named_in_the_settings_is_adopted() {
+    let (mut session, _desktop, _turn) = session();
+    assert_eq!(
+        session.wallpaper_mut().current_image_path(),
+        None,
+        "the fixture starts with no wallpaper"
+    );
+
+    let picture = fixture("rgb8");
+    session.shell_mut().appearance.wallpaper = Some(picture.clone());
+    session.sync_wallpaper();
+
+    assert_eq!(
+        session.wallpaper_mut().current_image_path(),
+        Some(picture.as_str()),
+        "the desktop is not showing the picture the settings name"
+    );
+}
+
+/// Clearing the setting goes back to the theme, not to a colour.
+///
+/// `follow_desktop_base` and a solid colour draw the same pixels today and
+/// diverge the moment the user switches between light and dark. Only one of
+/// them is a decision the user made.
+#[test]
+fn clearing_the_wallpaper_goes_back_to_following_the_theme() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.sync_wallpaper();
+    assert!(session.wallpaper_mut().current_image_path().is_some());
+
+    session.shell_mut().appearance.wallpaper = None;
+    session.sync_wallpaper();
+
+    assert_eq!(session.wallpaper_mut().current_image_path(), None);
+}
+
+/// **Re-adopting the same wallpaper does not re-decode it.**
+///
+/// `set_image` issues a fresh image id every call, and `paint_background`
+/// re-reads and re-inflates any id it has not seen. `sync_wallpaper` runs on
+/// every appearance change -- a comment edited in the file, a key this desktop
+/// does not read -- so without the guard, changing the accent colour would
+/// decode a full-screen photograph again.
+#[test]
+fn an_unrelated_settings_change_does_not_reload_the_picture() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.sync_wallpaper();
+    let first = session.wallpaper_mut().current_image_id();
+    assert_ne!(first, 0, "setting an image did not allocate an id");
+
+    // Something else about the appearance changed; the picture did not.
+    session.sync_wallpaper();
+
+    assert_eq!(
+        session.wallpaper_mut().current_image_id(),
+        first,
+        "the same wallpaper was issued a new id, so it will be decoded again"
+    );
+}
+
 fn fixture(name: &str) -> String {
     format!(
         "{}/../imagecodec/tests/data/{name}.png",

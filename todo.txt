@@ -54231,6 +54231,21 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##     caller that cannot wait passes GRND_INSECURE rather than substituting its
 ##     own generator. Checked lane B's callers for that exact fallback: none.
 ##     Annotated in design-decisions; no request needed, nothing to fix.
+##   CONFIRMED STILL STANDING on this pass, so the next one can skip them
+##   unless something below changes -- each is the observation that falsifies it:
+##     - "when a second terminal exists" (ctty_acquire's single-console leak):
+##       apps/ has exactly one terminal. Falsified by a second appearing.
+##     - "there is no notification service in the tree yet": services/ has none;
+##       the sole "notif" hit is services/ticker's READINESS notification, which
+##       is a different thing wearing the same word.
+##     - "there is no per-service capability plumbing yet": no grant-to-a-named-
+##       service path in kernel/. The entry says lane A has offered to add one,
+##       so that offer landing is the falsifier.
+##     - hardware RNG driver (the getrandom clause's first half): none.
+##       kernel/src/fs/hwrng.rs is accounting, not a driver.
+##   VERDICT FOR THIS PASS: 2 fired (S4, getrandom), 4 confirmed standing. The
+##   line of work stopped producing findings, so it is closed rather than
+##   re-run; resume from the scoping note below.
 ##   HOW THE SEARCH WAS SCOPED, for whoever resumes: "How to reverse" matches
 ##   ~130 entries and most describe how to UNDO a decision rather than a
 ##   condition that can expire. The ones that rot are those whose rationale

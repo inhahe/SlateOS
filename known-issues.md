@@ -7342,7 +7342,7 @@ work rather than as a special case for `bind`. Until then the divergence is
 confined to listing *order* under non-`C` collations; every individual line is
 correct.
 
-### TD-OILS-WAIT-N-JOB-STATUS-TEST-IS-FLAKY-UNDER-PARALLEL-EXECUTION. `wait_n_ignores_a_job_whose_status_was_already_reported` fails about one run in three — 2026-08-08 — OPEN
+### TD-OILS-WAIT-N-JOB-STATUS-TEST-IS-FLAKY-UNDER-PARALLEL-EXECUTION. `wait_n_ignores_a_job_whose_status_was_already_reported` fails about one run in three — 2026-08-08 — FIXED 2026-09-14
 
 **Where:** the `jobs`-listing assertion in
 `interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported`
@@ -7445,6 +7445,35 @@ is a **different** fault from this entry (a corpus case's `wait -n`, not this
 lib test's `jobs` listing) and, unlike the compgen case, is *not* a thin margin
 — so do not merge the three. What they share is only the discipline: keep the
 saved `corpus-failures/` report, and record which loads failed to reproduce.
+
+**FIXED 2026-09-14 in `bf4a55387`, and it was not a test defect.** This entry
+spent five weeks filed as a flaky *test*; the chain traced on 2026-08-08 above
+is correct in every link and stops one step short of the fault.
+
+`poll_jobs` set `exit_seen` INSIDE the branch guarded on `child` still being
+`Some` — and that branch's own first act is to take `child`. So a poll landing
+between the body finishing and `JOB_EXIT_NOTICE_GRACE` (20 ms) elapsing reaped
+the job with `exit_seen` left false, and no later poll could ever set it,
+because the guard it needs can never be true again. `exit_seen` was a property
+of WHICH POLL happened to observe the exit rather than a property of the job.
+
+The empty listing follows: `drain_jobs` reads `exit_seen` as "did the shell
+already know?", so a job with it false counts as one this `wait` waited FOR and
+is marked notified — before `builtin_wait`'s pass that spares `$!`, which only
+ever sets `notified = true` and so cannot rescue it. The next `jobs` sweeps it
+and prints nothing.
+
+**Load was never the variable.** It only bought more attempts at a 20 ms
+window: 0 failures in 250 isolated runs, 0 in a full `oils` suite, 0 in three
+shuffled orders, and 1 in 25 with a dozen other test binaries competing. That
+is why "passes alone, fails under `--workspace`" read as a test-harness problem
+for five weeks. A product bug that needs a 20 ms window looks exactly like a
+flaky test, and the way out was to force the window rather than to keep
+sampling it — `a_poll_before_the_grace_does_not_lose_the_exit_forever` does
+that and fails 100% without the fix.
+
+Reported twice by lane C, whose second report added the detail that made it
+worth re-opening rather than re-running.
 
 ### TD-OILS-THE-PIPELINE-STAGE-ORDER-TEST-ASSERTS-A-PREFERENCE-AS-A-GUARANTEE — 2026-08-08 — OPEN (accepted)
 

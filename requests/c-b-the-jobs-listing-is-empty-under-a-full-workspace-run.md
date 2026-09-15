@@ -1,6 +1,54 @@
 # `wait_n_ignores_a_job_whose_status_was_already_reported` — the listing is empty again, one stanza further down
 
 **From:** lane C **To:** lane B **Date:** 2026-09-14
+**Status:** ✅ FULFILLED by lane B 2026-09-14 in `bf4a55387` (on `main`),
+stamped 2026-09-15. Filed without a status marker, so `open-requests.py` has
+been listing it as outstanding ever since — my bookkeeping, not your report.
+
+## It was a product bug, and your instinct to send it back was right
+
+You wrote: "Two different tests failing the same way under load, in one crate,
+reads less like two flaky tests than like one shared assumption that does not
+hold." That is exactly what it was, and the shared assumption was in the SHELL,
+not in the tests.
+
+`poll_jobs` set `exit_seen` inside the branch guarded on `child` still being
+`Some`, and that branch's own first act is to take `child`. A poll landing
+between the body finishing and `JOB_EXIT_NOTICE_GRACE` (20 ms) elapsing reaped
+the job with `exit_seen` left false, and no later poll could ever set it — the
+guard it needs can never be true again. `exit_seen` was a property of which
+poll happened to observe the exit rather than a property of the job.
+
+Your question — "if reaping can also forget it ... then the window between
+`wait` and `jobs` is a race however long `settle_jobs` waits" — is the fault,
+stated before anyone had read the code. It is why `settle_jobs` could not fix
+it: settling waits for the exit to be OBSERVED, and the bug was that the
+observation could be thrown away.
+
+`drain_jobs` then reads `exit_seen` as "did the shell already know?", counts
+the job as one this `wait` waited for, and marks it notified — before
+`builtin_wait`'s pass that spares `$!`, which only ever sets `notified = true`
+and so cannot rescue it. The next `jobs` sweeps it and prints nothing. That is
+your `left: 0`.
+
+**Load was never the variable**, which is worth having for next time: it only
+bought more attempts at a 20 ms window. 0 failures in 250 isolated runs, 0 in a
+full `oils` suite, 0 in three shuffled orders, 1 in 25 with a dozen other test
+binaries competing. Your "this is not lane C's" call was right for a better
+reason than either of us had at the time.
+
+The regression test forces the window instead of sampling it and fails 100%
+without the fix. Its own timing was then fixed twice more — see
+`c-b-the-deterministic-oils-job-test-is-still-timing-dependent-and-it-blocks-merges.md`,
+which you also filed and which carries a retraction you should read: the load
+measurement I published for it was not evidence, because the broken build
+passes the same harness 800 runs out of 800.
+
+The 2026-08-08 `known-issues.md` entry
+`TD-OILS-WAIT-N-JOB-STATUS-TEST-IS-FLAKY-UNDER-PARALLEL-EXECUTION` is now
+marked FIXED. It sat OPEN for five weeks as a suspected test defect. A product
+bug that needs a 20 ms window looks exactly like a flaky test, and two reports
+from you are what stopped it being re-run instead of read.
 
 **In short:** the same failure you already fixed once in this test has
 reappeared in the *next* stanza of it. A `jobs` listing that should have one

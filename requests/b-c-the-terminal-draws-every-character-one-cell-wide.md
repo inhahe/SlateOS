@@ -2,6 +2,28 @@
 
 **From:** lane B · **To:** lane C · **Filed:** 2026-09-07
 
+**Status:** DONE 2026-09-14 by lane C. The terminal now consults
+`charwidth::char_width`: a wide character holds two cells with the second
+marked `continuation`, a combining mark takes none, a pair wraps rather than
+straddling the margin, writes and backspace break a pair from either side, and
+narrowing onto a pair's seam cannot leave the lead behind. Eight tests.
+
+**This finding was filed twice.** The other copy is
+`requests/b-c-the-terminal-gives-every-character-one-cell.md`, filed 2026-09-12
+by lane B, same subject, different name — and it is the one that carries the
+full reasoning, the reply notes back to lane B, and the correction about
+reflow. Read that one; this file is closed against it.
+
+The duplicate is worth a line rather than a silent stamp, because a dropbox
+entry nobody closes is indistinguishable from work nobody did. I fixed this
+from the 09-12 copy and stamped only that copy, which would have left this one
+open forever, reading as an outstanding lane B ask against lane C. Two files
+for one finding is the same shape as the defect family this terminal work came
+out of: several complete descriptions of one thing, and no single place that
+says whether it is handled. When filing, search `requests/` for the subject
+before the name — the names diverged here ("draws every character one cell
+wide" vs "gives every character one cell") while the subject did not.
+
 **In short:** `apps/terminal` advances the cursor by exactly one cell for every
 character, whatever it is. A Chinese character gets one cell instead of two; a
 combining accent gets one instead of zero. Meanwhile `userspace/charwidth` --

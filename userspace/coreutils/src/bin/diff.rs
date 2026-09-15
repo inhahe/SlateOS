@@ -2941,6 +2941,39 @@ mod tests {
     }
 
     // ---------------- parse_args ----------------
+
+    /// `--width 80` and `-W 80` take the FOLLOWING word.
+    ///
+    /// Nothing covered this. The attached forms `--width=80` and `-W80` were
+    /// exercised through other paths, and the two-word form was not, which is
+    /// how a refactor nearly shipped a `diff --width 80` that parsed
+    /// `"--width"` as the number and exited 2.
+    ///
+    /// Both sites read `args[i]` AFTER an `i += 1`, so they LOOK like the
+    /// argument the loop is holding and are not. A scripted rewrite of this
+    /// file treated them as the loop's own `arg`; the only thing that stopped
+    /// it was the anchor matching twice instead of once.
+    #[test]
+    fn width_takes_the_following_word() {
+        // Two words, long and short.
+        assert_eq!(run(&["diff", "--width", "80", "a", "b"]).width, 80);
+        assert_eq!(run(&["diff", "-W", "80", "a", "b"]).width, 80);
+
+        // Attached, which is what was already covered.
+        assert_eq!(run(&["diff", "--width=80", "a", "b"]).width, 80);
+        assert_eq!(run(&["diff", "-W80", "a", "b"]).width, 80);
+
+        // The operand after the value is still an operand: `-W` must consume
+        // exactly one word, not two.
+        let c = run(&["diff", "-W", "80", "left", "right"]);
+        assert_eq!(c.path1, "left");
+        assert_eq!(c.path2, "right");
+
+        // And the default survives, so a passing assertion above cannot be
+        // the default agreeing with the expected value by accident.
+        assert_eq!(run(&["diff", "a", "b"]).width, 130);
+    }
+
     /// A bare `-` is an OPERAND, not an option.
     ///
     /// It was falling into the option branch on `starts_with('-')`, so

@@ -498,6 +498,37 @@ BASELINE_HEADER = """\
 # exist that nothing reads.  That entry is the reason the deletion is safe to
 # make quickly: the ledger loses a line and the knowledge does not.
 #
+# SIXTH BATCH, 2026-09-15, lane C: one paid off and one newly visible, which
+# is the more interesting direction.
+#
+# PAID OFF: apps/sysinfo/src/hwquery.rs, 2,152 lines and 33 tests, wired into
+# the application that had been inventing a GenuineIntel processor and a Radeon
+# RX 7900 XTX beside it. Worth recording that the module was NOT dead because
+# it was broken: it reads /sys/hardware/cpu and friends, and nothing in
+# kernel/, services/ or userspace/ has ever produced those files. It is a
+# well-built client for an interface with no server -- the fifteen private
+# clipboards inverted. Wiring it makes the window say it cannot read the
+# hardware, which is true, and makes it start working the day a producer
+# appears.
+#
+# NEWLY VISIBLE: gui/desktop/src/privacy_settings.rs. It did not become an
+# island today; it became *detectable* today. The scan drops from its evidence
+# any name shared with another module, and apps/settings carried its own
+# PermissionKind and AppPermission until those were deleted a few hours ago
+# along with the page that told users a browser had their camera. Removing the
+# duplicate un-poisoned the evidence for the original.
+#
+# That is the conservatism in the header working exactly as designed and worth
+# seeing once: a false clearance hides a subsystem, and this one hid a 1,400-
+# line model with is_allowed and revoke_all and no callers for as long as a
+# second copy of two type names existed anywhere in lane C. Its disposal is
+# argued in known-issues.md under TD-C-THE-PRIVACY-PAGE-TOLD-YOU-A-BROWSER-HAD-
+# YOUR-CAMERA: it is a per-application permission table, which is not this
+# system's model half-built but Windows' model borrowed, and design.txt
+# specifies capability security with no ambient authority. Listed rather than
+# deleted in the same commit because deleting it is a separate decision from
+# wiring sysinfo, and bundling them would bury the argument.
+#
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
 # wired up or it does not land.  When you connect one, delete its line

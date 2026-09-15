@@ -606,11 +606,19 @@ pub struct SysInfoState {
     pub status_message: String,
 
     // Data sources (populated from system or stubbed).
-    pub cpu_info: CpuInfo,
-    pub memory_info: MemoryInfo,
+    /// What the hardware query returned for the processor, or `None` if it
+    /// could not be read.
+    ///
+    /// An `Option` rather than a zero-filled `CpuInfo`, which would draw as a
+    /// processor with no cores and a blank name -- a description of a machine
+    /// rather than an admission that none was obtained.
+    pub cpu_info: Option<CpuInfo>,
+    /// As [`SysInfoApp::cpu_info`], for memory.
+    pub memory_info: Option<MemoryInfo>,
     pub disks: Vec<DiskInfo>,
     pub network_adapters: Vec<NetworkAdapterInfo>,
-    pub display_info: DisplayInfo,
+    /// As [`SysInfoApp::cpu_info`], for the display.
+    pub display_info: Option<DisplayInfo>,
     pub pci_devices: Vec<PciDeviceInfo>,
     pub services: Vec<ServiceInfo>,
     pub processes: Vec<ProcessEntry>,
@@ -633,7 +641,23 @@ impl Default for SysInfoState {
 
 impl SysInfoState {
     /// Create a new state with default values.
+    /// Build the window, asking the system what hardware it has.
+    ///
+    /// `SyscallProvider` directly, not `FallbackProvider`. The fallback tries
+    /// the syscall path and drops to `StubProvider` on error, so on any host
+    /// without `/sys/hardware` -- which today is every host -- it would show
+    /// the same invented machine this replaced, through a longer call stack.
+    /// It would also pass any test that only checked the app was using
+    /// `hwquery`.
+    ///
+    /// Every query is expected to fail at present: nothing in `kernel/`,
+    /// `services/` or `userspace/` produces `/sys/hardware/*`. That is the
+    /// point rather than a defect here -- the window says it cannot read the
+    /// hardware, which is true, and it starts reporting real values on the day
+    /// a producer appears, with no change to this file.
     pub fn new() -> Self {
+        use hwquery::HardwareProvider;
+        let provider = hwquery::SyscallProvider::new();
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected_category: SysInfoCategory::SystemSummary,
@@ -652,688 +676,29 @@ impl SysInfoState {
             search_text: String::new(),
             search_focused: false,
             status_message: String::from("Ready"),
-            cpu_info: Self::populate_cpu(),
-            memory_info: Self::populate_memory(),
-            disks: Self::populate_storage(),
-            network_adapters: Self::populate_network(),
-            display_info: Self::populate_display(),
-            pci_devices: Self::populate_pci(),
-            services: Self::populate_services(),
-            processes: Self::populate_processes(),
-            drivers: Self::populate_drivers(),
-            env_vars: Self::populate_env_vars(),
-            irqs: Self::populate_irqs(),
-            io_ports: Self::populate_io_ports(),
-            memory_map: Self::populate_memory_map(),
-            dma_channels: Self::populate_dma(),
-            usb_devices: Self::populate_usb(),
-            sound_devices: Self::populate_sound(),
-            startup_programs: Self::populate_startup(),
+            cpu_info: provider.query_cpu().ok(),
+            memory_info: provider.query_memory().ok(),
+            disks: provider.query_storage().unwrap_or_default(),
+            network_adapters: provider.query_network().unwrap_or_default(),
+            display_info: provider.query_display().ok(),
+            pci_devices: provider.query_pci().unwrap_or_default(),
+            services: provider.query_services().unwrap_or_default(),
+            processes: provider.query_processes().unwrap_or_default(),
+            drivers: provider.query_drivers().unwrap_or_default(),
+            env_vars: provider.query_env_vars().unwrap_or_default(),
+            irqs: provider.query_irqs().unwrap_or_default(),
+            io_ports: provider.query_io_ports().unwrap_or_default(),
+            memory_map: provider.query_memory_map().unwrap_or_default(),
+            dma_channels: provider.query_dma().unwrap_or_default(),
+            usb_devices: provider.query_usb().unwrap_or_default(),
+            sound_devices: provider.query_sound().unwrap_or_default(),
+            startup_programs: provider.query_startup().unwrap_or_default(),
         }
     }
 
     // ========================================================================
     // Data population (stubbed with representative data)
     // ========================================================================
-
-    fn populate_cpu() -> CpuInfo {
-        CpuInfo {
-            brand: "Slate OS Virtual CPU @ 3.60GHz".to_string(),
-            vendor: "GenuineIntel".to_string(),
-            family: 6,
-            model: 158,
-            stepping: 13,
-            physical_cores: 8,
-            logical_processors: 16,
-            base_clock_mhz: 3600,
-            max_turbo_mhz: 5100,
-            l1_data_kb: 32,
-            l1_inst_kb: 32,
-            l2_kb: 256,
-            l3_kb: 16384,
-            features: vec![
-                ("SSE".to_string(), true),
-                ("SSE2".to_string(), true),
-                ("SSE3".to_string(), true),
-                ("SSSE3".to_string(), true),
-                ("SSE4.1".to_string(), true),
-                ("SSE4.2".to_string(), true),
-                ("AVX".to_string(), true),
-                ("AVX2".to_string(), true),
-                ("AVX-512".to_string(), false),
-                ("AES-NI".to_string(), true),
-                ("FMA".to_string(), true),
-                ("POPCNT".to_string(), true),
-                ("RDRAND".to_string(), true),
-                ("TSX".to_string(), false),
-                ("SHA".to_string(), true),
-                ("BMI1".to_string(), true),
-                ("BMI2".to_string(), true),
-            ],
-        }
-    }
-
-    fn populate_memory() -> MemoryInfo {
-        MemoryInfo {
-            total_mb: 32768,
-            available_mb: 18432,
-            mem_type: "DDR5".to_string(),
-            speed_mhz: 5600,
-            slots_used: 2,
-            slots_total: 4,
-            slots: vec![
-                MemorySlot {
-                    slot_name: "DIMM A1".to_string(),
-                    size_mb: 16384,
-                    mem_type: "DDR5".to_string(),
-                    speed_mhz: 5600,
-                    manufacturer: "Samsung".to_string(),
-                },
-                MemorySlot {
-                    slot_name: "DIMM B1".to_string(),
-                    size_mb: 16384,
-                    mem_type: "DDR5".to_string(),
-                    speed_mhz: 5600,
-                    manufacturer: "Samsung".to_string(),
-                },
-            ],
-        }
-    }
-
-    fn populate_storage() -> Vec<DiskInfo> {
-        vec![
-            // Byte counts as a drive actually reports them: a "2 TB" NVMe is
-            // 2.0×10¹² bytes, which is 1.82 TiB. The partitions below sum
-            // exactly to the disk's capacity, which the pre-scaled gigabyte
-            // figures they replaced did not.
-            DiskInfo {
-                model: "Samsung 990 Pro 2TB".to_string(),
-                capacity_bytes: 2_000_398_934_016,
-                interface: "NVMe".to_string(),
-                serial: "S6Z2NF0W123456".to_string(),
-                smart_status: "Healthy".to_string(),
-                partitions: vec![
-                    PartitionInfo {
-                        label: "EFI System".to_string(),
-                        filesystem: "FAT32".to_string(),
-                        capacity_bytes: 536_870_912,
-                        used_bytes: 115_343_360,
-                        free_bytes: 421_527_552,
-                        mount_point: "/boot/efi".to_string(),
-                    },
-                    PartitionInfo {
-                        label: "Slate OS Root".to_string(),
-                        filesystem: "ext4".to_string(),
-                        capacity_bytes: 536_870_912_000,
-                        used_bytes: 136_667_299_840,
-                        free_bytes: 400_203_612_160,
-                        mount_point: "/".to_string(),
-                    },
-                    PartitionInfo {
-                        label: "Home".to_string(),
-                        filesystem: "ext4".to_string(),
-                        capacity_bytes: 1_462_991_191_104,
-                        used_bytes: 905_000_000_000,
-                        free_bytes: 557_991_191_104,
-                        mount_point: "/home".to_string(),
-                    },
-                ],
-            },
-            DiskInfo {
-                model: "WD Blue SN580 1TB".to_string(),
-                capacity_bytes: 1_000_204_886_016,
-                interface: "NVMe".to_string(),
-                serial: "WD-WX32A0987654".to_string(),
-                smart_status: "Healthy".to_string(),
-                partitions: vec![PartitionInfo {
-                    label: "Data".to_string(),
-                    filesystem: "ext4".to_string(),
-                    capacity_bytes: 1_000_204_886_016,
-                    used_bytes: 443_000_000_000,
-                    free_bytes: 557_204_886_016,
-                    mount_point: "/mnt/data".to_string(),
-                }],
-            },
-        ]
-    }
-
-    fn populate_network() -> Vec<NetworkAdapterInfo> {
-        vec![
-            NetworkAdapterInfo {
-                name: "Intel I225-V Ethernet".to_string(),
-                adapter_type: "Ethernet".to_string(),
-                mac_address: "A4:BB:6D:12:34:56".to_string(),
-                ipv4: "192.168.1.100".to_string(),
-                ipv6: "fe80::a6bb:6dff:fe12:3456".to_string(),
-                subnet: "255.255.255.0".to_string(),
-                gateway: "192.168.1.1".to_string(),
-                dns: "1.1.1.1, 8.8.8.8".to_string(),
-                speed_mbps: 2500,
-                duplex: "Full".to_string(),
-                bytes_sent: 1_542_876_160,
-                bytes_received: 8_234_567_680,
-            },
-            NetworkAdapterInfo {
-                name: "Intel Wi-Fi 6E AX211".to_string(),
-                adapter_type: "Wi-Fi".to_string(),
-                mac_address: "B0:DC:EF:78:9A:BC".to_string(),
-                ipv4: "192.168.1.101".to_string(),
-                ipv6: "fe80::b2dc:efff:fe78:9abc".to_string(),
-                subnet: "255.255.255.0".to_string(),
-                gateway: "192.168.1.1".to_string(),
-                dns: "1.1.1.1, 8.8.8.8".to_string(),
-                speed_mbps: 1200,
-                duplex: "N/A".to_string(),
-                bytes_sent: 234_567_890,
-                bytes_received: 1_876_543_210,
-            },
-        ]
-    }
-
-    fn populate_display() -> DisplayInfo {
-        DisplayInfo {
-            gpu_name: "AMD Radeon RX 7900 XTX".to_string(),
-            vendor: "AMD".to_string(),
-            vram_mb: 24576,
-            resolution: "3840x2160".to_string(),
-            refresh_rate_hz: 144,
-            outputs: vec![
-                ("DisplayPort 1".to_string(), true),
-                ("DisplayPort 2".to_string(), false),
-                ("HDMI 1".to_string(), true),
-                ("HDMI 2".to_string(), false),
-            ],
-            driver_version: "24.5.1".to_string(),
-        }
-    }
-
-    fn populate_pci() -> Vec<PciDeviceInfo> {
-        vec![
-            PciDeviceInfo {
-                bus: 0,
-                device: 0,
-                function: 0,
-                vendor_id: 0x8086,
-                device_id: 0xA700,
-                class: "Host Bridge".to_string(),
-                description: "Intel 13th Gen Core Host Bridge".to_string(),
-                vendor_name: "Intel Corporation".to_string(),
-            },
-            PciDeviceInfo {
-                bus: 0,
-                device: 2,
-                function: 0,
-                vendor_id: 0x1002,
-                device_id: 0x744C,
-                class: "VGA Controller".to_string(),
-                description: "AMD Radeon RX 7900 XTX (Navi 31)".to_string(),
-                vendor_name: "Advanced Micro Devices".to_string(),
-            },
-            PciDeviceInfo {
-                bus: 0,
-                device: 14,
-                function: 0,
-                vendor_id: 0x8086,
-                device_id: 0x7AE8,
-                class: "USB Controller".to_string(),
-                description: "Intel USB 3.2 xHCI Host Controller".to_string(),
-                vendor_name: "Intel Corporation".to_string(),
-            },
-            PciDeviceInfo {
-                bus: 0,
-                device: 31,
-                function: 0,
-                vendor_id: 0x8086,
-                device_id: 0x7A04,
-                class: "ISA Bridge".to_string(),
-                description: "Intel Z790 Chipset LPC/eSPI Controller".to_string(),
-                vendor_name: "Intel Corporation".to_string(),
-            },
-            PciDeviceInfo {
-                bus: 1,
-                device: 0,
-                function: 0,
-                vendor_id: 0x144D,
-                device_id: 0xA80A,
-                class: "NVMe Controller".to_string(),
-                description: "Samsung 990 Pro NVMe SSD".to_string(),
-                vendor_name: "Samsung Electronics".to_string(),
-            },
-            PciDeviceInfo {
-                bus: 2,
-                device: 0,
-                function: 0,
-                vendor_id: 0x8086,
-                device_id: 0x125B,
-                class: "Ethernet Controller".to_string(),
-                description: "Intel I225-V 2.5G Ethernet".to_string(),
-                vendor_name: "Intel Corporation".to_string(),
-            },
-            PciDeviceInfo {
-                bus: 3,
-                device: 0,
-                function: 0,
-                vendor_id: 0x8086,
-                device_id: 0x51F0,
-                class: "Network Controller".to_string(),
-                description: "Intel Wi-Fi 6E AX211 (Gig+)".to_string(),
-                vendor_name: "Intel Corporation".to_string(),
-            },
-            PciDeviceInfo {
-                bus: 0,
-                device: 31,
-                function: 3,
-                vendor_id: 0x8086,
-                device_id: 0x7AD0,
-                class: "Audio Device".to_string(),
-                description: "Intel Alder Lake HD Audio Controller".to_string(),
-                vendor_name: "Intel Corporation".to_string(),
-            },
-        ]
-    }
-
-    fn populate_services() -> Vec<ServiceInfo> {
-        vec![
-            ServiceInfo {
-                name: "compositor".to_string(),
-                status: "Running".to_string(),
-                start_type: "Automatic".to_string(),
-            },
-            ServiceInfo {
-                name: "network-manager".to_string(),
-                status: "Running".to_string(),
-                start_type: "Automatic".to_string(),
-            },
-            ServiceInfo {
-                name: "audio-mixer".to_string(),
-                status: "Running".to_string(),
-                start_type: "Automatic".to_string(),
-            },
-            ServiceInfo {
-                name: "device-manager".to_string(),
-                status: "Running".to_string(),
-                start_type: "Automatic".to_string(),
-            },
-            ServiceInfo {
-                name: "package-daemon".to_string(),
-                status: "Stopped".to_string(),
-                start_type: "Manual".to_string(),
-            },
-            ServiceInfo {
-                name: "ssh-server".to_string(),
-                status: "Running".to_string(),
-                start_type: "Automatic".to_string(),
-            },
-            ServiceInfo {
-                name: "backup-scheduler".to_string(),
-                status: "Running".to_string(),
-                start_type: "Automatic".to_string(),
-            },
-            ServiceInfo {
-                name: "bluetooth".to_string(),
-                status: "Running".to_string(),
-                start_type: "Automatic".to_string(),
-            },
-        ]
-    }
-
-    fn populate_processes() -> Vec<ProcessEntry> {
-        vec![
-            ProcessEntry {
-                pid: 1,
-                name: "init".to_string(),
-                memory_kb: 2048,
-                cpu_percent: 0.0,
-            },
-            ProcessEntry {
-                pid: 2,
-                name: "compositor".to_string(),
-                memory_kb: 128000,
-                cpu_percent: 3.2,
-            },
-            ProcessEntry {
-                pid: 5,
-                name: "device-manager".to_string(),
-                memory_kb: 45000,
-                cpu_percent: 0.5,
-            },
-            ProcessEntry {
-                pid: 8,
-                name: "network-manager".to_string(),
-                memory_kb: 32000,
-                cpu_percent: 0.1,
-            },
-            ProcessEntry {
-                pid: 12,
-                name: "audio-mixer".to_string(),
-                memory_kb: 24000,
-                cpu_percent: 1.0,
-            },
-            ProcessEntry {
-                pid: 15,
-                name: "window-manager".to_string(),
-                memory_kb: 86000,
-                cpu_percent: 2.4,
-            },
-            ProcessEntry {
-                pid: 20,
-                name: "file-explorer".to_string(),
-                memory_kb: 64000,
-                cpu_percent: 0.8,
-            },
-            ProcessEntry {
-                pid: 25,
-                name: "terminal".to_string(),
-                memory_kb: 18000,
-                cpu_percent: 0.2,
-            },
-            ProcessEntry {
-                pid: 30,
-                name: "ssh-server".to_string(),
-                memory_kb: 8000,
-                cpu_percent: 0.0,
-            },
-            ProcessEntry {
-                pid: 42,
-                name: "sysinfo".to_string(),
-                memory_kb: 52000,
-                cpu_percent: 1.5,
-            },
-        ]
-    }
-
-    fn populate_drivers() -> Vec<DriverInfo> {
-        vec![
-            DriverInfo {
-                name: "nvme".to_string(),
-                path: "/drivers/storage/nvme.drv".to_string(),
-                status: "Loaded".to_string(),
-            },
-            DriverInfo {
-                name: "amdgpu".to_string(),
-                path: "/drivers/gpu/amdgpu.drv".to_string(),
-                status: "Loaded".to_string(),
-            },
-            DriverInfo {
-                name: "i225".to_string(),
-                path: "/drivers/net/i225.drv".to_string(),
-                status: "Loaded".to_string(),
-            },
-            DriverInfo {
-                name: "iwlwifi".to_string(),
-                path: "/drivers/net/iwlwifi.drv".to_string(),
-                status: "Loaded".to_string(),
-            },
-            DriverInfo {
-                name: "xhci-hcd".to_string(),
-                path: "/drivers/usb/xhci.drv".to_string(),
-                status: "Loaded".to_string(),
-            },
-            DriverInfo {
-                name: "hda-intel".to_string(),
-                path: "/drivers/audio/hda_intel.drv".to_string(),
-                status: "Loaded".to_string(),
-            },
-            DriverInfo {
-                name: "btusb".to_string(),
-                path: "/drivers/bluetooth/btusb.drv".to_string(),
-                status: "Loaded".to_string(),
-            },
-        ]
-    }
-
-    fn populate_env_vars() -> Vec<(String, String)> {
-        vec![
-            (
-                "PATH".to_string(),
-                "/bin:/sbin:/usr/bin:/usr/local/bin".to_string(),
-            ),
-            ("HOME".to_string(), "/home/user".to_string()),
-            ("SHELL".to_string(), "/bin/osh".to_string()),
-            ("TERM".to_string(), "slateos-256color".to_string()),
-            ("LANG".to_string(), "en_US.UTF-8".to_string()),
-            ("XDG_RUNTIME_DIR".to_string(), "/run/user/1000".to_string()),
-            ("DISPLAY".to_string(), ":0".to_string()),
-            ("EDITOR".to_string(), "/usr/bin/oedit".to_string()),
-        ]
-    }
-
-    fn populate_irqs() -> Vec<IrqInfo> {
-        vec![
-            IrqInfo {
-                irq_number: 0,
-                device: "Timer".to_string(),
-                irq_type: "Edge".to_string(),
-            },
-            IrqInfo {
-                irq_number: 1,
-                device: "Keyboard".to_string(),
-                irq_type: "Edge".to_string(),
-            },
-            IrqInfo {
-                irq_number: 8,
-                device: "RTC".to_string(),
-                irq_type: "Edge".to_string(),
-            },
-            IrqInfo {
-                irq_number: 12,
-                device: "Mouse".to_string(),
-                irq_type: "Edge".to_string(),
-            },
-            IrqInfo {
-                irq_number: 14,
-                device: "NVMe SSD".to_string(),
-                irq_type: "MSI-X".to_string(),
-            },
-            IrqInfo {
-                irq_number: 16,
-                device: "GPU".to_string(),
-                irq_type: "MSI-X".to_string(),
-            },
-            IrqInfo {
-                irq_number: 18,
-                device: "Ethernet".to_string(),
-                irq_type: "MSI".to_string(),
-            },
-            IrqInfo {
-                irq_number: 19,
-                device: "USB xHCI".to_string(),
-                irq_type: "MSI".to_string(),
-            },
-            IrqInfo {
-                irq_number: 22,
-                device: "HD Audio".to_string(),
-                irq_type: "MSI".to_string(),
-            },
-        ]
-    }
-
-    fn populate_io_ports() -> Vec<IoPortInfo> {
-        vec![
-            IoPortInfo {
-                start: 0x0000,
-                end: 0x001F,
-                device: "DMA Controller".to_string(),
-            },
-            IoPortInfo {
-                start: 0x0020,
-                end: 0x0021,
-                device: "PIC Master".to_string(),
-            },
-            IoPortInfo {
-                start: 0x0040,
-                end: 0x0043,
-                device: "PIT Timer".to_string(),
-            },
-            IoPortInfo {
-                start: 0x0060,
-                end: 0x0064,
-                device: "Keyboard Controller".to_string(),
-            },
-            IoPortInfo {
-                start: 0x0070,
-                end: 0x0071,
-                device: "RTC/CMOS".to_string(),
-            },
-            IoPortInfo {
-                start: 0x00A0,
-                end: 0x00A1,
-                device: "PIC Slave".to_string(),
-            },
-            IoPortInfo {
-                start: 0x03F8,
-                end: 0x03FF,
-                device: "COM1 (Serial)".to_string(),
-            },
-            IoPortInfo {
-                start: 0x0CF8,
-                end: 0x0CFF,
-                device: "PCI Configuration".to_string(),
-            },
-        ]
-    }
-
-    fn populate_memory_map() -> Vec<MemoryMapEntry> {
-        vec![
-            MemoryMapEntry {
-                start: 0x0000_0000,
-                end: 0x0009_FFFF,
-                region_type: "Conventional".to_string(),
-                description: "Low memory (640 KiB)".to_string(),
-            },
-            MemoryMapEntry {
-                start: 0x000A_0000,
-                end: 0x000F_FFFF,
-                region_type: "Reserved".to_string(),
-                description: "Legacy video/ROM area".to_string(),
-            },
-            MemoryMapEntry {
-                start: 0x0010_0000,
-                end: 0x7FFF_FFFF,
-                region_type: "Available".to_string(),
-                description: "Main memory (2 GiB)".to_string(),
-            },
-            MemoryMapEntry {
-                start: 0xFEC0_0000,
-                end: 0xFEC0_0FFF,
-                region_type: "MMIO".to_string(),
-                description: "I/O APIC".to_string(),
-            },
-            MemoryMapEntry {
-                start: 0xFEE0_0000,
-                end: 0xFEE0_0FFF,
-                region_type: "MMIO".to_string(),
-                description: "Local APIC".to_string(),
-            },
-            MemoryMapEntry {
-                start: 0x1_0000_0000,
-                end: 0x8_7FFF_FFFF,
-                region_type: "Available".to_string(),
-                description: "Extended memory (30 GiB)".to_string(),
-            },
-        ]
-    }
-
-    fn populate_dma() -> Vec<DmaInfo> {
-        vec![
-            DmaInfo {
-                channel: 0,
-                device: "Available".to_string(),
-                mode: "N/A".to_string(),
-            },
-            DmaInfo {
-                channel: 1,
-                device: "Available".to_string(),
-                mode: "N/A".to_string(),
-            },
-            DmaInfo {
-                channel: 2,
-                device: "Floppy (legacy)".to_string(),
-                mode: "Single".to_string(),
-            },
-            DmaInfo {
-                channel: 4,
-                device: "Cascade".to_string(),
-                mode: "Cascade".to_string(),
-            },
-        ]
-    }
-
-    fn populate_usb() -> Vec<UsbDeviceInfo> {
-        vec![
-            UsbDeviceInfo {
-                port: "1-1".to_string(),
-                vendor_id: 0x046D,
-                product_id: 0xC548,
-                description: "Logitech G Pro Wireless Mouse".to_string(),
-                speed: "USB 2.0 (12 Mbps)".to_string(),
-            },
-            UsbDeviceInfo {
-                port: "1-2".to_string(),
-                vendor_id: 0x046D,
-                product_id: 0xC33A,
-                description: "Logitech G915 Keyboard".to_string(),
-                speed: "USB 2.0 (12 Mbps)".to_string(),
-            },
-            UsbDeviceInfo {
-                port: "2-1".to_string(),
-                vendor_id: 0x0BDA,
-                product_id: 0x5411,
-                description: "Realtek USB Hub".to_string(),
-                speed: "USB 3.2 (5 Gbps)".to_string(),
-            },
-            UsbDeviceInfo {
-                port: "3-1".to_string(),
-                vendor_id: 0x8087,
-                product_id: 0x0033,
-                description: "Intel Bluetooth Adapter".to_string(),
-                speed: "USB 2.0 (12 Mbps)".to_string(),
-            },
-        ]
-    }
-
-    fn populate_sound() -> Vec<SoundInfo> {
-        vec![
-            SoundInfo {
-                name: "Realtek ALC4080 HD Audio".to_string(),
-                device_type: "Output".to_string(),
-                driver: "hda-intel".to_string(),
-                status: "Active".to_string(),
-            },
-            SoundInfo {
-                name: "Realtek ALC4080 Line In".to_string(),
-                device_type: "Input".to_string(),
-                driver: "hda-intel".to_string(),
-                status: "Idle".to_string(),
-            },
-            SoundInfo {
-                name: "AMD HDMI Audio (RX 7900 XTX)".to_string(),
-                device_type: "Output".to_string(),
-                driver: "amdgpu-audio".to_string(),
-                status: "Idle".to_string(),
-            },
-        ]
-    }
-
-    fn populate_startup() -> Vec<StartupEntry> {
-        vec![
-            StartupEntry {
-                name: "Network Manager".to_string(),
-                path: "/usr/bin/network-manager".to_string(),
-                source: "System".to_string(),
-            },
-            StartupEntry {
-                name: "Bluetooth Service".to_string(),
-                path: "/usr/bin/bluetoothd".to_string(),
-                source: "System".to_string(),
-            },
-            StartupEntry {
-                name: "Cloud Sync".to_string(),
-                path: "/usr/bin/cloudsync".to_string(),
-                source: "User".to_string(),
-            },
-        ]
-    }
 
     // ========================================================================
     // Property generation for each category
@@ -1371,9 +736,30 @@ impl SysInfoState {
         }
     }
 
+    /// The single row shown for a category the system could not be asked about.
+    ///
+    /// Says what was not read and where it would have come from, rather than
+    /// leaving the pane blank. A blank pane reads as "this machine has none of
+    /// those", which is a claim; this is the absence of one.
+    fn unreadable(what: &str, path: &str) -> Vec<Property> {
+        vec![Property::new(
+            what,
+            &format!("Not available — nothing on this system provides {path}"),
+        )]
+    }
+
     fn props_system_summary(&self) -> Vec<Property> {
-        let cpu = &self.cpu_info;
-        let mem = &self.memory_info;
+        let (Some(cpu), Some(mem)) = (&self.cpu_info, &self.memory_info) else {
+            // The OS rows below are this program's own constants and stay
+            // truthful; only the hardware half is unobtainable.
+            let mut props = vec![
+                Property::new("OS Name", "Slate OS"),
+                Property::new("OS Version", "1.0.0"),
+            ];
+            props.extend(Self::unreadable("Processor", "/sys/hardware/cpu"));
+            props.extend(Self::unreadable("Memory", "/sys/hardware/memory"));
+            return props;
+        };
         vec![
             Property::new("OS Name", "Slate OS"),
             Property::new("OS Version", "1.0.0"),
@@ -1411,7 +797,9 @@ impl SysInfoState {
     }
 
     fn props_cpu(&self) -> Vec<Property> {
-        let cpu = &self.cpu_info;
+        let Some(cpu) = &self.cpu_info else {
+            return Self::unreadable("Processor", "/sys/hardware/cpu");
+        };
         let mut props = vec![
             Property::new("Processor Name", &cpu.brand),
             Property::new("Vendor", &cpu.vendor),
@@ -1444,7 +832,9 @@ impl SysInfoState {
     }
 
     fn props_memory(&self) -> Vec<Property> {
-        let mem = &self.memory_info;
+        let Some(mem) = &self.memory_info else {
+            return Self::unreadable("Memory", "/sys/hardware/memory");
+        };
         let mut props = vec![
             Property::new(
                 "Total Installed",
@@ -1514,7 +904,9 @@ impl SysInfoState {
     }
 
     fn props_display(&self) -> Vec<Property> {
-        let d = &self.display_info;
+        let Some(d) = &self.display_info else {
+            return Self::unreadable("Display", "/sys/hardware/display");
+        };
         let mut props = vec![
             Property::new("GPU Name", &d.gpu_name),
             Property::new("Vendor", &d.vendor),
@@ -3032,7 +2424,11 @@ mod tests {
     #[test]
     fn the_reports_own_headings_survive() {
         // The fix must not cost the report the structure it legitimately has.
-        let report = SysInfoState::new().export_text();
+        // The CPU section comes from a fixture now: the application no
+        // longer invents a processor, so there are no features to head.
+        let mut app = SysInfoState::new();
+        app.cpu_info = Some(fixture_cpu());
+        let report = app.export_text();
         let at_zero = column_zero_lines(&report);
         assert!(
             at_zero.contains(&"--- CPU Features ---"),
@@ -3070,6 +2466,54 @@ mod tests {
     // test that asserted `scroll > 0` would have passed against it.
     // ========================================================================
 
+    /// A processor for the tests to describe, since the application no longer
+    /// invents one.
+    ///
+    /// Deliberately not a plausible real part. `SysInfoState::new` used to
+    /// carry a GenuineIntel with a Radeon RX 7900 XTX beside it, and the
+    /// closer a fixture looks to a real machine the easier it is for it to
+    /// reach production -- which is how that one got there. "Fixture CPU" says
+    /// what it is in the one place a reader would see it.
+    fn fixture_cpu() -> CpuInfo {
+        CpuInfo {
+            brand: "Fixture CPU".to_string(),
+            vendor: "FixtureVendor".to_string(),
+            family: 1,
+            model: 2,
+            stepping: 3,
+            physical_cores: 4,
+            logical_processors: 8,
+            base_clock_mhz: 1000,
+            max_turbo_mhz: 2000,
+            l1_data_kb: 32,
+            l1_inst_kb: 32,
+            l2_kb: 512,
+            l3_kb: 8192,
+            features: (0..24)
+                .map(|i| (format!("FEATURE_{i}"), i % 2 == 0))
+                .collect(),
+        }
+    }
+
+    /// Memory for the tests, on the same terms as [`fixture_cpu`].
+    fn fixture_memory() -> MemoryInfo {
+        MemoryInfo {
+            total_mb: 4096,
+            available_mb: 2048,
+            mem_type: "FixtureRAM".to_string(),
+            speed_mhz: 1600,
+            slots_used: 1,
+            slots_total: 2,
+            slots: vec![MemorySlot {
+                slot_name: "Slot 0".to_string(),
+                size_mb: 4096,
+                mem_type: "FixtureRAM".to_string(),
+                speed_mhz: 1600,
+                manufacturer: "Fixtures Inc".to_string(),
+            }],
+        }
+    }
+
     /// A state whose sidebar *and* property table both overflow their panes.
     ///
     /// The two `assert!`s are the fixture checking that it can fail. A scroll
@@ -3082,6 +2526,24 @@ mod tests {
                 app.expanded.push(root);
             }
         }
+
+        // The property table's rows come from the fixture, not from the
+        // application.
+        //
+        // Until 2026-09-15 they came from `SysInfoState::new`, which invented
+        // a machine -- a GenuineIntel processor, a Radeon RX 7900 XTX, forty
+        // PCI devices -- and every scroll test below was quietly resting on
+        // it. When that went, sixteen tests failed at once.
+        //
+        // They failed *loudly*, and that is worth noticing: the two asserts
+        // below are this fixture checking it can still fail, and they named
+        // the problem in their message ("4 rows in 144 px") instead of leaving
+        // sixteen scroll tests passing vacuously against a list that now fits
+        // on screen. The same defect in `apps/settings` had no such guard and
+        // surfaced only because a list became empty rather than merely
+        // shorter.
+        app.cpu_info = Some(fixture_cpu());
+        app.memory_info = Some(fixture_memory());
         app.window_height = 300.0;
         assert!(
             app.max_tree_scroll() > 0,

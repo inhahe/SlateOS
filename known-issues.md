@@ -141283,11 +141283,30 @@ suppressed everything, so a script running `patch -s` and reading stdout was
 told nothing at all about a failure. Silent means do not narrate the work; it
 does not mean hide that the work did not happen.
 
-**`-l`/`--ignore-whitespace` is accepted and inert**, on the same terms as
-`-N`/`-f`/`-F`/`-Z` above: it changes an answer only where a hunk differs from
-the target in whitespace alone, and no case in this tree does. Correct today,
-incomplete rather than wrong, and recorded so a passing harness is not read as
-evidence that whitespace-insensitive matching exists. It does not.
+**`-l`/`--ignore-whitespace` IS IMPLEMENTED as of 2026-09-15.** It was accepted
+and inert, on the same terms as `-N`/`-f`/`-F`/`-Z` above: it changes an answer
+only where a hunk differs from the target in whitespace alone, and no case in
+this tree did.
+
+That argument was wrong, and the way it was wrong is worth keeping. Lane C's
+dead-field detector found the flag was parsed and read by nothing, and the
+defect is not the inertness -- it is that `--help` advertised "Match ignoring
+whitespace." with no hint of it. Of the four places the option was written
+down, three said inert and the only one a user reads said it worked. **An inert
+option is defensible exactly as long as nothing promises otherwise.**
+
+The matching rule is measured, not guessed: strip trailing whitespace, then
+treat any run of whitespace as equal to any other run -- a run matches a
+different run but never matches nothing. Whitespace is SPACE and TAB only;
+`\v`, `\f` and `\r` all fail against a space, so `is_ascii_whitespace()` would
+have been wrong three ways with every fixture still green. Eighteen measured
+cases, in `loose_eq`'s doc comment and its tests.
+
+`patch-diff.sh` had an `--ignore-whitespace` case throughout, and it passed
+throughout, because its fixture's target and patch agree about whitespace. A
+flag-bearing case whose fixture makes the flag irrelevant is not coverage. The
+three cases added alongside this fix use a tab-indented target against a
+space-indented patch, and two of them fail if the flag goes inert again.
 
 ### A-OPTION-REFUSAL-PASS-LINE-CLAIMS-MORE-THAN-ITS-DETECTORS-ESTABLISH — 2026-09-12 — FIXED by lane B (lane A)
 
@@ -148490,9 +148509,32 @@ worth reading: a `pub fn sample()` that only tests call is a fixture in the
 wrong module, which is untidy. One the program calls is a fabrication.
 
 77 definitions matched the name; 63 are called from production. The count
-excludes signal-processing vocabulary — `sample_rate`, `bits_per_sample`,
+excludes signal-processing vocabulary
+
+**63 is a floor, and the method is why.** Lane B's objection, and it is right:
+`simulate_integer_benchmark` was caught because somebody named it honestly. The
+same function called `measure_integer_throughput` is invisible to a name grep,
+and there is no reason to think the careless cases are the ones that got the
+candid names — if anything the opposite. Do not let 63 settle in anyone's head
+as the size of the class; it is the size of what one keyhole showed.
+
+**The probe that does not depend on the name, which lane B proposed and which
+costs one test per suspect: vary the input, assert the output varies.** A
+benchmark that returns the same score on an idle machine and on a loaded one is
+refuted in a single measurement, whatever the function is called. A netscan
+reporting the same open ports against two different hosts, an undelete listing
+the same recoverable files on two different volumes — same probe. It tests the
+property that actually matters, that the output is a function of the world,
+rather than the property the name suggests. `apps/benchmark`'s
+`a_longer_piece_of_work_is_measured_as_longer` is that probe in its
+deterministic form. — `sample_rate`, `bits_per_sample`,
 `sample_count`, `record_sample`, and `sample` in `gui/compositor/src/blur.rs`
 and `gui/imagecodec/src/png.rs`, which are all the other meaning of the word.
+
+**PAID OFF 2026-09-15: `apps/benchmark`, all sixteen.** Four CPU and four
+memory tests are measured; one disk test is measured and four report why they
+are not; three graphics tests are measured and renamed. Details below, and the
+commits carry the numbers. That is 16 of the 63.
 
 **The one verified in detail, because it is the worst and it is instructive.**
 `apps/benchmark` has sixteen `simulate_*` functions and `run_cpu_benchmark`
@@ -148596,3 +148638,201 @@ which is the fixture-is-the-defect mode in 937: emptying the list is how you
 find out, and that wants its own change rather than riding on a boot-unblocking
 commit.
 
+**FIXING AN INSTANCE AND LEAVING THE CLASS — added 2026-09-15.**
+
+Lane B put this better than I had: *"the detector's real value was not finding
+`-l`; it was showing me I had fixed an instance and left the class."* They had
+implemented `patch --ignore-whitespace` after I reported it, and the detector
+then found `-N`, `-F` and `-Z` in the same file, under the same doc comment
+whose argument they had just spent a commit refuting.
+
+It is worth writing down because it is the shape of both our days, and it has a
+cause rather than being carelessness: **the instance is easy to see precisely
+because someone wrote down the reasoning that covers the class.** A rationale
+for leaving one thing inert is a rationale for leaving all of them, so the
+moment it is refuted, every sibling it covered becomes a finding — and nothing
+announces that. The same applies here: six fabricated Settings pages were fixed
+before anyone asked how many more there were, and the answer was 63.
+
+The check that follows from it costs nothing: **when a fix refutes a written
+rationale, grep for the other things that rationale covered** before closing
+the task. For `patch` that was the three other options under the same comment.
+For the Settings pages it would have been `SettingsState::new` — where all five
+sat together, in one constructor, visible in a single screen.
+
+**A better axis than mine, also from lane B.** They ranked their 110 by whether
+the option is advertised in the program's own `--help`: 50 are, and 24 of those
+are read by nothing at all. That is mechanical where my ordering by "what
+believing it costs" needs a judgement per row, and it gets at the same thing —
+a promise in `--help` is the program telling the user what to believe. The GUI
+analogue is not `--help` but the window itself, and by that measure all 63 here
+are advertised, which is why the ordering here has to be by consequence.
+
+**THE CHECK WORKED IMMEDIATELY, AND FOUND A BETTER INSTRUMENT.**
+
+Applying the rule above to my own day — grep for the other things the refuted
+rationale covered — turned up something the name sweep had no way to see.
+`apps/photomanager`'s `seeded_library` carried the comment *"so the first window
+is not an empty grid"*. That sentence is not unique to it:
+
+* `apps/videoplayer` — *"Sample content, so the first window is not an empty
+  black rectangle."*
+* `apps/devicemanager`, `apps/netmanager`, `apps/partmanager`,
+  `apps/remotedesktop`, `apps/sysinfo`, `apps/vpnmanager` — all six declare it
+  in their **module-level `//!` documentation**, in near-identical words:
+  *"…through Slate OS syscalls; stubbed with representative data for initial
+  development."*
+* `apps/netscan`, `apps/speedtest`, `apps/procexplorer`, `apps/rssreader`,
+  `apps/sysmonitor` carry the same admission in other forms.
+
+**CORRECTION, same day: the count above said "ten apps in total" and the real
+figure is 32.** Recounted with the pattern written out properly rather than
+typed from memory: **14** apps carry a module-level `//!` self-declaration and
+**24** carry one in a function or comment, for a union of 32. The ten I first
+listed were the ones the first grep happened to surface.
+
+The correction is worth more than the number. I published a count from a
+narrower pattern than the one I had just argued was the better instrument, and
+nothing would have caught it — a count has no test. What caught it was
+re-running the search before relying on the figure again, which is the only
+check available for a number in prose.
+
+**This is a better detector than the one that found the 63**, and it is worth
+saying why rather than just switching to it. A name grep asks whether somebody
+*happened to name a function candidly*; this asks whether the file *declares
+itself stubbed*. The second is evidence rather than a hint — the code is
+stating the fact, not hinting at it — and it cannot be evaded by renaming a
+function, which was lane B's whole objection to the 63 being treated as a
+count.
+
+**And it is exactly the `patch -l` shape at application scale.** Every one of
+these declares the stub in a module doc that only a maintainer reads, while the
+window shows the data as though it were the machine's. `apps/sysinfo` is the
+one I would look at first on that basis: a system information tool is read
+precisely when someone wants to know what hardware they have.
+
+None of the ten are fixed. They are listed here so that the next sweep starts
+from the self-declarations rather than from the names.
+
+## TD-C-SYSINFO-INVENTS-A-WHOLE-MACHINE-WHILE-THE-REAL-QUERY-LAYER-SITS-UNUSED
+
+**In short:** the System Information app tells you your machine has a
+GenuineIntel processor, an Intel I225-V network adapter, Intel Wi-Fi 6E AX211
+and an AMD Radeon RX 7900 XTX. It is describing no machine in particular — the
+values are written into `main.rs` as constants. Meanwhile a complete, layered
+hardware query module sits in the same crate with **no callers at all**.
+
+**Date:** 2026-09-15. **Lane:** C. First of the ten self-declared stubs on two
+independent grounds, which is why it is first rather than merely early.
+
+*Most harmful:* a system information tool is read precisely when someone wants
+to know what hardware they have, so a plausible invention there is worse than
+anywhere else on the list.
+
+*Cheapest — and this was wrong when I wrote it; see the correction below:* it
+is the only one of the ten whose real **client** already exists.
+Checked rather than assumed — every other app on that list is a single
+`main.rs` with no sibling module at all, so `devicemanager`, `netmanager`,
+`partmanager`, `remotedesktop`, `vpnmanager`, `netscan`, `speedtest`,
+`sysmonitor` and `videoplayer` each need a data *source* built before there is
+anything to wire, and most of those are blocked on the OS not exposing the data
+yet. `procexplorer` does have a second module, `features.rs`, but it is an
+unreached *feature* set — a window picker, a blocking analyser, affinity
+control — not a provider, so it belongs to the island ledger's "a widget
+becomes reachable when an application draws it" category rather than to this
+one.
+
+So the ten are not one task repeated ten times. Nine are blocked on the system;
+one is a wiring.
+
+**The two halves.** `apps/sysinfo/src/main.rs` builds everything in its
+constructor: `populate_cpu`, `populate_memory`, `populate_storage`,
+`populate_network`, `populate_display`, `populate_pci`, `populate_services`,
+`populate_processes`, `populate_drivers`, `populate_env_vars` and more, each
+returning hardcoded values. `apps/sysinfo/src/hwquery.rs` is 2,152 lines
+implementing a `HardwareProvider` trait with seventeen query methods, a
+`SyscallProvider` that reads `/sys/hardware/*`, a `StubProvider`, a
+`FallbackProvider`, and a `RefreshManager` with a TTL cache. `main.rs`
+references `hwquery::` **zero times**. It is on the island ledger as
+`apps/sysinfo/hwquery.rs`.
+
+So this is one defect wearing two of this tree's recurring shapes at once: an
+island, and a fabrication, each of which is the other's fix.
+
+**The trap in the obvious wiring, which is why this is a note and not a
+one-liner.** `FallbackProvider` tries the syscall provider and falls back to
+`StubProvider` on error. Wiring `main` to it would compile, run, and display
+exactly the same fictional machine — because the syscall path fails on any host
+without `/sys/hardware`, which is every host today. That is the fabrication with
+more steps and a longer call stack, and it would look like a fix.
+
+**What the fix is.** Wire `main` to `SyscallProvider` directly, and render
+`HwQueryError::NotAvailable { path }` as a row saying the value could not be
+read and from where. The error type already carries the path, so the honest
+message is available without inventing one. `StubProvider` becomes
+`#[cfg(test)]` — it is a perfectly good fixture, and the same "a fixture
+production can reach is a fixture that eventually ships" rule that moved
+`ExifData::sample` applies. `FallbackProvider` goes: falling back to fabricated
+data is the defect, not a feature.
+
+The app's own types will need `Option` where a category can be absent, the same
+move `apps/benchmark`'s `SubTestResult::score` needed today and for the same
+reason: a zero-filled `CpuInfo` reads as a processor with no cores rather than
+as an unanswered question.
+
+**AND THE FIRST THING THE RECOUNT FOUND WAS MY OWN.**
+
+`apps/benchmark` is on the module-level list — after being fixed. Its `//!`
+doc still reads:
+
+> simulated with representative computation; on real Slate OS hardware the
+> stubs would be replaced with timed kernel/driver calls.
+
+Thirteen of its sixteen tests measure the machine now and the other three say
+why they do not. So the code was corrected and the documentation that described
+the old behaviour was left, which is the same defect as the one being fixed,
+pointing the other way: before, the source admitted a fabrication the window
+denied; now the source claims a fabrication the code has stopped committing.
+
+Both directions mislead the next reader, and the second is the one more likely
+to survive — a doc that *understates* what the code does attracts no complaints
+from anyone. Fixed in the same commit as this note.
+
+The general form, for the checklist: **a fix is not finished until the prose
+that described the defect has been re-read.** Every one of the six settings
+pages got this right because rewriting the page forced the comment to be
+rewritten with it. `benchmark` got it wrong because the stale claim lived in a
+module header twelve hundred lines away from anything I edited.
+
+**CORRECTION: `hwquery` is a client, and the interface it reads has no server.**
+
+Lane B asked the right question — is the query layer dead because it is broken,
+or dead because nobody connected it? — and the answer is neither. It is dead
+because **the thing it reads does not exist**.
+
+`SyscallProvider` reads `/sys/hardware/cpu`, `/sys/hardware/memory`,
+`/sys/hardware/block`, `/sys/hardware/net` and so on. Grepping `kernel/`,
+`services/` and `userspace/` for `sys/hardware` returns **nothing**. No
+component in this tree has ever produced those files. The module is 2,152 lines
+and 33 tests of a well-built client for an interface with no server, which is
+the same defect as the fifteen private clipboards and the service with no
+clients — inverted.
+
+So my "nine are blocked on the system; one is a wiring" was wrong, and wrong in
+the flattering direction: sysinfo is blocked too, just one layer further along
+than the other nine. What it has that they lack is the *client* half already
+written and tested, so when a producer appears the app needs no new parsing
+code.
+
+**The wiring is still worth doing now, and this is why.** Pointing `main` at
+`SyscallProvider` today produces an application that says it cannot read the
+hardware — which is true, and is better than one that says you own a Radeon RX
+7900 XTX. It also means that on the day `/sys/hardware` gains a producer the
+app starts working with no further change. The alternative, waiting, leaves the
+invented machine on screen for the whole of that wait.
+
+**What the producer needs**, for whoever writes it: the format is already
+pinned by `hwquery`'s parser and its 33 tests — flat `key=value` files, one per
+category, with the field names `SyscallProvider::field` looks up. A producer
+written against those tests cannot disagree with the consumer, which is the one
+piece of luck in this arrangement.

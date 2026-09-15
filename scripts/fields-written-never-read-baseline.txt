@@ -127,6 +127,30 @@ apps/netmanager/src/main.rs:diagnostics_running
 # see TD-C-FIVE-CLIPBOARDS-AND-NONE-OF-THEM-IS-CONNECTED.
 apps/remotedesktop/src/main.rs:content_size_bytes
 apps/videoplayer/src/main.rs:seek_preview_position
+# TRIAGED 2026-09-14 -- THE SETTINGS-PANEL GROUP, and this is a checklist
+# for the design-decisions 815 port rather than a list of things to wire
+# where they stand. Fixing a panel that is about to be deleted is work done
+# twice; carrying its bug across is work done wrong. Each of these is a
+# value the panel computes and never shows or acts on:
+#
+#   backup_settings:last_backup_timestamp -- when the last backup ran is
+#     recorded from the history entry and never displayed, so the one
+#     question a backup screen exists to answer ("am I backed up?") is the
+#     one it does not answer.
+#   bluetooth:discoverable -- `set_discoverable` returns true and sets the
+#     field, and NOTHING reads it. The toggle does not make the adapter
+#     discoverable and the UI does not show that it is. A switch that does
+#     nothing, in both directions.
+#   startup_settings:last_run_at -- when a startup program last ran,
+#     recorded and never shown, so a program that fails at every boot looks
+#     the same as one that ran a second ago.
+#   sound_settings:output_device_id, volume_override -- per-app audio
+#     routing and volume, recorded and never applied.
+#   lib.rs:shortcut_message -- "Press the new keys, or Escape to cancel",
+#     "Unchanged", "That row is gone": the whole of the shortcut editor's
+#     feedback, composed and drawn nowhere, so rebinding a key is silent
+#     whether it worked or not.
+#
 gui/desktop/src/backup_settings.rs:last_backup_timestamp
 gui/desktop/src/bluetooth.rs:discoverable
 gui/desktop/src/context_ext.rs:loading_timeout

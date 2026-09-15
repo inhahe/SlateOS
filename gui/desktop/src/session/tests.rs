@@ -1245,6 +1245,43 @@ fn announce(desktop: &Desktop, surface: Surface, group: SettingsGroup) {
     )]);
 }
 
+/// **A wallpaper chosen while the desktop is running is adopted without a
+/// logout.**
+///
+/// The startup path (`load_appearance`) and the live path (the
+/// `SettingsChanged` arm) are two doors onto the same settings, and the live
+/// one's own comment says "adopting the settings is two steps and the second
+/// is easy to forget". This is that second step, asserted: without
+/// `sync_wallpaper` in the announce arm the picture would appear only after a
+/// restart, which reads to a user as the setting not working.
+#[test]
+fn a_wallpaper_chosen_while_running_is_adopted_without_a_restart() {
+    settingsfile::testing::with_scratch_config("session-live-wallpaper", |_root| {
+        let (mut session, desktop, _turn) = session();
+        session.load_appearance();
+        assert_eq!(
+            session.wallpaper_mut().current_image_path(),
+            None,
+            "the fixture starts with no wallpaper"
+        );
+
+        // The Settings app writes the file while the desktop is up.
+        let picture = fixture("rgb8");
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.wallpaper = Some(picture.clone());
+        file.save().expect("save");
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+
+        assert_eq!(
+            session.wallpaper_mut().current_image_path(),
+            Some(picture.as_str()),
+            "the desktop did not adopt the picture until a restart"
+        );
+    });
+}
+
 #[test]
 fn an_announced_appearance_change_repaints_the_chrome() {
     // The end of the chain this feature is: the Settings app writes

@@ -88,7 +88,22 @@ MACRO = re.compile(
 # defeat the "not after a newline escape" test below.
 # The directories this scans. Everything outside them is invisible to it,
 # which is a statement the summary line has to make rather than imply.
-CORPUS = ("gui", "apps", "scripts")
+CORPUS = (
+    "apps",
+    "bench",
+    "deflate",
+    "gui",
+    "init",
+    "kernel",
+    "net",
+    "netproto",
+    "pkg",
+    "posix",
+    "scripts",
+    "services",
+    "toolchain",
+    "userspace",
+)
 
 RUN = re.compile(r"(?<!" + SP + r")" + SP + r"{4,}")
 

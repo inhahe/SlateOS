@@ -1920,14 +1920,14 @@ mod tests {
         let odd = not_text();
         assert!(
             odd.to_str().is_none(),
-            "the fixture must be unrepresentable as a `String`, or this test              asserts nothing"
+            "the fixture must be unrepresentable as a `String`, or this test asserts nothing"
         );
 
         let opts = parse_useradd_args(std::slice::from_ref(&odd));
         assert_eq!(
             opts.username.as_deref(),
             Some(""),
-            "a name that cannot be decoded reads as empty, which              `validate_username` refuses"
+            "a name that cannot be decoded reads as empty, which `validate_username` refuses"
         );
     }
 

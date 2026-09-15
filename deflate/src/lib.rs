@@ -2937,7 +2937,7 @@ mod tests {
 
         assert!(
             dyn_size < fixed_size,
-            "a per-block Huffman table should beat the fixed one on data this              skewed (dynamic {dyn_size}, fixed {fixed_size}); if it does not,              the table-building or the code-length RLE is wrong"
+            "a per-block Huffman table should beat the fixed one on data this skewed (dynamic {dyn_size}, fixed {fixed_size}); if it does not, the table-building or the code-length RLE is wrong"
         );
         assert_eq!(inflate(&deflate(&skewed)).unwrap(), skewed);
     }

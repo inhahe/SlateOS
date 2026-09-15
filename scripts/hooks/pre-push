@@ -4281,15 +4281,42 @@ fi
 # pushing a commit whose contents you have not read.  Refuse and print the
 # command.
 #
-# IT SCANS `gui`, `apps` and `scripts` ONLY, which is narrower than it looks
-# and is deliberate for now.  Pointed at the whole tree on 2026-09-15 it
-# reported 73 findings, 3 genuine and 70 column-aligned text -- `free.rs` and
-# `ls.rs` expected-output fixtures, `arp`'s table header.  Its own docstring
-# records that a blanket four-space regex was reverted once for that class.
-# The three genuine ones outside its scope are fixed in the same commit as this
-# wiring, by hand; widening it properly needs the checker to tell a MESSAGE
-# from an EXPECTED VALUE, which is lane C's design call and is filed back to
-# them with the numbers.
+# IT SCANS THE WHOLE TREE, as of 2026-09-15, and did not at first.
+#
+# Wired scanning `gui`/`apps`/`scripts` only, because pointed tree-wide it then
+# reported 73 findings of which 70 were column-aligned text -- `free.rs` and
+# `ls.rs` expected-output fixtures, `arp`'s table header, the kernel's
+# statistics lines.  Widening it needed the checker to tell a MESSAGE from an
+# EXPECTED VALUE, which was lane C's design call; it was filed back to them
+# with those numbers and they answered it in `d966db365`.
+#
+# The predicate is theirs and lane A's between them, and it is better than
+# "which argument" -- it is whether the string is PROSE A PERSON READS AS A
+# SENTENCE or a LAYOUT IN WHICH THE WHITESPACE IS THE PAYLOAD.  A checker that
+# rewrites a layout corrupts data rather than tidying it.  Output macros leave
+# the set; only an assertion's message argument counts, found by counting
+# top-level commas with strings and nested calls blanked first.
+#
+# Measured here before widening rather than taken on report: 3904 files,
+# 5.45 s, seven findings, all seven genuine.  That is the same order as gate
+# 32 (eol) and gate 44 (text-mode-writes, 2.7 s), both already wired.  Lane A
+# independently ran the new predicate over 820 files of their own territory --
+# a different subsystem, written by somebody who had never heard of this
+# checker -- and found one genuine and zero false positives.
+#
+# THE OLD SCOPE WAS WORSE THAN NARROW, WHICH IS WHY THIS IS NOT JUST A
+# WIDENING.  The summary printed a file COUNT and not what it counted, so
+# `ok -- no collapsed assertion messages (382 source file(s))` read as
+# reassurance about the whole tree after every merge.  Lane A had been reading
+# it that way.  The 382 files were not too few; they were the wrong 382.  Lane
+# C made the summary name its directories in the same commit, which is the
+# repair that stops it happening again.
+#
+# All seven were fixed in the commit that widened this.  Six were in lane B's
+# globs; the seventh was `deflate/src/lib.rs`, a shared crate in no lane's
+# list, and it was still collapsed on `main` when this was wired -- so
+# widening without repairing it would have refused every lane's push for a
+# file none of them owns.
 #
 # One bug had to be fixed before it could be wired at all: `ROOT` was the
 # absolute path `E:/visual studio projects/os-lane-c`, so every run scanned

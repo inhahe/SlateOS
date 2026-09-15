@@ -102663,8 +102663,16 @@ st=1
             }
             std::thread::yield_now();
         }
+        // `born_at` an HOUR AHEAD, not `now()`. `Instant::elapsed` saturates
+        // at zero for a future instant, so `elapsed() >= GRACE` stays false
+        // however long this thread is off the CPU. Pinning it to `now()` left
+        // a 20 ms budget between two ADJACENT STATEMENTS, and under a full
+        // workspace run a deschedule that long is ordinary. Lane C found it;
+        // it is the same mistake as the `sleep(5ms)` this replaced, one step
+        // smaller.
+        let unreachable = std::time::Instant::now() + std::time::Duration::from_secs(3600);
         for j in &mut sh.jobs {
-            j.born_at = std::time::Instant::now();
+            j.born_at = unreachable;
         }
         sh.poll_jobs();
         assert!(
@@ -102675,6 +102683,17 @@ st=1
             !sh.jobs.iter().any(|j| j.exit_seen),
             "the grace must NOT have passed yet"
         );
+        // ...and now an hour BEHIND, so the grace has provably elapsed for
+        // everything after this point. THE BUDGET HAS TWO DIRECTIONS, which is
+        // what the future-instant fix alone misses: with `born_at` left in the
+        // future the grace can never pass, `settle_jobs` never sets
+        // `exit_seen`, and the test fails on the very property it exists to
+        // prove. Verified by trying lane C's suggestion exactly as given --
+        // `left: 0, right: 1`.
+        let long_past = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        for j in &mut sh.jobs {
+            j.born_at = long_past;
+        }
         settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert_eq!(

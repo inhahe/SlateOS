@@ -4527,6 +4527,29 @@
 
 ## Judgment Calls
 
+MacAddress is declared twice (lane A, 2026-09-15). Small, real, not urgent.
+
+  kernel/src/wol.rs:59        pub struct MacAddress(pub [u8; 6])   1 use
+  kernel/src/virtio/net.rs:151 pub struct MacAddress(pub [u8; 6])  13 uses
+
+  Identical definitions, each with its own Display impl. `net::interface`
+  imports the virtio one, which is why `InterfaceInfo::mac` is
+  `virtio::net::MacAddress` and the wol Display is not the one that formats
+  it -- a thing I had to check before writing /sys/devices/net's generator,
+  because picking the wrong type compiles into a different Display.
+
+  Same shape as the ICMP wire format written twice, which lane C filed and
+  which was worth consolidating: two declarations of one format drift, and
+  the drift is invisible until something reads both. Here the asymmetry
+  makes it cheap -- wol has one use, so it can adopt virtio's type and the
+  duplicate goes.
+
+  Not done because it is a type move across two driver modules for no
+  behavioural gain today, and the boot queue is busy. Trigger: anything that
+  needs to pass a MAC between wol and the interface layer, at which point
+  the conversion would have to be written and consolidating is strictly
+  less work.
+
 "Fixed" means fixed ON MAIN, and say which when telling another lane
 (lane A, 2026-09-15). Lane C's correction, adopted here because the same
 ambiguity is in everything I have said today.

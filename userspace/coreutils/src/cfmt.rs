@@ -77,8 +77,8 @@ pub fn render(spec: &Spec, value: Value<'_>) -> Vec<u8> {
         (b'c', Value::Byte(b)) => pad(spec, &[b]),
         (b's', Value::Text(t)) => {
             let body = match spec.precision {
-                Some(p) if p < t.len() => &t[..p],
-                _ => t,
+                Some(p) => t.get(..p).unwrap_or(t),
+                None => t,
             };
             pad(spec, body)
         }
@@ -162,11 +162,14 @@ fn integer(spec: &Spec, magnitude: u64, negative: bool, base: u32, upper: bool) 
     if spec.zero && spec.precision.is_none() {
         // The zeros go *inside*: after the sign and after `0x`, so that
         // `%08.x` of 255 is `0x0000ff` and not `000x00ff`.
-        let at = sign.len() + prefix.len();
-        let mut out = Vec::with_capacity(body.len() + fill);
-        out.extend_from_slice(&body[..at]);
+        let at = sign.len().saturating_add(prefix.len());
+        let mut out = Vec::with_capacity(body.len().saturating_add(fill));
+        // `at` counts the sign and the prefix, which are both inside `body`,
+        // so the split is in range; `split_at_checked` says it.
+        let (head, tail) = body.split_at_checked(at).unwrap_or((&body, &[]));
+        out.extend_from_slice(head);
         out.extend(std::iter::repeat_n(b'0', fill));
-        out.extend_from_slice(&body[at..]);
+        out.extend_from_slice(tail);
         return out;
     }
     let mut out = Vec::with_capacity(body.len() + fill);

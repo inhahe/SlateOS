@@ -61,7 +61,7 @@ fn usage() {
     println!("  -n, --nonblock       Fail rather than wait");
     println!("  -w, --timeout SECS   Wait at most SECS seconds");
     println!("  -o, --close          Close fd before running command");
-    println!("  -E, --conflict-exit N  Exit code on conflict (default 1)");
+    println!("  -E, --conflict-exit-code N  Exit code on conflict (default 1)");
     println!("  -v, --verbose        Verbose mode");
     println!("  -h, --help           Show this help");
     println!("  -V, --version        Show version");
@@ -144,7 +144,7 @@ fn parse_flock_args(args: &[String]) -> Result<FlockOpts, UsageError> {
                     opts.timeout = v.parse().ok();
                 }
             }
-            "-E" | "--conflict-exit" => {
+            "-E" | "--conflict-exit-code" | "--conflict-exit" => {
                 i = i.saturating_add(1);
                 if let Some(v) = args.get(i) {
                     opts.conflict_exit = v.parse().unwrap_or(1);

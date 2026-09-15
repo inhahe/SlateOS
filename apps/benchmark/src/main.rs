@@ -1020,53 +1020,96 @@ pub fn run_memory_benchmark() -> CategoryResult {
     cat
 }
 
+/// Sequential memory write, in megabytes per second.
+///
+/// Sixteen megabytes, which is past any level of cache on an ordinary desktop,
+/// so this measures memory rather than L2. The old version filled 64 KiB --
+/// comfortably inside L2 — and then returned 11,800 regardless.
 fn simulate_seq_write_throughput() -> f64 {
-    // Simulate sequential write by filling a buffer.
-    let size = 64 * 1024; // 64 KiB
-    let mut buf = vec![0u8; size];
-    for (i, byte) in buf.iter_mut().enumerate() {
-        *byte = (i & 0xFF) as u8;
-    }
-    let checksum: u64 = buf.iter().map(|&b| b as u64).sum();
-    let base = 11800.0;
-    if checksum > 0 { base + 50.0 } else { base }
+    const WORDS: usize = 2 * 1024 * 1024;
+    const BYTES: usize = WORDS * 8;
+    let mut buf = vec![0_u64; WORDS];
+    let secs = seconds(|| {
+        // A word at a time, not a byte. A byte loop measures the loop rather
+        // than the memory: byte-wise this reads 55 MB/s unoptimised against
+        // 6.75 GB/s for the `copy_from_slice` below, and the hundredfold gap
+        // is per-element overhead, not the machine. A benchmark whose answer
+        // is dominated by how its own loop was compiled is measuring the
+        // wrong thing even when the clock is real.
+        for (i, word) in buf.iter_mut().enumerate() {
+            *word = i as u64;
+        }
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let megabytes = BYTES as f64 / 1_000_000.0;
+    rate(megabytes, secs)
 }
 
+/// Sequential memory read, in megabytes per second.
+///
+/// The buffer is filled before the clock starts, so the measurement is of the
+/// read and not of the allocation — a first touch of fresh pages costs page
+/// faults, which would be charged to the read and reported as slow memory.
 fn simulate_seq_read_throughput() -> f64 {
-    let size = 64 * 1024;
-    let buf: Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
-    let checksum: u64 = buf.iter().map(|&b| b as u64).sum();
-    let base = 14200.0;
-    if checksum > 0 { base + 30.0 } else { base }
+    const WORDS: usize = 2 * 1024 * 1024;
+    const BYTES: usize = WORDS * 8;
+    #[allow(clippy::cast_possible_truncation)]
+    let buf: Vec<u64> = (0..WORDS).map(|i| i as u64).collect();
+    // A word at a time, for the same reason as the write above.
+    let secs = seconds(|| buf.iter().fold(0_u64, |acc, &w| acc.wrapping_add(w)));
+    #[allow(clippy::cast_precision_loss)]
+    let megabytes = BYTES as f64 / 1_000_000.0;
+    rate(megabytes, secs)
 }
 
+/// Random access latency, in nanoseconds per access. Lower is better.
+///
+/// A pointer chase: each cell holds the index of the next, so the processor
+/// cannot start an access until the previous one has landed. That serialising
+/// is the point — a stride the prefetcher can predict measures bandwidth
+/// rather than latency, and would report a number several times too good.
+///
+/// The table is 16 MiB so the chase misses cache on essentially every step.
+/// The old version chased 4,096 entries, which fits in L1, and then returned
+/// 78.0 regardless.
 fn simulate_random_access_latency() -> f64 {
-    // Lower is better. Simulate pointer-chasing.
-    let size: usize = 4096;
-    // Wrapping, not checked: the stride is a synthetic pointer-chase and the
-    // `% size` that follows makes any wrap land back inside the table, so a
-    // wrap would change which cells are visited but not the shape of the work.
-    let data: Vec<u32> = (0..size)
-        .map(|i| (i.wrapping_mul(7).wrapping_add(13) % size) as u32)
+    const CELLS: usize = 4 * 1024 * 1024;
+    const STEPS: usize = 400_000;
+    // A large odd multiplier walks the whole table before repeating, so the
+    // chase cannot settle into a short cycle that stays resident in cache.
+    let next: Vec<u32> = (0..CELLS)
+        .map(|i| u32::try_from(i.wrapping_mul(2_654_435_761) % CELLS).unwrap_or(0))
         .collect();
-    let mut idx: u32 = 0;
-    for _ in 0..1000 {
-        idx = data.get(idx as usize % size).copied().unwrap_or(0);
-    }
-    let base = 78.0;
-    if idx > 0 { base + 1.5 } else { base }
+    let mut idx = 0_usize;
+    let secs = seconds(|| {
+        for _ in 0..STEPS {
+            idx = next.get(idx).copied().unwrap_or(0) as usize;
+        }
+        idx
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let steps = STEPS as f64;
+    // Nanoseconds per access, so the rate is inverted: seconds per step,
+    // scaled. `rate` still guards the stopped clock.
+    rate(secs * 1_000_000_000.0, steps)
 }
 
+/// Memory bandwidth, in gigabytes per second.
+///
+/// A copy moves each byte twice — once read, once written — so the bytes
+/// touched are twice the buffer, which is the convention every other memory
+/// bandwidth figure uses. Reporting the buffer size alone would halve the
+/// number against everyone else's.
 fn simulate_memory_bandwidth() -> f64 {
-    let size = 32 * 1024;
-    let src: Vec<u64> = (0..size).map(|i| i as u64).collect();
-    let mut dst = vec![0u64; size];
-    for (d, s) in dst.iter_mut().zip(src.iter()) {
-        *d = *s;
-    }
-    let checksum: u64 = dst.iter().sum();
-    let base = 25.5;
-    if checksum > 0 { base + 0.3 } else { base }
+    const ELEMS: usize = 4 * 1024 * 1024;
+    const BYTES_TOUCHED: f64 = (ELEMS * 8 * 2) as f64;
+    #[allow(clippy::cast_possible_truncation)]
+    let src: Vec<u64> = (0..ELEMS).map(|i| i as u64).collect();
+    let mut dst = vec![0_u64; ELEMS];
+    let secs = seconds(|| {
+        dst.copy_from_slice(&src);
+    });
+    rate(BYTES_TOUCHED / 1_000_000_000.0, secs)
 }
 
 /// Run disk benchmarks.
@@ -3177,6 +3220,34 @@ mod tests {
             long > short,
             "50ms ({long}s) did not measure longer than 5ms ({short}s)"
         );
+    }
+
+    /// The memory scores are measured, not constants.
+    ///
+    /// Same shape as the CPU test above, including the latency: it is reported
+    /// lower-is-better, so a zero would read as an instantaneous memory access
+    /// rather than as a failed measurement, and is asserted against for that
+    /// reason rather than by copying the line above.
+    #[test]
+    fn the_memory_scores_are_measured_rather_than_returned() {
+        let cat = run_memory_benchmark();
+        assert_eq!(cat.sub_tests.len(), 4);
+        for test in &cat.sub_tests {
+            assert!(
+                test.score > 0.0,
+                "{} scored {}, which is what a clock that did not move returns",
+                test.name,
+                test.score
+            );
+            for fabricated in [11800.0, 11850.0, 14200.0, 14230.0, 78.0, 25.5, 25.8] {
+                assert!(
+                    (test.score - fabricated).abs() > 0.001,
+                    "{} scored {}, one of the constants this replaced",
+                    test.name,
+                    test.score
+                );
+            }
+        }
     }
 
     /// A clock that did not move reports nothing, not everything.

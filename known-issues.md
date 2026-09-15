@@ -151213,9 +151213,32 @@ exit. `collect_dir`, `extract_tags_from_file`, `read_existing_ctags`,
 `run_lp` and `run_lprm` are ordinary logic with inputs and outputs, hidden
 from the suite for no reason that shows at the call site.
 
-`lp` is the one to look at next: `userspace/lp`'s `cancel_purge` is also on
-the written-never-read list, which is the same pair of symptoms dbus had --
-a dead field in a crate whose entry point nothing can call.
+**ALL SEVEN CHECKED, 2026-09-15. Two were fabricating; five were not.** The
+cleared rows are here because they are the more useful half: they say the gate
+is a testability smell rather than a reliable predictor of a lie, and where
+not to look again.
+
+| crate | outcome |
+|---|---|
+| `dbus` | **FIXED.** All three personalities fabricated. The daemon announced a bus it never listened on and wrote a pid file naming PID 1; `dbus-send` printed a method call "on wire" that went nowhere; `dbus-monitor` claimed to be monitoring and exited 0. All ungated and refusing. |
+| `lp` | **FIXED.** Reported queued print jobs and never captured the document -- for `-` it drained stdin, measured it, and dropped it. Predicted from this list plus a written-never-read field, which is how it was found. |
+| `ctags` | **CLEAN.** A real tool: `File::create`, writes ctags/etags format, reports write errors. Probed end to end -- three source items in, three correct tag lines out, sorted. The gated functions are a testability gap, not a lie. |
+| `lex` | **CLEAN.** Two write sites, six refusal messages. Does real work and says so when it cannot. |
+| `yacc` | **CLEAN.** Three write sites, four refusal messages. Same. |
+| `chpasswd` | **CLEAN.** `print_help` / `print_version` only. |
+| `mesg` | **CLEAN.** `print_help` / `print_version` only. |
+
+**What the gate predicted, and what it did not.** Two of seven were
+fabricating -- so the gate is a useful place to look and a poor place to
+conclude. What sharpened it was the PAIR: a gated entry point *plus* a field
+on the written-never-read list. Both crates that had both were lying; none of
+the five with only the gate was. That pairing is worth more than either list
+alone, and it is cheap to compute.
+
+**Still open:** the five clean crates keep code the suite cannot reach.
+`ctags`'s `collect_dir`, `extract_tags_from_file` and `read_existing_ctags`
+are parsers with inputs and outputs and no tests, which is a real gap even
+though nothing is currently wrong behind it.
 
 **Why the gate is usually there at all.** These crates build `#![no_main]`
 for the real target and define a `main` the test harness must not duplicate.

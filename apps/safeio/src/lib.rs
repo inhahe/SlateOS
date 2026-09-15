@@ -167,6 +167,70 @@ impl CappedRead {
     }
 }
 
+/// What a bounded read of a BINARY file returned.
+///
+/// Separate from [`CappedRead`] rather than generic over the two, because the
+/// interesting part of the text version -- backing the cut up to a character
+/// boundary -- has no meaning here, and a type that carried the field without
+/// the behaviour would invite someone to rely on it.
+#[derive(Clone, Debug)]
+pub struct CappedBytes {
+    /// The bytes that were read.
+    pub bytes: Vec<u8>,
+    /// The file's full length, whether or not all of it was read.
+    pub whole: usize,
+    /// Whether `bytes` is shorter than the file.
+    pub truncated: bool,
+}
+
+impl CappedBytes {
+    /// A prefix to put in front of whatever the caller was going to say, or
+    /// the empty string when nothing was cut.
+    ///
+    /// **Front-loaded, and it matters more here than for text.** A truncated
+    /// binary file almost never parses -- a length prefix will point past the
+    /// end, a checksum will not match -- so a caller that reports the parse
+    /// error first tells the user their file is corrupt when it is merely
+    /// larger than this program will read.
+    #[must_use]
+    pub fn note(&self, max: usize) -> String {
+        if self.truncated {
+            format!("INCOMPLETE ({max} of {} bytes read): ", self.whole)
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// Read `path` as bytes, stopping after `max`.
+///
+/// For formats that are not text: a `.torrent` is bencode, an image is an
+/// image, and [`read_to_string_capped`] would refuse both at the first byte
+/// that is not UTF-8 -- reporting "stream did not contain valid UTF-8" about a
+/// file that is perfectly valid and simply not text.
+///
+/// # Errors
+///
+/// Whatever `std::fs::read` returns: the file is missing, or is not readable.
+pub fn read_capped(path: &Path, max: usize) -> io::Result<CappedBytes> {
+    let bytes = std::fs::read(path)?;
+    let whole = bytes.len();
+    if whole <= max {
+        return Ok(CappedBytes {
+            bytes,
+            whole,
+            truncated: false,
+        });
+    }
+    let mut bytes = bytes;
+    bytes.truncate(max);
+    Ok(CappedBytes {
+        bytes,
+        whole,
+        truncated: true,
+    })
+}
+
 /// Read `path` as text, stopping after `max` bytes.
 ///
 /// # Why a bounded read is its own function

@@ -9,5 +9,10 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# Ctrl+O reads through `safeio::read_capped`, the byte-oriented one: a
+# `.torrent` is bencode, and the text reader would refuse it at the first byte
+# that is not UTF-8.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

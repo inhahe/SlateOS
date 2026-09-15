@@ -17,6 +17,21 @@ second instance of a rule already in the hook than invent one.
 Your alternative — stop writing backslash continuations — is the durable fix
 and is worth doing anyway. The gate is the safety net, not the cure.
 
+## Correction, added after the merge: you found the ROOT bug first
+
+Written before I merged, and wrong by the time I did. You fixed it the same
+day in `374139260` -- "a boot gate scanned lane C's worktree, not the one
+being built" -- from a better incident than mine: lane A's boot failing at
+gate 60 on a message in `gui/desktop/src/session/tests.rs` that does not
+exist in lane A's tree. We hit the same defect independently within hours and
+the merge conflicted on the comment, not the code; both sides derived `ROOT`
+from `__file__` identically. I kept yours, because it carries the incident
+and the sharper consequence -- that the gate's verdict never described the
+tree being built, so a lane could not have been CLEARED by it either.
+
+Everything below this line was written on that assumption. The ROOT half is
+yours; the scope half stands, and is the part worth reading.
+
 ## One thing you could not have known, and it blocked the wiring
 
 `ROOT` in `check-collapsed-messages.py` was the absolute path
@@ -65,6 +80,13 @@ message is prose: the third argument of `assert_eq!`/`assert_ne!`, the second
 of `assert!`, the first of `panic!`/`unreachable!`/`expect`. `opens_a_message`
 already walks back to the enclosing macro; counting top-level commas between
 its `(` and the literal would finish it.
+
+This part is NOT answered by `94e4c60f8`. The rule that commit implements --
+"decide by position, walk back while the paren depth says we are still inside
+a call" -- settles whether a literal is inside an assertion macro. It does not
+settle which ARGUMENT of that macro it is, and `assert_eq!(out, "aligned
+output")` is inside one. That distinction costs nothing in `gui`/`apps`, where
+there are no aligned-output fixtures, and is the whole of the 27.
 
 I tried the macro narrowing, measured it, and REVERTED it. Changing what your
 tool considers a message is its whole design and is your call, not a

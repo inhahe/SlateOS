@@ -42,11 +42,39 @@ OURS_B = re.compile(r'"(--[a-z0-9][a-z0-9-]*)"\s*\|\s*"(-[A-Za-z0-9])"')
 # `-x, --long` as every util-linux/GNU help formats it. The long name may be
 # followed by an argument spec (`<file>`, `[=<dir>]`, `=NAME`), which stops
 # the match rather than joining it.
-THEIRS = re.compile(r"(?:^|\s)(-[A-Za-z0-9]),\s+(--[a-z0-9][a-z0-9-]*)")
+#
+# The SHORT name may carry one too, and psmisc writes it that way:
+#
+#     -N TYPE, --ns-sort=TYPE
+#     -H PID, --highlight-pid=PID
+#
+# Without the optional `[A-Z]+` below, the comma is not adjacent to the letter
+# and the whole line was skipped -- so every option written in that style went
+# UNCOMPARED. That is a false negative, which costs more than a false positive
+# here: a spurious finding is a minute of checking, and a missed one is
+# silent. `pstree -N` went unexamined for exactly this reason.
+THEIRS = re.compile(
+    r"(?:^|\s)(-[A-Za-z0-9])(?:\s+[A-Z][A-Z_]*)?,\s+(--[a-z0-9][a-z0-9-]*)"
+)
 
 # `progname.ends_with("umount")` and friends: how this tree spells "which
 # program am I being run as".
 PERSONALITY = re.compile(r'ends_with\("([a-z][a-z0-9_-]*)"\)')
+
+# The other spelling: `match prog_name.as_str() { "mountpoint" => ... }`.
+#
+# Keyed on the SCRUTINEE NAME rather than on the shape of the arms, and
+# deliberately so. Collecting arms from any match at all would hand the
+# checker extra "personalities" whose option tables then EXCUSE real
+# collisions -- a false negative, which costs more here than a false positive,
+# because a missed collision is silent and a spurious one is a minute of
+# checking.
+DISPATCH = re.compile(
+    r"match\s+(?:\w*(?:prog|argv0|personality|basename)\w*)"
+    r"(?:\.as_str\(\)|\.as_ref\(\))?\s*\{(.*?)\n\}",
+    re.S | re.I,
+)
+DISPATCH_ARM = re.compile(r'"([a-z][a-z0-9_-]*)"\s*(?:\||=>)')
 
 
 def personalities(crate_name: str, source: str, cargo: str) -> list[str]:
@@ -62,12 +90,20 @@ def personalities(crate_name: str, source: str, cargo: str) -> list[str]:
     does define `-f, --force` and `-l, --lazy`. The binding was correct and
     the checker was comparing it against the wrong program.
 
+    `userspace/findmnt` is the same story told a second way -- it is findmnt
+    and `mountpoint`, dispatching on `match prog_name.as_str()` rather than on
+    `ends_with`, so the first version of this function could not see it and
+    the checker reported `-d`/`--fs-devno` as wrong. mountpoint(1) defines
+    exactly that.
+
     So: collect every name the crate answers to, and treat a short option as
     mis-bound only if it disagrees with EVERY reference that defines it.
     """
     names = {crate_name}
     names.update(PERSONALITY.findall(source))
     names.update(re.findall(r'^name\s*=\s*"([a-z][a-z0-9_-]*)"', cargo, re.M))
+    for block in DISPATCH.findall(source):
+        names.update(DISPATCH_ARM.findall(block))
     # Only plausible command names: this tree also writes `ends_with(".rs")`
     # and similar, which are suffixes rather than programs.
     return sorted(n for n in names if not n.startswith(".") and len(n) > 1)
@@ -202,6 +238,11 @@ def selftest() -> int:
     assert theirs(" -d, --no-encoding   don't encode") == {"-d": {"--no-encoding"}}
     assert theirs(" -n, --match-types <list>  filter") == {"-n": {"--match-types"}}
     assert theirs(" -m, --mount[=<file>] unshare mounts") == {"-m": {"--mount"}}
+    # psmisc's form: an argument on the SHORT name, before the comma.
+    assert theirs(" -N TYPE, --ns-sort=TYPE") == {"-N": {"--ns-sort"}}
+    assert theirs(" -H PID, --highlight-pid=PID") == {"-H": {"--highlight-pid"}}
+    cases += 2
+
     # One letter documented twice keeps BOTH.
     assert theirs(" -V, --verbose explain\n -V, --version display") == {
         "-V": {"--verbose", "--version"}
@@ -246,10 +287,26 @@ def selftest() -> int:
     ]
     cases += 3
 
-    # Personality extraction.
+    # Personality extraction, all three spellings this tree uses.
     assert "umount" in personalities("mount", 'progname.ends_with("umount")', "")
     assert personalities("ss", "", 'name = "sockstat"') == ["sockstat", "ss"]
-    cases += 2
+    dispatch = (
+        "    match prog_name.as_str() {\n"
+        '        "mountpoint" => cmd_mountpoint(&rest),\n'
+        "        _ => cmd_findmnt(&rest),\n"
+        "    }\n}"
+    )
+    assert "mountpoint" in personalities("findmnt", dispatch, "")
+    # A match on something that is NOT the program name must contribute
+    # nothing: extra personalities would excuse real collisions.
+    other = (
+        "    match direction.as_str() {\n"
+        '        "backward" => go_back(),\n'
+        "        _ => go_forward(),\n"
+        "    }\n}"
+    )
+    assert personalities("findmnt", other, "") == ["findmnt"]
+    cases += 4
 
     print(f"selftest: {cases}/{cases} cases pass")
     return 0

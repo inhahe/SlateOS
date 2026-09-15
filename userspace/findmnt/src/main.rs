@@ -778,7 +778,11 @@ fn cmd_findmnt(args: &[String]) {
                     opts.target_filter = Some(args[i].clone());
                 }
             }
-            "-t" | "--type" => {
+            // `--types` is upstream's spelling; `--type` stays accepted as
+            // an alias, because it cannot collide with anything -- a long
+            // option upstream does not define fails visibly if it is wrong,
+            // and this one is simply an extra way to say the same thing.
+            "-t" | "--types" | "--type" => {
                 i += 1;
                 if i < args.len() {
                     let val = &args[i];
@@ -887,7 +891,7 @@ fn print_findmnt_usage() {
     println!("  -R, --submounts     Include submounts");
     println!("  -S, --source DEV    Filter by source device");
     println!("  -T, --target DIR    Filter by target mount point");
-    println!("  -t, --type TYPE     Filter by filesystem type");
+    println!("  -t, --types LIST    Limit by filesystem type (or no<type>)");
     println!("  -o, --output COLS   Columns (TARGET,SOURCE,FSTYPE,OPTIONS,...)");
     println!("  -h, --help          Show this help");
     println!("  -V, --version       Show version");

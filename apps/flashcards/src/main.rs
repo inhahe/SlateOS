@@ -3115,6 +3115,43 @@ mod tests {
         })
     }
 
+    /// A key with Ctrl held, for the picker tests.
+    fn ctrl_press(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event; the
+    /// writer test calls the writer with a path directly and never touches the
+    /// dialog. This is the half routing actually decides -- with a dialog up,
+    /// a keystroke belongs to the dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_deck() {
+        let mut app = FlashcardsApp::new();
+        let before = app.selected_deck;
+
+        app.handle_event(&ctrl_press(Key::O));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(&press(Key::Down));
+        assert_eq!(
+            app.selected_deck, before,
+            "Down at the open dialog moved the selection behind it"
+        );
+    }
+
     #[test]
     fn the_day_comes_from_the_calendar_and_not_from_a_counter() {
         // The scheduler this app is built around measures in days; a day that

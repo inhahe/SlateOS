@@ -3851,6 +3851,33 @@ mod tests {
         assert_eq!(on_disk(&app), vec!["2.jpg", "3.jpg", "4.jpg"]);
     }
 
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The other door test pins that the key *opens* the picker -- but the key
+    /// handler is what opens it, so cutting the picker's event routing
+    /// entirely leaves that assertion true. This is the half routing actually
+    /// decides: with a dialog up, a keystroke belongs to the dialog, and a
+    /// window that scrolls underneath one is a modal that is not modal.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_file_list() {
+        let mut app = RenamerApp::new();
+        app.add_file("one.txt", 10, 0);
+        app.add_file("two.txt", 10, 0);
+        app.selected_file = 0;
+
+        app.handle_event(&ctrl(Key::O));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(&press(Key::Down));
+        assert_eq!(
+            app.selected_file, 0,
+            "Down at the open dialog moved the selection behind it"
+        );
+    }
+
     /// Ctrl+O asks for a folder, and choosing one lists it.
     #[test]
     fn ctrl_o_opens_the_folder_picker() {

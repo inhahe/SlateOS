@@ -3638,6 +3638,56 @@ mod tests {
         })
     }
 
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The other door test pins that the key *opens* the picker -- but the key
+    /// handler is what opens it, so cutting the picker's event routing
+    /// entirely leaves that assertion true. This is the half routing actually
+    /// decides: with a dialog up, a keystroke belongs to the dialog, and a
+    /// window that scrolls underneath one is a modal that is not modal.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_panes() {
+        let mut app = FileDiffApp::new();
+        // Long enough that there is somewhere to scroll TO. Ten lines fit the
+        // viewport, so `max_scroll()` is zero and Down moves nothing whether
+        // or not the dialog took the key -- the assertion below would then
+        // hold for a reason that has nothing to do with what it is testing.
+        // The scanner caught exactly that: the first version of this test left
+        // the routing sabotage green.
+        app.left_content = {
+            use std::fmt::Write as _;
+            let mut out = String::new();
+            for i in 0..500 {
+                let _ = writeln!(out, "line {i}");
+            }
+            out
+        };
+        app.right_content.clone_from(&app.left_content);
+        app.recompute_diff();
+        assert!(
+            app.max_scroll() > 0.0,
+            "control: the fixture must be scrollable, or this asserts nothing"
+        );
+        let before = app.scroll_left;
+
+        app.handle_event(&ctrl_key(Key::O, false));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Down,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert_eq!(
+            app.scroll_left, before,
+            "Down at the open dialog scrolled the pane behind it"
+        );
+    }
+
     /// Two real files are read and compared.
     ///
     /// **This program could not open a file.** It had no `std::fs` and no

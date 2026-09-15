@@ -4597,6 +4597,35 @@ mod tests {
 
     // ---- The door ----
 
+    /// An open picker takes the keyboard, and the canvas behind it does not.
+    ///
+    /// The other door test pins that Ctrl+S *opens* the picker -- but the key
+    /// handler is what opens it, so cutting the picker's event routing
+    /// entirely leaves that assertion true. This is the half routing actually
+    /// decides: with a dialog up, a letter is a filename, not a tool
+    /// shortcut, and a drawing program that switched to the Line tool while
+    /// you typed `line.svg` is one where the dialog is not modal.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_canvas() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.current_tool = Tool::Pen;
+
+        app.handle_event(&press_with(Key::S, ctrl()));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        // `l` is the Line tool's shortcut, and the first letter of a filename
+        // somebody might reasonably type.
+        app.handle_event(&typed(Key::L, 'l'));
+        assert_eq!(
+            app.current_tool,
+            Tool::Pen,
+            "a letter typed at the save dialog changed the tool behind it"
+        );
+    }
+
     /// The drawing reaches the disk, and reads back as what was drawn.
     ///
     /// `export_svg` was written and tested and had no caller: this program had

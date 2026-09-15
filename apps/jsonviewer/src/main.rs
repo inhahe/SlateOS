@@ -48,6 +48,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Event, EventResult, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -1953,6 +1954,14 @@ struct App {
     input_focused: bool,
     /// Cursor position in input.
     cursor_pos: usize,
+    /// The file picker, while one is up.
+    ///
+    /// The only route a real document has into this viewer. Until 2026-09-15
+    /// there was none: `App::new` loaded `SAMPLE_JSON`, a document describing
+    /// the viewer itself, and that was the only thing it could ever show.
+    file_dialog: Option<FileDialog>,
+    /// What the last open attempt did, for the status line.
+    last_open: Option<String>,
     /// Width of the window.
     width: f32,
     /// Height of the window.
@@ -2055,14 +2064,17 @@ fn stats_table(columns: &[Column]) -> Table<'_> {
 
 impl App {
     fn new() -> Self {
-        let mut doc = Document::new(1, String::from("Untitled"));
-        // Load sample JSON
-        doc.input = SAMPLE_JSON.to_string();
-        doc.reparse();
+        // Opens empty. It used to load `SAMPLE_JSON` -- a document describing
+        // this program, its version and its feature list -- which was the only
+        // content the viewer could ever hold, because nothing here could read
+        // a file. Ctrl+O reads one now.
+        let doc = Document::new(1, String::from("Untitled"));
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             documents: vec![doc],
+            file_dialog: None,
+            last_open: Some(String::from("Press Ctrl+O to open a JSON file")),
             active_tab: 0,
             next_tab_id: 2,
             search_query: String::new(),
@@ -2178,6 +2190,10 @@ impl App {
         // Global shortcuts
         if modifiers.ctrl {
             match key {
+                Key::O => {
+                    self.open_file_dialog();
+                    return;
+                }
                 Key::N => {
                     self.new_tab();
                     return;
@@ -2695,7 +2711,102 @@ impl App {
     /// dispatched to it, because nothing delivered an event. This is that
     /// dispatch, and the translation of a `KeyEvent` into the three arguments
     /// `handle_key` takes.
+    /// Put the file picker up, listing the directory it starts in.
+    pub fn open_file_dialog(&mut self) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::open().with_initial_path(start);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.file_dialog = Some(dialog);
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
+        match action {
+            DialogAction::None => EventResult::Consumed,
+            DialogAction::Cancelled => {
+                self.file_dialog = None;
+                EventResult::Consumed
+            }
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+                EventResult::Consumed
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                self.last_open = Some(self.open_path(&path));
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Read `path` into a new tab. Returns what to say about it.
+    ///
+    /// A file that is not JSON is still *opened*: the text goes in and the
+    /// parse error is what the viewer is for. What is reported here is the
+    /// read, not the parse -- those are different failures, and conflating
+    /// them would tell someone their disk was unreadable when their braces
+    /// were unbalanced.
+    ///
+    /// Bounded at [`MAX_OPEN_BYTES`], and it says so when it cuts. A JSON
+    /// document truncated in the middle is not valid JSON, so a silent cut
+    /// would show a parse error that is about this cap rather than about the
+    /// file -- the worst kind, because it accuses the user's data.
+    pub fn open_path(&mut self, path: &std::path::Path) -> String {
+        let shown = path.display().to_string();
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => return format!("Could not read {shown}: {err}"),
+        };
+        let whole = text.len();
+        let truncated = whole > MAX_OPEN_BYTES;
+        let input = if truncated {
+            // Cut on a character boundary, or the slice is not valid UTF-8.
+            let mut cut = MAX_OPEN_BYTES;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut = cut.saturating_sub(1);
+            }
+            text.get(..cut).unwrap_or("").to_string()
+        } else {
+            text
+        };
+
+        let name = path
+            .file_name()
+            .map_or_else(|| shown.clone(), |n| n.to_string_lossy().into_owned());
+        let id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
+        let mut doc = Document::new(id, name);
+        doc.input = input;
+        doc.reparse();
+        self.documents.push(doc);
+        self.active_tab = self.documents.len().saturating_sub(1);
+
+        if truncated {
+            format!(
+                "Opened the first {MAX_OPEN_BYTES} bytes of {shown} -- it is {whole} bytes, so this is not the whole document"
+            )
+        } else {
+            format!("Opened {shown}")
+        }
+    }
+
     fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes the event first while it is up, or a click meant
+        // for a filename lands on the tree behind it.
+        if self.file_dialog.is_some() {
+            let (w, h) = (self.width, self.height);
+            let action = match (event, self.file_dialog.as_mut()) {
+                (Event::Key(key_ev), Some(dialog)) if key_ev.pressed => {
+                    dialog.handle_event(key_ev, h)
+                }
+                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
+                _ => return EventResult::Ignored,
+            };
+            return self.apply_dialog_action(action);
+        }
         match event {
             Event::Key(key_ev) => {
                 if !key_ev.pressed {
@@ -2765,6 +2876,7 @@ impl App {
         usize,
         usize,
         ViewMode,
+        bool,
     ) {
         let doc = self.documents.get(self.active_tab);
         (
@@ -2780,6 +2892,14 @@ impl App {
             // that moved the view has to read as a redraw.
             doc.map_or(0, |d| d.selected_node),
             doc.map_or(ViewMode::Tree, |d| d.view_mode),
+            // Opening or closing the picker is a redraw. Without this the
+            // dialog would be invisible until something else changed state:
+            // `handle_key` reports nothing, so this tuple is the only thing
+            // deciding whether a frame is drawn. `apps/hexeditor` nearly
+            // shipped the same invisible-picker bug today by a different
+            // route, which is why this line has a comment instead of being
+            // one more field in a tuple.
+            self.file_dialog.is_some(),
         )
     }
 
@@ -4289,6 +4409,19 @@ fn char_to_byte_pos(s: &str, char_idx: usize) -> usize {
 // Sample JSON
 // ============================================================================
 
+/// The most of a file one open will read.
+///
+/// Reported when it bites: a JSON document cut in half is not valid JSON, so a
+/// silent truncation would show a parse error about this cap while appearing
+/// to be about the file.
+pub const MAX_OPEN_BYTES: usize = 8 * 1024 * 1024;
+
+/// A sample document, for tests.
+///
+/// `#[cfg(test)]` since 2026-09-15. `App::new` loaded it, so a viewer that
+/// could not read a file showed a description of itself instead. A fixture
+/// production can reach is a fixture that ships.
+#[cfg(test)]
 const SAMPLE_JSON: &str = r#"{
   "name": "Slate OS JSON Viewer",
   "version": "0.1.0",
@@ -4378,9 +4511,13 @@ impl oswindow::app::App for App {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.width = width;
         self.height = height;
-        RenderTree {
-            commands: self.render_commands(),
+        let mut commands = self.render_commands();
+        // Last, so it is above everything -- the same order in which
+        // `handle_event` gives it the click.
+        if let Some(dialog) = &self.file_dialog {
+            commands.extend(dialog.render(&self.palette, width, height));
         }
+        RenderTree { commands }
     }
 }
 
@@ -5342,9 +5479,24 @@ mod tests {
 
     // --- App state tests ---
 
+    /// An app showing the sample document.
+    ///
+    /// `App::new` opens empty since 2026-09-15. The sample was production data
+    /// until then -- a JSON document describing this program -- and six tests
+    /// were resting on it without saying so, which is why they all went red at
+    /// once. They build their own now.
+    fn app_with_sample() -> App {
+        let mut app = App::new();
+        if let Some(doc) = app.documents.get_mut(0) {
+            doc.input = SAMPLE_JSON.to_string();
+            doc.reparse();
+        }
+        app
+    }
+
     #[test]
     fn app_new_creates_default_doc() {
-        let app = App::new();
+        let app = app_with_sample();
         assert_eq!(app.documents.len(), 1);
         assert!(app.documents[0].parsed.is_some());
     }
@@ -5381,7 +5533,7 @@ mod tests {
 
     #[test]
     fn app_search_flow() {
-        let mut app = App::new();
+        let mut app = app_with_sample();
         app.search_query = "name".to_string();
         app.perform_search();
         assert!(!app.search_results.is_empty());
@@ -5592,7 +5744,9 @@ mod tests {
     type StatCell = (f32, String, f32, FontWeightHint);
 
     fn stats_commands(width: f32) -> Vec<RenderCommand> {
-        let app = App::new();
+        // The sample document, because a statistics panel over an empty one
+        // has no types to distribute and nothing to draw.
+        let app = app_with_sample();
         let mut cmds = Vec::new();
         app.render_stats_view(&mut cmds, STATS_TOP, width, 600.0);
         cmds

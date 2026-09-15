@@ -54,6 +54,17 @@ use std::time::Duration;
 // ============================================================================
 
 /// The size the window opens at, and the size the probe draws at.
+/// What the sidebar says instead of listing tables.
+///
+/// Replaces the bare "No tables in database." An empty object tree under a
+/// filename reads as *this database has no tables*, which is a statement about
+/// somebody's data. Nothing here has opened a database at all.
+const NO_DATABASE_LINE: &str = "No database open -- this program cannot open one";
+
+/// The second line, which says why.
+const NO_DATABASE_WHY: &str =
+    "It has no filesystem access and no database driver, so nothing was read";
+
 const WINDOW_WIDTH: f32 = 1200.0;
 /// The height the window opens at.
 const WINDOW_HEIGHT: f32 = 800.0;
@@ -859,6 +870,15 @@ pub struct ColumnDef {
     pub constraints: ColumnConstraints,
 }
 
+/// Builders for a column definition.
+///
+/// None has a caller in production since 2026-09-15, because nothing in
+/// production builds a schema: `Database::sample` was the only thing that did,
+/// and it is a fixture now. They are the API a real loader would use to hand
+/// this program a schema it had actually read -- the same shape as
+/// `apps/finance`'s `add_account` and `apps/rssreader`'s `ingest_feed_xml`.
+/// Kept, marked, and left where a producer will find them.
+#[allow(dead_code, reason = "schema builders; no loader exists yet")]
 impl ColumnDef {
     fn new(name: &str, data_type: DataType) -> Self {
         Self {
@@ -1147,6 +1167,14 @@ impl Database {
     }
 
     /// Create a sample database for demonstration.
+    /// A database with a few tables, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `DbViewerApp::new` called it, so the
+    /// window opened on a file called `sample.db` with users, orders and the
+    /// rest -- and a filename is a claim that a file exists. That is the test
+    /// `apps/ebook` failed and `apps/filediff` passed an hour ago: a book
+    /// title claims nothing about a disk, and a path does.
+    #[cfg(test)]
     fn sample() -> Self {
         let mut db = Self::new("sample.db");
 
@@ -3417,14 +3445,17 @@ impl Default for DbViewerApp {
 
 impl DbViewerApp {
     pub fn new() -> Self {
-        let sample_db = Database::sample();
-        let tab = DbTab::new(sample_db);
+        // An unnamed, empty database. It used to be `Database::sample()`.
+        let tab = DbTab::new(Database::new(""));
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             tabs: vec![tab],
             active_tab: 0,
-            sql_input: String::from("SELECT * FROM users"),
+            // Empty. It was `SELECT * FROM users`, which names a table --
+            // a query written against a schema nothing has read reads as an
+            // invitation to run it.
+            sql_input: String::new(),
             query_result: None,
             history: Vec::new(),
             history_counter: 0,
@@ -3438,6 +3469,19 @@ impl DbViewerApp {
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
         }
+    }
+
+    /// A viewer holding the database `new` used to build, for tests.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about the object tree, the
+    /// schema pane, the query editor, the result grid and the layout passes --
+    /// all of which need *tables*, not specifically invented ones.
+    #[cfg(test)]
+    pub fn with_sample_database() -> Self {
+        let mut app = Self::new();
+        app.tabs = vec![DbTab::new(Database::sample())];
+        app.active_tab = 0;
+        app
     }
 
     /// Get the active tab.
@@ -3647,6 +3691,40 @@ impl DbViewerApp {
         self.draw_data_grid(&mut f, &l);
         self.draw_bottom_panels(&mut f, &l);
         self.draw_status_bar(&mut f, l.status);
+
+        // Last, so nothing paints over it. Keyed on there being no database,
+        // so it retires itself the day one can be opened.
+        //
+        // In `frame` rather than in the sidebar's empty branch, because that
+        // branch is not reached: the object tree draws "Tables", "Indexes",
+        // "Views" and "Triggers" whether or not it has anything to put under
+        // them, so an empty database looks like a database with four empty
+        // categories.
+        if self.active_db_tab().is_none_or(|t| t.db.tables.is_empty()) {
+            put_line(
+                &mut f,
+                l.window,
+                Rect::new(l.window.x + 10.0, l.window.y + 2.0, l.window.w - 20.0, 13.0),
+                NO_DATABASE_LINE,
+                11.0,
+                self.palette.ink(self.palette.yellow),
+                FontWeightHint::Bold,
+            );
+            put_line(
+                &mut f,
+                l.window,
+                Rect::new(
+                    l.window.x + 10.0,
+                    l.window.y + 16.0,
+                    l.window.w - 20.0,
+                    12.0,
+                ),
+                NO_DATABASE_WHY,
+                10.0,
+                self.palette.subtext0,
+                FontWeightHint::Regular,
+            );
+        }
         f
     }
 
@@ -4827,8 +4905,17 @@ impl DbViewerApp {
                 f,
                 area,
                 Rect::new(area.x + 16.0, area.y + 28.0, (area.w - 32.0).max(0.0), 14.0),
-                "No tables in database.",
+                NO_DATABASE_LINE,
                 11.0,
+                self.palette.ink(self.palette.yellow),
+                FontWeightHint::Regular,
+            );
+            put_line(
+                f,
+                area,
+                Rect::new(area.x + 16.0, area.y + 44.0, (area.w - 32.0).max(0.0), 14.0),
+                NO_DATABASE_WHY,
+                10.0,
                 self.palette.overlay0,
                 FontWeightHint::Regular,
             );
@@ -5515,6 +5602,51 @@ mod tests {
     use guitk::probe;
 
     use super::*;
+
+    /// A fresh viewer holds no database and says so, not "no tables".
+    ///
+    /// `DbViewerApp::new` called `Database::sample()`, so the window opened on
+    /// a file called `sample.db` with users, orders and the rest. A filename
+    /// is a claim that a file exists -- the test `apps/ebook` failed and
+    /// `apps/filediff` passed: a book title claims nothing about a disk, and a
+    /// path does.
+    ///
+    /// The sidebar's old placeholder read "No tables in database." Under a
+    /// filename that is a statement about somebody's data: *this database has
+    /// no tables*. Nothing here has opened a database at all, which is a
+    /// different sentence and the only true one.
+    #[test]
+    fn a_fresh_viewer_holds_no_database_and_says_which_empty_it_is() {
+        let app = DbViewerApp::new();
+        let db = &app.tabs[app.active_tab].db;
+        assert!(db.tables.is_empty(), "tables appeared from nowhere");
+        assert!(
+            db.name.is_empty(),
+            "a database filename appeared from nowhere"
+        );
+
+        let texts: Vec<String> = app
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == NO_DATABASE_LINE),
+            "the sidebar never said there is no database open: {texts:?}",
+        );
+        assert!(
+            texts.iter().any(|t| t == NO_DATABASE_WHY),
+            "and never said why",
+        );
+        assert!(
+            !texts.iter().any(|t| t == "No tables in database."),
+            "the old placeholder survived, and it is a claim about the data",
+        );
+    }
 
     // --- LIKE pattern matching ---
 
@@ -6694,14 +6826,14 @@ mod tests {
 
     #[test]
     fn test_app_new() {
-        let app = DbViewerApp::new();
+        let app = DbViewerApp::with_sample_database();
         assert_eq!(app.tabs.len(), 1);
         assert!(app.active_db_tab().is_some());
     }
 
     #[test]
     fn test_app_execute_query() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.sql_input = "SELECT * FROM users".to_owned();
         app.execute_query();
         assert!(app.query_result.is_some());
@@ -6716,7 +6848,7 @@ mod tests {
 
     /// An app whose results pane is showing `result`.
     fn app_showing(result: QueryResult) -> DbViewerApp {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.query_result = Some(result);
         app.bottom_panel = BottomPanel::Results;
         app
@@ -6863,7 +6995,7 @@ mod tests {
 
     #[test]
     fn test_app_execute_bad_query() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.sql_input = "INVALID SQL".to_owned();
         app.execute_query();
         assert!(app.query_result.as_ref().unwrap().is_error);
@@ -6871,7 +7003,7 @@ mod tests {
 
     #[test]
     fn test_app_execute_empty_query() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.sql_input.clear();
         app.execute_query();
         assert!(app.query_result.as_ref().unwrap().is_error);
@@ -6879,7 +7011,7 @@ mod tests {
 
     #[test]
     fn test_app_add_tab() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.add_tab("new.db");
         assert_eq!(app.tabs.len(), 2);
         assert_eq!(app.active_tab, 1);
@@ -6887,7 +7019,7 @@ mod tests {
 
     #[test]
     fn test_app_close_tab() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.add_tab("second.db");
         app.close_tab(0);
         assert_eq!(app.tabs.len(), 1);
@@ -6895,14 +7027,14 @@ mod tests {
 
     #[test]
     fn test_app_close_last_tab() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.close_tab(0);
         assert_eq!(app.tabs.len(), 1); // Should not close last tab
     }
 
     #[test]
     fn test_app_select_table() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.select_table("products");
         assert_eq!(
             app.active_db_tab().unwrap().selected_table.as_deref(),
@@ -6912,7 +7044,7 @@ mod tests {
 
     #[test]
     fn test_app_toggle_sort() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.toggle_sort(0);
         let sort = app.active_db_tab().unwrap().sort_state.as_ref().unwrap();
         assert_eq!(sort.column_idx, 0);
@@ -6925,7 +7057,7 @@ mod tests {
 
     #[test]
     fn test_app_pagination() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         assert_eq!(app.active_db_tab().unwrap().page, 0);
         app.next_page(); // Only 10 rows with PAGE_SIZE=50, no change
         app.prev_page();
@@ -6934,7 +7066,7 @@ mod tests {
 
     #[test]
     fn test_app_add_filter() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.filter_column_idx = 3; // age
         app.filter_op_idx = 0; // Equal
         app.filter_value = "30".to_owned();
@@ -6944,7 +7076,7 @@ mod tests {
 
     #[test]
     fn test_app_remove_filter() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.filter_value = "test".to_owned();
         app.add_filter();
         app.remove_filter(0);
@@ -6953,7 +7085,7 @@ mod tests {
 
     #[test]
     fn test_app_delete_row() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         let initial_count = app
             .active_db_tab()
             .unwrap()
@@ -6974,7 +7106,7 @@ mod tests {
 
     #[test]
     fn test_app_export_csv() {
-        let app = DbViewerApp::new();
+        let app = DbViewerApp::with_sample_database();
         let csv = app.export_current_table(ExportFormat::Csv);
         assert!(csv.is_some());
         assert!(csv.unwrap().contains("id,name,email,age,score"));
@@ -6982,7 +7114,7 @@ mod tests {
 
     #[test]
     fn test_app_export_json() {
-        let app = DbViewerApp::new();
+        let app = DbViewerApp::with_sample_database();
         let json = app.export_current_table(ExportFormat::Json);
         assert!(json.is_some());
         assert!(json.unwrap().contains("\"name\""));
@@ -6990,7 +7122,7 @@ mod tests {
 
     #[test]
     fn test_app_export_sql() {
-        let app = DbViewerApp::new();
+        let app = DbViewerApp::with_sample_database();
         let sql = app.export_current_table(ExportFormat::SqlInserts);
         assert!(sql.is_some());
         assert!(sql.unwrap().contains("INSERT INTO \"users\""));
@@ -6998,7 +7130,7 @@ mod tests {
 
     #[test]
     fn test_app_import_csv() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         let csv = "city,pop\nNY,8000000\nLA,4000000";
         assert!(app.import_csv_data("cities", csv).is_ok());
         assert!(
@@ -7012,7 +7144,7 @@ mod tests {
 
     #[test]
     fn test_app_toggle_favorite() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.sql_input = "SELECT 1".to_owned();
         app.execute_query();
         assert!(!app.history[0].favorite);
@@ -7022,7 +7154,7 @@ mod tests {
 
     #[test]
     fn test_app_history() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.sql_input = "SELECT * FROM users".to_owned();
         app.execute_query();
         app.sql_input = "SELECT * FROM products".to_owned();
@@ -7032,14 +7164,14 @@ mod tests {
 
     #[test]
     fn test_app_render() {
-        let app = DbViewerApp::new();
+        let app = DbViewerApp::with_sample_database();
         let cmds = app.render(1200.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_app_render_results_panel() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.sql_input = "SELECT * FROM users".to_owned();
         app.execute_query();
         let cmds = app.render(1200.0, 800.0);
@@ -7048,7 +7180,7 @@ mod tests {
 
     #[test]
     fn test_current_table_data_with_filter() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.filter_column_idx = 3; // age
         app.filter_op_idx = 5; // GreaterOrEqual (FilterOp::all() index)
         app.filter_value = "35".to_owned();
@@ -7063,7 +7195,7 @@ mod tests {
 
     #[test]
     fn test_current_table_data_with_sort() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.toggle_sort(3); // Sort by age ascending
         let (_, rows) = app.active_db_tab().unwrap().current_table_data().unwrap();
         let ages: Vec<i64> = rows
@@ -7102,7 +7234,7 @@ mod tests {
     /// bytes, so a column of accented text lost a third of its characters.
     #[test]
     fn a_cell_is_bounded_by_its_column_not_by_a_character_count() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.query_result = Some(QueryResult {
             columns: vec!["note".to_string()],
             rows: vec![vec![CellValue::Text(
@@ -7237,7 +7369,7 @@ mod tests {
     /// on. `DbViewerApp::new` selects one already; this says so out loud so a
     /// change to `new` does not quietly empty half the sweeps below.
     fn wired() -> DbViewerApp {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         app.select_table("users");
         assert!(
             app.active_db_tab()
@@ -7258,10 +7390,10 @@ mod tests {
     fn states() -> Vec<(&'static str, DbViewerApp)> {
         let mut out: Vec<(&'static str, DbViewerApp)> = Vec::new();
 
-        out.push(("as opened", DbViewerApp::new()));
+        out.push(("as opened", DbViewerApp::with_sample_database()));
         out.push(("a table selected", wired()));
 
-        let mut empty = DbViewerApp::new();
+        let mut empty = DbViewerApp::with_sample_database();
         empty.add_tab("empty");
         out.push(("an empty database", empty));
 
@@ -7958,13 +8090,16 @@ mod tests {
     fn execute_runs_the_query_the_editor_holds() {
         let mut app = wired();
         assert!(app.query_result.is_none(), "nothing has been run yet");
+
+        // The editor starts empty since 2026-09-15. It held
+        // `SELECT * FROM users` -- a query written against a schema nothing
+        // had read, which reads as an invitation to run it. A test named for
+        // the query the editor holds should put one in the editor.
+        app.sql_input = String::from("SELECT * FROM users");
+
         click_text(&mut app, FULL, "Execute");
         let result = app.query_result.as_ref().expect("Execute ran nothing");
-        assert!(
-            !result.is_error,
-            "the sample query failed: {}",
-            result.message
-        );
+        assert!(!result.is_error, "the query failed: {}", result.message);
         assert_eq!(app.history.len(), 1, "the query was not remembered");
         assert_eq!(
             app.bottom_panel,
@@ -8683,7 +8818,7 @@ mod tests {
 
     #[test]
     fn the_window_says_what_it_is() {
-        let app = DbViewerApp::new();
+        let app = DbViewerApp::with_sample_database();
         assert_eq!(app.title(), "DB Viewer");
         assert_eq!(app.app_id(), "dbviewer");
         assert_eq!(app.initial_size(), (1200, 800));
@@ -8696,7 +8831,7 @@ mod tests {
 
     #[test]
     fn the_close_button_closes_the_window_and_nothing_else_does() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
         assert_eq!(
             app.on_event(&Event::Resize {
@@ -8713,7 +8848,7 @@ mod tests {
 
     #[test]
     fn a_resize_moves_where_the_controls_answer() {
-        let app = DbViewerApp::new();
+        let app = DbViewerApp::with_sample_database();
         let wide = app.frame(1200.0, 800.0);
         let narrow = app.frame(700.0, 800.0);
 
@@ -8737,7 +8872,7 @@ mod tests {
 
     #[test]
     fn a_press_is_answered_against_the_size_the_last_frame_was_drawn_at() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         // The window is told it is 700 wide by a resize, with no frame drawn
         // in between. A press has to be answered against 700 and not against
         // the 1200 the app was built believing in.
@@ -8774,7 +8909,7 @@ mod tests {
 
     #[test]
     fn render_remembers_the_size_it_was_asked_for() {
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         // Spelled out rather than `app.render(...)`: there is an inherent
         // `render` that draws a frame and remembers nothing, and an inherent
         // method wins over a trait one. Written the short way this test drove
@@ -9091,7 +9226,7 @@ mod tests {
         // pass that drew at the size it was *launched* with would look correct
         // in every test that calls `frame` directly -- which is all of them but
         // this one -- and be wrong on the screen from the first resize onward.
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
         for (w, h) in [(640.0_f32, 480.0_f32), (900.0, 300.0)] {
             let tree = App::render(&mut app, w, h);
             let Some(RenderCommand::FillRect { width, height, .. }) = tree.commands.first() else {
@@ -9138,7 +9273,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = DbViewerApp::new();
+        let mut app = DbViewerApp::with_sample_database();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

@@ -107,6 +107,21 @@ use std::time::Duration;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
 
+/// What the magnified pane says instead of showing the screen.
+///
+/// This is the one program in the fabrication sweep whose user **cannot check
+/// it by looking**, because not being able to see the screen clearly is why
+/// they opened it. Every other invented figure could in principle be caught by
+/// a user who noticed something was off. A magnifier showing a procedural
+/// gradient to somebody with low vision is uncheckable by construction, which
+/// is why the explanation is in the pane itself rather than in a status line
+/// that has to be found.
+const CANNOT_CAPTURE_LINES: [&str; 3] = [
+    "Cannot magnify: there is no screen capture.",
+    "Nothing here can read the display, so this pane would show invented colours, not your screen.",
+    "The colour readout is switched off for the same reason -- it would name a colour nothing sampled.",
+];
+
 const WINDOW_WIDTH: f32 = 820.0;
 const WINDOW_HEIGHT: f32 = 620.0;
 
@@ -475,12 +490,22 @@ pub fn zoom_of(preset: usize) -> f32 {
 
 // ── The screen being magnified ─────────────────────────────────────────────
 
-/// The colour of one screen pixel.
+/// The colour of one screen pixel, computed from its coordinates.
 ///
-/// A stub for a compositor capture that does not exist yet, with the interface
-/// the real one will have: a screen coordinate in, a colour out. Out of bounds
-/// is black, which is what a magnifier pointed off the edge of the display
-/// should show — not a wrapped-around sample from the far side.
+/// `#[cfg(test)]` since 2026-09-15. Its doc already called it "a stub for a
+/// compositor capture that does not exist yet" -- honest in the source, and
+/// invisible on screen, which is where this program's user was.
+///
+/// It returned `x*7 + y*13 % 256` and two more like it: a smooth diagonal
+/// rainbow, drawn at whatever magnification the user had chosen, filtered
+/// through their chosen colour-blindness filter, with a hex readout beside it.
+/// Every part of the apparatus worked. The only thing wrong was that none of
+/// it came from the display.
+///
+/// The magnification arithmetic, the source-rectangle mapping, the block
+/// averaging and the filters are all real and are what this fixture still
+/// tests. What did not exist was the screen.
+#[cfg(test)]
 #[must_use]
 pub fn sample_pixel(x: i32, y: i32, screen_w: i32, screen_h: i32) -> (u8, u8, u8) {
     if x < 0 || y < 0 || x >= screen_w || y >= screen_h {
@@ -1224,24 +1249,17 @@ impl Magnifier {
     /// looking at is the filtered picture. The unfiltered value is in the
     /// status line beside it, so neither is hidden.
     fn pick_colour_at(&mut self, sx: f32, sy: f32) {
-        let (r, g, b) = sample_pixel(
-            sx as i32,
-            sy as i32,
-            self.screen.0 as i32,
-            self.screen.1 as i32,
-        );
-        let shown = self.filter.apply(r, g, b);
-        self.picked = Some(shown);
+        // Refused. This readout's own doc comment says it is here "so someone
+        // who cannot make out a colour can be told what it is" -- which makes
+        // naming an invented colour the most direct way this program could do
+        // harm, to the reader least able to notice. There is no screen
+        // capture, so there is no colour to name.
+        //
+        // `picked` is cleared rather than left alone: a stale swatch beside a
+        // refusal reads as the answer to the click that was just made.
+        self.picked = None;
         self.status = format!(
-            "{} at {:.0}, {:.0}{}",
-            hex_of(shown),
-            sx,
-            sy,
-            if self.filter == LensMode::None {
-                String::new()
-            } else {
-                format!(" (screen {})", hex_of((r, g, b)))
-            }
+            "Cannot read the colour at {sx:.0}, {sy:.0}: nothing here can capture the screen"
         );
     }
 
@@ -1739,8 +1757,53 @@ impl Magnifier {
         }
     }
 
-    /// One pane of screen content, sampled and filtered.
-    fn draw_pane(&self, f: &mut Frame, pane: Rect, zoom: f32) {
+    /// One pane of screen content -- or, today, why there is none.
+    ///
+    /// Drawn unconditionally rather than behind a flag: there is no state in
+    /// which this program can capture the display.
+    fn draw_pane(&self, f: &mut Frame, pane: Rect, _zoom: f32) {
+        const LINE_H: f32 = 18.0;
+        f.clip(pane);
+        for (i, line) in CANNOT_CAPTURE_LINES.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+            let y = pane.y + 8.0 + i as f32 * LINE_H;
+            // A line that does not fit is not drawn. `clip` would hide it, and
+            // hidden-but-drawn is the state `no_pass_paints_outside_the_region
+            // _it_owns` exists to catch -- it reads commands, not pixels,
+            // precisely because a clip makes an overflow invisible rather than
+            // absent. At 120x60 the third line runs past the bottom.
+            if y + LINE_H > pane.y + pane.h {
+                break;
+            }
+            f.push(RenderCommand::Text {
+                x: pane.x + 8.0,
+                y,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 14.0 } else { 11.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(pane.w - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        f.unclip();
+    }
+
+    /// The pane as it was drawn until 2026-09-15, for tests.
+    ///
+    /// Kept because everything in it except the pixel source is real and worth
+    /// exercising: the source rectangle, the block count, the seam handling
+    /// and the filters.
+    #[cfg(test)]
+    fn draw_pane_from_fixture(&self, f: &mut Frame, pane: Rect, zoom: f32) {
         let src = source_rect(pane, zoom, self.centre, self.screen);
         let cols = block_count(src.w);
         let rows = block_count(src.h);
@@ -3746,12 +3809,18 @@ mod tests {
         let mut a = app();
         a.resize(SIZE.0, SIZE.1);
         let v = a.layout().viewport;
+        // Was: `running.len() > 50`, a picture made of many blocks. The
+        // blocks were `sample_pixel` output -- a computed gradient, not the
+        // screen -- so what a running window draws now is the explanation.
         let running = blocks(&a.draw(SIZE), v);
+        assert!(running.is_empty(), "the pane drew a picture from nowhere");
         assert!(
-            running.len() > 50,
-            "a running window draws a picture made of many blocks, not {}",
-            running.len()
+            texts(&a.draw(SIZE))
+                .iter()
+                .any(|t| t.starts_with("Cannot magnify")),
+            "a running window should say why there is no picture"
         );
+        let _ = v;
 
         down(&mut a, Key::Escape);
         let f = a.draw(SIZE);
@@ -3802,51 +3871,53 @@ mod tests {
         }
     }
 
+    /// The magnification pass still draws, and the filter still reaches it.
+    ///
+    /// Was `the_filter_reaches_the_pixels_the_window_draws`, which drew the
+    /// live pane plain and inverted and compared the two block by block. The
+    /// pane no longer draws a picture, so it goes through
+    /// `draw_pane_from_fixture` instead.
+    ///
+    /// **Everything this exercises is real except the pixel source**: the
+    /// source rectangle, the block count, the seam handling that stops a
+    /// background-coloured line appearing between adjacent blocks, and the
+    /// filter arithmetic. Only where the colours come from was invented.
+    ///
+    /// It also gives the fixture a caller. Without one it is dead code rather
+    /// than a fixture -- the same thing that nearly happened to
+    /// `apps/musicplayer`'s demo library an hour ago.
     #[test]
-    fn the_filter_reaches_the_pixels_the_window_draws() {
-        // Not just the model field: the whole point of a filter is what comes
-        // out of the drawing pass.
-        // Not just the model field: the whole point of a filter is what comes
-        // out of the drawing pass — and `assert_ne!` on two lists of fills is
-        // satisfied by *any* difference at all, including one block moving.
-        // Inverting is checked here block by block, against the arithmetic.
+    fn the_magnification_pass_draws_and_the_filter_reaches_it() {
         let mut a = app();
         a.resize(SIZE.0, SIZE.1);
         let v = a.layout().viewport;
-        let plain = blocks(&a.draw(SIZE), v);
+
+        let mut plain_frame = Frame::new(SIZE.0, SIZE.1);
+        a.draw_pane_from_fixture(&mut plain_frame, v, 4.0);
+        let plain = blocks(&plain_frame, v);
+        assert!(!plain.is_empty(), "the magnification pass drew nothing");
+
         to_filter(&mut a, LensMode::Inverted);
-        let inverted = blocks(&a.draw(SIZE), v);
-        assert!(!plain.is_empty(), "there is a picture to filter");
+        let mut inverted_frame = Frame::new(SIZE.0, SIZE.1);
+        a.draw_pane_from_fixture(&mut inverted_frame, v, 4.0);
+        let inverted = blocks(&inverted_frame, v);
+
         assert_eq!(
             plain.len(),
             inverted.len(),
-            "a filter changes the colours, not the blocks"
+            "the filter changed how many blocks are drawn, not their colour"
         );
-        let mut differed = 0;
-        for (&(px, py, pc), &(ix, iy, ic)) in plain.iter().zip(inverted.iter()) {
-            assert!(
-                about(px, ix, 0.01) && about(py, iy, 0.01),
-                "block moved from {:?} to {:?}",
-                (px, py),
-                (ix, iy)
-            );
+        // Block by block, against the arithmetic -- `assert_ne!` on two lists
+        // is satisfied by any difference at all, including one block moving.
+        for (p, i) in plain.iter().zip(inverted.iter()) {
+            assert_eq!((p.0, p.1), (i.0, i.1), "a block moved");
             assert_eq!(
-                (ic.r, ic.g, ic.b),
-                (255 - pc.r, 255 - pc.g, 255 - pc.b),
-                "the block at {:?} was {pc:?} and inverts to {ic:?}",
-                (px, py)
+                (i.2.r, i.2.g, i.2.b),
+                (255 - p.2.r, 255 - p.2.g, 255 - p.2.b),
+                "the inverted filter did not reach this block",
             );
-            if pc != ic {
-                differed += 1;
-            }
         }
-        assert!(
-            differed > 0,
-            "a mid-grey picture would invert to itself; this one must not"
-        );
     }
-
-    // ── The ruler ──────────────────────────────────────────────────────────
 
     #[test]
     fn the_ruler_key_opens_it_closes_it_and_then_clears_it() {
@@ -3941,62 +4012,57 @@ mod tests {
     // ── The colour picker ──────────────────────────────────────────────────
 
     #[test]
-    fn picking_a_colour_reports_one_and_the_readout_says_where_it_came_from() {
+    fn the_picker_refuses_rather_than_naming_a_colour_nothing_sampled() {
+        // Was `picking_a_colour_reports_one_and_the_readout_says_where_it_came
+        // _from`, which compared the readout against `sample_pixel` at the
+        // same coordinate. It agreed, exactly -- a test that the readout
+        // matched the generator, which is the strongest kind of green for the
+        // weakest kind of reason.
+        //
+        // This readout's own doc comment says it exists "so someone who cannot
+        // make out a colour can be told what it is". Naming a colour nothing
+        // sampled, to that reader, is the most direct harm in this sweep: they
+        // opened this program *because* they cannot check it by looking.
         let mut a = app();
         assert_eq!(a.picked(), None, "nothing picked to start with");
         assert!(
             a.info_line().contains("no pick"),
             "and the info line says so"
         );
+
         down(&mut a, Key::C);
-        let picked = a.picked().expect("C picks the colour under the centre");
-        assert_eq!(
-            picked,
-            sample_pixel(
-                a.centre().0 as i32,
-                a.centre().1 as i32,
-                a.screen().0 as i32,
-                a.screen().1 as i32
-            ),
-            "and it is the pixel the view is centred on"
-        );
+        assert_eq!(a.picked(), None, "a colour was named for an unread screen");
         assert!(
-            a.info_line().contains(&hex_of(picked)),
-            "the info line should carry the colour: {}",
-            a.info_line()
+            a.status().contains("Cannot read the colour"),
+            "the refusal did not reach the status line: {}",
+            a.status()
         );
     }
 
     #[test]
-    fn the_readout_gives_the_filtered_colour_and_the_unfiltered_one_beside_it() {
+    fn the_pick_button_refuses_exactly_as_the_key_does() {
+        // The wiring is still worth pinning -- a button that does nothing at
+        // all reads as broken, and this one must reach the same refusal.
         let mut a = app();
-        to_filter(&mut a, LensMode::Inverted);
-        down(&mut a, Key::C);
-        let screen = sample_pixel(
-            a.centre().0 as i32,
-            a.centre().1 as i32,
-            a.screen().0 as i32,
-            a.screen().1 as i32,
-        );
-        let shown = LensMode::Inverted.apply(screen.0, screen.1, screen.2);
-        assert_eq!(
-            a.picked(),
-            Some(shown),
-            "the swatch shows what the picture shows"
-        );
+        click(&mut a, Target::PickColour);
+        assert_eq!(a.picked(), None, "the Pick button named a colour");
         assert!(
-            a.status().contains(&hex_of(screen)),
-            "and the status names the screen colour too: {}",
+            a.status().contains("Cannot read the colour"),
+            "the button is silent where the key explains: {}",
             a.status()
         );
     }
 
     #[test]
     fn a_picked_colour_puts_a_swatch_in_the_info_band() {
+        // The swatch itself is real and stays tested: `picked` is set directly
+        // rather than through a pick, because nothing can pick today. When a
+        // capture lands this is the assertion that says the swatch still
+        // appears.
         let mut a = app();
         a.resize(SIZE.0, SIZE.1);
         let before = fills(&a.draw(SIZE)).len();
-        down(&mut a, Key::C);
+        a.picked = Some((0x30, 0x60, 0x90));
         let after = fills(&a.draw(SIZE)).len();
         assert!(
             after > before,
@@ -4005,10 +4071,19 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_can_be_reached_by_its_button_as_well_as_its_key() {
-        let mut a = app();
-        click(&mut a, Target::PickColour);
-        assert!(a.picked().is_some(), "the Pick button picks");
+    fn the_filter_is_applied_to_whatever_colour_is_shown() {
+        // Was `the_readout_gives_the_filtered_colour_and_the_unfiltered_one
+        // _beside_it`, which picked a colour and checked both halves appeared.
+        // The filter arithmetic is real; what is gone is the pick. Applied
+        // directly, so the property survives the capture being missing.
+        let screen = (0x30u8, 0x60u8, 0x90u8);
+        let shown = LensMode::Inverted.apply(screen.0, screen.1, screen.2);
+        assert_ne!(shown, screen, "the inverted filter changed nothing");
+        assert_eq!(
+            LensMode::None.apply(screen.0, screen.1, screen.2),
+            screen,
+            "the identity filter changed something"
+        );
     }
 
     // ── The clock ──────────────────────────────────────────────────────────

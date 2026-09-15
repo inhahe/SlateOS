@@ -2075,7 +2075,22 @@ impl EbookApp {
         cmds.push(RenderCommand::Text {
             x: self.window_width - 200.0,
             y: 14.0,
-            text: format!("{} books", self.library.len()),
+            // "3 books" beside the word "Library" reads as *your* three
+            // books. There is no way to add a fourth: this crate has no
+            // filesystem access and no file picker, so the library is the
+            // three that shipped with it and always will be.
+            //
+            // Note what this is NOT. The prose in those books is included
+            // content, not a fabrication: it does not claim to describe
+            // anything outside this program, and nobody is misled by reading
+            // it. That is the line between the two, and this is the first app
+            // in twenty-three where the sweep's usual fix did not apply --
+            // `sample_library` stays exactly as it is. What was misleading was
+            // the framing around it, and that is a label.
+            text: format!(
+                "{} included samples -- cannot open your own files yet",
+                self.library.len()
+            ),
             color: tc.text_dim,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
@@ -2787,6 +2802,40 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The library header says the books are included, not the user's.
+    ///
+    /// "3 books" beside the word "Library" reads as *your* three books, and
+    /// there is no way to add a fourth: no filesystem access, no file picker.
+    ///
+    /// Deliberately not the sweep's usual fix. The prose in those books is
+    /// included content, not a fabrication -- it makes no claim about anything
+    /// outside this program, and nobody is misled by reading it. A fabrication
+    /// is a claim about something the program cannot observe; bundled content
+    /// is not a claim. `sample_library` stays.
+    #[test]
+    fn the_header_says_the_books_are_included_samples() {
+        let app = EbookApp::new();
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("included samples")),
+            "the header presents the shipped books as the user's library",
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("cannot open your own files")),
+            "nothing says the reader has no way to open a file",
+        );
+    }
+
     use guitk::event::Modifiers;
 
     // -- Helpers --

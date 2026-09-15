@@ -46,6 +46,16 @@ WORDS = (
 
 # A word that this tree uses for something other than invented data. Listed
 # rather than dropped from WORDS so the reason survives.
+#
+# READ THE FUNCTION BEFORE ADDING TO THIS LIST. On 2026-09-15 I was assembling
+# these from the report by name -- sample_rate, bits_per_sample, sample_pixel,
+# the lap `sample` in the stopwatch -- all obviously fine. `sample_pixel` was
+# not: `apps/magnifier` computed screen colours as `x*7 + y*13 % 256` and
+# magnified the result for a user who had opened a magnifier because they
+# cannot check the screen by looking. It was the most consequential finding of
+# the day and it looked exactly like the false positives beside it.
+#
+# Every entry below has been read. A name is evidence about a name.
 EXEMPT = {
     "sample_rate": "an audio sampling rate, not a fixture",
     "bits_per_sample": "an audio format field",

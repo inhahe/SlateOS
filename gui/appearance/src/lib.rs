@@ -221,6 +221,89 @@ impl PaletteSource for AppearanceSettings {
 }
 
 // ============================================================================
+// Image fit
+// ============================================================================
+
+/// How a wallpaper is scaled and positioned in the space it is drawn in.
+///
+/// Lives here rather than in `gui/desktop` because two crates need it and only
+/// one of them can own it: the shell draws the picture and the Settings app
+/// offers the choice. It was in `gui/desktop/src/wallpaper.rs` until
+/// 2026-09-14, which made it unreachable from `appearance.yaml` -- the setting
+/// could name a picture and not how to place it. design-decisions 852 records
+/// why that shipped as a gap rather than as a second copy of this enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFit {
+    /// Scale to cover the entire area, cropping if necessary.
+    Fill,
+    /// Scale to fit within the area, letterboxing if necessary.
+    Fit,
+    /// Stretch to exactly match the area (may distort aspect ratio).
+    Stretch,
+    /// Repeat the image in a tile pattern.
+    Tile,
+    /// Center the image at native size (no scaling).
+    Center,
+    /// Span the image across all monitors (multi-monitor setups).
+    Span,
+}
+
+impl ImageFit {
+    /// Every fit, in the order a chooser should offer them.
+    ///
+    /// Ordered here for the reason `ThemeMode::ALL` states: two front ends that
+    /// listed the variants themselves would be free to drift apart. Cropping
+    /// first, because it is the default and what most pictures want.
+    pub const ALL: &'static [Self] = &[
+        Self::Fill,
+        Self::Fit,
+        Self::Stretch,
+        Self::Tile,
+        Self::Center,
+        Self::Span,
+    ];
+
+    /// The name this fit is written as in `appearance.yaml`.
+    ///
+    /// The same six strings `gui/desktop`'s own wallpaper config already used,
+    /// so a file written by the older code still reads.
+    #[must_use]
+    pub fn yaml_name(self) -> &'static str {
+        match self {
+            Self::Fill => "fill",
+            Self::Fit => "fit",
+            Self::Stretch => "stretch",
+            Self::Tile => "tile",
+            Self::Center => "center",
+            Self::Span => "span",
+        }
+    }
+
+    /// The fit named by `name`, or `None` if it names nothing.
+    #[must_use]
+    pub fn from_yaml_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|f| f.yaml_name() == name)
+    }
+
+    /// What a chooser shows for this fit.
+    ///
+    /// Says what happens to the picture rather than naming the algorithm: a
+    /// user choosing a wallpaper knows whether they mind it being cropped, and
+    /// does not know what "fill" means.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fill => "Fill the screen (may crop)",
+            Self::Fit => "Fit the whole picture (may letterbox)",
+            Self::Stretch => "Stretch to fit (may distort)",
+            Self::Tile => "Tile",
+            Self::Center => "Centre at original size",
+            Self::Span => "Span all monitors",
+        }
+    }
+}
+
+// ============================================================================
 // Theme mode
 // ============================================================================
 
@@ -1160,6 +1243,15 @@ pub struct AppearanceSettings {
     /// called nothing" are different answers and only one of them is a
     /// mistake.
     pub wallpaper: Option<String>,
+    /// How that picture is placed in the screen it is drawn on.
+    ///
+    /// Meaningless without [`wallpaper`](Self::wallpaper) and harmless with it
+    /// unset, so it is a plain value rather than an `Option`: "how would I
+    /// place a picture if there were one" always has an answer, and keeping
+    /// the choice across a picture being removed and put back is what a user
+    /// expects. The same argument `night_light`/`night_light_strength` makes
+    /// one field along.
+    pub wallpaper_fit: ImageFit,
     /// The high-contrast scheme in force, or `None` for an ordinary theme.
     ///
     /// When set it *replaces* [`theme_mode`](Self::theme_mode) rather than
@@ -1237,6 +1329,10 @@ impl Default for AppearanceSettings {
             // the user never chose, and there is no stock wallpaper in this
             // tree to choose honestly.
             wallpaper: None,
+            // Cropping, because it is what a photograph on a screen of a
+            // different shape usually wants, and it is what the shell did
+            // unconditionally before this was settable.
+            wallpaper_fit: ImageFit::Fill,
             theme_mode: ThemeMode::Dark,
             // Borders, per §829. The `Default` impl is what a machine with no
             // configuration file gets, so this is where "the default theme" is
@@ -1705,6 +1801,12 @@ impl AppearanceSettings {
         // An empty string reads as "no wallpaper": a hand-edited file that
         // blanks the value means to turn it off, and treating that as a path
         // would make the desktop report a missing file the user never named.
+        read_into!(
+            s.wallpaper_fit,
+            doc.get_str(&["wallpaper", "fit"])
+                .and_then(|v| ImageFit::from_yaml_name(v.trim()))
+        );
+
         if let Some(path) = doc.get_str(&["wallpaper", "image"]) {
             let trimmed = path.trim().to_string();
             s.wallpaper = if trimmed.is_empty() {
@@ -1859,6 +1961,7 @@ impl AppearanceSettings {
             &["wallpaper", "image"],
             self.wallpaper.as_deref().unwrap_or_default(),
         );
+        doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
         doc.set_str(
             &["theme", "surface_style"],
@@ -2259,6 +2362,7 @@ mod tests {
             // wallpaper is the one appearance setting whose value comes from a
             // filesystem the user named, and a tidy ASCII fixture would pass
             // through a codec that mangled either.
+            wallpaper_fit: ImageFit::Tile,
             wallpaper: Some("/home/u/Pictures/maíz del alba.png".to_string()),
             theme_mode: ThemeMode::Light,
             caret_width_scale: 2.5,

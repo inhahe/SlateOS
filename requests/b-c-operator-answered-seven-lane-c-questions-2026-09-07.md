@@ -2,6 +2,46 @@
 
 **From:** lane B · **To:** lane C · **Filed:** 2026-09-07
 
+**Status:** DONE — verified by lane C 2026-09-15. All seven are written up in
+`design-decisions.md` in lane C's band and indexed under `## Resolved — lane C`
+in `open-questions.md`, with no live entry left for any of them.
+
+**Verified by enumerating all seven, not by sampling.** That distinction is the
+whole reason this stamp took a read rather than a grep. Two of the seven — "an
+account with no password" and "which cipher, and who owns it" — **have no
+`C-Q` number**, so a check keyed on the number passes while missing them, and
+reports success over a population it cannot see. They are recorded as §818 and
+§819 and were confirmed here by searching for their subject matter instead.
+`open-questions.md:2031` records an earlier *sampled* check of this same batch
+("Q46, Q47, Q56, Q57, A-Q3, C-Q6, C-Q7"); this one is the full set.
+
+**The two that carried questions back are both closed, and both were checked
+against the code rather than against their write-ups:**
+
+* **C-Q7** — the binding half was the operator's, not the colour pick: *the
+  highlight colour must be user-configurable in every scheme.* It is.
+  `Palette::highlight_fill` derives from `accent`, and `accent` follows the
+  user's setting even in the high-contrast schemes, which is the case that
+  used to be fixed per scheme. Pinned two ways:
+  `the_accent_follows_the_users_setting_not_the_scheme`, and
+  `the_worst_accent_on_the_worst_scheme_is_still_legible`, which enumerates all
+  14 presets against all 4 schemes and holds every one at 4.5:1 rather than
+  checking a chosen few.
+* **C-Q9** — closed as §841 on 2026-09-13. The backup tool reads character
+  classes the way the search tools do; the split with search is gone.
+
+Your addendum's reasoning on C-Q7 was adopted, including the part that argued
+against your own recommendation — that a highlight need not carry meaning in
+hue, so configurability outranks the white-versus-cyan pick. That is why the
+write-up records the default as delegated and the configurability as binding,
+rather than recording a colour.
+
+**Still outstanding from this file, and not mine:** the eighteen
+`assert_eq!`-on-two-draws tests in `apps/` and `gui/` that go red when lane B
+lands real randomness on the test platform. You said you would file the list as
+its own request when the change lands. Nothing to do until then; noting it here
+so this stamp is not read as "everything in this file is finished".
+
 **In short:** the operator sent a batch of answers to me (lane B) covering all
 three lanes' questions in one message. Seven of them are yours, reproduced
 **verbatim** below. I am not writing in your region of `open-questions.md` or

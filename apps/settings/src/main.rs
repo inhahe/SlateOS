@@ -825,6 +825,8 @@ pub enum DropdownId {
     CursorSize,
     NarratorVerbosity,
     HighContrast,
+    /// How the desktop picture is placed on the screen.
+    WallpaperFit,
 }
 
 impl DropdownId {
@@ -843,9 +845,10 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 11] = [
+    pub const FIXED: [Self; 12] = [
         Self::QuietStart,
         Self::QuietEnd,
+        Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
         Self::Scale,
@@ -2809,8 +2812,8 @@ impl SettingsState {
     const CATEGORY_ROW_PAINTED_HEIGHT: f32 = CATEGORY_ITEM_HEIGHT - 4.0;
 
     /// Y just past the last category row -- the bottom of the whole list.
-    fn category_list_bottom() -> f32 {
-        Self::category_row_top(SettingsCategory::ALL.len().saturating_sub(1))
+    fn category_list_bottom(&self) -> f32 {
+        Self::category_row_top(self.filtered_categories().len().saturating_sub(1))
             + Self::CATEGORY_ROW_PAINTED_HEIGHT
     }
 
@@ -2822,12 +2825,12 @@ impl SettingsState {
     /// oversight: the renderer paints nothing there, and a hit test that
     /// answers for a pixel the renderer left blank is how a hover highlight
     /// ends up sitting a few pixels above the pointer that summoned it.
-    fn category_at(mx: f32, my: f32) -> Option<usize> {
+    fn category_at(&self, mx: f32, my: f32) -> Option<usize> {
         if !mx.is_finite() || mx < 0.0 || mx >= SIDEBAR_WIDTH {
             return None;
         }
         let from_top = my - Self::category_list_top();
-        if !from_top.is_finite() || from_top < 0.0 || my >= Self::category_list_bottom() {
+        if !from_top.is_finite() || from_top < 0.0 || my >= self.category_list_bottom() {
             return None;
         }
         // Truncating rather than rounding: a point 43.9px below the first
@@ -2837,7 +2840,7 @@ impl SettingsState {
         // `category_list_bottom` has already ruled this out. It stays because
         // the cast above saturates rather than wrapping, and an index into
         // `ALL` is not a thing to leave to a float's rounding.
-        if idx >= SettingsCategory::ALL.len() {
+        if idx >= self.filtered_categories().len() {
             return None;
         }
         if my >= Self::category_row_top(idx) + Self::CATEGORY_ROW_PAINTED_HEIGHT {
@@ -2887,7 +2890,7 @@ impl SettingsState {
         }
 
         // Category list
-        for (idx, category) in SettingsCategory::ALL.iter().enumerate() {
+        for (idx, category) in self.filtered_categories().iter().enumerate() {
             let item_y = Self::category_row_top(idx);
             let is_selected = *category == self.current_category;
             let is_hovered = self.sidebar_hovered == Some(idx);
@@ -3317,6 +3320,16 @@ impl SettingsState {
             pal.accent,
             Some(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
+        // Offered only with a picture to place, for the reason Remove is:
+        // a control whose every option does the same nothing is one a user
+        // reads as broken rather than as inapplicable.
+        if self.appearance.settings.wallpaper.is_some() {
+            s.dropdown_row(
+                "How it is placed",
+                DropdownId::WallpaperFit,
+                self.appearance.settings.wallpaper_fit.label(),
+            );
+        }
         // Offered only when there is one to remove. A "Remove" that is always
         // there is a button whose press does nothing most of the time, and a
         // user cannot tell that from one that failed.
@@ -4587,6 +4600,17 @@ impl SettingsState {
                     at,
                 )
             }
+            DropdownId::WallpaperFit => {
+                let items: Vec<String> = appearance::ImageFit::ALL
+                    .iter()
+                    .map(|f| f.label().to_string())
+                    .collect();
+                let current = appearance::ImageFit::ALL
+                    .iter()
+                    .position(|f| *f == self.appearance.settings.wallpaper_fit)
+                    .unwrap_or(0);
+                (items, current)
+            }
             DropdownId::IpConfig => {
                 let items = vec![
                     IpConfigMode::Dhcp.label().to_string(),
@@ -4979,14 +5003,20 @@ impl SettingsState {
     /// at the top that jumps to the bottom moves the highlight further than the
     /// eye follows.
     fn step_category(&mut self, delta: isize) {
-        let current = SettingsCategory::ALL
+        // The *visible* list, so an arrow key cannot walk onto a category
+        // the search has hidden. `position` failing means the current category
+        // is not among them -- which happens the moment a query excludes it --
+        // and starting from 0 then puts the first press on the first visible
+        // row, which is where the eye already is.
+        let visible = self.filtered_categories();
+        let current = visible
             .iter()
             .position(|c| *c == self.current_category)
             .unwrap_or(0);
         let Some(next) = current.checked_add_signed(delta) else {
             return;
         };
-        if let Some(&new_cat) = SettingsCategory::ALL.get(next) {
+        if let Some(&new_cat) = visible.get(next) {
             self.current_category = new_cat;
             self.current_page = new_cat.default_page();
         }
@@ -5035,8 +5065,8 @@ impl SettingsState {
 
         // Sidebar category clicks
         if mx < SIDEBAR_WIDTH {
-            if let Some(idx) = Self::category_at(mx, my) {
-                if let Some(&new_cat) = SettingsCategory::ALL.get(idx) {
+            if let Some(idx) = self.category_at(mx, my) {
+                if let Some(&new_cat) = self.filtered_categories().get(idx) {
                     self.current_category = new_cat;
                     self.current_page = new_cat.default_page();
                     return EventResult::Consumed;
@@ -5360,7 +5390,7 @@ impl SettingsState {
 
         // Sidebar hover
         if mx < SIDEBAR_WIDTH {
-            self.sidebar_hovered = Self::category_at(mx, my);
+            self.sidebar_hovered = self.category_at(mx, my);
             return EventResult::Consumed;
         }
 
@@ -5438,6 +5468,11 @@ impl SettingsState {
                     rule.importance = *chosen;
                 }
             }
+            DropdownId::WallpaperFit => {
+                if let Some(fit) = appearance::ImageFit::ALL.get(index) {
+                    self.appearance.settings.wallpaper_fit = *fit;
+                }
+            }
             DropdownId::IpConfig => {
                 self.ip_config_mode = if index == 0 {
                     IpConfigMode::Dhcp
@@ -5507,7 +5542,16 @@ impl SettingsState {
         !stripped_query.is_empty() && strip(&text_lower).contains(&stripped_query)
     }
 
-    /// Get filtered categories based on search query.
+    /// The categories the sidebar is showing.
+    ///
+    /// **This is the list, and everything that touches the sidebar asks for
+    /// it.** The renderer iterated `SettingsCategory::ALL` while this function
+    /// existed, was tested, and was called by nothing but its own test -- so
+    /// the search box accepted typing, drew what you typed, and filtered
+    /// nothing. Rendering, hit-testing, hovering and arrow-key navigation now
+    /// all index into this, because a row drawn at index 3 and a click
+    /// resolved against a different list is how a click lands on the wrong
+    /// category.
     pub fn filtered_categories(&self) -> Vec<SettingsCategory> {
         if self.search_query.is_empty() {
             return SettingsCategory::ALL.to_vec();
@@ -6260,6 +6304,83 @@ mod tests {
         state.sidebar_hovered
     }
 
+    /// **Typing in the search box removes rows from the sidebar.**
+    ///
+    /// `filtered_categories` and `matches_search` were written, tested and
+    /// called by nothing but their own tests; the renderer iterated
+    /// `SettingsCategory::ALL`. So the box took typing, drew it, and filtered
+    /// nothing. This asserts on the strings the sidebar actually draws, not on
+    /// what `filtered_categories` returns -- the function was never the part
+    /// that was missing.
+    #[test]
+    fn searching_removes_rows_from_the_sidebar() {
+        fn sidebar_labels(state: &SettingsState) -> Vec<String> {
+            state
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    guitk::render::RenderCommand::Text { text, x, .. } if *x < SIDEBAR_WIDTH => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut state = SettingsState::new();
+        let all = sidebar_labels(&state);
+        assert!(
+            all.iter().any(|t| t == "Network"),
+            "the unfiltered sidebar does not draw Network: {all:?}"
+        );
+
+        state.search_query = "network".to_string();
+        let filtered = sidebar_labels(&state);
+
+        assert!(
+            filtered.iter().any(|t| t == "Network"),
+            "the search hid the thing it was searching for: {filtered:?}"
+        );
+        assert!(
+            filtered.len() < all.len(),
+            "the sidebar drew the same rows with a query as without one"
+        );
+    }
+
+    /// **A click on a filtered sidebar selects the row it landed on.**
+    ///
+    /// The row at index 0 of a filtered list is not the row at index 0 of
+    /// `ALL`. Rendering from one list and resolving a click against another is
+    /// how a click lands on the wrong category -- two predicates for one state,
+    /// which this tree has been bitten by before.
+    #[test]
+    fn a_click_on_a_filtered_sidebar_lands_on_the_row_it_hit() {
+        let mut state = SettingsState::new();
+        // A query that certainly excludes the first category, so an index into
+        // `ALL` and an index into the filtered list cannot agree by accident.
+        state.search_query = "network".to_string();
+        let visible = state.filtered_categories();
+        assert!(!visible.is_empty(), "the query matched nothing at all");
+        assert_ne!(
+            visible[0],
+            SettingsCategory::ALL[0],
+            "the fixture proves nothing if the first visible row is the first row"
+        );
+
+        let y = SettingsState::category_row_top(0) + 4.0;
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: 20.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+
+        assert_eq!(
+            state.current_category, visible[0],
+            "the click selected a category the sidebar was not showing there"
+        );
+    }
+
     #[test]
     fn every_category_is_clickable_exactly_where_it_was_painted() {
         for (idx, category) in SettingsCategory::ALL.iter().enumerate() {
@@ -6348,7 +6469,7 @@ mod tests {
         }
 
         // Below the last row, all the way to the bottom of the window.
-        let mut y = SettingsState::category_list_bottom();
+        let mut y = state.category_list_bottom();
         while y < state.window_height {
             click_sidebar(&mut state, y);
             assert_eq!(
@@ -6362,11 +6483,11 @@ mod tests {
         // And to the right of the sidebar, level with a row that would
         // otherwise answer.
         let inside = SettingsState::category_row_top(3) + 4.0;
-        assert_eq!(SettingsState::category_at(SIDEBAR_WIDTH, inside), None);
-        assert_eq!(SettingsState::category_at(f32::NAN, inside), None);
-        assert_eq!(SettingsState::category_at(100.0, f32::NAN), None);
-        assert_eq!(SettingsState::category_at(100.0, f32::INFINITY), None);
-        assert_eq!(SettingsState::category_at(100.0, f32::NEG_INFINITY), None);
+        assert_eq!(state.category_at(SIDEBAR_WIDTH, inside), None);
+        assert_eq!(state.category_at(f32::NAN, inside), None);
+        assert_eq!(state.category_at(100.0, f32::NAN), None);
+        assert_eq!(state.category_at(100.0, f32::INFINITY), None);
+        assert_eq!(state.category_at(100.0, f32::NEG_INFINITY), None);
     }
 
     #[test]
@@ -6400,10 +6521,10 @@ mod tests {
         // the notification pane's, not to shrink the row height.
         let state = SettingsState::new();
         assert!(
-            SettingsState::category_list_bottom() <= state.window_height,
+            state.category_list_bottom() <= state.window_height,
             "{} categories need {}px but the window is {}px tall",
             SettingsCategory::ALL.len(),
-            SettingsState::category_list_bottom(),
+            state.category_list_bottom(),
             state.window_height
         );
     }
@@ -6492,6 +6613,117 @@ mod tests {
         assert!(
             center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper)).is_some(),
             "the page draws no way to choose a picture"
+        );
+    }
+
+    /// **Remove actually removes it, and the removal reaches the file.**
+    ///
+    /// The other two Remove tests check only that the button is *drawn* when
+    /// there is a picture and not when there is none. A button that is drawn,
+    /// clickable and does nothing would pass both of them -- which is the
+    /// shape of half the defects found in this tree today, so it is not a
+    /// hypothetical worth leaving open in my own change.
+    #[test]
+    fn removing_the_wallpaper_reaches_the_file_the_desktop_reads() {
+        with_scratch_config("settings-wallpaper-remove", |root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+
+            let (cx, cy) = center_of(&state, RowHit::Press(ButtonId::ClearWallpaper))
+                .expect("the page draws no Remove button");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            assert_eq!(
+                state.appearance.settings.wallpaper, None,
+                "the press did not clear the picture"
+            );
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "removing should have written {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(
+                saved.wallpaper, None,
+                "the desktop will still be showing a picture the user removed"
+            );
+        });
+    }
+
+    /// **Choosing a fit reaches `appearance.yaml`.**
+    ///
+    /// Through the dropdown a user would use, and read back off disk rather
+    /// than from this process's own model, which would agree with itself
+    /// whether or not anything was written.
+    #[test]
+    fn choosing_a_fit_reaches_the_file_the_desktop_reads() {
+        with_scratch_config("settings-wallpaper-fit", |root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+            assert_eq!(
+                state.appearance.settings.wallpaper_fit,
+                appearance::ImageFit::Fill,
+                "the test's premise is that it starts at the default"
+            );
+
+            let (cx, cy) = center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit))
+                .expect("the page draws no fit chooser");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(state.open_dropdown, Some(DropdownId::WallpaperFit));
+
+            // The second entry is `Fit`, per `ImageFit::ALL`. Clicked where
+            // the popup drew it rather than set directly: the point is that a
+            // user can reach it, and the row the renderer drew and the row the
+            // hit-test names are the same answer.
+            let wanted = appearance::ImageFit::ALL[1];
+            let layout = state.dropdown_layout().expect("a dropdown is open");
+            let row = 1usize
+                .checked_sub(layout.window.start)
+                .expect("the six fits fit in the default window");
+            let y = layout.row_top(row) + DROPDOWN_ITEM_HEIGHT / 2.0;
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: layout.x + 20.0,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert!(state.open_dropdown.is_none(), "choosing closes the popup");
+
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "choosing should have written {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(
+                saved.wallpaper_fit, wanted,
+                "the fit did not survive the round trip to disk"
+            );
+        });
+    }
+
+    /// The chooser is offered only with a picture to place.
+    ///
+    /// A control whose every option does the same nothing reads as broken
+    /// rather than as inapplicable.
+    #[test]
+    fn the_fit_chooser_appears_only_with_a_picture() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_none(),
+            "a fit chooser with nothing to place"
+        );
+
+        state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_some(),
+            "no way to say how the picture is placed"
         );
     }
 
@@ -6643,6 +6875,17 @@ mod tests {
     fn fully_expanded(page: SettingsPage) -> SettingsState {
         let mut state = SettingsState::new();
         state.current_page = page;
+        // Not every hidden row is hidden behind a *switch*. The Wallpaper
+        // page's fit chooser and its Remove button appear once a picture is
+        // set, because a control whose every option does the same nothing
+        // reads as broken rather than as inapplicable -- so the loop below,
+        // which only turns toggles on, cannot reveal them.
+        //
+        // Set here rather than excluded from `DropdownId::FIXED`, which is the
+        // tempting fix and the wrong one: the sweep exists to catch a dropdown
+        // nothing can open, and a dropdown excluded for being hard to reach is
+        // exactly the one it should be checking.
+        state.appearance.settings.wallpaper = Some("/pictures/example.png".to_string());
         // Turning one switch on can reveal another, so repeat until the set
         // stops growing. Bounded because nothing here turns a switch back off.
         for _ in 0..8 {

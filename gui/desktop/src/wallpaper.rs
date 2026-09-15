@@ -121,47 +121,18 @@ impl WallpaperMode {
 // ImageFit
 // ============================================================================
 
-/// How an image is scaled/positioned within the display area.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImageFit {
-    /// Scale to cover the entire area, cropping if necessary.
-    Fill,
-    /// Scale to fit within the area, letterboxing if necessary.
-    Fit,
-    /// Stretch to exactly match the area (may distort aspect ratio).
-    Stretch,
-    /// Repeat the image in a tile pattern.
-    Tile,
-    /// Center the image at native size (no scaling).
-    Center,
-    /// Span the image across all monitors (multi-monitor setups).
-    Span,
-}
-
-impl ImageFit {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Fill => "fill",
-            Self::Fit => "fit",
-            Self::Stretch => "stretch",
-            Self::Tile => "tile",
-            Self::Center => "center",
-            Self::Span => "span",
-        }
-    }
-
-    fn from_str_config(s: &str) -> Result<Self, ConfigError> {
-        match s.trim() {
-            "fill" => Ok(Self::Fill),
-            "fit" => Ok(Self::Fit),
-            "stretch" => Ok(Self::Stretch),
-            "tile" => Ok(Self::Tile),
-            "center" => Ok(Self::Center),
-            "span" => Ok(Self::Span),
-            other => Err(ConfigError::UnknownFit(other.to_string())),
-        }
-    }
-}
+// Defined in `appearance` and re-exported, not declared here.
+//
+// Two crates need it -- this one draws the picture, `apps/settings` offers the
+// choice -- and `appearance` is the one they both already depend on. Declaring
+// it in each would be two models of one idea, which is the defect
+// design-decisions 852 refused to add a sixth of.
+//
+// Its `as_str`/`from_str_config` pair went with it, as `yaml_name`/
+// `from_yaml_name`: the same six strings, so a wallpaper config written by the
+// older code still reads. The orphan rule is why they had to move rather than
+// stay -- an inherent impl on a foreign type is not allowed here.
+pub use appearance::ImageFit;
 
 // ============================================================================
 // DynamicTheme -- time-of-day color palette
@@ -719,6 +690,19 @@ impl WallpaperManager {
     /// The caller is responsible for populating image paths via
     /// [`populate_slideshow_paths`](Self::populate_slideshow_paths) after
     /// calling this, since the wallpaper manager does not perform I/O.
+    /// Change how the current picture is placed, without re-reading it.
+    ///
+    /// Separate from [`set_image`](Self::set_image) because the fit is applied
+    /// at *draw* time -- `get_render_commands` hands it to
+    /// `compute_image_rect` -- so changing it needs no new pixels.
+    /// `set_image` issues a fresh image id, and the caller that uploads pixels
+    /// re-reads and re-inflates any id it has not seen, so a user trying each
+    /// of the six fits to see which they like would decode the same
+    /// photograph six times.
+    pub fn set_fit(&mut self, fit: ImageFit) {
+        self.config.fit = fit;
+    }
+
     pub fn set_slideshow(&mut self, directory: &str, interval_secs: u64, shuffle: bool) {
         self.config.mode = WallpaperMode::Slideshow;
         self.config.slideshow_dir = directory.to_string();
@@ -1055,7 +1039,7 @@ impl WallpaperManager {
         let mut out = String::new();
 
         out.push_str(&format!("mode={}\n", self.config.mode.as_str()));
-        out.push_str(&format!("fit={}\n", self.config.fit.as_str()));
+        out.push_str(&format!("fit={}\n", self.config.fit.yaml_name()));
         // Written only when the user actually chose one. Emitting the theme's
         // current base for an unset colour would turn the shell's answer into
         // the user's answer, and the next reader could not tell the difference
@@ -1136,7 +1120,12 @@ impl WallpaperManager {
 
             match key {
                 "mode" => mode = Some(WallpaperMode::from_str_config(val)?),
-                "fit" => fit = Some(ImageFit::from_str_config(val)?),
+                "fit" => {
+                    fit = Some(
+                        ImageFit::from_yaml_name(val.trim())
+                            .ok_or_else(|| ConfigError::UnknownFit(val.to_string()))?,
+                    );
+                }
                 "color" => color = Some(parse_hex_color(val)?),
                 "image_path" => image_path = val.to_string(),
                 "slideshow_dir" => slideshow_dir = val.to_string(),
@@ -1456,15 +1445,22 @@ mod tests {
             ImageFit::Center,
             ImageFit::Span,
         ] {
-            let parsed = ImageFit::from_str_config(fit.as_str()).expect("should parse");
+            let parsed = ImageFit::from_yaml_name(fit.yaml_name()).expect("should parse");
             assert_eq!(parsed, fit);
         }
     }
 
+    /// An unrecognised fit is `None`, and the *caller* turns that into the
+    /// error the config reader reports.
+    ///
+    /// Was `from_str_config` returning `Result<_, ConfigError>` when `ImageFit`
+    /// lived here. It moved to `appearance`, which has no opinion about this
+    /// crate's config errors, so the naming half returns `Option` and
+    /// `parse_config` maps it to `ConfigError::UnknownFit` -- checked by
+    /// `config_round_trip_unknown_fit` below rather than lost in the move.
     #[test]
-    fn fit_unknown_returns_error() {
-        let result = ImageFit::from_str_config("unknown");
-        assert!(matches!(result, Err(ConfigError::UnknownFit(_))));
+    fn fit_unknown_names_nothing() {
+        assert_eq!(ImageFit::from_yaml_name("unknown"), None);
     }
 
     // ------------------------------------------------------------------

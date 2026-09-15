@@ -362,6 +362,13 @@ struct TrayDrag {
 /// is, and a ghost they cannot recognise is worse than none.
 const GHOST_ALPHA: u8 = 110;
 
+/// How far the shortcut card's outcome line sits from its left and bottom
+/// edges.
+///
+/// One constant for both, so the message is inset by the same amount it is
+/// lifted and cannot drift into a corner as the card resizes.
+const SHORTCUT_MESSAGE_INSET: f32 = 20.0;
+
 /// The bell the tray draws when nothing is being silenced.
 ///
 /// Not read by the renderer, which asks the focus manager for the glyph of
@@ -7468,6 +7475,38 @@ impl DesktopShell {
             ),
             budget,
         ));
+        // What the last rebind did.
+        //
+        // `shortcut_message` has been composed on every outcome since the
+        // editor was written -- "Press the new keys, or Escape to cancel",
+        // "Unchanged", "That row is gone", "Ctrl+Alt+T is now Terminal", and
+        // the one that matters most, "...but could not be saved" -- and
+        // NOTHING DREW ANY OF IT. Rebinding a key was silent whether it
+        // worked, was refused, or worked and failed to persist.
+        //
+        // That last case is why this is not cosmetic. The handler's own
+        // comment calls it "the difference between a shortcut that will be
+        // gone tomorrow and one the user believes is set", and until now the
+        // user was always in the second state.
+        //
+        // Drawn by this function rather than passed into
+        // `hotkeys::render_settings_panel`: the message is the *shell's*
+        // record of what its editor just did, not a fact about the registry,
+        // and threading it through would make a general panel renderer carry
+        // one caller's state.
+        if let Some(message) = &self.shortcut_message {
+            let p = Palette::from_settings(&self.appearance);
+            tree.text(
+                x + SHORTCUT_MESSAGE_INSET,
+                y + height - SHORTCUT_MESSAGE_INSET,
+                message,
+                // `subtext0` and not the accent: this is an outcome, not an
+                // invitation, and the accent is what the card already uses for
+                // the row the keyboard is on.
+                p.subtext0,
+                self.font_size(TextRole::Body),
+            );
+        }
         Some(tree)
     }
 
@@ -8248,6 +8287,66 @@ mod window_manager_tests {
     /// Pressed through `handle_hotkey` rather than by setting the flag, because
     /// the flag was never the part that was missing — `render_settings_panel`
     /// existed and worked for months with nothing able to reach it.
+    /// Every string the shortcut card draws.
+    fn card_text(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .render_shortcut_card()
+            .expect("the card is not open")
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The card says what the last rebind did.**
+    ///
+    /// `shortcut_message` was composed on every outcome from the day the
+    /// editor was written and drawn by nothing, so rebinding a key was silent
+    /// whether it worked, was refused, or worked and failed to persist.
+    #[test]
+    fn the_shortcut_card_reports_the_last_rebind() {
+        let mut shell = shell();
+        shell.shortcut_card_open = true;
+        let quiet = card_text(&shell);
+
+        shell.shortcut_message = Some("Ctrl+Alt+T is now Terminal".to_string());
+        let loud = card_text(&shell);
+
+        assert!(
+            loud.iter().any(|t| t == "Ctrl+Alt+T is now Terminal"),
+            "the outcome never reached the card: {loud:?}"
+        );
+        assert!(
+            !quiet.iter().any(|t| t == "Ctrl+Alt+T is now Terminal"),
+            "the card drew the message before there was one"
+        );
+    }
+
+    /// **The half-failure is the one that must be visible.**
+    ///
+    /// A rebind that worked and could not be saved leaves the user with a
+    /// shortcut that works today and is gone tomorrow. The handler's own
+    /// comment calls that "the difference between a shortcut that will be gone
+    /// tomorrow and one the user believes is set" -- and until the message was
+    /// drawn, the user was always in the second state.
+    #[test]
+    fn a_rebind_that_could_not_be_saved_says_so_on_the_card() {
+        let mut shell = shell();
+        shell.shortcut_card_open = true;
+        shell.shortcut_message =
+            Some("Super+K is now Search, but could not be saved: disk full".to_string());
+
+        let drawn = card_text(&shell);
+
+        assert!(
+            drawn.iter().any(|t| t.contains("could not be saved")),
+            "a rebind that did not persist looks identical to one that did: {drawn:?}"
+        );
+    }
+
     #[test]
     fn the_shortcut_card_opens_and_closes_on_its_own_chord() {
         let mut shell = shell();

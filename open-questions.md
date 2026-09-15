@@ -40,9 +40,16 @@ cat "E:/visual studio projects/os/open-questions-answers.txt"
 ```
 
 A question sitting at `Status: OPEN` here is **not** evidence that the operator has
-not answered it. Two entries below (B-Q8, C-Q9) are open precisely because the
-operator *did* reply and asked for a clearer explanation — which is a reply, and
-which is invisible from this file alone.
+not answered it. An entry can be open precisely because the operator *did* reply
+and asked for a clearer explanation — which is a reply, and which is invisible
+from this file alone.
+
+*Both examples this note originally cited have since closed, which is worth
+saying rather than quietly editing: C-Q9 was written up as §841 on 2026-09-13,
+and lane B withdrew B-Q8's option (c) as overtaken on 2026-09-14. The point
+stands and the examples did not — so if you are checking the claim against them,
+check the dates first. Examples naming live entries go stale by being right;
+this note now names its examples as history instead. — lane C, 2026-09-14.*
 
 *Recorded by lane A. This describes what has been observed, not a policy the
 operator has set; if a different channel is preferred, say so and this goes away.*

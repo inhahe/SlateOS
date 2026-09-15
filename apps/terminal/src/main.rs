@@ -390,12 +390,25 @@ pub struct Cell {
     pub ch: char,
     /// Visual attributes for this cell.
     pub attrs: CellAttrs,
+    /// The second half of a double-width character that starts in the cell to
+    /// the left.
+    ///
+    /// The grid stays a rectangle of cells -- a wide character occupies two of
+    /// them rather than one cell of a different size -- because every other
+    /// operation here (erase, insert, scroll, select) is written in columns
+    /// and would need a second model otherwise.
+    ///
+    /// `ch` is a space in a continuation, so the renderer already skips it and
+    /// needs no change. The flag exists for the *text* path: without it,
+    /// copying a line of Chinese would yield a space after every character.
+    pub continuation: bool,
 }
 
 impl Default for Cell {
     fn default() -> Self {
         Self {
             ch: ' ',
+            continuation: false,
             attrs: CellAttrs::default(),
         }
     }
@@ -1002,22 +1015,77 @@ impl TerminalState {
             }
         }
 
+        // How many columns this character is entitled to.
+        //
+        // Every layout decision in this system is made from `charwidth`'s
+        // table, and until 2026-09-14 this function advanced by exactly one
+        // column for every character -- so 182,712 codepoints that the table
+        // calls two cells wide got one, and 2,362 zero-width marks got one
+        // they should not have. `ls` reserves two columns for a Chinese
+        // character; the terminal drew it in one; every column after it on the
+        // line was off by one and the next glyph was painted over the half
+        // that was never allocated. See
+        // `requests/b-c-the-terminal-gives-every-character-one-cell.md`.
+        //
+        // `None` is `wcwidth`'s -1 and means a control character, which should
+        // not reach here -- the parser handles those. One column is the safe
+        // reading if one does: it is what this function did for everything
+        // before, so an unexpected input cannot be made worse by the change.
+        let width = charwidth::char_width(ch).unwrap_or(1);
+
+        // A combining mark attaches to what it follows rather than taking a
+        // cell of its own. It is *not* written: doing so would replace the
+        // base character with the accent. Drawing the two together is the font
+        // layer's problem and is not what this request is about.
+        if width == 0 {
+            return;
+        }
+
+        // A double-width character at the last column does not fit. Wrapping
+        // first is what every terminal does, and the alternative -- splitting
+        // it across the margin -- is not representable in a grid of cells.
+        if width == 2 && self.cursor_col.saturating_add(1) >= cols && self.auto_wrap {
+            self.cursor_col = 0;
+            self.index_down();
+        }
+
+        // Whatever was here, this write ends it being half of something.
+        let row = self.cursor_row;
+        let col = self.cursor_col;
+        self.break_pair_at(row, col);
+        if width == 2 {
+            self.break_pair_at(row, col.saturating_add(1));
+        }
+
         // Write the character to the cell
         if let Some(line) = self.screen.get_mut(self.cursor_row)
             && let Some(cell) = line.cells.get_mut(self.cursor_col)
         {
             cell.ch = ch;
             cell.attrs = self.current_attrs;
+            cell.continuation = false;
+        }
+        if width == 2
+            && let Some(line) = self.screen.get_mut(self.cursor_row)
+            && let Some(cell) = line.cells.get_mut(self.cursor_col.saturating_add(1))
+        {
+            // A space, so the renderer skips it with no change; the flag is
+            // what stops the text path yielding a space after every wide
+            // character.
+            cell.ch = ' ';
+            cell.attrs = self.current_attrs;
+            cell.continuation = true;
         }
 
         // Advance cursor
-        if self.cursor_col >= cols.saturating_sub(1) {
+        let last = cols.saturating_sub(1);
+        if self.cursor_col.saturating_add(width) > last {
             if self.auto_wrap {
                 self.pending_wrap = true;
             }
-            // Cursor stays at the right margin
+            self.cursor_col = last;
         } else {
-            self.cursor_col = self.cursor_col.saturating_add(1);
+            self.cursor_col = self.cursor_col.saturating_add(width);
         }
     }
 
@@ -1159,9 +1227,58 @@ impl TerminalState {
         self.blink_ms = 0;
     }
 
+    /// Break any double-width pair that `col` is part of, so that writing
+    /// there cannot leave half a character behind.
+    ///
+    /// Two directions, and both happen. Writing onto the *second* half orphans
+    /// the lead, which would keep drawing as a wide glyph over a cell that now
+    /// holds something else. Writing onto the *first* half orphans the
+    /// continuation, which would swallow the character to its right by drawing
+    /// nothing where that character should be.
+    ///
+    /// Clearing to a space rather than to the incoming attributes: the cell
+    /// being vacated is not the cell being written, and giving it the new
+    /// character's colours would tint a blank the user never typed.
+    fn break_pair_at(&mut self, row: usize, col: usize) {
+        let Some(line) = self.screen.get_mut(row) else {
+            return;
+        };
+        if line.cells.get(col).is_some_and(|c| c.continuation) {
+            if let Some(lead) = col.checked_sub(1)
+                && let Some(cell) = line.cells.get_mut(lead)
+            {
+                cell.ch = ' ';
+                cell.continuation = false;
+            }
+            return;
+        }
+        let after = col.saturating_add(1);
+        if line.cells.get(after).is_some_and(|c| c.continuation)
+            && let Some(cell) = line.cells.get_mut(after)
+        {
+            cell.ch = ' ';
+            cell.continuation = false;
+        }
+    }
+
     fn backspace(&mut self) {
         self.pending_wrap = false;
         if self.cursor_col > 0 {
+            self.cursor_col = self.cursor_col.saturating_sub(1);
+        }
+        // Landing on the second half of a wide character means the cursor is
+        // inside one character, which no further operation has a sensible
+        // reading of. Step onto its lead, so backspacing over a wide character
+        // moves past the whole of it -- which is what the one-unit rule in
+        // `requests/b-c-the-terminal-gives-every-character-one-cell.md` asks
+        // for and what a user pressing backspace expects.
+        if self
+            .screen
+            .get(self.cursor_row)
+            .and_then(|l| l.cells.get(self.cursor_col))
+            .is_some_and(|c| c.continuation)
+            && self.cursor_col > 0
+        {
             self.cursor_col = self.cursor_col.saturating_sub(1);
         }
     }
@@ -1970,8 +2087,27 @@ impl TerminalState {
         }
 
         // Resize screen lines
+        //
+        // Narrowing can cut a double-width character in half: the continuation
+        // is truncated away and the lead is left at the last column, still
+        // drawing as a wide glyph in a cell that is now the edge of the screen.
+        // A lead is only recognisable by asking the width table what its
+        // character is, because `continuation` marks the *second* half and the
+        // second half is the one that just vanished.
+        //
+        // This is not reflow. `resize` truncates and pads rather than
+        // rewrapping, so no line's text moves between rows and there is no
+        // pair to split anywhere else. An earlier commit here said "rewrap on
+        // resize remains", which named a thing this terminal does not do.
         for line in &mut self.screen {
             line.resize(new_cols);
+            if let Some(last) = new_cols.checked_sub(1)
+                && let Some(cell) = line.cells.get_mut(last)
+                && charwidth::char_width(cell.ch) == Some(2)
+            {
+                cell.ch = ' ';
+                cell.continuation = false;
+            }
         }
 
         // Add or remove rows
@@ -2338,6 +2474,12 @@ impl TerminalState {
 
             for col in col_start..col_end.min(line.cells.len()) {
                 if let Some(cell) = line.cells.get(col) {
+                    if cell.continuation {
+                        // The second half of a wide character. Its `ch` is a
+                        // space; emitting it would put one after every CJK
+                        // character in copied text.
+                        continue;
+                    }
                     result.push(cell.ch);
                 }
             }
@@ -3050,6 +3192,184 @@ mod tests {
     /// stays dark on a light desktop is the defect; a terminal whose red is
     /// not red is a worse one, since a program that prints colour 1 expects
     /// red on every terminal ever made.
+    /// **A double-width character occupies two cells.**
+    ///
+    /// `put_char` advanced by exactly one column for every character, so the
+    /// 182,712 codepoints `charwidth` calls wide got one cell: `ls` reserves
+    /// two columns for a Chinese character, the terminal drew it in one, and
+    /// every column after it on the line was off by one.
+    #[test]
+    fn a_wide_character_takes_two_columns() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        let before = t.cursor_col;
+        t.put_char('\u{4E2D}'); // CJK, two cells
+
+        assert_eq!(
+            t.cursor_col,
+            before + 2,
+            "a wide character advanced the cursor like a narrow one"
+        );
+        let line = &t.screen[t.cursor_row];
+        assert_eq!(line.cells[before].ch, '\u{4E2D}');
+        assert!(
+            line.cells[before + 1].continuation,
+            "the second cell was left for the next character to paint over"
+        );
+    }
+
+    /// **A combining mark takes no cell and does not replace what it follows.**
+    #[test]
+    fn a_combining_mark_takes_no_column() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.put_char('e');
+        let after_e = t.cursor_col;
+        t.put_char('\u{0301}'); // combining acute
+
+        assert_eq!(t.cursor_col, after_e, "a zero-width mark took a column");
+        assert_eq!(
+            t.screen[t.cursor_row].cells[after_e - 1].ch,
+            'e',
+            "the mark replaced the letter it belongs to"
+        );
+    }
+
+    /// **Copied text does not gain a space after every wide character.**
+    ///
+    /// The continuation cell holds a space so the renderer skips it unchanged;
+    /// the flag is what the text path reads.
+    #[test]
+    fn copying_a_wide_character_yields_one_character() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        for ch in "\u{4E2D}\u{6587}".chars() {
+            t.put_char(ch);
+        }
+        t.selection_start(0.0, 0.0);
+        t.selection_extend(8.4 * 100.0, 0.0);
+        let copied = t.get_selection_text().expect("something was selected");
+        assert!(
+            copied.starts_with("\u{4E2D}\u{6587}"),
+            "copied text was {copied:?}"
+        );
+    }
+
+    /// **Overwriting half of a wide character does not leave the other half.**
+    ///
+    /// Both directions. Writing onto the second half would orphan the lead,
+    /// which keeps drawing as a wide glyph over a cell that now holds
+    /// something else; writing onto the first half would orphan the
+    /// continuation, which swallows the character to its right by drawing
+    /// nothing where it should be.
+    #[test]
+    fn overwriting_half_a_wide_character_clears_the_other_half() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.put_char('\u{4E2D}');
+
+        // Back onto the lead and write a narrow character over it.
+        t.cursor_col = 0;
+        t.put_char('x');
+
+        let line = &t.screen[t.cursor_row];
+        assert_eq!(line.cells[0].ch, 'x');
+        assert!(
+            !line.cells[1].continuation,
+            "the continuation outlived the character it belonged to"
+        );
+        assert_eq!(
+            line.cells[1].ch, ' ',
+            "the orphaned half still shows something"
+        );
+    }
+
+    /// Writing onto the *second* half clears the lead, so no wide glyph is
+    /// left painting over a cell it no longer owns.
+    #[test]
+    fn writing_onto_a_continuation_clears_its_lead() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.put_char('\u{4E2D}');
+
+        t.cursor_col = 1;
+        t.put_char('x');
+
+        let line = &t.screen[t.cursor_row];
+        assert_eq!(line.cells[1].ch, 'x');
+        assert_eq!(
+            line.cells[0].ch, ' ',
+            "the lead of a broken pair is still drawn as a wide character"
+        );
+    }
+
+    /// **Backspace over a wide character moves past the whole of it.**
+    ///
+    /// Landing on the second half leaves the cursor inside one character,
+    /// which no later operation has a sensible reading of.
+    #[test]
+    fn backspace_steps_over_a_whole_wide_character() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.put_char('\u{4E2D}');
+        assert_eq!(t.cursor_col, 2);
+
+        t.feed(b"\x08");
+
+        assert_eq!(
+            t.cursor_col, 0,
+            "backspace left the cursor inside the wide character"
+        );
+    }
+
+    /// A wide character that will not fit at the margin wraps rather than
+    /// being split across it, which a grid of cells cannot represent.
+    #[test]
+    fn a_wide_character_wraps_rather_than_straddling_the_margin() {
+        let mut t = TerminalState::new(TerminalConfig {
+            cols: 10,
+            rows: 5,
+            ..TerminalConfig::default()
+        });
+        for _ in 0..9 {
+            t.put_char('a');
+        }
+        assert_eq!(t.cursor_col, 9, "the fixture is not at the last column");
+        let row = t.cursor_row;
+
+        t.put_char('\u{4E2D}');
+
+        assert_eq!(t.cursor_row, row + 1, "the wide character did not wrap");
+        assert_eq!(t.screen[row + 1].cells[0].ch, '\u{4E2D}');
+        assert!(t.screen[row + 1].cells[1].continuation);
+    }
+    #[test]
+    fn narrowing_the_window_cannot_leave_half_a_wide_character() {
+        // Resize truncates rather than reflowing, so the only way a pair can be
+        // split by something that is not a write is a narrowing that lands
+        // exactly on the seam: the continuation falls off the end and the lead
+        // stays, drawing two columns wide in a one-column space.
+        let mut t = TerminalState::new(TerminalConfig {
+            cols: 10,
+            rows: 3,
+            ..TerminalConfig::default()
+        });
+        t.put_char('a');
+        t.put_char('\u{4E2D}');
+        let row = t.cursor_row;
+        assert_eq!(t.screen[row].cells[1].ch, '\u{4E2D}', "fixture");
+        assert!(t.screen[row].cells[2].continuation, "fixture");
+
+        // 2 columns keeps the lead at index 1 and drops its continuation.
+        t.resize(2, 3);
+
+        assert_ne!(
+            t.screen[row].cells[1].ch, '\u{4E2D}',
+            "the lead outlived the continuation it needed"
+        );
+        assert!(
+            t.screen[row]
+                .cells
+                .iter()
+                .all(|c| charwidth::char_width(c.ch) != Some(2)),
+            "a double-width character is still in a line narrowed onto its seam"
+        );
+    }
+
     #[test]
     fn the_chrome_follows_the_theme_and_the_ansi_table_does_not() {
         let dark = ColorScheme::from_palette(&Palette::for_mode(false));

@@ -1245,6 +1245,55 @@ fn announce(desktop: &Desktop, surface: Surface, group: SettingsGroup) {
     )]);
 }
 
+/// **The fit named in the settings is the fit the wallpaper is drawn with.**
+///
+/// `ImageFit` had six variants and the shell used `Fill` unconditionally,
+/// because `appearance.yaml` had no key for it -- design-decisions 852. This
+/// is that gap closed.
+#[test]
+fn the_wallpaper_is_placed_the_way_the_settings_say() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.wallpaper_fit = appearance::ImageFit::Fit;
+    session.sync_wallpaper();
+
+    assert_eq!(
+        session.wallpaper_mut().config.fit,
+        appearance::ImageFit::Fit,
+        "the desktop cropped a picture the user asked to letterbox"
+    );
+}
+
+/// **Changing only the fit does not re-read the picture.**
+///
+/// The fit is applied when the wallpaper is drawn, so moving it needs no new
+/// pixels. `set_image` issues a fresh image id and the background surface
+/// re-inflates any id it has not seen -- so going through `set_image` here
+/// would decode a full-screen photograph again to learn nothing new about it,
+/// six times for a user trying each fit.
+#[test]
+fn changing_the_fit_alone_does_not_reload_the_picture() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.sync_wallpaper();
+    let id = session.wallpaper_mut().current_image_id();
+    assert_ne!(id, 0, "setting an image did not allocate an id");
+
+    session.shell_mut().appearance.wallpaper_fit = appearance::ImageFit::Center;
+    session.sync_wallpaper();
+
+    assert_eq!(
+        session.wallpaper_mut().config.fit,
+        appearance::ImageFit::Center,
+        "the new fit did not take"
+    );
+    assert_eq!(
+        session.wallpaper_mut().current_image_id(),
+        id,
+        "the picture was issued a new id, so it will be decoded again"
+    );
+}
+
 /// **A wallpaper chosen while the desktop is running is adopted without a
 /// logout.**
 ///

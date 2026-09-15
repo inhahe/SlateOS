@@ -48,7 +48,20 @@ word meaning "not evidence", will under-report exactly as quietly as one that
 scans the wrong directory.** The two apps route through `state.picker` rather
 than `self.picker`, which is what the widened pattern is for.
 
+WHY IT HAS A SELF-TEST. Every app is pinned now, so this reports zero and will
+go on reporting zero -- which is indistinguishable from a pattern that has
+stopped matching. **That is not hypothetical: it already happened.** The first
+version of this file could not match `state.picker.handle(..)` at all, because
+its pattern began with a literal backspace, and it filed the two apps it could
+not read under "could not cut the routing; not evidence" -- a phrase that reads
+as a fact about those apps.
+
+So `--self-test` checks the pattern against the shapes the tree actually
+contains, including the ones rustfmt has split across lines. A checker whose
+only output is a zero needs a way to prove it can still find something.
+
 Usage:  python scripts/find-unpinned-picker-routing.py [--apps=kanban,torrent]
+        python scripts/find-unpinned-picker-routing.py --self-test
 """
 
 import hashlib
@@ -76,11 +89,43 @@ def apps_with_a_picker():
     )
 
 
+# Every routing shape in the tree on 2026-09-15, plus the two that broke the
+# first version. Kept verbatim rather than paraphrased: the point is that these
+# are what the files really say.
+SELF_TEST = [
+    ("self.picker.handle(event, self.width, self.height) {", True),
+    ("state.picker.handle(event, state.width, state.height) {", True),
+    ("match self.picker.handle(event, self.win_width, self.win_height) {", True),
+    # rustfmt splits a long call, and the pattern has to survive it.
+    ("match self\n            .picker\n            .handle(event, self.window_width, self.window_height)\n        {", True),
+    ("match self.picker.handle(event, size.0, size.1) {", True),
+    # Not the routing: a call that opens the dialog, and one that draws it.
+    ("self.picker.open_to_read();", False),
+    ("self.picker.render(&self.palette, width, height)", False),
+    # Not a picker at all.
+    ("self.dialog.handle(event, w, h) {", False),
+]
+
+
+def self_test():
+    bad = 0
+    for text, should in SELF_TEST:
+        hit = bool(ROUTING.search(text))
+        if hit != should:
+            bad += 1
+            verb = "matched" if hit else "did not match"
+            print(f"  FAIL  {verb}, expected the opposite: {text[:60]!r}")
+    print(f"{len(SELF_TEST) - bad}/{len(SELF_TEST)} self-test case(s) as expected")
+    return 1 if bad else 0
+
+
 def main():
     wanted = None
     for arg in sys.argv[1:]:
         if arg.startswith("--apps="):
             wanted = {a for a in arg.split("=", 1)[1].split(",") if a}
+        elif arg == "--self-test":
+            return self_test()
         else:
             print(f"unknown argument: {arg}", file=sys.stderr)
             return 2

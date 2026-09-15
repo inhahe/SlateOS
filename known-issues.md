@@ -144629,20 +144629,34 @@ explicit `pane.tick(dt)` with the delta handed in, and there is no
 animation itself is deterministic given a frame count; this is not an
 animation-on-wall-clock bug.
 
-**Where it is likely to be.** The test drives a real session harness across a
-process boundary -- `desktop.borrow_mut().send_input(...)` then
-`session.pump()`. How many frames the shell has processed by the time `pump()`
-returns is not fixed by the test, so under load the close animation can be
-further along than the assertion expects. The assertion is about a moment; the
-harness does not pin the moment.
+**Where it is not, corrected 2026-09-14.** The first version of this entry said
+the cause was "how many frames the shell has processed by the time `pump()`
+returns". **That is wrong and was written without reading `pump`.** `pump`
+dispatches queued events and reconciles the window and tray revisions; it does
+not call `step_frame` and does not advance a single animation. `step_frame` is
+the only animator and takes its delta as an argument. So both halves are
+deterministic and the frame count is fixed by the test.
 
-**What the proper fix looks like.** Make the test assert over a *bounded number
-of frames it steps itself* rather than at whatever instant `pump()` returns:
-send the close, then step one frame, and assert visible; step until not
-visible, and assert that took more than one frame. That states "closing is
-animated" without depending on how much the harness did while nobody was
-looking. Do not fix it by loosening the assertion -- "eventually invisible" is
-true of a snap, which is the thing it exists to catch.
+**What the failure actually requires.** `is_visible()` is `!matches!(self,
+Hidden)` and is true throughout the slide-out, so the assertion fails *only* if
+the pane is `Hidden` at that moment -- not merely further along. A close that
+had raced ahead would still be `SlideOut(p)` and still visible. So this is not
+an animation that got too far; it is a pane that was never open, or was closed
+twice. That points at input delivery or event coalescing in the harness, not at
+animation timing, and it means the "obvious" fix below would not have helped.
+
+**Still unknown.** A six-run reproduction sweep is the next step; until it
+reproduces, anything written here about the cause is a guess, and this entry
+has already carried one.
+
+**What the proper fix looks like** -- *once the cause is known.* The shape that
+survives either diagnosis is to assert over a bounded number of frames the test
+steps itself: send the close, step one frame, assert visible; step until not
+visible and assert that took more than one frame. But note this does **not**
+fix the failure described above, because the observed state was `Hidden`
+immediately, and stepping fewer frames cannot make an unopened pane open. Do
+not fix it by loosening the assertion either -- "eventually invisible" is true
+of a snap, which is the thing it exists to catch.
 
 **It has now been seen twice, and the second time blocked a push.** The
 pre-push scratch-config gate runs `cargo test -p desktop` itself, under the

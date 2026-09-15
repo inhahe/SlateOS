@@ -8,5 +8,9 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# Ctrl+S writes through `safeio::write_str_atomically`, not `fs::write`, which
+# truncates the target before writing it.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

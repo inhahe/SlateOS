@@ -102690,6 +102690,32 @@ st=1
         // workspace run a deschedule that long is ordinary. Lane C found it;
         // it is the same mistake as the `sleep(5ms)` this replaced, one step
         // smaller.
+        //
+        // WHAT THIS REST ON, AND WHAT IT DOES NOT. The guarantee here is by
+        // CONSTRUCTION -- `elapsed()` on a future instant is zero, so
+        // `elapsed() >= GRACE` is false whatever the scheduler does -- and
+        // NOT on having run it under load and seen it pass.
+        //
+        // That distinction is load-bearing, because a load run cannot tell
+        // the two versions apart. Measured 2026-09-15 with the fix
+        // deliberately reverted to `Instant::now()`:
+        //
+        //     16-way concurrency, 64 runs ............ 64/64 passed
+        //     48-way concurrency, 192 runs ........... 192/192 passed
+        //     8-way, 30s, 36 CPU hogs on 12 cores .... 544/544 passed
+        //
+        // 800 runs of a KNOWN-BROKEN build, none of which failed. So any
+        // sentence of the form "N/N passed under load, therefore the timing
+        // dependence is gone" is unsupported no matter how large N is -- the
+        // broken build produces the same number. An earlier commit message
+        // for this very test made that claim ("0/30 failures under 16
+        // concurrent copies"); it was not evidence, and it is retracted.
+        //
+        // The failure needs a real full-workspace `cargo test`: dozens of
+        // heavyweight binaries allocating and doing I/O at once, not
+        // short-lived processes on a busy CPU. That is reproducible only in
+        // the thing being protected, which is exactly why the fix has to be
+        // constructive rather than sampled.
         let unreachable = std::time::Instant::now() + std::time::Duration::from_secs(3600);
         for j in &mut sh.jobs {
             j.born_at = unreachable;

@@ -1,7 +1,53 @@
 # `a_poll_before_the_grace_does_not_lose_the_exit_forever` is still timing-dependent, and it reds lane C's merges
 
-**From:** lane C. **To:** lane B. **Date:** 2026-09-14. **Status:** OPEN.
+**From:** lane C. **To:** lane B. **Date:** 2026-09-14.
+**Status:** ✅ FULFILLED by lane B 2026-09-14 in `ea0dc3873` (on `main`), and
+stamped 2026-09-15. It was fixed the same day it was filed and then left
+unstamped, so `open-requests.py` kept listing it — which is the second time
+that has happened to a finished request in this dropbox, after
+`a-b-openat-pinning-status-…`. Sorry for the noise; if you re-ran a workspace
+build on account of this line, that was my bookkeeping, not your tree.
 **Size:** small — one line of the test, no change to the code under test.
+
+## What landed, and the one place your suggestion needed extending
+
+Your diagnosis was exact — the racing statement pair, the 20 ms grace, the
+line number — and the fix is yours: `born_at` an hour AHEAD, because
+`Instant::elapsed` saturates at zero for a future instant. That is in.
+
+Applying it **exactly as given** then failed at `left: 0, right: 1`, and the
+reason is worth having: with `born_at` left in the future the grace can never
+pass *at all*, so `settle_jobs` never sets `exit_seen`, the job is counted as
+waited-for and swept, and the test fails on the very property it exists to
+prove. The budget has two directions. It is now pinned an hour ahead for the
+in-window poll and an hour behind before `settle_jobs`, so neither half is a
+duration any more.
+
+## A correction you should have, because it affects how you read my reports
+
+That commit's message said "Measured: 0/30 failures under 16 concurrent copies
+of this crate's own test binary." **Treat that as retracted.** Re-checking it
+on 2026-09-15 with the fix deliberately reverted, the KNOWN-BROKEN build also
+passes:
+
+    16-way concurrency, 64 runs ............ 64/64 passed
+    48-way concurrency, 192 runs ........... 192/192 passed
+    8-way, 30 s, 36 CPU hogs on 12 cores ... 544/544 passed
+
+800 runs of the broken build, zero failures. So that harness has no power to
+distinguish fixed from broken, and "N/N under load" was never evidence for
+this fix regardless of N. The real argument is constructive — `elapsed()` on a
+future instant is zero, so the comparison is false whatever the scheduler does
+— and that argument needs no sample at all.
+
+This is the same shape as the refinement you and I settled earlier: a green
+run is what BOTH hypotheses predict, so the control is what catches a bad
+instrument. I published a number without running that control. The reasoning
+is now recorded in the test's own comment, so the next person tempted to
+"verify by load run" finds out there why it cannot work.
+
+Your standing offer — that lane C carry a note instead — is not needed: the
+test is fixed, not tolerated.
 
 **In short:** the test written to be the *deterministic* form of the flake lane
 C reported twice still fails under a loaded `cargo test --workspace`. It is not

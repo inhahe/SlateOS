@@ -1689,34 +1689,65 @@ fn print_side_by_side(ops: &[Edit], config: &Config) {
         30
     };
 
-    for Edit {
-        op,
-        text,
-        // NOT bound: side-by-side prints no no-newline marker.
-        // Measured -- GNU's `-y` on a file lacking its final
-        // newline shows the line and nothing else, and simply
-        // omits the newline from its own last line of output.
-        ..
-    } in ops
-    {
-        match op {
+    // A RUN OF DELETES IS ZIPPED WITH THE INSERTS THAT FOLLOW IT, which is
+    // the whole point of the format and is what this did not do.
+    //
+    // It walked the edit list one operation at a time, so a changed line came
+    // out as a `<` line and then a `>` line -- the old text and the new text on
+    // separate rows, which is the one thing `-y` exists to avoid. GNU pairs
+    // them: `charlie | CHANGED` on one row, with the surplus of whichever run
+    // is longer trailing as `<` or `>`. Measured
+    // (scripts/probe-diff-side-by-side.sh): two removed against one added
+    // gives `x1 | y1` then `x2 <`, and one against two gives `y1 | x1` then
+    // `> x2`.
+    //
+    // No-final-newline markers are deliberately absent: GNU's `-y` on a file
+    // lacking its final newline shows the line and nothing else, and simply
+    // omits the newline from its own last line of output.
+    let mut i = 0;
+    while i < ops.len() {
+        match ops[i].op {
             Op::Equal => {
+                let text = &ops[i].text;
                 let left = truncate_or_pad(text, col_width);
                 let right = truncate_or_pad(text, col_width);
                 let line = [left.as_slice(), b"   ", &right].concat();
                 write_body_line(&mut w, b"", &line, None);
+                i += 1;
             }
-            Op::Delete => {
-                let left = truncate_or_pad(text, col_width);
-                let right = vec![b' '; col_width];
-                let line = [left.as_slice(), b" < ", &right].concat();
-                write_body_line(&mut w, b"", &line, when(config.color, RED));
-            }
-            Op::Insert => {
-                let left = vec![b' '; col_width];
-                let right = truncate_or_pad(text, col_width);
-                let line = [left.as_slice(), b" > ", &right].concat();
-                write_body_line(&mut w, b"", &line, when(config.color, GREEN));
+            Op::Delete | Op::Insert => {
+                // Collect this run of deletes and the run of inserts that
+                // follows it, then pair them off.
+                let del_start = i;
+                while i < ops.len() && matches!(ops[i].op, Op::Delete) {
+                    i += 1;
+                }
+                let del = &ops[del_start..i];
+                let ins_start = i;
+                while i < ops.len() && matches!(ops[i].op, Op::Insert) {
+                    i += 1;
+                }
+                let ins = &ops[ins_start..i];
+
+                let pairs = del.len().min(ins.len());
+                for k in 0..pairs {
+                    let left = truncate_or_pad(&del[k].text, col_width);
+                    let right = truncate_or_pad(&ins[k].text, col_width);
+                    let line = [left.as_slice(), b" | ", &right].concat();
+                    write_body_line(&mut w, b"", &line, when(config.color, RED));
+                }
+                for d in del.iter().skip(pairs) {
+                    let left = truncate_or_pad(&d.text, col_width);
+                    let right = vec![b' '; col_width];
+                    let line = [left.as_slice(), b" < ", &right].concat();
+                    write_body_line(&mut w, b"", &line, when(config.color, RED));
+                }
+                for a in ins.iter().skip(pairs) {
+                    let left = vec![b' '; col_width];
+                    let right = truncate_or_pad(&a.text, col_width);
+                    let line = [left.as_slice(), b" > ", &right].concat();
+                    write_body_line(&mut w, b"", &line, when(config.color, GREEN));
+                }
             }
         }
     }

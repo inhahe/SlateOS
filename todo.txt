@@ -4787,6 +4787,39 @@ the next person to run these will see the same rows.
   care about heap availability at that point. That is the work; serving the
   file afterwards is trivial.
 
+  display is DELIBERATELY NOT SERVED, for the same reason as irqs below.
+  `fs::monitors` already backs a procfs file -- `procfs.rs:8223` reads
+  `monitors::stats()`, `desktop_bounds()` and `list_monitors()` -- and the
+  underlying source is `console::framebuffer_info()`, a kernel-owned copy
+  rather than the limine response. A /sys/devices/display node would be a
+  second answer to a question /proc already answers.
+
+  CHECKED AND CLEARED while there, so nobody re-derives it:
+  `drm/driver.rs:144` reads
+  `console::framebuffer_info().unwrap_or((0, 0, 0, 0))`, which pattern-matches
+  as the fabrication class -- substituting zeros for an absent measurement. It
+  is not. `fb_addr == 0` is a SENTINEL meaning "no framebuffer", and
+  `LimineBackend` tests it at every use site (:161 alongside width and height,
+  :257, :360) before touching the pointer. The zeros never reach a reader as a
+  claim about hardware. The ranking promotes; only checking demotes.
+
+  irqs is DELIBERATELY NOT SERVED, and that closes the category rather than
+  leaving it as work. The data is real -- `fs::irqstat::irq_lines()` reads
+  `idt::vector_counts()`, filters vectors that never fired, and its module
+  already applies the shared-reading discipline from 932 in its own comments.
+  But `/proc/interrupts` ALREADY publishes it (`procfs::gen_interrupts` at
+  :1521, dispatched at :13957, fed by the same `irq_lines()`).
+
+  So a `/sys/devices/irqs` node would be a second kernel answer to one
+  question, which is what 850 exists to prevent and the exact argument used
+  for `system/memory/total_kb` -- where the self-test asserts it EQUALS
+  /proc/meminfo's MemTotal rather than computing its own total. Linux puts
+  interrupt counts in /proc/interrupts too, so a consumer looking for them
+  has a canonical place already.
+
+  For lane C's tree-walker: irqs will never appear under /sys/devices. Read
+  /proc/interrupts.
+
   net stays blocked on a naming decision, unchanged: InterfaceInfo has no name
   field, so eth0 would be invented. dma and sound have no evident real source
   and should be checked for one before being built, not built and then

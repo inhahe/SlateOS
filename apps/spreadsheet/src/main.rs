@@ -54,6 +54,17 @@ const _COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 const MAX_COLS: usize = COLUMN_LETTERS.len();
 const MAX_ROWS: usize = 999;
+/// What the sheet says about the table it opens on.
+///
+/// The table stays. An Item/Price/Qty/Total grid with `=B2*C2` in it is a
+/// worked example of the formula engine -- it claims nothing about anything
+/// outside this program, which is the `apps/ebook` case rather than the
+/// `apps/kanban` one. What it needed was a label and the warning below.
+const EXAMPLE_SHEET_LINES: [&str; 2] = [
+    "Example sheet -- replace it with your own.",
+    "Nothing is saved between runs -- this app has no filesystem access, so anything you write here is gone when the window closes.",
+];
+
 const DEFAULT_COL_WIDTH: f32 = 100.0;
 const DEFAULT_ROW_HEIGHT: f32 = 24.0;
 const MIN_COL_WIDTH: f32 = 30.0;
@@ -4445,6 +4456,28 @@ impl SpreadsheetApp {
     /// nothing about it, which has happened in this tree before.
     pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(2000);
+        // After the background, or it would be painted over.
+        for (i, line) in EXAMPLE_SHEET_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+                y: 2.0 + i as f32 * 12.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 11.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(self.window_width - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Background
         cmds.push(RenderCommand::FillRect {

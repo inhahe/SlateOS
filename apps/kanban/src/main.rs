@@ -166,6 +166,9 @@ struct SimpleDate {
     day: u8,
 }
 
+/// `#[allow(dead_code)]`: `new` had no caller once `create_sample_data`
+/// became a fixture, and a date constructor is the API a real store would use.
+#[allow(dead_code, reason = "date constructor; no store exists yet")]
 impl SimpleDate {
     fn new(year: u16, month: u8, day: u8) -> Self {
         Self { year, month, day }
@@ -200,6 +203,13 @@ struct Card {
     swimlane: String,
 }
 
+/// Builders for a card.
+///
+/// The `with_*` methods have no production caller since `create_sample_data`
+/// became a fixture, because nothing in production builds a card yet. They are
+/// the API a real store or an editor would use -- the same shape as
+/// `apps/dbviewer`'s `ColumnDef` builders and `apps/finance`'s `add_account`.
+#[allow(dead_code, reason = "card builders; no store or editor calls them yet")]
 impl Card {
     fn new(title: &str) -> Self {
         Self {
@@ -1135,6 +1145,12 @@ impl KanbanApp {
         self.active_board_mut().add_card_to_column(card, col_idx)
     }
 
+    /// A board with cards, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. It built a project board -- "Implement
+    /// dark mode toggle" and the rest, with priorities, labels and created-at
+    /// timestamps -- in the place the user's own work belongs.
+    #[cfg(test)]
     fn create_sample_data(&mut self) {
         let board = self.active_board_mut();
         let bug_label = board.labels.first().map(|l| l.id);
@@ -1522,6 +1538,12 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
 // *reserves* for a card and the height it *draws* cannot disagree — which is
 // what lets a column work out which cards fit before drawing any of them.
 /// Blank space above the priority bar.
+/// What the board says before anything is on it.
+const NOTHING_YET_LINES: [&str; 2] = [
+    "No cards yet.",
+    "Nothing is saved between runs -- this app has no filesystem access, so anything you write here is gone when the window closes.",
+];
+
 const CARD_TOP_PAD: f32 = 12.0;
 /// The coloured priority stripe across the top of a card.
 const CARD_PRIORITY_BAR_H: f32 = 3.0;
@@ -2880,6 +2902,29 @@ fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
         corner_radii: CornerRadii::ZERO,
     });
 
+    // After the background, or it would be painted over.
+    for (i, line) in NOTHING_YET_LINES.iter().enumerate() {
+        tree.push(RenderCommand::Text {
+            x: 8.0,
+            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+            y: 2.0 + i as f32 * 12.0,
+            text: (*line).to_string(),
+            color: if i == 0 {
+                app.palette.ink(app.palette.yellow)
+            } else {
+                app.palette.subtext0
+            },
+            font_size: if i == 0 { 11.0 } else { 9.0 },
+            font_weight: if i == 0 {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
+            max_width: Some(width - 16.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
     // Toolbar
     render_toolbar(&mut tree, app, width);
     let mut content_y: f32 = 40.0;
@@ -3328,10 +3373,11 @@ const INITIAL_WIDTH: u32 = 1200;
 const INITIAL_HEIGHT: u32 = 800;
 
 fn main() -> ExitCode {
+    // Opens empty. The line removed here said "until a store on disk
+    // exists this is what there is to show" -- the seventh appearance of that
+    // reasoning in this sweep. It is right that an empty board looks unhelpful
+    // and wrong that filling it is the remedy.
     let mut app = KanbanApp::new();
-    // Until a store on disk exists this is what there is to show. One call, so
-    // that when a store arrives this is the line that changes.
-    app.create_sample_data();
     app::launch("kanban", &mut app)
 }
 

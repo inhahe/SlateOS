@@ -301,23 +301,31 @@ fn run(args: &[OsString], out: &mut Stream) -> Result<ExitCode, Trouble> {
     // The scan order is the operands' own, and the zero-increment check sits
     // between the second and the third: `seq 1 0 x` names the increment, not
     // the unreadable last operand.
+    // Bound by the pattern rather than by `n`, which was checked twenty
+    // lines above and used here. Nothing is scanned in the match: the scan
+    // ORDER below is load-bearing, per the comment above it.
+    let (op_first, op_second, op_third) = match operands.as_slice() {
+        [a] => (a, None, None),
+        [a, b] => (a, Some(b), None),
+        [a, b, c] => (a, Some(b), Some(c)),
+        // Unreachable: empty and >3 both returned above.
+        _ => return Err(SEQ.usage_referring("missing operand".to_string()).into()),
+    };
+
     let mut first = Operand::one();
     let mut step = Operand::one();
-    let mut last = scan_arg(&operands[0])?;
-    if n > 1 {
+    let mut last = scan_arg(op_first)?;
+    if let Some(second) = op_second {
         first = last;
-        last = scan_arg(&operands[1])?;
-        if n > 2 {
+        last = scan_arg(second)?;
+        if let Some(third) = op_third {
             step = last;
             if step.value.is_zero() {
                 return Err(SEQ
-                    .usage_referring(format!(
-                        "invalid Zero increment value: {}",
-                        quote(&operands[1])
-                    ))
+                    .usage_referring(format!("invalid Zero increment value: {}", quote(second)))
                     .into());
             }
-            last = scan_arg(&operands[2])?;
+            last = scan_arg(third)?;
         }
     }
 
@@ -918,9 +926,21 @@ fn try_fast_from_strings(
     }
 
     let one = b"1".to_vec();
-    let from = if n == 1 { &one } else { &operands[0] };
-    let to = &operands[n.saturating_sub(1)];
-    Ok(seq_fast(out, from, to, fast_step, settings.separator[0])?)
+    let (Some(to), Some(&sep)) = (
+        operands.get(n.saturating_sub(1)),
+        settings.separator.first(),
+    ) else {
+        return Ok(false);
+    };
+    let from = if n == 1 {
+        &one
+    } else {
+        let Some(f) = operands.first() else {
+            return Ok(false);
+        };
+        f
+    };
+    Ok(seq_fast(out, from, to, fast_step, sep)?)
 }
 
 /// The second entry, after conversion: operands like `1e3` are integers that do
@@ -963,7 +983,13 @@ fn try_fast_from_values(
     if from.first() == Some(&b'-') || to.first() == Some(&b'-') {
         return Ok(false);
     }
-    Ok(seq_fast(out, &from, &to, fast_step, settings.separator[0])?)
+    // The separator was checked to be one byte long above; `first` says so
+    // here, and "not taking the fast path" is already this function's answer
+    // for anything it cannot handle.
+    let Some(&sep) = settings.separator.first() else {
+        return Ok(false);
+    };
+    Ok(seq_fast(out, &from, &to, fast_step, sep)?)
 }
 
 /// `0 < v && v <= 200`, and the integer it is.
@@ -1015,12 +1041,12 @@ fn seq_fast(
 /// Add `step` to a decimal digit string in place.
 fn incr(p: &mut Vec<u8>, step: u64) {
     let mut carry = step;
-    for i in (0..p.len()).rev() {
+    for slot in p.iter_mut().rev() {
         if carry == 0 {
             break;
         }
-        let sum = u64::from(p[i].wrapping_sub(b'0')).saturating_add(carry);
-        p[i] = b'0'.wrapping_add(u8::try_from(sum % 10).unwrap_or(0));
+        let sum = u64::from(slot.wrapping_sub(b'0')).saturating_add(carry);
+        *slot = b'0'.wrapping_add(u8::try_from(sum % 10).unwrap_or(0));
         carry = sum / 10;
     }
     while carry > 0 {
@@ -1063,6 +1089,11 @@ fn arg_bytes(arg: &OsString) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;

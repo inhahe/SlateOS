@@ -109,7 +109,7 @@ fn write_case(line: &[u8]) -> String {
         return "!no-tab".to_string();
     };
     let (fmt, literal) = line.split_at(tab);
-    let literal = &literal[1..];
+    let literal = literal.get(1..).unwrap_or_default();
     let Some((spec, used)) = Spec::parse(fmt) else {
         return "!bad-format".to_string();
     };

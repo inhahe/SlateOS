@@ -3297,8 +3297,8 @@ fn escaped<'a>(body: &'a [u8], opts: &Options, cap: &[u8]) -> Cow<'a, [u8]> {
                 run = true;
             }
             o.extend_from_slice(b"\\x");
-            o.push(HEX[usize::from(b >> 4)]);
-            o.push(HEX[usize::from(b & 0x0f)]);
+            o.push(HEX.get(usize::from(b >> 4)).copied().unwrap_or(b'?'));
+            o.push(HEX.get(usize::from(b & 0x0f)).copied().unwrap_or(b'?'));
         } else if let Some(o) = out.as_mut() {
             close_escape_run(o, &mut run, opts, cap, ec);
             o.push(b);
@@ -3805,6 +3805,7 @@ fn search_stream(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;

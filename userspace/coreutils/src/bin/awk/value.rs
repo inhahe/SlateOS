@@ -240,6 +240,13 @@ fn trim_blanks(s: &[u8]) -> &[u8] {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use std::cmp::Ordering;

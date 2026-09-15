@@ -1123,7 +1123,7 @@ fn explode_old_option(args: &[OsString]) -> Result<Vec<OsString>, getopt::Error>
         return Ok(args.to_vec());
     }
     let mut out = Vec::with_capacity(args.len() + letters.len());
-    let mut rest = args[1..].iter();
+    let mut rest = args.get(1..).unwrap_or_default().iter();
     for &letter in letters {
         out.push(os_from_bytes(&[b'-', letter]));
         if !takes_a_value(letter) {
@@ -5634,6 +5634,11 @@ fn parse_octal(buf: &[u8]) -> u64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;

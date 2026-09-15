@@ -910,7 +910,10 @@ fn human_opts() -> Opts {
 /// information: printing `3 bytes (3 B) copied` would be noise.
 fn abbreviation_lacks_prefix(message: &str) -> bool {
     let b = message.as_bytes();
-    b.len() >= 2 && b[b.len() - 2] == b' '
+    b.len()
+        .checked_sub(2)
+        .and_then(|i| b.get(i))
+        .is_some_and(|&c| c == b' ')
 }
 
 /// Everything about *when* statistics are printed, and what was printed last.
@@ -1191,7 +1194,10 @@ impl Reader {
     fn iread_fullblock(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut nread = 0;
         while nread < buf.len() {
-            let ncurr = self.iread(&mut buf[nread..])?;
+            let Some(tail) = buf.get_mut(nread..) else {
+                break;
+            };
+            let ncurr = self.iread(tail)?;
             if ncurr == 0 {
                 break;
             }
@@ -1302,7 +1308,10 @@ impl Writer {
             }
 
             if nwritten == 0 {
-                match self.handle.file().write(&buf[total..]) {
+                let Some(rest) = buf.get(total..) else {
+                    break;
+                };
+                match self.handle.file().write(rest) {
                     // Some drivers return 0 rather than an error when written
                     // past the end of a device. Upstream substitutes ENOSPC so
                     // the diagnostic says something usable.
@@ -1408,31 +1417,46 @@ fn translate_buffer(table: &[u8; 256], buf: &mut [u8]) {
 /// input swaps identically at `bs=2`, `bs=3` and `bs=4`, which was measured
 /// (`abcde` → `badce` for all three) and is not what a naive per-block swap
 /// would do.
-fn swab_buffer(buf: &mut [u8], nread: &mut usize, saved_byte: &mut i32) -> usize {
+/// `None` when `buf` is too short for the swap.
+///
+/// IT CANNOT CHECK ITS OWN INVARIANT, which is why this returns an `Option`
+/// rather than indexing and hoping. The shift below touches `buf[*nread]`,
+/// one past the data, and that byte exists only because `alloc_buffer` is
+/// called with `extra = 1` when `conv=swab` is set -- two functions away,
+/// in an argument whose whole purpose is this. Reading the indexing here
+/// alone, `buf[*nread]` looks out of bounds for a full block, and I spent a
+/// tick convinced it was before finding the `+ 1`.
+///
+/// So the bound is asked for rather than assumed. `None` reaches `?` in the
+/// one production caller, which aborts the copy -- the right answer, because
+/// a partial swap writes a file whose bytes are in the wrong order and says
+/// nothing about it.
+fn swab_buffer(buf: &mut [u8], nread: &mut usize, saved_byte: &mut i32) -> Option<usize> {
     if *nread == 0 {
-        return 0;
+        return Some(0);
     }
 
     let prev_saved = *saved_byte;
     if (prev_saved < 0) == (*nread % 2 == 1) {
-        *nread -= 1;
-        *saved_byte = i32::from(buf[*nread]);
+        *nread = nread.checked_sub(1)?;
+        *saved_byte = i32::from(*buf.get(*nread)?);
     } else {
         *saved_byte = -1;
     }
 
     let mut i = *nread;
     while 1 < i {
-        buf[i] = buf[i - 2];
-        i -= 2;
+        let from = *buf.get(i.checked_sub(2)?)?;
+        *buf.get_mut(i)? = from;
+        i = i.checked_sub(2)?;
     }
 
     if prev_saved < 0 {
-        return 1;
+        return Some(1);
     }
-    buf[1] = u8::try_from(prev_saved).unwrap_or(0);
-    *nread += 1;
-    0
+    *buf.get_mut(1)? = u8::try_from(prev_saved).unwrap_or(0);
+    *nread = nread.checked_add(1)?;
+    Some(0)
 }
 
 /// The copy stopped early and its diagnostic has already been printed.
@@ -1505,8 +1529,8 @@ impl Dd {
 
     /// Append one byte to the output buffer, flushing when it fills.
     fn output_char(&mut self, c: u8) -> Result<(), Aborted> {
-        self.obuf[self.oc] = c;
-        self.oc += 1;
+        *self.obuf.get_mut(self.oc).ok_or(Aborted)? = c;
+        self.oc = self.oc.saturating_add(1);
         if self.oc >= self.obuf.len() {
             self.write_output()?;
         }
@@ -1516,13 +1540,17 @@ impl Dd {
     /// No conversion: move bytes into the output buffer, flushing whenever it
     /// fills. This is what re-aggregates short reads into whole records.
     fn copy_simple(&mut self, buf: &[u8]) -> Result<(), Aborted> {
-        let mut start = 0;
+        let mut start = 0usize;
         let mut nread = buf.len();
         loop {
-            let nfree = nread.min(self.obuf.len() - self.oc);
-            self.obuf[self.oc..self.oc + nfree].copy_from_slice(&buf[start..start + nfree]);
-            nread -= nfree;
-            start += nfree;
+            let nfree = nread.min(self.obuf.len().saturating_sub(self.oc));
+            let to = self.oc.saturating_add(nfree);
+            let from = start.saturating_add(nfree);
+            let dst = self.obuf.get_mut(self.oc..to).ok_or(Aborted)?;
+            let src = buf.get(start..from).ok_or(Aborted)?;
+            dst.copy_from_slice(src);
+            nread = nread.saturating_sub(nfree);
+            start = from;
             self.oc += nfree;
             if self.oc >= self.obuf.len() {
                 self.write_output()?;
@@ -1563,8 +1591,7 @@ impl Dd {
     /// which is why the loop advances `i` on every path but one.
     fn copy_with_unblock(&mut self, buf: &[u8]) -> Result<(), Aborted> {
         let mut i = 0;
-        while i < buf.len() {
-            let c = buf[i];
+        while let Some(&c) = buf.get(i) {
             let col = self.col;
             self.col += 1;
 
@@ -1798,7 +1825,10 @@ fn skip_input(
     loop {
         let want = if records != 0 { blocksize } else { *bytes };
         let want = usize::try_from(want).unwrap_or(usize::MAX).min(capacity);
-        match reader.read_block(&mut ibuf[..want]) {
+        let Some(window) = ibuf.get_mut(..want) else {
+            break;
+        };
+        match reader.read_block(window) {
             Err(e) => {
                 stdfd::diag_line(&format!(
                     "dd: error reading {}: {}",
@@ -1883,7 +1913,10 @@ fn seek_output(dd: &mut Dd, records: i64, bytes: &mut i64) -> Result<Skipped, Dd
             .unwrap_or(usize::MAX)
             .min(dd.obuf.len());
         let read = loop {
-            match dd.out.handle.file().read(&mut dd.obuf[..want]) {
+            let Some(window) = dd.obuf.get_mut(..want) else {
+                break Ok(0);
+            };
+            match dd.out.handle.file().read(window) {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 other => break other,
             }
@@ -2141,7 +2174,14 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
             translate_buffer(&dd.trans.table, win_mut(&mut ibuf, 0, n_bytes_read)?);
         }
         let start = if swab {
-            swab_buffer(&mut ibuf, &mut n_bytes_read, &mut saved_byte)
+            // `None` means the buffer was not the size `conv=swab` needs, so
+            // the swap could not be completed. Aborting beats writing half a
+            // swap, which is a file with its bytes transposed and no warning.
+            let Some(s) = swab_buffer(&mut ibuf, &mut n_bytes_read, &mut saved_byte) else {
+                stdfd::diag_line("dd: internal error: swab buffer too small");
+                return Err(DdError::Aborted);
+            };
+            s
         } else {
             0
         };
@@ -3265,7 +3305,8 @@ mod tests {
         let mut nread = 5usize;
         let mut saved = -1i32;
 
-        let start = swab_buffer(&mut buf, &mut nread, &mut saved);
+        let start = swab_buffer(&mut buf, &mut nread, &mut saved)
+            .expect("the fixture buffer is sized for the swap");
         assert_eq!(start, 1, "the swapped bytes begin one byte in");
         assert_eq!(nread, 4);
         assert_eq!(&buf[start..start + nread], b"badc");
@@ -3274,7 +3315,8 @@ mod tests {
         // The next read picks the carried byte back up.
         let mut buf = b"fg\0".to_vec();
         let mut nread = 2usize;
-        let start = swab_buffer(&mut buf, &mut nread, &mut saved);
+        let start = swab_buffer(&mut buf, &mut nread, &mut saved)
+            .expect("the fixture buffer is sized for the swap");
         assert_eq!(start, 0);
         assert_eq!(nread, 2);
         assert_eq!(&buf[start..start + nread], b"fe");
@@ -3291,7 +3333,8 @@ mod tests {
         let mut buf = b"abcd\0".to_vec();
         let mut nread = 4usize;
         let mut saved = -1i32;
-        let start = swab_buffer(&mut buf, &mut nread, &mut saved);
+        let start = swab_buffer(&mut buf, &mut nread, &mut saved)
+            .expect("the fixture buffer is sized for the swap");
         assert_eq!(start, 1);
         assert_eq!(nread, 4);
         assert_eq!(&buf[start..start + nread], b"badc");
@@ -3303,7 +3346,7 @@ mod tests {
         let mut buf = vec![0u8; 4];
         let mut nread = 0usize;
         let mut saved = -1i32;
-        assert_eq!(swab_buffer(&mut buf, &mut nread, &mut saved), 0);
+        assert_eq!(swab_buffer(&mut buf, &mut nread, &mut saved), Some(0));
         assert_eq!(nread, 0);
     }
 

@@ -4054,6 +4054,7 @@ fn status(quit: Option<i32>, bad: bool) -> i32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 #[allow(
     clippy::unwrap_used,
     clippy::panic,

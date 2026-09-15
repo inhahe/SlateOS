@@ -329,7 +329,10 @@ fn logical_name_is_usable(wd: &[u8]) -> bool {
     }
     let mut i = 0;
     while i + 1 < wd.len() {
-        if wd[i] != b'/' || wd[i + 1] != b'.' {
+        let (Some(&here), Some(&next)) = (wd.get(i), wd.get(i.saturating_add(1))) else {
+            break;
+        };
+        if here != b'/' || next != b'.' {
             i += 1;
             continue;
         }

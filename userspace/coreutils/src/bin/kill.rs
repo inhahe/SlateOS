@@ -483,6 +483,11 @@ fn send_one(_pid: i32, _signal: i32) -> io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;

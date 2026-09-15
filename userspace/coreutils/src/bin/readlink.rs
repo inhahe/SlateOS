@@ -355,6 +355,7 @@ fn read_all<F: Fs + ?Sized, W: Write, E: Write>(
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 #[allow(
     clippy::unwrap_used,
     clippy::panic,

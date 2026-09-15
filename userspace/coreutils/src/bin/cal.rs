@@ -356,7 +356,7 @@ fn month_length(reform_year: i32, month: i32, year: i32) -> i32 {
     let leap = usize::from(leap_year(reform_year, year));
     usize::try_from(month)
         .ok()
-        .and_then(|m| DAYS_IN_MONTH[leap].get(m).copied())
+        .and_then(|m| DAYS_IN_MONTH.get(leap)?.get(m).copied())
         .unwrap_or(0)
 }
 
@@ -370,7 +370,10 @@ fn day_in_year(reform_year: i32, day: i32, month: i32, year: i32) -> i32 {
     let mut m = 1i32;
     while m < month {
         if let Ok(i) = usize::try_from(m) {
-            total += DAYS_IN_MONTH[leap].get(i).copied().unwrap_or(0);
+            total += DAYS_IN_MONTH
+                .get(leap)
+                .and_then(|t| t.get(i).copied())
+                .unwrap_or(0);
         }
         m += 1;
     }
@@ -609,7 +612,7 @@ struct Scanned {
 /// to the input.
 fn scan_integer(s: &[u8], base: u32) -> Option<Scanned> {
     let mut i = 0usize;
-    while i < s.len() && c_isspace(s[i]) {
+    while s.get(i).copied().is_some_and(c_isspace) {
         i += 1;
     }
     let mut negative = false;
@@ -800,7 +803,7 @@ fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
     // Only positive numbers are acceptable. The check is on the first
     // non-blank byte, while the conversion below still starts at the front.
     let mut lead = 0usize;
-    while lead < s.len() && c_isspace(s[lead]) {
+    while s.get(lead).copied().is_some_and(c_isspace) {
         lead += 1;
     }
     if s.get(lead) == Some(&b'-') {
@@ -841,7 +844,7 @@ fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
                 fstr += 1;
             }
             let end = if at(fstr).is_ascii_digit() {
-                let Some(fsc) = scan_integer(&s[fstr..], 0) else {
+                let Some(fsc) = scan_integer(s.get(fstr..).unwrap_or_default(), 0) else {
                     return Err(NumErr::Invalid);
                 };
                 if fsc.saturated || fsc.magnitude > u128::from(u64::MAX) {
@@ -1034,7 +1037,7 @@ fn parse_sec(t: &[u8]) -> Option<u64> {
         }
 
         // `strtoll(p, &e, 10)`, whose sign is accepted and then refused.
-        let scanned = scan_integer(&t[p..], 10);
+        let scanned = scan_integer(t.get(p..).unwrap_or_default(), 10);
         let (l, mut e) = match &scanned {
             Some(sc) => {
                 if sc.saturated {
@@ -1052,7 +1055,7 @@ fn parse_sec(t: &[u8]) -> Option<u64> {
         let mut n = 0usize;
         if t.get(e) == Some(&b'.') {
             let b = e + 1;
-            let frac = scan_integer(&t[b..], 10)?;
+            let frac = scan_integer(t.get(b..).unwrap_or_default(), 10)?;
             if frac.saturated || frac.negative {
                 return None;
             }
@@ -1069,7 +1072,11 @@ fn parse_sec(t: &[u8]) -> Option<u64> {
 
         let mut matched = false;
         for (suffix, usec) in SEC_TABLE {
-            if !t[e..].starts_with(suffix.as_bytes()) {
+            if !t
+                .get(e..)
+                .unwrap_or_default()
+                .starts_with(suffix.as_bytes())
+            {
                 continue;
             }
             let mut k = z.saturating_mul(*usec);
@@ -1096,7 +1103,7 @@ fn parse_subseconds(t: &[u8]) -> Option<u64> {
     }
     let mut ret: u64 = 0;
     let mut factor: u64 = USEC_PER_SEC / 10;
-    for &c in &t[1..] {
+    for &c in t.get(1..).unwrap_or_default() {
         if !c.is_ascii_digit() || factor < 1 {
             return None;
         }
@@ -1147,7 +1154,9 @@ fn strptime(s: &[u8], fmt: &str, tm: &mut BrokenDown, zone: &localtime::Zone) ->
     let mut fi = 0usize;
 
     while fi < fmt.len() {
-        let fc = fmt[fi];
+        let Some(&fc) = fmt.get(fi) else {
+            break;
+        };
         if c_isspace(fc) {
             while s.get(rp).is_some_and(|c| c_isspace(*c)) {
                 rp += 1;
@@ -1281,7 +1290,7 @@ const DAY_NR: &[(&str, i32)] = &[
 
 fn starts_with_no_case(s: &[u8], prefix: &str) -> bool {
     let p = prefix.as_bytes();
-    s.len() >= p.len() && s[..p.len()].eq_ignore_ascii_case(p)
+    s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p))
 }
 
 /// `parse_timestamp_reference`: everything `cal <timestamp>` accepts.
@@ -1316,17 +1325,17 @@ fn parse_timestamp(zone: &localtime::Zone, reference: i64, t: &[u8]) -> Option<u
         tm.minute = 0;
         tm.hour = 0;
     } else if t.first() == Some(&b'+') {
-        plus = parse_sec(&t[1..])?;
+        plus = parse_sec(t.get(1..)?)?;
     } else if t.first() == Some(&b'-') {
-        minus = parse_sec(&t[1..])?;
+        minus = parse_sec(t.get(1..)?)?;
     } else if t.first() == Some(&b'@') {
-        let k = strptime(&t[1..], "%s", &mut tm, zone)?;
-        let rest = &t[1 + k..];
+        let k = strptime(t.get(1..)?, "%s", &mut tm, zone)?;
+        let rest = t.get(1usize.saturating_add(k)..)?;
         if !rest.is_empty() {
             ret = parse_subseconds(rest)?;
         }
     } else if t.ends_with(b" ago") {
-        minus = parse_sec(&t[..t.len() - 4])?;
+        minus = parse_sec(t.len().checked_sub(4).and_then(|n| t.get(..n))?)?;
     } else {
         let mut s = t;
         for (name, nr) in DAY_NR {
@@ -1337,7 +1346,7 @@ fn parse_timestamp(zone: &localtime::Zone, reference: i64, t: &[u8]) -> Option<u
                 continue;
             }
             weekday = *nr;
-            s = &s[name.len() + 1..];
+            s = s.get(name.len().saturating_add(1)..).unwrap_or_default();
             break;
         }
 
@@ -1348,7 +1357,9 @@ fn parse_timestamp(zone: &localtime::Zone, reference: i64, t: &[u8]) -> Option<u
             let Some(k) = strptime(s, fmt, &mut tm, zone) else {
                 continue;
             };
-            let rest = &s[k..];
+            let Some(rest) = s.get(k..) else {
+                continue;
+            };
             if rest.is_empty() {
                 match after {
                     After::Keep => {}
@@ -2569,6 +2580,13 @@ fn run_main() -> ExitCode {
 /// from the source, because the two disagreed four times while this file was
 /// being written and the binary was right every time.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

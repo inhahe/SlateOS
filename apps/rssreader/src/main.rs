@@ -4980,6 +4980,40 @@ mod tests {
     /// same path is the half that matters: a reader you point at a file you
     /// re-download every morning must merge into the feed already there, not
     /// grow a second copy of it beside the first.
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event -- and in
+    /// this crate that test called `handle_key` directly, one layer below the
+    /// routing. This is the half routing decides: with a dialog up, a
+    /// keystroke belongs to the dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_articles() {
+        // `app()` is the fixture with articles in it. A bare `new()` has none,
+        // so `next_article` cannot move and "the index did not change" is
+        // trivially true -- which is what the first version of this test
+        // asserted, and why the scanner still called the routing unpinned.
+        let mut app = app();
+        assert!(
+            app.filtered_article_indices().len() > 1,
+            "control: the fixture needs more than one article to move between"
+        );
+        app.selected_article_index = 0;
+        let before = app.selected_article_index;
+
+        app.handle_event(&key_ev(Key::O, true, false));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(&press(Key::Down));
+        assert_eq!(
+            app.selected_article_index, before,
+            "Down at the open dialog moved through the articles behind it"
+        );
+    }
+
     #[test]
     fn a_downloaded_feed_becomes_articles_and_reopening_it_does_not_duplicate() {
         let dir = std::env::temp_dir().join("slateos-rssreader-door-test");

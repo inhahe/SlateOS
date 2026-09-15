@@ -3387,6 +3387,9 @@ impl PhotoApp {
         if let Some(ref lens) = exif.lens {
             entries.push(("Lens", lens.clone()));
         }
+        if let Some(mm) = exif.focal_length_mm {
+            entries.push(("Focal Length", format!("{mm:.0} mm")));
+        }
         entries.push(("Resolution", exif.resolution_str()));
         if let Some(mp) = exif.megapixels() {
             entries.push(("Megapixels", format!("{mp:.1} MP")));
@@ -3395,11 +3398,29 @@ impl PhotoApp {
         if exposure != "No exposure data" {
             entries.push(("Exposure", exposure));
         }
+        if let Some(ref program) = exif.exposure_program {
+            entries.push(("Program", program.clone()));
+        }
+        if let Some(bias) = exif.exposure_bias {
+            // Signed, with the sign always shown. "0.3 EV" and "-0.3 EV" are a
+            // stop and a half apart in what they mean and one character apart
+            // on the panel, so the plus is not decoration.
+            entries.push(("Exp. Bias", format!("{bias:+.1} EV")));
+        }
+        if let Some(fired) = exif.flash_fired {
+            entries.push((
+                "Flash",
+                if fired { "Fired" } else { "Did not fire" }.to_owned(),
+            ));
+        }
         if let Some(ref date) = exif.date_taken {
             entries.push(("Date", date.clone()));
         }
         if let Some(gps) = exif.gps_str() {
             entries.push(("GPS", gps));
+        }
+        if let Some(alt) = exif.gps_altitude {
+            entries.push(("Altitude", format!("{alt:.0} m")));
         }
         if let Some(ref cs) = exif.color_space {
             entries.push(("Color Space", cs.clone()));
@@ -3409,6 +3430,13 @@ impl PhotoApp {
         }
         if let Some(ref mm) = exif.metering_mode {
             entries.push(("Metering", mm.clone()));
+        }
+        // Last, because they are about the file rather than the photograph.
+        if let Some(ref software) = exif.software {
+            entries.push(("Software", software.clone()));
+        }
+        if let Some(ref copyright) = exif.copyright {
+            entries.push(("Copyright", copyright.clone()));
         }
 
         entries
@@ -5285,6 +5313,80 @@ mod tests {
         let smart_id = app.create_smart_album("Best Photos", true);
         app.add_smart_rule(smart_id, SmartRule::MinRating(4));
         app
+    }
+
+    /// Every EXIF field the parser fills reaches the panel.
+    ///
+    /// Seven of them did not, and were found by
+    /// `scripts/check-fields-written-never-read.py`: focal length, whether the
+    /// flash fired, GPS altitude, the writing software, the copyright, the
+    /// exposure program and the exposure bias. The parser decoded all seven
+    /// out of the file and `collect_exif_entries` listed neither, so the work
+    /// was done and thrown away -- the same shape as an option a program
+    /// parses and ignores.
+    ///
+    /// Written against the labels rather than the field names because the
+    /// label is what a person actually sees, and a field renamed without its
+    /// row being added back would otherwise pass.
+    #[test]
+    fn every_parsed_exif_field_reaches_the_panel() {
+        let app = PhotoApp::new();
+        let mut exif = ExifData::sample();
+        exif.copyright = Some("(c) nobody".to_owned());
+        exif.exposure_program = Some("Aperture priority".to_owned());
+        exif.exposure_bias = Some(-0.7);
+        exif.metering_mode = Some("Matrix".to_owned());
+        exif.white_balance = Some("Auto".to_owned());
+        exif.color_space = Some("sRGB".to_owned());
+
+        let mut photo = Photo::new(1, "/photos/x.jpg", "x.jpg", ImageFormat::Jpeg, 1, 0);
+        photo.exif = exif;
+        let labels: Vec<&str> = app
+            .collect_exif_entries(&photo)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+
+        for expected in [
+            "Camera",
+            "Model",
+            "Lens",
+            "Focal Length",
+            "Exposure",
+            "Program",
+            "Exp. Bias",
+            "Flash",
+            "Date",
+            "GPS",
+            "Altitude",
+            "Color Space",
+            "White Bal.",
+            "Metering",
+            "Software",
+            "Copyright",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "the panel drops {expected:?}; it shows {labels:?}"
+            );
+        }
+    }
+
+    /// The exposure bias keeps its sign.
+    ///
+    /// "0.7 EV" and "-0.7 EV" are a stop and a half apart in what they mean
+    /// and one character apart on the panel, so the plus is not decoration.
+    #[test]
+    fn a_positive_exposure_bias_is_shown_as_positive() {
+        let app = PhotoApp::new();
+        let mut photo = Photo::new(1, "/photos/x.jpg", "x.jpg", ImageFormat::Jpeg, 1, 0);
+        photo.exif.exposure_bias = Some(0.7);
+        let entries = app.collect_exif_entries(&photo);
+        let bias = entries
+            .iter()
+            .find(|(label, _)| *label == "Exp. Bias")
+            .expect("no bias row");
+        assert_eq!(bias.1, "+0.7 EV");
     }
 
     /// The Import button is drawn where the hit test says it is.

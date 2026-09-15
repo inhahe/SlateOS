@@ -2086,6 +2086,8 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
+ "scratchdir",
 ]
 
 [[package]]

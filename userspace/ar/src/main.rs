@@ -107,8 +107,13 @@ const SHN_UNDEF: u16 = 0;
 /// Parsed archive member header.
 #[derive(Debug, Clone)]
 struct ArHeader {
-    /// Member name (decoded from header or extended name table).
-    name: String,
+    /// Member name, as BYTES.
+    ///
+    /// The `ar` header carries a 16-byte name field, and longer names live in
+    /// the `//` table; neither is required to be UTF-8. Holding this as a
+    /// `String` meant the parser had to decode it, and the decode was fallible
+    /// and fatal -- see the note on the parse below.
+    name: Vec<u8>,
     /// Modification timestamp (seconds since epoch).
     mtime: u64,
     /// Owner UID.
@@ -125,15 +130,20 @@ impl ArHeader {
     /// Format as a 60-byte archive header line.
     /// If the name is too long for the 16-byte field, returns `None` (caller
     /// must use extended name encoding).
-    fn to_bytes_short(&self, name_override: Option<&str>) -> Option<Vec<u8>> {
-        let name = name_override.unwrap_or(&self.name);
+    fn to_bytes_short(&self, name_override: Option<&[u8]>) -> Option<Vec<u8>> {
+        let name: &[u8] = name_override.unwrap_or(&self.name);
         if name.len() > 15 {
             return None;
         }
         let mut hdr = Vec::with_capacity(AR_HDR_SIZE);
-        // Name field: name + "/" padded to 16 bytes
-        let name_field = format!("{name}/");
-        write!(hdr, "{:<16}", name_field).ok()?;
+        // Name field: the name's BYTES, then '/', then spaces to 16. Built by
+        // hand rather than with `format!("{:<16}")`, which needs the name to
+        // be text -- and a member name is not required to be.
+        hdr.extend_from_slice(name);
+        hdr.push(b'/');
+        while hdr.len() < 16 {
+            hdr.push(b' ');
+        }
         write!(hdr, "{:<12}", self.mtime).ok()?;
         write!(hdr, "{:<6}", self.uid).ok()?;
         write!(hdr, "{:<6}", self.gid).ok()?;
@@ -224,9 +234,28 @@ impl Archive {
                 return Err(format!("bad header magic at offset {offset}"));
             }
 
-            let raw_name = std::str::from_utf8(&hdr_bytes[0..16])
-                .map_err(|e| format!("invalid name field: {e}"))?
-                .trim_end();
+            // NO `from_utf8` HERE, and removing it is the point of this
+            // function rather than a tidy-up.
+            //
+            // This used to be `std::str::from_utf8(&hdr_bytes[0..16])?`, and
+            // that `?` aborted the WHOLE archive parse. So `ar t` on a valid
+            // archive -- one GNU `ar` produced, holding one member whose name
+            // has a byte that is not UTF-8 -- failed with `invalid name field`
+            // and every member in it became unreachable. Not the member: the
+            // archive.
+            //
+            // Nothing below needs the field to be text. The structural markers
+            // `//`, `/`, `#1/N` and `/N` are ASCII *by the format's
+            // definition*, so they match on bytes, and the name itself is
+            // carried as bytes to the end.
+            let raw_name: &[u8] = {
+                let field = &hdr_bytes[0..16];
+                let end = field
+                    .iter()
+                    .rposition(|b| *b != b' ')
+                    .map_or(0, |i| i.saturating_add(1));
+                &field[..end]
+            };
             let mtime = parse_header_field(&hdr_bytes[16..28])?;
             let uid = parse_header_field(&hdr_bytes[28..34])? as u32;
             let gid = parse_header_field(&hdr_bytes[34..40])? as u32;
@@ -244,32 +273,43 @@ impl Archive {
             let member_data = &data[data_start..data_end];
 
             // Decode name
-            let (name, actual_data) = if raw_name == "//" {
+            let (name, actual_data) = if raw_name == b"//" {
                 // GNU/SysV string table — store it, skip as member
                 gnu_strtab = Some(member_data.to_vec());
                 offset = align2(data_end);
                 continue;
-            } else if raw_name == "/" {
+            } else if raw_name == b"/" {
                 // Symbol table — skip as member
                 offset = align2(data_end);
                 continue;
-            } else if raw_name.starts_with('#') && raw_name.contains('/') {
+            } else if raw_name.first() == Some(&b'#') && raw_name.contains(&b'/') {
                 // BSD extended name: #1/N
                 decode_bsd_name(raw_name, member_data)?
-            } else if raw_name.starts_with('/') && raw_name.len() > 1 {
-                // GNU/SysV extended name: /N
-                let idx_str = &raw_name[1..];
-                let idx: usize = idx_str
-                    .parse()
-                    .map_err(|_| format!("bad GNU name index: {idx_str}"))?;
+            } else if raw_name.first() == Some(&b'/') && raw_name.len() > 1 {
+                // GNU/SysV extended name: /N. The index is decimal ASCII by
+                // the format's definition, so a field that does not decode is
+                // simply not an index and takes the error path below.
+                let idx_bytes = raw_name.get(1..).unwrap_or(&[]);
+                let idx: usize = std::str::from_utf8(idx_bytes)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| {
+                        format!(
+                            "bad GNU name index: {}",
+                            quoting::escape_unprintable(idx_bytes)
+                        )
+                    })?;
                 let strtab = gnu_strtab
                     .as_ref()
                     .ok_or("GNU extended name before string table")?;
                 let gnu_name = read_gnu_strtab_entry(strtab, idx)?;
                 (gnu_name, member_data)
             } else {
-                // Short name — strip trailing '/'
-                let name = raw_name.trim_end_matches('/').to_string();
+                // Short name — strip the trailing '/' the format adds.
+                let mut name = raw_name.to_vec();
+                while name.last() == Some(&b'/') {
+                    name.pop();
+                }
                 (name, member_data)
             };
 
@@ -304,7 +344,7 @@ impl Archive {
             if member.header.name.len() > 15 {
                 let off = gnu_strtab.len();
                 name_offsets.push(Some(off));
-                gnu_strtab.extend_from_slice(member.header.name.as_bytes());
+                gnu_strtab.extend_from_slice(&member.header.name);
                 gnu_strtab.extend_from_slice(b"/\n");
             } else {
                 name_offsets.push(None);
@@ -457,7 +497,7 @@ impl Archive {
     }
 
     /// Find the index of a member by name.
-    fn find_member(&self, name: &str) -> Option<usize> {
+    fn find_member(&self, name: &[u8]) -> Option<usize> {
         self.members.iter().position(|m| m.header.name == name)
     }
 }
@@ -491,32 +531,45 @@ fn parse_header_octal(field: &[u8]) -> Result<u32, String> {
 
 /// Decode a BSD extended name (`#1/N` format).
 fn decode_bsd_name<'a>(
-    raw_name: &str,
+    raw_name: &[u8],
     member_data: &'a [u8],
-) -> Result<(String, &'a [u8]), String> {
-    let prefix = AR_BSD_NAME_PREFIX;
+) -> Result<(Vec<u8>, &'a [u8]), String> {
+    let prefix = AR_BSD_NAME_PREFIX.as_bytes();
     if !raw_name.starts_with(prefix) {
-        return Err(format!("expected BSD name prefix, got: {raw_name}"));
+        return Err(format!(
+            "expected BSD name prefix, got: {}",
+            quoting::escape_unprintable(raw_name)
+        ));
     }
-    let len_str = &raw_name[prefix.len()..];
-    let name_len: usize = len_str
-        .parse()
-        .map_err(|_| format!("bad BSD name length: {len_str}"))?;
+    // The LENGTH is decimal ASCII by the format's definition; the name it
+    // introduces is not, and is never decoded.
+    let len_bytes = raw_name.get(prefix.len()..).unwrap_or(&[]);
+    let name_len: usize = std::str::from_utf8(len_bytes)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "bad BSD name length: {}",
+                quoting::escape_unprintable(len_bytes)
+            )
+        })?;
     if name_len > member_data.len() {
         return Err("BSD name length exceeds member data".into());
     }
     let name_bytes = &member_data[..name_len];
-    // Strip trailing NUL padding
-    let name = std::str::from_utf8(name_bytes)
-        .map_err(|e| format!("invalid BSD name: {e}"))?
-        .trim_end_matches('\0')
-        .to_string();
+    // Strip trailing NUL padding, on the bytes. The `from_utf8` that stood
+    // here was the THIRD fatal decode in this parser: a BSD-style long name
+    // that is not UTF-8 failed the whole archive.
+    let mut name = name_bytes.to_vec();
+    while name.last() == Some(&0) {
+        name.pop();
+    }
     let actual_data = &member_data[name_len..];
     Ok((name, actual_data))
 }
 
 /// Read a name from the GNU/SysV string table at the given offset.
-fn read_gnu_strtab_entry(strtab: &[u8], offset: usize) -> Result<String, String> {
+fn read_gnu_strtab_entry(strtab: &[u8], offset: usize) -> Result<Vec<u8>, String> {
     if offset >= strtab.len() {
         return Err(format!(
             "GNU strtab offset {offset} out of range (len {})",
@@ -528,11 +581,14 @@ fn read_gnu_strtab_entry(strtab: &[u8], offset: usize) -> Result<String, String>
     while end < strtab.len() && strtab[end] != b'\n' {
         end += 1;
     }
-    let name_bytes = &strtab[offset..end];
-    let name = std::str::from_utf8(name_bytes)
-        .map_err(|e| format!("invalid GNU strtab entry: {e}"))?
-        .trim_end_matches('/');
-    Ok(name.to_string())
+    // Bytes out. The `from_utf8` that stood here was the second of the two
+    // fatal decodes: a long member name that is not UTF-8 failed the whole
+    // archive, exactly as the 16-byte field did.
+    let mut name = strtab.get(offset..end).unwrap_or(&[]).to_vec();
+    while name.last() == Some(&b'/') {
+        name.pop();
+    }
+    Ok(name)
 }
 
 /// Align to 2-byte boundary.
@@ -1136,14 +1192,14 @@ fn rebuild_elf(data: &[u8], info: &ElfInfo, sections: &[ElfSection], keep: &[boo
 /// Options/modifiers for ar operations.
 #[derive(Debug, Clone)]
 struct ArOptions {
-    operation: char,                 // r, d, t, x, q, p
-    verbose: bool,                   // v
-    create_silently: bool,           // c
-    write_symtab: bool,              // s
-    update_only: bool,               // u
-    deterministic: bool,             // D
-    position_after: Option<String>,  // a <member>
-    position_before: Option<String>, // b/i <member>
+    operation: char,                  // r, d, t, x, q, p
+    verbose: bool,                    // v
+    create_silently: bool,            // c
+    write_symtab: bool,               // s
+    update_only: bool,                // u
+    deterministic: bool,              // D
+    position_after: Option<Vec<u8>>,  // a <member>
+    position_before: Option<Vec<u8>>, // b/i <member>
 }
 
 impl ArOptions {
@@ -1164,17 +1220,14 @@ impl ArOptions {
 /// Parse ar command-line flags and return (options, archive_path, member_files).
 /// One operand as text, or a refusal naming the bytes.
 ///
-/// **This is a real limit of this build, stated rather than hidden.** The `ar`
-/// format stores a member name in a 16-byte header field (or the `//` long-name
-/// table), and those are BYTES -- a name need not be valid UTF-8. This
-/// implementation carries member names as `String` from the header structs
-/// outward, so a name it cannot decode is one it cannot represent at all.
+/// **Only `ranlib` and `strip` still need this.** `ar` itself no longer does:
+/// its archive paths, member files and member names are carried as bytes end
+/// to end, so it neither refuses nor decodes them.
 ///
-/// Until 2026-09-14 the question never arose: `env::args()`'s iterator is a
-/// literal `unwrap`, so such an operand killed the process before `ar` ran.
-/// Refusing with the bytes in the message is strictly better than that, and it
-/// is honest about which layer is the obstacle -- see known-issues.md
-/// `B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER`.
+/// The two remaining personalities take file paths and still hold them as
+/// `String`, which is the same defect one binary over. Converting them is the
+/// obvious follow-up and is not done here only because it is a separate
+/// change with its own tests.
 fn decode_operand(arg: &OsStr) -> Result<String, String> {
     arg.to_str().map(str::to_string).ok_or_else(|| {
         format!(
@@ -1184,17 +1237,19 @@ fn decode_operand(arg: &OsStr) -> Result<String, String> {
     })
 }
 
-fn parse_ar_args(args: &[String]) -> Result<(ArOptions, String, Vec<String>), String> {
+fn parse_ar_args(args: &[OsString]) -> Result<(ArOptions, OsString, Vec<OsString>), String> {
     if args.is_empty() {
         return Err("no operation specified".into());
     }
 
     let mut opts = ArOptions::new();
-    let mut positional: Vec<String> = Vec::new();
+    let mut positional: Vec<OsString> = Vec::new();
     let mut i = 0;
 
-    // First arg is the flags string (like "rv" or "rcs")
-    let flags = &args[0];
+    // First arg is the flags string (like "rv" or "rcs"). Decoded, because
+    // every flag `ar` has is an ASCII letter -- a word that does not decode is
+    // not a flag string and every character test below simply misses.
+    let flags: &str = args[0].to_str().unwrap_or("");
     let chars = flags.chars().peekable();
 
     for ch in chars {
@@ -1247,13 +1302,13 @@ fn parse_ar_args(args: &[String]) -> Result<(ArOptions, String, Vec<String>), St
         let last_flag = flags.chars().last().unwrap_or('\0');
         if last_flag == 'a' || flags.contains('a') {
             if i < args.len() {
-                opts.position_after = Some(args[i].clone());
+                opts.position_after = Some(quoting::os_bytes(&args[i]).into_owned());
                 i += 1;
             }
         } else if last_flag == 'b' || last_flag == 'i' || flags.contains('b') || flags.contains('i')
         {
             if i < args.len() {
-                opts.position_before = Some(args[i].clone());
+                opts.position_before = Some(quoting::os_bytes(&args[i]).into_owned());
                 i += 1;
             }
         }
@@ -1283,13 +1338,8 @@ fn parse_ar_args(args: &[String]) -> Result<(ArOptions, String, Vec<String>), St
 
 /// Execute the ar operation.
 fn run_ar(args: &[OsString]) -> Result<(), String> {
-    // Decoded at the boundary; see `decode_operand` for why this
-    // build cannot carry the bytes further in.
-    let args: Vec<String> = args
-        .iter()
-        .map(|a| decode_operand(a))
-        .collect::<Result<_, _>>()?;
-    let args: &[String] = &args;
+    // No decode. An operand here is either an archive path, a file to add, or
+    // a member name to match, and none of the three is required to be text.
     let (opts, archive_path, member_files) = parse_ar_args(args)?;
 
     match opts.operation {
@@ -1308,7 +1358,11 @@ fn run_ar(args: &[OsString]) -> Result<(), String> {
 }
 
 /// `ar r` — insert or replace members.
-fn ar_replace(opts: &ArOptions, archive_path: &str, member_files: &[String]) -> Result<(), String> {
+fn ar_replace(
+    opts: &ArOptions,
+    archive_path: &OsStr,
+    member_files: &[OsString],
+) -> Result<(), String> {
     let mut archive = load_or_create_archive(archive_path, opts.create_silently)?;
 
     for file_path in member_files {
@@ -1348,14 +1402,14 @@ fn ar_replace(opts: &ArOptions, archive_path: &str, member_files: &[String]) -> 
             }
             archive.members[existing_idx] = new_member;
             if opts.verbose {
-                eprintln!("r - {member_name}");
+                eprintln!("r - {}", quoting::escape_unprintable(&member_name));
             }
         } else {
             // Insert at position
             let insert_idx = find_insert_position(&archive, opts);
             archive.members.insert(insert_idx, new_member);
             if opts.verbose {
-                eprintln!("a - {member_name}");
+                eprintln!("a - {}", quoting::escape_unprintable(&member_name));
             }
         }
     }
@@ -1366,16 +1420,20 @@ fn ar_replace(opts: &ArOptions, archive_path: &str, member_files: &[String]) -> 
 }
 
 /// `ar d` — delete members.
-fn ar_delete(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> Result<(), String> {
+fn ar_delete(
+    opts: &ArOptions,
+    archive_path: &OsStr,
+    member_names: &[OsString],
+) -> Result<(), String> {
     let data = fs::read(archive_path)
         .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let mut archive = Archive::parse(&data)?;
 
     for name in member_names {
-        if let Some(idx) = archive.find_member(name) {
+        if let Some(idx) = archive.find_member(&quoting::os_bytes(name)) {
             archive.members.remove(idx);
             if opts.verbose {
-                eprintln!("d - {name}");
+                eprintln!("d - {}", quoteaf_os(name));
             }
         } else {
             eprintln!("ar: {}: no such member", quoteaf_os(name));
@@ -1388,7 +1446,7 @@ fn ar_delete(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> R
 }
 
 /// `ar t` — list members.
-fn ar_list(opts: &ArOptions, archive_path: &str) -> Result<(), String> {
+fn ar_list(opts: &ArOptions, archive_path: &OsStr) -> Result<(), String> {
     let data = fs::read(archive_path)
         .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let archive = Archive::parse(&data)?;
@@ -1406,10 +1464,10 @@ fn ar_list(opts: &ArOptions, archive_path: &str) -> Result<(), String> {
                 member.header.gid,
                 member.header.size,
                 format_timestamp(member.header.mtime),
-                member.header.name,
+                quoting::escape_unprintable(&member.header.name),
             );
         } else {
-            let _ = writeln!(out, "{}", member.header.name);
+            let _ = writeln!(out, "{}", quoting::escape_unprintable(&member.header.name));
         }
     }
 
@@ -1417,7 +1475,11 @@ fn ar_list(opts: &ArOptions, archive_path: &str) -> Result<(), String> {
 }
 
 /// `ar x` — extract members.
-fn ar_extract(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> Result<(), String> {
+fn ar_extract(
+    opts: &ArOptions,
+    archive_path: &OsStr,
+    member_names: &[OsString],
+) -> Result<(), String> {
     let data = fs::read(archive_path)
         .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let archive = Archive::parse(&data)?;
@@ -1425,14 +1487,21 @@ fn ar_extract(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> 
     let extract_all = member_names.is_empty();
 
     for member in &archive.members {
-        if !extract_all && !member_names.iter().any(|n| n == &member.header.name) {
+        if !extract_all
+            && !member_names
+                .iter()
+                .any(|n| quoting::os_bytes(n).as_ref() == member.header.name.as_slice())
+        {
             continue;
         }
         if opts.verbose {
-            eprintln!("x - {}", member.header.name);
+            eprintln!("x - {}", quoting::escape_unprintable(&member.header.name));
         }
-        fs::write(&member.header.name, &member.data)
-            .map_err(|e| format!("cannot write {}: {e}", quoteaf_os(&member.header.name)))?;
+        // The member name IS the output path here, so it goes back to an
+        // OsString rather than through any text form.
+        let out_path = quoting::os_from_bytes(&member.header.name);
+        fs::write(&out_path, &member.data)
+            .map_err(|e| format!("cannot write {}: {e}", quoteaf_os(&out_path)))?;
     }
 
     Ok(())
@@ -1441,8 +1510,8 @@ fn ar_extract(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> 
 /// `ar q` — quick append (no duplicate check).
 fn ar_quick_append(
     opts: &ArOptions,
-    archive_path: &str,
-    member_files: &[String],
+    archive_path: &OsStr,
+    member_files: &[OsString],
 ) -> Result<(), String> {
     let mut archive = load_or_create_archive(archive_path, true)?;
 
@@ -1470,7 +1539,7 @@ fn ar_quick_append(
         });
 
         if opts.verbose {
-            eprintln!("a - {member_name}");
+            eprintln!("a - {}", quoting::escape_unprintable(&member_name));
         }
     }
 
@@ -1480,7 +1549,11 @@ fn ar_quick_append(
 }
 
 /// `ar p` — print member contents to stdout.
-fn ar_print(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> Result<(), String> {
+fn ar_print(
+    opts: &ArOptions,
+    archive_path: &OsStr,
+    member_names: &[OsString],
+) -> Result<(), String> {
     let data = fs::read(archive_path)
         .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let archive = Archive::parse(&data)?;
@@ -1491,11 +1564,15 @@ fn ar_print(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> Re
     let print_all = member_names.is_empty();
 
     for member in &archive.members {
-        if !print_all && !member_names.iter().any(|n| n == &member.header.name) {
+        if !print_all
+            && !member_names
+                .iter()
+                .any(|n| quoting::os_bytes(n).as_ref() == member.header.name.as_slice())
+        {
             continue;
         }
         if opts.verbose {
-            eprintln!("\n<{}>", member.header.name);
+            eprintln!("\n<{}>", quoting::escape_unprintable(&member.header.name));
         }
         let _ = out.write_all(&member.data);
     }
@@ -1504,7 +1581,7 @@ fn ar_print(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> Re
 }
 
 /// Update the symbol table of an existing archive (used by `ranlib` and `ar s`).
-fn ar_update_symtab(archive_path: &str) -> Result<(), String> {
+fn ar_update_symtab(archive_path: &OsStr) -> Result<(), String> {
     let data = fs::read(archive_path)
         .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let archive = Archive::parse(&data)?;
@@ -1518,25 +1595,28 @@ fn ar_update_symtab(archive_path: &str) -> Result<(), String> {
 // ============================================================================
 
 /// Load an existing archive, or create a new empty one.
-fn load_or_create_archive(path: &str, silent: bool) -> Result<Archive, String> {
+fn load_or_create_archive(path: &OsStr, silent: bool) -> Result<Archive, String> {
     if Path::new(path).exists() {
         let data = fs::read(path).map_err(|e| format!("cannot read {}: {e}", quoteaf_os(path)))?;
         Archive::parse(&data)
     } else {
         if !silent {
-            eprintln!("ar: creating {path}");
+            eprintln!("ar: creating {}", quoteaf_os(path));
         }
         Ok(Archive::new())
     }
 }
 
 /// Extract the basename from a file path for use as the archive member name.
-fn member_basename(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
-        .to_string()
+fn member_basename(path: &OsStr) -> Vec<u8> {
+    // Bytes throughout. This used to end `.and_then(|n| n.to_str()).unwrap_or(path)`,
+    // which silently fell back to the WHOLE PATH when the basename did not
+    // decode -- so a file with an undecodable name would have been stored in
+    // the archive under its full path, had the parser got this far.
+    Path::new(path).file_name().map_or_else(
+        || quoting::os_bytes(path).into_owned(),
+        |n| quoting::os_bytes(n).into_owned(),
+    )
 }
 
 /// Determine the insertion position based on position modifiers.
@@ -1555,7 +1635,7 @@ fn find_insert_position(archive: &Archive, opts: &ArOptions) -> usize {
 }
 
 /// Get file modification time as seconds since epoch.
-fn get_file_mtime(path: &str) -> Option<u64> {
+fn get_file_mtime(path: &OsStr) -> Option<u64> {
     let metadata = fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
     modified
@@ -1596,7 +1676,7 @@ fn run_ranlib(args: &[OsString]) -> Result<(), String> {
         } else if arg.starts_with('-') {
             return Err(format!("unknown option: {arg}"));
         } else {
-            archive_path = Some(arg.clone());
+            archive_path = Some(OsString::from(arg));
         }
     }
 
@@ -1854,12 +1934,50 @@ mod tests {
 
     // -- Helper: build a minimal archive from members --
 
+    /// An archive whose member name is not valid UTF-8 parses, and the name
+    /// survives.
+    ///
+    /// **This is the whole point of the conversion.** Until 2026-09-14 the
+    /// parser opened with `std::str::from_utf8(&hdr_bytes[0..16])?`, and that
+    /// `?` aborted the WHOLE archive -- so one member with an ordinary Latin-1
+    /// byte in its name made every member of a perfectly valid archive
+    /// unreachable, with `invalid name field` as the only explanation.
+    ///
+    /// `ar` elsewhere produces such archives; nothing in the format forbids
+    /// them.
+    #[test]
+    fn an_archive_whose_member_name_is_not_utf8_still_parses() {
+        let odd: &[u8] = b"od\xe9.o";
+        let mut ar = Archive::new();
+        ar.members.push(ArMember {
+            header: ArHeader {
+                name: odd.to_vec(),
+                mtime: 1234567890,
+                uid: 1000,
+                gid: 1000,
+                mode: 0o100644,
+                size: 2,
+            },
+            data: b"hi".to_vec(),
+        });
+        let bytes = ar.serialize(false);
+
+        let parsed = Archive::parse(&bytes).expect("a valid archive must parse");
+        assert_eq!(parsed.members.len(), 1);
+        assert_eq!(
+            parsed.members[0].header.name, odd,
+            "the name must survive as bytes, not become U+FFFD or fail"
+        );
+        // ...and it must be findable by those bytes.
+        assert_eq!(parsed.find_member(odd), Some(0));
+    }
+
     fn make_archive(members: &[(&str, &[u8])]) -> Vec<u8> {
         let mut ar = Archive::new();
         for (name, data) in members {
             ar.members.push(ArMember {
                 header: ArHeader {
-                    name: (*name).to_string(),
+                    name: (*name).as_bytes().to_vec(),
                     mtime: 1234567890,
                     uid: 1000,
                     gid: 1000,
@@ -1877,7 +1995,7 @@ mod tests {
         for (name, data) in members {
             ar.members.push(ArMember {
                 header: ArHeader {
-                    name: (*name).to_string(),
+                    name: (*name).as_bytes().to_vec(),
                     mtime: 0,
                     uid: 0,
                     gid: 0,
@@ -2195,7 +2313,7 @@ mod tests {
         let data = make_archive(&[("foo.o", b"data")]);
         let ar = Archive::parse(&data).unwrap();
         assert_eq!(ar.members.len(), 1);
-        assert_eq!(ar.members[0].header.name, "foo.o");
+        assert_eq!(ar.members[0].header.name, b"foo.o");
     }
 
     #[test]
@@ -2204,7 +2322,7 @@ mod tests {
         let name = "123456789012345";
         let data = make_archive(&[(name, b"data")]);
         let ar = Archive::parse(&data).unwrap();
-        assert_eq!(ar.members[0].header.name, name);
+        assert_eq!(ar.members[0].header.name, name.as_bytes());
     }
 
     #[test]
@@ -2213,15 +2331,15 @@ mod tests {
         let name = "very_long_object_filename.o";
         let data = make_archive(&[(name, b"data")]);
         let ar = Archive::parse(&data).unwrap();
-        assert_eq!(ar.members[0].header.name, name);
+        assert_eq!(ar.members[0].header.name, name.as_bytes());
     }
 
     #[test]
     fn test_bsd_name_decode() {
         let raw_name = "#1/8";
         let member_data = b"test.o\0\0real_data";
-        let (name, actual) = decode_bsd_name(raw_name, member_data).unwrap();
-        assert_eq!(name, "test.o");
+        let (name, actual) = decode_bsd_name(raw_name.as_bytes(), member_data).unwrap();
+        assert_eq!(name, b"test.o");
         assert_eq!(actual, b"real_data");
     }
 
@@ -2229,8 +2347,8 @@ mod tests {
     fn test_bsd_name_exact_length() {
         let raw_name = "#1/4";
         let member_data = b"ab.odata";
-        let (name, actual) = decode_bsd_name(raw_name, member_data).unwrap();
-        assert_eq!(name, "ab.o");
+        let (name, actual) = decode_bsd_name(raw_name.as_bytes(), member_data).unwrap();
+        assert_eq!(name, b"ab.o");
         assert_eq!(actual, b"data");
     }
 
@@ -2238,9 +2356,9 @@ mod tests {
     fn test_gnu_strtab_entry() {
         let strtab = b"first.o/\nsecond_long_name.o/\n";
         let name1 = read_gnu_strtab_entry(strtab, 0).unwrap();
-        assert_eq!(name1, "first.o");
+        assert_eq!(name1, b"first.o");
         let name2 = read_gnu_strtab_entry(strtab, 9).unwrap();
-        assert_eq!(name2, "second_long_name.o");
+        assert_eq!(name2, b"second_long_name.o");
     }
 
     #[test]
@@ -2268,7 +2386,7 @@ mod tests {
             data: b"aaa".to_vec(),
         });
         assert_eq!(ar.members.len(), 1);
-        assert_eq!(ar.members[0].header.name, "a.o");
+        assert_eq!(ar.members[0].header.name, b"a.o");
     }
 
     #[test]
@@ -2287,7 +2405,7 @@ mod tests {
         });
 
         // Replace
-        if let Some(idx) = ar.find_member("a.o") {
+        if let Some(idx) = ar.find_member(b"a.o") {
             ar.members[idx].data = b"new".to_vec();
             ar.members[idx].header.size = 3;
         }
@@ -2300,9 +2418,9 @@ mod tests {
     fn test_insert_preserves_order() {
         let data = make_archive(&[("a.o", b"1"), ("b.o", b"2"), ("c.o", b"3")]);
         let ar = Archive::parse(&data).unwrap();
-        assert_eq!(ar.members[0].header.name, "a.o");
-        assert_eq!(ar.members[1].header.name, "b.o");
-        assert_eq!(ar.members[2].header.name, "c.o");
+        assert_eq!(ar.members[0].header.name, b"a.o");
+        assert_eq!(ar.members[1].header.name, b"b.o");
+        assert_eq!(ar.members[2].header.name, b"c.o");
     }
 
     // ====================================================================
@@ -2313,12 +2431,12 @@ mod tests {
     fn test_delete_member() {
         let data = make_archive(&[("a.o", b"1"), ("b.o", b"2"), ("c.o", b"3")]);
         let mut ar = Archive::parse(&data).unwrap();
-        if let Some(idx) = ar.find_member("b.o") {
+        if let Some(idx) = ar.find_member(b"b.o") {
             ar.members.remove(idx);
         }
         assert_eq!(ar.members.len(), 2);
-        assert_eq!(ar.members[0].header.name, "a.o");
-        assert_eq!(ar.members[1].header.name, "c.o");
+        assert_eq!(ar.members[0].header.name, b"a.o");
+        assert_eq!(ar.members[1].header.name, b"c.o");
     }
 
     #[test]
@@ -2327,7 +2445,7 @@ mod tests {
         let mut ar = Archive::parse(&data).unwrap();
         ar.members.remove(0);
         assert_eq!(ar.members.len(), 1);
-        assert_eq!(ar.members[0].header.name, "b.o");
+        assert_eq!(ar.members[0].header.name, b"b.o");
     }
 
     #[test]
@@ -2336,14 +2454,14 @@ mod tests {
         let mut ar = Archive::parse(&data).unwrap();
         ar.members.pop();
         assert_eq!(ar.members.len(), 1);
-        assert_eq!(ar.members[0].header.name, "a.o");
+        assert_eq!(ar.members[0].header.name, b"a.o");
     }
 
     #[test]
     fn test_delete_nonexistent() {
         let data = make_archive(&[("a.o", b"1")]);
         let ar = Archive::parse(&data).unwrap();
-        assert!(ar.find_member("nope.o").is_none());
+        assert!(ar.find_member(b"nope.o").is_none());
     }
 
     // ====================================================================
@@ -2354,8 +2472,12 @@ mod tests {
     fn test_list_members() {
         let data = make_archive(&[("x.o", b"xx"), ("y.o", b"yy")]);
         let ar = Archive::parse(&data).unwrap();
-        let names: Vec<&str> = ar.members.iter().map(|m| m.header.name.as_str()).collect();
-        assert_eq!(names, vec!["x.o", "y.o"]);
+        let names: Vec<&[u8]> = ar
+            .members
+            .iter()
+            .map(|m| m.header.name.as_slice())
+            .collect();
+        assert_eq!(names, vec![b"x.o".as_slice(), b"y.o".as_slice()]);
     }
 
     #[test]
@@ -2389,7 +2511,7 @@ mod tests {
     fn test_extract_specific_member() {
         let data = make_archive(&[("a.o", b"aaa"), ("b.o", b"bbb"), ("c.o", b"ccc")]);
         let ar = Archive::parse(&data).unwrap();
-        let idx = ar.find_member("b.o").unwrap();
+        let idx = ar.find_member(b"b.o").unwrap();
         assert_eq!(ar.members[idx].data, b"bbb");
     }
 
@@ -2468,7 +2590,7 @@ mod tests {
             hdr.gid,
             hdr.size,
             format_timestamp(hdr.mtime),
-            hdr.name
+            quoting::escape_unprintable(&hdr.name)
         );
         assert!(formatted.contains("100644"));
         assert!(formatted.contains("1000/1000"));
@@ -2581,9 +2703,9 @@ mod tests {
             },
         );
 
-        assert_eq!(ar.members[0].header.name, "a.o");
-        assert_eq!(ar.members[1].header.name, "b.o");
-        assert_eq!(ar.members[2].header.name, "c.o");
+        assert_eq!(ar.members[0].header.name, b"a.o");
+        assert_eq!(ar.members[1].header.name, b"b.o");
+        assert_eq!(ar.members[2].header.name, b"c.o");
     }
 
     #[test]
@@ -2641,9 +2763,9 @@ mod tests {
             },
         );
 
-        assert_eq!(ar.members[0].header.name, "a.o");
-        assert_eq!(ar.members[1].header.name, "b.o");
-        assert_eq!(ar.members[2].header.name, "c.o");
+        assert_eq!(ar.members[0].header.name, b"a.o");
+        assert_eq!(ar.members[1].header.name, b"b.o");
+        assert_eq!(ar.members[2].header.name, b"c.o");
     }
 
     #[test]
@@ -2973,7 +3095,7 @@ mod tests {
         let with_index = ar.serialize(true);
         let parsed = Archive::parse(&with_index).unwrap();
         assert_eq!(parsed.members.len(), 1);
-        assert_eq!(parsed.members[0].header.name, "obj.o");
+        assert_eq!(parsed.members[0].header.name, b"obj.o");
     }
 
     // ====================================================================
@@ -3030,7 +3152,7 @@ mod tests {
         let data = make_archive(&[("only.o", b"single member data")]);
         let ar = Archive::parse(&data).unwrap();
         assert_eq!(ar.members.len(), 1);
-        assert_eq!(ar.members[0].header.name, "only.o");
+        assert_eq!(ar.members[0].header.name, b"only.o");
         assert_eq!(ar.members[0].data, b"single member data");
     }
 
@@ -3039,7 +3161,7 @@ mod tests {
         let name = "this_is_a_very_long_object_file_name_that_exceeds_sixteen_characters.o";
         let data = make_archive(&[(name, b"data")]);
         let ar = Archive::parse(&data).unwrap();
-        assert_eq!(ar.members[0].header.name, name);
+        assert_eq!(ar.members[0].header.name, name.as_bytes());
     }
 
     #[test]
@@ -3072,7 +3194,7 @@ mod tests {
         let ar = Archive::parse(&data).unwrap();
         assert_eq!(ar.members.len(), 50);
         for (i, member) in ar.members.iter().enumerate() {
-            assert_eq!(member.header.name, format!("m{i:03}.o"));
+            assert_eq!(member.header.name, format!("m{i:03}.o").into_bytes());
         }
     }
 
@@ -3088,9 +3210,9 @@ mod tests {
 
     #[test]
     fn test_member_basename() {
-        assert_eq!(member_basename("foo.o"), "foo.o");
-        assert_eq!(member_basename("/path/to/bar.o"), "bar.o");
-        assert_eq!(member_basename("./local.o"), "local.o");
+        assert_eq!(member_basename(OsStr::new("foo.o")), b"foo.o");
+        assert_eq!(member_basename(OsStr::new("/path/to/bar.o")), b"bar.o");
+        assert_eq!(member_basename(OsStr::new("./local.o")), b"local.o");
     }
 
     #[test]
@@ -3123,21 +3245,24 @@ mod tests {
 
     #[test]
     fn test_parse_ar_args_basic() {
-        let args: Vec<String> = ["rcs", "libfoo.a", "foo.o", "bar.o"]
+        let args: Vec<OsString> = ["rcs", "libfoo.a", "foo.o", "bar.o"]
             .iter()
-            .map(|s| s.to_string())
+            .map(OsString::from)
             .collect();
         let (opts, archive, members) = parse_ar_args(&args).unwrap();
         assert_eq!(opts.operation, 'r');
         assert!(opts.create_silently);
         assert!(opts.write_symtab);
-        assert_eq!(archive, "libfoo.a");
-        assert_eq!(members, vec!["foo.o", "bar.o"]);
+        assert_eq!(archive, OsStr::new("libfoo.a"));
+        assert_eq!(
+            members,
+            vec![OsString::from("foo.o"), OsString::from("bar.o")]
+        );
     }
 
     #[test]
     fn test_parse_ar_args_no_op() {
-        let args: Vec<String> = vec!["v".into()];
+        let args: Vec<OsString> = vec!["v".into()];
         assert!(parse_ar_args(&args).is_err());
     }
 

@@ -940,7 +940,7 @@ work is real but it is not research.
 and because a reader looking at a 176-line baseline needs to know it is one
 wall and not 176 separate jobs.
 
-## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) — OPEN
+## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) -- member names now carry as bytes; ranlib/strip operands still do not
 
 `ar` no longer dies on an operand that is not valid UTF-8, but it does not
 handle one either: it **refuses**, naming the bytes, at `decode_operand`.
@@ -988,6 +988,23 @@ members.
 
 **Reachability:** `ar` is one of only three argv-baseline binaries on the
 image, so this one is worth doing, unlike most of that backlog.
+
+**Done 2026-09-14 for `ar` itself.** `ArHeader.name` is `Vec<u8>`, and all
+three fatal decodes are gone — the 16-byte field, the GNU `//` table entry, and
+the BSD `#1/N` tail. The structural markers match on bytes, as the format
+defines them, so nothing in the parser needs the name to be text. A test builds
+an archive whose member name holds `0xE9`, parses it, and finds the member by
+those bytes; reintroducing the first decode makes it fail with the original
+`invalid name field`, which is how the test is known to measure something.
+
+Display sites go through `escape_unprintable`, so an unprintable byte in a
+member name cannot forge a line of `ar t` output. `ar x` writes the member out
+under its own name as an `OsString` rather than any text form.
+
+**Still open, and narrower than the heading:** the `ranlib` and `strip`
+personalities in the same binary hold their file-path operands as `String` and
+route them through `decode_operand`, which now serves only them. Same defect,
+one program over; a separate change with its own tests.
 
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 

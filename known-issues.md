@@ -144596,6 +144596,60 @@ That is strictly better than before -- it used to be true of *every* copy --
 and it is worth knowing that the remaining case exists rather than wondering
 why one copy behaves differently from another.
 
+## TD-C-THE-PANE-CLOSE-ANIMATION-TEST-IS-FLAKY-UNDER-LOAD
+
+**Date:** 2026-09-14. **Lane:** C. **OPEN.**
+
+**In short:** one test in the desktop suite fails occasionally and passes on a
+re-run, which is the worst kind of failure: it teaches whoever sees it to run
+the suite again instead of reading it. Nothing is wrong with the program -- the
+test asks a question about timing that the test harness cannot answer reliably
+when the machine is busy.
+
+**What it is.** `session::tests::closing_the_pane_slides_it_out_and_it_stays_out`
+(`gui/desktop/src/session/tests.rs:3119`), asserting
+`"the close snapped instead of sliding"`.
+
+The test opens the notification pane, steps 200 frames so the open animation
+finishes, sends the close key, pumps, and then asserts the pane is **still
+visible** -- that is, that closing *starts an animation* rather than vanishing.
+It is a good thing to test and the assertion is the right one.
+
+**What was measured, 2026-09-14:**
+
+| run | result |
+|---|---|
+| full `-p desktop` suite, 35.9 s wall (compiling, machine loaded) | **FAILED** |
+| same test alone, three consecutive runs | passed, passed, passed |
+| full `-p desktop` suite again, 12.9 s wall | passed (2976) |
+
+**Where the nondeterminism is not.** The pane animation is driven by an
+explicit `pane.tick(dt)` with the delta handed in, and there is no
+`Instant::now` or `SystemTime::now` anywhere in `notif_pane.rs`. So the
+animation itself is deterministic given a frame count; this is not an
+animation-on-wall-clock bug.
+
+**Where it is likely to be.** The test drives a real session harness across a
+process boundary -- `desktop.borrow_mut().send_input(...)` then
+`session.pump()`. How many frames the shell has processed by the time `pump()`
+returns is not fixed by the test, so under load the close animation can be
+further along than the assertion expects. The assertion is about a moment; the
+harness does not pin the moment.
+
+**What the proper fix looks like.** Make the test assert over a *bounded number
+of frames it steps itself* rather than at whatever instant `pump()` returns:
+send the close, then step one frame, and assert visible; step until not
+visible, and assert that took more than one frame. That states "closing is
+animated" without depending on how much the harness did while nobody was
+looking. Do not fix it by loosening the assertion -- "eventually invisible" is
+true of a snap, which is the thing it exists to catch.
+
+**Why it is filed rather than fixed now:** it was found while deleting an
+unrelated cached field, the failure is in a test rather than in shipped
+behaviour, and rewriting a cross-process timing test deserves its own change
+with its own re-runs rather than being folded into a deletion. It has not been
+seen twice; if it recurs, that is worth recording here rather than re-running.
+
 ## TD-C-CREATING-A-FILE-THAT-ALREADY-EXISTS-DESTROYS-IT-SILENTLY
 
 **Date:** 2026-09-14. **Lane:** C. **Repaired the same hour; kept as a trap.**

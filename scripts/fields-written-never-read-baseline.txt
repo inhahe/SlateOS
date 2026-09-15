@@ -161,7 +161,8 @@ apps/remotedesktop/src/main.rs:content_size_bytes
 #
 gui/desktop/src/backup_settings.rs:last_backup_timestamp
 gui/desktop/src/bluetooth.rs:discoverable
-# TRIAGED 2026-09-14, REAL, and the SECOND instance today of one pattern.
+# FIXED 2026-09-14 by deletion, as was the contacts one. Kept for the
+# reasoning, which is the pattern:
 #   `record_invocation` sets `loading_timeout = self.response_time_avg_ms >
 #   200.0`, and `is_slow()` twelve lines below returns
 #   `self.response_time_avg_ms > 200.0`. The same predicate, cached in one
@@ -173,7 +174,6 @@ gui/desktop/src/bluetooth.rs:discoverable
 #   that has to be refreshed by hand is the stale half of a pair waiting
 #   to happen, and this gate finds them because the cache is what nobody
 #   reads. Fix in both cases is a deletion, keeping the live computation.
-gui/desktop/src/context_ext.rs:loading_timeout
 gui/desktop/src/lib.rs:shortcut_message
 gui/desktop/src/sound_settings.rs:volume_override
 gui/desktop/src/sound_settings.rs:output_device_id

@@ -49,6 +49,17 @@
 //! against the constant, and by comparing against a reference implementation
 //! on known hardware, and by nothing else.
 //!
+//! **One partial check exists, and it catches the direction that flatters.**
+//! Lane B's point: a reported rate has a physical ceiling. `clock_hz` times a
+//! plausible operations-per-cycle bounds what the hardware can do, so an
+//! *inflated* `OPS_PER_ITERATION` walks the reported figure through that
+//! ceiling. The old constant is the worked example — 5,200 Mops/s against the
+//! 1,288 actually measured here. It cannot catch an undercount and cannot tell
+//! four operations per iteration from five, but an inflated count is the
+//! failure mode that produces a flattering number, and a flattering number is
+//! the one nobody questions. So the count is checkable from above by physics
+//! and from below by nothing.
+//!
 //! That limit is worth stating because the obvious test — vary the input and
 //! assert the output varies — passes here regardless. Lane B hit the same
 //! edge on `patch -l` the same day: their probe confirmed the flag was live

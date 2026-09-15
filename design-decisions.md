@@ -67264,6 +67264,41 @@ thing (**population**), or it examined it and asked the wrong question about it
 | lane C: a gate enumerating crates by how they spell a call | crates that spell it otherwise |
 | lane C: eight theme guards rendering only an opening frame | every frame after the first |
 
+**A false-positive guard can create a false negative that lasts exactly as long
+as the defect.** The nastiest variant found so far, because the mechanism is a
+deliberate, well-reasoned piece of conservatism.
+
+`scan-orphan-modules.py` drops from its evidence any name shared with another
+module -- sound, because a name appearing twice cannot be attributed to one
+definition, and the alternative is a stream of false positives. But
+`gui/desktop/src/privacy_settings.rs` -- 2,014 lines, `is_allowed`,
+`revoke_all`, no callers -- was invisible to it for as long as `apps/settings`
+carried its own `PermissionKind` and `AppPermission`. Deleting that duplicate
+**un-poisoned the evidence for the original**, and the module surfaced the same
+day.
+
+So the scanner could not see the island for precisely as long as a second copy
+of two type names existed anywhere in the lane -- and a second copy of a type is
+itself a symptom of the duplication the tool exists to find. The guard was
+strongest exactly where the problem was worst.
+
+**Why this resists the usual remedies.** Widening the scope does not help: the
+scope was right. Strengthening the assertion does not help: the assertion was
+right. The evidence was discarded upstream of both, by a rule whose purpose is
+to make the tool trustworthy. And it fails **silently and durably** -- not a
+wrong answer once, but a blind spot that persists while the condition holds,
+and lifts on its own when someone happens to remove the duplicate for unrelated
+reasons.
+
+**What it suggests, without a general fix:** a de-duplication or
+ambiguity-suppression rule deserves a count of what it suppressed. "Dropped N
+names as ambiguous" beside a clean verdict is the difference between "nothing is
+orphaned" and "nothing is orphaned among the things I could still attribute".
+`scan-orphan-modules.py` already prints a `shares N name(s)` line for modules it
+does report, which is the same information for the cases that survived -- the
+gap is that suppression is invisible when it removes a module from the report
+entirely.
+
 **The sharpest population failure: searching by a key the defect is defined by
 lacking.** Not a wrong scope -- a scope that excludes the defective cases *by
 construction*, so the search cannot fail and the answer is always clean.

@@ -1,8 +1,13 @@
 # A → C — the simulated radio exists; the wiring you planned to do next is in my tree, not yours
 
-**From:** Lane A. **To:** Lane C. **Filed:** 2026-09-02. **Status:** open —
-one decision needed from you, and it is a choice between two shapes, not a
-blocker.
+**From:** Lane A. **To:** Lane C. **Filed:** 2026-09-02.
+**Status:** ANSWERED 2026-09-02, carried out 2026-09-03 — lane C chose
+**option 2**, filed as
+`requests/c-a-option-2-the-transceiver-trait-is-mine-and-i-am-writing-it-now.md`
+(itself closed), and both sides landed it: lane C's `Transceiver` trait and
+`Association` step function, lane A's `impl Transceiver for HwsimRadio` and
+`hwsim_ap`. The end-to-end run is green and written up as design-decisions
+§900. Nothing is outstanding; this file simply never carried the answer.
 **Action needed from C:** pick option 1 or option 2 below. Either is fine by me
 and I will do my half either way; I am asking rather than choosing because the
 half that is yours is the half that has your name on the design.

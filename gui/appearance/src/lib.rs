@@ -221,6 +221,89 @@ impl PaletteSource for AppearanceSettings {
 }
 
 // ============================================================================
+// Image fit
+// ============================================================================
+
+/// How a wallpaper is scaled and positioned in the space it is drawn in.
+///
+/// Lives here rather than in `gui/desktop` because two crates need it and only
+/// one of them can own it: the shell draws the picture and the Settings app
+/// offers the choice. It was in `gui/desktop/src/wallpaper.rs` until
+/// 2026-09-14, which made it unreachable from `appearance.yaml` -- the setting
+/// could name a picture and not how to place it. design-decisions 852 records
+/// why that shipped as a gap rather than as a second copy of this enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFit {
+    /// Scale to cover the entire area, cropping if necessary.
+    Fill,
+    /// Scale to fit within the area, letterboxing if necessary.
+    Fit,
+    /// Stretch to exactly match the area (may distort aspect ratio).
+    Stretch,
+    /// Repeat the image in a tile pattern.
+    Tile,
+    /// Center the image at native size (no scaling).
+    Center,
+    /// Span the image across all monitors (multi-monitor setups).
+    Span,
+}
+
+impl ImageFit {
+    /// Every fit, in the order a chooser should offer them.
+    ///
+    /// Ordered here for the reason `ThemeMode::ALL` states: two front ends that
+    /// listed the variants themselves would be free to drift apart. Cropping
+    /// first, because it is the default and what most pictures want.
+    pub const ALL: &'static [Self] = &[
+        Self::Fill,
+        Self::Fit,
+        Self::Stretch,
+        Self::Tile,
+        Self::Center,
+        Self::Span,
+    ];
+
+    /// The name this fit is written as in `appearance.yaml`.
+    ///
+    /// The same six strings `gui/desktop`'s own wallpaper config already used,
+    /// so a file written by the older code still reads.
+    #[must_use]
+    pub fn yaml_name(self) -> &'static str {
+        match self {
+            Self::Fill => "fill",
+            Self::Fit => "fit",
+            Self::Stretch => "stretch",
+            Self::Tile => "tile",
+            Self::Center => "center",
+            Self::Span => "span",
+        }
+    }
+
+    /// The fit named by `name`, or `None` if it names nothing.
+    #[must_use]
+    pub fn from_yaml_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|f| f.yaml_name() == name)
+    }
+
+    /// What a chooser shows for this fit.
+    ///
+    /// Says what happens to the picture rather than naming the algorithm: a
+    /// user choosing a wallpaper knows whether they mind it being cropped, and
+    /// does not know what "fill" means.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fill => "Fill the screen (may crop)",
+            Self::Fit => "Fit the whole picture (may letterbox)",
+            Self::Stretch => "Stretch to fit (may distort)",
+            Self::Tile => "Tile",
+            Self::Center => "Centre at original size",
+            Self::Span => "Span all monitors",
+        }
+    }
+}
+
+// ============================================================================
 // Theme mode
 // ============================================================================
 

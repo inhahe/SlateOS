@@ -968,8 +968,16 @@ mod tests {
         };
         let a = parse(b"A\xff\xfeB");
         let b = parse(b"A\xfe\xffB");
-        assert_eq!(a, b"A\xff\xfeB".to_vec(), "label was not preserved verbatim");
-        assert_eq!(b, b"A\xfe\xffB".to_vec(), "label was not preserved verbatim");
+        assert_eq!(
+            a,
+            b"A\xff\xfeB".to_vec(),
+            "label was not preserved verbatim"
+        );
+        assert_eq!(
+            b,
+            b"A\xfe\xffB".to_vec(),
+            "label was not preserved verbatim"
+        );
         assert_ne!(a, b, "two different on-disk labels collided");
     }
 
@@ -987,10 +995,7 @@ mod tests {
     #[test]
     fn format_uuid_groups_the_bytes_8_4_4_4_12() {
         assert_eq!(format_uuid(UUID_BYTES), UUID_TEXT);
-        assert_eq!(
-            format_uuid([0; 16]),
-            "00000000-0000-0000-0000-000000000000"
-        );
+        assert_eq!(format_uuid([0; 16]), "00000000-0000-0000-0000-000000000000");
         assert_eq!(
             format_uuid([0xFF; 16]),
             "ffffffff-ffff-ffff-ffff-ffffffffffff"
@@ -1048,7 +1053,10 @@ mod tests {
     fn ntfs_reads_the_volume_serial() {
         let mut info = blank("ntfs");
         parse_ntfs_info(
-            &image(0x100, &[(0x48, &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])]),
+            &image(
+                0x100,
+                &[(0x48, &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])],
+            ),
             &mut info,
         );
         assert_eq!(info.uuid, "EFCDAB8967452301");

@@ -144495,6 +144495,19 @@ There is a picker, so it is not guesswork -- it is a `FileDialog::save()`, a
 field on the app, routing in `handle_event`, and somewhere to report the result,
 which that program currently has no status line for. Small, and open.
 
+**FIXED 2026-09-14.** Ctrl+E puts up `guitk::dialog::FileDialog::save()`, the
+history is written through `safeio::write_str_atomically`, and the status bar
+reports the path -- because a generated password is on screen and a file on
+disk is not, so the write is the one thing this window cannot otherwise show.
+Exporting an empty history is refused with a reason rather than producing an
+empty file of passwords. Four tests drive the whole path and read the file back
+off the disk; three of them go red if the write is removed.
+
+Note what was *not* done: persistence. The entry below is still right that this
+program keeps nothing across runs, and for a password **generator** that is
+correct rather than a gap -- passwords you generated and did not use should not
+linger on disk. The export is the deliberate escape hatch, and it now exists.
+
 **Sharper, and worse, checked 2026-09-14:** `apps/passwordgen` persists
 *nothing*. No `settingsfile`, no load, no save, no config file of any kind --
 the history exists for as long as the window is open and is gone when it

@@ -23,6 +23,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::kv;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -53,8 +54,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// because the whole point is that they do not remember either.
 const SAMPLE_AND_PROGRESS_LINES: [&str; 2] = [
     "Three included decks -- these came with the app, not from you.",
-    "No progress is saved: this app has no filesystem access, so every review schedule resets when the window closes.",
+    "Nothing is saved automatically -- press Ctrl+S to write the deck, schedules included, or every review resets when the window closes.",
 ];
+
+/// The most of a deck file one open will read.
+///
+/// Reported when it bites. A cut deck file parses: every complete card block
+/// in it is valid, so the tail is simply missing, and **a deck short of its
+/// last hundred cards looks like a deck that only had the first ones.**
+pub const MAX_DECK_BYTES: usize = 8 * 1024 * 1024;
 
 const CARD_HEADING_SIZE: f32 = 11.0;
 const CARD_FRONT_SIZE: f32 = 13.0;
@@ -129,6 +137,55 @@ struct ReviewData {
 }
 
 impl ReviewData {
+    /// One line of the deck format: every field, in declaration order.
+    ///
+    /// **The format used to carry front, back and tags and nothing else**, so
+    /// an export and a re-import returned every card to new. In a spaced
+    /// repetition program that is close to worthless and it is invisible: a
+    /// restored deck with a reset schedule looks exactly like a restored deck,
+    /// until four hundred mature cards all come due on the same morning.
+    fn to_line(&self) -> String {
+        format!(
+            "{} {:.4} {} {} {} {} {} {} {}",
+            self.repetitions,
+            self.ease_factor,
+            self.interval_days,
+            self.last_review_day,
+            self.total_reviews,
+            self.rating_counts[0],
+            self.rating_counts[1],
+            self.rating_counts[2],
+            self.rating_counts[3],
+        )
+    }
+
+    /// Read a line written by [`to_line`](Self::to_line).
+    ///
+    /// `None` when the line is not one of ours. The caller counts those and
+    /// says so rather than quietly substituting a new card's schedule, which
+    /// would be the same silent reset one level down.
+    fn from_line(line: &str) -> Option<Self> {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        // Exactly nine, so a short line and a line with junk appended are both
+        // rejected rather than half-read.
+        if f.len() != 9 {
+            return None;
+        }
+        let num = |i: usize| -> Option<u32> { f.get(i)?.parse().ok() };
+        let ease_factor: f32 = f.get(1)?.parse().ok()?;
+        if !ease_factor.is_finite() || ease_factor <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            repetitions: num(0)?,
+            ease_factor,
+            interval_days: num(2)?,
+            last_review_day: num(3)?,
+            total_reviews: num(4)?,
+            rating_counts: [num(5)?, num(6)?, num(7)?, num(8)?],
+        })
+    }
+
     fn new() -> Self {
         Self {
             repetitions: 0,
@@ -209,7 +266,78 @@ impl ReviewData {
     }
 }
 
+/// A deck name reduced to something that can be a filename.
+///
+/// Only the three characters a path cannot contain are replaced. A name is the
+/// user's, and rewriting more of it than necessary means they cannot find the
+/// file by the name they gave the deck.
+fn sanitise(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | '\0') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        String::from("deck")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// What to call a deck read from `path`.
+///
+/// The file's own stem, because that is what the user will look for in the
+/// deck list. A name that is not valid text is **not** forced through a lossy
+/// conversion -- that would silently rename their file in the one place they
+/// would go looking for it.
+fn deck_name_of(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| String::from("Imported deck"), str::to_owned)
+}
+
 // ── Card ────────────────────────────────────────────────────────────
+/// What a card block said about its review history.
+///
+/// Three states, and the middle one is the reason this is an enum rather than
+/// the `Option<Option<ReviewData>>` it started as. Absent and Unreadable both
+/// leave a new card, and they mean opposite things: absent is what an older
+/// file legitimately contains, unreadable is a file that lost something. A
+/// type that spells them the same way invites a caller to treat them the same
+/// way, which is exactly the silent reset this commit exists to remove.
+enum ReviewLine {
+    /// No `R:` line. A new card -- what a file written before this format
+    /// change contains, and correct.
+    Absent,
+    /// An `R:` line this version could not read. The card is still imported
+    /// and starts again as new, and the count says so.
+    Unreadable,
+    /// A history that parsed.
+    Present(ReviewData),
+}
+
+/// What one import did.
+///
+/// Two numbers because two different things can go wrong, and "40 cards
+/// imported" hides the second: a card whose review line this version cannot
+/// read is still imported, and starts again as new. Saying so is the whole
+/// difference between a backup and a deck that looks restored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Imported {
+    /// Cards added to the deck.
+    pub cards: u32,
+    /// Of those, how many arrived with a review line that would not parse and
+    /// therefore start again from new.
+    pub history_unreadable: u32,
+}
+
 #[derive(Clone, Debug)]
 struct Card {
     id: u32,
@@ -420,6 +548,11 @@ impl Deck {
                 let tags: Vec<String> = card.tags.iter().map(|t| escape_tag(t)).collect();
                 out.push_str(&format!("T: {}\n", tags.join(",")));
             }
+            // Only for a card with a history. Its absence means a new card,
+            // which is what an older file without this line should import as.
+            if card.review.total_reviews > 0 {
+                out.push_str(&format!("R: {}\n", card.review.to_line()));
+            }
             out.push('\n');
         }
         out
@@ -434,24 +567,21 @@ impl Deck {
     /// anything this program wrote comes back byte for byte.
     /// Read a deck back from `export_text`'s format. Same story: no caller.
     #[allow(dead_code, reason = "no import/export control yet -- see todo.txt")]
-    fn import_text(&mut self, text: &str) -> u32 {
-        let mut count = 0u32;
+    fn import_text(&mut self, text: &str) -> Imported {
+        let mut done = Imported::default();
         let mut front: Option<String> = None;
         let mut back: Option<String> = None;
         let mut tags: Vec<String> = Vec::new();
+        let mut review = ReviewLine::Absent;
 
         for line in text.lines() {
             if line.trim().is_empty() {
-                // End of a card block
                 if let (Some(f), Some(b)) = (front.take(), back.take()) {
-                    let id = self.next_card_id;
-                    self.next_card_id = self.next_card_id.saturating_add(1);
-                    let mut card = Card::new(id, &f, &b);
-                    card.tags = tags.clone();
-                    self.cards.push(card);
-                    count = count.saturating_add(1);
+                    let seen = std::mem::replace(&mut review, ReviewLine::Absent);
+                    self.push_imported(&f, &b, &tags, seen, &mut done);
                     tags.clear();
                 }
+                review = ReviewLine::Absent;
                 continue;
             }
             // Match the prefix on the raw line first so that leading and
@@ -466,19 +596,46 @@ impl Deck {
                 'T' => {
                     tags = split_tags(value);
                 }
+                'R' => {
+                    review = ReviewData::from_line(value)
+                        .map_or(ReviewLine::Unreadable, ReviewLine::Present);
+                }
                 _ => {}
             }
         }
         // Handle last card if no trailing blank line
         if let (Some(f), Some(b)) = (front.take(), back.take()) {
-            let id = self.next_card_id;
-            self.next_card_id = self.next_card_id.saturating_add(1);
-            let mut card = Card::new(id, &f, &b);
-            card.tags = tags;
-            self.cards.push(card);
-            count = count.saturating_add(1);
+            self.push_imported(&f, &b, &tags, review, &mut done);
         }
-        count
+        done
+    }
+
+    /// Add one parsed card, with whatever history came with it.
+    ///
+    /// Factored out because the loop and the trailing-card case both do it,
+    /// and the two copies had already drifted once: the loop cloned the tags
+    /// and the tail moved them.
+    fn push_imported(
+        &mut self,
+        front: &str,
+        back: &str,
+        tags: &[String],
+        review: ReviewLine,
+        done: &mut Imported,
+    ) {
+        let id = self.next_card_id;
+        self.next_card_id = self.next_card_id.saturating_add(1);
+        let mut card = Card::new(id, front, back);
+        card.tags = tags.to_vec();
+        match review {
+            ReviewLine::Present(data) => card.review = data,
+            ReviewLine::Unreadable => {
+                done.history_unreadable = done.history_unreadable.saturating_add(1);
+            }
+            ReviewLine::Absent => {}
+        }
+        self.cards.push(card);
+        done.cards = done.cards.saturating_add(1);
     }
 }
 
@@ -540,7 +697,11 @@ fn unescape_field(s: &str) -> String {
 fn split_field(line: &str) -> Option<(char, &str)> {
     let mut chars = line.chars();
     let tag = chars.next()?;
-    if !matches!(tag, 'Q' | 'A' | 'T') {
+    // 'R' joined the set when the format learned to carry review history.
+    // Leaving it out here is why the first run of the round-trip test came
+    // back with every schedule at zero: `import_text` matched on 'R', and this
+    // function never let one through to be matched.
+    if !matches!(tag, 'Q' | 'A' | 'T' | 'R') {
         return None;
     }
     let rest = chars.as_str().strip_prefix(':')?;
@@ -671,6 +832,11 @@ impl StudySession {
 
 // ── Main application ────────────────────────────────────────────────
 struct FlashcardsApp {
+    /// The open or save picker. Holds the dialog, the saving flag and the
+    /// routing thirteen applications used to write out by hand.
+    picker: FilePicker,
+    /// What the last open or save did, for the status line.
+    last_file_action: Option<String>,
     width: f32,
     height: f32,
     view: AppView,
@@ -741,6 +907,8 @@ impl FlashcardsApp {
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: FilePicker::new(),
+            last_file_action: None,
             width: 1000.0,
             height: 700.0,
             view: AppView::DeckList,
@@ -1173,7 +1341,95 @@ impl FlashcardsApp {
     // ── Events ──────────────────────────────────────────────────────
 
     /// Route a compositor event into the app.
+    /// Put the save picker up, named after the deck it will write.
+    pub fn open_save_dialog(&mut self) {
+        let name = self
+            .decks
+            .get(self.selected_deck)
+            .map_or_else(|| String::from("deck"), |d| sanitise(&d.name));
+        self.picker.open_to_write(format!("{name}.deck"));
+    }
+
+    /// Write the selected deck to `path`.
+    ///
+    /// **Schedules included.** Until this commit the format carried front,
+    /// back and tags and nothing else, so an export and a re-import returned
+    /// every card to new -- invisibly, because a restored deck with a reset
+    /// schedule looks exactly like a restored deck.
+    pub fn write_deck(&mut self, path: &std::path::Path) -> String {
+        let Some(deck) = self.decks.get(self.selected_deck) else {
+            return String::from("No deck selected");
+        };
+        if deck.cards.is_empty() {
+            return String::from("That deck has no cards -- nothing to write");
+        }
+        let text = deck.export_text();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!(
+                "Wrote {} card(s) from {} to {}",
+                deck.cards.len(),
+                deck.name,
+                path.display()
+            ),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` as a deck and add it.
+    ///
+    /// Reports cards imported and, separately, cards whose review line this
+    /// version could not read. The second number is the one that matters: a
+    /// card without its history starts again as new, and "40 cards imported"
+    /// would hide that.
+    pub fn read_deck(&mut self, path: &std::path::Path) -> String {
+        let read = match safeio::read_to_string_capped(path, MAX_DECK_BYTES) {
+            Ok(read) => read,
+            Err(err) => return format!("Could not read {}: {err}", path.display()),
+        };
+        let note = read.note(MAX_DECK_BYTES);
+        let mut deck = Deck::new(&deck_name_of(path), "");
+        let done = deck.import_text(&read.text);
+        if done.cards == 0 {
+            return format!(
+                "{note}{} holds no cards this program can read",
+                path.display()
+            );
+        }
+        self.decks.push(deck);
+        self.selected_deck = self.decks.len().saturating_sub(1);
+        if done.history_unreadable > 0 {
+            format!(
+                "{note}Imported {} card(s); {} had a review line this version could not read and start again as new",
+                done.cards, done.history_unreadable
+            )
+        } else {
+            format!("{note}Imported {} card(s) with their schedules", done.cards)
+        }
+    }
+
     fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up, or a filename is typed
+        // at the study view -- where a bare digit rates the card in front of
+        // you and changes its schedule.
+        //
+        // A tick comes back as `Ignored` and falls through on purpose: the
+        // arm below rolls the day over, and a save dialog left open across
+        // midnight must not hold yesterday's due list.
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_deck(&path)
+                } else {
+                    self.read_deck(&path)
+                });
+                return EventResult::Consumed;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key_ev) => self.handle_key_event(key_ev),
             Event::Tick { .. } => self.refresh_day(),
@@ -1197,6 +1453,25 @@ impl FlashcardsApp {
     fn handle_key_event(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
+        }
+        // Handled here, ahead of the fingerprint below. Opening a picker
+        // changes nothing `state_fingerprint` covers, so routing it through
+        // there would answer `Ignored`, the frame would not be redrawn, and
+        // **the picker would be up and invisible**. `apps/hexeditor` nearly
+        // shipped that same bug by a different route, and `apps/jsonviewer`
+        // carries a comment about it.
+        if key.modifiers.ctrl {
+            match key.key {
+                Key::S => {
+                    self.open_save_dialog();
+                    return EventResult::Consumed;
+                }
+                Key::O => {
+                    self.picker.open_to_read();
+                    return EventResult::Consumed;
+                }
+                _ => {}
+            }
         }
         let Some(name) = Self::key_name(key) else {
             return EventResult::Ignored;
@@ -1569,6 +1844,12 @@ impl FlashcardsApp {
         }
 
         self.render_status_bar(&mut cmds);
+
+        // Last, so it is above everything. Forgetting this is how a picker
+        // ends up open and invisible: it takes every keystroke, and nothing
+        // on screen says why the window stopped responding.
+        cmds.extend(self.picker.render(&self.palette, self.width, self.height));
+
         cmds
     }
 
@@ -2970,6 +3251,149 @@ mod tests {
 
     use super::*;
 
+    /// A deck with history survives a write and a read.
+    ///
+    /// **This is the bug this commit exists for.** The format carried front,
+    /// back and tags and nothing else, so an export and a re-import returned
+    /// every card to new. In a spaced repetition program that is close to
+    /// worthless, and it is invisible: a restored deck with a reset schedule
+    /// looks exactly like a restored deck, until four hundred mature cards all
+    /// come due on the same morning.
+    #[test]
+    fn a_deck_keeps_its_schedules_across_a_write_and_a_read() {
+        let mut deck = Deck::new("Studied", "Desc");
+        deck.add_card("front", "back");
+        let studied = ReviewData {
+            repetitions: 7,
+            ease_factor: 2.35,
+            interval_days: 21,
+            last_review_day: 19_000,
+            total_reviews: 11,
+            rating_counts: [1, 2, 6, 2],
+        };
+        deck.cards.first_mut().expect("one card").review = studied.clone();
+
+        let text = deck.export_text();
+        let mut back = Deck::new("Imported", "");
+        let done = back.import_text(&text);
+
+        assert_eq!(done.cards, 1, "the card did not come back");
+        assert_eq!(done.history_unreadable, 0, "its history would not parse");
+        let got = back.cards.first().expect("one card").review.clone();
+        assert_eq!(got.repetitions, studied.repetitions);
+        assert_eq!(got.interval_days, studied.interval_days);
+        assert_eq!(got.last_review_day, studied.last_review_day);
+        assert_eq!(got.total_reviews, studied.total_reviews);
+        assert_eq!(got.rating_counts, studied.rating_counts);
+        assert!(
+            (got.ease_factor - studied.ease_factor).abs() < 0.001,
+            "ease factor drifted: {} -> {}",
+            studied.ease_factor,
+            got.ease_factor
+        );
+    }
+
+    /// A card that was never reviewed writes no review line, and an older file
+    /// without one imports as a new card -- which is what it is.
+    #[test]
+    fn a_new_card_writes_no_review_line_and_reads_back_as_new() {
+        let mut deck = Deck::new("Fresh", "");
+        deck.add_card("q", "a");
+        let text = deck.export_text();
+        assert!(
+            !text.contains("R: "),
+            "a new card wrote a history: {text:?}"
+        );
+
+        let mut back = Deck::new("Imported", "");
+        let done = back.import_text(&text);
+        assert_eq!(done.cards, 1);
+        assert_eq!(done.history_unreadable, 0, "absence is not corruption");
+        assert_eq!(
+            back.cards.first().expect("one card").review.total_reviews,
+            0,
+            "a card with no history should arrive with none"
+        );
+    }
+
+    /// A review line this version cannot read is COUNTED, not silently reset.
+    ///
+    /// The card is still imported -- losing it would be worse -- but it starts
+    /// again as new, and "1 card imported" would hide that. The difference
+    /// between a backup and a deck that merely looks restored is whether the
+    /// program says which happened.
+    #[test]
+    fn an_unreadable_review_line_is_counted_rather_than_silently_reset() {
+        let text = "# Deck\n## D\nQ: q\nA: a\nR: 7 not-a-number 21 19000 11 1 2 6 2\n\n";
+        let mut deck = Deck::new("Imported", "");
+        let done = deck.import_text(text);
+
+        assert_eq!(done.cards, 1, "the card should still be imported");
+        assert_eq!(done.history_unreadable, 1, "the loss was not reported");
+        assert_eq!(
+            deck.cards.first().expect("one card").review.total_reviews,
+            0,
+            "an unreadable history should leave a new card, not a wrong one"
+        );
+    }
+
+    /// A short review line is rejected rather than half-read.
+    #[test]
+    fn a_short_review_line_is_rejected() {
+        assert!(ReviewData::from_line("7 2.5 21").is_none());
+        assert!(ReviewData::from_line("7 2.5 21 19000 11 1 2 6 2 extra").is_none());
+        assert!(ReviewData::from_line("7 0 21 19000 11 1 2 6 2").is_none());
+        assert!(ReviewData::from_line("7 2.5 21 19000 11 1 2 6 2").is_some());
+    }
+
+    /// An empty deck is refused rather than written. See design-decisions 854.
+    #[test]
+    fn a_deck_with_no_cards_is_not_written() {
+        let path = std::env::temp_dir().join("slateos-flashcards-should-not-exist.deck");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = FlashcardsApp::new();
+        app.decks.push(Deck::new("Empty", ""));
+        app.selected_deck = app.decks.len() - 1;
+        let said = app.write_deck(&path);
+        assert_eq!(said, "That deck has no cards -- nothing to write");
+        assert!(!path.exists(), "nothing should have been created");
+    }
+
+    /// Ctrl+S opens a picker that the window will actually draw.
+    ///
+    /// `handle_key_event` answers Consumed or Ignored by comparing a state
+    /// fingerprint before and after. Opening a picker changes nothing that
+    /// fingerprint covers, so routing it through there would answer Ignored,
+    /// the frame would not be redrawn, and **the picker would be up and
+    /// invisible**. apps/hexeditor nearly shipped that same bug by a different
+    /// route.
+    #[test]
+    fn ctrl_s_opens_a_picker_and_says_the_frame_changed() {
+        let mut app = FlashcardsApp::new();
+        let before = app.render_commands().len();
+
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        let result = app.handle_event(&Event::Key(KeyEvent {
+            key: Key::S,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::from("s"),
+        }));
+
+        assert!(app.picker.is_open(), "Ctrl+S did not open the picker");
+        assert_eq!(
+            result,
+            EventResult::Consumed,
+            "the window was not told to redraw, so the picker would be invisible"
+        );
+        assert!(
+            app.render_commands().len() > before,
+            "the picker is open and nothing was drawn for it"
+        );
+    }
+
     /// The window names the decks as included and the progress as unsaved.
     ///
     /// Both scanners reached this app, and they disagreed usefully.
@@ -3005,11 +3429,24 @@ mod tests {
                 "the window never said {line:?}"
             );
         }
+        // The PROPERTY, not the phrase. This required the words "review
+        // schedule resets", which stayed true of the test after it stopped
+        // being true of the program -- the third banner assertion in this
+        // tree to pin wording and go on passing while the wording went wrong
+        // (see apps/contacts and apps/diagram). What has to hold is that the
+        // banner names BOTH the cost and the remedy: a reader who believes it
+        // should know what they lose and what to do about it.
         assert!(
             SAMPLE_AND_PROGRESS_LINES
                 .iter()
-                .any(|l| l.contains("review schedule resets")),
+                .any(|l| l.contains("resets when the window closes")),
             "the message states the mechanism but not what it costs the user",
+        );
+        assert!(
+            SAMPLE_AND_PROGRESS_LINES
+                .iter()
+                .any(|l| l.contains("Ctrl+S")),
+            "the message states the cost but not how to avoid it",
         );
     }
 
@@ -3504,7 +3941,7 @@ mod tests {
         let mut deck = Deck::new("T", "D");
         let text = "Q: What is 1+1?\nA: 2\n\nQ: What is 2+2?\nA: 4\n";
         let count = deck.import_text(text);
-        assert_eq!(count, 2);
+        assert_eq!(count.cards, 2);
         assert_eq!(deck.cards.len(), 2);
         assert_eq!(deck.cards[0].front, "What is 1+1?");
         assert_eq!(deck.cards[0].back, "2");
@@ -3515,7 +3952,7 @@ mod tests {
         let mut deck = Deck::new("T", "D");
         let text = "Q: Question\nA: Answer\nT: math, algebra\n";
         let count = deck.import_text(text);
-        assert_eq!(count, 1);
+        assert_eq!(count.cards, 1);
         assert_eq!(deck.cards[0].tags.len(), 2);
         assert_eq!(deck.cards[0].tags[0], "math");
     }
@@ -3525,7 +3962,7 @@ mod tests {
         let mut deck = Deck::new("T", "D");
         let text = "Q: Question\nA: Answer";
         let count = deck.import_text(text);
-        assert_eq!(count, 1);
+        assert_eq!(count.cards, 1);
     }
 
     /// Card text that the unescaped format could not survive. None of these is
@@ -3554,7 +3991,7 @@ mod tests {
             let count = imported.import_text(&exported);
             // One card in, one card out -- counting, not substring matching,
             // because escaped output legitimately contains the payload text.
-            assert_eq!(count, 1, "field forged a card: {text:?}");
+            assert_eq!(count.cards, 1, "field forged a card: {text:?}");
             let card = imported.cards.first().expect("one card");
             assert_eq!(card.front, *text, "front changed: {text:?}");
             assert_eq!(card.back, *text, "back changed: {text:?}");
@@ -3575,7 +4012,7 @@ mod tests {
         original.add_card("real", "real");
         let mut imported = Deck::new("Imported", "");
         let count = imported.import_text(&original.export_text());
-        assert_eq!(count, 1, "the deck name forged a card");
+        assert_eq!(count.cards, 1, "the deck name forged a card");
         let card = imported.cards.first().expect("one card");
         assert_eq!(card.front, "real");
     }
@@ -3634,7 +4071,7 @@ mod tests {
         let exported = original.export_text();
         let mut imported = Deck::new("Imported", "");
         let count = imported.import_text(&exported);
-        assert_eq!(count, 2);
+        assert_eq!(count.cards, 2);
         assert_eq!(imported.cards[0].front, "Q1");
         assert_eq!(imported.cards[0].back, "A1");
         assert_eq!(imported.cards[0].tags.len(), 1);
@@ -4227,14 +4664,14 @@ mod tests {
         let mut deck = Deck::new("T", "D");
         let text = "# Deck Name\n## Description\n\nQ: Question\nA: Answer\n";
         let count = deck.import_text(text);
-        assert_eq!(count, 1);
+        assert_eq!(count.cards, 1);
     }
 
     #[test]
     fn test_import_empty_text() {
         let mut deck = Deck::new("T", "D");
         let count = deck.import_text("");
-        assert_eq!(count, 0);
+        assert_eq!(count.cards, 0);
     }
 
     #[test]

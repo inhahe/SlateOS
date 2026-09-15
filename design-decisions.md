@@ -72927,7 +72927,22 @@ statement it withdrew.
   about which **other** code paths that skip leaves unexercised. Deriving the
   second from the first is a separate act and nothing prompts it.
 * Two checks agreeing is evidence only insofar as their inputs are
-  independent.
+  independent. Lane A recorded a tell for it: **the agreement was perfect on a
+  question where partial disagreement was likely.** Ours was perfect too.
+* **A negative about a searchable corpus is a search, not an inference.**
+  Lane A's naming of their own half, and the sharpest rule to come out of this
+  entry. "Nobody was asking which filesystems the gate exercises" is a claim
+  about the whole tree, and the tree is greppable: one `grep -rl` over
+  `scripts/` finds `check-gated-selftests.py` in **0.13 s**, measured. Neither
+  of us ran it -- they inferred the absence from not having met it, and I
+  inherited the inference without testing it.
+
+  If you cannot name the query you ran, you have not checked, and **"I would
+  have noticed" is not a query.** The same move appears twice more in one day's
+  work across two lanes: a `git diff` that printed nothing read as "unchanged"
+  when its baseline ref did not resolve, and a watcher of mine that reported a
+  push had failed because it compared against a SHA captured before the push
+  finished. All three are an absence of output read as an absence of the thing.
 
 ---
 

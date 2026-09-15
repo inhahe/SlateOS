@@ -21,6 +21,11 @@
 //! │   ├── pci/
 //! │   │   ├── BB:DD.F      PCI device info per BDF address
 //! │   │   └── ...
+//! │   ├── block/                        One per registered block device
+//! │   │   └── <name>/                   e.g. vda; absent if not registered
+//! │   │       ├── sector_count          Capacity in sectors (read-only)
+//! │   │       ├── sector_size           Bytes per sector (read-only)
+//! │   │       └── read_only             1 if write-protected (read-only)
 //! │   └── system/
 //! │       ├── cpu/
 //! │       │   ├── online    Online CPU range, e.g. "0-7" (read-only)
@@ -147,10 +152,20 @@ enum SysPath<'a> {
     CpuCacheIndexDir(usize, usize),
     /// A per-CPU cache file: /sys/devices/system/cpu/cpuN/cache/indexI/size etc.
     CpuCacheFile(usize, usize, &'a str),
+    /// The devices/system/cpu/cpuid/ directory.
     CpuidDir,
+    /// A CPUID identity file: /sys/devices/system/cpu/cpuid/family etc.
     CpuidFile(&'a str),
+    /// The devices/system/memory/ directory.
     MemoryDir,
+    /// A memory file: /sys/devices/system/memory/total_kb etc.
     MemoryFile(&'a str),
+    /// The devices/block/ directory.
+    BlockDir,
+    /// A block device directory: /sys/devices/block/vda/
+    BlockDevice(&'a str),
+    /// A block device file: /sys/devices/block/vda/sector_count etc.
+    BlockFile(&'a str, &'a str),
     /// File in fs/ subdir: /sys/fs/cache_sectors etc.
     FsFile(&'a str),
     /// Not found.
@@ -188,6 +203,15 @@ const CPUID_FILES: &[&str] = &["family", "model", "stepping"];
 /// has no producer here, so they are absent rather than zero. Units are kB,
 /// matching `cache/size` and the rest of this tree.
 const MEMORY_FILES: &[&str] = &["total_kb", "available_kb"];
+
+/// Per-device facts under `/sys/devices/block/<name>/`.
+///
+/// Not Linux's `size`/`ro`: Linux reports `size` in 512-byte units whatever
+/// the device's real sector size is, so a reader that multiplied `size` by
+/// `sector_size` would be wrong on any device that is not 512 -- and every
+/// device here is 512 today, which is the condition that would let that bug
+/// ship unnoticed. Each of these three names means exactly one thing.
+const BLOCK_FILES: &[&str] = &["sector_count", "sector_size", "read_only"];
 
 /// Per-CPU topology files in /sys/devices/system/cpu/cpuN/topology/.
 ///
@@ -384,6 +408,31 @@ fn classify_path(rel: &str) -> SysPath<'_> {
                         SysPath::PciDevice(tail)
                     } else {
                         SysPath::NotFound
+                    }
+                } else if second == "block" {
+                    if tail.is_empty() {
+                        SysPath::BlockDir
+                    } else {
+                        let (dev, leaf) = match tail.find('/') {
+                            Some(pos) => {
+                                let (a, b) = tail.split_at(pos);
+                                (a, b.get(1..).unwrap_or(""))
+                            }
+                            None => (tail, ""),
+                        };
+                        // An unregistered device has no directory at all rather
+                        // than a directory of zeros: a reader cannot tell an
+                        // absent disk from a zero-sector one, so do not offer it
+                        // the choice. Emit-or-omit, as agreed with lane C.
+                        if !block_device_exists(dev) {
+                            SysPath::NotFound
+                        } else if leaf.is_empty() {
+                            SysPath::BlockDevice(dev)
+                        } else if !leaf.contains('/') && BLOCK_FILES.contains(&leaf) {
+                            SysPath::BlockFile(dev, leaf)
+                        } else {
+                            SysPath::NotFound
+                        }
                     }
                 } else if second == "system" {
                     if tail.is_empty() {
@@ -604,6 +653,31 @@ fn gen_memory_file(name: &str) -> KernelResult<Vec<u8>> {
     let v = match name {
         "total_kb" => info.total_bytes / 1024,
         "available_kb" => info.free_bytes / 1024,
+        _ => return Err(KernelError::NotFound),
+    };
+    Ok(format!(
+        "{v}
+"
+    )
+    .into_bytes())
+}
+
+/// Whether a block device of this name is currently registered.
+fn block_device_exists(name: &str) -> bool {
+    crate::blkdev::list_devices().iter().any(|d| d.name == name)
+}
+
+/// One per-device fact, or `NotFound` if the device or the name is unknown.
+fn gen_block_file(dev: &str, name: &str) -> KernelResult<Vec<u8>> {
+    let devices = crate::blkdev::list_devices();
+    let info = devices
+        .iter()
+        .find(|d| d.name == dev)
+        .ok_or(KernelError::NotFound)?;
+    let v = match name {
+        "sector_count" => info.sector_count,
+        "sector_size" => u64::from(info.sector_size),
+        "read_only" => u64::from(info.read_only),
         _ => return Err(KernelError::NotFound),
     };
     Ok(format!(
@@ -867,11 +941,23 @@ impl FileSystem for SysFs {
                 Ok(entries)
             }
             SysPath::DevicesDir => {
-                // "pci/" (PCI devices) and "system/" (CPU/topology tree).
+                // "pci/" (PCI devices), "block/" (registered disks) and
+                // "system/" (CPU/topology tree).
+                //
+                // "block/" is listed unconditionally and is empty when no
+                // device is registered. That is a different statement from
+                // its absence, which would say this kernel does not model
+                // block devices at all.
                 Ok(vec![
                     DirEntry {
                         ino: 0,
                         name: PathBuf::from("pci"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    },
+                    DirEntry {
+                        ino: 0,
+                        name: PathBuf::from("block"),
                         entry_type: EntryType::Directory,
                         size: 0,
                     },
@@ -1019,6 +1105,36 @@ impl FileSystem for SysFs {
                     .collect();
                 Ok(entries)
             }
+            SysPath::BlockDir => {
+                // Whatever is registered, in registration order. Empty is a
+                // legitimate answer: no disks were found.
+                let entries = crate::blkdev::list_devices()
+                    .into_iter()
+                    .map(|d| DirEntry {
+                        ino: 0,
+                        name: PathBuf::from(d.name),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    })
+                    .collect();
+                Ok(entries)
+            }
+            SysPath::BlockDevice(dev) => {
+                // Same rule as MemoryDir: list only what reads back, so no
+                // name is offered that a read would then refuse.
+                let entries = BLOCK_FILES
+                    .iter()
+                    .filter_map(|name| {
+                        gen_block_file(dev, name).ok().map(|d| DirEntry {
+                            ino: 0,
+                            name: PathBuf::from(*name),
+                            entry_type: EntryType::File,
+                            size: d.len() as u64,
+                        })
+                    })
+                    .collect();
+                Ok(entries)
+            }
             SysPath::CpuNTopologyDir(idx) => {
                 let entries = CPU_TOPOLOGY_FILES
                     .iter()
@@ -1073,7 +1189,9 @@ impl FileSystem for SysFs {
             | SysPath::CpuCacheDir(_)
             | SysPath::CpuCacheIndexDir(_, _)
             | SysPath::CpuidDir
-            | SysPath::MemoryDir => Err(KernelError::IsADirectory),
+            | SysPath::MemoryDir
+            | SysPath::BlockDir
+            | SysPath::BlockDevice(_) => Err(KernelError::IsADirectory),
 
             SysPath::KernelFile(name) => gen_kernel_file(name),
             SysPath::ParamFile(name) => gen_param_file(name),
@@ -1085,6 +1203,7 @@ impl FileSystem for SysFs {
             SysPath::CpuCacheFile(idx, ci, name) => gen_cpu_cache_file(idx, ci, name),
             SysPath::CpuidFile(name) => gen_cpuid_file(name),
             SysPath::MemoryFile(name) => gen_memory_file(name),
+            SysPath::BlockFile(dev, name) => gen_block_file(dev, name),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -1204,6 +1323,27 @@ impl FileSystem for SysFs {
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
+            SysPath::BlockDir => Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("block"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::BlockDevice(dev) => Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(dev),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::BlockFile(dev, name) => {
+                let size = gen_block_file(dev, name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    ino: 0,
+                    name: PathBuf::from(name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
             SysPath::CpuidFile(name) => {
                 let size = gen_cpuid_file(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
@@ -1288,7 +1428,8 @@ impl FileSystem for SysFs {
             | SysPath::CpuTopoFile(_, _)
             | SysPath::CpuCacheFile(_, _, _)
             | SysPath::CpuidFile(_)
-            | SysPath::MemoryFile(_) => {
+            | SysPath::MemoryFile(_)
+            | SysPath::BlockFile(_, _) => {
                 // Read-only files (we do not model runtime CPU hot-plug).
                 Err(KernelError::NotSupported)
             }
@@ -1303,7 +1444,9 @@ impl FileSystem for SysFs {
             | SysPath::CpuCacheDir(_)
             | SysPath::CpuCacheIndexDir(_, _)
             | SysPath::CpuidDir
-            | SysPath::MemoryDir => Err(KernelError::IsADirectory),
+            | SysPath::MemoryDir
+            | SysPath::BlockDir
+            | SysPath::BlockDevice(_) => Err(KernelError::IsADirectory),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -2087,6 +2230,114 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::IoError);
         }
         serial_println!("[sysfs]   devices/system: cpuid + memory OK, cpufreq absent by design");
+
+        // 5. Block devices must agree with the registry that supplies them.
+        //
+        //    The tree is not a second source of truth: `gen_block_file`
+        //    reads `blkdev::list_devices()`, so this asserts the rendering,
+        //    and it asserts it per fact rather than per file. Checking that
+        //    three files exist and parse would pass against a tree serving
+        //    one disk's geometry under every name.
+        let devices = crate::blkdev::list_devices();
+        let block_entries = match fs.readdir(Path::new("/devices/block")) {
+            Ok(v) => v,
+            Err(e) => {
+                serial_println!("[sysfs]   FAIL: readdir /devices/block failed: {e:?}");
+                return Err(e);
+            }
+        };
+        if block_entries.len() != devices.len() {
+            serial_println!(
+                "[sysfs]   FAIL: /devices/block lists {} entries, registry has {}",
+                block_entries.len(),
+                devices.len()
+            );
+            return Err(KernelError::IoError);
+        }
+        for d in &devices {
+            if !block_entries
+                .iter()
+                .any(|e| e.name.as_path().as_bytes() == d.name.as_bytes())
+            {
+                serial_println!("[sysfs]   FAIL: /devices/block omits {:?}", d.name);
+                return Err(KernelError::IoError);
+            }
+            let want = [
+                ("sector_count", d.sector_count),
+                ("sector_size", u64::from(d.sector_size)),
+                ("read_only", u64::from(d.read_only)),
+            ];
+            for (leaf, expect) in want {
+                let path = format!("/devices/block/{}/{leaf}", d.name);
+                let got = match fs.read_file(Path::new(&path)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        serial_println!("[sysfs]   FAIL: read {path} failed: {e:?}");
+                        return Err(e);
+                    }
+                };
+                let got_s = core::str::from_utf8(&got).unwrap_or("").trim();
+                if got_s.parse::<u64>() != Ok(expect) {
+                    serial_println!(
+                        "[sysfs]   FAIL: {path} reads {got_s:?}, registry says {expect}"
+                    );
+                    return Err(KernelError::IoError);
+                }
+            }
+            // Linux's spellings are absent ON PURPOSE. Its `size` is in
+            // 512-byte units whatever the real sector size is, so a reader
+            // multiplying `size` by `sector_size` is wrong on any device that
+            // is not 512 -- and every device here is 512, which is precisely
+            // the condition under which that bug ships unnoticed. Asserted so
+            // the omission stays a decision instead of a gap someone fills in.
+            for linuxism in ["size", "ro"] {
+                let path = format!("/devices/block/{}/{linuxism}", d.name);
+                if fs.read_file(Path::new(&path)).is_ok() {
+                    serial_println!(
+                        "[sysfs]   FAIL: {path} answered; its unit is ambiguous by design"
+                    );
+                    return Err(KernelError::IoError);
+                }
+            }
+        }
+
+        // The negative control. An unregistered name must have no directory
+        // at all -- not an empty one, and not files reading 0, which a reader
+        // cannot tell from a real zero-sector disk. Without this the suite
+        // could not distinguish a working guard from no guard.
+        if fs
+            .read_file(Path::new(
+                "/devices/block/no-such-disk-selftest/sector_count",
+            ))
+            .is_ok()
+        {
+            serial_println!("[sysfs]   FAIL: an unregistered block device answered a read");
+            return Err(KernelError::IoError);
+        }
+        if fs
+            .readdir(Path::new("/devices/block/no-such-disk-selftest"))
+            .is_ok()
+        {
+            serial_println!("[sysfs]   FAIL: an unregistered block device has a directory");
+            return Err(KernelError::IoError);
+        }
+
+        // Says when it proved nothing. With no disks registered the loop
+        // above ran zero times, and an unqualified OK would read as coverage.
+        if devices.is_empty() {
+            serial_println!(
+                "[sysfs]   devices/block: listed and empty, and an unregistered name is \
+                 absent: OK -- but NO disk is registered, so the per-device checks \
+                 proved nothing this run"
+            );
+        } else {
+            serial_println!(
+                "[sysfs]   devices/block: {} device(s), every sector_count/sector_size/\
+                 read_only matches blkdev::list_devices(), Linux's size/ro absent, \
+                 unregistered name absent: OK",
+                devices.len()
+            );
+        }
     }
     serial_println!("[sysfs] Self-test passed{}.", skips.suffix());
     Ok(())

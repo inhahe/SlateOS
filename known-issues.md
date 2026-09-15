@@ -148224,3 +148224,63 @@ drawing an empty name or a stopped clock.
 IRQs, I/O ports, the memory map, DMA — has no producer, and the window says so
 per category rather than as one banner, which is right: those are separate
 facts and will arrive separately.
+
+## TD-C-ONE-HUNDRED-AND-FIFTEEN-OF-THE-HUNDRED-AND-THIRTY-NINE-APPS-CANNOT-OPEN-A-FILE
+
+**In short:** the invented data in these programs is not the disease. It is the
+symptom. **115 of the 139 applications with a `main.rs` have no filesystem
+access of any kind** — no file picker, no `std::fs`, no `safeio`. They cannot
+open a document, save one, or read anything the user has. The seeded libraries
+and sample records exist because there is no other way for a window to have
+anything in it, and one of them says so in its own comment: *"so the first
+window is not an empty grid"*.
+
+**Date:** 2026-09-15. **Lane:** C. Found by asking, after fixing the photo
+manager, how many other applications were in the state it had been in.
+
+**The measurement.** For each `apps/*/src/`, count references to `FileDialog`,
+`std::fs` and `safeio::`. 115 of 139 score zero. Games are a legitimate part of
+that number — `chess` needs no files — so the count alone overstates it, and
+the named cases below are the argument rather than the total.
+
+**Three that are worth reading twice:**
+
+* **`apps/filesearch` cannot search files.** Its dependencies are `globmatch`,
+  `guitk`, `oswindow` and `appearance` — nothing that reads a directory. The
+  search machinery is *complete*: search by name, by glob, by regular
+  expression, by category, with sorting. It runs against `Index::entries`, and
+  `index.add(...)` is called from **tests only**. So a finished search engine
+  runs against an index production never fills.
+* **`apps/filediff` cannot read files.** It depends on `diffcore`, which is a
+  real diff implementation, and on nothing that opens a file.
+* **`apps/email` has neither network nor storage.** It depends on `guitk`,
+  `oswindow` and `appearance`, and seeds itself with `seed_sample_mail`.
+
+`apps/photomanager` was in exactly this class until 2026-09-15: a real EXIF
+parser, a real album model, an invented library, and no picker. It took one
+`FileDialog` and `guitk::dialog::list_directory` to fix, both of which already
+existed.
+
+**Why this changes the order of the remaining work.** The 63 fixture functions
+and the 32 self-declared stubs are two views of one cause. Fixing them
+app-by-app — replacing invented records with an honest "nothing here" — makes
+each program truthful and leaves it useless, which is the right trade when
+nothing better is available and a poor one when something is. For this class
+something is: the toolkit has had a working file picker all along.
+
+**So the cheap fix is a shared one.** Every app in this class needs the same
+three things the photo manager needed: a control that opens
+`guitk::dialog::FileDialog`, a handler that reads the chosen path, and an
+empty-state that says what to do. That is a per-app change, but it is the same
+change, and it converts "honest and empty" into "works".
+
+**What this does not cover.** The other class — `sysinfo`, `devicemanager`,
+`partmanager`, `netmanager`, `netscan`, `sysmonitor`, `undelete`, `speedtest` —
+needs data the *system* must produce, not data the user can hand over, and
+those stay blocked on kernel work whatever this does. `sysinfo` is the worked
+example: its client is finished and waiting on `/sys/devices` producers.
+
+**The honest caveat on the number.** 115 counts every `main.rs` app including
+games and toys. I have not classified all 139, and the per-app judgement of
+"should this open files" is exactly the kind of thing that should be made when
+someone picks the app up rather than pre-decided in a list here.

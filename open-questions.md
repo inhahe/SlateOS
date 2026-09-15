@@ -2215,6 +2215,11 @@ arrived at the same two habits that catch it. The question is whether those
 habits should become a written rule all three lanes follow, which only you can
 decide: rules like that live in `CLAUDE.md`, and that file is yours.
 
+**The shortest evidence is that filing this question tripped its own rule.**
+The first anchor I used to insert it matched **eight** places in this file; the
+count check stopped the edit, and a more specific anchor matched one. The habit
+caught its own proposal before the proposal was written down.
+
 **The two habits.** Neither needs new tooling.
 
 1. **Assert the match count before replacing.** A script that means to change

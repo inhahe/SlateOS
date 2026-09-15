@@ -151512,3 +151512,83 @@ something says otherwise.
 events into it is a separate piece of work; an empty, honest table is the
 correct state until then, and is now labelled as such rather than filled.
 
+
+## TD-C-A-TEST-THAT-PINS-WORDING-PASSES-UNTIL-THE-WORDING-IS-WRONG -- FIXED 2026-09-15
+
+**In short:** four apps had a test asserting that a warning message contained a
+particular phrase. Each of those phrases later became untrue, and every one of
+those tests went on passing — because the words were still there. The test was
+guarding the sentence rather than the thing the sentence was for. All four now
+assert the property instead.
+
+### The four
+
+| app | the phrase it pinned | what made it false |
+|---|---|---|
+| `contacts` | "Nothing is saved between runs" | a vCard door |
+| `diagram` | "gone when the window closes" | a save door |
+| `flashcards` | "review schedule resets" | a deck door that keeps schedules |
+| `mindmap` | "gone when the window closes" | an outline door |
+
+In each case the app gained a way to save, the banner had to change, and the
+assertion that was supposed to protect the banner **was the last thing to
+notice**. Three of the four were found only because the banner edit made the
+test fail; the fourth was found by reading the other three.
+
+### Why the shape is so easy to write
+
+The message is a constant a few lines above the test:
+
+```rust
+const NO_CONTACTS_LINES: [&str; 2] = [
+    "No contacts.",
+    "Nothing is saved between runs -- this app has no filesystem access, ...",
+];
+```
+
+so the literal is *right there*, and asserting on it feels like asserting on
+the thing. It is not. **A phrase is an implementation of a promise, and a test
+that pins the implementation cannot fail when the promise stops being kept.**
+
+It is worse than an untested banner, because it reads as coverage. Someone
+changing the wording sees a test named
+`the_window_says_what_it_cannot_do`, sees it pass, and concludes the window
+still says what it cannot do.
+
+### What to assert instead
+
+Ask what has to be true for the message to do its job, and assert that:
+
+```rust
+// before: the phrase
+assert!(LINES.iter().any(|l| l.contains("gone when the window closes")));
+
+// after: the property -- the reader must learn both halves
+assert!(LINES.iter().any(|l| l.contains("Ctrl+S")),
+        "the banner does not say how to keep the work");
+assert!(LINES.iter().any(|l| l.contains("not opened again")),
+        "the banner does not say the diagram cannot be reopened");
+```
+
+Those still match on substrings — there is no way to assert "this sentence is
+true" — but they match on the **load-bearing** part, the bit whose absence is
+the defect. Changing "press Ctrl+S" to "use Ctrl+S" keeps them green, which is
+right: that edit does not break the promise. Removing the remedy breaks them,
+which is also right.
+
+### The general form, which is not about banners
+
+This is the same failure as a test that passes because its fixture had nothing
+to act on, and as a checker whose green result was computed over the wrong
+corpus. In all three the result is *true* and answers a question nobody asked:
+
+* the fixture had no selected item, so "nothing was deleted" held trivially;
+* the gate scanned `gui`/`apps`/`scripts`, so "no collapsed messages" said
+  nothing about `kernel/`;
+* the phrase was still in the constant, so "the window says it" held while the
+  window said something false.
+
+**Green is only as meaningful as the question it answers.** The check worth
+making on any passing assertion is: *what would have to change in the program
+for this to fail?* If the answer is "an edit that does not matter", the
+assertion is pinned to the wrong thing.

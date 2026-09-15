@@ -825,6 +825,8 @@ pub enum DropdownId {
     CursorSize,
     NarratorVerbosity,
     HighContrast,
+    /// How the desktop picture is placed on the screen.
+    WallpaperFit,
 }
 
 impl DropdownId {
@@ -843,9 +845,10 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 11] = [
+    pub const FIXED: [Self; 12] = [
         Self::QuietStart,
         Self::QuietEnd,
+        Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
         Self::Scale,
@@ -3317,6 +3320,16 @@ impl SettingsState {
             pal.accent,
             Some(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
+        // Offered only with a picture to place, for the reason Remove is:
+        // a control whose every option does the same nothing is one a user
+        // reads as broken rather than as inapplicable.
+        if self.appearance.settings.wallpaper.is_some() {
+            s.dropdown_row(
+                "How it is placed",
+                DropdownId::WallpaperFit,
+                self.appearance.settings.wallpaper_fit.label(),
+            );
+        }
         // Offered only when there is one to remove. A "Remove" that is always
         // there is a button whose press does nothing most of the time, and a
         // user cannot tell that from one that failed.
@@ -4587,6 +4600,17 @@ impl SettingsState {
                     at,
                 )
             }
+            DropdownId::WallpaperFit => {
+                let items: Vec<String> = appearance::ImageFit::ALL
+                    .iter()
+                    .map(|f| f.label().to_string())
+                    .collect();
+                let current = appearance::ImageFit::ALL
+                    .iter()
+                    .position(|f| *f == self.appearance.settings.wallpaper_fit)
+                    .unwrap_or(0);
+                (items, current)
+            }
             DropdownId::IpConfig => {
                 let items = vec![
                     IpConfigMode::Dhcp.label().to_string(),
@@ -5436,6 +5460,11 @@ impl SettingsState {
                     && let Some(rule) = self.notif.settings.apps.get_mut(app)
                 {
                     rule.importance = *chosen;
+                }
+            }
+            DropdownId::WallpaperFit => {
+                if let Some(fit) = appearance::ImageFit::ALL.get(index) {
+                    self.appearance.settings.wallpaper_fit = *fit;
                 }
             }
             DropdownId::IpConfig => {
@@ -6495,6 +6524,80 @@ mod tests {
         );
     }
 
+    /// **Choosing a fit reaches `appearance.yaml`.**
+    ///
+    /// Through the dropdown a user would use, and read back off disk rather
+    /// than from this process's own model, which would agree with itself
+    /// whether or not anything was written.
+    #[test]
+    fn choosing_a_fit_reaches_the_file_the_desktop_reads() {
+        with_scratch_config("settings-wallpaper-fit", |root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+            assert_eq!(
+                state.appearance.settings.wallpaper_fit,
+                appearance::ImageFit::Fill,
+                "the test's premise is that it starts at the default"
+            );
+
+            let (cx, cy) = center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit))
+                .expect("the page draws no fit chooser");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(state.open_dropdown, Some(DropdownId::WallpaperFit));
+
+            // The second entry is `Fit`, per `ImageFit::ALL`. Clicked where
+            // the popup drew it rather than set directly: the point is that a
+            // user can reach it, and the row the renderer drew and the row the
+            // hit-test names are the same answer.
+            let wanted = appearance::ImageFit::ALL[1];
+            let layout = state.dropdown_layout().expect("a dropdown is open");
+            let row = 1usize
+                .checked_sub(layout.window.start)
+                .expect("the six fits fit in the default window");
+            let y = layout.row_top(row) + DROPDOWN_ITEM_HEIGHT / 2.0;
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: layout.x + 20.0,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert!(state.open_dropdown.is_none(), "choosing closes the popup");
+
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "choosing should have written {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(
+                saved.wallpaper_fit, wanted,
+                "the fit did not survive the round trip to disk"
+            );
+        });
+    }
+
+    /// The chooser is offered only with a picture to place.
+    ///
+    /// A control whose every option does the same nothing reads as broken
+    /// rather than as inapplicable.
+    #[test]
+    fn the_fit_chooser_appears_only_with_a_picture() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_none(),
+            "a fit chooser with nothing to place"
+        );
+
+        state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_some(),
+            "no way to say how the picture is placed"
+        );
+    }
+
     /// Remove is offered only when there is something to remove.
     ///
     /// A button that is always there is one whose press does nothing most of
@@ -6643,6 +6746,17 @@ mod tests {
     fn fully_expanded(page: SettingsPage) -> SettingsState {
         let mut state = SettingsState::new();
         state.current_page = page;
+        // Not every hidden row is hidden behind a *switch*. The Wallpaper
+        // page's fit chooser and its Remove button appear once a picture is
+        // set, because a control whose every option does the same nothing
+        // reads as broken rather than as inapplicable -- so the loop below,
+        // which only turns toggles on, cannot reveal them.
+        //
+        // Set here rather than excluded from `DropdownId::FIXED`, which is the
+        // tempting fix and the wrong one: the sweep exists to catch a dropdown
+        // nothing can open, and a dropdown excluded for being hard to reach is
+        // exactly the one it should be checking.
+        state.appearance.settings.wallpaper = Some("/pictures/example.png".to_string());
         // Turning one switch on can reveal another, so repeat until the set
         // stops growing. Bounded because nothing here turns a switch back off.
         for _ in 0..8 {

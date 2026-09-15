@@ -148548,3 +148548,51 @@ file); **wire it** where a real source exists in the tree (the Accounts page
 onto `gui/loginusers`); **say so** where neither is possible (Sound, Updates,
 Privacy, Network). What is never right is leaving it, and what is never enough
 is a comment — three of the six fixed today had one.
+
+## TD-A-THE-DEVICE-EVENT-REGISTRY-SEEDS-ITSELF-WITH-THREE-DEVICES-THAT-MAY-NOT-EXIST (lane A, 2026-09-15)
+
+**In short:** `fs::dmevent::init_defaults()` -- production, not a test --
+populates the kernel's device-event registry with three hardcoded devices:
+
+    /sys/block/sda              sda         Block   online: true
+    /sys/class/net/eth0         eth0
+    /sys/class/input/keyboard0  keyboard0
+
+None is enumerated from hardware. All three are `String::from` literals in an
+`alloc::vec!` inside `init_defaults`, and `online: true` is asserted for the
+first regardless of whether any disk is present. A user listing devices through
+the kshell `dmevent` command sees them on any machine.
+
+**This is lane C's `apps/settings` finding, in the kernel.** They spent
+2026-09-14 removing five pages of plausible records -- an adapter "connected at
+192.168.1.100" on a system that cannot enumerate interfaces, three accounts with
+`example.com` addresses. This is the same construction: a `Vec` of believable
+records built in an init function. The eth0 entry is very nearly the same
+invented device.
+
+**The devpaths name a tree nothing serves**, which is how it was found.
+`sysfs.rs` has **zero** references to `block` -- no `SysPath` variant, no
+`classify_path` arm. So `/sys/block/sda` is a string in an event payload
+describing a sysfs node that does not exist. In Linux a `DEVPATH` in a uevent is
+a promise that the node is there to be opened; a consumer following ours finds
+nothing.
+
+**How it surfaced:** lane C's request stated "the tree is live:
+`/sys/kernel/hostname`, `/sys/class`, `/sys/block/sda`". The first is served.
+The third is only *mentioned* -- by this file. Grepping for the path finds
+references and reads as evidence of a producer, which is the
+documentation-versus-code confusion recorded in 938 turned up one level: here
+the misleading text is a **string literal in production code**, which looks even
+more like evidence than a comment does.
+
+**The fix, and it is not simply deletion.** The registry should start empty and
+gain entries when something real registers. Removing the seed makes the kshell
+command print nothing on a machine with no enumeration, which is the honest
+state and matches `design-decisions.md` §1006 -- a command that does not work is
+deleted rather than kept as a stub. Deferred rather than done because the
+kshell `dmevent` subcommands were written against a populated registry and
+several of their self-tests will be standing on these three records as fixtures,
+which is the fixture-is-the-defect mode in 937: emptying the list is how you
+find out, and that wants its own change rather than riding on a boot-unblocking
+commit.
+

@@ -28,6 +28,7 @@ use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Personality detection
@@ -59,6 +60,13 @@ struct Config {
     personality: Personality,
     port: String,
     baud_rates: Vec<u32>,
+    /// Whether a baud rate came from the command line.
+    ///
+    /// `baud_rates` defaults to `[9600]`, so its VALUE cannot answer "did the
+    /// operator ask for this?" -- someone typing 9600 is indistinguishable
+    /// from someone typing nothing. That distinction is the difference
+    /// between a useful warning and one printed on every boot.
+    baud_explicit: bool,
     // Terminal settings parsed and not applied, and a path helper used only by
     // tests. Kept so the record matches what the tty layer will need.
     #[allow(dead_code)]
@@ -94,6 +102,7 @@ impl Default for Config {
             personality: Personality::Getty,
             port: String::new(),
             baud_rates: vec![9600],
+            baud_explicit: false,
             term_type: String::from("linux"),
             autologin_user: None,
             no_issue: false,
@@ -267,6 +276,7 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
                 cfg.port = port.to_string_lossy().into_owned();
             }
             if positional.len() > 1 {
+                cfg.baud_explicit = true;
                 cfg.baud_rates.clear();
                 for baud in positional.iter().skip(1) {
                     // A baud rate is a number, so one that is not text is not
@@ -521,13 +531,15 @@ fn print_help(personality: Personality) {
             println!("  -N, --nonewline           Don't print newline before issue");
             println!("  -o, --long-hostname        Show full qualified hostname");
             println!("  -p, --login-pause          Wait for keypress before login prompt");
-            println!("  -r, --chroot <dir>        Chroot before login");
+            println!(
+                "  -r, --chroot <dir>        Chroot before login (REFUSED: no SYS_CHROOT ABI)"
+            );
             println!("  -s, --keep-baud           Keep existing baud rate");
             println!("  -t, --timeout <secs>      Timeout for login name input");
             println!("  --nohostname              Don't show hostname in prompt");
             println!("  --erase-chars <char>      Additional erase character");
             println!("  --kill-chars <char>       Additional kill character");
-            println!("  --delay <msecs>           Delay before opening tty");
+            println!("      --delay <number>      sleep seconds before prompt");
             println!("  --nice <value>            Run with adjusted nice value");
             println!("  -h, --help                Show this help");
             println!("  -V, --version             Show version");
@@ -634,6 +646,18 @@ fn run_getty(
         writeln!(writer).map_err(|e| format!("write: {e}"))?;
     }
 
+    // Placed here because the reference says "before prompt", which is the
+    // only statement of placement I could measure -- agetty's source was not
+    // available to check whether it sleeps earlier, and guessing at that
+    // would be inventing a second fact after correcting the first.
+    //
+    // Tests do not reach this: none of them set `--delay`, and the pure
+    // `prompt_delay` above is what they assert on.
+    let delay = prompt_delay(cfg);
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
+    }
+
     // Show login prompt and read username
     loop {
         // Build prompt
@@ -683,6 +707,95 @@ fn run_getty(
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Settings the operator asked for that this build parses and never applies.
+///
+/// `setup_terminal` builds a `TermSettings` and `run_getty` binds it to
+/// `_term`. Nothing applies it, because there is no termios layer to apply it
+/// to -- so the baud rate, the erase and kill characters, the local-line flag
+/// and keep-baud are computed and dropped. `--nice` is here for a different
+/// reason: there is no `setpriority`/`nice` in `posix/` to call.
+///
+/// Reported rather than refused, and the difference from `--chroot` is the
+/// point. An ignored chroot makes a session look confined when it is not, so
+/// continuing is unsafe. An ignored baud rate makes a serial console
+/// unreadable -- bad, visibly bad, and not a reason to refuse to offer a
+/// login prompt on the console that still works. Refusing here would turn a
+/// degraded console into no console.
+///
+/// Only what was ASKED for, so a plain `getty tty1` says nothing. A warning
+/// printed on every boot is one nobody reads by the third boot.
+fn unapplied_settings(cfg: &Config) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if cfg.baud_explicit {
+        out.push("baud rate");
+    }
+    if cfg.erase_char.is_some() {
+        out.push("--erase-chars");
+    }
+    if cfg.kill_char.is_some() {
+        out.push("--kill-chars");
+    }
+    if cfg.local_line {
+        out.push("--local-line");
+    }
+    if cfg.keep_baud {
+        out.push("--keep-baud");
+    }
+    if cfg.nice_value.is_some() {
+        out.push("--nice");
+    }
+    out
+}
+
+/// How long to wait before showing the login prompt.
+///
+/// Split from the sleep itself on purpose: the SLEEP has nothing to get wrong
+/// and cannot be tested without measuring wall-clock time, which is how a
+/// suite acquires a test that fails on a loaded machine. How long it should
+/// be is the part that can be wrong, and this is testable with no clock at
+/// all.
+///
+/// SECONDS, not milliseconds. Measured against util-linux 2.39.3 rather than
+/// recalled -- `agetty --help` says:
+///
+///     --delay <number>       sleep seconds before prompt
+///
+/// This crate's own help said "Delay before opening tty" and its test used
+/// `--delay 500`, which reads as milliseconds. Both were invented: the option
+/// had never been implemented, so nothing ever contradicted the description.
+/// An unimplemented option cannot have its documentation checked by use.
+fn prompt_delay(cfg: &Config) -> Duration {
+    Duration::from_secs(u64::from(cfg.delay.unwrap_or(0)))
+}
+
+/// The diagnostic for a configuration this build cannot carry out, if any.
+///
+/// Only `--chroot` qualifies today, and it qualifies because IGNORING IT IS
+/// UNSAFE rather than merely incomplete. getty execs a login program; with
+/// `--chroot` accepted and discarded, that program ran with the whole host
+/// filesystem visible while the operator's configuration said it was confined.
+/// An unconfined shell that looks confined is worse than a getty that will not
+/// start, because the mistake is invisible from the terminal it produces.
+///
+/// This is the same rule `userspace/chroot` already settled for itself, and
+/// deliberately the same rather than a second answer: there is no
+/// `SYS_CHROOT` ABI, so nothing can perform the confinement, and that file's
+/// own comment gives the reasoning -- "dropping privileges without changing
+/// the root would leave the caller believing they were sandboxed when they
+/// were not, which is a worse failure than refusing."
+///
+/// Returned rather than printed so it can be tested without a terminal.
+/// Delete this the day `SYS_CHROOT` lands and getty can call it.
+fn unsupported_request(cfg: &Config) -> Option<String> {
+    let dir = cfg.chroot_dir.as_ref()?;
+    Some(format!(
+        "--chroot {}: chroot is not implemented in this kernel (no SYS_CHROOT ABI yet), \
+and running login WITHOUT it would hand the session the whole host filesystem \
+while your configuration says it is confined",
+        dir.display()
+    ))
+}
+
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
@@ -706,6 +819,28 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     if cfg.show_version {
         print_version(cfg.personality);
         return 0;
+    }
+
+    // Checked AFTER --help and --version, so both still answer, and BEFORE
+    // the terminal is touched, so a getty that cannot do its job never
+    // presents a login prompt that implies it can.
+    if let Some(why) = unsupported_request(&cfg) {
+        eprintln!("getty: {why}");
+        eprintln!("getty: refusing to start.");
+        return 1;
+    }
+
+    let unapplied = unapplied_settings(&cfg);
+    if !unapplied.is_empty() {
+        eprintln!(
+            "getty: these settings are parsed but NOT applied: {}",
+            unapplied.join(", ")
+        );
+        eprintln!(
+            "getty: this build has no termios layer and no setpriority, so the terminal \
+is left exactly as it was found. On a serial line that means the baud rate is whatever \
+the firmware set."
+        );
     }
 
     let stdin = io::stdin();
@@ -954,6 +1089,84 @@ mod tests {
         let args = argv(&["getty", "-c", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_reset);
+    }
+
+    /// Settings that were asked for are named; a plain getty says nothing.
+    #[test]
+    fn unapplied_settings_are_named_only_when_requested() {
+        let args = argv(&["getty", "tty1"]);
+        let cfg = parse_args(&args).expect("a plain getty parses");
+        assert!(
+            unapplied_settings(&cfg).is_empty(),
+            "a getty that asked for nothing must not warn about anything"
+        );
+
+        // The default baud rate is NOT a request. This is the case the
+        // `baud_explicit` flag exists for: `baud_rates` is `[9600]` either
+        // way, so its value cannot tell these two apart.
+        assert_eq!(cfg.baud_rates, vec![9600], "default baud is still set");
+
+        let args = argv(&["getty", "--local-line", "--keep-baud", "ttyS0", "115200"]);
+        let cfg = parse_args(&args).expect("flags parse");
+        assert_eq!(
+            unapplied_settings(&cfg),
+            vec!["baud rate", "--local-line", "--keep-baud"]
+        );
+
+        // An explicitly-typed 9600 is a request too, even though it matches
+        // the default -- the flag records that it was typed, not what it was.
+        let args = argv(&["getty", "ttyS0", "9600"]);
+        let cfg = parse_args(&args).expect("baud parses");
+        assert_eq!(unapplied_settings(&cfg), vec!["baud rate"]);
+    }
+
+    /// `--delay` is seconds, and absent means no wait at all.
+    ///
+    /// Asserted on the pure decision rather than by timing a sleep: a test
+    /// that measures elapsed time is a test that fails on a busy machine,
+    /// which this suite has been bitten by before.
+    #[test]
+    fn delay_is_seconds_before_the_prompt() {
+        let args = argv(&["getty", "--delay", "5", "tty1"]);
+        let cfg = parse_args(&args).expect("--delay parses");
+        assert_eq!(prompt_delay(&cfg), Duration::from_secs(5));
+
+        let args = argv(&["getty", "tty1"]);
+        let cfg = parse_args(&args).expect("a plain getty parses");
+        assert_eq!(
+            prompt_delay(&cfg),
+            Duration::ZERO,
+            "no --delay must mean no wait, not a default one"
+        );
+    }
+
+    /// `--chroot` is refused; a config without it is not.
+    ///
+    /// Both halves matter. Without the second, a `unsupported_request` that
+    /// returned `Some` for everything would pass -- and a getty that refuses
+    /// every invocation is not a fix, it is an outage.
+    #[test]
+    fn chroot_is_refused_because_ignoring_it_would_unconfine_the_session() {
+        let args = argv(&["getty", "--chroot", "/mnt/root", "tty1"]);
+        let cfg = parse_args(&args).expect("--chroot still parses");
+        let why = unsupported_request(&cfg).expect("--chroot must be refused");
+        assert!(
+            why.contains("/mnt/root"),
+            "the refusal must name the directory asked for, got: {why}"
+        );
+        assert!(
+            why.contains("SYS_CHROOT"),
+            "the refusal must say what is missing, got: {why}"
+        );
+
+        // The same command line without --chroot is something this build can
+        // actually do, and must not be refused.
+        let args = argv(&["getty", "tty1"]);
+        let cfg = parse_args(&args).expect("a plain getty parses");
+        assert!(
+            unsupported_request(&cfg).is_none(),
+            "a getty with no --chroot must start"
+        );
     }
 
     #[test]

@@ -242,16 +242,19 @@ struct Options {
     /// either way, which is why an inert `-N` agreed with GNU on every case
     /// this tree had.
     forward: bool,
-    /// Accepted and currently inert: `-f/--force`, `-Z/--set-utc`.
+    /// `-f/--force`: never ask, and never treat a reversed or already-applied
+    /// patch as anything other than a failure. IMPLEMENTED.
     ///
-    /// Each was measured against GNU on the cases this tree exercises, and on
-    /// those the behaviour coincides with the default: `-f` differs only where
-    /// GNU would otherwise prompt, `-Z` only in the timestamps it sets.
+    /// The old note here said it "differs only where GNU would otherwise
+    /// prompt", which was measured on cases that could not tell the
+    /// difference. It changes the message, the word the count uses, and the
+    /// EXIT STATUS -- see the table at the reversed-patch check.
     ///
-    /// That argument is weaker than it reads, and `-l` is why. An option the
-    /// `--help` text ADVERTISES is one the user has been told works, so
-    /// "coincides on the cases we exercise" stops being a defence the moment
-    /// the case is a user's rather than a harness's. These two are next.
+    /// Accepted and still inert: `-Z/--set-utc`, which sets mtimes from the
+    /// patch header. Measured: no observable difference on the cases here, and
+    /// the differential harness snapshots mode, content and size rather than
+    /// mtime, so it could not see one either. That is a reason to be careful
+    /// about calling it harmless, not a reason to call it done.
     force: bool,
     fuzz: Option<usize>,
     set_utc: bool,
@@ -1910,7 +1913,20 @@ fn main() {
             && opposite
                 .iter()
                 .all(|h| apply_hunk(&lines, h, 0, opts.ignore_whitespace, max_fuzz).is_some());
-        if forward_fails && opposite_applies {
+        // `-f/--force` suppresses the whole check. This is a far bigger
+        // difference than the "only where GNU would otherwise prompt" this
+        // file used to claim -- measured, on an already-applied patch:
+        //
+        // |  | without `-f` | with `-f` |
+        // |---|---|---|
+        // | message | `Reversed (or previously applied) patch detected!` | `Hunk #1 FAILED at 1.` |
+        // | count | `1 out of 1 hunk ignored` | `1 out of 1 hunk FAILED` |
+        // | status | 0 | 1 |
+        //
+        // So the prompt is the least of it: `-f` turns a patch that is quietly
+        // skipped into one that fails, and a script reading the exit status
+        // sees the opposite answer.
+        if forward_fails && opposite_applies && !opts.force {
             any_failed = true;
             // `-r FILE` names the reject file outright; without it the reject
             // sits beside the target as `<target>.rej`.

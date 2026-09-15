@@ -481,6 +481,12 @@ run_case ws.patch -p1
 run_case applied.patch -p1
 run_case applied.patch -p1 -N
 run_case applied.patch -p1 --forward
+# `-f/--force` goes the other way from `-N`: rather than skipping the reversed
+# patch more quietly, it refuses to recognise it at all, so the hunk simply
+# FAILS. Different message, different count word, and exit 1 where the default
+# gives 0 -- which is what makes an inert `-f` a divergence rather than a gap.
+run_case applied.patch -p1 -f
+run_case applied.patch -p1 --force
 # ...and the `-R` form, where the detection reads "Unreversed" instead. This
 # pair uses u.patch against the UNPATCHED base.txt on purpose: `-R` against a
 # file that already carries the change applies cleanly and never reaches the

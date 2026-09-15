@@ -11463,6 +11463,18 @@ fn gen_dmevent() -> Vec<u8> {
         "devices: {}\nbuffered_events: {}\nrules: {}\ntotal_events: {}\nmatched: {}\nops: {}\n",
         devs, evs, rules, total, matched, ops
     ));
+    // Zero devices is not self-explanatory, and the difference matters: no
+    // driver calls `dmevent::notify`, so an empty list means NOBODY REPORTED,
+    // not "this machine has no devices". Left bare, `devices: 0` states the
+    // second. Same failure as rendering an unread partition table as
+    // "0 partition(s)", which tells the reader a drive is blank.
+    if devs == 0 {
+        out.push_str(
+            "note: no driver reports device events yet (dmevent::notify has no \
+             producer), so devices: 0 means unreported, not none",
+        );
+        out.push('\n');
+    }
     for d in crate::fs::dmevent::list_devices() {
         let st = if d.online { "online" } else { "offline" };
         out.push_str(&format!(

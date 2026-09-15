@@ -184,32 +184,21 @@ pub fn init_defaults() {
                 enabled: true,
             },
         ],
-        devices: alloc::vec![
-            KnownDevice {
-                devpath: String::from("/sys/block/sda"),
-                devname: String::from("sda"),
-                subsystem: Subsystem::Block,
-                online: true,
-                first_seen_ns: now,
-                last_event_ns: now,
-            },
-            KnownDevice {
-                devpath: String::from("/sys/class/net/eth0"),
-                devname: String::from("eth0"),
-                subsystem: Subsystem::Net,
-                online: true,
-                first_seen_ns: now,
-                last_event_ns: now,
-            },
-            KnownDevice {
-                devpath: String::from("/sys/class/input/keyboard0"),
-                devname: String::from("keyboard0"),
-                subsystem: Subsystem::Input,
-                online: true,
-                first_seen_ns: now,
-                last_event_ns: now,
-            },
-        ],
+        // EMPTY, deliberately. This table previously shipped `sda`, `eth0` and
+        // `keyboard0` as `online: true` with `first_seen_ns` set to the moment
+        // of initialisation -- three devices nobody had detected, published
+        // through `/proc` by `procfs::gen_dmevent`.
+        //
+        // A device belongs here when something reports it via `notify`, and
+        // nothing does yet: the only callers are a manual `kshell` command and
+        // this module's self-test. So an empty list is the correct content, and
+        // `gen_dmevent` says so rather than leaving `devices: 0` to be read as
+        // "this machine has none".
+        //
+        // The RULES above are kept: default policy that has not fired claims
+        // nothing about the hardware present, which is the difference between a
+        // shipped ruleset and an invented inventory.
+        devices: Vec::new(),
         next_seq: 1,
         next_rule_id: 3,
         total_events: 0,
@@ -418,8 +407,12 @@ fn self_test_inner() {
     crate::serial_println!("dmevent::self_test() — running tests...");
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_devices().len(), 3);
+    // 1: Defaults. NO devices -- a device appears when something reports
+    //    one, and the defaults report nothing. This asserted 3 while the
+    //    table shipped three invented entries, which made the fabrication
+    //    load-bearing: removing it would have turned this suite red and the
+    //    suite would have looked like what broke.
+    assert_eq!(list_devices().len(), 0);
     assert_eq!(list_rules().len(), 2);
     crate::serial_println!("  [1/8] defaults: OK");
 
@@ -433,7 +426,10 @@ fn self_test_inner() {
     )
     .expect("notify");
     assert!(seq >= 1);
-    assert_eq!(list_devices().len(), 4);
+    // One, from the `notify` above -- which is what this case actually
+    // proves. Previously 4, i.e. three seeded plus this one, so the
+    // interesting increment was buried in fixture noise.
+    assert_eq!(list_devices().len(), 1);
     crate::serial_println!("  [2/8] notify add: OK");
 
     // 3: Poll events.

@@ -63,6 +63,33 @@
  * bounded yield budget is what should notice and the fixture inventing its
  * own alarm would hide the thing it was built to show.
  *
+ * WHY THE MARKERS, AND WHY BEFORE EACH SEGMENT RATHER THAN BETWEEN THEM.  A
+ * hang means the process never exits, so the exit code carries nothing: 42
+ * says both orderings passed, and silence says one of them did not, without
+ * saying which.  The two halves exercise different kernel paths -- the
+ * already-zombie case hits the reap lookup, the already-blocked case hits the
+ * wakeup -- so a hang that cannot name its half reports that the bug is real
+ * and not WHERE TO LOOK, which is most of the investigation missing.
+ *
+ * Each marker is emitted BEFORE the work it names, so the LAST line in the
+ * serial log is the segment that did not finish.  Marking only BETWEEN the
+ * halves would leave a hang before the first marker indistinguishable from a
+ * hang in ordering one, silently attributing a failure to start to the first
+ * case; `[zw] start` is what separates those.
+ *
+ * `[zw] B child released` is the one marker a child emits, and it buys a
+ * distinction the parent cannot make alone.  If the parent hangs after
+ * `[zw] B wait` and that line IS present, the child woke, ran and exited --
+ * so a corpse exists and nobody delivered the wakeup.  If it is ABSENT, the
+ * child never came back from `read`, and the fault is in the pipe or the
+ * scheduler rather than in reaping at all.  Two very different searches, told
+ * apart by one line.
+ *
+ * Unbuffered `write(1, ...)`, as `services/ctest-initfini/main.c` explains at
+ * length: a marker held in a stdio buffer is a marker lost in exactly the run
+ * that needed it, because a hang never flushes.  Each is a single short write
+ * so the parent's and the child's cannot interleave mid-line.
+ *
  * Exit codes:
  *    42  every check passed
  *     1  pipe() failed (case A)
@@ -86,6 +113,21 @@
  * arrives from the wrong child is visible rather than plausible. */
 #define CHILD_A_CODE 21
 #define CHILD_B_CODE 23
+
+/* Unbuffered, and a failed diagnostic must never change the verdict: this
+ * fixture's answer is its exit code, so a marker that could not be written is
+ * a lost line rather than a different result. */
+static void emit(const char *s)
+{
+    size_t n = 0;
+    while (s[n] != '\0') {
+        n++;
+    }
+    if (n != 0) {
+        ssize_t written = write(1, s, n);
+        (void)written;
+    }
+}
 
 /* read() and write() are declared warn_unused_result under -Werror, and every
  * call here is checked; these wrappers keep the checks readable. */
@@ -112,6 +154,7 @@ static int read_exactly(int fd, char *buf, int want)
 static int already_zombie(void)
 {
     int fds[2];
+    emit("[zw] A fork (already-zombie: the reap lookup)\n");
     if (pipe(fds) != 0) {
         return 1;
     }
@@ -151,6 +194,7 @@ static int already_zombie(void)
     (void)close(fds[0]);
 
     int status = 0;
+    emit("[zw] A wait (a corpse already exists)\n");
     pid_t reaped = wait(&status);
     if (reaped != child) {
         return 5;
@@ -166,6 +210,7 @@ static int already_zombie(void)
 static int waiter_first(void)
 {
     int fds[2];
+    emit("[zw] B fork (waiter-first: the wakeup)\n");
     if (pipe(fds) != 0) {
         return 7;
     }
@@ -181,6 +226,7 @@ static int waiter_first(void)
         (void)close(fds[1]);
         char scratch = 0;
         (void)read_exactly(fds[0], &scratch, 1); /* returns 0 at EOF */
+        emit("[zw] B child released\n");
         _exit(CHILD_B_CODE);
     }
 
@@ -191,6 +237,7 @@ static int waiter_first(void)
     (void)close(fds[1]);
 
     int status = 0;
+    emit("[zw] B wait (nothing to reap yet; a wakeup must arrive)\n");
     pid_t reaped = wait(&status);
     if (reaped != child) {
         return 9;
@@ -203,6 +250,10 @@ static int waiter_first(void)
 
 int main(void)
 {
+    /* Before anything else: a hang with no marker at all is a process that
+     * never reached main, which is a loader or spawn fault and not this
+     * fixture's subject. */
+    emit("[zw] start\n");
     int rc = already_zombie();
     if (rc != 0) {
         return rc;
@@ -211,5 +262,6 @@ int main(void)
     if (rc != 0) {
         return rc;
     }
+    emit("[zw] ok (both orderings reaped)\n");
     return 42;
 }

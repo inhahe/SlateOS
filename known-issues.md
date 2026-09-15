@@ -150432,3 +150432,56 @@ Until (4), **kanban's door would be export-only**, and an export you cannot
 read back is not a backup. That is a defensible thing to ship if it is said
 plainly -- JSON is readable and portable, so the file is not a dead end -- but
 it must be said, and the app must not imply otherwise.
+
+## TD-B-A-FUNCTION-THE-SUITE-CANNOT-REACH-IS-A-FUNCTION-NOTHING-CHECKS -- OPEN 2026-09-15
+
+`#[cfg(not(test))]` on anything other than `main` removes that code from the
+test build entirely. Not "untested" -- UNREACHABLE. No test can call it,
+`cargo test` compiles a binary that does not contain it, and every coverage
+signal the project has says nothing about it either way.
+
+**Found because dbus-daemon fabricated for as long as it did.** It printed
+"system bus listening at ...", wrote a pid file containing "1", and returned
+0 without creating a socket, with 132 tests passing. `run_dbus_daemon` was
+`cfg(not(test))`. Its two sibling personalities, `run_dbus_send` and
+`run_dbus_monitor`, were gated the same way and were fabricating the same
+way -- and the second was found by looking for the gate, not by looking for
+the defect.
+
+**The sweep.** Seven crates in `userspace/` gate a function other than
+`main`:
+
+| crate | gated functions |
+|---|---|
+| `dbus` | `parse_send_args`, `run_dbus_send`, `run_dbus_monitor`, `run_main` -- **all fixed and ungated 2026-09-15** |
+| `ctags` | `collect_dir`, `extract_tags_from_file`, `read_stdin_filelist`, `read_existing_ctags`, `print_help`, `run_main` |
+| `lp` | `get_next_job_id`, `get_default_printer`, `current_username`, `run_lp`, `run_lprm`, `print_help` |
+| `lex` | `print_help`, `print_version`, `run` |
+| `yacc` | `run_main` |
+| `chpasswd` | `print_help`, `print_version` |
+| `mesg` | `print_help`, `print_version` |
+
+**Not all of these are equal, and the difference is the point.** `print_help`
+and `print_version` behind the gate cost little -- they print a constant and
+exit. `collect_dir`, `extract_tags_from_file`, `read_existing_ctags`,
+`run_lp` and `run_lprm` are ordinary logic with inputs and outputs, hidden
+from the suite for no reason that shows at the call site.
+
+`lp` is the one to look at next: `userspace/lp`'s `cancel_purge` is also on
+the written-never-read list, which is the same pair of symptoms dbus had --
+a dead field in a crate whose entry point nothing can call.
+
+**Why the gate is usually there at all.** These crates build `#![no_main]`
+for the real target and define a `main` the test harness must not duplicate.
+That justifies gating `main`, and nothing else; the rest gets swept along
+because it was written next to it. In `dbus` the only casualty of ungating
+was two constants and an unused import.
+
+**How to check:**
+
+    grep -Pzo '#\[cfg\(not\(test\)\)\]\s*\n(?:#\[[^\n]*\]\s*\n)*(?:pub )?fn\s+\w+' \
+        userspace/*/src/main.rs
+
+or the Python in the commit that opened this entry. It cannot be a gate: a
+crate may have a legitimate reason to gate a helper, and the check has no way
+to tell one from an accident. It is a list to work through.

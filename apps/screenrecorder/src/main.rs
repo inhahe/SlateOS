@@ -51,6 +51,22 @@ const WINDOW_HEIGHT: f32 = 640.0;
 const SIDEBAR_WIDTH: f32 = 200.0;
 const TOOLBAR_HEIGHT: f32 = 48.0;
 const STATUS_BAR_HEIGHT: f32 = 30.0;
+
+/// Why no recording can be made.
+const CANNOT_RECORD: &str = "No frame source: nothing here can capture the screen or write a file";
+
+/// What the window says instead of a recording indicator.
+///
+/// Three lines. The third is the one that stops a second, worse reading: an
+/// empty history is taken for "you have not recorded anything yet", which is
+/// true and beside the point. The point is that pressing Record will not
+/// change it, and a user who believes otherwise finds out after the thing
+/// they wanted to capture has happened.
+const CANNOT_RECORD_LINES: [&str; 3] = [
+    "This program cannot record the screen.",
+    "It has no way to capture a frame and no way to write a file, so nothing is being saved.",
+    "Pressing Record will not produce a file -- this is not an empty history waiting to fill.",
+];
 const BUTTON_HEIGHT: f32 = 34.0;
 const BUTTON_SPACING: f32 = 8.0;
 const PADDING: f32 = 12.0;
@@ -883,6 +899,15 @@ impl RecordingHistory {
     }
 
     /// Create mock history entries for UI development.
+    /// Two past recordings, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `App::new` called this, so the window
+    /// opened on a 1.0 GB "Desktop Recording" at
+    /// `~/Videos/Recordings/recording_20260518_120000` and another beside it.
+    /// Both name a path. A history entry that names a path and a size is a
+    /// claim that a file is *there*, and it is the kind of claim someone acts
+    /// on by freeing up space elsewhere, or by sending the path to somebody.
+    #[cfg(test)]
     pub fn mock_entries() -> Self {
         let mut history = Self::new();
         history.add(
@@ -1717,6 +1742,8 @@ pub struct ScreenRecorderApp {
     pub window_width: f32,
     pub window_height: f32,
     /// Total frames recorded in the current session.
+    /// Why the last Record press did nothing.
+    pub blocked_reason: Option<String>,
     pub total_frames: u32,
     /// Total bytes written in the current session.
     pub total_bytes: u64,
@@ -2080,7 +2107,8 @@ impl ScreenRecorderApp {
             annotations: Vec::new(),
             current_annotation: None,
             output: OutputSettings::default(),
-            history: RecordingHistory::mock_entries(),
+            history: RecordingHistory::new(),
+            blocked_reason: None,
             trim: None,
             hotkeys: default_hotkeys(),
             schedules: ScheduleManager::new(),
@@ -2100,7 +2128,35 @@ impl ScreenRecorderApp {
     }
 
     /// Start a new recording (with countdown if configured).
+    /// Report that no recording can be made.
+    ///
+    /// `handle_tick` used to call `record_frame(self.frame_bytes())` on every
+    /// tick while Recording -- a frame count and a byte total computed from the
+    /// resolution, not from captured pixels, because nothing here captures
+    /// pixels and nothing here writes a file. The indicator showed elapsed
+    /// time climbing and a file size growing, and on Stop `save_to_history`
+    /// filed a history entry naming a path and a size.
+    ///
+    /// That last step is what makes this worse than the sound recorder's
+    /// version of the same bug: the user is left with a *durable record*
+    /// pointing at a file that does not exist, which they may act on days
+    /// later -- by freeing space elsewhere, or by sending someone the path.
+    ///
+    /// Refused at the start rather than reported during, for the reason a
+    /// recorder exists at all: by the time a running take reports trouble, the
+    /// event it was pointed at has already happened.
     pub fn start_recording(&mut self) {
+        self.blocked_reason = Some(String::from(CANNOT_RECORD));
+    }
+
+    /// Start a take, the way the button used to.
+    ///
+    /// `#[cfg(test)]`. The state machine below is real and heavily tested --
+    /// the countdown, the transition table, the indicator's blink, the size
+    /// limit -- and all of it is worth keeping under test. None of it is worth
+    /// shipping, because the frames it sequences do not exist.
+    #[cfg(test)]
+    pub fn begin_recording_fixture(&mut self) {
         // Through the transition table rather than a hand-written test of the
         // current state. `RecordingState::can_transition_to` has fifteen tests
         // and had no caller: every verb in this file checked the state its own
@@ -2240,7 +2296,6 @@ impl ScreenRecorderApp {
     /// trait knows nothing about, so they keep the name.
     pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
-
         // Main background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -2301,6 +2356,42 @@ impl ScreenRecorderApp {
         }
         if self.recording_state == RecordingState::Countdown {
             cmds.extend(self.render_countdown_overlay());
+        }
+
+        // Unconditional: there is no state in which this program can capture a
+        // frame, so a condition here would be one that is always true.
+        for (i, line) in CANNOT_RECORD_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 10.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                y: 2.0 + i as f32 * 13.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 12.0 } else { 10.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(self.window_width - 20.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        if let Some(reason) = &self.blocked_reason {
+            cmds.push(RenderCommand::Text {
+                x: 10.0,
+                y: 41.0,
+                text: reason.clone(),
+                color: self.palette.ink(self.palette.peach),
+                font_size: 10.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(self.window_width - 20.0),
+                overflow: TextOverflow::Ellipsis,
+            });
         }
 
         cmds
@@ -3832,6 +3923,78 @@ mod tests {
 
     use super::*;
 
+    /// Record produces no take, no frames, and no history entry.
+    ///
+    /// `handle_tick` used to call `record_frame(self.frame_bytes())` every
+    /// tick while Recording -- a frame count and a byte total computed from the
+    /// resolution rather than from captured pixels -- and on Stop
+    /// `save_to_history` filed an entry naming a path and a size.
+    ///
+    /// The history entry is what makes this worse than the sound recorder's
+    /// version: the user is left with a durable record pointing at a file that
+    /// does not exist, and may act on it days later by freeing space
+    /// elsewhere or by sending someone the path.
+    #[test]
+    fn record_produces_no_take_and_no_history_entry() {
+        let mut app = ScreenRecorderApp::new();
+        app.countdown = CountdownTimer::new(0);
+        assert!(
+            app.history.entries.is_empty(),
+            "the window opened on recordings"
+        );
+
+        app.handle_event(&press(Key::F9));
+        assert_eq!(app.recording_state, RecordingState::Idle, "a take began");
+
+        for _ in 0..120 {
+            app.handle_event(&tick());
+        }
+        assert_eq!(app.total_frames, 0, "frames were counted from nowhere");
+        assert_eq!(app.total_bytes, 0, "bytes were counted from nowhere");
+        assert_eq!(
+            app.elapsed_secs, 0,
+            "the clock ran on a take that never began"
+        );
+
+        app.handle_event(&press(Key::F9));
+        assert!(
+            app.history.entries.is_empty(),
+            "a recording was filed for a file that does not exist",
+        );
+
+        let why = app
+            .blocked_reason
+            .clone()
+            .expect("Record said nothing at all");
+        assert!(why.contains("No frame source"), "{why}");
+    }
+
+    /// And the window says so, before Record is pressed.
+    #[test]
+    fn the_window_says_it_cannot_record_the_screen() {
+        let app = ScreenRecorderApp::new();
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_RECORD_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}",
+            );
+        }
+        assert!(
+            CANNOT_RECORD_LINES
+                .iter()
+                .any(|l| l.contains("not an empty history waiting to fill")),
+            "nothing forecloses reading the empty history as merely unused",
+        );
+    }
+
     // ------------------------------------------------------------------
     // Wiring
     //
@@ -3874,7 +4037,7 @@ mod tests {
         assert_eq!(app.recording_state, RecordingState::Idle);
         assert_eq!(app.tick_interval(), None, "an idle window needs no clock");
 
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
         assert_eq!(app.recording_state, RecordingState::Recording);
         assert!(app.tick_interval().is_some(), "a recording does");
 
@@ -3900,7 +4063,7 @@ mod tests {
         let mut app = ScreenRecorderApp::new();
         app.countdown = CountdownTimer::new(3);
 
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
         assert_eq!(app.recording_state, RecordingState::Countdown);
         assert_eq!(app.tick_interval(), Some(Duration::from_secs(1)));
 
@@ -3930,7 +4093,7 @@ mod tests {
         let mut app = ScreenRecorderApp::new();
         app.countdown = CountdownTimer::new(0);
         app.fps_preset = FpsPreset::Fps30;
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
 
         for _ in 0..30 {
             app.handle_event(&tick());
@@ -3950,7 +4113,7 @@ mod tests {
         let mut app = ScreenRecorderApp::new();
         app.countdown = CountdownTimer::new(0);
         app.fps_preset = FpsPreset::Fps15;
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
 
         let fps = app.fps_preset.value() as usize;
         let start = app.indicator.blink_on;
@@ -3976,7 +4139,7 @@ mod tests {
     fn the_clock_runs_at_the_chosen_frame_rate() {
         let mut app = ScreenRecorderApp::new();
         app.countdown = CountdownTimer::new(0);
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
 
         app.fps_preset = FpsPreset::Fps15;
         let slow = app.tick_interval().expect("recording");
@@ -3994,7 +4157,7 @@ mod tests {
         let mut app = ScreenRecorderApp::new();
         app.countdown = CountdownTimer::new(0);
         app.output.max_file_size = 1;
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
         assert_eq!(app.recording_state, RecordingState::Recording);
 
         app.handle_event(&tick());
@@ -4016,7 +4179,7 @@ mod tests {
         app.handle_event(&press(Key::F10));
         assert_eq!(app.recording_state, RecordingState::Idle);
 
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
         app.handle_event(&press(Key::F9));
         assert_eq!(app.recording_state, RecordingState::Stopped);
 
@@ -4052,14 +4215,18 @@ mod tests {
     fn a_new_recording_starts_from_zero() {
         let mut app = ScreenRecorderApp::new();
         app.countdown = CountdownTimer::new(0);
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
         for _ in 0..5 {
             app.handle_event(&tick());
         }
         app.handle_event(&press(Key::F9));
         assert_eq!(app.total_frames, 5);
 
-        app.handle_event(&press(Key::F9));
+        // The second start goes through the fixture too, with the `reset`
+        // that F9's handler does first -- Stopped's only legal move is to
+        // Idle, so without it the fixture's `enter(Recording)` refuses.
+        app.reset();
+        app.begin_recording_fixture();
         assert_eq!(app.recording_state, RecordingState::Recording);
         assert_eq!(app.total_frames, 0, "the counters carried over");
         assert_eq!(app.total_bytes, 0);
@@ -4073,7 +4240,7 @@ mod tests {
         let mut app = ScreenRecorderApp::new();
         app.history = RecordingHistory::new();
         app.countdown = CountdownTimer::new(0);
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
         app.handle_event(&tick());
         app.handle_event(&press(Key::F9));
         assert_eq!(app.history.entries.len(), 1, "the recording was not saved");
@@ -4332,7 +4499,7 @@ mod tests {
         app.countdown = CountdownTimer::new(0);
         assert_eq!(app.title(), "Screen Recorder");
 
-        app.handle_event(&press(Key::F9));
+        app.begin_recording_fixture();
         for _ in 0..app.fps_preset.value() {
             app.handle_event(&tick());
         }
@@ -5244,7 +5411,7 @@ mod tests {
     #[test]
     fn test_app_start_recording_with_countdown() {
         let mut app = ScreenRecorderApp::new();
-        app.start_recording();
+        app.begin_recording_fixture();
         assert_eq!(app.recording_state, RecordingState::Countdown);
         assert!(app.countdown.active);
     }
@@ -5253,7 +5420,7 @@ mod tests {
     fn test_app_start_recording_no_countdown() {
         let mut app = ScreenRecorderApp::new();
         app.countdown.set_duration(0);
-        app.start_recording();
+        app.begin_recording_fixture();
         assert_eq!(app.recording_state, RecordingState::Recording);
     }
 
@@ -5261,7 +5428,7 @@ mod tests {
     fn test_app_stop_recording() {
         let mut app = ScreenRecorderApp::new();
         app.countdown.set_duration(0);
-        app.start_recording();
+        app.begin_recording_fixture();
         app.stop_recording();
         assert_eq!(app.recording_state, RecordingState::Stopped);
     }
@@ -5270,7 +5437,7 @@ mod tests {
     fn test_app_pause_resume() {
         let mut app = ScreenRecorderApp::new();
         app.countdown.set_duration(0);
-        app.start_recording();
+        app.begin_recording_fixture();
         app.pause_recording();
         assert_eq!(app.recording_state, RecordingState::Paused);
         app.resume_recording();
@@ -5280,7 +5447,7 @@ mod tests {
     #[test]
     fn test_app_countdown_to_recording() {
         let mut app = ScreenRecorderApp::new();
-        app.start_recording(); // starts countdown (3s)
+        app.begin_recording_fixture(); // starts countdown (3s)
         assert_eq!(app.recording_state, RecordingState::Countdown);
 
         assert!(!app.tick_countdown()); // 3 -> 2
@@ -5293,7 +5460,7 @@ mod tests {
     fn test_app_record_frame() {
         let mut app = ScreenRecorderApp::new();
         app.countdown.set_duration(0);
-        app.start_recording();
+        app.begin_recording_fixture();
         let frame = app.record_frame(8294400); // 1920*1080*4
         assert_eq!(frame, 1);
         assert_eq!(app.total_bytes, 8294400);
@@ -5303,7 +5470,7 @@ mod tests {
     fn test_app_tick_elapsed() {
         let mut app = ScreenRecorderApp::new();
         app.countdown.set_duration(0);
-        app.start_recording();
+        app.begin_recording_fixture();
         app.tick_elapsed();
         app.tick_elapsed();
         assert_eq!(app.elapsed_secs, 2);
@@ -5322,7 +5489,7 @@ mod tests {
     fn test_app_reset() {
         let mut app = ScreenRecorderApp::new();
         app.countdown.set_duration(0);
-        app.start_recording();
+        app.begin_recording_fixture();
         app.record_frame(1000);
         app.tick_elapsed();
         app.reset();
@@ -5452,7 +5619,7 @@ mod tests {
     #[test]
     fn test_render_countdown_overlay() {
         let mut app = ScreenRecorderApp::new();
-        app.start_recording(); // triggers countdown
+        app.begin_recording_fixture(); // triggers countdown
         let cmds = app.render_commands();
         let has_get_ready = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
@@ -5468,7 +5635,7 @@ mod tests {
     fn test_render_recording_indicator() {
         let mut app = ScreenRecorderApp::new();
         app.countdown.set_duration(0);
-        app.start_recording();
+        app.begin_recording_fixture();
         app.indicator.update(10, 50000, 30);
         let cmds = app.render_commands();
         // Should have the indicator overlay with time/fps
@@ -5536,7 +5703,7 @@ mod tests {
     fn test_render_annotation_toolbar() {
         let mut app = ScreenRecorderApp::new();
         app.countdown.set_duration(0);
-        app.start_recording();
+        app.begin_recording_fixture();
         app.annotation_toolbar_visible = true;
         let cmds = app.render_commands();
         let has_rect_tool = cmds.iter().any(|c| {
@@ -5567,7 +5734,7 @@ mod tests {
     fn test_render_status_bar_recording() {
         let mut app = ScreenRecorderApp::new();
         app.countdown.set_duration(0);
-        app.start_recording();
+        app.begin_recording_fixture();
         app.total_frames = 100;
         app.total_bytes = 50000;
         app.elapsed_secs = 5;

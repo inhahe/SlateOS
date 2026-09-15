@@ -1758,6 +1758,18 @@ use std::time::Duration;
 /// A request, not a promise: `render` is handed the size it is actually being
 /// drawn at and lays out from that, which is why nothing else in this file
 /// stores a width.
+/// What the window says instead of listing mail.
+///
+/// Three lines. The third exists because an empty inbox is a *believable*
+/// empty inbox -- it reads as "no new mail", which is a fact about the user's
+/// correspondence rather than about this program. That is the one reading
+/// this client has not earned: it has never contacted a server.
+const CANNOT_FETCH_LINES: [&str; 3] = [
+    "This client cannot send or receive mail.",
+    "It has no network access, so no account is connected and no server has been contacted.",
+    "An empty mailbox here does not mean no new mail -- nothing was ever fetched.",
+];
+
 const WINDOW_WIDTH: f32 = 1400.0;
 /// As [`WINDOW_WIDTH`].
 const WINDOW_HEIGHT: f32 = 900.0;
@@ -2510,6 +2522,30 @@ impl EmailApp {
             corner_radii: CornerRadii::ZERO,
         });
 
+        // After the background, or it would be painted over -- which is the
+        // mistake `apps/screenrecorder` made an hour ago and a test caught.
+        for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 10.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                y: 2.0 + i as f32 * 14.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 12.0 } else { 10.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(width - 20.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         // Header
         self.palette.push_surface(
             &mut cmds,
@@ -3169,6 +3205,16 @@ impl EmailApp {
     /// In a method rather than in `main` because a test cannot call `main`, and
     /// a mail client that opens on an empty inbox looks broken rather than
     /// idle.
+    /// An account and a handful of messages, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `main` called it, so every launch
+    /// opened on an account for `user@gmail.com` in the name of "John Doe",
+    /// an inbox of messages nobody had received, and a filter rule acting on
+    /// them. The account is the part worth singling out: a configured account
+    /// in a mail client is read as *credentials are stored and a server was
+    /// reached*, which is a claim about the user's setup and about what this
+    /// program has been given.
+    #[cfg(test)]
     pub fn seed_sample_mail(&mut self) {
         // Add sample account
         let acct = EmailAccount::gmail("user@gmail.com", "John Doe");
@@ -3206,11 +3252,12 @@ impl EmailApp {
 }
 
 fn main() -> ExitCode {
+    // Opens empty. It used to call `seed_sample_mail`.
     let mut app = EmailApp::new();
-    app.seed_sample_mail();
     app::launch("email", &mut app)
 }
 
+#[cfg(test)]
 fn create_sample_messages(account_id: u32) -> Vec<MessageSummary> {
     vec![
         MessageSummary {
@@ -3367,6 +3414,55 @@ fn create_sample_messages(account_id: u32) -> Vec<MessageSummary> {
 )]
 mod tests {
     use super::*;
+
+    /// A fresh client has no account and no mail.
+    ///
+    /// `main` called `seed_sample_mail`, so every launch opened on an account
+    /// for `user@gmail.com` in the name of "John Doe", an inbox of messages
+    /// nobody had received, and a filter rule acting on them. The account is
+    /// the part worth singling out: a configured account in a mail client is
+    /// read as *credentials are stored and a server was reached*.
+    ///
+    /// Note where the seeding lived. It was in `main`, not in `new` -- which
+    /// is why this is the first application in twelve where removing the
+    /// fabrication broke no tests at all. Every other one wired its fixture
+    /// into the constructor, so every test got it without asking; here the
+    /// tests had to call for it, and still can.
+    #[test]
+    fn a_fresh_client_has_no_account_and_no_mail() {
+        let app = EmailApp::new();
+        assert!(app.accounts.is_empty(), "the client opened on an account");
+        assert!(
+            app.messages.is_empty(),
+            "the client opened on mail nobody received"
+        );
+    }
+
+    /// And the window says why, so an empty inbox is not read as "no new mail".
+    #[test]
+    fn the_window_says_it_cannot_fetch_mail() {
+        let app = EmailApp::new();
+        let texts: Vec<String> = app
+            .render_commands(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_FETCH_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_FETCH_LINES
+                .iter()
+                .any(|l| l.contains("nothing was ever fetched")),
+            "nothing forecloses reading the empty inbox as no new mail",
+        );
+    }
 
     // ------------------------------------------------------------------
     // Wiring

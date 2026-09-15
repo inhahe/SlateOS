@@ -1364,6 +1364,140 @@ fn main() {
 #[cfg(test)]
 mod tests {
 
+    // ---- Header parsers -------------------------------------------------
+    //
+    // `parse_tcp`, `parse_udp`, `parse_icmp`, `parse_arp` and `read_u32_be`
+    // had NO test of any kind. They are the functions a lint sweep over this
+    // crate touches most -- 133 indexing and arithmetic sites live in the
+    // decode path -- and a mechanical `[i]` -> `get(i)` conversion changes
+    // behaviour silently wherever the fallback differs from the original.
+    // These pin the values AND the truncation boundary, so such a change has
+    // to show itself.
+
+    /// One byte short must be `None`, not a panic and not a zero-filled
+    /// header. The boundary is the assertion: `len() < N` and `len() <= N`
+    /// differ by exactly the packet that is legal.
+    #[test]
+    fn every_header_parser_refuses_one_byte_short() {
+        assert!(parse_ethernet(&[0u8; 13]).is_none());
+        assert!(parse_ethernet(&[0u8; 14]).is_some());
+
+        // IPv4 also needs version 4 and IHL >= 5, so a zero buffer is
+        // rejected on content; 0x45 is the ordinary "version 4, 20 bytes".
+        let mut ip = [0u8; 20];
+        ip[0] = 0x45;
+        assert!(parse_ipv4(&ip[..19]).is_none());
+        assert!(parse_ipv4(&ip).is_some());
+
+        assert!(parse_tcp(&[0u8; 19]).is_none());
+        assert!(parse_tcp(&[0u8; 20]).is_some());
+        assert!(parse_udp(&[0u8; 7]).is_none());
+        assert!(parse_udp(&[0u8; 8]).is_some());
+        assert!(parse_icmp(&[0u8; 7]).is_none());
+        assert!(parse_icmp(&[0u8; 8]).is_some());
+        assert!(parse_arp(&[0u8; 27]).is_none());
+        assert!(parse_arp(&[0u8; 28]).is_some());
+    }
+
+    /// A real IPv4 header, field by field.
+    #[test]
+    fn parse_ipv4_reads_every_field() {
+        let pkt: [u8; 20] = [
+            0x45, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00, 0x40, 0x06, 0xb1, 0xe6, 0xc0, 0xa8,
+            0x00, 0x68, 0xc0, 0xa8, 0x00, 0x01,
+        ];
+        let ip = parse_ipv4(&pkt).expect("a well-formed IPv4 header");
+        assert_eq!(ip.version, 4);
+        assert_eq!(ip.ihl, 5);
+        assert_eq!(ip.tos, 0);
+        assert_eq!(ip.total_length, 60);
+        assert_eq!(ip.identification, 0x1c46);
+        assert_eq!(ip.flags, 2, "Don't Fragment");
+        assert_eq!(ip.fragment_offset, 0);
+        assert_eq!(ip.ttl, 64);
+        assert_eq!(ip.protocol, PROTO_TCP);
+        assert_eq!(ip.header_checksum, 0xb1e6);
+        assert_eq!(ip.src_ip, 0xc0a8_0068, "192.168.0.104");
+        assert_eq!(ip.dst_ip, 0xc0a8_0001, "192.168.0.1");
+
+        // Content, not just length: IHL below 5 describes a header shorter
+        // than the fixed part, and version 6 is not this parser's packet.
+        let mut bad_ihl = pkt;
+        bad_ihl[0] = 0x44;
+        assert!(parse_ipv4(&bad_ihl).is_none(), "IHL 4 is impossible");
+        let mut bad_ver = pkt;
+        bad_ver[0] = 0x65;
+        assert!(parse_ipv4(&bad_ver).is_none(), "version 6 is not IPv4");
+    }
+
+    #[test]
+    fn parse_tcp_reads_every_field() {
+        let pkt: [u8; 20] = [
+            0x00, 0x50, 0x1f, 0x90, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x50, 0x18,
+            0x20, 0x00, 0xab, 0xcd, 0x00, 0x00,
+        ];
+        let tcp = parse_tcp(&pkt).expect("a well-formed TCP header");
+        assert_eq!(tcp.src_port, 80);
+        assert_eq!(tcp.dst_port, 8080);
+        assert_eq!(tcp.seq_num, 1);
+        assert_eq!(tcp.ack_num, 2);
+        assert_eq!(tcp.data_offset, 5, "the high nibble of byte 12");
+        assert_eq!(tcp.flags, 0x18, "PSH|ACK");
+        assert_eq!(tcp.window, 0x2000);
+        assert_eq!(tcp.checksum, 0xabcd);
+        assert_eq!(tcp.urgent_ptr, 0);
+    }
+
+    #[test]
+    fn parse_udp_and_icmp_read_every_field() {
+        let udp: [u8; 8] = [0x00, 0x35, 0x04, 0x01, 0x00, 0x20, 0x12, 0x34];
+        let u = parse_udp(&udp).expect("a well-formed UDP header");
+        assert_eq!(u.src_port, 53);
+        assert_eq!(u.dst_port, 1025);
+        assert_eq!(u.length, 32);
+        assert_eq!(u.checksum, 0x1234);
+
+        let icmp: [u8; 8] = [0x08, 0x00, 0xf7, 0xff, 0x00, 0x01, 0x00, 0x02];
+        let i = parse_icmp(&icmp).expect("a well-formed ICMP header");
+        assert_eq!(i.icmp_type, 8, "echo request");
+        assert_eq!(i.code, 0);
+        assert_eq!(i.checksum, 0xf7ff);
+        assert_eq!(i.id, 1);
+        assert_eq!(i.seq, 2);
+    }
+
+    #[test]
+    fn parse_arp_reads_every_field() {
+        let pkt: [u8; 28] = [
+            0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+            0xc0, 0xa8, 0x00, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xa8, 0x00, 0x01,
+        ];
+        let arp = parse_arp(&pkt).expect("a well-formed ARP packet");
+        assert_eq!(arp.hw_type, 1, "Ethernet");
+        assert_eq!(arp.proto_type, 0x0800, "IPv4");
+        assert_eq!(arp.hw_len, 6);
+        assert_eq!(arp.proto_len, 4);
+        assert_eq!(arp.operation, 1, "request");
+        assert_eq!(arp.sender_mac, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        assert_eq!(arp.sender_ip, 0xc0a8_0068);
+        assert_eq!(arp.target_mac, [0, 0, 0, 0, 0, 0]);
+        assert_eq!(arp.target_ip, 0xc0a8_0001);
+    }
+
+    /// `read_u32_be` had no test, and its short-read branch returns 0 --
+    /// which is indistinguishable from a genuine zero. Pinned so that if
+    /// anyone makes it fallible, every caller is revisited deliberately.
+    #[test]
+    fn read_u32_be_reads_and_reports_zero_past_the_end() {
+        let data = [0xde, 0xad, 0xbe, 0xef, 0x11];
+        assert_eq!(read_u32_be(&data, 0), 0xdead_beef);
+        assert_eq!(read_u32_be(&data, 1), 0xadbe_ef11);
+        // Two bytes short of a u32: currently 0, and unreachable from the
+        // parsers because each checks a length that covers its own reads.
+        assert_eq!(read_u32_be(&data, 2), 0);
+        assert_eq!(read_u32_be(&data, 99), 0);
+    }
+
     /// A frame shorter than the IP header it DECLARES must not slice past
     /// its end.
     ///

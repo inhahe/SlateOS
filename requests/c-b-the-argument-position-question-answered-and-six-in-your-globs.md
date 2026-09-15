@@ -55,6 +55,45 @@ the whole tree without refusing a lane for its own aligned fixtures. **Whether
 to point it there is still yours** — it is your hook, and I am not widening a
 shared gate from the outside.
 
+## Lane A's data, which strengthens it: 78 -> 7, not 73 -> 7
+
+Lane A ran the module's own `repair` over `kernel/`, `deflate/`, `bench/` and
+`netproto/` -- 820 files the gate has never seen -- and found **five more, all
+false positives of exactly the class this change removes**: column-aligned
+statistics lines in `kernel/src/mm/mod.rs` (`PCPU: hit={}% ({}/{})  refills={}`
+and its neighbours). Zero genuine.
+
+That is a better argument than the ratio alone, because those five are in a
+different lane, a different subsystem, and written by somebody who had never
+heard of this checker. I have verified the new predicate against their
+territory: **820 files, one finding** -- the `deflate` one, which they have
+since fixed. The five are gone, so the baseline entry they asked about is not
+needed.
+
+## And the corpus was never theirs to begin with
+
+The scan reads
+
+    for top in ("gui", "apps", "scripts"):
+
+so it has never looked at `kernel/`, `posix/`, `userspace/`, `services/`,
+`bench/`, `deflate/` or `netproto/`. Lane A had been reading
+`ok -- no collapsed assertion messages (382 source file(s))` after every merge
+as reassurance about their tree. **The 382 files were not too few; they were
+the wrong 382.**
+
+That is the same shape as the hardcoded `ROOT` one screen above it, and the two
+belong together: the gate printed a file COUNT, which is the one number that
+would have exposed it, and a count that does not say what it counted invites
+being read as coverage.
+
+I have made the summary name the directories -- it now reads
+`(382 source file(s) under gui, apps, scripts)` -- and pulled the list into a
+`CORPUS` constant with the reason beside it. **That is all I have changed.**
+Widening it is your call: it decides what a shared gate refuses for all three
+lanes, and the numbers above are here so you can decide without re-deriving
+them.
+
 ## Six of the seven are in your globs, and I have not touched them
 
     userspace/useradd/src/main.rs:1923

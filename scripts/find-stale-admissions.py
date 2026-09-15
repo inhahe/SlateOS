@@ -61,6 +61,14 @@ WHAT IT CANNOT SEE, stated plainly:
     with the error messages and not printed. "Cannot open {path}: this program
     has no file access" would be missed.
 
+THE ONE IT STILL REPORTS, so nobody investigates it twice: `gui/compositor`
+[network], for "the mode-set the kernel would have refused was never sent".
+That is a display mode-set, not a packet; "never sent" is network vocabulary
+here and the sentence is not about the network. Tightening the phrase to
+require a network noun nearby was tried and rejected -- it is one readable
+line, and narrowing vocabulary to silence a single true-by-the-rules entry is
+how a check starts missing real ones.
+
 Report-only, no --check, for the reason the others have none: several entries
 will be legitimate, and a gate teaches the next reader to silence it rather
 than read it.
@@ -72,7 +80,7 @@ import pathlib
 import re
 import sys
 
-from rustlex import live_code, string_literals
+from rustlex import live_code, string_literals, strip_noise
 
 PAIRS = {
     "file": (
@@ -133,8 +141,16 @@ def main():
             crates += 1
             prod = production_source(crate)
             said = string_literals(prod)
+            # A capability must be looked for in CODE. Searching the raw source
+            # counts a mention in a comment or a string, and `apps/undelete`
+            # showed how badly that goes: its only `std::fs` is a module doc
+            # reading "contains no reference to `std::fs` or `safeio`", so the
+            # sentence denying the capability was itself the evidence that the
+            # crate had it. The same bug in find-silent-incapacity runs the
+            # other way and skips such a crate as capable.
+            code = strip_noise(prod)
             for kind, (capability, denial) in PAIRS.items():
-                if not capability.search(prod):
+                if not capability.search(code):
                     continue
                 hits = [s for s in said if denial.search(s)]
                 # A denial carrying a format placeholder is a report about one

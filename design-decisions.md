@@ -537,6 +537,39 @@ path is never modified to produce one.**
 - Do **not**, at any point, add auxv construction to
   `spawn.rs::setup_user_stack` or any other native launch code.
 
+> **§4 UPDATE 2026-09-15 (lane B, from the standing expiry audit in
+> `todo.txt`): THE PREREQUISITE THIS ENTRY IS BLOCKED ON HAS LANDED.** The
+> rejection above reads "there is no Linux compat ELF loader yet (a Phase 5.1
+> feature), so there is no real auxv to serve". Both halves of that are now
+> false, measured rather than assumed:
+>
+> * `kernel/src/proc/linux_stack.rs` builds a System V initial stack with a
+>   **17-entry auxv** — `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_BASE`,
+>   `AT_ENTRY`, `AT_RANDOM`, `AT_SECURE`, `AT_EXECFN`, `AT_HWCAP`,
+>   `AT_CLKTCK`, `AT_PAGESZ`, `AT_FLAGS`, `AT_UID`/`AT_EUID`/`AT_GID`/
+>   `AT_EGID`, `AT_NULL`.
+> * It is **live, not scaffolding**: `spawn.rs` calls `install_linux_stack`,
+>   and the ABI is chosen in the real exec path from
+>   `ElfFile::detect_linux_abi()`. Checked precisely because the neighbouring
+>   `build_linux_*_test_elf` helpers make a test-only reading plausible.
+> * `PR_GET_AUXV` in `kernel/src/syscall/linux.rs` still returns the bare
+>   `AT_NULL`, and its comment still gives this entry's reason: "We don't yet
+>   store a kernel-side auxv copy".
+>
+> So the decision itself is **still correct** — native processes genuinely
+> have no auxv and the bare `AT_NULL` remains the honest answer for them. What
+> has expired is the *blocker*: the one step left is precisely the one this
+> clause already names, "stash the built auxv in Linux-ABI PCB state" and have
+> procfs/prctl serve that copy for Linux-ABI processes only.
+>
+> Filed for lane A, whose tree both files are in:
+> `requests/b-a-the-auxv-blocker-in-section-4-has-expired.md`.
+>
+> Recorded here rather than only in the request because this is the exact
+> shape §305 exists to catch — a decision resting on a missing prerequisite,
+> the prerequisite arriving, and nobody re-reading the clause. S72 went 25 days
+> that way and ~1,100 commits were built on a dead premise.
+
 ---
 
 ## 5. fork() copy-on-write — swap swapped-out parent pages back IN rather than refcount swap slots

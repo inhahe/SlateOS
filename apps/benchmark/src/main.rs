@@ -33,6 +33,29 @@
 //! prose describing the old behaviour was not. Recorded here rather than
 //! quietly replaced, because a stale doc that *understates* what the code does
 //! is the version of this mistake nobody ever complains about.
+//!
+//! # What the tests do and do not establish
+//!
+//! The tests prove these numbers are *measurements* — non-zero, not equal to
+//! any of the constants they replaced, and produced by a clock that is
+//! genuinely attached to the work. They do **not** prove the numbers are
+//! right, and the gap is structural rather than an omission.
+//!
+//! A rate is invariant to its own operation count. Doubling the work doubles
+//! the elapsed time, so `ops / seconds` is unchanged whether the loop is
+//! counted at four operations per iteration or forty. Nothing runnable in this
+//! tree can therefore check `OPS_PER_ITERATION`, `FLOPS_PER_ITERATION` or the
+//! `2 * n^3` for the matrix multiply: they are checkable by reading the loop
+//! against the constant, and by comparing against a reference implementation
+//! on known hardware, and by nothing else.
+//!
+//! That limit is worth stating because the obvious test — vary the input and
+//! assert the output varies — passes here regardless. Lane B hit the same
+//! edge on `patch -l` the same day: their probe confirmed the flag was live
+//! and said nothing about it doing the right thing, and the bug was found by
+//! reading the code instead. A probe that establishes liveness is not a probe
+//! that establishes correctness, and treating one as the other is how a
+//! measured number becomes as trustworthy-looking as a fabricated one.
 
 use std::collections::VecDeque;
 use std::process::ExitCode;
@@ -898,10 +921,12 @@ pub fn run_cpu_benchmark() -> CategoryResult {
 
 /// Integer arithmetic, in millions of operations per second.
 ///
-/// Four integer operations per iteration: a multiply, an add, a shift and an
-/// exclusive-or. Counted rather than estimated, because the unit on the panel
-/// says "Mops/s" and a made-up operation count is the same defect as a made-up
-/// time.
+/// Four integer operations per iteration, one per operator in the loop:
+/// `wrapping_mul`, `wrapping_add`, `>>` and `^=`. Written out that way so a
+/// reader can check the count against the body without running anything —
+/// which is the only check it can get. See this file's module documentation,
+/// "What the tests do and do not establish": a rate is invariant to its own
+/// operation count, so nothing runnable can verify this four.
 fn simulate_integer_benchmark() -> f64 {
     const ITERATIONS: u64 = 8_000_000;
     const OPS_PER_ITERATION: f64 = 4.0;

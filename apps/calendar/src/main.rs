@@ -1601,6 +1601,38 @@ impl CalendarApp {
         let layout = Layout::new(width, height, self.sidebar_visible);
 
         fill(&mut frame, layout.window, self.palette.base, 0.0);
+
+        // After the background, or it would be painted over. Keyed on the
+        // store being empty so it retires itself at the first real event.
+        if self.store.is_empty() {
+            for (i, line) in NO_EVENTS_LINES.iter().enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+                let ty = layout.window.y + 1.0 + i as f32 * 11.0;
+                let avail = (layout.window.w - 16.0).max(0.0);
+                if avail <= 0.0 || ty + 11.0 > layout.window.y + layout.window.h {
+                    break;
+                }
+                frame.push(RenderCommand::Text {
+                    x: layout.window.x + 8.0,
+                    y: ty,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 10.0 } else { 9.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(avail),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+
         self.draw_top_bar(&mut frame, &layout);
 
         if let Some(bar) = layout.sidebar {
@@ -2969,6 +3001,24 @@ fn today_from_clock() -> Option<Date> {
 // Sample data
 // ============================================================================
 
+/// What the window says instead of listing events.
+///
+/// Two lines, two different absences. The first is that nothing here is the
+/// user's; the second is that nothing the user adds will survive.
+const NO_EVENTS_LINES: [&str; 2] = [
+    "No events -- this calendar opened with a Team Standup and four others until 2026-09-15. Nobody had scheduled any of them.",
+    "Nothing is saved: this app has no filesystem access, so an event added today is gone when the window closes.",
+];
+
+/// A day's worth of events, for tests.
+///
+/// `#[cfg(test)]` since 2026-09-15. `main` called it, so the window opened on
+/// a "Team Standup" at 09:00 **today** and four more like it. An event on a
+/// dated day is a claim about what the user has scheduled -- the same shape as
+/// `apps/reminders`' overdue task and `apps/habits`' check-ins, and acted on
+/// the same way: somebody glances at a calendar to find out whether they are
+/// free.
+#[cfg(test)]
 fn sample_events(store: &mut EventStore, today: Date) {
     store.add(CalendarEvent {
         id: 0,
@@ -3166,8 +3216,8 @@ fn main() -> ExitCode {
         month: 1,
         day: 1,
     });
+    // Opens empty. It used to call `sample_events`.
     let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
-    sample_events(&mut app.store, today);
     app::launch("calendar", &mut app)
 }
 
@@ -3190,6 +3240,51 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A fresh calendar holds no events, and says the emptiness is not yours.
+    ///
+    /// `main` called `sample_events`, so the window opened on a "Team
+    /// Standup" at 09:00 **today** and four more. An event on a dated day is a
+    /// claim about what the user has scheduled -- the same shape as
+    /// `apps/reminders`' overdue task and `apps/habits`' check-ins, and acted
+    /// on the same way: somebody glances at a calendar to find out whether
+    /// they are free.
+    ///
+    /// Two absences, two lines. Nothing here is the user's, and nothing the
+    /// user adds will survive the window.
+    #[test]
+    fn a_fresh_calendar_holds_no_events_and_says_so_twice() {
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
+        assert!(app.store.is_empty(), "events appeared from nowhere");
+
+        let texts: Vec<String> = app
+            .frame(DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_EVENTS_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NO_EVENTS_LINES
+                .iter()
+                .any(|l| l.contains("gone when the window closes")),
+            "nothing warns that an event added today does not survive",
+        );
+    }
+
     use guitk::probe;
 
     /// The draw commands of one frame at the app's current size.

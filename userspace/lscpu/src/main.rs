@@ -66,11 +66,6 @@ struct CpuInfo {
 
 struct LscpuOpts {
     json: bool,
-    extended: bool,
-    parse: bool,
-    online: bool,
-    offline: bool,
-    hex: bool,
     caches: bool,
     /// `-B`: sizes as raw byte counts rather than sysfs's K/M/G form.
     bytes: bool,
@@ -447,6 +442,24 @@ fn print_caches(out: &mut io::StdoutLock<'_>, info: &CpuInfo) {
 
 /// Refuse an option this program does not have.
 ///
+/// Refuse an option this build parses but does not implement.
+///
+/// Accepting it silently is the defect this file has already been through
+/// once: before `refuse_unknown_option`, `lscpu --zzq` printed the CPU table
+/// and exited 0. An option that IS in the parser and does nothing is the same
+/// answer in a better disguise, and a worse one to debug -- `--help` lists it,
+/// the parser takes it, and only the output is missing.
+///
+/// Not `usageerror`: that crate spells getopt's wording for an option that
+/// does not exist, and these do exist. What they lack is an implementation,
+/// which is a different sentence.
+fn refuse_unimplemented(opt: &str) -> ! {
+    eprintln!("lscpu: {opt} is accepted by the parser but not implemented in this build.");
+    eprintln!("It needs a per-CPU topology table, which this lscpu does not build.");
+    eprintln!("Try 'lscpu --help' for more information.");
+    process::exit(1);
+}
+
 /// The wording is getopt's, shared through `usageerror` so every program
 /// here renders it identically. The status is **1**, measured rather than
 /// assumed: `lscpu`, `lsmem`, `prlimit` and `blkzone` all exit 1 for this,
@@ -486,11 +499,6 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut opts = LscpuOpts {
         json: false,
-        extended: false,
-        parse: false,
-        online: false,
-        offline: false,
-        hex: false,
         caches: false,
         bytes: false,
     };
@@ -505,12 +513,12 @@ fn main() {
                 println!();
                 println!("Options:");
                 println!("  -J, --json         JSON output");
-                println!("  -e, --extended     Extended readable format");
+                println!("  -e, --extended     Extended readable format (not implemented)");
                 println!("  -p, --parse        Parseable output");
                 println!("  -B, --bytes        Print sizes in bytes");
                 println!("  -C, --caches       Show cache info");
-                println!("  --online           Show online CPUs only");
-                println!("  --offline          Show offline CPUs only");
+                println!("  --online           Show online CPUs only (needs --extended)");
+                println!("  --offline          Show offline CPUs only (needs --extended)");
                 println!("  -x, --hex          Show hex masks");
                 println!("  -h, --help         Show this help");
                 println!("  -V, --version      Show version");
@@ -521,12 +529,33 @@ fn main() {
                 process::exit(0);
             }
             "-J" | "--json" => opts.json = true,
-            "-e" | "--extended" => opts.extended = true,
-            "-p" | "--parse" => opts.parse = true,
-            "--online" => opts.online = true,
-            "--offline" => opts.offline = true,
-            "-x" | "--hex" => opts.hex = true,
             "-C" | "--caches" => opts.caches = true,
+            // `--online`/`--offline` select which CPUs the per-CPU table
+            // covers, so they mean nothing without a per-CPU table. GNU
+            // refuses them outright, and the wording below is its own,
+            // measured rather than paraphrased -- util-linux names all three
+            // of `--all`, `--online` and `--offline` in one sentence whichever
+            // was given, and exits 1 with nothing on stdout.
+            //
+            // This build has no `--extended`/`--parse` either, so the
+            // condition GNU describes can never be met here. Refusing on
+            // GNU's terms is still right: a script that checks for this
+            // message gets it, and the alternative is the CPU table and
+            // exit 0, which is what the whole file has already been fixed
+            // for once.
+            "--online" | "--offline" => {
+                eprintln!(
+                    "lscpu: options --all, --online and --offline may only be \
+used with options --extended or --parse."
+                );
+                process::exit(1);
+            }
+            // Parsed and ignored until now. `-p` is the one that bites: a
+            // script asking for a parseable table got the human one and an
+            // exit 0, so it parsed a heading as data.
+            "-e" | "--extended" => refuse_unimplemented("--extended"),
+            "-p" | "--parse" => refuse_unimplemented("--parse"),
+            "-x" | "--hex" => refuse_unimplemented("--hex"),
             // Advertised by the help above and parsed by nothing until now;
             // found by `scripts/check-help-vs-parser.py`.
             "-B" | "--bytes" => opts.bytes = true,

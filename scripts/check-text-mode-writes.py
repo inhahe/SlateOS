@@ -111,9 +111,18 @@ import argparse
 import ast
 import io
 import contextlib
+import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+
+# This repository, derived from where this file IS rather than from where the
+# process happens to be standing. See `_git`.
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import gitenv  # noqa: E402  (needs the path above)
 
 # Measured 2026-09-04: 170 tracked `*.py` under `scripts/` (169 before this
 # file joined them), carrying 197 text-mode write sites -- 110 of which already
@@ -162,7 +171,47 @@ UNKNOWN_MODE = "<computed>"
 
 
 def _git(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], capture_output=True, check=False)
+    """Run git against THIS repository, whatever the environment says.
+
+    A hook exports `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE`, and those
+    OUTRANK `cwd`. Without scrubbing them, `git ls-files scripts` run from
+    inside the pre-push hook enumerates whichever repository git was pointed
+    at, not this one.
+
+    **This was not hypothetical and it was mine.** Wiring this checker as
+    pre-push gate 44 on 2026-09-15 put it into
+    `test-selftests-are-repo-safe.py`'s corpus -- that suite discovers its
+    subjects FROM the hook -- and it failed on first contact in all three
+    hostile-environment cases, returning 2 ("git ls-files scripts returned no
+    python") where 0 was required. Lane A found it and reported it rather than
+    silencing it from the file they own.
+
+    The collision was real and worth naming, because two of this tree's own
+    decisions disagreed. `TD-B-AUDITED-EVERY-CHECKER-THAT-SHELLS-OUT-TO-GIT`
+    blessed rc=2 under a hostile `GIT_DIR` as correct fail-closed behaviour and
+    lists this checker as "2 -- declines". The repo-safety suite requires 0 from
+    the same checker in the same environment. Both are defensible.
+
+    What the audit measured was whether these gates REFUSE, not whether they
+    still GRADE. A gate that always declines inside the hook is safe and is
+    simultaneously inert at the only moment it fires -- which is the shape this
+    whole tree keeps finding, one level up: a check that cannot fail is not
+    protecting anything.
+
+    Fixing it here satisfies both rather than trading them. The corpus is
+    always the real repository, so the verdict is 0 and the gate actually
+    grades; and `_decline` survives untriggered, as a backstop for an
+    enumeration that is genuinely broken rather than merely redirected. The
+    alternative -- teaching the suite to accept 2 -- would license every gated
+    self-test to be inert in the hook, which is the opposite of the fix.
+    """
+    return subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        check=False,
+        cwd=ROOT,
+        env=gitenv.clean_env(),
+    )
 
 
 def tracked_py(prefix: str | None = "scripts") -> list[str]:
@@ -345,7 +394,14 @@ def scan(paths: list[str]) -> tuple[list[Finding], int, list[tuple[str, str]]]:
     bad: list[tuple[str, str]] = []
     for p in paths:
         try:
-            with open(p, "rb") as fh:
+            # Resolved against ROOT, not the process's cwd. `p` stays
+            # repo-relative because that is what the report should say and
+            # what the baseline is keyed on; only the READ is absolute.
+            # Enumerating the right files and then opening them relative to
+            # wherever the caller happens to be standing is the same defect
+            # twice -- `_git` fixed the first half, and the self-test found
+            # the second by failing with 200 "No such file or directory".
+            with open(ROOT / p, "rb") as fh:
                 src = fh.read()
         except OSError as exc:
             bad.append((p, f"cannot read: {exc}"))

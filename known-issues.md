@@ -84,6 +84,50 @@ terminator before comparing — and the formatter has to emit the
 and context output alike. Upstream diffutils carries a flag per side for exactly
 this.
 
+## TD-B-LSCPU-HAS-NO-PER-CPU-TABLE-SO-FIVE-OPTIONS-REFUSE — 2026-09-15 — OPEN
+
+**In short:** `lscpu -e`, `-p`, `--hex`, `--online` and `--offline` now refuse
+with exit 1 instead of printing the ordinary CPU summary and exiting 0. All
+five need a **per-CPU topology table** this lscpu does not build, and refusing
+is the honest interim, not the destination.
+
+**Why they were worse than missing.** Each was in the parser, in `--help`, and
+read by nothing. `lscpu -p` is the one that bites: a script asking for a
+parseable table got the human-readable one *and exit 0*, so it parsed a heading
+as data rather than failing.
+
+**What implementing them needs.** `collect_cpu_info` builds one aggregate
+`CpuInfo`. `-e` and `-p` need a row per CPU — cpu, core, socket, node, and the
+four cache columns — which means reading
+`/sys/devices/system/cpu/cpuN/topology/*` per CPU rather than the summary
+files. `--online`/`--offline` then filter those rows, and `--hex` changes how
+the masks in them are printed. **Doing it half-way would be worse than the
+refusal**: a per-CPU table with invented topology is a fabrication of exactly
+the kind this tree has been clearing out today, and a plausible wrong row is
+harder to notice than a missing one.
+
+**Measured against util-linux 2.40 before refusing.** GNU's message for
+`--online`/`--offline` without `-e`/`-p` is copied verbatim, including its
+naming of `--all` whichever of the three was given, and it exits 1 with an
+empty stdout. Worth recording *how* that was measured: the first attempt used
+`wsl -- bash -c 'lscpu --offline >/dev/null 2>&1; echo $?'` and reported exit
+**0**, because `wsl.exe`'s inline argument handling mangles `>` and `$`. The
+heredoc form (`bash -s <<'EOF'`) gives 1, which is the real answer. That hazard
+is documented in this repo and I used the broken form anyway.
+
+**Also in this file, unfixed:** `parse_cpu_range` computes `count += e - s + 1`
+with no check that `e >= s`. `/sys/devices/system/cpu/online` holding a
+reversed range (`5-2`) would underflow — a panic in debug, a wrap in release.
+It is not fixed here because `lscpu/Cargo.toml` has **no `[lints]` section at
+all**, so `arithmetic_side_effects` is off across the crate and this is one
+instance of a crate-wide gap rather than a lone bug. See
+`TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
+
+**Where it lives:** `userspace/lscpu/src/main.rs` — the refusal arms in the
+option loop, `refuse_unimplemented`, and `parse_cpu_range`.
+
+---
+
 ## TD-B-GDB-ARGS-LOSES-AN-ARGUMENT-THAT-SPELLS-ONE-OF-GDBS-OWN — 2026-09-15 — OPEN
 
 **In short:** `gdb --args ./prog -q` quiets **gdb** instead of passing `-q` to
@@ -149321,6 +149365,168 @@ is the fifth, sixth and seventh application in a row where removing the
 fabrication turned tests red. Several of those tests asserted the fabricated
 behaviour directly — `test_engine_recovery` required that "at least some should
 succeed" — and were correct about the behaviour. The behaviour was the defect.
+
+## TD-C-A-SPEED-TEST-THAT-NEVER-SENT-A-PACKET -- FIXED 2026-09-15
+
+**In short:** `apps/speedtest` told the user how fast their internet connection
+was. It has no network access of any kind, so it had never contacted anything;
+the figures were generated on the spot from a random number generator tuned to
+look like a good broadband line.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+Pressing Start ran a full latency, then download, then upload sequence, a frame
+at a time, with a sweeping dial and a filling graph, and produced roughly
+450 Mbps down, 120 Mbps up and 12.5 ms round-trip. All four constants were in
+the source, named `SIM_DOWNLOAD_MBPS` and so on, and the word "simulated"
+appears around twenty times in the file.
+
+**It appears zero times on screen, and the screen is what the user reads.**
+That is the whole finding, and it is the same axis as everything else in this
+sweep: rank by what the program tells the user to believe, and a `--help` line
+and a window count equally. An internal comment is not a disclosure.
+
+**Why this ranks where it does.** It is not irreversible like the recovery and
+partition tools, so it sits below them. It is above the remaining stub apps
+because a speed test is *evidence in an argument with a third party*. It is
+what someone checks before deciding whether the connection they are paying for
+is the connection they are getting, and 450/120 is a good result -- so the
+fabrication counsels **doing nothing** about a line that may genuinely be bad.
+A fabricated number that flatters the status quo is acted on by inaction,
+which is the hardest kind of harm to notice afterwards.
+
+**What was kept, and why that is most of the file.** Everything that *computes*
+is real and correct: minimum, maximum and average round-trip time, jitter,
+packet loss, average, peak and instantaneous throughput, the rolling
+twenty-entry history with its aggregates, and the text export. All of it
+operates on samples handed to `LatencyTester::record_sample` and
+`ThroughputTester::record_bytes`. **Those two functions are the doors a real
+network stack comes through**, and they already exist and are already right.
+Only the producer that was feeding them from an RNG became `#[cfg(test)]`.
+
+This is the same shape as the `sysinfo` fix: the consumer was fine, the
+producer was invented, and the honest state is a tested consumer with no
+producer rather than a producer that makes things up.
+
+**The refusal needed its own phase.** `SpeedTestPhase::Error` already existed,
+and using it would have been wrong: an error is something a run *hit*, and this
+is the absence of a run. Labelling it "Error" tells the user their
+**connection** failed -- a claim about their network that a program which has
+never sent a packet is in no position to make. The new `Unavailable` variant
+reads "Not run".
+
+**The line worth arguing for is the third one on screen:** *"No download,
+upload or latency figure was produced -- they are unknown, not zero."* An empty
+result strip is read as a *reading*, and for a speed test the reading it is
+read as is zero, which says the line is dead. Removing a flattering untruth and
+leaving an alarming one in its place is not a fix. This is the sharpest
+instance so far of lane B's "no results" versus "cannot look": for a
+**measurement**, the empty value is not merely ambiguous, it is a specific and
+alarming number.
+
+**What the deletion exposed, via compiler warnings.** Two things nothing had
+noticed because the fabrication was holding them up:
+
+* The app's random number generator. Production draws no random numbers now,
+  because it produces no numbers.
+* `ThroughputTester::num_connections`, which held the same fact as
+  `connection_bytes.len()` while only the simulator ever read it. `record_bytes`
+  already indexed the vector, so the count was a second copy that could
+  disagree with the thing it described. Deleted.
+
+**Fifteen tests rested on the run.** Eighth application in a row. Most moved to
+a `begin_simulated_run` fixture and still cover the phase machine, which is
+correct and was hard-won. **Two could not be moved, and that is a real loss
+recorded in place rather than papered over:** they asserted the wiring from the
+event loop to the run -- that `Event::Tick` reached the phase machine at all.
+That wiring is gone with the run it carried. It was missing once before, in
+August, and nothing noticed for months: the app ran its entire ten-second test
+inside a single call, so no frame was ever drawn in a testing phase and
+Escape's cancel could never fire. The comment left in the test file says to
+restore the test the day Start does something again.
+
+## TD-C-A-NETWORK-MANAGER-THAT-CANNOT-SEE-THE-NETWORK -- FIXED 2026-09-15
+
+**In short:** `apps/netmanager` showed the user their network interfaces, the
+Wi-Fi networks in range, their VPN connections and a clean diagnostic report.
+It has no network access of any kind. All of it was written into the program by
+hand, and one of the invented facts was that a VPN was connected.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+The crate has no `std::net`, no socket syscall and no filesystem access. What it
+displayed: three interfaces with addresses, link speeds and states; five Wi-Fi
+networks with SSIDs, signal strengths, channels and **security types**; three
+VPN configurations; sixty seconds of throughput history; and, on request, a
+diagnostic report in which the gateway answered in 1.2 ms, DNS resolved, a
+traceroute found twelve hops at 45 ms, packet loss was 0% over 100 pings and
+MTU 1500 was confirmed.
+
+**The worst single line was the VPN state vector.** It was initialised to
+`[Disconnected, Connected, Disconnected]`, so **opening the network manager
+showed a VPN as connected**. Of every false belief in this sweep, that is the
+one that is acted on by *transmitting* something. A person who believes their
+traffic is tunnelled uses the connection differently from one who knows it is
+not -- different sites, different files, different networks they are willing to
+do it from. There is no taking that back afterwards, which puts it alongside
+the recovery and partition tools rather than alongside the stub pages.
+
+**Second worst is the diagnostic report, for a subtler reason.** It *passed*.
+A diagnostic is what somebody runs while troubleshooting, so a fabricated
+passing report does not merely misinform -- it actively redirects the search.
+It tells the user the network is fine and the problem is elsewhere.
+
+**Eight acts it could not perform, all of them reported as done:** applying an
+IP configuration ("IP configuration updated for eth0"), connecting to a Wi-Fi
+network, toggling a VPN, bringing an interface up, bringing an interface down,
+running diagnostics, rescanning ("Scanned: 5 networks found"), and the
+interface status summaries derived from all of it.
+
+**Two of the refusals needed more thought than the others, and both are
+general.**
+
+*A switch must not move.* Every other refusal in this sweep leaves a list
+empty. The VPN and interface toggles had to leave a **control** alone instead,
+and that is a stronger requirement: a list that fills is a claim about the
+world, but **a switch that moves is a claim that the thing it controls moved
+with it**. Leaving the switch flipped while printing "cannot connect" would be
+read as the message being stale, not the switch being wrong.
+
+*A clear is a claim.* Refresh does not empty the Wi-Fi list. Clearing it would
+assert "the networks that were here are gone", which this program knows no
+better than it knows what is there. This is the second time in one day -- I
+made the same mistake in `undelete`, writing `RecycleBinReader::scan` as a
+clear, and caught it there too. **The no-op and the clear look identical in a
+diff and mean opposite things.**
+
+**Emptying the lists was only half the fix, again.** An empty interface list
+claims the machine has no network hardware. An empty Wi-Fi list claims nothing
+is in range. An empty VPN list claims none is configured. And the status bar
+said "0 interfaces" outright. The window now carries an unconditional
+three-line banner; the third line is the one doing the work:
+
+> Every list below is empty because nothing was examined -- not because nothing
+> is there.
+
+It is drawn unconditionally rather than behind an `is_empty()` check, because
+there is no state in which this app *can* see the network, and a condition that
+is always true is a condition that rots the moment it stops being.
+
+**66 of 139 tests rested on the invented data** -- the ninth application in a
+row and the largest share yet, just under half. The split is worth recording,
+because it is the same split every time:
+
+* **48 were interaction tests** -- sidebar scrolling, DNS reordering, caret
+  placement, hit testing, wheel fractions. They needed *some* interfaces to
+  interact with, not specifically invented ones. They moved to a
+  `with_sample_data()` fixture and kept their full value.
+* **18 asserted the fabricated acts directly** and were rewritten to assert the
+  refusals: that the VPN switch does not move, that Apply does not write the
+  address, that Diagnose produces no report.
+
+The lesson repeats: **production fixture data is load-bearing for tests nobody
+recorded as depending on it**, and the tests that break loudest are the ones
+that never mentioned the fixture at all.
 
 ## A-THE-BOOT-TEST-NEVER-MOUNTS-FAT-SO-A-WHOLE-FILESYSTEMS-WRITE-PATHS-ARE-UNGATED (lane A, 2026-09-15) — **Status: FIXED** (the openat2 half; the coverage gap remains open)
 

@@ -77,7 +77,6 @@ userspace/lsusb
 userspace/m4
 userspace/make
 userspace/man
-userspace/mesg
 userspace/mkfs
 userspace/mktemp
 userspace/monctl

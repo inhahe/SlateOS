@@ -587,6 +587,23 @@ fn format_subst(fmt: &str, value: u32) -> Vec<u8> {
 // BOM detection for UTF-16
 // ---------------------------------------------------------------------------
 
+/// How many bytes must be in hand before a BOM can be RULED OUT.
+///
+/// `detect_bom` is careful not to claim a BOM it cannot see, but "no BOM
+/// here" and "not enough bytes to tell" are different answers and it returns
+/// the same value for both. The caller needs to distinguish them, so it asks
+/// this first.
+const fn bom_len(enc: Encoding) -> usize {
+    match enc {
+        Encoding::Utf8 => 3,
+        Encoding::Utf16Le | Encoding::Utf16Be => 2,
+        Encoding::Utf32Le | Encoding::Utf32Be => 4,
+        // No BOM is defined for the single-byte encodings, so nothing needs
+        // to be in hand before the question is settled.
+        _ => 0,
+    }
+}
+
 /// Detect a Byte Order Mark at the start of the buffer and return the
 /// effective encoding if one is found, along with the number of BOM bytes
 /// to skip.
@@ -898,13 +915,36 @@ fn convert_stream<R: Read, W: Write + ?Sized>(
         stats.bytes_in += n as u64;
 
         // BOM detection on the very first chunk of the very first file.
-        if !bom_checked && !remainder.is_empty() {
-            let (detected, skip) = detect_bom(effective_from, &remainder);
-            effective_from = detected;
-            if skip > 0 && skip <= remainder.len() {
-                remainder.drain(..skip);
+        //
+        // The test is `remainder.len() >= bom_len(..)`, not `!is_empty()`.
+        // `Read::read` may return any number of bytes it likes, and on a pipe
+        // a first read of one or two bytes is ordinary rather than
+        // pathological. The old condition ran detection on whatever had
+        // arrived and then set `bom_checked` whatever the answer was, so a
+        // short first read RULED OUT a BOM that was still in flight.
+        //
+        // The damage was not confined to a stray character. For UTF-8 the BOM
+        // then decoded as content and a U+FEFF appeared in the output; for
+        // UTF-16 the byte order stayed at the default instead of being taken
+        // from the mark, so the WHOLE FILE came out byte-swapped. Either way
+        // the result depended on how the input happened to be chunked, which
+        // is the one thing a streaming converter may never let show.
+        if !bom_checked {
+            if remainder.len() >= bom_len(effective_from) || eof {
+                let (detected, skip) = detect_bom(effective_from, &remainder);
+                effective_from = detected;
+                if skip > 0 && skip <= remainder.len() {
+                    remainder.drain(..skip);
+                }
+                bom_checked = true;
+            } else {
+                // Too early to tell. Go back for more rather than decoding,
+                // because decoding now would consume the BOM as content and
+                // there would be no way to take it back. `eof` is false here,
+                // so there is more to come; at EOF the branch above settles
+                // it even for a file shorter than a BOM.
+                continue;
             }
-            bom_checked = true;
         }
 
         let mut pos: usize = 0;
@@ -1830,6 +1870,102 @@ mod tests {
     // -----------------------------------------------------------------------
     // Cross-encoding conversion (integration via convert_stream)
     // -----------------------------------------------------------------------
+
+    /// A reader that hands back at most one byte per `read` call.
+    ///
+    /// `io::Cursor` -- which every other test here uses -- always returns the
+    /// whole buffer in a single `read`, so no Cursor-based test can reach the
+    /// code that runs when a read lands mid-sequence or mid-BOM. On a pipe
+    /// that is the ordinary case, not a pathological one.
+    struct DripReader<'a> {
+        data: &'a [u8],
+    }
+
+    impl Read for DripReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match (self.data.first(), buf.first_mut()) {
+                (Some(&byte), Some(slot)) => {
+                    *slot = byte;
+                    self.data = self.data.get(1..).unwrap_or_default();
+                    Ok(1)
+                }
+                _ => Ok(0),
+            }
+        }
+    }
+
+    fn convert_with<R: Read>(reader: &mut R, from: Encoding, to: Encoding) -> Vec<u8> {
+        let opts = Opts {
+            from,
+            to,
+            output_file: None,
+            discard_unmappable: false,
+            byte_subst: None,
+            unicode_subst: None,
+            verbose: false,
+            input_files: Vec::new(),
+        };
+        let mut output = Vec::new();
+        convert_stream(reader, &mut output, from, to, &opts, true)
+            .expect("convert_stream should not fail on in-memory I/O");
+        output
+    }
+
+    /// The same bytes must convert to the same bytes however they arrive.
+    ///
+    /// This is the invariant a streaming converter lives or dies by, and it
+    /// is stronger than testing any single case: it says the chunking is not
+    /// allowed to be observable at all.
+    #[test]
+    fn conversion_does_not_depend_on_how_the_input_is_chunked() {
+        let cases: &[(&str, &[u8], Encoding, Encoding)] = &[
+            (
+                "UTF-8 with BOM -> UTF-8",
+                b"\xEF\xBB\xBFhello",
+                Encoding::Utf8,
+                Encoding::Utf8,
+            ),
+            (
+                "UTF-16 with LE BOM -> UTF-8",
+                b"\xFF\xFEh\x00i\x00",
+                Encoding::Utf16Be, // deliberately the WRONG default: the BOM must win
+                Encoding::Utf8,
+            ),
+            (
+                "UTF-16 with BE BOM -> UTF-8",
+                b"\xFE\xFF\x00h\x00i",
+                Encoding::Utf16Le, // again the wrong default
+                Encoding::Utf8,
+            ),
+            (
+                "multi-byte sequences split across reads",
+                "\u{e9}\u{4e2d}\u{1F600}".as_bytes(),
+                Encoding::Utf8,
+                Encoding::Utf8,
+            ),
+        ];
+
+        // Every case is reported, not just the first to fail: they differ in
+        // how badly the bug bites -- a stray character versus a byte-swapped
+        // file -- and stopping at the first would hide that.
+        let mut failures = Vec::new();
+        for (name, input, from, to) in cases {
+            let whole = convert_with(&mut io::Cursor::new(*input), *from, *to);
+            let dripped = convert_with(&mut DripReader { data: input }, *from, *to);
+            if whole != dripped {
+                failures.push(format!(
+                    "  {name}\n\
+                     all at once:   {whole:02x?}\n\
+                     one at a time: {dripped:02x?}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "output changed when the input arrived one byte at a time:\n{}",
+            failures.join("\n")
+        );
+    }
 
     fn convert_bytes(input: &[u8], from: Encoding, to: Encoding) -> (Vec<u8>, ConvStats) {
         let opts = Opts {

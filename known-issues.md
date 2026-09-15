@@ -144645,9 +144645,33 @@ an animation that got too far; it is a pane that was never open, or was closed
 twice. That points at input delivery or event coalescing in the harness, not at
 animation timing, and it means the "obvious" fix below would not have helped.
 
-**Still unknown.** A six-run reproduction sweep is the next step; until it
-reproduces, anything written here about the cause is a guess, and this entry
-has already carried one.
+**Still unknown, after twelve attempts.** It has not reproduced once:
+
+| attempt | result |
+|---|---|
+| the named test alone, 3 runs | passed |
+| full suite, default threads, 6 runs | passed |
+| full suite, `--test-threads=1` (the gate's mode) | passed |
+| full suite, serial, with `XDG_CONFIG_HOME` and `HOME` pointed at an empty probe dir (the gate's exact environment) | passed |
+
+**Ruled out, by reading rather than by guessing:**
+
+* *Frames advancing inside `pump`* -- it dispatches events and reconciles
+  revisions; it never calls `step_frame`.
+* *An animation that raced ahead* -- `is_visible()` is true throughout
+  `SlideOut`, so only `Hidden` fails the assertion.
+* *`reduced_motion`* -- this was the most promising lead, because
+  `begin_notifications_slide` returns early when it is set and the pane then
+  lands immediately, which is *exactly* what "snapped instead of sliding"
+  describes. But `AnimationManager::new()` defaults it to false, nothing loads
+  it from configuration, and the only two tests that set it do so on their own
+  session. Disproved.
+* *Serial ordering and a leaked `XDG_CONFIG_HOME`* -- both reproduced above
+  without failing.
+
+Two confident causes have been written into this entry and removed again. The
+useful residue is the list above: whoever sees this next should not re-derive
+it, and should distrust the next tidy explanation, including their own.
 
 **What the proper fix looks like** -- *once the cause is known.* The shape that
 survives either diagnosis is to assert over a bounded number of frames the test
@@ -144658,12 +144682,14 @@ immediately, and stepping fewer frames cannot make an unopened pane open. Do
 not fix it by loosening the assertion either -- "eventually invisible" is true
 of a snap, which is the thing it exists to catch.
 
-**It has now been seen twice, and the second time blocked a push.** The
-pre-push scratch-config gate runs `cargo test -p desktop` itself, under the
-load of every other gate, and refused the push with
-`desktop: its own tests did not pass, so this says nothing`. So this is not a
-local nuisance -- a flaky test in `gui/desktop` stops lane C publishing, and
-the crate has 2,978 tests for it to hide in.
+**Seen once for certain. A second, unnamed failure may or may not be this.**
+The pre-push scratch-config gate refused a push with
+`desktop: its own tests did not pass, so this says nothing` -- and **that log
+named no test**, which is what prompted the gate fix below. Attributing it to
+this entry was an assumption, made because this test had failed an hour
+earlier; it is recorded here as unverified rather than as a second sighting.
+What *is* established either way: a failing test anywhere in `gui/desktop`
+stops lane C publishing, and the crate has 2,978 tests for one to hide in.
 
 That refusal also exposed a second, separate problem, now fixed: **the gate did
 not say which test failed.** The four-line log it keeps held nothing but "FAIL

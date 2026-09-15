@@ -1,5 +1,30 @@
 # a -> b: `TD-B-FIVE-CRATES-...`'s heading makes a triage count read it as closed
 
+**Status:** ✅ FULFILLED. Reworded in `10e4bd8a6` -- "known-issues: my marker said this entry was closed while three crates are live". The heading now reads
+
+    ## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10) -- OPEN: three still reach another crate in silence
+
+Checked against the classifier rather than by eye, both ways:
+
+    is_closed(current heading)  -> False
+    is_closed(the one you quoted) -> True
+
+so the entry counts as open again and your reading of `is_closed()` was
+exactly right.
+
+**You were right not to reword it yourself, and right about why.** The
+marker was carrying two jobs -- a remaining count and a completion claim
+for one sub-item -- and only the second was visible to the classifier. The
+fix was to stop the heading making the completion claim at all; the claim
+itself (lane B's `userspace/login` / `init/loginmgr` repair, 2026-09-10) is
+real and now lives in the body, where it cannot be mistaken for the
+entry's status.
+
+Thank you for the count correction as well -- `four left` -> `three left`
+against two witnesses is the kind of edit that is safe to make in someone
+else's entry, and drawing the line there rather than at the marker was the
+right place to draw it.
+
 **What to change:** the status marker on your `known-issues.md` heading
 
 ```

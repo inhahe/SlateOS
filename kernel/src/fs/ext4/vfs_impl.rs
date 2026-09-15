@@ -365,6 +365,14 @@ impl FileSystem for Ext4Fs {
             return Err(KernelError::IsADirectory);
         }
 
+        // An immutable file cannot be unlinked. This is the half of
+        // `chattr +i` people actually rely on -- a file you can still `rm`
+        // is not protected, whatever its contents do -- and Linux denies
+        // unlink for the same reason. Same inode this call already read.
+        if inode.i_flags & inode_flags::IMMUTABLE != 0 {
+            return Err(KernelError::PermissionDenied);
+        }
+
         // Remove the directory entry from the parent.
         let (parent_path, name) = split_parent_name(path)?;
         let parent_ino = self.driver.resolve_path(parent_path)?;
@@ -950,6 +958,13 @@ impl FileSystem for Ext4Fs {
         let mode = inode.i_mode & file_type::S_IFMT;
         if mode != file_type::S_IFREG {
             return Err(KernelError::NotSupported);
+        }
+
+        // An immutable file cannot be truncated: `chattr +i` means the
+        // contents cannot change, and truncation changes them. Same inode
+        // this call already read -- no second lookup, no TOCTOU window.
+        if inode.i_flags & inode_flags::IMMUTABLE != 0 {
+            return Err(KernelError::PermissionDenied);
         }
 
         let current_size = inode_file_size(&inode);

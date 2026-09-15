@@ -163,6 +163,22 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
 
+        // Truncate and unlink are refused too, on the same flag. Checked
+        // separately because they are separate guards on separate paths: a
+        // test that only covered `write_file` would have passed with both of
+        // them missing, which is how the write path came to be the only one
+        // enforced in the first place.
+        if crate::fs::Vfs::truncate(path, 0).is_ok() {
+            serial_println!("[ext4]   FAIL: truncating an immutable file succeeded");
+            let _ = crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE);
+            let _ = crate::fs::Vfs::remove(path);
+            return Err(crate::error::KernelError::IoError);
+        }
+        if crate::fs::Vfs::remove(path).is_ok() {
+            serial_println!("[ext4]   FAIL: removing an immutable file succeeded");
+            return Err(crate::error::KernelError::IoError);
+        }
+
         crate::fs::Vfs::set_attributes(path, crate::fs::vfs::FileAttr::NONE)?;
         if let Err(e) = crate::fs::Vfs::write_file(path, b"three") {
             serial_println!(
@@ -174,7 +190,7 @@ pub fn self_test() -> KernelResult<()> {
         }
         crate::fs::Vfs::remove(path)?;
         serial_println!(
-            "[ext4]   immutable: a write to an immutable file is refused, and allowed again once cleared: OK"
+            "[ext4]   immutable: write, truncate and unlink are all refused, and allowed again once cleared: OK"
         );
     }
 

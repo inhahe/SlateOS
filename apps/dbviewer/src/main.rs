@@ -34,6 +34,7 @@
 
 use appearance::Palette;
 use guitk::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
 use guitk::probe::Probe;
@@ -58,12 +59,40 @@ use std::time::Duration;
 ///
 /// Replaces the bare "No tables in database." An empty object tree under a
 /// filename reads as *this database has no tables*, which is a statement about
-/// somebody's data. Nothing here has opened a database at all.
-const NO_DATABASE_LINE: &str = "No database open -- this program cannot open one";
+/// somebody's data.
+///
+/// **Reworded when the file door landed.** It used to read "No database open
+/// -- this program cannot open one", which was true when written and became a
+/// falsehood the moment Import could reach a file. A banner that denies a
+/// capability the program has is the same defect as one that claims a
+/// capability it lacks, pointed the other way: both leave the user believing
+/// something about the program that is not so. The incapacity that remains --
+/// no database driver -- is still stated, because it is still true.
+const NO_TABLES_LINE: &str = "No tables here yet -- open a CSV file to make one";
 
-/// The second line, which says why.
-const NO_DATABASE_WHY: &str =
-    "It has no filesystem access and no database driver, so nothing was read";
+/// The second line, which says what this program still cannot do.
+const NO_TABLES_WHY: &str = "There is no database driver here, so a .db or .sqlite file cannot be read; one CSV becomes one table";
+
+/// The most of a CSV file one import will read.
+///
+/// Reported when it bites, and reported *first*: a cut CSV still parses --
+/// every complete line in it is a valid record -- so without saying so the
+/// user would get a table that is silently short, which is the failure this
+/// whole sweep is about. A table missing its last ten thousand rows looks
+/// exactly like a table that only had the first ones.
+pub const MAX_CSV_BYTES: usize = 8 * 1024 * 1024;
+
+/// What the table an unusable filename produces is called.
+const FALLBACK_TABLE_NAME: &str = "imported";
+
+/// What the picker that is up will do with the path it returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileIntent {
+    /// Write the selected table out in this format.
+    Export(ExportFormat),
+    /// Read a CSV file in as a new table.
+    ImportCsv,
+}
 
 const WINDOW_WIDTH: f32 = 1200.0;
 /// The height the window opens at.
@@ -3400,6 +3429,10 @@ impl DbTab {
 
 /// Main application state.
 pub struct DbViewerApp {
+    /// The open or save picker, while one is up.
+    pub file_dialog: Option<FileDialog>,
+    /// What the picker that is up will do with the path it returns.
+    pub file_intent: FileIntent,
     pub tabs: Vec<DbTab>,
     pub active_tab: usize,
     pub sql_input: String,
@@ -3450,6 +3483,8 @@ impl DbViewerApp {
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            file_dialog: None,
+            file_intent: FileIntent::ImportCsv,
             tabs: vec![tab],
             active_tab: 0,
             // Empty. It was `SELECT * FROM users`, which names a table --
@@ -3660,12 +3695,21 @@ impl DbViewerApp {
     }
 
     /// Import CSV data into the active database.
+    /// Parse `csv_data` and add it to the open database as a table called
+    /// `name`.
+    ///
+    /// The `None` arm is not reachable today -- closing the last tab is
+    /// refused, so `tabs` is never empty -- but it used to fall through to
+    /// `Ok(())`, which would have reported a successful import for an import
+    /// that did not happen. An outcome returned for a state the function did
+    /// not handle is the same mistake as an outcome written before the attempt.
     pub fn import_csv_data(&mut self, name: &str, csv_data: &str) -> Result<(), String> {
         let table = import_csv(name, csv_data)?;
-        if let Some(tab) = self.active_db_tab_mut() {
-            tab.db.create_table(table)?;
-            tab.refresh_tree();
-        }
+        let Some(tab) = self.active_db_tab_mut() else {
+            return Err(String::from("No database tab is open"));
+        };
+        tab.db.create_table(table)?;
+        tab.refresh_tree();
         Ok(())
     }
 
@@ -3705,7 +3749,7 @@ impl DbViewerApp {
                 &mut f,
                 l.window,
                 Rect::new(l.window.x + 10.0, l.window.y + 2.0, l.window.w - 20.0, 13.0),
-                NO_DATABASE_LINE,
+                NO_TABLES_LINE,
                 11.0,
                 self.palette.ink(self.palette.yellow),
                 FontWeightHint::Bold,
@@ -3719,11 +3763,18 @@ impl DbViewerApp {
                     l.window.w - 20.0,
                     12.0,
                 ),
-                NO_DATABASE_WHY,
+                NO_TABLES_WHY,
                 10.0,
                 self.palette.subtext0,
                 FontWeightHint::Regular,
             );
+        }
+
+        // Last, so it is above everything.
+        if let Some(dialog) = &self.file_dialog {
+            for cmd in dialog.render(&self.palette, l.window.w, l.window.h) {
+                f.push(cmd);
+            }
         }
         f
     }
@@ -4905,7 +4956,7 @@ impl DbViewerApp {
                 f,
                 area,
                 Rect::new(area.x + 16.0, area.y + 28.0, (area.w - 32.0).max(0.0), 14.0),
-                NO_DATABASE_LINE,
+                NO_TABLES_LINE,
                 11.0,
                 self.palette.ink(self.palette.yellow),
                 FontWeightHint::Regular,
@@ -4914,7 +4965,7 @@ impl DbViewerApp {
                 f,
                 area,
                 Rect::new(area.x + 16.0, area.y + 44.0, (area.w - 32.0).max(0.0), 14.0),
-                NO_DATABASE_WHY,
+                NO_TABLES_WHY,
                 10.0,
                 self.palette.overlay0,
                 FontWeightHint::Regular,
@@ -5144,6 +5195,17 @@ impl DbViewerApp {
 impl DbViewerApp {
     /// Route an event to whatever the drawing pass put under it.
     fn handle_event(&mut self, event: &Event, size: (f32, f32)) {
+        // The picker takes the event first while it is up, or a keystroke
+        // meant for a filename lands in the SQL editor behind it.
+        if self.file_dialog.is_some() {
+            let action = match (event, self.file_dialog.as_mut()) {
+                (Event::Key(ke), Some(dialog)) if ke.pressed => dialog.handle_event(ke, size.1),
+                (Event::Mouse(me), Some(dialog)) => dialog.handle_mouse(me, size.0, size.1),
+                _ => return,
+            };
+            self.apply_dialog_action(action);
+            return;
+        }
         match event {
             Event::Key(ke) => self.handle_key(ke),
             Event::Mouse(me) => self.handle_mouse(me, size),
@@ -5179,6 +5241,131 @@ impl DbViewerApp {
             .unwrap_or_default()
     }
 
+    /// Put the export or import picker up.
+    ///
+    /// `export_csv`, `export_json`, `export_sql_inserts` and `import_csv` were
+    /// all written and all tested, and the program could not reach a file.
+    /// What it did instead was route them through the SQL editor -- the one
+    /// text surface the window had. That was an honest stopgap and it is now
+    /// replaced, for a reason beyond tidiness: see `Target::Export`.
+    pub fn open_file_dialog(&mut self, intent: FileIntent) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = match intent {
+            FileIntent::Export(format) => {
+                let stem = self
+                    .active_db_tab()
+                    .and_then(|t| t.selected_table.clone())
+                    .unwrap_or_else(|| String::from("table"));
+                FileDialog::save()
+                    .with_initial_path(start)
+                    .with_filename(format!("{stem}.{}", format.extension()))
+            }
+            FileIntent::ImportCsv => FileDialog::open().with_initial_path(start),
+        };
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.file_intent = intent;
+        self.file_dialog = Some(dialog);
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) {
+        match action {
+            DialogAction::None => {}
+            DialogAction::Cancelled => self.file_dialog = None,
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                self.status = match self.file_intent {
+                    FileIntent::Export(format) => self.write_table(&path, format),
+                    FileIntent::ImportCsv => self.read_csv_file(&path),
+                };
+            }
+        }
+    }
+
+    /// Write the selected table to `path` in `format`.
+    pub fn write_table(&mut self, path: &std::path::Path, format: ExportFormat) -> String {
+        let Some(text) = self.export_current_table(format) else {
+            return String::from("Nothing to export: no table selected");
+        };
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!(
+                "Wrote {} as {} to {} ({} bytes)",
+                self.active_db_tab()
+                    .and_then(|t| t.selected_table.clone())
+                    .unwrap_or_default(),
+                format.label(),
+                path.display(),
+                text.len()
+            ),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` as CSV and add it to the open database as a new table.
+    ///
+    /// The table is named after the file, which is what the user will look for
+    /// in the sidebar. A filename that is not valid text is **not** forced
+    /// through a lossy conversion to produce one -- that would silently rename
+    /// the user's file in the one place they would go looking for it. The
+    /// table gets a fixed name instead and the status line says why.
+    pub fn read_csv_file(&mut self, path: &std::path::Path) -> String {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => return format!("Could not read {}: {err}", path.display()),
+        };
+        let whole = text.len();
+        let truncated = whole > MAX_CSV_BYTES;
+        let body = if truncated {
+            let mut end = MAX_CSV_BYTES;
+            while end > 0 && !text.is_char_boundary(end) {
+                end = end.saturating_sub(1);
+            }
+            // Back up to the last complete line, so the final row is not a
+            // record with half its columns -- which `import_csv` would accept.
+            let kept = text.get(..end).unwrap_or("");
+            kept.rfind('\n')
+                .map_or("", |nl| kept.get(..nl).unwrap_or(""))
+                .to_string()
+        } else {
+            text
+        };
+
+        let (name, renamed) = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(stem) if !stem.is_empty() => (stem.to_owned(), false),
+            _ => (String::from(FALLBACK_TABLE_NAME), true),
+        };
+        let cut_note = if truncated {
+            format!("INCOMPLETE ({MAX_CSV_BYTES} of {whole} bytes read): ")
+        } else {
+            String::new()
+        };
+        let rename_note = if renamed {
+            format!(
+                " (called {FALLBACK_TABLE_NAME}: the filename is not text this program can use as a table name)"
+            )
+        } else {
+            String::new()
+        };
+
+        match self.import_csv_data(&name, &body) {
+            Ok(()) => {
+                self.select_table(&name);
+                let rows = self
+                    .active_db_tab()
+                    .and_then(|t| t.db.find_table(&name))
+                    .map_or(0, Table::row_count);
+                format!("{cut_note}Imported {name}: {rows} row(s){rename_note}")
+            }
+            Err(err) => format!("{cut_note}Could not import {}: {err}", path.display()),
+        }
+    }
+
     /// Do what pressing `target` means, and say on the status line what it did.
     fn activate(&mut self, target: Target) {
         match target {
@@ -5194,39 +5381,20 @@ impl DbViewerApp {
                 self.add_tab(&name);
                 self.status = format!("Opened {name}");
             }
-            Target::Export(format) => match self.export_current_table(format) {
-                Some(text) => {
-                    // The export is put in the editor rather than thrown away.
-                    // `export_current_table` returned a `String` that no caller
-                    // outside the tests ever received: the three formats were
-                    // written, and the program had nowhere to put the result.
-                    // The editor is the one text surface the window has, and it
-                    // makes export-then-import a round trip a user can perform.
-                    self.status = format!(
-                        "Exported {} as {} into the editor ({} bytes)",
-                        self.active_db_tab()
-                            .and_then(|t| t.selected_table.clone())
-                            .unwrap_or_default(),
-                        format.label(),
-                        text.len()
-                    );
-                    self.sql_input = text;
-                    self.bottom_panel = BottomPanel::SqlEditor;
-                    self.focus = Focus::Editor;
+            // Both of these used to go through the SQL editor, because the
+            // program had no file. Export assigned the serialised table to
+            // `self.sql_input`, **destroying whatever query the user was
+            // composing**, with no warning and nothing to undo it with -- a
+            // stopgap that cost real work to use. Import read the same buffer
+            // back. Now they reach a file, which is what the two words mean.
+            Target::Export(format) => {
+                if self.export_current_table(format).is_none() {
+                    self.status = String::from("Nothing to export: no table selected");
+                } else {
+                    self.open_file_dialog(FileIntent::Export(format));
                 }
-                None => self.status = String::from("Nothing to export: no table selected"),
-            },
-            Target::Import => {
-                let name = format!("imported{}", self.tabs.len().saturating_add(1));
-                let csv = self.sql_input.clone();
-                self.status = match self.import_csv_data(&name, &csv) {
-                    Ok(()) => {
-                        self.select_table(&name);
-                        format!("Imported {name}")
-                    }
-                    Err(e) => format!("Import failed: {e}"),
-                };
             }
+            Target::Import => self.open_file_dialog(FileIntent::ImportCsv),
             Target::SelectTab(i) => {
                 if i < self.tabs.len() {
                     self.active_tab = i;
@@ -5555,6 +5723,22 @@ impl ExportFormat {
             Self::SqlInserts => "SQL",
         }
     }
+
+    /// What the save picker suggests the file be called.
+    ///
+    /// A suggestion, not a rule: the user may type any name. On the way *out*
+    /// the extension is the user's own statement of intent about a file that
+    /// does not exist yet, which is the opposite of the situation on the way
+    /// in -- where the content is authoritative and the extension is only a
+    /// claim by whoever named it.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+            Self::SqlInserts => "sql",
+        }
+    }
 }
 
 // ============================================================================
@@ -5635,11 +5819,11 @@ mod tests {
             })
             .collect();
         assert!(
-            texts.iter().any(|t| t == NO_DATABASE_LINE),
+            texts.iter().any(|t| t == NO_TABLES_LINE),
             "the sidebar never said there is no database open: {texts:?}",
         );
         assert!(
-            texts.iter().any(|t| t == NO_DATABASE_WHY),
+            texts.iter().any(|t| t == NO_TABLES_WHY),
             "and never said why",
         );
         assert!(
@@ -8465,27 +8649,81 @@ mod tests {
         assert_eq!(shown_names(&app).len(), 10, "the rows did not come back");
     }
 
+    /// Exporting opens a picker and leaves the query alone.
+    ///
+    /// This is a regression test for what the old export did. It assigned the
+    /// serialised table to `self.sql_input`, so pressing "Export CSV" while a
+    /// query was half-written **destroyed the query**, with no warning and
+    /// nothing to undo it with. The editor was the only text surface the
+    /// window had, which made it a reasonable stopgap and did not make it a
+    /// safe one.
     #[test]
-    fn export_puts_the_table_in_the_editor_and_import_reads_it_back() {
+    fn exporting_opens_a_picker_and_does_not_eat_the_query() {
         let mut app = wired();
-        click_text(&mut app, FULL, "Export CSV");
-        assert!(
-            app.sql_input.starts_with("id,name,email"),
-            "the export did not reach the editor: {:?}",
-            app.sql_input
-        );
-        assert_eq!(
-            app.bottom_panel,
-            BottomPanel::SqlEditor,
-            "the export was put somewhere nobody was looking"
-        );
-        assert_eq!(app.focus, Focus::Editor);
+        app.sql_input = String::from("SELECT * FROM users WHERE age > 30");
+        let before = app.sql_input.clone();
 
+        click_text(&mut app, FULL, "Export CSV");
+        assert!(app.file_dialog.is_some(), "no picker came up");
+        assert_eq!(
+            app.file_intent,
+            FileIntent::Export(ExportFormat::Csv),
+            "the picker does not know what it is for"
+        );
+        assert_eq!(app.sql_input, before, "the export overwrote the query");
+    }
+
+    /// Importing opens a picker rather than reading the editor.
+    #[test]
+    fn importing_opens_a_picker() {
+        let mut app = wired();
         click_text(&mut app, FULL, "Import");
+        assert!(app.file_dialog.is_some(), "no picker came up");
+        assert_eq!(app.file_intent, FileIntent::ImportCsv);
+    }
+
+    /// While the picker is up it takes the keyboard, so a filename does not
+    /// land in the SQL editor behind it.
+    #[test]
+    fn the_picker_takes_the_keyboard_from_the_editor_behind_it() {
+        let mut app = wired();
+        app.focus = Focus::Editor;
+        app.sql_input = String::from("SELECT");
+        click_text(&mut app, FULL, "Import");
+
+        probe::type_str(&mut app, "abc");
+        assert_eq!(
+            app.sql_input, "SELECT",
+            "typing at the picker reached the editor behind it"
+        );
+    }
+
+    /// A table survives a write and a read, and is named after the file.
+    ///
+    /// The name matters: it is what the user looks for in the sidebar. The old
+    /// import called every table `imported{n}`, which was all it could do with
+    /// no filename to work from.
+    #[test]
+    fn a_table_survives_a_write_and_a_read() {
+        let dir = std::env::temp_dir().join("slateos-dbviewer-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("people.csv");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = wired();
+        let said = app.write_table(&path, ExportFormat::Csv);
+        assert!(said.starts_with("Wrote users as CSV"), "said: {said}");
+        assert!(path.exists(), "nothing was written");
+
+        let said = app.read_csv_file(&path);
+        assert!(
+            said.starts_with("Imported people: 10 row(s)"),
+            "said: {said}"
+        );
         assert_eq!(
             app.active_db_tab()
                 .and_then(|t| t.selected_table.as_deref()),
-            Some("imported2"),
+            Some("people"),
             "the import did not select what it read"
         );
         assert!(
@@ -8498,6 +8736,70 @@ mod tests {
             10,
             "the round trip changed how many rows there are"
         );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Importing the same file twice is refused by name rather than silently
+    /// making a second copy of the table.
+    #[test]
+    fn importing_the_same_file_twice_says_the_table_is_already_there() {
+        let dir = std::env::temp_dir().join("slateos-dbviewer-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("twice.csv");
+        std::fs::write(&path, "city,pop\nNY,8000000\nLA,4000000\n").expect("write csv");
+
+        let mut app = wired();
+        assert!(
+            app.read_csv_file(&path)
+                .starts_with("Imported twice: 2 row(s)")
+        );
+        let said = app.read_csv_file(&path);
+        assert!(
+            said.contains("already exists"),
+            "a second import should say so, said: {said}"
+        );
+        assert_eq!(
+            app.active_db_tab()
+                .and_then(|t| t.db.find_table("twice"))
+                .map(Table::row_count),
+            Some(2),
+            "the refused import changed the table anyway"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that is not there is reported as a read failure.
+    #[test]
+    fn importing_a_file_that_is_not_there_says_so_and_changes_nothing() {
+        let path = std::env::temp_dir().join("slateos-dbviewer-absent.csv");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = wired();
+        let tables_before = app.active_db_tab().map(|t| t.db.tables.len());
+        let said = app.read_csv_file(&path);
+        assert!(said.starts_with("Could not read"), "said: {said}");
+        assert_eq!(
+            app.active_db_tab().map(|t| t.db.tables.len()),
+            tables_before,
+            "a failed read added a table"
+        );
+    }
+
+    /// An export with nothing selected does not open a picker.
+    ///
+    /// Putting a save dialog up and then failing after the user has chosen a
+    /// path wastes their answer and leaves a file that was never written.
+    #[test]
+    fn exporting_with_no_table_selected_refuses_before_asking_for_a_path() {
+        let mut app = DbViewerApp::new();
+        click_text(&mut app, FULL, "Export CSV");
+        assert!(
+            app.file_dialog.is_none(),
+            "asked for a path it had nothing to write to"
+        );
+        assert_eq!(app.status, "Nothing to export: no table selected");
     }
 
     #[test]

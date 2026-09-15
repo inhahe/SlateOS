@@ -118,29 +118,49 @@ def ours(source: str) -> dict[str, str]:
     return found
 
 
-def theirs(help_text: str) -> dict[str, str]:
-    """Short -> long, as the reference's own `--help` states them."""
-    found: dict[str, str] = {}
+def theirs(help_text: str) -> dict[str, set[str]]:
+    """Short -> every long the reference gives it.
+
+    A SET, because a reference may legitimately bind one letter twice.
+    util-linux `mkfs` documents both
+
+        -V, --verbose   explain what is being done
+        -V, --version   display version information and exit
+
+    and resolves them by context -- `-V` alone is `--version`, `-V` with other
+    options is `--verbose`. Keeping only the first match reported our
+    `-V`/`--version` as a collision when it is one of the two right answers.
+    """
+    found: dict[str, set[str]] = {}
     for short, long in THEIRS.findall(help_text):
-        found.setdefault(short, long)
+        found.setdefault(short, set()).add(long)
     return found
 
 
-def compare(mine: dict[str, str], refs: list[dict[str, str]]) -> list[tuple[str, str, str]]:
-    """Shorts bound differently in ALL references that define them.
+def compare(
+    mine: dict[str, str], refs: list[dict[str, set[str]]]
+) -> list[tuple[str, str, str]]:
+    """Shorts bound differently in EVERY reading the references allow.
 
     Only shorts present in both: a short we do not have is a missing feature
     and a short they do not have is an extension, and neither can silently
     mean the wrong thing, because an unknown option is refused out loud.
 
-    `refs` is a list because one crate may be several programs. A short that
-    matches ANY of them is correct for that personality and is not reported.
+    Two separate reasons a short may have several right answers, and matching
+    any one of them clears it:
+
+      * the crate is several programs (`userspace/mount` is mount and
+        umount), so `refs` is a list;
+      * one program binds the letter twice (`mkfs -V` is both `--verbose`
+        and `--version`), so each value is a set.
     """
     out = []
     for short, long in sorted(mine.items()):
-        defined = [r[short] for r in refs if short in r]
-        if defined and long not in defined:
-            out.append((short, long, "/".join(sorted(set(defined)))))
+        allowed: set[str] = set()
+        for ref in refs:
+            allowed |= ref.get(short, set())
+        if allowed and long not in allowed:
+            out.append((short, long, "/".join(sorted(allowed))))
     return out
 
 
@@ -179,14 +199,18 @@ def selftest() -> int:
     cases += 4
 
     # Reference extraction, with and without an argument spec.
-    assert theirs(" -d, --no-encoding   don't encode") == {"-d": "--no-encoding"}
-    assert theirs(" -n, --match-types <list>  filter") == {"-n": "--match-types"}
-    assert theirs(" -m, --mount[=<file>] unshare mounts") == {"-m": "--mount"}
-    cases += 3
+    assert theirs(" -d, --no-encoding   don't encode") == {"-d": {"--no-encoding"}}
+    assert theirs(" -n, --match-types <list>  filter") == {"-n": {"--match-types"}}
+    assert theirs(" -m, --mount[=<file>] unshare mounts") == {"-m": {"--mount"}}
+    # One letter documented twice keeps BOTH.
+    assert theirs(" -V, --verbose explain\n -V, --version display") == {
+        "-V": {"--verbose", "--version"}
+    }
+    cases += 4
 
     # THE ONE THAT MATTERS: the real blkid regression must be reported.
     mine = {"-n": "--no-encoding", "-c": "--cache-file"}
-    ref = {"-n": "--match-types", "-d": "--no-encoding", "-c": "--cache-file"}
+    ref = {"-n": {"--match-types"}, "-d": {"--no-encoding"}, "-c": {"--cache-file"}}
     assert compare(mine, [ref]) == [("-n", "--no-encoding", "--match-types")], (
         "the comparator failed to flag the blkid -n collision it exists for"
     )
@@ -201,8 +225,8 @@ def selftest() -> int:
     # THE FALSE POSITIVE THIS CHECK ACTUALLY PRODUCED. `userspace/mount` is
     # both mount and umount; `-f` is `--fake` in one and `--force` in the
     # other, and ours is umount's. Matching EITHER personality clears it.
-    mount_ref = {"-f": "--fake", "-l": "--show-labels"}
-    umount_ref = {"-f": "--force", "-l": "--lazy"}
+    mount_ref = {"-f": {"--fake"}, "-l": {"--show-labels"}}
+    umount_ref = {"-f": {"--force"}, "-l": {"--lazy"}}
     assert compare({"-f": "--force"}, [mount_ref, umount_ref]) == [], (
         "a binding correct for one personality must not be reported"
     )
@@ -211,6 +235,16 @@ def selftest() -> int:
         ("-f", "--frobnicate", "--fake/--force")
     ], "a binding wrong for every personality must still be reported"
     cases += 2
+
+    # THE mkfs FALSE POSITIVE: one program, one letter, two documented
+    # meanings. Ours is the second, and must not be reported.
+    mkfs_ref = {"-V": {"--verbose", "--version"}}
+    assert compare({"-V": "--version"}, [mkfs_ref]) == []
+    assert compare({"-V": "--verbose"}, [mkfs_ref]) == []
+    assert compare({"-V": "--vorpal"}, [mkfs_ref]) == [
+        ("-V", "--vorpal", "--verbose/--version")
+    ]
+    cases += 3
 
     # Personality extraction.
     assert "umount" in personalities("mount", 'progname.ends_with("umount")', "")

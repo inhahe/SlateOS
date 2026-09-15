@@ -521,7 +521,9 @@ fn print_help(personality: Personality) {
             println!("  -N, --nonewline           Don't print newline before issue");
             println!("  -o, --long-hostname        Show full qualified hostname");
             println!("  -p, --login-pause          Wait for keypress before login prompt");
-            println!("  -r, --chroot <dir>        Chroot before login");
+            println!(
+                "  -r, --chroot <dir>        Chroot before login (REFUSED: no SYS_CHROOT ABI)"
+            );
             println!("  -s, --keep-baud           Keep existing baud rate");
             println!("  -t, --timeout <secs>      Timeout for login name input");
             println!("  --nohostname              Don't show hostname in prompt");
@@ -683,6 +685,34 @@ fn run_getty(
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// The diagnostic for a configuration this build cannot carry out, if any.
+///
+/// Only `--chroot` qualifies today, and it qualifies because IGNORING IT IS
+/// UNSAFE rather than merely incomplete. getty execs a login program; with
+/// `--chroot` accepted and discarded, that program ran with the whole host
+/// filesystem visible while the operator's configuration said it was confined.
+/// An unconfined shell that looks confined is worse than a getty that will not
+/// start, because the mistake is invisible from the terminal it produces.
+///
+/// This is the same rule `userspace/chroot` already settled for itself, and
+/// deliberately the same rather than a second answer: there is no
+/// `SYS_CHROOT` ABI, so nothing can perform the confinement, and that file's
+/// own comment gives the reasoning -- "dropping privileges without changing
+/// the root would leave the caller believing they were sandboxed when they
+/// were not, which is a worse failure than refusing."
+///
+/// Returned rather than printed so it can be tested without a terminal.
+/// Delete this the day `SYS_CHROOT` lands and getty can call it.
+fn unsupported_request(cfg: &Config) -> Option<String> {
+    let dir = cfg.chroot_dir.as_ref()?;
+    Some(format!(
+        "--chroot {}: chroot is not implemented in this kernel (no SYS_CHROOT ABI yet), \
+and running login WITHOUT it would hand the session the whole host filesystem \
+while your configuration says it is confined",
+        dir.display()
+    ))
+}
+
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
@@ -706,6 +736,15 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     if cfg.show_version {
         print_version(cfg.personality);
         return 0;
+    }
+
+    // Checked AFTER --help and --version, so both still answer, and BEFORE
+    // the terminal is touched, so a getty that cannot do its job never
+    // presents a login prompt that implies it can.
+    if let Some(why) = unsupported_request(&cfg) {
+        eprintln!("getty: {why}");
+        eprintln!("getty: refusing to start.");
+        return 1;
     }
 
     let stdin = io::stdin();
@@ -954,6 +993,35 @@ mod tests {
         let args = argv(&["getty", "-c", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_reset);
+    }
+
+    /// `--chroot` is refused; a config without it is not.
+    ///
+    /// Both halves matter. Without the second, a `unsupported_request` that
+    /// returned `Some` for everything would pass -- and a getty that refuses
+    /// every invocation is not a fix, it is an outage.
+    #[test]
+    fn chroot_is_refused_because_ignoring_it_would_unconfine_the_session() {
+        let args = argv(&["getty", "--chroot", "/mnt/root", "tty1"]);
+        let cfg = parse_args(&args).expect("--chroot still parses");
+        let why = unsupported_request(&cfg).expect("--chroot must be refused");
+        assert!(
+            why.contains("/mnt/root"),
+            "the refusal must name the directory asked for, got: {why}"
+        );
+        assert!(
+            why.contains("SYS_CHROOT"),
+            "the refusal must say what is missing, got: {why}"
+        );
+
+        // The same command line without --chroot is something this build can
+        // actually do, and must not be refused.
+        let args = argv(&["getty", "tty1"]);
+        let cfg = parse_args(&args).expect("a plain getty parses");
+        assert!(
+            unsupported_request(&cfg).is_none(),
+            "a getty with no --chroot must start"
+        );
     }
 
     #[test]

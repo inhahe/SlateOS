@@ -726,20 +726,38 @@ impl HardwareProvider for SyscallProvider {
 
 /// Provider that returns representative stub data.
 /// Used for development, testing, and as a fallback when live queries fail.
+/// Representative hardcoded values, for tests only.
+///
+/// `#[cfg(test)]` since 2026-09-15. It was reachable from production and
+/// `FallbackProvider` called it whenever the syscall path failed — which is
+/// every host without the sysfs tree, i.e. all of them — so the fallback's
+/// purpose in practice was to display an invented machine. `FallbackProvider`
+/// is gone; this stays because the tests legitimately need a provider that
+/// answers.
+///
+/// One of the tests removed with the fallback asserted the fabrication
+/// happened: *"FallbackProvider should work since SyscallProvider will fail
+/// (no sysfs on dev machine) and fall back to StubProvider"*, then checked the
+/// invented brand string. A test can pin a fabrication in place as firmly as
+/// it pins anything else.
+#[cfg(test)]
 pub struct StubProvider;
 
+#[cfg(test)]
 impl Default for StubProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl StubProvider {
     pub fn new() -> Self {
         Self
     }
 }
 
+#[cfg(test)]
 impl HardwareProvider for StubProvider {
     fn query_cpu(&self) -> Result<CpuInfo, HwQueryError> {
         Ok(CpuInfo {
@@ -1030,95 +1048,6 @@ impl HardwareProvider for StubProvider {
 // Fallback provider — tries live, falls back to stub
 // ============================================================================
 
-/// Provider that tries `SyscallProvider` first and falls back to `StubProvider`
-/// for each individual query if the syscall-based query fails.
-pub struct FallbackProvider {
-    syscall: SyscallProvider,
-    stub: StubProvider,
-}
-
-impl Default for FallbackProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FallbackProvider {
-    pub fn new() -> Self {
-        Self {
-            syscall: SyscallProvider::new(),
-            stub: StubProvider::new(),
-        }
-    }
-}
-
-/// Macro to implement fallback: try syscall, fall back to stub on error.
-macro_rules! fallback_query {
-    ($self:expr, $method:ident) => {
-        match $self.syscall.$method() {
-            Ok(result) => Ok(result),
-            Err(_) => $self.stub.$method(),
-        }
-    };
-}
-
-impl HardwareProvider for FallbackProvider {
-    fn query_cpu(&self) -> Result<CpuInfo, HwQueryError> {
-        fallback_query!(self, query_cpu)
-    }
-    fn query_memory(&self) -> Result<MemoryInfo, HwQueryError> {
-        fallback_query!(self, query_memory)
-    }
-    fn query_storage(&self) -> Result<Vec<DiskInfo>, HwQueryError> {
-        fallback_query!(self, query_storage)
-    }
-    fn query_network(&self) -> Result<Vec<NetworkAdapterInfo>, HwQueryError> {
-        fallback_query!(self, query_network)
-    }
-    fn query_display(&self) -> Result<DisplayInfo, HwQueryError> {
-        fallback_query!(self, query_display)
-    }
-    fn query_pci(&self) -> Result<Vec<PciDeviceInfo>, HwQueryError> {
-        fallback_query!(self, query_pci)
-    }
-    fn query_usb(&self) -> Result<Vec<UsbDeviceInfo>, HwQueryError> {
-        fallback_query!(self, query_usb)
-    }
-    fn query_sound(&self) -> Result<Vec<SoundInfo>, HwQueryError> {
-        fallback_query!(self, query_sound)
-    }
-    fn query_irqs(&self) -> Result<Vec<IrqInfo>, HwQueryError> {
-        fallback_query!(self, query_irqs)
-    }
-    fn query_io_ports(&self) -> Result<Vec<IoPortInfo>, HwQueryError> {
-        fallback_query!(self, query_io_ports)
-    }
-    fn query_memory_map(&self) -> Result<Vec<MemoryMapEntry>, HwQueryError> {
-        fallback_query!(self, query_memory_map)
-    }
-    fn query_dma(&self) -> Result<Vec<DmaInfo>, HwQueryError> {
-        fallback_query!(self, query_dma)
-    }
-    fn query_services(&self) -> Result<Vec<ServiceInfo>, HwQueryError> {
-        fallback_query!(self, query_services)
-    }
-    fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> {
-        fallback_query!(self, query_processes)
-    }
-    fn query_drivers(&self) -> Result<Vec<DriverInfo>, HwQueryError> {
-        fallback_query!(self, query_drivers)
-    }
-    fn query_env_vars(&self) -> Result<Vec<(String, String)>, HwQueryError> {
-        fallback_query!(self, query_env_vars)
-    }
-    fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError> {
-        fallback_query!(self, query_startup)
-    }
-    fn provider_name(&self) -> &'static str {
-        "FallbackProvider (live → stub)"
-    }
-}
-
 // ============================================================================
 // Refresh Manager — cached queries with configurable TTL
 // ============================================================================
@@ -1193,11 +1122,6 @@ const TTL_DYNAMIC_SECS: u64 = 5; // Processes, memory usage: change constantly
 const TTL_MODERATE_SECS: u64 = 30; // Network stats, services: change occasionally
 
 impl RefreshManager {
-    /// Create a new refresh manager with a fallback provider and default TTLs.
-    pub fn new_with_fallback() -> Self {
-        Self::new(Box::new(FallbackProvider::new()))
-    }
-
     /// Create a new refresh manager with a specific provider.
     pub fn new(provider: Box<dyn HardwareProvider>) -> Self {
         Self {
@@ -2108,21 +2032,6 @@ mod tests {
     fn test_refresh_manager_provider_name() {
         let mgr = RefreshManager::new(Box::new(StubProvider::new()));
         assert!(mgr.provider_name().contains("Stub"));
-    }
-
-    #[test]
-    fn test_fallback_provider_uses_stub_when_syscall_fails() {
-        // FallbackProvider should work since SyscallProvider will fail
-        // (no sysfs on dev machine) and fall back to StubProvider
-        let provider = FallbackProvider::new();
-        let cpu = provider.query_cpu().expect("fallback cpu");
-        assert!(cpu.brand.contains("Slate OS"));
-    }
-
-    #[test]
-    fn test_fallback_provider_name() {
-        let provider = FallbackProvider::new();
-        assert!(provider.provider_name().contains("Fallback"));
     }
 
     // -- Syscall provider (limited testing since sysfs doesn't exist on dev host) --

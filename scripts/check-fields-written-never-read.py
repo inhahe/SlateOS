@@ -28,6 +28,25 @@ WHAT IT DOES NOT REPORT, deliberately:
   * a field read anywhere in production, however far from where it is written;
   * anything listed in the baseline beside this file.
 
+THE INVERSE QUESTION DOES NOT WORK, and it is worth saying so here because it
+is the obvious next idea. "Fields *read* in production that only a test ever
+writes" would find settings stuck at their default -- a control that exists,
+is applied, and cannot be changed. Tried on 2026-09-14: **249 hits, almost all
+artifact.**
+
+The reason is an asymmetry in Rust rather than in this script. Reads are
+overwhelmingly `.field` accesses, which is why the forward direction works.
+Writes are overwhelmingly *struct literals* -- `yellow: LIGHT_YELLOW`,
+`prevent_close: true` -- which a `.field =` matcher cannot see at all. So every
+value built by construction looks unwritten. `Palette::yellow` came back as
+"read 313 times, written only by tests".
+
+The one promising hit, `gui/remote`'s `prevent_close`/`prevent_move`/
+`prevent_resize`, turned out to be documented already:
+`TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`, which also
+explains why it is deliberate. So the inverse sweep's best signal was a finding
+someone had already written down, and its other 248 were noise.
+
 HOW IT SEES A READ, AND THE MISTAKE THAT MATTERS. The first version matched
 `self.field` only. Every finding vanished, including the two above -- because a
 test reaches a field through the variable it built (`ui.last_export`), never

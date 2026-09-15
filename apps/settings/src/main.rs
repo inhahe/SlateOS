@@ -17,6 +17,7 @@ use appearance::{
 };
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -578,6 +579,12 @@ pub struct SettingsState {
     // Window dimensions
     pub window_width: f32,
     pub window_height: f32,
+    /// The file picker, when the user is choosing a wallpaper.
+    ///
+    /// The only dialog in this window. Settings pages otherwise ask closed
+    /// questions -- a switch, a value from a list -- and a wallpaper is the one
+    /// answer that comes from the filesystem.
+    pub dialog: Option<FileDialog>,
 
     // Display settings
     pub resolution_index: usize,
@@ -898,6 +905,64 @@ impl SettingsState {
     /// is in effect in this process either way, and there is nowhere in this
     /// UI to surface an error yet. When there is a status line, this is the
     /// call site that should feed it.
+    /// Put up the picker, starting where the current picture lives.
+    ///
+    /// The filter is the formats `gui/imagecodec` can actually decode. A
+    /// picker that offered every file would let a user choose a `.txt` and
+    /// meet a failure the desktop reports somewhere they are not looking.
+    fn open_wallpaper_dialog(&mut self) {
+        let start = self
+            .appearance
+            .settings
+            .wallpaper
+            .as_deref()
+            .and_then(|p| {
+                std::path::Path::new(p)
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::open()
+            .with_initial_path(start)
+            // Globs, not bare extensions: `FileFilter::patterns` is
+            // documented as glob patterns and `matches_any_pattern` compares
+            // the whole name, so "png" matches a file *called* png and nothing
+            // else. Passing the extensions bare made every directory list as
+            // empty -- caught by the round-trip test below, which could not
+            // find its own fixture.
+            .with_filter("Pictures", &["*.png", "*.jpg", "*.jpeg", "*.bmp"]);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.dialog = Some(dialog);
+    }
+
+    /// Give the picker an event; `None` when there is no picker up.
+    fn dialog_event(&mut self, event: &Event) -> Option<bool> {
+        let (width, height) = (self.window_width, self.window_height);
+        let action = {
+            let dialog = self.dialog.as_mut()?;
+            match event {
+                Event::Key(key) if key.pressed => dialog.handle_event(key, height),
+                Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
+                _ => DialogAction::None,
+            }
+        };
+        match action {
+            DialogAction::Selected(path) => {
+                self.dialog = None;
+                self.appearance.settings.wallpaper = Some(path.to_string_lossy().into_owned());
+            }
+            DialogAction::Cancelled => self.dialog = None,
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+            }
+            DialogAction::None => {}
+        }
+        Some(true)
+    }
+
     fn save_appearance(&mut self) {
         if let Err(err) = self.appearance.save() {
             eprintln!("settings: could not save appearance.yaml: {err}");
@@ -1028,6 +1093,7 @@ impl SettingsState {
 
             window_width: 1200.0,
             window_height: 800.0,
+            dialog: None,
 
             // Display defaults
             resolution_index: 2,   // 1920x1080
@@ -2233,6 +2299,10 @@ enum AnchorId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonId {
     CheckForUpdates,
+    /// Open the picker and choose a desktop picture.
+    ChooseWallpaper,
+    /// Go back to the plain background that follows the theme.
+    ClearWallpaper,
 }
 
 /// What a click on a page landed on.
@@ -2657,6 +2727,9 @@ impl SettingsState {
     pub fn render_tree(&self) -> RenderTree {
         let pal = &self.palette();
         let mut tree = RenderTree::new();
+        // The picker is drawn last, at the bottom of this function, over
+        // everything: it is modal, and one drawn under the page it belongs to
+        // would be a picker the user could not read.
 
         // Background
         tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, pal.base);
@@ -2683,6 +2756,14 @@ impl SettingsState {
         // Dropdown overlay (rendered on top of everything)
         if self.open_dropdown.is_some() {
             self.render_open_dropdown(&mut tree);
+        }
+
+        // And the file picker over even that: it is the only modal thing in
+        // this window, and a dropdown drawn over it would be a list the user
+        // could not dismiss.
+        if let Some(dialog) = &self.dialog {
+            tree.commands
+                .extend(dialog.render(pal, self.window_width, self.window_height));
         }
 
         tree
@@ -2924,6 +3005,7 @@ impl SettingsState {
             SettingsPage::Display => self.build_display_page(sink),
             SettingsPage::Notifications => self.build_notifications_page(sink),
             SettingsPage::Sound => self.build_sound_page(sink),
+            SettingsPage::Wallpaper => self.build_wallpaper_page(sink),
             SettingsPage::Mouse => self.build_mouse_page(sink),
             SettingsPage::Themes => self.build_themes_page(sink),
             SettingsPage::Colors => self.build_colors_page(sink),
@@ -3199,6 +3281,53 @@ impl SettingsState {
 
         s.section("Per-Application Volume");
         s.note("Nothing is playing audio, and nothing here can ask.", 28.0);
+    }
+
+    /// The Wallpaper page: which picture the desktop shows.
+    ///
+    /// The shell could already crop, letterbox, tile, centre and span a
+    /// wallpaper across monitors, tint it by time of day and rotate a
+    /// slideshow. `set_image` was called four times in the whole tree and all
+    /// four were in the shell's own tests: the feature was complete except
+    /// that no user could reach it.
+    ///
+    /// Only the picture is offered, not the fit mode, the slideshow or the
+    /// dynamic tint. Those are settings `appearance.yaml` does not carry yet,
+    /// and a control that writes a value nothing reads is the defect the Mouse
+    /// page below refuses in its own words.
+    fn build_wallpaper_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Desktop Picture");
+
+        match self.appearance.settings.wallpaper.as_deref() {
+            Some(path) => {
+                s.note(path, 28.0);
+            }
+            None => {
+                s.note(
+                    "No picture. The desktop is the plain background, which follows your theme.",
+                    28.0,
+                );
+            }
+        }
+
+        let pal = self.palette();
+        s.button_row(
+            "Desktop picture",
+            "Choose...",
+            pal.accent,
+            Some(RowHit::Press(ButtonId::ChooseWallpaper)),
+        );
+        // Offered only when there is one to remove. A "Remove" that is always
+        // there is a button whose press does nothing most of the time, and a
+        // user cannot tell that from one that failed.
+        if self.appearance.settings.wallpaper.is_some() {
+            s.button_row(
+                "Remove the picture",
+                "Remove",
+                pal.surface1,
+                Some(RowHit::Press(ButtonId::ClearWallpaper)),
+            );
+        }
     }
 
     // --- Mouse page ---
@@ -4748,6 +4877,19 @@ impl SettingsState {
     /// so the routing can be exercised without writing to the user's home
     /// directory.
     fn dispatch_event(&mut self, event: &Event) -> EventResult {
+        // The picker answers first, and everything but a resize. It is modal,
+        // and a keystroke meant for a filename would otherwise reach the page
+        // behind it -- where, on this window, every key is a setting.
+        //
+        // Inside `handle_event`'s snapshot bracket deliberately: choosing a
+        // wallpaper changes `appearance`, and the save is the whole-struct
+        // comparison that wraps this call rather than an explicit write. A
+        // handler that saved for itself would be a second way to persist, and
+        // the one that forgets is the one that loses a setting.
+        if !matches!(event, Event::Resize { .. }) && self.dialog.is_some() {
+            self.dialog_event(event);
+            return EventResult::Consumed;
+        }
         match event {
             Event::Key(key_evt) => self.handle_key(key_evt),
             Event::Mouse(mouse_evt) => self.handle_mouse(mouse_evt),
@@ -5012,6 +5154,10 @@ impl SettingsState {
             }
             RowHit::Press(ButtonId::CheckForUpdates) => {
                 self.checking_for_updates = !self.checking_for_updates;
+            }
+            RowHit::Press(ButtonId::ChooseWallpaper) => self.open_wallpaper_dialog(),
+            RowHit::Press(ButtonId::ClearWallpaper) => {
+                self.appearance.settings.wallpaper = None;
             }
         }
     }
@@ -6338,6 +6484,62 @@ mod tests {
         assert_eq!(state.sidebar_hovered, Some(0));
     }
 
+    /// **The Wallpaper page is a page now, not a placeholder.**
+    #[test]
+    fn the_wallpaper_page_offers_a_way_to_choose_one() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper)).is_some(),
+            "the page draws no way to choose a picture"
+        );
+    }
+
+    /// Remove is offered only when there is something to remove.
+    ///
+    /// A button that is always there is one whose press does nothing most of
+    /// the time, and a user cannot tell that from one that failed.
+    #[test]
+    fn remove_appears_only_once_a_picture_is_set() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ClearWallpaper)).is_none(),
+            "Remove is offered with no picture to remove"
+        );
+
+        state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ClearWallpaper)).is_some(),
+            "Remove is missing when there is a picture"
+        );
+    }
+
+    /// Pressing Choose puts the picker up, and it is drawn.
+    ///
+    /// Both halves: a picker that is open and not painted is the defect this
+    /// tree keeps finding, and `is_some()` alone would not have noticed.
+    #[test]
+    fn choosing_puts_up_a_picker_and_draws_it() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        let before = state.render_tree().len();
+        let (cx, cy) = center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper))
+            .expect("the page draws a Choose button");
+
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+
+        assert!(state.dialog.is_some(), "no picker came up");
+        assert!(
+            state.render_tree().len() > before,
+            "the picker is open and nothing is drawn for it"
+        );
+    }
+
     #[test]
     fn test_open_dropdown_renders() {
         let mut state = SettingsState::new();
@@ -7377,6 +7579,72 @@ mod tests {
             assert!(
                 saved.taskbar_autohide,
                 "the setting did not survive the round trip to disk"
+            );
+        });
+    }
+
+    /// **A chosen wallpaper reaches the file the desktop reads.**
+    ///
+    /// Checked by reading `appearance.yaml` back off disk, not by asking this
+    /// process's own model, which would agree with itself whether or not
+    /// anything was written. The desktop is the consumer, not this app.
+    ///
+    /// Also checks there is no explicit save in the handler: the write happens
+    /// because `handle_event` compares a snapshot around the dispatch, and a
+    /// handler that saved for itself would be a second way to persist. The one
+    /// that forgets is the one that loses a setting.
+    #[test]
+    fn a_chosen_wallpaper_reaches_the_file_the_desktop_reads() {
+        with_scratch_config("settings-wallpaper-file", |root| {
+            // A picture to choose. The picker lists a real directory, so the
+            // file has to exist for a row to select.
+            let picture = root.join("sunset.png");
+            std::fs::write(&picture, b"not really a png").expect("write the fixture");
+
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            assert!(
+                state.appearance.settings.wallpaper.is_none(),
+                "the test's premise is that it starts unset"
+            );
+
+            let (cx, cy) = center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper))
+                .expect("the page draws a Choose button");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            let dialog = state.dialog.as_mut().expect("no picker came up");
+            dialog.navigate_to(root);
+            dialog.set_entries(guitk::dialog::list_directory(root));
+            let index = dialog
+                .entries()
+                .iter()
+                .position(|e| e.name == *std::ffi::OsStr::new("sunset.png"))
+                .expect("the fixture is not in the listing");
+            dialog.select_entry(index);
+            state.handle_event(&Event::Key(KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }));
+
+            assert!(state.dialog.is_none(), "the picker stayed up");
+
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "choosing should have written {path:?}");
+
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            let written = saved
+                .wallpaper
+                .expect("no wallpaper survived the round trip");
+            assert!(
+                written.ends_with("sunset.png"),
+                "the file names {written:?} rather than the picture chosen"
             );
         });
     }

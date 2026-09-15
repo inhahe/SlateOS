@@ -988,6 +988,27 @@ interface. This is the pattern `known-issues.md` records as lesson 47, and the
 sharp version of it: the process explorer's *own source* quotes that lesson
 while this module sat beside it.
 
+**A worked example of option A's cost, measured 2026-09-14.** A sixth feature
+of this shape was wired that day, and it is offered here as evidence rather
+than as a decision: the desktop's wallpaper. `WallpaperManager` could already
+load a picture, crop or letterbox or tile or centre it, span it across
+monitors, tint it by time of day and rotate a folder of them — and `set_image`
+was called four times in the whole tree, all four in the shell's own tests.
+
+Wiring it end to end came to a setting in `appearance.yaml`, twelve lines in
+the shell to adopt it, a Settings page with a file picker, and eight tests.
+Under an hour, and it turned up a real bug on the way: the picker's file filter
+was given bare extensions where the toolkit documents glob patterns, so every
+directory would have listed as empty on first use.
+
+**Two caveats, because an example that flatters the option is not evidence.**
+The wallpaper is the *easy* shape — its interface is a settings row, and this
+tree already has settings rows. The five above need a menu item, a panel or a
+keystroke in applications that have none, which is the part this entry says is
+unclear and the part the wallpaper did not have to solve. And one of the five,
+the image viewer's video player, is not a row anywhere: it is a second mode for
+a whole window.
+
 **The options**
 
 **A. Wire them up.** *What changes:* the installer can set up a bootloader, the
@@ -1125,6 +1146,33 @@ another's. The visible consequence today: the Settings app cannot offer you a
 choice of web browser, because it has no way to find out what browsers are
 installed — so that screen shows a placeholder. The question is which list
 should become the one everybody reads.
+
+**Added 2026-09-14, and it changes what is being asked.** This is not one
+duplicated list, it is the fourth example of one shape found in a single day,
+and the others are larger:
+
+| the idea | how many implementations | connected? |
+|---|---|---|
+| which programs are installed | 4 | none to any other |
+| the clipboard | **15** private ones, plus a service | the service has no clients at all |
+| which programs start at login | 3 | nothing launches any of them |
+| the ICMP echo header | 2 | the unused one is in a crate the user already depends on |
+
+Each was found by asking *what reads this?* and getting "nothing" — never by
+looking for a missing feature, because nothing is missing: every copy works.
+Details in `known-issues.md` under
+`TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO`,
+`TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`, and
+`requests/c-a-the-icmp-wire-format-is-written-twice...`.
+
+**Why that is worth your time rather than noise in this entry:** a decision
+about *one* list is a small call about app registries. If the same answer would
+settle the other three, it is worth making it as a rule — "a thing the whole
+system shares lives in one place, and that place is X" — rather than four
+times, differently, by whoever touches each one next. If you would rather
+answer only the narrow question, that is fine and the options below are
+unchanged; this note exists so the choice is yours rather than made by the
+entry's framing.
 
 **The four lists**, with what each knows:
 

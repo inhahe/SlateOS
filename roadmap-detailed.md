@@ -849,7 +849,7 @@ audit-logged JSON-lines (who, what target, when, with what reason)._
   - [ ] `ui.theme.widget_style` — change **global widget styling** (button/input/scrollbar/toggle appearance) inherited by all toolkit apps.
   - [ ] `ui.theme.fonts` — change **global font preferences** (system/monospace font, sizes, weight).
   - [ ] `ui.theme.sounds` — replace the **global system sound scheme** (notification/error/login sounds, etc.). Attention axis: a spoofed system sound can mislead the user, so the OS still marks which sounds are OS-authentic vs. theme-provided where it matters (e.g. security prompts).
-  - [ ] `ui.theme.wallpaper` — set the **desktop background / wallpaper** (static, animated, dynamic, or rotation) — see §3.4 → Desktop Background.
+  - [-] `ui.theme.wallpaper` — set the **desktop background / wallpaper** (static, animated, dynamic, or rotation) — see §3.4 → Desktop Background. *Static done 2026-09-14: `appearance.yaml` carries the path, the shell adopts it on load and on live change, and the Settings app's Wallpaper page picks one. Animated, dynamic and rotation are not settable — `WallpaperManager` implements the slideshow and the time-of-day tint, but neither has a key in `appearance.yaml`, and a control that writes a value nothing reads is the defect design-decisions 852 is about.*
   - [ ] `ui.theme.animation` — tune **global animation parameters** (duration, easing, enable/disable) per §3.4 Tier 3 Animation Tuning.
   - [ ] `ui.theme.terminal` — set the **global terminal color scheme** (16 ANSI + fg/bg) shared by terminal emulators.
   - [ ] `ui.theme.full` — convenience grant covering *all* axes at once (apply/replace a complete theme wholesale, as a theme-manager or settings-sync app would). Prompted as "change your entire desktop appearance"; the user can down-scope to individual axes. Composed of the per-axis capabilities above, never a way to bypass any one of their per-axis safeguards.
@@ -1846,11 +1846,11 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - **Custom rendering code** (shaders, custom draw functions) — themes are declarative data, never executable. Fundamentally different widget appearances require a compositor/toolkit plugin, which goes through the full app vetting process.
 
 ##### Desktop Background (independent of themes, but themes can recommend wallpapers)
-- [ ] Static image
+- [x] Static image — 2026-09-14. `AppearanceSettings::wallpaper` names it, `ShellSession::sync_wallpaper` adopts it at startup *and* on live change, and the Settings app's Wallpaper page chooses it.
 - [ ] Animated background (video)
 - [ ] Dynamic program-driven background (program receives desktop events as input — window changes, time, etc.)
-- [ ] Fit options: fit with letterbox, fill with crop (user can scroll to center)
-- [ ] Random background on boot or daily rotation (with exclusion filters)
+- [~] Fit options: fit with letterbox, fill with crop (user can scroll to center) — blocked on nothing but a setting. `wallpaper::ImageFit` already implements six (Fill, Fit, Stretch, Tile, Center, Span) and the shell uses `Fill` unconditionally, because `appearance.yaml` has no key for it. See design-decisions 852.
+- [~] Random background on boot or daily rotation (with exclusion filters) — same shape: `WallpaperManager::set_slideshow` exists, takes a directory, an interval and a shuffle flag, and nothing outside the shell's tests calls it.
 - [ ] Login screen background (easy way to match desktop background)
 
 #### Hotkeys

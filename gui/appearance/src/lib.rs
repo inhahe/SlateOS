@@ -1146,6 +1146,20 @@ pub struct AppearanceSettings {
     /// Clamped on read, so a hand-edited file cannot ask for a negative
     /// warmth or for more than the mapping defines.
     pub night_light_strength: f32,
+    /// The picture to show on the desktop, or `None` for the plain background.
+    ///
+    /// A path and nothing else. The desktop's `WallpaperManager` can already
+    /// crop, letterbox, stretch, tile, centre and span across monitors, and
+    /// none of those are here: the fit mode is a second setting, and a setting
+    /// whose control does not exist is one a user cannot reach. The manager's
+    /// default is used until the Wallpaper page offers the choice, on the same
+    /// rule the Mouse settings page states -- each gets its control when it
+    /// gets a consumer.
+    ///
+    /// `None` rather than an empty string, because "no wallpaper" and "a file
+    /// called nothing" are different answers and only one of them is a
+    /// mistake.
+    pub wallpaper: Option<String>,
     /// The high-contrast scheme in force, or `None` for an ordinary theme.
     ///
     /// When set it *replaces* [`theme_mode`](Self::theme_mode) rather than
@@ -1219,6 +1233,10 @@ pub struct AppearanceSettings {
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
+            // No picture. A desktop that invented one would be showing a file
+            // the user never chose, and there is no stock wallpaper in this
+            // tree to choose honestly.
+            wallpaper: None,
             theme_mode: ThemeMode::Dark,
             // Borders, per §829. The `Default` impl is what a machine with no
             // configuration file gets, so this is where "the default theme" is
@@ -1684,6 +1702,18 @@ impl AppearanceSettings {
     pub fn read_from(doc: &Document) -> Self {
         let mut s = Self::default();
 
+        // An empty string reads as "no wallpaper": a hand-edited file that
+        // blanks the value means to turn it off, and treating that as a path
+        // would make the desktop report a missing file the user never named.
+        if let Some(path) = doc.get_str(&["wallpaper", "image"]) {
+            let trimmed = path.trim().to_string();
+            s.wallpaper = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            };
+        }
+
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -1822,6 +1852,13 @@ impl AppearanceSettings {
     /// Write these settings into a configuration document, leaving every
     /// comment, blank line and unrelated key in it exactly as it was.
     pub fn write_into(&self, doc: &mut Document) {
+        // Written even when unset, as the empty string, so the key is in the
+        // file with a comment beside it rather than absent. A key you can see
+        // is a key you can edit; an absent one has to be guessed at.
+        doc.set_str(
+            &["wallpaper", "image"],
+            self.wallpaper.as_deref().unwrap_or_default(),
+        );
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
         doc.set_str(
             &["theme", "surface_style"],
@@ -2218,6 +2255,11 @@ mod tests {
     /// round-trip test cannot pass by accident on a field it forgot.
     fn all_non_default() -> AppearanceSettings {
         AppearanceSettings {
+            // A path with a space and a non-ASCII character in it, because a
+            // wallpaper is the one appearance setting whose value comes from a
+            // filesystem the user named, and a tidy ASCII fixture would pass
+            // through a codec that mangled either.
+            wallpaper: Some("/home/u/Pictures/maíz del alba.png".to_string()),
             theme_mode: ThemeMode::Light,
             caret_width_scale: 2.5,
             focus_ring_scale: 3.0,

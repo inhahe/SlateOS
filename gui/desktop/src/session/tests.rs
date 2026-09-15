@@ -1245,6 +1245,43 @@ fn announce(desktop: &Desktop, surface: Surface, group: SettingsGroup) {
     )]);
 }
 
+/// **A wallpaper chosen while the desktop is running is adopted without a
+/// logout.**
+///
+/// The startup path (`load_appearance`) and the live path (the
+/// `SettingsChanged` arm) are two doors onto the same settings, and the live
+/// one's own comment says "adopting the settings is two steps and the second
+/// is easy to forget". This is that second step, asserted: without
+/// `sync_wallpaper` in the announce arm the picture would appear only after a
+/// restart, which reads to a user as the setting not working.
+#[test]
+fn a_wallpaper_chosen_while_running_is_adopted_without_a_restart() {
+    settingsfile::testing::with_scratch_config("session-live-wallpaper", |_root| {
+        let (mut session, desktop, _turn) = session();
+        session.load_appearance();
+        assert_eq!(
+            session.wallpaper_mut().current_image_path(),
+            None,
+            "the fixture starts with no wallpaper"
+        );
+
+        // The Settings app writes the file while the desktop is up.
+        let picture = fixture("rgb8");
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.wallpaper = Some(picture.clone());
+        file.save().expect("save");
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+
+        assert_eq!(
+            session.wallpaper_mut().current_image_path(),
+            Some(picture.as_str()),
+            "the desktop did not adopt the picture until a restart"
+        );
+    });
+}
+
 #[test]
 fn an_announced_appearance_change_repaints_the_chrome() {
     // The end of the chain this feature is: the Settings app writes
@@ -2573,6 +2610,76 @@ fn a_window_animation_runs_off_the_same_clock() {
 /// *nothing in this repository chose its bytes* — and a copy inherits the bytes
 /// without inheriting the property, then goes stale the first time the fixture
 /// is regenerated. The pictures are 9x7; see `gui/imagecodec/tests/data/`.
+/// **The wallpaper a user chose is the one the desktop shows.**
+///
+/// `WallpaperManager` could crop, tile, tint and rotate pictures long before
+/// this test existed, and `set_image` was called four times in the tree -- all
+/// four in this file. Nothing in production had ever set a wallpaper, because
+/// `appearance.yaml` had nowhere to name one. This drives the real path: write
+/// the setting, load the appearance, and ask the manager what it is holding.
+#[test]
+fn a_wallpaper_named_in_the_settings_is_adopted() {
+    let (mut session, _desktop, _turn) = session();
+    assert_eq!(
+        session.wallpaper_mut().current_image_path(),
+        None,
+        "the fixture starts with no wallpaper"
+    );
+
+    let picture = fixture("rgb8");
+    session.shell_mut().appearance.wallpaper = Some(picture.clone());
+    session.sync_wallpaper();
+
+    assert_eq!(
+        session.wallpaper_mut().current_image_path(),
+        Some(picture.as_str()),
+        "the desktop is not showing the picture the settings name"
+    );
+}
+
+/// Clearing the setting goes back to the theme, not to a colour.
+///
+/// `follow_desktop_base` and a solid colour draw the same pixels today and
+/// diverge the moment the user switches between light and dark. Only one of
+/// them is a decision the user made.
+#[test]
+fn clearing_the_wallpaper_goes_back_to_following_the_theme() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.sync_wallpaper();
+    assert!(session.wallpaper_mut().current_image_path().is_some());
+
+    session.shell_mut().appearance.wallpaper = None;
+    session.sync_wallpaper();
+
+    assert_eq!(session.wallpaper_mut().current_image_path(), None);
+}
+
+/// **Re-adopting the same wallpaper does not re-decode it.**
+///
+/// `set_image` issues a fresh image id every call, and `paint_background`
+/// re-reads and re-inflates any id it has not seen. `sync_wallpaper` runs on
+/// every appearance change -- a comment edited in the file, a key this desktop
+/// does not read -- so without the guard, changing the accent colour would
+/// decode a full-screen photograph again.
+#[test]
+fn an_unrelated_settings_change_does_not_reload_the_picture() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.sync_wallpaper();
+    let first = session.wallpaper_mut().current_image_id();
+    assert_ne!(first, 0, "setting an image did not allocate an id");
+
+    // Something else about the appearance changed; the picture did not.
+    session.sync_wallpaper();
+
+    assert_eq!(
+        session.wallpaper_mut().current_image_id(),
+        first,
+        "the same wallpaper was issued a new id, so it will be decoded again"
+    );
+}
+
 fn fixture(name: &str) -> String {
     format!(
         "{}/../imagecodec/tests/data/{name}.png",

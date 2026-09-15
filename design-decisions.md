@@ -72785,114 +72785,149 @@ halves and ask which runs first. Moving one emission after a read was worth nine
 harness cases in `patch`; the emission and the read were both correct before and
 after.
 
-## 1022. A green gate has two ways of being unable to go red, and only one of them contains a false sentence
+## 1022. A gate that cannot go red: the report overclaims, or the fixture cannot reach the arm
 
 **Date:** 2026-09-15
 **Decided by:** Claude (autonomous)
-**Lane:** B — framed with lane A, whose half of it this is
+**Lane:** B — framed with lane A, whose half this is, and **corrected twice
+before it was right**
 
 **In short:** A gate can pass because its report claims more than its code
-computes, or because its fixture never reaches the code its label covers. Both
-look identical from outside: a green line in a log. They need opposite
-remedies, and telling them apart turns on one question — **is any sentence in
-the tree false?**
+computes, or because the fixture it runs against cannot reach the code anyone
+cares about. Both look identical from outside: a green line in a log. The
+second is not "nothing was written down" — this entry said that for one
+revision and it was false.
 
-### The two faces, found the same afternoon from opposite directions
-
-**Face 1 — the report overclaims the computation. A false sentence exists.**
+### Face 1 — the report overclaims the computation
 
 `scripts/check-help-vs-parser.py` printed:
 
     options advertised but never read: 0
 
-and the number it printed counts options the **parser does not recognise**.
-Whether the field the parser writes is ever read again is a question that gate
-cannot see at all. Its docstring had it right ("its parser never reads"); the
-summary line dropped the word "parser" and became a stronger claim than the
-code makes.
+and the number counts options the **parser does not recognise**. Whether the
+field the parser writes is ever read again is a question that gate cannot see.
+Its docstring was right ("its parser never reads"); the summary line dropped
+the word "parser" and became a stronger claim than the code makes. It printed
+that zero on a day when **eleven** parsed-but-never-read options existed — five
+in `lscpu`, plus `patch`'s `-l`/`-N`/`-F`/`-f`, `curl`'s two timeouts,
+`tee -i`, `pstree -H`, `gdb --args`.
 
-That zero was printed on a day when **eleven** parsed-but-never-read options
-existed — five in `lscpu` alone, plus `patch`'s `-l`/`-N`/`-F`/`-f`, `curl`'s
-two timeouts, `tee -i`, `pstree -H`, `gdb --args`. The check was right; its
-summary was not.
+A false sentence, wrong on every run, findable by reading the gate against its
+own code, fixed permanently by one careful reader.
 
-**Face 2 — the fixture never reaches the code. No sentence is false.**
+### Face 2 — the fixture cannot reach the arm
 
 Lane A's: `scripts/boot-test.sh` never attaches `disk.img`, so `fat::init`
 fails, the root stays memfs, and a FAT-only arm of `openat2` has been
 unreachable since 2026-07-22 — including by a test written for it on
-2026-08-30. Six weeks green. The arm reports failure for a non-default mode
-and keeps the side effect: the file is created and then the error propagates.
+2026-08-30. The arm reports failure for a non-default mode and keeps the side
+effect: the file is created, then the error propagates.
 
-**And this is the correction that makes the entry worth writing.** My first
-framing said the fixture "cannot reach the code its label covers", and lane A
-rejected it: `boot-test.sh` never claimed to cover FAT. *There is no label to
-correct.* Every artifact was individually true —
+**What this entry claimed for one revision, and what is actually true.**
 
-* the boot test truthfully reported every gate it ran;
-* the `openat2` self-test truthfully passed, on the root it was given;
-* `fat.rs` even **documented the mechanism out loud**, in a comment above
-  `self_test_datetime`: the boot test mounts an in-memory root and attaches
-  vda as a raw swap disk, so init fails and the suite is skipped.
+My first version said face 2 contained *no false sentence anywhere* and that
+*nobody had asked the question*. Lane A proposed that framing and then
+retracted it; I checked the retraction and it is the retraction that is right.
+`scripts/check-gated-selftests.py` exists precisely to catch self-tests that
+never run, it **flagged this one**, and its allowlist entry says, verbatim:
 
-The truth was written down, in the right file, beside the code — and reached
-nobody, because it was answering a different question. That comment exists to
-explain why one datetime suite was extracted. Read as an answer to "which
-filesystems does this gate exercise?" it is decisive. Nobody was asking that.
-**The coverage claim was never made by anyone; it was inferred from "the boot
-test passes".**
+> A FAT filesystem on vda. The boot test mounts an in-memory root and attaches
+> vda as a raw swap disk, so `fs::fat::init("vda")` returns an error there and
+> the suite is skipped; it runs on a real FAT boot. **This entry ends the day
+> the harness attaches a FAT-formatted vda.**
 
-### The decision: separate them by whether a false sentence exists
+So the mechanism was noticed, answered honestly, and carries its own
+termination condition. "There is no sentence to find" was exactly backwards.
+
+**The true, narrower claim — and it is still worth the entry:**
+
+> A "never ran" gate catches suites that **do not run**. It cannot catch a
+> suite that **does** run against a fixture that cannot reach the interesting
+> arm.
+
+`openat2`'s self-test ran on every boot and passed honestly, on memfs. Its
+case (e) exercised a mode stamp against a filesystem that stores modes, so it
+could only ever pass. No banner is missing, so no never-ran gate can see it,
+and the allowlist reasons about **one suite's banner** rather than about which
+code paths the fixture leaves unreachable.
+
+The gap was known at the level of *"a FAT suite is skipped"* and never drawn
+out to *"therefore every FAT-only arm in the VFS is unexercised."* Grepping for
+the shape rather than the instance found three create-then-report-failure
+sites, not one: `openat2`, `Vfs::mkdir_mode`, and the pinned `mkdir_at` route.
+
+### The better specimen, which was already written down
+
+The same file records something sharper than either half we brought. A
+2026-08-31 audit concluded all six gated sites run on this host. It was wrong
+about FAT, because the FAT site declared `format_self_test`'s banner rather
+than its own, and that suite is dispatched unconditionally — so its banner is
+on every boot. In the checker's own words:
+
+> the audit and this gate were reading the same mislabelled marker, which is
+> why they agreed.
+
+**Two independent instruments concurring because they shared one broken
+input.** Agreement between checks is evidence only to the extent their inputs
+are independent, and nothing about either check advertised that they were not.
+
+### The decision
+
+Separate the two faces by what the remedy is, not by whether prose is wrong:
 
 | | face 1 | face 2 |
 |---|---|---|
-| a false sentence exists | yes | **no** |
-| how it is found | read the gate against its own code | ask a question nobody had reason to ask |
-| remedy | a correction | an **inventory** |
-| cost of leaving it | wrong on every run | correct on every run it can make |
-| who can fix it | one careful reader, permanently | whoever owns the fixture |
+| defect | a summary claims more than the code computes | a fixture cannot reach the arm |
+| found by | reading the gate against its own code | asking what the fixture reaches |
+| remedy | a correction | an **inventory**, then a second fixture |
+| a never-ran gate sees it | n/a | **no** — the suite runs |
 
-Lane A's one-line statement of face 2 is the one to keep: **a gate's coverage
-is a fact about its fixture, and no gate reports what its fixture could not
-reach.**
+**Face 2 is the more dangerous**, and the grounding is not "nothing is written
+down", because something was. It is that **the written fact was scoped to one
+suite's banner, and the consequence for every other code path sharing that
+fixture was never derived.** The allowlist entry asked for a FAT-formatted vda
+months before anyone noticed what its absence implied for `openat2`. That is
+why the repair is a second boot configuration and not an edited comment:
+changing the existing one alters what mounts at `/` for every self-test in the
+run, trading a known-unreachable arm for an unknown-perturbed suite.
 
-**Face 2 is the more dangerous, and the grounding matters.** Not because it
-lasts longer — that is the symptom. Because **there is nothing wrong to
-notice.** Face 1 is a defect in prose and prose can be proofread. Face 2
-cannot be fixed by correcting anything, because nothing is incorrect; it is
-fixed only by enumerating what the fixture reaches and comparing that against
-what the suite is trusted for. That is why the repair for lane A's case is a
-**second boot configuration** and not an edited comment: attaching a FAT disk
-to the existing one changes what mounts at `/` for every self-test in the run,
-trading a known-unreachable arm for an unknown-perturbed suite.
+### How this entry was got wrong, which is the same family
+
+I took a peer's framing and wrote it up **without checking it**, on a day spent
+verifying every other claim that crossed this lane — including two of lane C's
+and one of lane A's. The framing was confident, it was about their own tree,
+and it arrived as a correction to something of mine, all of which made it feel
+already-verified. It was not. One `grep` of `check-gated-selftests.py` falsifies
+it, and that grep took under a minute once I ran it.
+
+A retraction is a claim too, and this one earned its checking as much as the
+statement it withdrew.
 
 ### Alternatives considered
 
-* **Treat them as one defect ("gates that cannot fail") and hunt both with one
-  tool.** Rejected: the tools are different in kind. Face 1 is found by
-  diffing a report's wording against the expression that produces it, which is
-  mechanical. Face 2 needs a coverage inventory, which is a different artifact
-  that does not exist yet.
-* **Frame face 2 as a documentation failure.** Rejected, and this was my first
-  attempt. The documentation was present and correct. Blaming prose here would
-  produce a rule ("write it down") that was already followed.
-* **Add a gate for face 1 now.** Deferred rather than rejected: a checker that
-  compares a report string against the variable it prints is plausible, but
-  the population is small and the wording varies. The cheaper discipline, and
-  the one this entry asks for, is that **a summary line states what was
-  measured and not what the gate is for.**
+* **Treat both faces as one defect and hunt them with one tool.** Rejected:
+  face 1 is found by diffing a report's wording against the expression that
+  produces it, which is mechanical; face 2 needs a coverage inventory, which is
+  a different artifact and does not exist yet.
+* **Write a checker for face 1 now.** Deferred: the population is small and the
+  wording varies. The cheaper discipline is that a summary line states what was
+  **measured**, not what the gate is **for**.
+* **Add the FAT marker to the allowlist so the gate stops flagging it.**
+  Rejected, and the checker already refuses it: a marker not present in any
+  `gated_ran` is not live, and an entry naming nothing would fail. That refusal
+  is correct and stays.
 
 ### Consequences
 
 * When a gate's output is a count, the label names the predicate that produced
-  the count — "never parsed", not "never read". Where a gate cannot see a
-  neighbouring question, it says so and names the tool that can.
-  `check-help-vs-parser` now points at
-  `check-fields-written-never-read.py --advertised` in its own output.
-* A suite's coverage is not inferrable from its pass. Before trusting "the
-  boot test passes" about a subsystem, check the fixture reaches it.
-* Lane A's half is recorded as the eighth mode of §937 and points here; this
-  entry points back.
+  it — "never parsed", not "never read". `check-help-vs-parser` now points at
+  `check-fields-written-never-read.py --advertised` for the question it cannot
+  answer.
+* An allowlist entry that explains why a suite is skipped has said nothing
+  about which **other** code paths that skip leaves unexercised. Deriving the
+  second from the first is a separate act and nothing prompts it.
+* Two checks agreeing is evidence only insofar as their inputs are
+  independent.
 
 ---
 

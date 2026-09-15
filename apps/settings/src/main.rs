@@ -3023,6 +3023,25 @@ impl SettingsState {
             SettingsPage::SystemUpdates | SettingsPage::Recovery | SettingsPage::Snapshots => {
                 self.build_update_page(sink);
             }
+            // WHY `StartupApps` IS STILL A PLACEHOLDER, deliberately.
+            //
+            // design-decisions 815 says a screen you *open* moves here and the
+            // shell's copy is deleted, and `gui/desktop/src/startup_settings.rs`
+            // is 2,129 lines of exactly such a screen. It is not ported because
+            // **nothing launches user startup applications.** Checked
+            // 2026-09-14: the shell's session start never mentions them,
+            // `apps/startupmanager` spawns nothing but its own window, and
+            // `services/init` reads `/etc/startup.conf` to start *system
+            // services*, which is a different thing and lane B's.
+            //
+            // So three user interfaces manage a list no launcher reads. Porting
+            // the fourth would "save a value to a file, look as though it had
+            // worked, and change nothing" -- the Mouse page above refuses that
+            // in the same words, and `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-
+            // NOTHING` is what it was filed about. This page gets its controls
+            // when the list gets a consumer, and not before.
+            //
+            // See `TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`.
             _ => self.build_placeholder_page(sink),
         }
     }

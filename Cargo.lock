@@ -2898,6 +2898,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "procinfo",
 ]
 
 [[package]]

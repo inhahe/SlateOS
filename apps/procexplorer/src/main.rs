@@ -194,12 +194,6 @@ impl ProcessStatus {
 // Process info
 // ============================================================================
 
-/// The clock ticks a second holds, as `/proc` counts them.
-///
-/// 100 on every platform this runs on; named rather than spelled `100` at the
-/// one site that divides by it.
-const TICKS_PER_SECOND: u64 = 100;
-
 /// A `/proc` state letter as this window's own status.
 ///
 /// `D` -- uninterruptible sleep -- maps to `Sleeping` rather than gaining a
@@ -748,7 +742,7 @@ impl ProcessExplorerState {
                 user: String::new(),
                 command_line: cmdline,
                 start_time_secs: 0,
-                cpu_time_ms: ticks.saturating_mul(1000) / TICKS_PER_SECOND,
+                cpu_time_ms: ticks.saturating_mul(1000) / procinfo::TICKS_PER_SEC,
                 threads: Vec::new(),
                 handles: Vec::new(),
                 environment: Vec::new(),

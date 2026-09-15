@@ -5,6 +5,15 @@
 //!
 //! Creates new namespaces (mount, UTS, IPC, network, PID, user, cgroup, time)
 //! and optionally runs a command in the isolated context.
+//!
+//! **Except that it cannot, on this system, and therefore refuses.**
+//! `posix::unshare` validates its flags and its `CAP_SYS_ADMIN` gate and then
+//! returns `ENOSYS`. Until 2026-09-15 this program called `unshare(2)` not at
+//! all, printed "unshare: mapping current user to root in user namespace" --
+//! present tense, about something it had not done -- and then ran the command
+//! with no namespaces created. Running UNISOLATED is the harm rather than a
+//! lesser version of it: `unshare` is reached for when an operation is risky
+//! enough to want containing, and the command succeeded against the host.
 
 #![deny(clippy::all)]
 
@@ -267,6 +276,9 @@ fn parse_args(args: &[String]) -> UnshareOpts {
 fn print_help() {
     println!("Usage: unshare [options] [program [arguments]]");
     println!();
+    println!("This system has no namespace subsystem, so unshare cannot create");
+    println!("one and will not run the program. Options are parsed and checked.");
+    println!();
     println!("Run a program with some namespaces unshared from parent.");
     println!();
     println!("Options:");
@@ -320,55 +332,56 @@ fn cmd_unshare(args: &[String]) {
 
     let ns_names = namespace_names(opts.namespaces);
 
-    // In real implementation: call unshare(2) with the combined flags.
-    // For simulation, we report what would happen and exec the command.
+    // ------------------------------------------------------------------ //
+    // REFUSING, for the same reason `nsenter` does and with one difference
+    // that makes this worse.
+    //
+    // This program never called `unshare(2)`. It printed a line claiming to
+    // have mapped the user into a new user namespace -- in the PRESENT TENSE,
+    // "unshare: mapping current user to root in user namespace" -- and then
+    // ran the command with no namespaces created at all. `nsenter` at least
+    // said nothing; this one asserted the thing it had not done.
+    //
+    // Running unisolated is the harm, not a lesser version of it. `unshare` is
+    // reached for precisely when an operation is risky enough to want
+    // containing: `unshare -m -- <mount juggling>` expects its mounts to be
+    // private, and without a new mount namespace they are the host's. The
+    // command runs, it succeeds, and it changes the wrong system.
+    //
+    // There is nothing to wire it to, and that was checked rather than
+    // assumed: `posix::unshare` validates its flag set and its CAP_SYS_ADMIN
+    // gate and then returns ENOSYS, "the namespace subsystem isn't wired up".
+    // (Its `unshare(0) -> 0` is not an exception -- Linux defines that as a
+    // successful no-op and util-linux uses it to probe for the syscall.)
+    //
+    // This refusal ends the day a namespace subsystem lands.
     let stderr = io::stderr();
     let mut err = stderr.lock();
 
-    // User namespace mapping.
-    if opts.namespaces & CLONE_NEWUSER != 0 && opts.map_root_user {
-        // Would write to /proc/self/uid_map and /proc/self/gid_map.
-        let _ = writeln!(
-            err,
-            "unshare: mapping current user to root in user namespace"
-        );
-    }
-
-    // Mount propagation.
-    if opts.namespaces & CLONE_NEWNS != 0 {
-        let propagation = opts.propagation.as_deref().unwrap_or("private");
-        let _ = propagation; // Would set via mount(2).
-    }
-
-    // Time namespace offsets.
-    if opts.namespaces & CLONE_NEWTIME != 0
-        && let Some(offset) = opts.monotonic
-    {
-        // Would write to /proc/self/timens_offsets.
-        let _ = offset;
-    }
-
-    // Build command.
     let command = if opts.command.is_empty() {
         vec![env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())]
     } else {
         opts.command.clone()
     };
+    let what = command.first().map_or("a command", String::as_str);
 
-    // Execute.
-    let status = process::Command::new(&command[0])
-        .args(&command[1..])
-        .status();
-
-    let _ = ns_names;
-
-    match status {
-        Ok(s) => process::exit(s.code().unwrap_or(1)),
-        Err(e) => {
-            eprintln!("unshare: failed to execute {}: {e}", command[0]);
-            process::exit(127);
-        }
-    }
+    let _ = writeln!(
+        err,
+        "unshare: cannot create new {} namespace(s): this system has no \
+namespace subsystem.",
+        ns_names.join(", ")
+    );
+    let _ = writeln!(
+        err,
+        "unshare: unshare(2) validates its arguments and returns ENOSYS."
+    );
+    let _ = writeln!(
+        err,
+        "unshare: refusing to run {what}, because running it UNISOLATED is not \
+what was asked for."
+    );
+    let _ = err.flush();
+    process::exit(1);
 }
 
 // ============================================================================

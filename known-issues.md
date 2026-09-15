@@ -84,7 +84,154 @@ terminator before comparing — and the formatter has to emit the
 and context output alike. Upstream diffutils carries a flag per side for exactly
 this.
 
-## TD-B-HARDLINK-MERGES-ON-CONTENT-ALONE-AND-ALL-FIVE-RESPECT-FLAGS-ARE-INERT — 2026-09-15 — OPEN
+## TD-B-AUDITD-LOGGED-A-DAEMON-START-THAT-NEVER-HAPPENED — 2026-09-15 — FIXED by refusing
+
+**In short:** `auditd` wrote `DaemonStart … res=success` into the audit log and
+returned 0, while the process exited immediately — there is no event loop and
+no fork. The messages on stdout were honest about it; the log was not.
+
+**The asymmetry is the defect.** stdout said *"auditd: would fork to background
+(simulated)"* and *"daemon event loop would run here"* — both true, both
+subjunctive, and both read once by whoever ran the command. The audit log said
+a daemon started successfully, and an audit log is read **later**, by someone
+reconstructing what happened, whose whole reason for consulting it is that it
+can be trusted without corroboration. The terminal told the truth and the
+durable record did not.
+
+Returning 0 compounded it: an init script would have counted the service as up.
+
+**The finding inside the finding.** Removing the two fabricated writes left
+`write_audit_event` with no callers at all. **Those two events were the only
+thing this program had ever written to the audit log.** Until today its sole
+output was a record of something that did not occur — and an audit log whose
+only entry is false is worse than an empty one, because an empty one is
+obviously empty.
+
+`write_audit_event` is kept with `#[allow(dead_code)]` and that explanation,
+the way `gdb` keeps its inferior-control helpers while there is no `ptrace`:
+it is the writer a real event source will need, and its record format is the
+part worth preserving.
+
+**How it was found:** by grepping the *shape* after fixing `nsenter` —
+`For simulation|in real implementation, this would` across `userspace/*/src/`.
+Three hits, two of them real (`unshare`, `audit`), one of them my own comment
+quoting the original. Neither `unshare` nor `audit` was on the
+advertised-but-unread ranking, because in both the fields **are** read — by
+the simulation.
+
+### The sweep was then WIDENED, because three hits was a fact about the query
+
+That first grep matched two exact phrasings. Widening it to
+`simulat|in a real (daemon|implementation)|would (fork|run here|be done|actually)`
+matches **62 files**, not three — so "three hits" described what I asked, not
+what is there. (Lane A's rule, recorded in design-decisions §1022: a negative
+about a searchable corpus is a search, not an inference.)
+
+62 mentions are mostly benign, so the population that matters is the
+intersection with a real side effect — `Command::new`, `fs::remove_*`,
+`fs::write`, `fs::rename`, `execv`. Ranked by that, and **checked rather than
+assumed**, the security-critical head of the list came back clean:
+
+| checked | verdict |
+|---|---|
+| `sudo` | **already fixed.** Calls `authlib::identity::become_user` before spawning. Its own comment records the defect I was reconstructing: *"Until now sudo authorised the command … and then ran it as the caller."* My `setuid` grep missed it because the call goes through `authlib`. |
+| `su` | same shared helper, same ordering |
+| `authlib::identity::become_user` | correct, and documents its own remaining gap (supplementary groups from `userdb`) |
+| `firejail` | its "we simulate it" is `create_symlink` portability in a symlink-installer, not sandboxing |
+
+So the shape is real and rarer than the raw grep count suggests. What separates
+a defect from a benign mention is not the word "simulate" — it is whether a
+**consequential action happens anyway**, which no text search can answer.
+
+**Where it lives:** `userspace/audit/src/main.rs`, the `auditd` start path.
+
+---
+
+## TD-B-UNSHARE-RAN-THE-COMMAND-UNISOLATED-AND-SAID-IT-HAD-NOT — 2026-09-15 — FIXED by refusing
+
+**In short:** `unshare` never called `unshare(2)`. It printed *"unshare:
+mapping current user to root in user namespace"* — **present tense, about
+something it had not done** — and then ran the command with no namespaces
+created at all.
+
+**The sibling of `TD-B-NSENTER-RAN-THE-COMMAND-IN-THE-WRONG-NAMESPACE`, found
+by grepping the shape rather than waiting for it.** `nsenter` was fixed first;
+one `grep` for `real implementation|simulat|Command::new` over the neighbouring
+crate found this within a minute. Two tools, one defect, and the second would
+not have been looked at on its own — it was not on the advertised-but-unread
+ranking, because its fields *are* read. They are read by the simulation.
+
+**Worse than `nsenter` in one respect.** `nsenter` said nothing and ran the
+command elsewhere; this one **asserted the action** before running the command
+without it. A false statement in the present tense is not a stale comment — it
+is output, and the user read it as confirmation.
+
+**Running unisolated is the harm, not a lesser version of it.** `unshare` is
+reached for exactly when an operation is risky enough to want containing:
+`unshare -m -- <mount juggling>` expects private mounts, and without a new
+mount namespace they are the host's. The command runs, succeeds, and changes
+the wrong system.
+
+**Refused, not wired — checked rather than assumed.** `posix::unshare`
+validates its flag set and its `CAP_SYS_ADMIN` gate and then returns `ENOSYS`.
+Its `unshare(0) -> 0` is **not** an exception and was examined before being
+dismissed: Linux defines the zero-flag call as a successful no-op, and
+util-linux uses it to probe for the syscall's existence.
+
+The execution path is deleted rather than guarded — `Command::new` no longer
+appears in the file. The module doc and `--help` say what happens now.
+
+**Ends the day a namespace subsystem lands**, at which point both this and the
+`nsenter` refusal become real `unshare(2)`/`setns(2)` calls.
+
+**Where it lives:** `userspace/unshare/src/main.rs`.
+
+---
+
+## TD-B-NSENTER-RAN-THE-COMMAND-IN-THE-WRONG-NAMESPACE — 2026-09-15 — FIXED by refusing
+
+**In short:** `nsenter` checked that the target's namespace files existed, did
+**not** call `setns`, and then **ran the command anyway** — in the caller's own
+namespaces, reporting nothing unusual. `nsenter -t <container> -m -- rm -rf
+/data` deleted the host's `/data`.
+
+**Why this was worse than any inert flag in this tree.** Everywhere else, an
+unread field meant a requested behaviour did not happen: `patch -l` matched
+strictly, `tee -i` died on `^C`, `lscpu -p` printed the wrong table. Here the
+command was not skipped — it was **performed, in the wrong place**. The user
+saw it run normally and had no way to tell where.
+
+Three comments in the file said so out loud — *"in real implementation, this
+would use setns(2)"*, *"For simulation, just verify accessibility"*, *"Execute
+command (in real implementation, this would happen after setns)"*. All three
+were true, none reached the user, and the program between them did the
+dangerous thing. A truthful comment beside a false behaviour is the shape
+design-decisions §1022 catalogues.
+
+**Fixed by refusing, not by wiring.** There is nothing to wire to:
+`posix::setns` validates its arguments and its `CAP_SYS_ADMIN` gate and then
+returns `ENOSYS` — "namespace subsystem not implemented". This is not the
+`curl`/`tee` pattern where the capability existed and the call site was
+missing; the capability genuinely is absent. `nsenter` now reports that and
+exits 1, and the execution path is **deleted** rather than guarded —
+`Command::new` no longer appears in the file, so it cannot run a command by
+any route.
+
+**This entry ends the day a namespace subsystem lands.** At that point `setns`
+stops returning `ENOSYS`, and the refusal should become a real `setns` call in
+the loop that currently only checks the files.
+
+**Also moot until then:** `-W/--wdns` (`wd_fd`), `-F/--no-fork` and
+`--preserve-credentials` are parsed and read by nothing. They describe what to
+do *after* entering a namespace, so there is nothing for them to modify while
+entry is refused. Listed so the next reader does not count them as separate
+defects.
+
+**Where it lives:** `userspace/nsenter/src/main.rs`.
+
+---
+
+## TD-B-HARDLINK-MERGES-ON-CONTENT-ALONE-AND-ALL-FIVE-RESPECT-FLAGS-ARE-INERT — 2026-09-15 — FIXED same day
 
 **In short:** `hardlink` decides two files are the same from their **contents
 only**. Every flag that exists to narrow that — `-f/--respect-name`,
@@ -110,6 +257,21 @@ too early to be correct.
 commit's claim is "a failed link no longer destroys the duplicate", and
 widening it to "and the right files are chosen" would make one commit answer
 two questions. The destructive window was the urgent half.
+
+**FIXED in the commit after it.** `FileInfo` now records real `mtime`, `mode`,
+`uid` and `gid` as `Option`s, and `may_link` consults them before any pair is
+merged. The four `_`-prefixed fields it replaces were hardcoded to `0` with
+the comment "Platform-dependent, simulated" -- **and that is why wiring the
+flags to them would have been worse than leaving them inert.** A zero standing
+in for a real mode compares equal to every other zero, so every pair would have
+passed every check and the flags would have looked implemented while preventing
+nothing.
+
+So an attribute this build cannot read is an `Err`, never a match:
+`--respect-perm` on a platform with no mode bits refuses the merge rather than
+permitting it. `--respect-xattr` always refuses, because there is no
+`getxattr` to call. `--respect-name` compares the BASENAME, not the path --
+deduplicating identical files across directories is the point of the tool.
 
 **Where it lives:** `userspace/hardlink/src/main.rs` — `HardlinkOpts`'s five
 `respect_*` fields, `files_identical`, and the grouping in `deduplicate`.

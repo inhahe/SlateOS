@@ -6,6 +6,14 @@
 //!
 //! Enters one or more namespaces of a target process (via /proc/<pid>/ns/),
 //! then executes a command in that context.
+//!
+//! **Except that it cannot, on this system, and therefore refuses.** There is
+//! no namespace subsystem: `posix::setns` validates its arguments and returns
+//! `ENOSYS`. Until 2026-09-15 this program checked the namespace files, did
+//! not call `setns`, and ran the command anyway -- in the caller's own
+//! namespaces, silently. It now reports that and runs nothing, because a
+//! command aimed at a container and landing on the host is worse than a
+//! command that does not run.
 
 #![deny(clippy::all)]
 
@@ -221,6 +229,9 @@ fn parse_args(args: &[String]) -> NsenterOpts {
 fn print_help() {
     println!("Usage: nsenter [options] [program [arguments]]");
     println!();
+    println!("This system has no namespace subsystem, so nsenter cannot enter");
+    println!("one and will not run the program. Options are parsed and checked.");
+    println!();
     println!("Run a program with namespaces of other processes.");
     println!();
     println!("Options:");
@@ -296,7 +307,8 @@ fn cmd_nsenter(args: &[String]) {
         }
     }
 
-    // Report namespace entry (in real implementation, this would use setns(2)).
+    // Verify the namespace files, then REFUSE. See below for why refusing is
+    // the whole of the fix rather than a limitation of it.
     let stderr = io::stderr();
     let mut err = stderr.lock();
 
@@ -318,30 +330,56 @@ fn cmd_nsenter(args: &[String]) {
             process::exit(1);
         }
 
-        // In real implementation: open ns_path and call setns(fd, ns_flag).
-        // For simulation, just verify accessibility.
+        // The file exists and is reachable. That is as far as this build can
+        // get: joining it needs `setns(2)`, and there is nothing to join.
     }
 
-    // Build command.
+    // ------------------------------------------------------------------ //
+    // REFUSING TO RUN THE COMMAND, which is the fix and not a shortfall of
+    // it.
+    //
+    // This program used to verify the namespace files, NOT call `setns`, and
+    // then execute the command anyway -- in the caller's own namespaces. Three
+    // comments said so out loud ("in real implementation, this would use
+    // setns(2)"), and none of them reached the user, who saw a command run
+    // normally and had no way to tell where it ran.
+    //
+    // That is worse than any inert flag elsewhere in this tree, because the
+    // command is not skipped -- it is PERFORMED, in the wrong place.
+    // `nsenter -t <container> -m -- rm -rf /data` deleted the host's `/data`
+    // while reporting nothing unusual. A destructive command aimed at a
+    // container and landing on the host is the failure this refusal exists to
+    // prevent.
+    //
+    // There is nothing to wire it to. `posix::setns` validates its arguments
+    // and its `CAP_SYS_ADMIN` gate and then returns `ENOSYS` -- "namespace
+    // subsystem not implemented" -- so unlike `curl`'s non-blocking connect or
+    // `tee`'s `SIG_IGN`, the capability genuinely is absent rather than merely
+    // unused. This entry ends the day a namespace subsystem lands.
     let command = if opts.command.is_empty() {
-        // Default: run user's shell.
         vec![env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())]
     } else {
         opts.command.clone()
     };
+    let what = command.first().map_or("a command", String::as_str);
 
-    // Execute command (in real implementation, this would happen after setns).
-    let status = process::Command::new(&command[0])
-        .args(&command[1..])
-        .status();
-
-    match status {
-        Ok(s) => process::exit(s.code().unwrap_or(1)),
-        Err(e) => {
-            eprintln!("nsenter: failed to execute {}: {e}", command[0]);
-            process::exit(127);
-        }
-    }
+    let _ = writeln!(
+        err,
+        "nsenter: cannot enter the {} namespace(s) of PID {pid}: this system \
+has no namespace subsystem.",
+        ns_to_enter.join(", ")
+    );
+    let _ = writeln!(
+        err,
+        "nsenter: setns(2) validates its arguments and returns ENOSYS."
+    );
+    let _ = writeln!(
+        err,
+        "nsenter: refusing to run {what}, because running it in THIS namespace \
+is not what was asked for."
+    );
+    let _ = err.flush();
+    process::exit(1);
 }
 
 // ============================================================================

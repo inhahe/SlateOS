@@ -331,7 +331,13 @@ impl ExifData {
         Self::default()
     }
 
-    /// Create sample EXIF data for testing.
+    /// Sample EXIF data, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. It was reachable from production and
+    /// `seeded_library` used it, so every photo in the window that opened was
+    /// described as a Canon EOS R5 shot in San Francisco. A fixture that
+    /// production can reach is a fixture that eventually ships.
+    #[cfg(test)]
     pub fn sample() -> Self {
         Self {
             camera_make: Some("Canon".to_owned()),
@@ -3746,45 +3752,20 @@ impl App for PhotoApp {
     }
 }
 
-/// A library with something in it, so the first window is not an empty grid.
-fn seeded_library() -> PhotoApp {
-    let mut app = PhotoApp::new();
-    let _album = app.create_album("Vacation 2025");
-    app.create_album("Family");
-
-    let p1 = app.import_photo_with_exif(
-        "/photos/IMG_0001.jpg",
-        "IMG_0001.jpg",
-        ImageFormat::Jpeg,
-        5_242_880,
-        ExifData::sample(),
-    );
-    let p2 = app.import_photo(
-        "/photos/IMG_0002.png",
-        "IMG_0002.png",
-        ImageFormat::Png,
-        3_145_728,
-    );
-    let _p3 = app.import_photo(
-        "/photos/sunset.raw",
-        "sunset.raw",
-        ImageFormat::Raw,
-        25_165_824,
-    );
-
-    app.rate_photo(p1, 5);
-    app.rate_photo(p2, 3);
-    app.add_tag(p1, "vacation");
-    app.add_tag(p1, "beach");
-    app.toggle_flag(p1);
-
-    let smart_id = app.create_smart_album("Best Photos", true);
-    app.add_smart_rule(smart_id, SmartRule::MinRating(4));
-    app
-}
-
 fn main() -> ExitCode {
-    let mut app = seeded_library();
+    // Starts empty. It used to call `seeded_library`, which built two albums
+    // ("Vacation 2025", "Family") and three photos at paths like
+    // `/photos/IMG_0001.jpg`, one of them carrying `ExifData::sample` -- a
+    // Canon EOS R5, an RF 24-70mm lens, Adobe Lightroom, and GPS coordinates
+    // in San Francisco. None of it was on the machine. The comment above that
+    // function said why: "so the first window is not an empty grid".
+    //
+    // An empty grid is the truth here, and the grid already has a message for
+    // it. A photo manager showing you albums you did not make, of photographs
+    // that do not exist, taken on a camera you do not own, is a worse first
+    // window than an empty one -- and it cannot be clicked through to anything
+    // real, so the impression it makes is the only thing it ever does.
+    let mut app = PhotoApp::new();
     app::launch("photomanager", &mut app)
 }
 
@@ -5113,8 +5094,73 @@ mod tests {
         assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
     }
 
+    /// A library with something in it, for the tests that need one.
+    ///
+    /// This was production code until 2026-09-15 and `main` called it, so the
+    /// window opened on albums and photographs that were not on the machine.
+    /// It is a perfectly good *fixture*; what was wrong was where it lived.
+    fn seeded_library() -> PhotoApp {
+        let mut app = PhotoApp::new();
+        let _album = app.create_album("Vacation 2025");
+        app.create_album("Family");
+
+        let p1 = app.import_photo_with_exif(
+            "/photos/IMG_0001.jpg",
+            "IMG_0001.jpg",
+            ImageFormat::Jpeg,
+            5_242_880,
+            ExifData::sample(),
+        );
+        let p2 = app.import_photo(
+            "/photos/IMG_0002.png",
+            "IMG_0002.png",
+            ImageFormat::Png,
+            3_145_728,
+        );
+        let _p3 = app.import_photo(
+            "/photos/sunset.raw",
+            "sunset.raw",
+            ImageFormat::Raw,
+            25_165_824,
+        );
+
+        app.rate_photo(p1, 5);
+        app.rate_photo(p2, 3);
+        app.add_tag(p1, "vacation");
+        app.add_tag(p1, "beach");
+        app.toggle_flag(p1);
+
+        let smart_id = app.create_smart_album("Best Photos", true);
+        app.add_smart_rule(smart_id, SmartRule::MinRating(4));
+        app
+    }
+
+    /// The window opens on an empty grid now, and says so.
+    ///
+    /// Replaces `the_seeded_library_opens_on_something_to_look_at`, which
+    /// asserted the opposite and passed because `main` seeded a fake library.
     #[test]
-    fn the_seeded_library_opens_on_something_to_look_at() {
+    fn a_new_library_is_empty_and_the_grid_says_so() {
+        let app = PhotoApp::new();
+        assert!(app.photos.is_empty(), "a new library invented a photo");
+        assert!(app.albums.is_empty(), "a new library invented an album");
+        let text: Vec<String> = app
+            .render_commands(1000.0, 700.0)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.iter().any(|t| t.contains("No photos")),
+            "an empty grid drew no explanation: {text:?}"
+        );
+    }
+
+    /// The fixture still builds a library, which is what the tests below need.
+    #[test]
+    fn the_fixture_library_has_something_to_look_at() {
         let app = seeded_library();
         assert!(!app.photos.is_empty());
         assert!(!app.albums.is_empty());

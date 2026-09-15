@@ -23,7 +23,7 @@ use appearance::Surface;
 use std::collections::HashMap;
 
 use guitk::color::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -942,10 +942,9 @@ pub enum SidebarSelection {
 
 /// The main podcast manager application.
 pub struct PodcastApp {
-    /// The open or save picker, while one is up.
-    pub file_dialog: Option<FileDialog>,
-    /// Whether the picker that is up is saving rather than opening.
-    pub dialog_saves: bool,
+    /// The open or save picker. Holds the dialog, the saving flag and the
+    /// routing that ten applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the last open or save did, for the status line.
     pub last_file_action: Option<String>,
     pub width: f32,
@@ -1002,8 +1001,7 @@ impl PodcastApp {
     pub fn new(width: f32, height: f32) -> Self {
         let app = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            file_dialog: None,
-            dialog_saves: false,
+            picker: FilePicker::new(),
             last_file_action: None,
             width,
             height,
@@ -2030,18 +2028,23 @@ impl PodcastApp {
 
     /// Handle one input event. Returns whether anything changed.
     pub fn handle_event(&mut self, event: &Event) -> bool {
-        // The picker takes the event first while it is up, or a keystroke
-        // meant for a filename reaches the player behind it -- and Space,
-        // which every player binds, would start an episode mid-filename.
-        if self.file_dialog.is_some() {
-            let (w, h) = (self.width, self.height);
-            let action = match (event, self.file_dialog.as_mut()) {
-                (Event::Key(key), Some(dialog)) if key.pressed => dialog.handle_event(key, h),
-                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
-                _ => return false,
-            };
-            self.apply_dialog_action(action);
-            return true;
+        // The picker takes input first while it is up, or a keystroke meant
+        // for a filename reaches the player behind it -- and Space, which
+        // every player binds, would start an episode mid-filename. A tick
+        // comes back as `Ignored` and falls through on purpose: playback and
+        // the download queue must keep running while a dialog is open.
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_opml(&path)
+                } else {
+                    self.read_opml(&path)
+                });
+                return true;
+            }
+            Picked::Handled => return true,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
@@ -2122,38 +2125,10 @@ impl PodcastApp {
     /// subscription list leaves a program that cannot fetch, and a list you
     /// cannot get out of an app is a list you have to retype.
     pub fn open_file_dialog(&mut self, saving: bool) {
-        let start =
-            std::env::var_os("HOME").map_or_else(std::env::temp_dir, std::path::PathBuf::from);
-        let mut dialog = if saving {
-            FileDialog::save()
-                .with_initial_path(start)
-                .with_filename(String::from("subscriptions.opml"))
+        if saving {
+            self.picker.open_to_write("subscriptions.opml");
         } else {
-            FileDialog::open().with_initial_path(start)
-        };
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.dialog_saves = saving;
-        self.file_dialog = Some(dialog);
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) {
-        match action {
-            DialogAction::None => {}
-            DialogAction::Cancelled => self.file_dialog = None,
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                let saving = self.dialog_saves;
-                self.last_file_action = Some(if saving {
-                    self.write_opml(&path)
-                } else {
-                    self.read_opml(&path)
-                });
-            }
+            self.picker.open_to_read();
         }
     }
 
@@ -2520,11 +2495,7 @@ impl PodcastApp {
         }
 
         // Last, so it is above everything.
-        if let Some(dialog) = &self.file_dialog {
-            for cmd in dialog.render(&self.palette, self.width, self.height) {
-                cmds.push(cmd);
-            }
-        }
+        cmds.extend(self.picker.render(&self.palette, self.width, self.height));
 
         cmds
     }
@@ -4716,7 +4687,7 @@ mod tests {
             modifiers: ctrl,
             text: String::new(),
         }));
-        assert!(app.file_dialog.is_some(), "Ctrl+S did not open the picker");
+        assert!(app.picker.is_open(), "Ctrl+S did not open the picker");
 
         app.handle_event(&space());
         assert_eq!(

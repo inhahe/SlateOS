@@ -39,7 +39,7 @@ use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;
 use oswindow::app::{self, App, Response};
@@ -1625,10 +1625,9 @@ fn parse_subtasks_json(json: &str) -> Vec<Subtask> {
 // ============================================================================
 
 pub struct RemindersApp {
-    /// The open or save picker, while one is up.
-    pub file_dialog: Option<FileDialog>,
-    /// Whether the picker that is up is saving rather than opening.
-    pub dialog_saves: bool,
+    /// The open or save picker. Holds the dialog, the saving flag and the
+    /// routing that ten applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the last open or save did, for the banner line.
     pub last_file_action: Option<String>,
     pub width: f32,
@@ -1656,8 +1655,7 @@ impl RemindersApp {
     pub fn new(width: f32, height: f32, now: DateTime) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            file_dialog: None,
-            dialog_saves: false,
+            picker: FilePicker::new(),
             last_file_action: None,
             width,
             height,
@@ -1783,16 +1781,26 @@ impl RemindersApp {
 
     /// Route a compositor event into the app.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
-        // The picker takes the event first while it is up, or a keystroke
-        // meant for a filename lands in the search box behind it.
-        if self.file_dialog.is_some() {
-            let (w, h) = (self.width, self.height);
-            let action = match (event, self.file_dialog.as_mut()) {
-                (Event::Key(key), Some(dialog)) if key.pressed => dialog.handle_event(key, h),
-                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
-                _ => return EventResult::Ignored,
-            };
-            return self.apply_dialog_action(action);
+        // The picker takes input first while it is up, or a keystroke meant
+        // for a filename lands in the search box behind it.
+        //
+        // A tick comes back as `Ignored` and falls through, which the hand
+        // written version got wrong: it returned early for everything that was
+        // not a key press or a click, so `Event::Tick => self.refresh_now()`
+        // never ran while a dialog was open and **the clock stopped** -- in an
+        // app whose whole job is telling you what is overdue.
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_json(&path)
+                } else {
+                    self.read_json(&path)
+                });
+                return EventResult::Consumed;
+            }
+            Picked::Handled => return EventResult::Consumed,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
@@ -1824,46 +1832,10 @@ impl RemindersApp {
     /// nothing could call either: this app had no way to reach a file, so a
     /// list of what you have to do survived exactly as long as the window did.
     pub fn open_file_dialog(&mut self, saving: bool) {
-        // `map_or_else` rather than `map(..).unwrap_or_else(..)`: this crate
-        // denies clippy::pedantic at the top of the file, which several of its
-        // neighbours do not.
-        let start =
-            std::env::var_os("HOME").map_or_else(std::env::temp_dir, std::path::PathBuf::from);
-        let mut dialog = if saving {
-            FileDialog::save()
-                .with_initial_path(start)
-                .with_filename(String::from("reminders.json"))
+        if saving {
+            self.picker.open_to_write("reminders.json");
         } else {
-            FileDialog::open().with_initial_path(start)
-        };
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.dialog_saves = saving;
-        self.file_dialog = Some(dialog);
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
-        match action {
-            DialogAction::None => EventResult::Consumed,
-            DialogAction::Cancelled => {
-                self.file_dialog = None;
-                EventResult::Consumed
-            }
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-                EventResult::Consumed
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                let saving = self.dialog_saves;
-                self.last_file_action = Some(if saving {
-                    self.write_json(&path)
-                } else {
-                    self.read_json(&path)
-                });
-                EventResult::Consumed
-            }
+            self.picker.open_to_read();
         }
     }
 
@@ -2161,11 +2133,7 @@ impl RemindersApp {
         self.render_task_list(&mut cmds, main_x, content_y, main_w, content_h);
 
         // Last, so it is above everything.
-        if let Some(dialog) = &self.file_dialog {
-            for cmd in dialog.render(&self.palette, self.width, self.height) {
-                cmds.push(cmd);
-            }
-        }
+        cmds.extend(self.picker.render(&self.palette, self.width, self.height));
 
         cmds
     }
@@ -4118,6 +4086,35 @@ mod tests {
         );
     }
 
+    /// The clock keeps running while the picker is open.
+    ///
+    /// The hand-written intercept this replaced returned early for every
+    /// event that was not a key press or a click, so `Event::Tick` never
+    /// reached `refresh_now` while a dialog was up. **Time stopped in an app
+    /// whose entire job is telling you what is overdue**, for as long as the
+    /// save dialog stayed open. `FilePicker::handle` returns `Ignored` for a
+    /// tick precisely so it falls through.
+    #[test]
+    fn the_clock_keeps_running_while_the_picker_is_open() {
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        // A moment the real clock cannot be at, so any advance is visible.
+        let long_ago = DateTime::new(
+            Date::new(2000, 1, 1).expect("a real date"),
+            Time::new(0, 0).expect("a real time"),
+        );
+        app.now = long_ago;
+
+        app.open_file_dialog(true);
+        assert!(app.picker.is_open(), "no picker to test behind");
+
+        app.handle_event(&Event::Tick { elapsed_ms: 60_000 });
+        assert_ne!(
+            app.now, long_ago,
+            "the clock stopped because a dialog was open"
+        );
+        assert!(app.picker.is_open(), "the tick closed the dialog");
+    }
+
     /// Ctrl+S saves; plain S still cycles the sort.
     ///
     /// The arms are ordered `Key::S if ctrl` before `Key::S`, and the other
@@ -4136,17 +4133,17 @@ mod tests {
             modifiers: ctrl,
             text: String::new(),
         });
-        assert!(app.file_dialog.is_some(), "Ctrl+S did not open the picker");
+        assert!(app.picker.is_open(), "Ctrl+S did not open the picker");
         assert_eq!(app.sort_mode, sort_before, "Ctrl+S reordered the list");
 
-        app.file_dialog = None;
+        app.picker.close();
         app.handle_key(&KeyEvent {
             key: Key::S,
             pressed: true,
             modifiers: Modifiers::NONE,
             text: String::new(),
         });
-        assert!(app.file_dialog.is_none(), "plain S opened a picker");
+        assert!(!app.picker.is_open(), "plain S opened a picker");
         assert_ne!(app.sort_mode, sort_before, "plain S no longer sorts");
     }
 

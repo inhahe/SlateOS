@@ -2283,6 +2283,35 @@ mod tests {
         })
     }
 
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event. This is
+    /// the half routing decides: with a dialog up, a keystroke belongs to the
+    /// dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_results() {
+        let mut app = indexed();
+        app.selected_result = Some(0);
+        let before = app.selected_result;
+        assert!(
+            app.results.len() > 1,
+            "control: the fixture needs more than one result to move between"
+        );
+
+        app.handle_event(&press_ctrl(Key::O));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(&press(Key::Down));
+        assert_eq!(
+            app.selected_result, before,
+            "Down at the open dialog moved the selection behind it"
+        );
+    }
+
     #[test]
     fn typing_searches_without_a_keystroke_to_get_started() {
         // A search program that needs focus moved to its own query box before

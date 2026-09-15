@@ -25,7 +25,7 @@ use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1460,13 +1460,9 @@ pub struct HexEditor {
     pub show_inspector: bool,
     /// Recent file paths.
     pub recent_files: VecDeque<String>,
-    /// The file picker, while one is up.
-    ///
-    /// The only route a real file has into this editor. Until 2026-09-15 there
-    /// was none: `main` filled the first document with `(0..=255).collect()`
-    /// and labelled it `/demo/sample.bin`, so the window named a file it was
-    /// not showing.
-    pub file_dialog: Option<FileDialog>,
+    /// The picker. Holds the dialog and the routing thirteen
+    /// applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the last open attempt did, shown in the status bar.
     pub last_open: Option<String>,
     /// Window width.
@@ -1514,7 +1510,7 @@ impl HexEditor {
             search: SearchState::default(),
             show_inspector: true,
             recent_files: VecDeque::new(),
-            file_dialog: None,
+            picker: FilePicker::new(),
             last_open: None,
             window_width: width,
             window_height: height,
@@ -2399,54 +2395,7 @@ impl HexEditor {
     /// the convention `apps/fileassoc`, `apps/photomanager` and
     /// `apps/filesearch` all follow.
     pub fn open_file_dialog(&mut self) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = FileDialog::open().with_initial_path(start);
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.file_dialog = Some(dialog);
-    }
-
-    fn dialog_key(&mut self, key: &KeyEvent) -> EventResult {
-        if !key.pressed {
-            return EventResult::Ignored;
-        }
-        let height = self.window_height;
-        let action = match self.file_dialog.as_mut() {
-            Some(dialog) => dialog.handle_event(key, height),
-            None => return EventResult::Ignored,
-        };
-        self.apply_dialog_action(action)
-    }
-
-    fn dialog_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
-        let (w, h) = (self.window_width, self.window_height);
-        let action = match self.file_dialog.as_mut() {
-            Some(dialog) => dialog.handle_mouse(mouse, w, h),
-            None => return EventResult::Ignored,
-        };
-        self.apply_dialog_action(action)
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
-        match action {
-            DialogAction::None => EventResult::Consumed,
-            DialogAction::Cancelled => {
-                self.file_dialog = None;
-                EventResult::Consumed
-            }
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-                EventResult::Consumed
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                self.last_open = Some(self.open_path(&path));
-                EventResult::Consumed
-            }
-        }
+        self.picker.open_to_read();
     }
 
     /// Read `path` into a document. Returns what to say about it.
@@ -2501,9 +2450,25 @@ impl HexEditor {
     }
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up. A tick or a
+        // resize comes back as `Ignored` and falls through to its own arm
+        // below -- the guard arms this replaced had that property by
+        // construction, and it is why neither of these two ever stopped
+        // its application's clock.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.last_open = Some(self.open_path(&path));
+                return EventResult::Consumed;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
-            Event::Key(key_ev) if self.file_dialog.is_some() => self.dialog_key(key_ev),
-            Event::Mouse(mouse) if self.file_dialog.is_some() => self.dialog_mouse(mouse),
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
             Event::Resize { width, height } => {
@@ -3483,10 +3448,8 @@ impl App for HexEditor {
         // invisible -- and the comment would have told the next reader to look
         // somewhere else. `the_picker_is_drawn_when_it_is_open` exists because
         // of it.
-        if let Some(dialog) = &self.file_dialog {
-            tree.commands
-                .extend(dialog.render(&self.palette, width, height));
-        }
+        tree.commands
+            .extend(self.picker.render(&self.palette, width, height));
         tree
     }
 }

@@ -2531,7 +2531,9 @@ impl RssReaderApp {
                 };
                 return EventResult::Consumed;
             }
-            Picked::Handled => return EventResult::Consumed,
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
         match event {

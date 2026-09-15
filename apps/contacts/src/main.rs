@@ -3713,7 +3713,9 @@ impl ContactsApp {
                 });
                 return;
             }
-            Picked::Handled => return,
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return,
             Picked::Ignored => {}
         }
         match event {

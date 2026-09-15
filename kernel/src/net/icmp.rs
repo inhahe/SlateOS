@@ -48,18 +48,14 @@ use super::ipv4::{self, Ipv4Packet, PROTO_ICMP, PROTO_TCP};
 // ICMP types
 // ---------------------------------------------------------------------------
 
-/// Echo Reply.
 /// Destination Unreachable.
 const ICMP_DEST_UNREACHABLE: u8 = 3;
-/// Echo Request.
 /// Redirect.
 const ICMP_REDIRECT: u8 = 5;
 /// Time Exceeded.
 const ICMP_TIME_EXCEEDED: u8 = 11;
 /// Parameter Problem.
 const ICMP_PARAM_PROBLEM: u8 = 12;
-
-/// ICMP header size (type + code + checksum + id/seq or unused).
 
 // ---------------------------------------------------------------------------
 // ICMP error rate limiter (RFC 1812 §4.3.2.7)

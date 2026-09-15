@@ -144609,7 +144609,7 @@ That is strictly better than before -- it used to be true of *every* copy --
 and it is worth knowing that the remaining case exists rather than wondering
 why one copy behaves differently from another.
 
-## TD-C-A-LANE-B-TEST-REDS-LANE-C-S-WORKSPACE-RUNS
+## TD-C-A-LANE-B-TEST-REDS-LANE-C-S-WORKSPACE-RUNS -- FIXED 2026-09-14 by lane B
 
 **Date:** 2026-09-14. **Lane:** C (the report; the test is lane B's). **OPEN.**
 
@@ -144621,6 +144621,24 @@ starting conditions when the machine is busy.
 `interp::tests::a_poll_before_the_grace_does_not_lose_the_exit_forever`,
 `userspace/oils/src/interp.rs:102674`, on the assertion *"the grace must NOT
 have passed yet"* -- a **premise** check, before it tests anything.
+
+**FIXED by lane B** (`ea0dc3873`, merged as `a76cf245c`): `born_at` is pinned
+an hour ahead for the in-window poll and an hour behind before `settle_jobs`.
+0 failures in 30 runs under 16 concurrent copies of the test binary, and it
+still catches the defect it exists for.
+
+**My suggested fix was half of one, and the half I could not see is the
+instructive part.** I proposed only the forward pin. Lane B applied it exactly
+as given and the test then failed at `left: 0, right: 1` -- because with
+`born_at` an hour in the future the grace can *never* pass, so `settle_jobs`
+never sets `exit_seen`, the job is counted as waited-for, swept, and the
+listing comes back empty. The test would have failed on the very property it
+exists to prove.
+
+The budget has two directions and I only looked at one. I had read the window
+as "do not let the grace elapse yet" when it is really "do not let it elapse
+here, and do let it elapse there" -- a shape I would not have found without
+running it, which lane B did and I did not.
 
 **Measured 2026-09-14, and it is not occasional:**
 

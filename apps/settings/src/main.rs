@@ -434,9 +434,7 @@ impl AccountType {
 #[derive(Clone, Debug)]
 pub struct UserAccount {
     pub name: String,
-    pub email: String,
     pub account_type: AccountType,
-    pub login_count: u32,
     pub last_login: String,
     pub is_current: bool,
     /// Index into [`ACCOUNT_PICTURES`] of the picture this account shows.
@@ -964,6 +962,62 @@ impl SettingsState {
         self.notif = notifsettings::NotifFile::load();
     }
 
+    /// Read the machine's real accounts from the system account database.
+    ///
+    /// Separate from [`SettingsState::new`] and called by `main`, the same as
+    /// the other `load_*` methods: a constructor that reads a file makes every
+    /// test of this type depend on the machine it runs on, and the tests here
+    /// are pure `(w, h) -> RenderTree` functions by design.
+    ///
+    /// `gui/loginusers` is the shared source, already read by the login screen
+    /// and `apps/lockscreen`. Two answers to "which accounts does this machine
+    /// have" would drift, and a person cannot tell a hidden account from a
+    /// deleted one.
+    ///
+    /// **Three fields this page used to show have no source and are gone:**
+    /// an email address, a login count, and -- for one invented account -- a
+    /// child account with "Screen time limits and content filters are active"
+    /// beneath it. The database carries no email, counts no logins, and has no
+    /// notion of a child account, so all three were written into the source as
+    /// constants: Alice, Bob and Charlie, with `@example.com` addresses and
+    /// login counts of 142, 56 and 23.
+    ///
+    /// Nothing says which account is *signed in*, so none is marked. That is
+    /// the documented fallback in [`SettingsState::current_account_picture`] --
+    /// "a machine with nobody signed in does not claim a choice was made" --
+    /// rather than a new compromise.
+    pub fn load_user_accounts(&mut self) {
+        self.set_user_accounts(&loginusers::offered_from_system());
+    }
+
+    /// The mapping half of [`SettingsState::load_user_accounts`], with the read
+    /// lifted out so a test can supply accounts without a filesystem.
+    pub fn set_user_accounts(&mut self, accounts: &[loginusers::Account]) {
+        self.user_accounts = accounts
+            .iter()
+            .map(|a| UserAccount {
+                name: a.display_name.clone(),
+                account_type: if a.is_admin {
+                    AccountType::Admin
+                } else {
+                    AccountType::Standard
+                },
+                last_login: format_last_login(a.last_login),
+                // No source for "who is signed in"; see the doc above.
+                is_current: false,
+                // The database's avatar is a name, and this page offers a fixed
+                // grid of pictures. Until something maps one to the other, every
+                // account shows the same placeholder rather than a picture
+                // chosen by an index that means nothing.
+                picture: 0,
+            })
+            .collect();
+        // A stale selection would index past a shorter list on the next reload.
+        if self.selected_account >= self.user_accounts.len() {
+            self.selected_account = 0;
+        }
+    }
+
     /// The palette this application draws itself with.
     ///
     /// Bound as `pal` at every use site, not `p` as the shell names it. This
@@ -1106,36 +1160,8 @@ impl SettingsState {
             proxy_address: String::new(),
             proxy_port: String::new(),
 
-            // Accounts defaults
-            user_accounts: vec![
-                UserAccount {
-                    name: "Alice".into(),
-                    email: "alice@example.com".into(),
-                    account_type: AccountType::Admin,
-                    login_count: 142,
-                    last_login: "2026-05-17 09:34".into(),
-                    is_current: true,
-                    picture: 2,
-                },
-                UserAccount {
-                    name: "Bob".into(),
-                    email: "bob@example.com".into(),
-                    account_type: AccountType::Standard,
-                    login_count: 56,
-                    last_login: "2026-05-16 18:20".into(),
-                    is_current: false,
-                    picture: 1,
-                },
-                UserAccount {
-                    name: "Charlie".into(),
-                    email: "charlie@example.com".into(),
-                    account_type: AccountType::Child,
-                    login_count: 23,
-                    last_login: "2026-05-15 14:05".into(),
-                    is_current: false,
-                    picture: 5,
-                },
-            ],
+            // Accounts: empty until `load_user_accounts` reads the database.
+            user_accounts: Vec::new(),
             selected_account: 0,
             auto_login_enabled: false,
 
@@ -1241,6 +1267,34 @@ impl SettingsState {
 // ============================================================================
 
 /// Push a rounded rectangle fill command.
+/// When an account last logged in, as the page shows it.
+///
+/// Zero means never -- `gui/loginusers` documents it that way so a never-used
+/// account sorts last -- and "Never" is the honest rendering rather than
+/// 1 January 1970, which is what a bare conversion produces and what a reader
+/// would take for a real date.
+///
+/// UTC, and it says so in the string. The alternative is the machine's local
+/// zone, which this application has no way to ask for: the shell's clock gets
+/// it from a `Tz` it loads itself, and there is no service a settings window
+/// can consult. A time labelled UTC is checkable; an unlabelled one that might
+/// be either is not.
+fn format_last_login(secs: u64) -> String {
+    let Ok(secs) = i64::try_from(secs) else {
+        return "Never".to_string();
+    };
+    if secs == 0 {
+        return "Never".to_string();
+    }
+    let dt = guitk::datetime::DateTime::at(secs, &guitk::tzrules::Tz::utc());
+    let (y, m, day) = dt.date().ymd();
+    format!(
+        "{y:04}-{m:02}-{day:02} {:02}:{:02} UTC",
+        dt.hour(),
+        dt.minute()
+    )
+}
+
 fn fill_rounded(tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32) {
     tree.fill_rounded_rect(x, y, w, h, color, CornerRadii::all(radius));
 }
@@ -2208,8 +2262,8 @@ enum AnchorId {
 ///
 /// Only buttons with an effect are listed. The rest of the page's buttons —
 /// Change Password, Add/Remove Account, Clear Activity History, Go Back, Fresh
-/// Start, Manage Family Settings — have no state behind them yet, so they
-/// register no click target rather than swallowing a click and doing nothing.
+/// Start — have no state behind them yet, so they register no click target
+/// rather than swallowing a click and doing nothing.
 /// See known-issues.md `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonId {
@@ -3561,6 +3615,18 @@ impl SettingsState {
         // User account list (default UserAccounts page)
         s.section("User Accounts");
 
+        // An empty list means the database was unreadable or holds no human
+        // account, and saying so beats an empty panel that looks like a page
+        // still loading. It is also what this page shows in every test, which
+        // is deliberate: `load_user_accounts` is called by `main`, so a test
+        // never touches the machine's real accounts.
+        if self.user_accounts.is_empty() {
+            s.note(
+                "No accounts to show. Either the system account database could                  not be read, or it holds no ordinary user account.",
+                28.0,
+            );
+        }
+
         let control_x = s.control_x();
         for (idx, account) in self.user_accounts.iter().enumerate() {
             let selected = idx == self.selected_account;
@@ -3587,7 +3653,6 @@ impl SettingsState {
                 tree.text(x + 16.0, y + 20.0, avatar, pal.text, 16.0);
 
                 text_bold(tree, x + 56.0, y + 12.0, &account.name, pal.text, 14.0);
-                tree.text(x + 56.0, y + 32.0, &account.email, pal.subtext0, 12.0);
 
                 let badge_color = account.account_type.color(pal);
                 fill_rounded(tree, control_x, y + 18.0, 90.0, 22.0, badge_color, 4.0);
@@ -3615,22 +3680,12 @@ impl SettingsState {
         if let Some(account) = self.user_accounts.get(self.selected_account) {
             s.section("Account Details");
             s.value_row("Name", &account.name, pal.text);
-            s.value_row("Email", &account.email, pal.text);
             s.value_row(
                 "Account Type",
                 account.account_type.label(),
                 account.account_type.color(pal),
             );
-            s.value_row("Login Count", &account.login_count.to_string(), pal.text);
             s.value_row("Last Login", &account.last_login, pal.text);
-
-            // Family safety for child accounts
-            if account.account_type == AccountType::Child {
-                s.gap();
-                s.section("Family Safety");
-                s.note("Screen time limits and content filters are active", 24.0);
-                s.button_at(0.0, 0.0, "Manage Family Settings", pal.peach, None);
-            }
         }
     }
 
@@ -5552,6 +5607,10 @@ fn main() -> ExitCode {
     // was loaded from and an unloaded model has nothing in it.
     state.load_notifications();
 
+    // The machine's real accounts. Empty if the database cannot be read, which
+    // the Accounts page says rather than drawing a blank panel.
+    state.load_user_accounts();
+
     // `launch` rather than `launch_with`: Settings takes no file and no page
     // name, so it wants exactly the shared command line and nothing more —
     // including the rejection of an unrecognised argument, which was previously
@@ -6747,9 +6806,41 @@ mod tests {
     /// the narrator's verbosity, the per-app permission lists — and a sweep
     /// over the default state would report those as unreachable when they are
     /// merely not shown yet.
+    /// Three accounts with distinct pictures, one of them signed in.
+    ///
+    /// Built by the tests rather than by `SettingsState::new`, which now starts
+    /// with an empty list: real accounts arrive from `load_user_accounts`,
+    /// which `main` calls, so no test depends on the machine it runs on.
+    ///
+    /// This used to be production data. `new` carried Alice, Bob and Charlie
+    /// with `@example.com` addresses, login counts of 142, 56 and 23, and one
+    /// marked as a child account with "Screen time limits and content filters
+    /// are active" drawn beneath it. Every test in this section relied on them
+    /// without saying so, which is why they all went red at once when the list
+    /// became empty -- a fixture that lives in production code is a fixture
+    /// nobody can see they are using.
+    fn account_fixture() -> Vec<UserAccount> {
+        ["Ada", "Grace", "Alan"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| UserAccount {
+                name: (*name).to_string(),
+                account_type: if i == 0 {
+                    AccountType::Admin
+                } else {
+                    AccountType::Standard
+                },
+                last_login: "Never".to_string(),
+                is_current: i == 0,
+                picture: i,
+            })
+            .collect()
+    }
+
     fn fully_expanded(page: SettingsPage) -> SettingsState {
         let mut state = SettingsState::new();
         state.current_page = page;
+        state.user_accounts = account_fixture();
         // Not every hidden row is hidden behind a *switch*. The Wallpaper
         // page's fit chooser and its Remove button appear once a picture is
         // set, because a control whose every option does the same nothing
@@ -6851,10 +6942,16 @@ mod tests {
     /// Every state worth sweeping for painted buttons: each page with its
     /// switches turned on, and one such state per user account.
     ///
-    /// The per-account repetition is not padding. "Manage Family Settings" is
-    /// drawn only while a child account is selected, so a sweep that took the
-    /// default selection would report six inert buttons where there are seven
-    /// and would go on passing if the seventh were wired wrongly.
+    /// The per-account repetition is not padding: it is what catches a button
+    /// drawn only for *some* account, which a sweep taking the default
+    /// selection would miss and then go on passing over.
+    ///
+    /// The example it was written for is gone. "Manage Family Settings"
+    /// appeared only while a child account was selected -- and the only child
+    /// account was Charlie, one of three invented accounts `SettingsState::new`
+    /// used to carry, under the words "Screen time limits and content filters
+    /// are active" for a system that has neither. The sweep shape stays because
+    /// the hazard is general, not because that button is coming back.
     fn states_to_sweep() -> Vec<(SettingsPage, SettingsState)> {
         let mut out = Vec::new();
         for page in all_pages() {
@@ -6954,7 +7051,6 @@ mod tests {
                 "Change Password",
                 "Clear Activity History",
                 "Go Back",
-                "Manage Family Settings",
                 "Reset",
             ]
         );
@@ -6981,6 +7077,7 @@ mod tests {
                 let cy = by + BUTTON_HEIGHT / 2.0;
                 let mut after = SettingsState::new();
                 after.current_page = page;
+                after.user_accounts = account_fixture();
                 after.selected_account = state.selected_account;
                 let before = after.render_tree().commands.len();
                 after.handle_click(cx, cy);
@@ -7104,6 +7201,7 @@ mod tests {
     fn login_options() -> SettingsState {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::LoginOptions;
+        state.user_accounts = account_fixture();
         state
     }
 
@@ -7283,10 +7381,9 @@ mod tests {
     fn the_account_list_draws_each_account_s_own_picture() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::UserAccounts;
-        assert_eq!(
-            account_list_avatars(&state),
-            ["\u{1F469}", "\u{1F468}", "\u{1F476}"]
-        );
+        state.user_accounts = account_fixture();
+        let expected: Vec<String> = (0..3).map(|i| ACCOUNT_PICTURES[i].to_string()).collect();
+        assert_eq!(account_list_avatars(&state), expected);
     }
 
     /// Choosing a picture is visible where the picture is used, not only on
@@ -7297,9 +7394,13 @@ mod tests {
         let (icon, x, y, _) = painted_picture_tiles(&state)[4].clone();
         state.handle_click(x + PICTURE_TILE_SIZE / 2.0, y + PICTURE_TILE_SIZE / 2.0);
         state.current_page = SettingsPage::UserAccounts;
+        // The other two are whatever the fixture gave them, read back from
+        // ACCOUNT_PICTURES rather than spelled out: this test is about the
+        // *chosen* tile reaching the list, and hardcoding its neighbours only
+        // re-states the fixture.
         assert_eq!(
             account_list_avatars(&state),
-            [icon.as_str(), "\u{1F468}", "\u{1F476}"]
+            [icon.as_str(), ACCOUNT_PICTURES[1], ACCOUNT_PICTURES[2]]
         );
     }
 

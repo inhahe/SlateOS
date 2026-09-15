@@ -958,6 +958,26 @@ boundary is the honest place to say so.
 is a literal `unwrap` and the process died first. The refusal is strictly
 better and is not the end state.
 
+**It is worse than "cannot represent" — it cannot READ, either.** Found
+2026-09-14 while scoping the conversion, at `main.rs:227`:
+
+```rust
+let raw_name = std::str::from_utf8(&hdr_bytes[0..16])
+    .map_err(|e| format!("invalid name field: {e}"))?
+```
+
+That `?` aborts the whole archive parse. So `ar t` on a **valid archive** —
+one GNU `ar` produced, containing one member whose name holds a byte that is
+not UTF-8 — fails outright with `invalid name field`, and every member in it
+becomes unreachable. Not the member: the archive. This is not a limit of our
+own output, it is a refusal to read other people's, and it is the strongest
+argument for doing the conversion rather than leaving the boundary refusal in
+place.
+
+The structural markers do **not** need decoding to keep working: `//`, `/`,
+`#1/N` and `/N` are ASCII by the format's definition, so they can be matched on
+bytes and the 16-byte field never has to be text at all.
+
 **The fix** is to carry member names as bytes through the format layer —
 `name: Vec<u8>`, comparisons on bytes, and `escape_unprintable` at the
 display sites (`t` listing, `v` output, diagnostics). It is a real piece of

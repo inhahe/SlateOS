@@ -149901,3 +149901,102 @@ case in both directions.
 `--cache-file` long form. Neither is a collision -- a missing spelling fails
 visibly with "unknown option" -- so they are a different and much milder
 class than the above.
+
+## TD-C-FINISHED-SERIALISERS-THAT-NOBODY-COULD-REACH -- PARTLY FIXED 2026-09-15
+
+**In short:** the tree turned out to contain a large amount of completed,
+tested file-format code that no program could call. Four apps now can. The
+remaining 82 functions are listed by a scanner rather than by hand.
+
+**Date:** 2026-09-15. **Lane:** C. **Status:** four done, the rest OPEN and
+scanned. Third of a trio, after
+`TD-C-WHAT-THE-FABRICATION-SWEEP-ACTUALLY-TAUGHT` and
+`TD-C-THE-OTHER-HALF-PROGRAMS-THAT-SAY-TOO-LITTLE`.
+
+### The observation
+
+`apps/spreadsheet` said it in its own module doc, and had said it for a while:
+
+> CSV import and export are implemented (`Sheet::export_csv`,
+> `Sheet::import_csv`) and are not on that list, because **nothing can reach
+> them**: they take and return a `String`, and this program has no file
+> dialog, no command line and no clipboard beyond its own internal one, so
+> there is nowhere for the text to come from or go.
+
+That is an accurate description of a consumer with no producer, written by
+somebody who had understood the situation completely. **It had sat there as a
+description rather than as a task.** The serialiser was the hard part and it
+was already finished; what was missing was twenty lines of picker.
+
+`scripts/find-stranded-serialisers.py` asks the general question -- does a
+crate define something that turns its data into text or bytes while having no
+way to read or write a file -- and found **92 such functions across 37
+crates**, including several complete interchange formats:
+
+| app | format, already written |
+|---|---|
+| `contacts` | vCard, with CRLF joining per spec and `BEGIN:VCARD` block parsing |
+| `calendar` | iCalendar, with `VERSION:2.0`, a `PRODID` and `X-WR-CALNAME` |
+| `podcast`, `rssreader` | OPML |
+| `musicplayer` | M3U |
+| `dbviewer` | CSV, JSON and SQL inserts |
+| `diagram` | JSON and SVG |
+
+### What was done
+
+Four doors, all on `apps/editor`'s pattern -- `FileDialog` plus
+`safeio::write_str_atomically`, never `fs::write`, because `fs::write`
+truncates the target *before* writing and an interrupted save leaves a
+fragment where the user's only copy used to be.
+
+* **`notes`** -- Ctrl+S writes the selected note as Markdown. No format was
+  designed: a note is text and its title is a heading. Designing one would
+  mean deciding how a notebook *tree* is represented, which is a much larger
+  question than "write this note down".
+* **`spreadsheet`** -- Ctrl+S and Ctrl+O, through the CSV that was waiting.
+* **`contacts`** -- vCard.
+* **`calendar`** -- iCalendar.
+
+### What the doors needed that the formats did not
+
+**Refuse to write nothing.** `contacts` will not write an empty book and
+`calendar` will not write a header with no events. A zero-byte `.vcf` is
+indistinguishable from a failed export afterwards, and an `.ics` holding only
+`BEGIN:VCALENDAR` is *valid*, which is worse: it imports silently as nothing.
+
+**Add, do not replace.** Importing a colleague's calendar should not discard
+your own, and importing an address book is not a request to delete the one you
+have. Duplicates are the duplicate finder's problem, and `contacts` has one.
+
+**Bound the read, and say so when it bites.** All four cap at 8 MiB. The
+message is front-loaded with `INCOMPLETE` because it lands in a
+bounded-width status line and the clause that must survive an ellipsis is the
+one saying the file is not all there. This matters more than it sounds:
+`parse_ics` and `import_vcards` both stop at a truncation *without
+complaining*, so a cut file simply yields fewer entries -- and **a calendar
+missing an appointment looks exactly like a calendar that never had one.**
+
+**Report the read, not the parse.** `import_csv` takes any text and fills
+cells from it, so a file that is not really CSV produces cells rather than an
+error. Saying "could not read" about a file that *was* read points the user at
+the wrong thing.
+
+**A round-trip test is not a conformance test.** `calendar`'s asserts the
+written file starts with `BEGIN:VCALENDAR` as well as round-tripping, because
+a round-trip alone passes against any format that is its own inverse,
+including a wrong one. Same shape as the liveness-versus-correctness point in
+`apps/benchmark`: varying the input and watching the output vary proves the
+measurement is live and says nothing about whether it is right.
+
+### Why this is a different kind of finding
+
+The fabrication sweep removed claims. The silence sweep added explanations.
+This one is a list of things that **already work and are one picker away from
+being usable** -- unusually cheap leads, and every one of them would have been
+walked past if `spreadsheet`'s module doc had not stated its own problem so
+precisely.
+
+**A precise description of a gap is not a fix, and it reads like one.** That is
+the transferable part: `spreadsheet`, `credmanager`, `defrag` and
+`systemrestore` all documented their own missing capability accurately, in the
+source, and the accuracy is what made it look handled.

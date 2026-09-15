@@ -10,6 +10,7 @@
 
 use appearance::Palette;
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 // The shared civil-date arithmetic. This app used to carry its own: a Zeller's
 // congruence for the weekday, a *separate* Julian day number for differences,
 // its own leap rule, and an ISO week number its own comment admitted was "a
@@ -1205,7 +1206,23 @@ impl Layout {
 // Main calendar application
 // ============================================================================
 
+/// The most of an `.ics` file one open will read.
+///
+/// Reported when it bites. `parse_ics` stops at a truncation without
+/// complaining -- a cut file simply yields fewer events, and a calendar
+/// missing an appointment looks exactly like a calendar that never had one.
+pub const MAX_ICS_BYTES: usize = 8 * 1024 * 1024;
+
+/// Leads a message about a file operation that did not happen.
+const FILE_FAILED_PREFIX: &str = "Could not";
+
 pub struct CalendarApp {
+    /// The open or save picker, while one is up.
+    pub file_dialog: Option<FileDialog>,
+    /// Whether the picker that is up is saving rather than opening.
+    pub dialog_saves: bool,
+    /// What the last open or save did, for the status line.
+    pub last_file_action: Option<String>,
     pub width: f32,
     pub height: f32,
 
@@ -1262,6 +1279,9 @@ impl CalendarApp {
             today,
             selected_date: today,
             view_date: today,
+            file_dialog: None,
+            dialog_saves: false,
+            last_file_action: None,
             store: EventStore::new(),
             sidebar_visible: true,
             search_query: String::new(),
@@ -1659,6 +1679,36 @@ impl CalendarApp {
         }
         frame.untranslate();
         frame.unclip();
+
+        // What the last open or save did. This is the one place the user's
+        // calendar leaves the process.
+        if let Some(note) = &self.last_file_action {
+            let avail = (layout.window.w - 16.0).max(0.0);
+            if avail > 0.0 {
+                frame.push(RenderCommand::Text {
+                    x: layout.window.x + 8.0,
+                    y: layout.window.y + 26.0,
+                    text: note.clone(),
+                    color: if note.starts_with(FILE_FAILED_PREFIX) || note.starts_with("INCOMPLETE")
+                    {
+                        self.palette.ink(self.palette.red)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: 9.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(avail),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+
+        // Last, so it is above everything.
+        if let Some(dialog) = &self.file_dialog {
+            for cmd in dialog.render(&self.palette, layout.window.w, layout.window.h) {
+                frame.push(cmd);
+            }
+        }
 
         frame
     }
@@ -2696,6 +2746,17 @@ fn draw_nav_button(frame: &mut Frame, pal: &Palette, rect: Rect, glyph: &str, ta
 
 /// The one body both the window and the test probe drive the calendar through.
 pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
+    // The picker takes the event first while it is up, or a keystroke meant
+    // for a filename lands in the search box behind it.
+    if state.file_dialog.is_some() {
+        let (w, h) = (state.width, state.height);
+        let action = match (event, state.file_dialog.as_mut()) {
+            (Event::Key(key), Some(dialog)) if key.pressed => dialog.handle_event(key, h),
+            (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
+            _ => return EventResult::Ignored,
+        };
+        return state.apply_dialog_action(action);
+    }
     match event {
         Event::Key(key) if key.pressed => handle_key(state, key),
         Event::Mouse(mouse) => handle_mouse(state, mouse),
@@ -2735,6 +2796,103 @@ fn view_for_digit(key: Key) -> Option<usize> {
     }
 }
 
+impl CalendarApp {
+    /// Put the open or save picker up.
+    ///
+    /// `generate_ics` and `parse_ics` were written, tested and unreachable:
+    /// real iCalendar, with BEGIN:VCALENDAR, VERSION:2.0 and a PRODID. The
+    /// format was the hard part and it was already finished.
+    pub fn open_file_dialog(&mut self, saving: bool) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = if saving {
+            FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(String::from("calendar.ics"))
+        } else {
+            FileDialog::open().with_initial_path(start)
+        };
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.dialog_saves = saving;
+        self.file_dialog = Some(dialog);
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
+        match action {
+            DialogAction::None => EventResult::Consumed,
+            DialogAction::Cancelled => {
+                self.file_dialog = None;
+                EventResult::Consumed
+            }
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+                EventResult::Consumed
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                let saving = self.dialog_saves;
+                self.last_file_action = Some(if saving {
+                    self.write_ics(&path)
+                } else {
+                    self.read_ics(&path)
+                });
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Write every event to `path` as iCalendar.
+    ///
+    /// Refuses on an empty calendar rather than writing a file with a header
+    /// and no events. An `.ics` holding only BEGIN:VCALENDAR is valid, which
+    /// is exactly the problem: it imports silently as nothing, and the user
+    /// cannot tell it apart from an export that went wrong.
+    pub fn write_ics(&mut self, path: &std::path::Path) -> String {
+        if self.store.is_empty() {
+            return String::from("No events to write");
+        }
+        let text = self.store.export_ics("SlateOS Calendar");
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!("Wrote {} event(s) to {}", self.store.len(), path.display()),
+            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` and add every event in it.
+    ///
+    /// Adds rather than replaces: importing a colleague's calendar should not
+    /// discard your own.
+    pub fn read_ics(&mut self, path: &std::path::Path) -> String {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
+        };
+        let whole = text.len();
+        let truncated = whole > MAX_ICS_BYTES;
+        let body = if truncated {
+            let mut cut = MAX_ICS_BYTES;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut = cut.saturating_sub(1);
+            }
+            text.get(..cut).unwrap_or("").to_string()
+        } else {
+            text
+        };
+        let added = self.store.import_ics(&body);
+        if truncated {
+            format!(
+                "INCOMPLETE: {added} event(s) from the first {MAX_ICS_BYTES} bytes of {}, which is {whole} bytes",
+                path.display()
+            )
+        } else {
+            format!("Added {added} event(s) from {}", path.display())
+        }
+    }
+}
+
 fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
     if key.modifiers.ctrl {
         return match key.key {
@@ -2745,6 +2903,14 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
             Key::B => {
                 state.sidebar_visible = !state.sidebar_visible;
                 state.clamp_scroll();
+                EventResult::Consumed
+            }
+            Key::S => {
+                state.open_file_dialog(true);
+                EventResult::Consumed
+            }
+            Key::O => {
+                state.open_file_dialog(false);
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -3240,6 +3406,87 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A calendar survives a write and a read.
+    ///
+    /// `generate_ics` and `parse_ics` were written, tested and unreachable:
+    /// real iCalendar, BEGIN:VCALENDAR, VERSION:2.0, a PRODID. The format was
+    /// the hard part and it was finished -- found by
+    /// `scripts/find-stranded-serialisers.py`, which reports 92 such
+    /// functions across 37 crates.
+    #[test]
+    fn a_calendar_survives_a_write_and_a_read() {
+        let dir = std::env::temp_dir().join("slateos-calendar-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("cal.ics");
+
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
+        app.store.add(CalendarEvent {
+            id: 0,
+            title: "Dentist".to_string(),
+            description: String::new(),
+            category: EventCategory::Personal,
+            start: DateTime::new(
+                today,
+                Time {
+                    hour: 14,
+                    minute: 0,
+                },
+            ),
+            end: DateTime::new(
+                today,
+                Time {
+                    hour: 15,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
+        });
+
+        let said = app.write_ics(&path);
+        assert!(said.starts_with("Wrote 1 event"), "{said}");
+
+        let raw = std::fs::read_to_string(&path).expect("written");
+        assert!(raw.starts_with("BEGIN:VCALENDAR"), "not iCalendar: {raw:?}");
+
+        let mut reopened = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
+        let said = reopened.read_ics(&path);
+        assert!(said.starts_with("Added 1 event"), "{said}");
+        assert_eq!(reopened.store.len(), 1);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// An empty calendar refuses rather than writing a header with no events.
+    ///
+    /// An .ics holding only BEGIN:VCALENDAR is valid, which is exactly the
+    /// problem: it imports silently as nothing, and the user cannot tell it
+    /// apart from an export that went wrong.
+    #[test]
+    fn an_empty_calendar_refuses_to_write() {
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
+        assert!(app.store.is_empty());
+        let path = std::env::temp_dir().join("slateos-calendar-should-not-exist.ics");
+        std::fs::remove_file(&path).ok();
+
+        let said = app.write_ics(&path);
+        assert!(said.contains("No events to write"), "{said}");
+        assert!(!path.exists(), "a header-only calendar was written anyway");
+    }
 
     /// A fresh calendar holds no events, and says the emptiness is not yours.
     ///

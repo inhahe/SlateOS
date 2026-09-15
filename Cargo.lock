@@ -232,6 +232,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]
@@ -393,6 +394,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]
@@ -1942,6 +1944,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]
@@ -2685,6 +2688,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]

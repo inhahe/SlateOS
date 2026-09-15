@@ -9,7 +9,6 @@ promises about its own output, which a one-line summary cannot carry.
 
 | script | what it does |
 |---|---|
-| `scripts/.wip-find-generators.py` | Find production functions that manufacture the data their app displays. |
 | `scripts/abi-reach.py` | Which kernel capabilities can the Linux-ABI table reach that no native number can? |
 | `scripts/all-diff.sh` | Run every `*-diff.sh` harness and print one summary line each. |
 | `scripts/argv-utf8.py` | Find utilities that read argv or the environment as `String`, and so panic. |
@@ -131,6 +130,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/cmp-diff.sh` | Differential test: our cmp against GNU diffutils' cmp. |
 | `scripts/comm-diff.sh` | Differential test: our comm against GNU comm. |
 | `scripts/comm-probe.py` | Ad-hoc measurement of GNU `comm`. Not part of the build; kept only so the |
+| `scripts/compare-short-options.py` | Compare each tool's short->long option mapping against the real program. |
 | `scripts/convert-fastpy-embeds.py` | One-shot refactor: convert fastpy self-test `include_bytes!` embeds in |
 | `scripts/coreutils-check.sh` | Build, lint and test a userspace package against BOTH targets that matter, |
 | `scripts/coreutils-spike/run.sh` | Cross-compile upstream GNU coreutils and link every one of its ~100 binaries |
@@ -166,6 +166,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/find-diff.sh` | Differential test: our find against GNU find. |
 | `scripts/find-reachable-fixtures.py` | Which invented-data builders can a *shipping* build reach? |
+| `scripts/find-silent-incapacity.py` | Which programs cannot do the thing they are for, and do not say so? |
+| `scripts/find-stale-admissions.py` | Which programs still deny a capability they have since acquired? |
+| `scripts/find-stranded-serialisers.py` | Which finished serialisers can nobody reach? |
 | `scripts/flake-hunt.sh` | flake-hunt.sh — run a crate's test suite N times and report only the runs |
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
@@ -373,4 +376,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_363 scripts._
+_366 scripts._

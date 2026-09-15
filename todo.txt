@@ -4527,6 +4527,38 @@
 
 ## Judgment Calls
 
+After any merge, sweep the stale-artifact checkers BEFORE launching a boot
+(lane A, 2026-09-15). Cost two full cycles today by skipping it once.
+
+  A merge that adds a script invalidates scripts/INDEX.md, and the gate that
+  notices sits at position 53 of ~106 -- so the answer arrives roughly twelve
+  minutes into a thirty-five minute run, and the run is then thrown away. The
+  same is true of any baseline another lane's work can move.
+
+  The sweep is seconds, not minutes:
+
+    python scripts/gen-script-index.py --check
+    python scripts/scan-orphan-modules.py --check
+    python scripts/check-fields-written-never-read.py
+    python scripts/check-design-decisions-bands.py
+    python scripts/check-gates-are-wired.py
+    python scripts/check-collapsed-messages.py
+    python scripts/check-control-bytes.py
+    python scripts/check-known-issues-index.py
+
+  I did exactly this after one merge earlier today and it caught the stale
+  index for free; I skipped it after the next and paid a boot for the same
+  finding. The lesson is not 'remember' -- it is that a cheap deterministic
+  check has no business running after an expensive one.
+
+  Deferred and NOT done: moving the script-index gate earlier in
+  boot-test.sh. It is lane A's file, but gate POSITIONS are referenced by
+  number elsewhere (lane B hit a gate-number collision in
+  scripts/hooks/pre-push on 2026-09-13), so reordering is a rename with
+  callers rather than a local edit. Worth doing as its own change, with the
+  general principle stated there: order gates by cost, cheapest first, so a
+  mechanical staleness never consumes a build.
+
 Lane C's fabrication scanners, run over --roots=kernel (lane A, 2026-09-15).
 Verdicts recorded because the ranking promotes and only checking demotes, so
 the next person to run these will see the same rows.

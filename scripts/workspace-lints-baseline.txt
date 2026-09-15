@@ -32,7 +32,6 @@ userspace/arp
 userspace/at
 userspace/backup
 userspace/base64
-userspace/blkid
 userspace/chpasswd
 userspace/chroot
 userspace/column

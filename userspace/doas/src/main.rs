@@ -2615,7 +2615,7 @@ users:x:100:alice,bob
         let odd = not_text();
         assert!(
             odd.to_str().is_none(),
-            "the fixture must be unrepresentable as a `String`, or this test              asserts nothing"
+            "the fixture must be unrepresentable as a `String`, or this test asserts nothing"
         );
 
         let raw = vec![OsString::from("doas"), OsString::from("cat"), odd.clone()];

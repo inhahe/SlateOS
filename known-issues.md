@@ -148368,9 +148368,45 @@ and `hexeditor` caps a read at 16 MiB. Both say so when they bite. A silent cap
 turns a partial answer into a confident wrong one: "no results" reads as "no
 such file", and a truncated hex view lies about a specific address.
 
+*The app must agree that something changed.* `apps/jsonviewer` decides whether
+to redraw by comparing a `state_fingerprint()` before and after the key
+handler, because `handle_key` reports nothing. Opening the picker changes no
+*other* watched state, so until `file_dialog.is_some()` joined that tuple the
+dialog would have been invisible until something else moved — the same
+invisible-picker bug as `hexeditor`'s, reached by a completely different
+mechanism. **Step 6 of the list above is not sufficient on its own.** Before
+writing the picker, find out how the app decides to draw a frame: an
+`EventResult`, a dirty flag, a fingerprint, or nothing at all. Two of the four
+apps done so far needed something beyond "render it last", and they needed
+different things.
+
 *Names are bytes.* `guitk`'s `DirEntry` is deliberately `OsString`, and its own
 doc explains why — decoding lossily "could make it match one it should not". In
 `filesearch` that is the whole game, so non-UTF-8 names are **skipped and
 counted** rather than decoded, and the count is shown. `IndexEntry` holding
 `String` and `globmatch::glob_match` taking `&str` is the real limit; fixing it
 properly means byte-capable matching, which is its own task.
+
+**FOUR FOR FOUR ON THE FIXTURE POINT.**
+
+Every one of `photomanager`, `sysinfo`, `filesearch` and `jsonviewer` had tests
+resting on the invented production data, and in every case they went red
+together the moment it was removed — six, sixteen, sixteen and six of them.
+None of those tests said they depended on it; they read as self-contained and
+were not.
+
+The consistency is the finding. **Production fixture data is always
+load-bearing for tests that nobody recorded as depending on it**, because a
+test needs *something* to act on and the seeded data is there. So the red is
+not a complication of this work, it is the reliable second half of it, and
+budgeting for it is the difference between "delete the fixture" being a
+ten-minute job and a surprise.
+
+Worth adding: the failures are loud only when the data becomes **absent**
+rather than merely **different**. `apps/settings` surfaced because an account
+list became empty; had I replaced three invented accounts with three real ones,
+all six tests would have kept passing against whatever the machine happened to
+have, and I would have called it a clean migration. `apps/sysinfo` was the
+opposite and the better case: its fixture asserts its own precondition, so the
+sixteen failures named the problem — *"fixture's property table fits on screen:
+4 rows in 144 px"* — instead of passing vacuously.

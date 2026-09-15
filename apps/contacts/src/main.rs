@@ -18,6 +18,7 @@
 
 use appearance::Palette;
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::frame::{Frame, Rect};
 // The shared civil-date arithmetic. This app's own copy was *correct* --
 // unlike the calendar's, whose ISO week number was wrong on 38.5% of all
@@ -52,6 +53,17 @@ use std::time::Duration;
 // ============================================================================
 // Constants
 // ============================================================================
+
+/// What the window says before any contact exists.
+///
+/// The second line used to read "this app has no filesystem access", which was
+/// true when written and false from the moment Ctrl+S opened a save dialog.
+/// See `apps/calendar`'s NO_EVENTS_LINES for the reasoning; found by
+/// `scripts/find-stale-admissions.py`, which exists because of it.
+const NO_CONTACTS_LINES: [&str; 2] = [
+    "No contacts.",
+    "Nothing is saved automatically -- press Ctrl+S to write a vCard file, or anyone you add is gone when the window closes.",
+];
 
 const SIDEBAR_WIDTH: f32 = 280.0;
 const ALPHABET_BAR_WIDTH: f32 = 24.0;
@@ -2044,7 +2056,23 @@ pub enum DetailView {
 }
 
 /// Top-level application state.
+/// The most of a vCard file one open will read.
+///
+/// Reported when it bites: a vCard cut mid-entry is not the address book the
+/// user chose, and `import_vcards` would simply stop at the truncation without
+/// anything saying a name was lost.
+pub const MAX_VCARD_BYTES: usize = 8 * 1024 * 1024;
+
+/// Leads a message about a file operation that did not happen.
+const FILE_FAILED_PREFIX: &str = "Could not";
+
 pub struct ContactsApp {
+    /// The open or save picker, while one is up.
+    pub file_dialog: Option<FileDialog>,
+    /// Whether the picker that is up is saving rather than opening.
+    pub dialog_saves: bool,
+    /// What the last open or save did, for the status line.
+    pub last_file_action: Option<String>,
     pub store: ContactStore,
     pub view: DetailView,
     pub search_query: String,
@@ -2101,6 +2129,9 @@ impl ContactsApp {
     pub fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            file_dialog: None,
+            dialog_saves: false,
+            last_file_action: None,
             store: ContactStore::new(),
             view: DetailView::Empty,
             search_query: String::new(),
@@ -2284,6 +2315,75 @@ impl ContactsApp {
         self.draw_alphabet(&mut f, &l);
         self.draw_panel(&mut f, &l);
         self.draw_status(&mut f, &l);
+
+        // Last, so nothing paints over it. Keyed on the store being empty so
+        // it retires itself at the first real contact.
+        if self.store.contacts.is_empty() {
+            for (i, line) in NO_CONTACTS_LINES.iter().enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+                let y = l.window.y + 2.0 + i as f32 * 12.0;
+                // A window can be two pixels across. `w - 16.0` goes negative
+                // there, and a line that does not fit vertically must not be
+                // drawn at all -- both caught by
+                // `every_run_of_text_is_bounded_and_inside_the_window`, which
+                // is the second render-invariant test in this sweep to reject
+                // one of these banners. They read commands rather than pixels,
+                // so a clip cannot hide an overrun from them.
+                let avail = (l.window.w - 16.0).max(0.0);
+                if avail <= 0.0 || y + 12.0 > l.window.y + l.window.h {
+                    break;
+                }
+                f.push(RenderCommand::Text {
+                    x: l.window.x + 8.0,
+                    y,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 11.0 } else { 9.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(avail),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+        // What the last open or save did. This is the one place the user's
+        // address book leaves the process.
+        if let Some(note) = &self.last_file_action {
+            let avail = (l.window.w - 16.0).max(0.0);
+            if avail > 0.0 {
+                f.push(RenderCommand::Text {
+                    x: l.window.x + 8.0,
+                    y: l.window.y + 26.0,
+                    text: note.clone(),
+                    color: if note.starts_with(FILE_FAILED_PREFIX) || note.starts_with("INCOMPLETE")
+                    {
+                        self.palette.ink(self.palette.red)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: 9.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(avail),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+
+        // Last, so it is above everything -- the same order in which
+        // `handle_event` gives it the keystroke.
+        if let Some(dialog) = &self.file_dialog {
+            for cmd in dialog.render(&self.palette, l.window.w, l.window.h) {
+                f.push(cmd);
+            }
+        }
+
         f
     }
 
@@ -3377,6 +3477,28 @@ impl ContactsApp {
     }
 
     /// Populate with sample contacts for demonstration.
+    /// Groups and contacts, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `main` called it, so the window opened
+    /// on Alice Anderson of Acme Corp, her mobile and work numbers, two email
+    /// addresses, a birthday, a home address and the note "Met at the Rust
+    /// conference 2024" -- filed under Family, Work and Friends, in the place
+    /// the user's own address book goes.
+    ///
+    /// **Note how carefully it was built.** The numbers are `+1-555-01xx`,
+    /// which is the reserved fictional range, and the domain is `example.com`,
+    /// which is reserved for documentation. Whoever wrote this made sure
+    /// nobody could accidentally ring or mail these people. That is genuinely
+    /// thoughtful, and it is the third fixture in this sweep where the
+    /// *harmful* part was handled with care and the *claim* was not examined
+    /// at all -- `apps/reminders` made its due dates relative so "overdue"
+    /// would stay true, and `apps/habits` spread its check-ins to a plausible
+    /// 70%.
+    ///
+    /// **A careful fixture is harder to notice than a careless one.** Stale
+    /// dates, a routable phone number or a flat 100% streak would each have
+    /// been questioned sooner than the polished version was.
+    #[cfg(test)]
     pub fn load_sample_data(&mut self) {
         // Groups
         let g1 = self
@@ -3585,6 +3707,17 @@ fn put_text(
 impl ContactsApp {
     /// Route an event to whatever the drawing pass put under it.
     fn handle_event(&mut self, event: &Event, size: (f32, f32)) {
+        // The picker takes the event first while it is up, or a keystroke
+        // meant for a filename lands in the search box behind it.
+        if self.file_dialog.is_some() {
+            let action = match (event, self.file_dialog.as_mut()) {
+                (Event::Key(ke), Some(dialog)) if ke.pressed => dialog.handle_event(ke, size.1),
+                (Event::Mouse(me), Some(dialog)) => dialog.handle_mouse(me, size.0, size.1),
+                _ => return,
+            };
+            self.apply_dialog_action(action);
+            return;
+        }
         match event {
             Event::Key(ke) => self.handle_key(ke),
             Event::Mouse(me) => self.handle_mouse(me, size),
@@ -3873,6 +4006,109 @@ impl ContactsApp {
 
     /// A keystroke: text into whatever has the keyboard, otherwise a
     /// shortcut.
+    /// Put the open or save picker up.
+    ///
+    /// `export_vcards` and `import_vcards` were written, tested, and
+    /// unreachable: full vCard, with CRLF joining per the spec and
+    /// `BEGIN:VCARD` block parsing. The format was the hard part and it was
+    /// already finished.
+    pub fn open_file_dialog(&mut self, saving: bool) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = if saving {
+            FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(String::from("contacts.vcf"))
+        } else {
+            FileDialog::open().with_initial_path(start)
+        };
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.dialog_saves = saving;
+        self.file_dialog = Some(dialog);
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) {
+        match action {
+            DialogAction::None => {}
+            DialogAction::Cancelled => self.file_dialog = None,
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                let saving = self.dialog_saves;
+                self.last_file_action = Some(if saving {
+                    self.write_vcards(&path)
+                } else {
+                    self.read_vcards(&path)
+                });
+            }
+        }
+    }
+
+    /// Write every contact to `path` as vCard.
+    ///
+    /// Through `safeio::write_str_atomically`: `fs::write` truncates before
+    /// writing, and an exported address book may be the only copy of numbers
+    /// the user cannot reconstruct.
+    ///
+    /// Refuses on an empty book rather than writing an empty file. A zero-byte
+    /// `contacts.vcf` is indistinguishable from a failed export afterwards,
+    /// and the user would have no way to tell which they had.
+    pub fn write_vcards(&mut self, path: &std::path::Path) -> String {
+        if self.store.contacts.is_empty() {
+            return String::from("No contacts to write");
+        }
+        let text = self.store.export_all();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!(
+                "Wrote {} contact(s) to {}",
+                self.store.contacts.len(),
+                path.display()
+            ),
+            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` and add every vCard in it to the book.
+    ///
+    /// Adds rather than replaces: the user asked to import an address book,
+    /// not to discard the one they have. Duplicates are the duplicate finder's
+    /// problem and this app already has one.
+    ///
+    /// Bounded, and it says so when it cuts, because `import_vcards` stops at
+    /// a truncation without complaining -- a cut file simply yields fewer
+    /// names, which is the failure mode nobody notices.
+    pub fn read_vcards(&mut self, path: &std::path::Path) -> String {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
+        };
+        let whole = text.len();
+        let truncated = whole > MAX_VCARD_BYTES;
+        let body = if truncated {
+            let mut cut = MAX_VCARD_BYTES;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut = cut.saturating_sub(1);
+            }
+            text.get(..cut).unwrap_or("").to_string()
+        } else {
+            text
+        };
+        let added = self.store.import_vcards(&body);
+        if truncated {
+            format!(
+                "INCOMPLETE: {added} contact(s) from the first {MAX_VCARD_BYTES} bytes of {}, which is {whole} bytes",
+                path.display()
+            )
+        } else {
+            format!("Added {added} contact(s) from {}", path.display())
+        }
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) {
         if !event.pressed {
             return;
@@ -3936,6 +4172,18 @@ impl ContactsApp {
                 }
                 Focus::None => {}
             }
+        }
+
+        // The two that take a modifier come first: a guard on an or-pattern
+        // applies to the whole of it, and `S` and `O` are already taken
+        // unmodified by Search and Cycle sort.
+        if event.modifiers.ctrl {
+            match event.key {
+                Key::S => self.open_file_dialog(true),
+                Key::O => self.open_file_dialog(false),
+                _ => {}
+            }
+            return;
         }
 
         // Nothing has the keyboard, so letters are shortcuts.
@@ -4037,8 +4285,8 @@ fn main() -> ExitCode {
     // The previous `main` was three lines: build the store, load the sample
     // data, render one frame into a `Vec` and drop it. It exercised the
     // drawing code and showed nobody the result.
+    // Opens empty. It used to call `load_sample_data`.
     let mut app = ContactsApp::new();
-    app.load_sample_data();
     app::launch("contacts", &mut app)
 }
 
@@ -4060,6 +4308,128 @@ mod tests {
     )]
 
     use super::*;
+
+    /// An address book survives a write and a read.
+    ///
+    /// `export_vcards` and `import_vcards` were written, tested and
+    /// unreachable: full vCard, CRLF joining per the spec, `BEGIN:VCARD` block
+    /// parsing. The format was the hard part and it was already finished --
+    /// `scripts/find-stranded-serialisers.py` exists because this is common.
+    ///
+    /// Round-tripped through the real functions rather than compared against a
+    /// literal: the vCard shape is `export_vcards`' business, and this test is
+    /// about the door.
+    #[test]
+    fn an_address_book_survives_a_write_and_a_read() {
+        let dir = std::env::temp_dir().join("slateos-contacts-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("book.vcf");
+
+        let mut app = ContactsApp::new();
+        let mut c = Contact::new(0, "Ada", "Lovelace");
+        c.phones
+            .push(PhoneNumber::new("+44 20 7946 0000", PhoneType::Mobile));
+        app.store.add_contact(c);
+
+        let said = app.write_vcards(&path);
+        assert!(said.starts_with("Wrote 1 contact"), "{said}");
+
+        let mut reopened = ContactsApp::new();
+        let said = reopened.read_vcards(&path);
+        assert!(said.starts_with("Added 1 contact"), "{said}");
+        assert_eq!(reopened.store.contacts.len(), 1);
+        assert_eq!(reopened.store.contacts[0].first_name, "Ada");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// An import adds rather than replaces.
+    ///
+    /// The user asked to import an address book, not to discard the one they
+    /// have. Duplicates are the duplicate finder's problem, and this app
+    /// already has one.
+    #[test]
+    fn an_import_adds_rather_than_replacing() {
+        let dir = std::env::temp_dir().join("slateos-contacts-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("one.vcf");
+
+        let mut source = ContactsApp::new();
+        source.store.add_contact(Contact::new(0, "Grace", "Hopper"));
+        source.write_vcards(&path);
+
+        let mut app = ContactsApp::new();
+        app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+        app.read_vcards(&path);
+        assert_eq!(app.store.contacts.len(), 2, "the import replaced the book");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// An empty book refuses rather than writing an empty file.
+    ///
+    /// A zero-byte contacts.vcf is indistinguishable from a failed export
+    /// afterwards, and the user would have no way to tell which they had.
+    #[test]
+    fn an_empty_book_refuses_to_write() {
+        let mut app = ContactsApp::new();
+        assert!(app.store.contacts.is_empty());
+        let path = std::env::temp_dir().join("slateos-contacts-should-not-exist.vcf");
+        std::fs::remove_file(&path).ok();
+
+        let said = app.write_vcards(&path);
+        assert!(said.contains("No contacts to write"), "{said}");
+        assert!(!path.exists(), "an empty file was written anyway");
+    }
+
+    /// A fresh window holds nobody, and says nothing is kept.
+    ///
+    /// `main` called `load_sample_data`, so the window opened on Alice
+    /// Anderson of Acme Corp with two phone numbers, two email addresses, a
+    /// birthday, a home address and a note about meeting her at a conference
+    /// -- in the place the user's own address book goes.
+    ///
+    /// The fixture was built with real care: `+1-555-01xx` is the reserved
+    /// fictional range and `example.com` is reserved for documentation, so
+    /// nobody could accidentally ring or mail these people. That care is why
+    /// it lasted. A careful fixture is harder to notice than a careless one.
+    #[test]
+    fn a_fresh_window_holds_nobody_and_says_nothing_is_kept() {
+        let app = ContactsApp::new();
+        assert!(
+            app.store.contacts.is_empty(),
+            "contacts appeared from nowhere"
+        );
+        assert!(app.store.groups.is_empty(), "groups appeared from nowhere");
+
+        let texts: Vec<String> = app
+            .render()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_CONTACTS_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NO_CONTACTS_LINES
+                .iter()
+                // The property, not the sentence. The old assertion pinned the
+                // words "Nothing is saved between runs", which stayed true of
+                // the test long after it stopped being true of the program:
+                // this app gained a vCard door and the banner still said it
+                // had no filesystem access. What must hold is that the warning
+                // names the remedy, so a reader who believes it knows what to
+                // do instead of concluding the app cannot save at all.
+                .any(|l| l.contains("Ctrl+S")),
+            "nothing warns that a contact added today does not survive the window",
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Helper: create a minimal contact for tests

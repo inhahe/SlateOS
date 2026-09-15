@@ -191,6 +191,21 @@ impl QualityPreset {
 // Audio input device
 // ============================================================================
 
+/// Why no take can be started, in one line.
+const CANNOT_RECORD: &str = "No audio input: nothing here can enumerate or open a capture device";
+
+/// What the window says instead of a timer that would not be measuring audio.
+///
+/// Two lines. The second exists because the first, on its own, is read as a
+/// hardware fault -- "no audio input" sounds like an unplugged microphone, and
+/// the user goes looking for one. The distinction between *this machine has no
+/// microphone* and *this program cannot look for one* is the entire content of
+/// the fix, so it has to be on screen.
+const CANNOT_RECORD_LINES: [&str; 2] = [
+    "Cannot record: no audio input is available.",
+    "This is not a missing microphone -- this program has no way to open a capture device at all.",
+];
+
 /// Represents an audio input source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioInputDevice {
@@ -206,6 +221,13 @@ pub struct AudioInputDevice {
 
 impl AudioInputDevice {
     /// Create a list of mock input devices for the UI.
+    /// Three plausible microphones, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `App::new` called this, so the device
+    /// menu listed a built-in microphone, a USB interface and a line input,
+    /// none of which had been enumerated from anything -- this crate has no
+    /// audio device access, no `std::fs` and no syscall that could find one.
+    #[cfg(test)]
     pub fn mock_devices() -> Vec<AudioInputDevice> {
         vec![
             AudioInputDevice {
@@ -689,14 +711,21 @@ impl VuMeter {
 pub struct RecordingTimer {
     /// Elapsed recording time in milliseconds.
     elapsed_ms: u64,
-    /// Available disk space in bytes (for remaining-time estimate).
-    available_bytes: u64,
+    /// Available disk space in bytes, if anything has measured it.
+    ///
+    /// `Option` since 2026-09-15. It was a `u64` initialised to 1_000_000_000
+    /// -- a flat gigabyte nothing had looked up -- and the transport displayed
+    /// `-01:26:48` beside the elapsed clock as the time left to record. That
+    /// is a number someone plans a session around: it says whether the take
+    /// will fit. A `u64` has no way to say "unmeasured", so the only available
+    /// answer was a wrong one.
+    available_bytes: Option<u64>,
     /// Current bytes-per-second rate for space estimation.
     bytes_per_second: u32,
 }
 
 impl RecordingTimer {
-    pub fn new(available_bytes: u64, bytes_per_second: u32) -> Self {
+    pub fn new(available_bytes: Option<u64>, bytes_per_second: u32) -> Self {
         Self {
             elapsed_ms: 0,
             available_bytes,
@@ -729,16 +758,29 @@ impl RecordingTimer {
     }
 
     /// Estimate remaining recording time in seconds based on available space.
-    pub fn remaining_secs(&self) -> f64 {
+    ///
+    /// `None` when nothing has measured the free space, which is the only
+    /// state this program can currently be in.
+    pub fn remaining_secs(&self) -> Option<f64> {
         if self.bytes_per_second == 0 {
-            return f64::INFINITY;
+            return Some(f64::INFINITY);
         }
-        self.available_bytes as f64 / self.bytes_per_second as f64
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a byte count displayed to the second"
+        )]
+        Some(self.available_bytes? as f64 / f64::from(self.bytes_per_second))
     }
 
     /// Format remaining time as a human-readable string.
+    ///
+    /// `--:--:--` when the free space is unmeasured. Deliberately not `00:00:00`,
+    /// which says the disk is full and the take is about to stop, and not an
+    /// omitted field, which is read as however much room you like.
     pub fn format_remaining(&self) -> String {
-        let secs = self.remaining_secs();
+        let Some(secs) = self.remaining_secs() else {
+            return "--:--:--".into();
+        };
         if secs.is_infinite() || secs > 359_999.0 {
             return "99:59:59+".into();
         }
@@ -751,7 +793,7 @@ impl RecordingTimer {
 
     /// Update the available space (e.g., after writing a chunk).
     pub fn set_available_bytes(&mut self, bytes: u64) {
-        self.available_bytes = bytes;
+        self.available_bytes = Some(bytes);
     }
 
     /// Update the byte rate (e.g., after changing quality preset).
@@ -762,7 +804,13 @@ impl RecordingTimer {
     /// Render the timer display.
     pub fn render(&self, pal: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {
         let elapsed_text = self.format_elapsed();
-        let remaining_text = format!("-{}", self.format_remaining());
+        // No leading minus when the figure is unknown: "-​--:--:--" reads as a
+        // negative duration rather than an absent one.
+        let remaining_text = if self.remaining_secs().is_some() {
+            format!("-{}", self.format_remaining())
+        } else {
+            self.format_remaining()
+        };
 
         vec![
             // Elapsed time (large)
@@ -1703,6 +1751,12 @@ pub struct SoundRecorderApp {
     /// Selected sample rate (can override preset).
     pub sample_rate: SampleRate,
     /// Available input devices.
+    /// Why the last transport press did nothing, if it did nothing.
+    ///
+    /// Carries a reason rather than a flag: "could not start" and "could not
+    /// start *because there is no input device*" send the user to different
+    /// places, and only the second one is any use.
+    pub blocked_reason: Option<String>,
     pub input_devices: Vec<AudioInputDevice>,
     /// Index of the selected input device.
     pub selected_device: usize,
@@ -1746,12 +1800,16 @@ impl SoundRecorderApp {
             state: RecordingState::Idle,
             preset,
             sample_rate: preset.sample_rate(),
-            input_devices: AudioInputDevice::mock_devices(),
+            // Empty. Nothing here can enumerate an audio device.
+            blocked_reason: None,
+            input_devices: Vec::new(),
             selected_device: 0,
             wav: WavFile::from_preset(preset),
             waveform: WaveformDisplay::new(20.0, 120.0, 560.0, 100.0),
             vu_meter: VuMeter::new(20.0, 230.0, 560.0, 20.0),
-            timer: RecordingTimer::new(1_000_000_000, preset.bytes_per_second()),
+            // `None`: nothing here can ask the filesystem how much room is
+            // left. It was a flat 1_000_000_000.
+            timer: RecordingTimer::new(None, preset.bytes_per_second()),
             markers: MarkerList::new(),
             trim: None,
             noise_gate: NoiseGate::new(0.02),
@@ -1765,8 +1823,47 @@ impl SoundRecorderApp {
 
     /// Transition to a new recording state if the transition is valid.
     /// Returns true if the transition was performed.
+    /// A recorder with input devices, for tests.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about the transport, the
+    /// timer, markers and trimming, and need *an* input to exist rather than
+    /// a specific invented one. Before 2026-09-15 they got it from `new`,
+    /// which is exactly the problem: the device list production could reach
+    /// was the device list that shipped.
+    #[cfg(test)]
+    fn with_mock_input() -> Self {
+        let mut app = Self::new();
+        app.input_devices = AudioInputDevice::mock_devices();
+        app
+    }
+
     pub fn transition_to(&mut self, target: RecordingState) -> bool {
         if !self.state.can_transition_to(target) {
+            return false;
+        }
+
+        // Refuse to start a take there is no input for.
+        //
+        // This is the whole of the 2026-09-15 fix and it is worth being precise
+        // about what was wrong, because the app was not obviously broken.
+        //
+        // `process_samples` is the door audio comes in through, and nothing in
+        // production calls it -- there is no capture device to call it from. So
+        // `wav.samples` stayed empty for the whole take. But `tick` advanced
+        // the timer regardless, so the window showed a clock climbing through
+        // 00:03:47 while zero audio existed; the auto-save fired on its
+        // schedule and incremented `save_count`, so the user was also told
+        // their work was being written to disk; and the state read "Recording".
+        //
+        // A person recording an interview would have watched all three, stopped,
+        // and had nothing. The event is not repeatable. That is worse than any
+        // wrong *number* in this sweep, because the loss is of something that
+        // existed only while the program claimed to be keeping it.
+        //
+        // The VU meter staying flat was the one honest signal on screen, and it
+        // is indistinguishable from a quiet room.
+        if target == RecordingState::Recording && self.current_device().is_none() {
+            self.blocked_reason = Some(String::from(CANNOT_RECORD));
             return false;
         }
 
@@ -1989,6 +2086,36 @@ impl SoundRecorderApp {
             0.0,
             Surface::Card,
         );
+        // Why there is no take, above everything else in the window.
+        //
+        // Unconditional on the device list rather than on `blocked_reason`,
+        // because it has to be visible *before* the user presses Record and
+        // starts timing something. A message that appears only after the press
+        // has already let them believe the take began.
+        if self.input_devices.is_empty() {
+            for (i, line) in CANNOT_RECORD_LINES.iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: 16.0,
+                    #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0..2")]
+                    y: 44.0 + i as f32 * 16.0,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 13.0 } else { 11.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(self.window_width - 32.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+
         cmds.push(RenderCommand::Text {
             x: 16.0,
             y: 10.0,
@@ -2090,6 +2217,31 @@ impl SoundRecorderApp {
 
     /// Render control buttons based on the current state.
     fn render_controls(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
+        // What the last transport press did, under the buttons.
+        //
+        // The banner at the top already says why no take can start, so this
+        // looks redundant -- and it is not, for the reason netscan's Send
+        // button taught earlier the same day: a press that changes nothing
+        // visible reads as a *broken button*, and sends the user hunting a
+        // fault in the wrong place. The banner explains the situation; this
+        // confirms the press was received and refused.
+        //
+        // Caught by `check-fields-written-never-read`, which is the third time
+        // in one day it has found a field of mine that production writes and
+        // nothing draws.
+        if let Some(reason) = &self.blocked_reason {
+            cmds.push(RenderCommand::Text {
+                x,
+                y: y + 38.0,
+                text: reason.clone(),
+                color: self.palette.ink(self.palette.yellow),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(self.window_width - x - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         match self.state {
             RecordingState::Idle => {
                 self.render_button(cmds, x, y, 100.0, 32.0, "Record", self.palette.red);
@@ -2213,9 +2365,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    // A test that overflows or indexes out of range should fail loudly and
-    // point at the line that did it — that is the diagnosis. The defensive
-    // lints exist to keep panics out of code that runs on a user's data.
+
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -2226,6 +2376,128 @@ mod tests {
     )]
 
     use super::*;
+
+    /// Unmeasured free space reads as unknown, not as full and not as plenty.
+    ///
+    /// The transport used to show `-01:26:48` beside the elapsed clock, which
+    /// is 1 GB divided by the bitrate -- a gigabyte nothing had looked up. It
+    /// is the number a person plans a session around: it says whether the take
+    /// will fit. `00:00:00` would have been just as wrong in the other
+    /// direction, saying the disk is about to fill.
+    #[test]
+    fn unmeasured_free_space_reads_as_unknown() {
+        let t = RecordingTimer::new(None, 192_000);
+        assert_eq!(t.remaining_secs(), None);
+        assert_eq!(t.format_remaining(), "--:--:--");
+
+        let app = SoundRecorderApp::new();
+        assert_eq!(
+            app.timer.remaining_secs(),
+            None,
+            "a fresh recorder knows the free space"
+        );
+
+        // And the countdown drops its minus sign: "-​--:--:--" reads as a
+        // negative duration rather than an absent one.
+        let drawn = t.render(
+            &Palette::from_settings(&appearance::AppearanceSettings::default()),
+            0.0,
+            0.0,
+        );
+        assert!(
+            drawn.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "--:--:--"
+            )),
+            "the unknown figure did not reach the screen unadorned",
+        );
+    }
+
+    /// A take cannot be started, and the timer does not run.
+    ///
+    /// The defect this whole change exists for. `process_samples` is the door
+    /// audio comes in through and nothing in production calls it, so a take
+    /// captured nothing -- while `tick` advanced the clock, the auto-save
+    /// incremented its count, and the state read "Recording". Someone
+    /// recording an interview would have watched all three, stopped, and had
+    /// nothing, with no second chance at the event.
+    #[test]
+    fn a_take_cannot_be_started_without_an_input_and_no_clock_runs() {
+        let mut app = SoundRecorderApp::new();
+        assert!(app.input_devices.is_empty());
+
+        assert!(
+            !app.transition_to(RecordingState::Recording),
+            "a take began with nothing to capture from",
+        );
+        assert_ne!(app.state, RecordingState::Recording);
+
+        // The clock is the strongest false signal on the screen, so it is the
+        // one to pin: a minute of ticks must not move it.
+        for _ in 0..60 {
+            app.tick(1000);
+            assert!(
+                !app.check_auto_save(1000),
+                "auto-save fired for a take that never began"
+            );
+        }
+        assert_eq!(
+            app.timer.elapsed_ms, 0,
+            "the clock ran on a take that never began"
+        );
+        assert_eq!(
+            app.auto_save.save_count, 0,
+            "saves were counted that never happened"
+        );
+
+        let why = app
+            .blocked_reason
+            .clone()
+            .expect("refused and said nothing");
+        assert!(why.contains("No audio input"), "{why}");
+
+        // And it reaches the window. A press that changes nothing visible
+        // reads as a broken button -- the lesson netscan's Send button taught
+        // earlier the same day.
+        assert!(
+            app.render_commands().iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == &why
+            )),
+            "the refusal never reached the screen",
+        );
+    }
+
+    /// And the window says so before the user presses anything.
+    ///
+    /// Drawn on the device list being empty rather than on a previous refusal,
+    /// because a message that appears only after the press has already let the
+    /// user believe the take began.
+    #[test]
+    fn the_window_says_it_cannot_record_before_record_is_pressed() {
+        let app = SoundRecorderApp::new();
+        let cmds = app.render_commands();
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_RECORD_LINES {
+            assert!(texts.contains(&line), "the window never said {line:?}");
+        }
+        assert!(
+            CANNOT_RECORD_LINES
+                .iter()
+                .any(|l| l.contains("not a missing microphone")),
+            "nothing distinguishes an absent device from an absent capability",
+        );
+    }
+
+    // A test that overflows or indexes out of range should fail loudly and
+    // point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user's data.
 
     // -- RecordingState tests ------------------------------------------------
 
@@ -2590,45 +2862,45 @@ mod tests {
 
     #[test]
     fn test_timer_initial_zero() {
-        let t = RecordingTimer::new(1_000_000, 192000);
+        let t = RecordingTimer::new(Some(1_000_000), 192000);
         assert_eq!(t.elapsed_secs(), 0.0);
     }
 
     #[test]
     fn test_timer_tick() {
-        let mut t = RecordingTimer::new(1_000_000, 192000);
+        let mut t = RecordingTimer::new(Some(1_000_000), 192000);
         t.tick(1500);
         assert!((t.elapsed_secs() - 1.5).abs() < 0.001);
     }
 
     #[test]
     fn test_timer_format_elapsed() {
-        let mut t = RecordingTimer::new(0, 0);
+        let mut t = RecordingTimer::new(Some(0), 0);
         t.tick(3_661_000); // 1h 1m 1s
         assert_eq!(t.format_elapsed(), "01:01:01");
     }
 
     #[test]
     fn test_timer_remaining() {
-        let t = RecordingTimer::new(384_000, 192000);
-        assert!((t.remaining_secs() - 2.0).abs() < 0.001);
+        let t = RecordingTimer::new(Some(384_000), 192000);
+        assert!((t.remaining_secs().expect("space was set") - 2.0).abs() < 0.001);
     }
 
     #[test]
     fn test_timer_remaining_zero_rate() {
-        let t = RecordingTimer::new(1000, 0);
-        assert!(t.remaining_secs().is_infinite());
+        let t = RecordingTimer::new(Some(1000), 0);
+        assert!(t.remaining_secs().expect("space was set").is_infinite());
     }
 
     #[test]
     fn test_timer_format_remaining_overflow() {
-        let t = RecordingTimer::new(u64::MAX, 1);
+        let t = RecordingTimer::new(Some(u64::MAX), 1);
         assert_eq!(t.format_remaining(), "99:59:59+");
     }
 
     #[test]
     fn test_timer_reset() {
-        let mut t = RecordingTimer::new(1000, 100);
+        let mut t = RecordingTimer::new(Some(1000), 100);
         t.tick(5000);
         t.reset();
         assert_eq!(t.elapsed_secs(), 0.0);
@@ -2637,7 +2909,7 @@ mod tests {
     #[test]
     fn test_timer_render_produces_commands() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let t = RecordingTimer::new(1000, 100);
+        let t = RecordingTimer::new(Some(1000), 100);
         let cmds = t.render(&pal, 0.0, 0.0);
         assert!(!cmds.is_empty());
     }
@@ -3159,21 +3431,21 @@ mod tests {
 
     #[test]
     fn test_app_creation() {
-        let app = SoundRecorderApp::new();
+        let app = SoundRecorderApp::with_mock_input();
         assert_eq!(app.state, RecordingState::Idle);
         assert_eq!(app.preset, QualityPreset::Music);
     }
 
     #[test]
     fn test_app_start_recording() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         assert!(app.transition_to(RecordingState::Recording));
         assert_eq!(app.state, RecordingState::Recording);
     }
 
     #[test]
     fn test_app_full_lifecycle() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         assert!(app.transition_to(RecordingState::Recording));
         assert!(app.transition_to(RecordingState::Paused));
         assert!(app.transition_to(RecordingState::Recording)); // resume
@@ -3183,14 +3455,14 @@ mod tests {
 
     #[test]
     fn test_app_invalid_transition() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         assert!(!app.transition_to(RecordingState::Stopped));
         assert_eq!(app.state, RecordingState::Idle);
     }
 
     #[test]
     fn test_app_process_samples() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.transition_to(RecordingState::Recording);
         app.process_samples(&[5000, -5000, 3000, -3000]);
         assert!(!app.wav.samples.is_empty());
@@ -3198,14 +3470,14 @@ mod tests {
 
     #[test]
     fn test_app_process_samples_ignored_when_idle() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.process_samples(&[5000, -5000]);
         assert_eq!(app.wav.samples.len(), 0);
     }
 
     #[test]
     fn test_app_set_preset() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.set_preset(QualityPreset::Voice);
         assert_eq!(app.preset, QualityPreset::Voice);
         assert_eq!(app.sample_rate, SampleRate::Hz8000);
@@ -3213,7 +3485,7 @@ mod tests {
 
     #[test]
     fn test_app_select_device() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         assert!(app.select_device(1));
         assert_eq!(app.selected_device, 1);
         assert!(!app.select_device(999));
@@ -3221,7 +3493,7 @@ mod tests {
 
     #[test]
     fn test_app_add_marker_during_recording() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.transition_to(RecordingState::Recording);
         let id = app.add_marker("Test".into());
         assert!(id.is_some());
@@ -3230,13 +3502,13 @@ mod tests {
 
     #[test]
     fn test_app_add_marker_idle_fails() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         assert!(app.add_marker("Test".into()).is_none());
     }
 
     #[test]
     fn test_app_stop_sets_trim() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.transition_to(RecordingState::Recording);
         app.process_samples(&[1000; 100]);
         app.transition_to(RecordingState::Stopped);
@@ -3245,7 +3517,7 @@ mod tests {
 
     #[test]
     fn test_app_save_recording() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.transition_to(RecordingState::Recording);
         app.process_samples(&[1000; 100]);
         app.transition_to(RecordingState::Stopped);
@@ -3256,13 +3528,13 @@ mod tests {
 
     #[test]
     fn test_app_save_recording_idle_fails() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         assert!(app.save_recording("test.wav".into()).is_none());
     }
 
     #[test]
     fn test_app_tick() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.transition_to(RecordingState::Recording);
         app.tick(1000);
         assert!((app.timer.elapsed_secs() - 1.0).abs() < 0.01);
@@ -3270,21 +3542,21 @@ mod tests {
 
     #[test]
     fn test_app_tick_idle_no_effect() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.tick(5000);
         assert_eq!(app.timer.elapsed_secs(), 0.0);
     }
 
     #[test]
     fn test_app_render_produces_commands() {
-        let app = SoundRecorderApp::new();
+        let app = SoundRecorderApp::with_mock_input();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_app_render_stopped_has_playback() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.transition_to(RecordingState::Recording);
         app.process_samples(&[1000; 100]);
         app.transition_to(RecordingState::Stopped);
@@ -3295,14 +3567,14 @@ mod tests {
 
     #[test]
     fn test_app_current_device() {
-        let app = SoundRecorderApp::new();
+        let app = SoundRecorderApp::with_mock_input();
         let device = app.current_device().expect("should have default device");
         assert!(device.is_default);
     }
 
     #[test]
     fn test_app_auto_save_during_recording() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.auto_save.set_interval_secs(1);
         app.transition_to(RecordingState::Recording);
         assert!(!app.check_auto_save(500));
@@ -3311,7 +3583,7 @@ mod tests {
 
     #[test]
     fn test_app_auto_save_idle_no_trigger() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.auto_save.set_interval_secs(1);
         assert!(!app.check_auto_save(5000));
     }
@@ -3335,7 +3607,7 @@ mod tests {
     /// keystroke can reach it.
     #[test]
     fn space_starts_pauses_and_resumes() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         assert_eq!(app.state, RecordingState::Idle);
         assert!(app.handle_event(&key(Key::Space)));
         assert_eq!(app.state, RecordingState::Recording);
@@ -3351,7 +3623,7 @@ mod tests {
     /// lost: the user means "hold on a moment" and the app hears "finish".
     #[test]
     fn stop_is_a_separate_key_from_pause() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.handle_event(&key(Key::Space));
         assert_eq!(app.state, RecordingState::Recording);
         assert!(app.handle_event(&key(Key::S)));
@@ -3366,7 +3638,7 @@ mod tests {
     /// second to call a `tick` that returns immediately.
     #[test]
     fn the_recorder_asks_for_a_clock_only_while_recording() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         assert_eq!(
             app.tick_interval(),
             None,
@@ -3390,7 +3662,7 @@ mod tests {
     /// one number a recording has to get right.
     #[test]
     fn elapsed_time_follows_milliseconds_and_not_tick_count() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.handle_event(&key(Key::Space));
 
         for _ in 0..3 {
@@ -3398,7 +3670,7 @@ mod tests {
         }
         let after_three_short = app.timer.elapsed_secs();
 
-        let mut other = SoundRecorderApp::new();
+        let mut other = SoundRecorderApp::with_mock_input();
         other.handle_event(&key(Key::Space));
         other.handle_event(&Event::Tick { elapsed_ms: 300 });
 
@@ -3412,7 +3684,7 @@ mod tests {
     /// A paused recorder does not accumulate time.
     #[test]
     fn a_paused_recorder_does_not_count_time() {
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
         app.handle_event(&key(Key::Space));
         app.handle_event(&Event::Tick { elapsed_ms: 500 });
         let while_recording = app.timer.elapsed_secs();
@@ -3523,7 +3795,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = SoundRecorderApp::new();
+        let mut app = SoundRecorderApp::with_mock_input();
 
         oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

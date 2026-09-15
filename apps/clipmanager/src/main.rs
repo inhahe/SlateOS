@@ -1020,6 +1020,19 @@ impl AppState {
 // the renderer put it.
 // ---------------------------------------------------------------------------
 
+/// What the window says while the history is empty.
+///
+/// There is no capture path in this crate -- nothing watches the clipboard,
+/// and nothing can. An empty history under the word "History" is read as *you
+/// have not copied anything*, which is a statement about what the user did.
+/// The second line is the one with the cost: a clipboard manager is kept open
+/// precisely so that something copied an hour ago can be found again, and
+/// somebody who trusts this one will not think to keep the original.
+const NOT_WATCHING_LINES: [&str; 2] = [
+    "Nothing is being captured.",
+    "This program cannot watch the clipboard, so the history stays empty however much you copy.",
+];
+
 const MARGIN: f32 = 12.0;
 const TOP_BAR_H: f32 = 36.0;
 const TAB_BAR_H: f32 = 32.0;
@@ -1165,6 +1178,36 @@ fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
     });
 
     let inner_w = (width - MARGIN * 2.0).max(0.0);
+
+    // After the background, or it would be painted over. Keyed on the history
+    // being empty, so it retires itself the day a capture path lands.
+    if state.store.entries.is_empty() {
+        for (i, line) in NOT_WATCHING_LINES.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+            let ty = 1.0 + i as f32 * 11.0;
+            if inner_w <= 0.0 || ty + 11.0 > height {
+                break;
+            }
+            frame.push(RenderCommand::Text {
+                x: MARGIN,
+                y: ty,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    state.palette.ink(state.palette.yellow)
+                } else {
+                    state.palette.subtext0
+                },
+                font_size: if i == 0 { 10.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(inner_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
 
     render_search_bar(&mut frame, state, MARGIN, 8.0, inner_w, TOP_BAR_H);
 
@@ -2850,6 +2893,44 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The empty history says nothing is being captured.
+    ///
+    /// There is no capture path in this crate: nothing watches the clipboard.
+    /// An empty history under the word "History" reads as *you have not copied
+    /// anything*, which is a statement about what the user did rather than
+    /// about what this program can see.
+    ///
+    /// The cost is specific. A clipboard manager is kept open precisely so
+    /// that something copied an hour ago can be found again, and somebody who
+    /// trusts this one will not think to keep the original.
+    #[test]
+    fn an_empty_history_says_nothing_is_being_captured() {
+        let state = AppState::new();
+        assert!(state.store.entries.is_empty());
+
+        let texts: Vec<String> = build_frame(&state, 900.0, 700.0)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NOT_WATCHING_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NOT_WATCHING_LINES
+                .iter()
+                .any(|l| l.contains("however much you copy")),
+            "nothing forecloses reading the empty history as 'you copied nothing'",
+        );
+    }
+
     use guitk::event::{MouseEvent, MouseEventKind};
     use guitk::probe::{
         click, click_background, control_names, is_visible, key, press, rect_of, target_matching,

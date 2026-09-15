@@ -137,8 +137,13 @@ const WIN1252_MAP: [u32; 32] = [
 ];
 
 fn windows1252_to_unicode(byte: u8) -> u32 {
+    // 0x80..=0x9F is the only range where Windows-1252 differs from
+    // ISO-8859-1; everything else is the identity.
     if (0x80..=0x9F).contains(&byte) {
-        WIN1252_MAP[(byte - 0x80) as usize]
+        WIN1252_MAP
+            .get(usize::from(byte).saturating_sub(0x80))
+            .copied()
+            .unwrap_or(u32::from(byte))
     } else {
         u32::from(byte)
     }
@@ -146,16 +151,15 @@ fn windows1252_to_unicode(byte: u8) -> u32 {
 
 fn unicode_to_windows1252(cp: u32) -> Option<u8> {
     // Fast path: identity range.
-    if cp < 0x80 {
-        return Some(cp as u8);
-    }
-    if (0xA0..=0xFF).contains(&cp) {
-        return Some(cp as u8);
+    if cp < 0x80 || (0xA0..=0xFF).contains(&cp) {
+        return u8::try_from(cp).ok();
     }
     // Search the 0x80..0x9F mapping.
     for (i, &mapped) in WIN1252_MAP.iter().enumerate() {
         if mapped == cp {
-            return Some((0x80 + i) as u8);
+            // `i < 32` by construction, so both steps hold; they are written
+            // as fallible rather than asserted.
+            return u8::try_from(i).ok().and_then(|i| i.checked_add(0x80));
         }
     }
     None
@@ -198,17 +202,21 @@ fn koi8r_to_unicode(byte: u8) -> u32 {
     if byte < 0x80 {
         u32::from(byte)
     } else {
-        KOI8R_MAP[(byte - 0x80) as usize]
+        KOI8R_MAP
+            .get(usize::from(byte).saturating_sub(0x80))
+            .copied()
+            .unwrap_or(u32::from(byte))
     }
 }
 
 fn unicode_to_koi8r(cp: u32) -> Option<u8> {
     if cp < 0x80 {
-        return Some(cp as u8);
+        return u8::try_from(cp).ok();
     }
     for (i, &mapped) in KOI8R_MAP.iter().enumerate() {
         if mapped == cp {
-            return Some((0x80 + i) as u8);
+            // `i < 128` by construction.
+            return u8::try_from(i).ok().and_then(|i| i.checked_add(0x80));
         }
     }
     None
@@ -231,14 +239,24 @@ enum DecodeResult {
 }
 
 /// Decode one codepoint from `buf` using the given encoding.
+/// The first `N` bytes of `buf`, or `None` if they are not all there.
+///
+/// Every decoder below needs a fixed-size window at a known position and has
+/// to tolerate not getting one, because a read can land anywhere. This says
+/// that in one expression and leaves no arithmetic to overflow.
+#[inline]
+fn head<const N: usize>(buf: &[u8]) -> Option<[u8; N]> {
+    buf.get(..N)?.try_into().ok()
+}
+
 fn decode_one(enc: Encoding, buf: &[u8]) -> DecodeResult {
-    if buf.is_empty() {
+    let Some(&b0) = buf.first() else {
         return DecodeResult::Incomplete { needed: 1 };
-    }
+    };
 
     match enc {
         Encoding::Ascii => {
-            let b = buf[0];
+            let b = b0;
             if b > 127 {
                 DecodeResult::Invalid {
                     bad_byte: b,
@@ -253,22 +271,22 @@ fn decode_one(enc: Encoding, buf: &[u8]) -> DecodeResult {
         }
 
         Encoding::Iso8859_1 => DecodeResult::Codepoint {
-            cp: u32::from(buf[0]),
+            cp: u32::from(b0),
             consumed: 1,
         },
 
         Encoding::Iso8859_15 => DecodeResult::Codepoint {
-            cp: iso8859_15_to_unicode(buf[0]),
+            cp: iso8859_15_to_unicode(b0),
             consumed: 1,
         },
 
         Encoding::Windows1252 => DecodeResult::Codepoint {
-            cp: windows1252_to_unicode(buf[0]),
+            cp: windows1252_to_unicode(b0),
             consumed: 1,
         },
 
         Encoding::Koi8R => DecodeResult::Codepoint {
-            cp: koi8r_to_unicode(buf[0]),
+            cp: koi8r_to_unicode(b0),
             consumed: 1,
         },
 
@@ -281,7 +299,9 @@ fn decode_one(enc: Encoding, buf: &[u8]) -> DecodeResult {
 }
 
 fn decode_utf8(buf: &[u8]) -> DecodeResult {
-    let b0 = buf[0];
+    let Some(&b0) = buf.first() else {
+        return DecodeResult::Incomplete { needed: 1 };
+    };
 
     if b0 < 0x80 {
         return DecodeResult::Codepoint {
@@ -304,20 +324,22 @@ fn decode_utf8(buf: &[u8]) -> DecodeResult {
         };
     };
 
-    if buf.len() < expected_len {
+    let Some(continuations) = buf.get(1..expected_len) else {
         return DecodeResult::Incomplete {
-            needed: expected_len - buf.len(),
+            needed: expected_len.saturating_sub(buf.len()),
         };
-    }
+    };
 
-    for &b in &buf[1..expected_len] {
+    for &b in continuations {
         if b & 0xC0 != 0x80 {
             return DecodeResult::Invalid {
                 bad_byte: b0,
                 consumed: 1,
             };
         }
-        cp = (cp << 6) | u32::from(b & 0x3F);
+        // `cp` holds at most 21 bits at this point, so the shift cannot lose
+        // a bit; `wrapping_shl` says so without asserting it.
+        cp = cp.wrapping_shl(6) | u32::from(b & 0x3F);
     }
 
     // Reject overlong encodings.
@@ -341,42 +363,47 @@ fn decode_utf8(buf: &[u8]) -> DecodeResult {
 }
 
 fn decode_utf16(buf: &[u8], little_endian: bool) -> DecodeResult {
-    if buf.len() < 2 {
+    let Some(first) = head::<2>(buf) else {
         return DecodeResult::Incomplete {
-            needed: 2 - buf.len(),
+            needed: 2usize.saturating_sub(buf.len()),
         };
-    }
+    };
 
     let unit = if little_endian {
-        u16::from_le_bytes([buf[0], buf[1]])
+        u16::from_le_bytes(first)
     } else {
-        u16::from_be_bytes([buf[0], buf[1]])
+        u16::from_be_bytes(first)
     };
+    let bad_byte = first.first().copied().unwrap_or(0);
 
     // High surrogate: need a second code unit.
     if (0xD800..=0xDBFF).contains(&unit) {
-        if buf.len() < 4 {
+        let Some(second) = buf.get(2..).and_then(head::<2>) else {
             return DecodeResult::Incomplete {
-                needed: 4 - buf.len(),
+                needed: 4usize.saturating_sub(buf.len()),
             };
-        }
+        };
         let unit2 = if little_endian {
-            u16::from_le_bytes([buf[2], buf[3]])
+            u16::from_le_bytes(second)
         } else {
-            u16::from_be_bytes([buf[2], buf[3]])
+            u16::from_be_bytes(second)
         };
         if !(0xDC00..=0xDFFF).contains(&unit2) {
             return DecodeResult::Invalid {
-                bad_byte: buf[0],
+                bad_byte,
                 consumed: 2,
             };
         }
-        let cp = 0x10000 + (u32::from(unit - 0xD800) << 10) + u32::from(unit2 - 0xDC00);
+        // Both subtractions are inside the ranges just tested, and the shift
+        // moves at most 10 significant bits into a 21-bit result.
+        let high = u32::from(unit.saturating_sub(0xD800)).wrapping_shl(10);
+        let low = u32::from(unit2.saturating_sub(0xDC00));
+        let cp = 0x10000u32.saturating_add(high).saturating_add(low);
         DecodeResult::Codepoint { cp, consumed: 4 }
     } else if (0xDC00..=0xDFFF).contains(&unit) {
         // Lone low surrogate: invalid.
         DecodeResult::Invalid {
-            bad_byte: buf[0],
+            bad_byte,
             consumed: 2,
         }
     } else {
@@ -388,21 +415,21 @@ fn decode_utf16(buf: &[u8], little_endian: bool) -> DecodeResult {
 }
 
 fn decode_utf32(buf: &[u8], little_endian: bool) -> DecodeResult {
-    if buf.len() < 4 {
+    let Some(quad) = head::<4>(buf) else {
         return DecodeResult::Incomplete {
-            needed: 4 - buf.len(),
+            needed: 4usize.saturating_sub(buf.len()),
         };
-    }
+    };
 
     let cp = if little_endian {
-        u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+        u32::from_le_bytes(quad)
     } else {
-        u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]])
+        u32::from_be_bytes(quad)
     };
 
     if cp > 0x10FFFF || (0xD800..=0xDFFF).contains(&cp) {
         DecodeResult::Invalid {
-            bad_byte: buf[0],
+            bad_byte: quad.first().copied().unwrap_or(0),
             consumed: 4,
         }
     } else {
@@ -497,32 +524,34 @@ fn encode_utf8(cp: u32, out: &mut Vec<u8>) -> usize {
 }
 
 fn encode_utf16(cp: u32, out: &mut Vec<u8>, little_endian: bool) -> usize {
-    if cp < 0x10000 {
-        let unit = cp as u16;
+    let mut put = |unit: u16| {
         let bytes = if little_endian {
             unit.to_le_bytes()
         } else {
             unit.to_be_bytes()
         };
         out.extend_from_slice(&bytes);
-        2
-    } else {
-        let adjusted = cp - 0x10000;
-        let high = (0xD800 + (adjusted >> 10)) as u16;
-        let low = (0xDC00 + (adjusted & 0x3FF)) as u16;
-        let hb = if little_endian {
-            high.to_le_bytes()
-        } else {
-            high.to_be_bytes()
-        };
-        let lb = if little_endian {
-            low.to_le_bytes()
-        } else {
-            low.to_be_bytes()
-        };
-        out.extend_from_slice(&hb);
-        out.extend_from_slice(&lb);
-        4
+    };
+
+    // `u16::try_from` IS the Basic-Multilingual-Plane test: a code point fits
+    // one UTF-16 code unit exactly when it fits a `u16`.
+    match u16::try_from(cp) {
+        Ok(unit) => {
+            put(unit);
+            2
+        }
+        Err(_) => {
+            // Above the BMP: a surrogate pair. Every decoder in this file
+            // rejects anything over U+10FFFF before a code point reaches
+            // here, so `adjusted` is at most 0xFFFFF; the masks make each
+            // half provably 10 bits rather than relying on that.
+            let adjusted = cp.saturating_sub(0x10000);
+            let high = u16::try_from(adjusted.wrapping_shr(10) & 0x3FF).unwrap_or(0);
+            let low = u16::try_from(adjusted & 0x3FF).unwrap_or(0);
+            put(0xD800u16.saturating_add(high));
+            put(0xDC00u16.saturating_add(low));
+            4
+        }
     }
 }
 
@@ -534,51 +563,37 @@ fn encode_utf16(cp: u32, out: &mut Vec<u8>, little_endian: bool) -> usize {
 /// given value.  Only supports `%02x` and `%x` for simplicity.  The POSIX
 /// iconv `--byte-subst` / `--unicode-subst` use this.
 fn format_subst(fmt: &str, value: u32) -> Vec<u8> {
+    // The specifiers, each with how to render it. No specifier is a prefix
+    // of another, so the order here is not load-bearing -- which is worth
+    // saying, because the hand-written `if`/`else if` chain this replaces
+    // looked like it depended on one.
+    type Render = fn(u32) -> String;
+    const SPECS: &[(&[u8], Render)] = &[
+        (b"%02x", |v| format!("{v:02x}")),
+        (b"%04x", |v| format!("{v:04x}")),
+        (b"%02X", |v| format!("{v:02X}")),
+        (b"%04X", |v| format!("{v:04X}")),
+        (b"%x", |v| format!("{v:x}")),
+        (b"%X", |v| format!("{v:X}")),
+    ];
+
     let mut result = Vec::new();
     let bytes = fmt.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 1 < bytes.len() {
-            // Try to parse a simple format specifier.
-            let rest = &bytes[i..];
-            if rest.starts_with(b"%02x") {
-                let formatted = format!("{value:02x}");
-                result.extend_from_slice(formatted.as_bytes());
-                i += 4;
-                continue;
-            } else if rest.starts_with(b"%04x") {
-                let formatted = format!("{value:04x}");
-                result.extend_from_slice(formatted.as_bytes());
-                i += 4;
-                continue;
-            } else if rest.starts_with(b"%02X") {
-                let formatted = format!("{value:02X}");
-                result.extend_from_slice(formatted.as_bytes());
-                i += 4;
-                continue;
-            } else if rest.starts_with(b"%04X") {
-                let formatted = format!("{value:04X}");
-                result.extend_from_slice(formatted.as_bytes());
-                i += 4;
-                continue;
-            } else if rest.starts_with(b"%x") {
-                let formatted = format!("{value:x}");
-                result.extend_from_slice(formatted.as_bytes());
-                i += 2;
-                continue;
-            } else if rest.starts_with(b"%X") {
-                let formatted = format!("{value:X}");
-                result.extend_from_slice(formatted.as_bytes());
-                i += 2;
-                continue;
-            } else if rest.starts_with(b"%%") {
-                result.push(b'%');
-                i += 2;
-                continue;
-            }
+    let mut i = 0usize;
+    while let Some(rest) = bytes.get(i..).filter(|r| !r.is_empty()) {
+        if let Some((spec, render)) = SPECS.iter().find(|(spec, _)| rest.starts_with(spec)) {
+            result.extend_from_slice(render(value).as_bytes());
+            i = i.saturating_add(spec.len());
+        } else if rest.starts_with(b"%%") {
+            result.push(b'%');
+            i = i.saturating_add(2);
+        } else if let Some(&b) = rest.first() {
+            // Anything else, including a trailing lone `%`, is literal text.
+            result.push(b);
+            i = i.saturating_add(1);
+        } else {
+            break;
         }
-        result.push(bytes[i]);
-        i += 1;
     }
     result
 }
@@ -587,36 +602,51 @@ fn format_subst(fmt: &str, value: u32) -> Vec<u8> {
 // BOM detection for UTF-16
 // ---------------------------------------------------------------------------
 
+/// How many bytes must be in hand before a BOM can be RULED OUT.
+///
+/// `detect_bom` is careful not to claim a BOM it cannot see, but "no BOM
+/// here" and "not enough bytes to tell" are different answers and it returns
+/// the same value for both. The caller needs to distinguish them, so it asks
+/// this first.
+const fn bom_len(enc: Encoding) -> usize {
+    match enc {
+        Encoding::Utf8 => 3,
+        Encoding::Utf16Le | Encoding::Utf16Be => 2,
+        Encoding::Utf32Le | Encoding::Utf32Be => 4,
+        // No BOM is defined for the single-byte encodings, so nothing needs
+        // to be in hand before the question is settled.
+        _ => 0,
+    }
+}
+
 /// Detect a Byte Order Mark at the start of the buffer and return the
 /// effective encoding if one is found, along with the number of BOM bytes
 /// to skip.
 fn detect_bom(enc: Encoding, buf: &[u8]) -> (Encoding, usize) {
     match enc {
+        // `starts_with` carries the length check, so the explicit
+        // `buf.len() >= N` guards are gone rather than merely rewritten.
         Encoding::Utf16Le | Encoding::Utf16Be => {
-            if buf.len() >= 2 {
-                if buf[0] == 0xFF && buf[1] == 0xFE {
-                    return (Encoding::Utf16Le, 2);
-                }
-                if buf[0] == 0xFE && buf[1] == 0xFF {
-                    return (Encoding::Utf16Be, 2);
-                }
+            if buf.starts_with(&[0xFF, 0xFE]) {
+                return (Encoding::Utf16Le, 2);
+            }
+            if buf.starts_with(&[0xFE, 0xFF]) {
+                return (Encoding::Utf16Be, 2);
             }
             (enc, 0)
         }
         Encoding::Utf8 => {
-            if buf.len() >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF {
+            if buf.starts_with(&[0xEF, 0xBB, 0xBF]) {
                 return (Encoding::Utf8, 3);
             }
             (enc, 0)
         }
         Encoding::Utf32Le | Encoding::Utf32Be => {
-            if buf.len() >= 4 {
-                if buf[0] == 0xFF && buf[1] == 0xFE && buf[2] == 0x00 && buf[3] == 0x00 {
-                    return (Encoding::Utf32Le, 4);
-                }
-                if buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0xFE && buf[3] == 0xFF {
-                    return (Encoding::Utf32Be, 4);
-                }
+            if buf.starts_with(&[0xFF, 0xFE, 0x00, 0x00]) {
+                return (Encoding::Utf32Le, 4);
+            }
+            if buf.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) {
+                return (Encoding::Utf32Be, 4);
             }
             (enc, 0)
         }
@@ -670,9 +700,13 @@ fn parse_args() -> Opts {
     let mut verbose = false;
     let mut input_files: Vec<String> = Vec::new();
 
-    let mut i = 1;
+    let mut i = 1usize;
     while i < args.len() {
-        let arg = &args[i];
+        // Kept index-based on purpose: -f, -t and -o may consume the NEXT
+        // argv entry, which an iterator cannot express.
+        let Some(arg) = args.get(i) else {
+            break;
+        };
 
         // --list / -l
         if arg == "-l" || arg == "--list" {
@@ -691,71 +725,73 @@ fn parse_args() -> Opts {
         // --verbose
         if arg == "--verbose" {
             verbose = true;
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         // -c
         if arg == "-c" {
             discard = true;
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         // --byte-subst=FORMAT
         if let Some(val) = arg.strip_prefix("--byte-subst=") {
             byte_subst = Some(val.to_string());
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         // --unicode-subst=FORMAT
         if let Some(val) = arg.strip_prefix("--unicode-subst=") {
             unicode_subst = Some(val.to_string());
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         // --from-code=NAME
         if let Some(val) = arg.strip_prefix("--from-code=") {
             from = Some(parse_encoding(val).unwrap_or_else(|e| die(&e)));
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         // --to-code=NAME
         if let Some(val) = arg.strip_prefix("--to-code=") {
             to = Some(parse_encoding(val).unwrap_or_else(|e| die(&e)));
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         // --output=FILE
         if let Some(val) = arg.strip_prefix("--output=") {
             output_file = Some(val.to_string());
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         // -f / -t / -o with separate value
-        if (arg == "-f" || arg == "-t" || arg == "-o") && i + 1 < args.len() {
-            let val = &args[i + 1];
+        if let Some(val) = match arg.as_str() {
+            "-f" | "-t" | "-o" => args.get(i.saturating_add(1)),
+            _ => None,
+        } {
             match arg.as_str() {
                 "-f" => from = Some(parse_encoding(val).unwrap_or_else(|e| die(&e))),
                 "-t" => to = Some(parse_encoding(val).unwrap_or_else(|e| die(&e))),
                 "-o" => output_file = Some(val.clone()),
                 _ => {}
             }
-            i += 2;
+            i = i.saturating_add(2);
             continue;
         }
 
         // -- separator
         if arg == "--" {
-            i += 1;
-            while i < args.len() {
-                input_files.push(args[i].clone());
-                i += 1;
+            i = i.saturating_add(1);
+            while let Some(file) = args.get(i) {
+                input_files.push(file.clone());
+                i = i.saturating_add(1);
             }
             break;
         }
@@ -763,48 +799,60 @@ fn parse_args() -> Opts {
         // Unrecognized option
         if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
             // Could be combined short flags like -cf
-            let chars: Vec<char> = arg[1..].chars().collect();
-            let mut j = 0;
+            let chars: Vec<char> = arg.get(1..).unwrap_or_default().chars().collect();
+            let mut j = 0usize;
             let mut all_known = true;
             while j < chars.len() {
-                match chars[j] {
+                let Some(&opt) = chars.get(j) else {
+                    break;
+                };
+                match opt {
                     'c' => discard = true,
                     'f' => {
                         // Remainder of this arg or next arg is the value.
-                        if j + 1 < chars.len() {
-                            let rest: String = chars[j + 1..].iter().collect();
+                        // `get(..).filter(non-empty)`: the slice one past the
+                        // end is `Some` and empty, which is not a value.
+                        if let Some(rest) =
+                            chars.get(j.saturating_add(1)..).filter(|r| !r.is_empty())
+                        {
+                            let rest: String = rest.iter().collect();
                             from = Some(parse_encoding(&rest).unwrap_or_else(|e| die(&e)));
                             j = chars.len(); // consume all
                             continue;
-                        } else if i + 1 < args.len() {
-                            from = Some(parse_encoding(&args[i + 1]).unwrap_or_else(|e| die(&e)));
-                            i += 1;
+                        } else if let Some(next) = args.get(i.saturating_add(1)) {
+                            from = Some(parse_encoding(next).unwrap_or_else(|e| die(&e)));
+                            i = i.saturating_add(1);
                         } else {
                             die("-f requires an argument");
                         }
                     }
                     't' => {
-                        if j + 1 < chars.len() {
-                            let rest: String = chars[j + 1..].iter().collect();
+                        // `get(..).filter(non-empty)`: the slice one past the
+                        // end is `Some` and empty, which is not a value.
+                        if let Some(rest) =
+                            chars.get(j.saturating_add(1)..).filter(|r| !r.is_empty())
+                        {
+                            let rest: String = rest.iter().collect();
                             to = Some(parse_encoding(&rest).unwrap_or_else(|e| die(&e)));
-                            j = chars.len();
+                            j = chars.len(); // consume all
                             continue;
-                        } else if i + 1 < args.len() {
-                            to = Some(parse_encoding(&args[i + 1]).unwrap_or_else(|e| die(&e)));
-                            i += 1;
+                        } else if let Some(next) = args.get(i.saturating_add(1)) {
+                            to = Some(parse_encoding(next).unwrap_or_else(|e| die(&e)));
+                            i = i.saturating_add(1);
                         } else {
                             die("-t requires an argument");
                         }
                     }
                     'o' => {
-                        if j + 1 < chars.len() {
-                            let rest: String = chars[j + 1..].iter().collect();
-                            output_file = Some(rest);
-                            j = chars.len();
+                        if let Some(rest) =
+                            chars.get(j.saturating_add(1)..).filter(|r| !r.is_empty())
+                        {
+                            output_file = Some(rest.iter().collect());
+                            j = chars.len(); // consume all
                             continue;
-                        } else if i + 1 < args.len() {
-                            output_file = Some(args[i + 1].clone());
-                            i += 1;
+                        } else if let Some(next) = args.get(i.saturating_add(1)) {
+                            output_file = Some(next.clone());
+                            i = i.saturating_add(1);
                         } else {
                             die("-o requires an argument");
                         }
@@ -814,12 +862,12 @@ fn parse_args() -> Opts {
                         break;
                     }
                 }
-                j += 1;
+                j = j.saturating_add(1);
             }
             if !all_known {
                 die(&format!("unrecognized option: {arg}"));
             }
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -829,7 +877,7 @@ fn parse_args() -> Opts {
 
         // Positional argument: input file.
         input_files.push(arg.clone());
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     let from = match from {
@@ -857,11 +905,26 @@ fn parse_args() -> Opts {
 // Conversion engine
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 struct ConvStats {
     bytes_in: u64,
     bytes_out: u64,
     codepoints: u64,
     errors: u64,
+}
+
+impl ConvStats {
+    /// Fold another stream's totals into this one.
+    ///
+    /// Saturating rather than wrapping: a counter that has genuinely reached
+    /// 2^64 bytes is already meaningless, and sticking at the maximum is a
+    /// less misleading failure than wrapping to nearly zero.
+    fn add(&mut self, other: &Self) {
+        self.bytes_in = self.bytes_in.saturating_add(other.bytes_in);
+        self.bytes_out = self.bytes_out.saturating_add(other.bytes_out);
+        self.codepoints = self.codepoints.saturating_add(other.codepoints);
+        self.errors = self.errors.saturating_add(other.errors);
+    }
 }
 
 /// Convert a complete input byte stream from `from_enc` to `to_enc`, writing
@@ -875,12 +938,13 @@ fn convert_stream<R: Read, W: Write + ?Sized>(
     opts: &Opts,
     first_chunk: bool,
 ) -> io::Result<ConvStats> {
-    let mut stats = ConvStats {
-        bytes_in: 0,
-        bytes_out: 0,
-        codepoints: 0,
-        errors: 0,
-    };
+    let mut stats = ConvStats::default();
+
+    /// The file offset of the byte being decoded: everything read so far,
+    /// less whatever has not been consumed yet.
+    fn offset_of(bytes_in: u64, unconsumed: usize) -> u64 {
+        bytes_in.saturating_sub(u64::try_from(unconsumed).unwrap_or(u64::MAX))
+    }
 
     // We keep a buffer of un-consumed input (a remainder from the previous
     // read that ended in the middle of a multi-byte sequence, plus new data).
@@ -894,29 +958,56 @@ fn convert_stream<R: Read, W: Write + ?Sized>(
         let n = reader.read(&mut read_buf)?;
         let eof = n == 0;
 
-        remainder.extend_from_slice(&read_buf[..n]);
-        stats.bytes_in += n as u64;
+        remainder.extend_from_slice(read_buf.get(..n).unwrap_or(&read_buf));
+        stats.bytes_in = stats
+            .bytes_in
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
 
         // BOM detection on the very first chunk of the very first file.
-        if !bom_checked && !remainder.is_empty() {
-            let (detected, skip) = detect_bom(effective_from, &remainder);
-            effective_from = detected;
-            if skip > 0 && skip <= remainder.len() {
-                remainder.drain(..skip);
+        //
+        // The test is `remainder.len() >= bom_len(..)`, not `!is_empty()`.
+        // `Read::read` may return any number of bytes it likes, and on a pipe
+        // a first read of one or two bytes is ordinary rather than
+        // pathological. The old condition ran detection on whatever had
+        // arrived and then set `bom_checked` whatever the answer was, so a
+        // short first read RULED OUT a BOM that was still in flight.
+        //
+        // The damage was not confined to a stray character. For UTF-8 the BOM
+        // then decoded as content and a U+FEFF appeared in the output; for
+        // UTF-16 the byte order stayed at the default instead of being taken
+        // from the mark, so the WHOLE FILE came out byte-swapped. Either way
+        // the result depended on how the input happened to be chunked, which
+        // is the one thing a streaming converter may never let show.
+        if !bom_checked {
+            if remainder.len() >= bom_len(effective_from) || eof {
+                let (detected, skip) = detect_bom(effective_from, &remainder);
+                effective_from = detected;
+                if skip > 0 && skip <= remainder.len() {
+                    remainder.drain(..skip);
+                }
+                bom_checked = true;
+            } else {
+                // Too early to tell. Go back for more rather than decoding,
+                // because decoding now would consume the BOM as content and
+                // there would be no way to take it back. `eof` is false here,
+                // so there is more to come; at EOF the branch above settles
+                // it even for a file shorter than a BOM.
+                continue;
             }
-            bom_checked = true;
         }
 
         let mut pos: usize = 0;
 
         while pos < remainder.len() {
-            let slice = &remainder[pos..];
+            let Some(slice) = remainder.get(pos..) else {
+                break;
+            };
             match decode_one(effective_from, slice) {
                 DecodeResult::Codepoint { cp, consumed } => {
                     // Try to encode.
                     match encode_one(to_enc, cp, &mut out_buf) {
                         Ok(_) => {
-                            stats.codepoints += 1;
+                            stats.codepoints = stats.codepoints.saturating_add(1);
                         }
                         Err(()) => {
                             // Unmappable codepoint.
@@ -929,14 +1020,14 @@ fn convert_stream<R: Read, W: Write + ?Sized>(
                                 let _ = writeln!(
                                     io::stderr(),
                                     "iconv: cannot convert U+{cp:04X} to target encoding at byte offset {}",
-                                    stats.bytes_in - (remainder.len() - pos) as u64,
+                                    offset_of(stats.bytes_in, remainder.len().saturating_sub(pos)),
                                 );
-                                stats.errors += 1;
+                                stats.errors = stats.errors.saturating_add(1);
                             }
-                            stats.codepoints += 1;
+                            stats.codepoints = stats.codepoints.saturating_add(1);
                         }
                     }
-                    pos += consumed;
+                    pos = pos.saturating_add(consumed);
                 }
                 DecodeResult::Invalid { bad_byte, consumed } => {
                     if opts.discard_unmappable {
@@ -945,33 +1036,34 @@ fn convert_stream<R: Read, W: Write + ?Sized>(
                         let sub = format_subst(fmt, u32::from(bad_byte));
                         out_buf.extend_from_slice(&sub);
                     } else {
-                        let offset = stats.bytes_in - (remainder.len() - pos) as u64;
+                        let offset = offset_of(stats.bytes_in, remainder.len().saturating_sub(pos));
                         let _ = writeln!(
                             io::stderr(),
                             "iconv: invalid byte 0x{bad_byte:02x} at offset {offset} in source encoding",
                         );
-                        stats.errors += 1;
+                        stats.errors = stats.errors.saturating_add(1);
                     }
-                    pos += consumed;
+                    pos = pos.saturating_add(consumed);
                 }
                 DecodeResult::Incomplete { needed: _needed } => {
                     if eof {
                         // Truncated sequence at end of input.
-                        let bad_byte = slice[0];
+                        let bad_byte = slice.first().copied().unwrap_or(0);
                         if opts.discard_unmappable {
                             // skip
                         } else if let Some(ref fmt) = opts.byte_subst {
                             let sub = format_subst(fmt, u32::from(bad_byte));
                             out_buf.extend_from_slice(&sub);
                         } else {
-                            let offset = stats.bytes_in - (remainder.len() - pos) as u64;
+                            let offset =
+                                offset_of(stats.bytes_in, remainder.len().saturating_sub(pos));
                             let _ = writeln!(
                                 io::stderr(),
                                 "iconv: incomplete byte sequence at offset {offset}",
                             );
-                            stats.errors += 1;
+                            stats.errors = stats.errors.saturating_add(1);
                         }
-                        pos += 1;
+                        pos = pos.saturating_add(1);
                     } else {
                         // Need more data; break out to read more.
                         break;
@@ -983,7 +1075,9 @@ fn convert_stream<R: Read, W: Write + ?Sized>(
         // Flush the output buffer.
         if !out_buf.is_empty() {
             writer.write_all(&out_buf)?;
-            stats.bytes_out += out_buf.len() as u64;
+            stats.bytes_out = stats
+                .bytes_out
+                .saturating_add(u64::try_from(out_buf.len()).unwrap_or(u64::MAX));
             out_buf.clear();
         }
 
@@ -1026,12 +1120,7 @@ fn main() {
         &mut stdout_handle.lock() as &mut dyn Write
     };
 
-    let mut total_stats = ConvStats {
-        bytes_in: 0,
-        bytes_out: 0,
-        codepoints: 0,
-        errors: 0,
-    };
+    let mut total_stats = ConvStats::default();
     let mut had_error = false;
 
     if opts.input_files.is_empty() {
@@ -1042,10 +1131,7 @@ fn main() {
                 if s.errors > 0 {
                     had_error = true;
                 }
-                total_stats.bytes_in += s.bytes_in;
-                total_stats.bytes_out += s.bytes_out;
-                total_stats.codepoints += s.codepoints;
-                total_stats.errors += s.errors;
+                total_stats.add(&s);
             }
             Err(e) => die(&format!("I/O error: {e}")),
         }
@@ -1064,10 +1150,7 @@ fn main() {
                     if s.errors > 0 {
                         had_error = true;
                     }
-                    total_stats.bytes_in += s.bytes_in;
-                    total_stats.bytes_out += s.bytes_out;
-                    total_stats.codepoints += s.codepoints;
-                    total_stats.errors += s.errors;
+                    total_stats.add(&s);
                 }
                 Err(e) => {
                     let _ = writeln!(io::stderr(), "iconv: {path}: {e}");
@@ -1097,6 +1180,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // Panicking on bad data is the point in a test: an `unwrap` that fires
+    // is a failed assertion with a stack trace, which is what a test is for.
+    // CLAUDE.md allows the defensive lints off here for exactly that reason.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // -----------------------------------------------------------------------
@@ -1831,6 +1925,85 @@ mod tests {
     // Cross-encoding conversion (integration via convert_stream)
     // -----------------------------------------------------------------------
 
+    fn convert_with<R: Read>(reader: &mut R, from: Encoding, to: Encoding) -> Vec<u8> {
+        let opts = Opts {
+            from,
+            to,
+            output_file: None,
+            discard_unmappable: false,
+            byte_subst: None,
+            unicode_subst: None,
+            verbose: false,
+            input_files: Vec::new(),
+        };
+        let mut output = Vec::new();
+        convert_stream(reader, &mut output, from, to, &opts, true)
+            .expect("convert_stream should not fail on in-memory I/O");
+        output
+    }
+
+    /// The same bytes must convert to the same bytes however they arrive.
+    ///
+    /// This is the invariant a streaming converter lives or dies by, and it
+    /// is stronger than testing any single case: it says the chunking is not
+    /// allowed to be observable at all.
+    ///
+    /// `ChunkedReader::new(input, 1)` is the same instrument
+    /// `test_streaming_utf8_1byte_chunks` already used. What was missing was
+    /// never the instrument -- it was a BOM in the fixture. Every chunked
+    /// test fed BOM-less input, so the one decision `convert_stream` makes
+    /// from the first read alone was the one decision never exercised.
+    #[test]
+    fn conversion_does_not_depend_on_how_the_input_is_chunked() {
+        let cases: &[(&str, &[u8], Encoding, Encoding)] = &[
+            (
+                "UTF-8 with BOM -> UTF-8",
+                b"\xEF\xBB\xBFhello",
+                Encoding::Utf8,
+                Encoding::Utf8,
+            ),
+            (
+                "UTF-16 with LE BOM -> UTF-8",
+                b"\xFF\xFEh\x00i\x00",
+                Encoding::Utf16Be, // deliberately the WRONG default: the BOM must win
+                Encoding::Utf8,
+            ),
+            (
+                "UTF-16 with BE BOM -> UTF-8",
+                b"\xFE\xFF\x00h\x00i",
+                Encoding::Utf16Le, // again the wrong default
+                Encoding::Utf8,
+            ),
+            (
+                "multi-byte sequences split across reads",
+                "\u{e9}\u{4e2d}\u{1F600}".as_bytes(),
+                Encoding::Utf8,
+                Encoding::Utf8,
+            ),
+        ];
+
+        // Every case is reported, not just the first to fail: they differ in
+        // how badly the bug bites -- a stray character versus a byte-swapped
+        // file -- and stopping at the first would hide that.
+        let mut failures = Vec::new();
+        for (name, input, from, to) in cases {
+            let whole = convert_with(&mut io::Cursor::new(*input), *from, *to);
+            let dripped = convert_with(&mut ChunkedReader::new(input, 1), *from, *to);
+            if whole != dripped {
+                failures.push(format!(
+                    "  {name}\n\
+                     all at once:   {whole:02x?}\n\
+                     one at a time: {dripped:02x?}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "output changed when the input arrived one byte at a time:\n{}",
+            failures.join("\n")
+        );
+    }
+
     fn convert_bytes(input: &[u8], from: Encoding, to: Encoding) -> (Vec<u8>, ConvStats) {
         let opts = Opts {
             from,
@@ -2039,7 +2212,7 @@ mod tests {
         }
     }
 
-    impl<'a> Read for ChunkedReader<'a> {
+    impl Read for ChunkedReader<'_> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if self.pos >= self.data.len() {
                 return Ok(0);

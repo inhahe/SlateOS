@@ -695,7 +695,6 @@ struct ShredConfig {
     overwrite_size: Option<u64>,
     verbose: bool,
     force: bool,
-    random_source: String,
     files: Vec<String>,
 }
 
@@ -708,7 +707,6 @@ impl Default for ShredConfig {
             overwrite_size: None,
             verbose: false,
             force: false,
-            random_source: "/dev/urandom".into(),
             files: Vec::new(),
         }
     }
@@ -748,7 +746,21 @@ fn parse_shred_args(args: &[String]) -> Result<ShredConfig, String> {
         } else if let Some(rest) = arg.strip_prefix("--size=") {
             cfg.overwrite_size = Some(parse_size(rest)?);
         } else if let Some(rest) = arg.strip_prefix("--random-source=") {
-            cfg.random_source = rest.to_string();
+            // REFUSED, not ignored, and the difference matters more here than
+            // anywhere else this flag shape has come up: shred destroys the
+            // file. A user who asked for a specific source of random bytes and
+            // silently got a different one has already lost the data by the
+            // time they can notice. Failing before the first pass is the only
+            // answer that leaves them a choice.
+            //
+            // It was accepted and dropped: the field was parsed, stored, and
+            // read by nothing, while the passes came from the internal
+            // xorshift64 below.
+            return Err(format!(
+                "--random-source={rest} is not implemented: this build \
+generates pass content from an internal deterministic PRNG, not from a file. \
+See known-issues.md TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED."
+            ));
         } else if arg.starts_with('-') {
             return Err(format!("unknown option: {arg}"));
         } else {
@@ -775,7 +787,11 @@ fn print_shred_usage() {
     eprintln!("  -s SIZE, --size=SIZE      Overwrite only first SIZE bytes");
     eprintln!("  -v, --verbose             Show progress");
     eprintln!("  -f, --force               Change permissions to allow writing");
-    eprintln!("  --random-source=FILE      Source of random bytes (default /dev/urandom)");
+    // The old line advertised "(default /dev/urandom)". Nothing in this
+    // program opens /dev/urandom; `generate_shred_pattern` uses xorshift64,
+    // deliberately, so that a shred pass does not depend on a device node
+    // existing. The default was as false as the option was inert.
+    eprintln!("  --random-source=FILE      Not implemented; passes use an internal PRNG");
     eprintln!("  -h, --help                Show this help");
 }
 

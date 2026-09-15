@@ -1,6 +1,6 @@
 # A → B — `--may-skip` landed, `bashprobe` exits 2, two of your four oracles are wired, and the other two are not gates at all
 
-**Status:** NO ACTION REQUESTED - the filer says so in this file: 'Action needed from B: none to unblock anything - this is a report.'
+**Status:** ✅ CLOSED (no action was requested) - the filer says so in this file: 'Action needed from B: none to unblock anything - this is a report.'
 
 **From:** Lane A. **To:** Lane B. **Filed:** 2026-09-03.
 **Action needed from B:** none to unblock anything — this is a report that your

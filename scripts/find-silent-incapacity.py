@@ -1,0 +1,158 @@
+"""Which programs cannot do the thing they are for, and do not say so?
+
+`find-reachable-fixtures.py` finds programs that say too much -- data invented
+and presented as real. It cannot find the opposite failure, and the opposite
+failure is common: a program with no fabrication at all, an empty screen, and
+nothing explaining why the screen is empty.
+
+`apps/clipmanager` was the case that prompted this. It invents nothing, so the
+fixture scanner never flagged it. It also has no capture path: nothing watches
+the clipboard and nothing can, so the history is empty and stays empty however
+long the window is open. **An empty list under the word "History" is read as a
+statement about the user** -- you have not copied anything -- rather than about
+the program.
+
+So this asks a different question: **does the crate have any capability at all,
+and if not, does it admit that anywhere the user could read it?**
+
+HOW IT DECIDES
+
+A crate is *incapable* if nothing in it touches the outside world: no
+`std::fs`, no `std::net`, no `std::process::Command`, no `safeio`, no file
+dialog. Those are the four doors anything in `apps/` could come through.
+
+A crate *admits it* if some string literal carries refusal vocabulary --
+"cannot", "no ... access", "nothing was", "not saved", "unavailable". The
+match is on string literals only, because a comment is not an admission: the
+user does not read the source. That distinction is the entire sweep.
+
+WHAT IT CANNOT SEE, stated plainly:
+
+  * A crate can be incapable in a way that does not matter. A calculator needs
+    no filesystem and owes nobody an explanation. **The output is a list to
+    read, not a list to empty** -- most entries will be fine.
+  * A crate can admit one incapacity and stay silent about another. The check
+    is per-crate, not per-feature.
+  * Vocabulary is a proxy. A window that says "Press Ctrl+O to open a file" in
+    an app with no opener passes this check and is still a promise it cannot
+    keep -- `apps/pdfviewer` shipped exactly that. Passing here is not a
+    clean bill of health.
+
+Report-only, and no --check mode, for the same reason as the fixture scanner:
+several entries are legitimate, and a gate would train the next reader to
+silence it rather than read it.
+
+Usage:  python scripts/find-silent-incapacity.py [--roots=apps]
+"""
+
+import pathlib
+import re
+import sys
+
+from rustlex import live_code, string_literals, strip_noise
+
+# Anything that reaches outside the process.
+CAPABILITY = re.compile(
+    r"std::fs\b|std::net\b|std::process::Command|safeio::|FileDialog|list_directory"
+    r"|std::env::var|read_dir\b"
+)
+
+# Refusal vocabulary, matched inside string literals only.
+# Deliberately wide. The first draft matched only "cannot" and a few cousins,
+# and reported `apps/diskanalyzer` and `apps/pdfviewer` as silent -- both of
+# which admit clearly, in words it had not thought of ("Could not scan: {err}",
+# "none can be opened"). A vocabulary list that is narrower than the language
+# produces false accusations, and a tool that accuses honest code is a tool the
+# next reader learns to skip.
+ADMITS = re.compile(
+    r"cannot|can't|could not|couldn't|none can|no way to"
+    # `sound`, `camera`, `notification` and their kin were tried here as nouns
+    # and taken out again. "No camera" cleared `apps/camera`, and "No camera"
+    # is not an admission -- it is a label, and it reads as *you have no camera
+    # plugged in*, a statement about the user's hardware, when the truth is
+    # that nothing in the program can look. Widening vocabulary is how this
+    # check stops accusing honest code, and it is also how it starts excusing
+    # the exact defect it was written to find. Measure what a widening clears
+    # and read the difference before keeping it.
+    r"|no .{0,30}(access|source|installed|available|configured|reader|driver|service)"
+    r"|nothing (was|is|has|here|can|will)|not (saved|kept|yet|able|connected|implemented|examined)"
+    r"|unavailable|unimplemented|under construction|has no |never (fetched|examined|contacted|sent)",
+    re.I,
+)
+
+def main():
+    roots = ["apps"]
+    for arg in sys.argv[1:]:
+        if arg.startswith("--roots="):
+            roots = [r for r in arg.split("=", 1)[1].split(",") if r]
+        else:
+            print(f"unknown argument: {arg}", file=sys.stderr)
+            return 2
+
+    silent, capable, admitting = [], 0, 0
+    for root in roots:
+        base = pathlib.Path(root)
+        if not base.is_dir():
+            print(f"no such directory: {root}", file=sys.stderr)
+            return 2
+        for crate in sorted(p for p in base.iterdir() if (p / "src").is_dir()):
+            # Test code is not the shipping program, so it goes -- via
+            # `rustlex.live_code`, per file. This used to concatenate the whole
+            # crate and truncate at the first `#[cfg(test)] mod tests` in the
+            # join, discarding every file that sorted after it. `apps/editor`
+            # is four files; `highlight.rs` sorts first, so `main.rs` -- the one
+            # holding the file dialog -- was thrown away and the crate was
+            # reported as reaching nothing outside the process. **The door
+            # model of this entire sweep appeared on the list of programs that
+            # have no door.**
+            prod = "".join(
+                live_code(f.read_text(encoding="utf-8", errors="replace"))[0]
+                for f in sorted((crate / "src").rglob("*.rs"))
+            )
+
+            # Looked for in CODE, not in the raw source. A crate whose
+            # module doc says it "contains no reference to `std::fs`" was
+            # counted as having std::fs -- and since a capable crate is
+            # skipped, the sentence denying the capability was what excused
+            # the crate from the check. `apps/undelete` is the case.
+            if CAPABILITY.search(strip_noise(prod)):
+                capable += 1
+                continue
+
+            # Literals come from the lexer, not from `re.findall('"(...)"')`.
+            # The naive version failed toward silence: one quotation mark in a
+            # `//` comment pairs with the next one in code, and the source
+            # between comes back as a "literal", so any comment containing the
+            # word "cannot" made a crate that admits nothing look like one that
+            # does -- and it was skipped. Nobody goes looking for what a tool
+            # did not print.
+            said = [s for s in string_literals(prod) if ADMITS.search(s)]
+            if said:
+                admitting += 1
+                continue
+
+            # How loudly does it talk about doing things it cannot do?
+            verbs = len(
+                re.findall(
+                    r"\b(save|load|open|export|import|scan|connect|record|capture|sync|fetch)\b",
+                    prod,
+                    re.I,
+                )
+            )
+            silent.append((crate.name, verbs))
+
+    silent.sort(key=lambda kv: -kv[1])
+    print(
+        f"{len(silent)} crate(s) reach nothing outside the process and say so nowhere\n"
+        f"({capable} have a capability, {admitting} are incapable and admit it)\n"
+    )
+    print("  the second column counts verbs like save/open/scan/connect in")
+    print("  production code -- a rough measure of how much the program claims")
+    print("  to do, and therefore how loudly its silence reads\n")
+    for name, verbs in silent:
+        print(f"    {name:<20} {verbs}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

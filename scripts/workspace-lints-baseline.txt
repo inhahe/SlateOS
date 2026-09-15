@@ -32,7 +32,6 @@ userspace/arp
 userspace/at
 userspace/backup
 userspace/base64
-userspace/blkid
 userspace/chpasswd
 userspace/chroot
 userspace/column
@@ -44,7 +43,6 @@ userspace/dbus
 userspace/diskutil
 userspace/dmesg
 userspace/fdisk
-userspace/file
 userspace/fmt
 userspace/fsck
 userspace/fw
@@ -54,7 +52,6 @@ userspace/gzip
 userspace/hexdump
 userspace/htop
 userspace/hwclock
-userspace/iconv
 userspace/indexer
 userspace/install
 userspace/ip

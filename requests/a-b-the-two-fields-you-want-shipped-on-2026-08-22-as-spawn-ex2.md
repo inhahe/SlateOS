@@ -1,6 +1,6 @@
 # A → B: nothing to build — the two fields shipped on 2026-08-22 as `SYS_PROCESS_SPAWN_EX2`, and you mirrored them
 
-**Status:** NO ACTION REQUESTED - the filer says so in this file: the title is 'nothing to build'.
+**Status:** ✅ CLOSED (no action was requested) - the filer says so in this file: the title is 'nothing to build'.
 
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-30 · Answers
 `requests/b-a-per-service-capabilities-are-where-inputdevice-goes-and-here-is-the-spawn-ex-shape.md`

@@ -2167,6 +2167,19 @@ use guitk::text;
 /// Font size used for every detail-table header and cell.
 const TABLE_FONT: f32 = 11.0;
 
+/// What the window says instead of a transfer.
+///
+/// Three lines. The third exists because an empty torrent list, or a torrent
+/// sitting at 0%, is read as *the swarm has nobody in it* -- an unpopular
+/// torrent, a dead tracker, someone else's problem. It is not: nothing here
+/// has contacted a tracker or a peer, and nothing here can write a file even
+/// if it had.
+const CANNOT_TRANSFER_LINES: [&str; 3] = [
+    "This client cannot download or upload anything.",
+    "It has no network access and no way to write a file, so no tracker or peer has been contacted.",
+    "A torrent showing no progress is not an empty swarm -- nothing was ever asked for.",
+];
+
 /// Columns of the Peers detail table.
 const PEER_COLUMNS: &[Column] = &[
     Column {
@@ -2464,6 +2477,7 @@ impl TorrentApp {
     /// overlap unevenly on purpose, so `piece_availability` produces genuinely
     /// different counts and the picker's rarest-first choice is exercised
     /// rather than being a tie broken by index.
+    #[cfg(test)]
     fn attach_simulated_peers(&mut self, id: u32) {
         let Some(torrent) = self.torrents.iter_mut().find(|t| t.id == id) else {
             return;
@@ -2536,15 +2550,27 @@ impl TorrentApp {
     /// with it is the real thing.
     fn handle_tick(&mut self) -> EventResult {
         let mut moved = false;
-        let mut needs_peers: Vec<u32> = Vec::new();
         for torrent in &mut self.torrents {
             if torrent.state != TorrentState::Downloading {
                 continue;
             }
             if torrent.peers.is_empty() {
-                // Deferred to the first tick rather than done at `add_torrent`,
-                // because that is when a real announce would have returned.
-                needs_peers.push(torrent.id);
+                // And that is where it stops. This used to call
+                // `attach_simulated_peers`, which invented a seed and two
+                // partial peers at 203.0.113.10, 198.51.100.7 and 192.0.2.44,
+                // between them holding every piece -- so the picker below
+                // always had something to pick, every piece "arrived" the
+                // instant it was requested, and the torrent ran to 100% and
+                // flipped to Seeding with a completion time.
+                //
+                // Nothing was transferred and nothing was written: this crate
+                // has no `std::net` and no `std::fs`. So the client reported a
+                // finished download of a file that exists nowhere, and then
+                // reported that it was uploading that file to other people.
+                //
+                // A finished download is acted on. It is the point at which
+                // someone stops looking for the thing, and may delete the
+                // source they got the torrent from.
                 continue;
             }
             let availability = piece_availability(&torrent.peers, torrent.pieces.total_count());
@@ -2571,10 +2597,6 @@ impl TorrentApp {
                 torrent.state = TorrentState::Seeding;
                 torrent.completed_time = Some(torrent.added_time);
             }
-            moved = true;
-        }
-        for id in needs_peers {
-            self.attach_simulated_peers(id);
             moved = true;
         }
         if moved {
@@ -2816,6 +2838,31 @@ impl TorrentApp {
     /// wins method lookup outright and the trait's is never called, silently.
     pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
+        // Drawn first so the layout below sits under it, and unconditionally:
+        // there is no state in which this client *can* transfer, so a
+        // condition here would be one that is always true and would rot the
+        // moment it stopped being.
+        for (i, line) in CANNOT_TRANSFER_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 12.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                y: 4.0 + i as f32 * 14.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 12.0 } else { 10.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
         let header_h = 48.0;
         let tab_h = 36.0;
         let status_h = 28.0;
@@ -3858,10 +3905,16 @@ impl App for TorrentApp {
 }
 
 impl TorrentApp {
-    /// The torrents the window opens on.
+    /// Two torrents to populate a list, for tests.
     ///
-    /// In a method rather than in `main` because a test cannot call `main`,
-    /// and a client that opens on an empty list looks broken rather than idle.
+    /// `#[cfg(test)]` since 2026-09-15. The reasoning in the old doc comment
+    /// was "a client that opens on an empty list looks broken rather than
+    /// idle", which is true and is the wrong fix: the answer to a list that
+    /// looks broken is to *say why it is empty*, not to fill it. Filling it
+    /// meant the shipped binary opened on a 4.2 GB "Ubuntu 24.04 LTS Desktop"
+    /// and a 350 MB "LibreOffice 7.6.4", announced against real tracker URLs,
+    /// that then began to download.
+    #[cfg(test)]
     pub fn seed_sample_torrents(&mut self) {
         // Add sample torrents for testing
         let sample_torrent = create_sample_torrent(
@@ -3898,11 +3951,13 @@ impl TorrentApp {
 }
 
 fn main() -> ExitCode {
+    // Opens empty. It used to call `seed_sample_torrents`, so every launch
+    // began with two torrents nobody had asked for, which then made progress.
     let mut app = TorrentApp::new();
-    app.seed_sample_torrents();
     app::launch("torrent", &mut app)
 }
 
+#[cfg(test)]
 fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) -> TorrentMetainfo {
     let piece_count = (size.saturating_add(piece_len).saturating_sub(1)) / piece_len;
     let pieces: Vec<[u8; 20]> = (0..piece_count)
@@ -3945,6 +4000,68 @@ fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) 
 )]
 mod tests {
     use super::*;
+
+    /// A fresh client holds nothing and finishes nothing.
+    ///
+    /// `main` called `seed_sample_torrents`, so every launch opened on a
+    /// 4.2 GB "Ubuntu 24.04 LTS Desktop" and a 350 MB "LibreOffice 7.6.4",
+    /// announced against real tracker URLs. `handle_tick` then invented three
+    /// peers holding every piece between them, so each torrent ran to 100%
+    /// and flipped to Seeding with a completion time -- a finished download of
+    /// a file that exists nowhere, followed by a claim to be uploading it.
+    ///
+    /// A finished download is acted on: it is the point at which somebody
+    /// stops looking for the thing, and may delete the source they got it
+    /// from.
+    #[test]
+    fn a_fresh_client_holds_nothing_and_a_tick_finishes_nothing() {
+        let mut app = TorrentApp::new();
+        assert!(
+            app.torrents.is_empty(),
+            "the client opened on torrents nobody asked for"
+        );
+
+        // Even given a torrent, no tick can advance it: there is no swarm to
+        // ask, and nothing here could ask one.
+        let meta = create_sample_torrent("Small", 1000, 256, "https://example/announce");
+        let id = app.add_torrent(meta, None);
+        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
+            t.state = TorrentState::Downloading;
+            t.downloaded = 0;
+        }
+        for _ in 0..50 {
+            app.handle_event(&tick());
+        }
+        let t = app.torrents.iter().find(|t| t.id == id).expect("there");
+        assert!(t.peers.is_empty(), "peers appeared from nowhere");
+        assert_eq!(t.downloaded, 0, "bytes arrived from nowhere");
+        assert_eq!(t.pieces.completed_count(), 0, "pieces arrived from nowhere");
+        assert_ne!(t.state, TorrentState::Seeding, "it claimed to be uploading");
+        assert!(t.completed_time.is_none(), "it recorded a completion");
+    }
+
+    /// And the window says why, before the user wonders about the swarm.
+    #[test]
+    fn the_window_says_it_cannot_transfer() {
+        let app = TorrentApp::new();
+        let cmds = app.render_commands(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_TRANSFER_LINES {
+            assert!(texts.contains(&line), "the window never said {line:?}");
+        }
+        assert!(
+            CANNOT_TRANSFER_LINES
+                .iter()
+                .any(|l| l.contains("not an empty swarm")),
+            "nothing forecloses reading no progress as an unpopular torrent",
+        );
+    }
 
     // ------------------------------------------------------------------
     // Wiring
@@ -4006,16 +4123,22 @@ mod tests {
             .map_or(0, |t| t.pieces.completed_count());
         assert!(app.tick_interval().is_some(), "a download needs a clock");
 
-        // The first tick fetches the swarm -- what a tracker announce would
-        // have returned -- and the second takes a piece from it.
-        app.handle_event(&tick());
+        // The swarm is attached here rather than by the first tick. Until
+        // 2026-09-15 `handle_tick` called `attach_simulated_peers` itself, so
+        // a shipped client invented three peers and ran every torrent to 100%.
+        // What is still worth testing is the picker and the accounting, which
+        // are real; what is not is the swarm arriving out of nowhere.
+        app.attach_simulated_peers(id);
         assert!(
             app.torrents
                 .iter()
                 .find(|t| t.id == id)
                 .is_some_and(|t| !t.peers.is_empty()),
-            "the first tick should have found peers"
+            "the fixture attached no peers"
         );
+
+        // One tick, one piece. It used to take two, because the first tick
+        // was the one that invented the swarm.
         app.handle_event(&tick());
         let after = app
             .torrents
@@ -4036,6 +4159,7 @@ mod tests {
             t.state = TorrentState::Downloading;
             t.downloaded = 0;
         }
+        app.attach_simulated_peers(id);
 
         for _ in 0..200 {
             if app
@@ -4117,6 +4241,7 @@ mod tests {
         if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
             t.state = TorrentState::Downloading;
         }
+        app.attach_simulated_peers(id);
         app.handle_event(&tick());
 
         let t = app.torrents.iter().find(|t| t.id == id).expect("there");

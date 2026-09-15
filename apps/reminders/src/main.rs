@@ -66,6 +66,21 @@ use guitk::text;
 // Layout constants
 // ============================================================================
 
+/// What the window says before any task exists.
+///
+/// Three lines, and the third is the one this app cannot do without. Once the
+/// invented tasks are gone an empty list reads as **"you have nothing due"**,
+/// which is a statement about the user's commitments -- and a reminders app
+/// with nowhere to store a task is in no position to make it. Worse, it is the
+/// `apps/weather` alert shape: a list that has shown you something teaches you
+/// that it would show you something, and its silence tomorrow reads as an
+/// all-clear.
+const NO_TASKS_LINES: [&str; 3] = [
+    "No reminders.",
+    "This app opened with five tasks until 2026-09-15, one of them overdue. Nobody had been given any of them.",
+    "It has no filesystem access, so nothing is kept between runs -- an empty list here does not mean nothing is due.",
+];
+
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -1922,6 +1937,32 @@ impl RemindersApp {
             corner_radii: CornerRadii::ZERO,
         });
 
+        // After the background, or it would be painted over. Keyed on the
+        // store being empty so it retires itself at the first real task.
+        if self.store.tasks.is_empty() {
+            for (i, line) in NO_TASKS_LINES.iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: 8.0,
+                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                    y: 2.0 + i as f32 * 12.0,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 11.0 } else { 9.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(self.width - 16.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+
         // Notification banner (if any active notifications)
         let notification_offset = self.render_notifications(&mut cmds);
 
@@ -3139,6 +3180,26 @@ impl RemindersApp {
 // Sample data
 // ============================================================================
 
+/// Five tasks with due dates, for tests.
+///
+/// `#[cfg(test)]` since 2026-09-15. `main` called it, so the window opened on
+/// a high-priority "Review quarterly report" **two days overdue**, and four
+/// more. A reminders app opening on an overdue task is a claim that the user
+/// has missed a commitment.
+///
+/// The comment that stood over the call is worth keeping, because it is
+/// careful and it defends the wrong thing:
+///
+/// > Until there is a store on disk this is what there is to show, and the
+/// > dates are all relative to `now`, so "overdue" and "due today" are true
+/// > statements about the clock rather than about May 2026.
+///
+/// That is correct. The dates were not stale, and somebody checked. But
+/// "overdue" being true about the clock does not make "you have an overdue
+/// quarterly report" true about the user. **The checkable half was verified
+/// and the half that mattered was not** -- and verifying the checkable half is
+/// exactly what makes the whole look examined.
+#[cfg(test)]
 fn sample_tasks(store: &mut TaskStore, now: DateTime) {
     let today = now.date;
 
@@ -3423,12 +3484,9 @@ fn main() -> ExitCode {
     });
     let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, now);
 
-    // Until there is a store on disk this is what there is to show, and the
-    // dates are all relative to `now`, so "overdue" and "due today" are true
-    // statements about the clock rather than about May 2026.
-    sample_tasks(&mut app.store, now);
-    app.selected_task_id = app.current_tasks().first().map(|t| t.id);
-    app.check_notifications();
+    // Opens empty. It used to call `sample_tasks`, and then
+    // `check_notifications` over the result -- so the app raised notices about
+    // deadlines nobody had.
 
     app::launch("reminders", &mut app)
 }
@@ -3775,6 +3833,46 @@ mod tests {
         assert!((app.height - 1024.0).abs() < f32::EPSILON);
     }
     use super::*;
+
+    /// A fresh window holds no obligations, and says the silence means nothing.
+    ///
+    /// `main` called `sample_tasks`, so the window opened on five tasks, one
+    /// of them a high-priority "Review quarterly report" **two days overdue**,
+    /// and then ran `check_notifications` over them. A reminders app opening
+    /// on an overdue task is a claim that the user has missed a commitment.
+    ///
+    /// The third banner line is the one this app cannot do without. Once the
+    /// invented tasks are gone, an empty list reads as "you have nothing due"
+    /// -- a statement about the user's commitments, from a program with
+    /// nowhere to store a task. That is the `apps/weather` alert shape: a list
+    /// that has shown you something teaches you that it would show you
+    /// something, and its silence tomorrow reads as an all-clear.
+    #[test]
+    fn a_fresh_window_holds_no_tasks_and_says_the_silence_means_nothing() {
+        let app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        assert!(app.store.tasks.is_empty(), "tasks appeared from nowhere");
+
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_TASKS_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NO_TASKS_LINES
+                .iter()
+                .any(|l| l.contains("does not mean nothing is due")),
+            "nothing forecloses reading the empty list as an all-clear",
+        );
+    }
 
     fn make_now() -> DateTime {
         DateTime::new(

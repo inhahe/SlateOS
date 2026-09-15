@@ -84,6 +84,244 @@ terminator before comparing — and the formatter has to emit the
 and context output alike. Upstream diffutils carries a flag per side for exactly
 this.
 
+## TD-B-AUDITD-LOGGED-A-DAEMON-START-THAT-NEVER-HAPPENED — 2026-09-15 — FIXED by refusing
+
+**In short:** `auditd` wrote `DaemonStart … res=success` into the audit log and
+returned 0, while the process exited immediately — there is no event loop and
+no fork. The messages on stdout were honest about it; the log was not.
+
+**The asymmetry is the defect.** stdout said *"auditd: would fork to background
+(simulated)"* and *"daemon event loop would run here"* — both true, both
+subjunctive, and both read once by whoever ran the command. The audit log said
+a daemon started successfully, and an audit log is read **later**, by someone
+reconstructing what happened, whose whole reason for consulting it is that it
+can be trusted without corroboration. The terminal told the truth and the
+durable record did not.
+
+Returning 0 compounded it: an init script would have counted the service as up.
+
+**The finding inside the finding.** Removing the two fabricated writes left
+`write_audit_event` with no callers at all. **Those two events were the only
+thing this program had ever written to the audit log.** Until today its sole
+output was a record of something that did not occur — and an audit log whose
+only entry is false is worse than an empty one, because an empty one is
+obviously empty.
+
+`write_audit_event` is kept with `#[allow(dead_code)]` and that explanation,
+the way `gdb` keeps its inferior-control helpers while there is no `ptrace`:
+it is the writer a real event source will need, and its record format is the
+part worth preserving.
+
+**How it was found:** by grepping the *shape* after fixing `nsenter` —
+`For simulation|in real implementation, this would` across `userspace/*/src/`.
+Three hits, two of them real (`unshare`, `audit`), one of them my own comment
+quoting the original. Neither `unshare` nor `audit` was on the
+advertised-but-unread ranking, because in both the fields **are** read — by
+the simulation.
+
+### The sweep was then WIDENED, because three hits was a fact about the query
+
+That first grep matched two exact phrasings. Widening it to
+`simulat|in a real (daemon|implementation)|would (fork|run here|be done|actually)`
+matches **62 files**, not three — so "three hits" described what I asked, not
+what is there. (Lane A's rule, recorded in design-decisions §1022: a negative
+about a searchable corpus is a search, not an inference.)
+
+62 mentions are mostly benign, so the population that matters is the
+intersection with a real side effect — `Command::new`, `fs::remove_*`,
+`fs::write`, `fs::rename`, `execv`. Ranked by that, and **checked rather than
+assumed**, the security-critical head of the list came back clean:
+
+| checked | verdict |
+|---|---|
+| `sudo` | **already fixed.** Calls `authlib::identity::become_user` before spawning. Its own comment records the defect I was reconstructing: *"Until now sudo authorised the command … and then ran it as the caller."* My `setuid` grep missed it because the call goes through `authlib`. |
+| `su` | same shared helper, same ordering |
+| `authlib::identity::become_user` | correct, and documents its own remaining gap (supplementary groups from `userdb`) |
+| `firejail` | its "we simulate it" is `create_symlink` portability in a symlink-installer, not sandboxing |
+
+So the shape is real and rarer than the raw grep count suggests. What separates
+a defect from a benign mention is not the word "simulate" — it is whether a
+**consequential action happens anyway**, which no text search can answer.
+
+**Where it lives:** `userspace/audit/src/main.rs`, the `auditd` start path.
+
+---
+
+## TD-B-UNSHARE-RAN-THE-COMMAND-UNISOLATED-AND-SAID-IT-HAD-NOT — 2026-09-15 — FIXED by refusing
+
+**In short:** `unshare` never called `unshare(2)`. It printed *"unshare:
+mapping current user to root in user namespace"* — **present tense, about
+something it had not done** — and then ran the command with no namespaces
+created at all.
+
+**The sibling of `TD-B-NSENTER-RAN-THE-COMMAND-IN-THE-WRONG-NAMESPACE`, found
+by grepping the shape rather than waiting for it.** `nsenter` was fixed first;
+one `grep` for `real implementation|simulat|Command::new` over the neighbouring
+crate found this within a minute. Two tools, one defect, and the second would
+not have been looked at on its own — it was not on the advertised-but-unread
+ranking, because its fields *are* read. They are read by the simulation.
+
+**Worse than `nsenter` in one respect.** `nsenter` said nothing and ran the
+command elsewhere; this one **asserted the action** before running the command
+without it. A false statement in the present tense is not a stale comment — it
+is output, and the user read it as confirmation.
+
+**Running unisolated is the harm, not a lesser version of it.** `unshare` is
+reached for exactly when an operation is risky enough to want containing:
+`unshare -m -- <mount juggling>` expects private mounts, and without a new
+mount namespace they are the host's. The command runs, succeeds, and changes
+the wrong system.
+
+**Refused, not wired — checked rather than assumed.** `posix::unshare`
+validates its flag set and its `CAP_SYS_ADMIN` gate and then returns `ENOSYS`.
+Its `unshare(0) -> 0` is **not** an exception and was examined before being
+dismissed: Linux defines the zero-flag call as a successful no-op, and
+util-linux uses it to probe for the syscall's existence.
+
+The execution path is deleted rather than guarded — `Command::new` no longer
+appears in the file. The module doc and `--help` say what happens now.
+
+**Ends the day a namespace subsystem lands**, at which point both this and the
+`nsenter` refusal become real `unshare(2)`/`setns(2)` calls.
+
+**Where it lives:** `userspace/unshare/src/main.rs`.
+
+---
+
+## TD-B-NSENTER-RAN-THE-COMMAND-IN-THE-WRONG-NAMESPACE — 2026-09-15 — FIXED by refusing
+
+**In short:** `nsenter` checked that the target's namespace files existed, did
+**not** call `setns`, and then **ran the command anyway** — in the caller's own
+namespaces, reporting nothing unusual. `nsenter -t <container> -m -- rm -rf
+/data` deleted the host's `/data`.
+
+**Why this was worse than any inert flag in this tree.** Everywhere else, an
+unread field meant a requested behaviour did not happen: `patch -l` matched
+strictly, `tee -i` died on `^C`, `lscpu -p` printed the wrong table. Here the
+command was not skipped — it was **performed, in the wrong place**. The user
+saw it run normally and had no way to tell where.
+
+Three comments in the file said so out loud — *"in real implementation, this
+would use setns(2)"*, *"For simulation, just verify accessibility"*, *"Execute
+command (in real implementation, this would happen after setns)"*. All three
+were true, none reached the user, and the program between them did the
+dangerous thing. A truthful comment beside a false behaviour is the shape
+design-decisions §1022 catalogues.
+
+**Fixed by refusing, not by wiring.** There is nothing to wire to:
+`posix::setns` validates its arguments and its `CAP_SYS_ADMIN` gate and then
+returns `ENOSYS` — "namespace subsystem not implemented". This is not the
+`curl`/`tee` pattern where the capability existed and the call site was
+missing; the capability genuinely is absent. `nsenter` now reports that and
+exits 1, and the execution path is **deleted** rather than guarded —
+`Command::new` no longer appears in the file, so it cannot run a command by
+any route.
+
+**This entry ends the day a namespace subsystem lands.** At that point `setns`
+stops returning `ENOSYS`, and the refusal should become a real `setns` call in
+the loop that currently only checks the files.
+
+**Also moot until then:** `-W/--wdns` (`wd_fd`), `-F/--no-fork` and
+`--preserve-credentials` are parsed and read by nothing. They describe what to
+do *after* entering a namespace, so there is nothing for them to modify while
+entry is refused. Listed so the next reader does not count them as separate
+defects.
+
+**Where it lives:** `userspace/nsenter/src/main.rs`.
+
+---
+
+## TD-B-HARDLINK-MERGES-ON-CONTENT-ALONE-AND-ALL-FIVE-RESPECT-FLAGS-ARE-INERT — 2026-09-15 — FIXED same day
+
+**In short:** `hardlink` decides two files are the same from their **contents
+only**. Every flag that exists to narrow that — `-f/--respect-name`,
+`-t/--respect-time`, `-p/--respect-perm`, `-o/--respect-owner`,
+`-x/--respect-xattr` — is parsed, stored, advertised, and read by nothing. A
+user who passes `-o` to avoid merging across owners gets the merge anyway.
+
+**Why it matters more than an ordinary inert flag.** Linking is destructive and
+collapses metadata. Two files with identical bytes but different modes become
+one inode with the *master's* mode, so `hardlink -p` failing to respect
+permissions can turn a `0600` file into a `0644` one — a privacy regression
+the user explicitly asked to prevent. `-o` does the same for ownership.
+
+**What implementing them needs.** `FileInfo` carries the path and size;
+deciding these flags needs `st_mode`, `st_uid`, `st_gid`, `st_mtime` and the
+xattr set captured at scan time, then compared before a group is linked rather
+than after. That is a change to what the scan records, not a condition bolted
+onto the link step — the grouping happens by content hash long before
+`link_over` is reached, so filtering at the link is too late to be cheap and
+too early to be correct.
+
+**Not fixed in the same change as the data-loss repair**, deliberately: that
+commit's claim is "a failed link no longer destroys the duplicate", and
+widening it to "and the right files are chosen" would make one commit answer
+two questions. The destructive window was the urgent half.
+
+**FIXED in the commit after it.** `FileInfo` now records real `mtime`, `mode`,
+`uid` and `gid` as `Option`s, and `may_link` consults them before any pair is
+merged. The four `_`-prefixed fields it replaces were hardcoded to `0` with
+the comment "Platform-dependent, simulated" -- **and that is why wiring the
+flags to them would have been worse than leaving them inert.** A zero standing
+in for a real mode compares equal to every other zero, so every pair would have
+passed every check and the flags would have looked implemented while preventing
+nothing.
+
+So an attribute this build cannot read is an `Err`, never a match:
+`--respect-perm` on a platform with no mode bits refuses the merge rather than
+permitting it. `--respect-xattr` always refuses, because there is no
+`getxattr` to call. `--respect-name` compares the BASENAME, not the path --
+deduplicating identical files across directories is the point of the tool.
+
+**Where it lives:** `userspace/hardlink/src/main.rs` — `HardlinkOpts`'s five
+`respect_*` fields, `files_identical`, and the grouping in `deduplicate`.
+
+---
+
+## TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED — 2026-09-15 — OPEN
+
+**In short:** `shred --random-source=FILE` now fails before touching the file
+instead of silently using a different source of random bytes. Implementing it
+properly needs a decision this entry records rather than makes.
+
+**What was wrong.** `random_source` was parsed, stored, defaulted to
+`"/dev/urandom"`, advertised as *"Source of random bytes (default
+/dev/urandom)"* — and read by nothing. Two false statements in one option:
+
+* the flag did nothing;
+* **the advertised default was also wrong.** Nothing in the program opens
+  `/dev/urandom`. `generate_shred_pattern` uses an internal `XorShift64`,
+  deliberately, so that a shred pass does not depend on a device node
+  existing.
+
+**Why refuse rather than ignore, when elsewhere this tree accepts an inert
+option.** Because shred destroys the file. A user who asks for a particular
+source of random bytes and silently gets a different one has already lost the
+data by the time they could notice. Failing before the first pass is the only
+outcome that leaves them a choice. Verified: the refusal exits 1 and the file
+is byte-intact afterwards.
+
+**What implementing it needs, and why it is not obvious.** The pass scheme here
+is bespoke — even passes are random, odd passes are the **bitwise complement of
+the previous pass**, reproduced by re-seeding the PRNG identically. A file
+source breaks that reconstruction:
+
+* re-reading the previous pass's bytes needs a seek, and the obvious sources
+  (`/dev/urandom`, a pipe) are not seekable;
+* buffering a whole pass to complement it later is unbounded in the file size;
+* using the file to *seed* the PRNG instead would preserve the scheme and
+  **would not be what GNU does** — GNU consumes the file as the byte stream.
+  Inventing that divergence silently is worse than refusing.
+
+So the choice is between changing the pass scheme and buffering per chunk, and
+that is a design decision with a security dimension. It should be made
+deliberately, not as a side effect of clearing an unread field.
+
+**Where it lives:** `userspace/pv/src/main.rs` — `parse_shred_args`'s
+`--random-source=` arm, `generate_shred_pattern`, `XorShift64`.
+
+---
+
 ## TD-B-LSCPU-HAS-NO-PER-CPU-TABLE-SO-FIVE-OPTIONS-REFUSE — 2026-09-15 — OPEN
 
 **In short:** `lscpu -e`, `-p`, `--hex`, `--online` and `--offline` now refuse
@@ -7104,7 +7342,7 @@ work rather than as a special case for `bind`. Until then the divergence is
 confined to listing *order* under non-`C` collations; every individual line is
 correct.
 
-### TD-OILS-WAIT-N-JOB-STATUS-TEST-IS-FLAKY-UNDER-PARALLEL-EXECUTION. `wait_n_ignores_a_job_whose_status_was_already_reported` fails about one run in three — 2026-08-08 — OPEN
+### TD-OILS-WAIT-N-JOB-STATUS-TEST-IS-FLAKY-UNDER-PARALLEL-EXECUTION. `wait_n_ignores_a_job_whose_status_was_already_reported` fails about one run in three — 2026-08-08 — FIXED 2026-09-14
 
 **Where:** the `jobs`-listing assertion in
 `interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported`
@@ -7207,6 +7445,35 @@ is a **different** fault from this entry (a corpus case's `wait -n`, not this
 lib test's `jobs` listing) and, unlike the compgen case, is *not* a thin margin
 — so do not merge the three. What they share is only the discipline: keep the
 saved `corpus-failures/` report, and record which loads failed to reproduce.
+
+**FIXED 2026-09-14 in `bf4a55387`, and it was not a test defect.** This entry
+spent five weeks filed as a flaky *test*; the chain traced on 2026-08-08 above
+is correct in every link and stops one step short of the fault.
+
+`poll_jobs` set `exit_seen` INSIDE the branch guarded on `child` still being
+`Some` — and that branch's own first act is to take `child`. So a poll landing
+between the body finishing and `JOB_EXIT_NOTICE_GRACE` (20 ms) elapsing reaped
+the job with `exit_seen` left false, and no later poll could ever set it,
+because the guard it needs can never be true again. `exit_seen` was a property
+of WHICH POLL happened to observe the exit rather than a property of the job.
+
+The empty listing follows: `drain_jobs` reads `exit_seen` as "did the shell
+already know?", so a job with it false counts as one this `wait` waited FOR and
+is marked notified — before `builtin_wait`'s pass that spares `$!`, which only
+ever sets `notified = true` and so cannot rescue it. The next `jobs` sweeps it
+and prints nothing.
+
+**Load was never the variable.** It only bought more attempts at a 20 ms
+window: 0 failures in 250 isolated runs, 0 in a full `oils` suite, 0 in three
+shuffled orders, and 1 in 25 with a dozen other test binaries competing. That
+is why "passes alone, fails under `--workspace`" read as a test-harness problem
+for five weeks. A product bug that needs a 20 ms window looks exactly like a
+flaky test, and the way out was to force the window rather than to keep
+sampling it — `a_poll_before_the_grace_does_not_lose_the_exit_forever` does
+that and fails 100% without the fix.
+
+Reported twice by lane C, whose second report added the detail that made it
+worth re-opening rather than re-running.
 
 ### TD-OILS-THE-PIPELINE-STAGE-ORDER-TEST-ASSERTS-A-PREFERENCE-AS-A-GUARANTEE — 2026-08-08 — OPEN (accepted)
 
@@ -149528,6 +149795,873 @@ The lesson repeats: **production fixture data is load-bearing for tests nobody
 recorded as depending on it**, and the tests that break loudest are the ones
 that never mentioned the fixture at all.
 
+## TD-C-A-RECORDER-THAT-RAN-A-CLOCK-OVER-NO-AUDIO -- FIXED 2026-09-15
+
+**In short:** `apps/soundrecorder` showed a recording timer counting up, a
+count of automatic saves, and the word "Recording", while capturing no sound
+at all and writing nothing to disk. Someone recording an interview would have
+watched all three, pressed Stop, and had nothing.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+`process_samples` is the door audio comes in through. **Nothing in production
+calls it** -- this crate has no audio device access, no `std::fs`, and no
+syscall that could find a capture device -- so the sample buffer stayed empty
+for the whole of every take. Everything around it ran anyway:
+
+| what the window showed | what was true |
+|---|---|
+| a clock climbing through 00:03:47 | `tick` advanced a timer that no audio fed |
+| an auto-save count going up | `check_auto_save` fired on schedule and wrote nothing |
+| the state "Recording" | nothing was being recorded |
+| a device menu with three microphones | `mock_devices()`, enumerated from nothing |
+| a time-remaining countdown of `-01:26:48` | 1 GB of free space that nothing measured, divided by the bitrate |
+
+**This is the worst finding of the sweep on the axis that matters, and it is
+not close.** Every other fabrication here misreports something that still
+exists to be checked: a wrong speed can be re-measured, a wrong partition list
+can be re-read, a wrong scan can be re-run. **This one destroys an
+unrepeatable event.** And it destroys it while displaying the specific
+reassurance a careful person would look for -- an auto-save count is what you
+check *because* you are worried about losing the take.
+
+**The one honest signal on screen was the flat VU meter**, and a flat VU meter
+is indistinguishable from a quiet room. That is worth sitting with: the
+program did have a true indicator, and it was the one no user would read as an
+error.
+
+**The fix is a refusal at the start of the take**, not a warning during it. A
+take that begins and then reports trouble has already cost the user the thing
+they were recording. Because `tick` and `check_auto_save` are both guarded on
+the `Recording` state, refusing to enter it stops the clock and the save
+counter too; the test drives a minute of ticks and asserts both stay at zero.
+
+**The second fabrication in the same file is the time-remaining countdown.**
+`RecordingTimer::available_bytes` was a `u64` initialised to `1_000_000_000`.
+A `u64` has no way to say "unmeasured", so the only answer it could give was a
+wrong one. It is `Option<u64>` now and the field reads `--:--:--`. Deliberately
+**not** `00:00:00`, which says the disk is about to fill and the take is about
+to stop, and **not** an omitted field, which is read as however much room you
+like. The countdown also drops its leading minus when unknown, because
+`-​--:--:--` reads as a negative duration rather than an absent one.
+
+**The banner says "This is not a missing microphone -- this program has no way
+to open a capture device at all."** The first line on its own reads as a
+hardware fault and sends the user hunting for an unplugged cable. The
+distinction between *this machine has no microphone* and *this program cannot
+look for one* is the whole content of the fix, so it has to be on screen.
+
+**A third defect surfaced during the fix, and it was mine:** `blocked_reason`
+was set on a refused press and rendered by nothing, caught by
+`check-fields-written-never-read`. Third time in one day that gate found a
+field of mine that production writes and nothing draws. The fix is the one
+`netscan`'s Send button had taught an hour earlier -- **a press that changes
+nothing visible reads as a broken button** -- so the reason is drawn under the
+transport even though the banner above already explains the situation.
+
+13 of 133 tests rested on the invented device list and moved to a
+`with_mock_input()` fixture.
+
+
+## TD-C-A-DEVICE-MANAGER-THAT-INVENTED-THE-MACHINE -- FIXED 2026-09-15
+
+**In short:** `apps/devicemanager` listed the computer's hardware -- graphics
+card, IRQ numbers, memory ranges, driver versions and dates -- and had no way
+to look at any of it. Every device it showed was marked Working.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+The crate has no `/sys` reader, no `std::fs` and no syscall that could
+enumerate a bus. `sample_devices()` supplied the tree: a Virtio GPU at IRQ 11
+with an MMIO range of `0xFD000000`-`0xFDFFFFFF`, driver `virtio-gpu` version
+`1.2.0` dated `2026-04-01`, and several more, each with a hardware ID, a
+vendor, a status and a driver date. `sample_events()` supplied a matching
+event history.
+
+**What makes a device manager a uniquely bad host for this is who opens one.**
+It is where somebody goes *when hardware is not working*. The thing they came
+to find is precisely the device that is missing, faulted, or claimed by the
+wrong driver -- and **an invented inventory cannot be missing anything**. Every
+device in it was Working. So the program answered the one question it exists
+to answer, wrongly, for the reader least able to discount the answer.
+
+**Six acts it could not perform.** Scan (documented as "Scan for hardware
+changes") recomputed the tree from a list nothing changes, and reported the
+non-search by the strongest means available: leaving the list exactly as it
+was, so the user concluded nothing had changed. Enable and Disable flipped a
+flag in this process. **Uninstall is the worst**: somebody troubleshooting
+removes a driver, sees it gone, and reboots expecting the system to install a
+fresh one -- nothing was removed, so nothing is reinstalled, and they have now
+*eliminated* the real fault from their search. Export ended with
+`let _report = self.export_report();` and a comment saying a real app would
+save it: a button that discarded its own output in silence.
+
+**Export now builds the report anyway and says how many bytes it would have
+written.** That is the difference between "cannot write a file" and "nothing
+happened", and the report's own field sanitiser -- which stops a
+hardware-supplied string from redrawing the table -- stays exercised on the
+production path rather than only from tests.
+
+**The refusals in Enable, Disable and Uninstall are written out even though
+nothing can currently reach them**, because `selected_device()` has nothing to
+select. An empty list is a reason, not a safeguard, and it stops being empty
+the day a real enumerator lands.
+
+**The banner is keyed on the device list being empty, not on a constant.** It
+disappears by itself when something fills the list, rather than becoming a
+stale claim of its own -- which is the failure mode three descriptions in
+`apps/benchmark` hit earlier the same day.
+
+**When a real producer arrives it is `/sys/devices`**, the same source
+`sysinfo` reads since design-decisions §850. Lane A has
+`block/<name>/{sector_count,sector_size,read_only}` built and pending a green
+boot.
+
+**51 of 137 tests rested on the invented inventory** -- the tenth application
+in a row. Most were about the tree, the search filter, the properties tabs,
+resource conflicts and the report, all of which need devices rather than
+specifically invented ones, and moved to a `with_sample_devices()` fixture.
+Three asserted the fabricated acts, including `test_state_default`, which
+asserted that a freshly opened manager already knew about hardware it had
+never looked for.
+
+## TD-C-FOUR-MORE-PROGRAMS-THAT-REPORTED-WHAT-THEY-COULD-NOT-SEE -- FIXED 2026-09-15
+
+**In short:** a screen recorder that filed recordings of nothing, an email
+client that opened on somebody else's inbox, a weather app that issued a
+severe-weather warning it invented, and a startup manager that listed programs
+it had never looked for. None of the four could reach the thing it described.
+
+**Date:** 2026-09-15. **Lane:** C. Applications eleven through fourteen of the
+fabrication sweep.
+
+### `apps/screenrecorder` -- the sound recorder's bug, plus a durable record
+
+`handle_tick` called `record_frame(self.frame_bytes())` every tick while
+recording. `frame_bytes` is computed from the **resolution**, not from captured
+pixels, because nothing in the crate captures pixels and nothing writes a file.
+So the frame counter and byte total climbed, the floating indicator showed
+elapsed time and a growing file size, and the recording light blinked once a
+second.
+
+**Then Stop filed a history entry** with a name, duration, frame count,
+resolution, size and a path -- `~/Videos/Recordings/recording_20260518_120000` --
+and `App::new` pre-loaded two more, so the window already opened on a 1.0 GB
+"Desktop Recording".
+
+That last step is the difference from `soundrecorder`, where the loss at least
+announced itself the moment you went looking for the audio. **Here the user is
+left with a list, with sizes, that survives the session.** They may act on it
+days later by freeing space elsewhere, or by sending someone the path.
+
+Refused at the *start* of the take rather than reported during it, for the same
+reason as the sound recorder: by the time a running take reports trouble, the
+event it was pointed at has already happened.
+
+### `apps/email` -- and the one structural difference that mattered
+
+Opened on an account for `user@gmail.com` in the name of "John Doe", an inbox
+of messages nobody had received, and a filter rule acting on them. **The
+account is the part worth singling out**: an empty inbox is at worst ambiguous,
+but a *configured account* is read as credentials being stored and a server
+having been reached -- a claim both about the user's setup and about what this
+program has been handed.
+
+The crate's own source already admitted the problem. A comment in its event
+section notes that about twenty IMAP and SMTP command builders "have nowhere to
+send a string because this tree has no network". **The protocol builders were
+honest about it and the window was not.**
+
+**This is the only one of fourteen applications where removing the fabrication
+broke no tests at all** -- 73 passed before and after. The reason is structural
+and worth keeping: **its seeding lived in `main()`, not in `new()`.** Every
+other app wired the fixture into the constructor, so every test received
+invented data without asking. Here the tests had to ask, and still can. The
+same fabrication, one call frame higher, costs nothing to remove.
+
+### `apps/weather` -- the alert is worse than the forecast, and not for the obvious reason
+
+`WeatherApp::new` filled an observation, an hourly forecast, a daily forecast,
+a saved location of "New York, NY" marked as the user's default -- a claim about
+where they are -- and this:
+
+> **Thunderstorm Watch.** Thunderstorms expected this afternoon. Stay alert.
+
+A wrong forecast is wrong for a day. But **a weather app is the only program in
+this sweep carrying a channel whose entire purpose is to make somebody change
+their plans for safety**, and a fabricated warning teaches the user that this
+app *has* such a channel. So its silence tomorrow reads as "no warnings in
+force" rather than "not connected".
+
+**The false alert is a one-day problem; the false confidence in the channel
+outlives it, and it fails in exactly the situation it was trusted for.** This is
+the sharpest case of absent-versus-empty in the whole sweep, because here the
+dangerous state is the *empty* one, and it arrives later -- when nobody is
+looking at the change that caused it. The banner says so outright: *"It cannot
+deliver severe-weather alerts either. Silence here is not an all-clear."*
+
+`current` became `Option<CurrentWeather>`. As a bare struct the only answer it
+could give was invented, and a default renders as **0 degrees and Clear** --
+not a blank, a plausible winter reading. Same defect and same fix as
+`soundrecorder`'s `available_bytes: u64` a few hours earlier. Only three
+functions read it, so threading it through as a parameter was cheaper than
+twenty-one `unwrap_or_default()`s and makes the absent case *unrepresentable*
+in the drawing code rather than merely handled.
+
+### `apps/startupmanager` -- and the class these two belong to
+
+Opened on System Tray at `/usr/bin/systray`, Network Manager at
+`/usr/sbin/networkd --daemon` and the rest, each with a path, arguments, a
+vendor, a description and an impact rating, none of it read from anything. The
+crate's only `std::` import beyond the toolkit is `process::ExitCode`.
+
+**Every entry was benign, and that is the harm rather than a mitigation of it.**
+A startup manager is an audit tool: people open it to find out what runs at
+login that they did not put there. An invented list cannot contain that thing.
+
+**Together with `devicemanager`, this names a class worth carrying forward: for
+a diagnostic tool, invented data is worse than it is for a display tool,
+because what the user is looking for is an *absence* or an *anomaly*, and
+fabricated data is neither. A wrong weather forecast is a wrong fact. A wrong
+startup list is a wrong conclusion.**
+
+Enable and Disable flipped a flag in this process. **Disable is the
+consequential half** -- somebody disables a startup entry because they do not
+want it running, often because they do not trust it -- and greying the row out
+while the program still launches at every login is `devicemanager`'s Uninstall
+again: the user marks the thing as dealt with and stops watching it.
+
+### Two process notes from these four
+
+**A banner drawn before the background is not drawn.** In `screenrecorder` I
+pushed the explanation at the top of `render_commands`, ahead of the background
+`FillRect` that would have painted over it. The only reason it was caught is
+that `test_render_produces_commands` asserts the first command is the
+background. Third render-ordering mistake of the sweep, second one a test found
+rather than me.
+
+**Fixture placement predicts the blast radius exactly.** Thirteen of fourteen
+apps wired their fixture into the constructor and broke 6 to 66 tests each;
+the one that wired it into `main` broke none. The fix is identical either way,
+so the cost is entirely in where the call sat.
+## TD-B-BLKID-HAS-NO-UDEV-OUTPUT-FORMAT -- OPEN 2026-09-15
+
+`blkid -o udev` is the one output format util-linux has that we do not. It is
+refused honestly today -- `unknown output format: udev` -- so nothing claims
+it works; this is a missing feature, not a wrong one.
+
+It is worth recording because of WHY it exists, which was measured against
+util-linux 2.39.3 in WSL rather than recalled. A real ext4 image was built
+with `mkfs.ext4 -L $(printf 'A\xff\xfeB')` -- a label that is deliberately
+not valid UTF-8 -- and the reference was asked what it prints:
+
+    $ blkid -o value -s LABEL lbl.img | xxd
+    00000000: 41ff fe42 0a                             A..B.
+
+    $ blkid -o udev lbl.img
+    ID_FS_LABEL=A__B
+    ID_FS_LABEL_ENC=A\xff\xfeB
+
+So util-linux answers the "should output be escaped?" question by **refusing
+to choose**: `LABEL` is the raw bytes, and the escaped forms live in `-o udev`
+under DIFFERENT TAG NAMES -- `ID_FS_LABEL` with unsafe bytes replaced by `_`,
+and `ID_FS_LABEL_ENC` with them hex-escaped. Both are present in the same
+output, so a consumer picks the one it can handle rather than having a policy
+imposed on it.
+
+Two further measurements, both of which our `-t` now matches and did not
+before 2026-09-15:
+
+    blkid -t LABEL=$(printf 'A\xff\xfeB')          -> matches
+    blkid -t LABEL=$(printf 'A\357\277\275...B')  -> does NOT match
+
+That is, the reference matches the RAW bytes and does not match the U+FFFD
+replacement form. Our `from_utf8_lossy` label made us do exactly the opposite
+of both -- see the commit "blkid: lossy-decoding filesystem labels merged
+distinct devices".
+
+**What implementing it looks like.** Add `OutputFormat::Udev`; emit
+`ID_FS_<TAG>` for each field, plus `ID_FS_<TAG>_ENC` for the two that can
+carry arbitrary bytes (`LABEL`, `PARTLABEL`). The `_ENC` encoder is
+util-linux's `blkid_encode_string`: pass through the safe set and emit
+`\x<hh>` for everything else. The plain form replaces each unsafe byte with
+a single `_`. Do not reuse one encoder for both -- they differ, and the
+difference is the point of having two tags.
+
+**Why it is not urgent.** `-o udev` exists for udev rules, and we have no
+udev. Nothing in the tree calls it. The blocking half -- carrying label bytes
+intact so an encoder has something faithful to encode -- is done; what is
+left is the formatting.
+
+## TD-C-FOUR-CLIENTS-FOR-SERVICES-THEY-COULD-NOT-REACH -- FIXED 2026-09-15
+
+**In short:** a remote desktop client that reported connections, a feed reader
+whose articles never came from a feed, a podcast app that marked episodes
+downloaded and counted the disk space they used, and a video player that played
+a two-hour film from a path with no file. None of the four could reach the
+thing it was a client for.
+
+**Date:** 2026-09-15. **Lane:** C. Applications fifteen through eighteen.
+
+### `apps/remotedesktop` -- and an outcome recorded before the attempt
+
+`new` called `load_sample_data`, so the window opened on profiles for machines
+nobody had configured and a session already in `SessionState::Connected`.
+Pressing Connect created a session that `handle_tick` walked through
+`Authenticating` to `Connected`.
+
+**The second fabrication is the one worth separating out, because it would be
+a defect even with a working network.** `connect_profile` wrote a history entry
+with `success: true` **at the moment Connect was pressed**, before any outcome
+was known.
+
+An outcome written at the start of an attempt is not a record of what happened;
+it is a record of what was *intended*, filed where somebody will later read it
+as what happened. A connection log exists to be consulted after the fact, by
+someone asking whether a machine was reachable last Tuesday -- and this one
+answered yes to every question it was ever asked.
+
+`advance_session_state` is `#[cfg(test)]` now. Its own doc comment already said
+"simulated for UI development", and `handle_tick` called it on every tick, so
+**the simulation was the shipping behaviour and the comment saying so was read
+only by somebody already looking at that line.**
+
+### `apps/rssreader` -- where the split fell, and which half to keep
+
+`new` called `populate_sample_data`, which built folders, feeds and articles out
+of `SAMPLE_RSS` -- a constant XML document **fed through the real parser**.
+
+The split is unusually clean and it decides the fix: **everything downstream of
+the parse was genuine, and everything upstream of it was invented.**
+`parse_feed`, the de-duplication, the article merge and the unread and starred
+counters are all real and stay.
+
+So `ingest_feed_xml` became `pub` rather than private, and deliberately **not**
+`#[cfg(test)]`. It is the door a real fetcher comes through -- the same shape as
+`speedtest`'s `record_sample` and `soundrecorder`'s `process_samples`. It has no
+caller in production, which is the honest state of the app: the parser is
+written and tested, and the thing that would hand it bytes is not built.
+Retiring it into the test build would hide that, and would make whoever writes
+the fetcher reconstruct an entry point that already exists and already works.
+
+It also advertises **F5 and Shift+F5** in its own key list as "Refresh current
+feed" and "Refresh all feeds", and nothing dispatches either. A key that is
+documented and does nothing reads as a broken key, so the banner names it.
+
+### `apps/podcast` -- two claims that fail in different places
+
+The tick called `simulate_download_tick` every frame. It moved each active item
+on by 10%, and on reaching 1.0 marked the episode `Downloaded` **and added the
+episode's file size to `used_disk_bytes`**.
+
+* **The disk figure outlives the session.** Someone checking why their storage
+  is full finds gigabytes attributed to podcasts, and deleting them frees
+  nothing.
+* **The `Downloaded` mark fails somewhere more specific.** Offline availability
+  is the entire reason anyone downloads a podcast, so a wrong mark surfaces on
+  a plane or a train -- **at the exact moment there is no connection to fall
+  back on.** That is the same structure as `weather`'s alert channel: the
+  failure is deferred to the situation the feature existed for.
+
+### `apps/videoplayer` -- and the fourth author to reach the same wrong conclusion
+
+`main` called `seeded_player`, so every launch opened on a two-hour "Sample
+Movie" at `/home/user/Videos/sample.mkv`, with chapters, external subtitles and
+a playlist. Pressing play ran the clock, advanced the chapter markers and put
+subtitles on screen on cue, over a black rectangle.
+
+**The playlist is the part that outlives the window.** An entry naming a path is
+a claim that a file is at that path, and a playlist is the kind of thing
+somebody reads later to find out what they have.
+
+Its doc comment said the sample content existed *"so the first window is not an
+empty black rectangle"*. **That is the fourth appearance of this reasoning in
+the sweep, in four different authors' words:**
+
+| app | the words |
+|---|---|
+| `videoplayer` | "so the first window is not an empty black rectangle" |
+| `torrent` | "a client that opens on an empty list looks broken rather than idle" |
+| `photomanager` | "so the first window is not an empty grid" |
+| `filesearch` | "until a real index exists this is what there is to search" |
+
+**All four were right about the symptom and wrong about the remedy.** An empty
+window does look broken. The answer is to **say why it is empty**, not to fill
+it. Four people reached the first half independently and none reached the
+second, which suggests the missing step is not obvious and is worth stating
+plainly wherever it can be seen.
+
+### The fixture-placement correlation is now exact
+
+Eighteen applications. **Sixteen wired their fixture into the constructor and
+broke between 6 and 66 tests each. Two called it from `main()` instead --
+`apps/email` and `apps/videoplayer` -- and both broke zero.**
+
+The fix is otherwise identical in all eighteen. So the cost of removing a
+fabrication is almost entirely in **where the call sat**, not in what it
+produced: a fixture in the constructor is handed to every test whether it wants
+it or not, and a fixture in `main` has to be asked for.
+
+## TD-C-WHAT-THE-FABRICATION-SWEEP-ACTUALLY-TAUGHT -- INDEX, 2026-09-15
+
+**In short:** on one day, thirty-nine application and library directories in
+lane C turned out to be telling the user things the program had no way to know.
+The individual findings are in the twelve entries above. This one is for what
+they have in common, because the per-app entries cannot carry it and the next
+person will meet the pattern before they meet any particular app.
+
+**Date:** 2026-09-15. **Lane:** C. **Status:** INDEX -- nothing here is
+outstanding work; it is the reasoning, kept where it can be found.
+
+### How to rank them
+
+Not by how much of a program is invented. **By what the program tells the user
+to believe, and by what believing it costs.** A `--help` line and a window are
+the same thing. On that axis the ordering that fell out was:
+
+1. **Acts reported but not performed, where the act is irreversible.** undelete
+   reporting files recovered, partmanager reporting a format applied,
+   devicemanager's Uninstall, mediaconvert's Completed. The false *success* is
+   worse than the false failure, every time: someone told a thing failed keeps
+   looking, and someone told it succeeded stops -- and may delete the original.
+2. **Records that outlive the session.** screenrecorder filed a history entry
+   naming a path and a size; podcast added file sizes to a disk total;
+   remotedesktop wrote `success: true` before the attempt. These are consulted
+   later, when the thing they describe is gone.
+3. **Evidence in an argument with a third party.** speedtest's 450 Mbps is
+   what somebody checks before deciding whether the connection they pay for is
+   the one they get.
+4. **Diagnostic tools.** See below -- these deserve their own rule.
+5. **Everything else.**
+
+### For a diagnostic tool, invented data is worse than for a display tool
+
+**Because what the user is looking for is an absence or an anomaly, and
+fabricated data is neither.** devicemanager and startupmanager are the same bug
+by this measure: a device manager is where somebody goes *when hardware is not
+working*, and an invented inventory cannot be missing anything. Every device in
+it was Working. A startup manager is where somebody goes to find what runs at
+login that they did not put there; every entry was a benign system component.
+
+**A wrong forecast is a wrong fact. A wrong startup list is a wrong
+conclusion.**
+
+### Absent is not empty, and the empty state is sometimes the dangerous one
+
+Removing a fabrication leaves a hole, and a hole is read as an answer. Three
+increasingly sharp forms:
+
+* **An empty list reads as "none found".** An empty partition list says the
+  machine has no disks; an empty scan says the network is quiet.
+* **For a measurement, the empty value is a specific and alarming reading.**
+  0 Mbps says the line is dead. `00:00:00` of recording space says the disk is
+  full. Hence `--:--:--` and "unknown, not zero".
+* **For an alert channel, silence is read as an all-clear -- and that failure
+  is deferred to the exact situation the feature existed for.** weather's
+  fabricated "Thunderstorm Watch" was a one-day problem; teaching the user that
+  the app *has* an alert channel outlives it. Same shape as podcast's
+  Downloaded mark, which fails on a plane, and reminders' empty list, which
+  says "nothing is due".
+
+### A fabrication is a claim about something the program cannot observe
+
+Bundled content is not a claim, and this is the distinction that stopped the
+sweep from becoming mechanical. `apps/ebook` ships three books and **keeps
+them**: a title claims nothing about a disk, the prose reads, nobody is misled.
+`apps/spreadsheet` keeps its Item/Price/Qty/Total example for the same reason.
+
+Two tests separate the cases, and both came from being wrong first:
+
+* **The path test.** A filename is a claim that a file exists. `left.rs`,
+  `sample.db`, `/music/song.flac`, `/home/user/Documents` -- all retired.
+* **The slot test.** A fixture becomes a fabrication when it occupies the slot
+  where the user's own record goes. A notebook called "Work", a card called
+  "Implement dark mode toggle", a contact called Alice Anderson, a check-in on
+  a dated day. Indistinguishable from yours a week later.
+
+### A careful fixture is harder to notice than a careless one
+
+Three of them had the *harmful* part handled correctly and the claim itself
+unexamined:
+
+| app | the care taken |
+|---|---|
+| `reminders` | due dates relative to `now`, so "overdue" stayed true as the clock moved |
+| `habits` | check-ins spread to a plausible 70% rather than a flat 100% |
+| `contacts` | `+1-555-01xx` and `example.com` -- reserved, non-routable |
+
+Every one of those identified a real hazard and handled it well. **The polish is
+what makes the data read as something that was thought about, and therefore
+meant.** Stale dates, a flat streak or a routable number would have been
+questioned sooner.
+
+### "An empty window looks broken" -- seven authors, none reaching the remedy
+
+The same reasoning, in seven different people's words: `videoplayer`'s "so the
+first window is not an empty black rectangle", `torrent`'s "a client that opens
+on an empty list looks broken rather than idle", `photomanager`'s "so the first
+window is not an empty grid", `filesearch`'s "until a real index exists this is
+what there is to search", `kanban`'s "until a store on disk exists this is what
+there is to show", `musicplayer`'s -- the sharpest -- "an empty library would
+read as a broken player rather than an unimplemented one", and `reminders`'.
+
+**All seven were right about the symptom and none reached the remedy.** An
+empty window does look broken. The answer is to **say why it is empty**, not to
+fill it. Seven people getting the first half and missing the second is not
+seven mistakes; it is one idea that does not occur to people, which is the only
+reason this section exists.
+
+### Three smaller rules, each learned by getting it wrong
+
+* **A fix that promises a capability the program does not have is the same
+  defect, pointed one step further into the future.** `finance`'s banner first
+  read "add an account and a transaction, and every figure below will be
+  yours". There is no control that adds an account. The compiler found it.
+* **A distinction can be drawn correctly at the data layer and collapsed in a
+  format string.** `diskimager`'s `PartitionTable` separated `None` from
+  `Unknown` with a doc comment explaining why it mattered; the drive panel
+  printed `partitions.len()` regardless, so an unread table read as "0
+  partitions" -- a blank drive, the one you overwrite. Lane A found it.
+* **An outcome written at the start of an attempt is not a record of what
+  happened.** `remotedesktop` wrote `success: true` the moment Connect was
+  pressed. That would be a defect with a working network.
+
+### On the tooling, and on trusting it
+
+`scripts/find-reachable-fixtures.py` asks who *calls* a builder rather than
+what it is named, which is the question that separates a fixture from a
+fabrication. It found `netscan`'s three remaining inventions hours after that
+same file was declared fixed.
+
+**And it nearly lost its best find to me.** I was assembling its EXEMPT list
+from the report by name -- `sample_rate`, `bits_per_sample`, `sample_pixel` --
+all obviously fine. `apps/magnifier` computed screen colours as
+`x*7 + y*13 % 256` and magnified the result **for someone who had opened a
+magnifier because they cannot check the screen by looking.** It was the most
+consequential finding of the day and it sat in the report looking exactly like
+the false positives beside it. The caution is now in the file, beside the list.
+
+Two render-invariant tests caught banners I added -- `magnifier`'s containment
+pass and `contacts`' bounds check. Both read *commands* rather than pixels,
+which is precisely why a clip could not hide an overrun from them.
+
+### One measurement, which came out cleaner than expected
+
+**Fixture placement predicts the blast radius exactly.** Of the applications
+whose fixture was wired into the *constructor*, every one broke between 6 and
+66 tests when it was removed. Of those that called it from `main()` --
+`email`, `videoplayer`, `musicplayer`, `filediff`, `reminders`, `notes`,
+`kanban`, `spreadsheet` -- **every one broke zero.**
+
+The fix is otherwise identical. A fixture in the constructor is handed to every
+test whether it wants it or not; a fixture in `main` has to be asked for. **The
+cost of removing a fabrication is almost entirely in where the call sat, not in
+what it produced.**
+
+## TD-C-THE-OTHER-HALF-PROGRAMS-THAT-SAY-TOO-LITTLE -- FIXED 2026-09-15
+
+**In short:** after the fabrication sweep, ten more programs turned out to be
+misleading in the opposite direction. None of them invents anything. Each has
+an empty screen, or a silent incapacity, and nothing explaining it -- and an
+empty screen is read as an answer.
+
+**Date:** 2026-09-15. **Lane:** C. Follows
+`TD-C-WHAT-THE-FABRICATION-SWEEP-ACTUALLY-TAUGHT`.
+
+### Why a second scanner was needed
+
+`scripts/find-reachable-fixtures.py` asks who *calls* an invented-data builder.
+It is a good question and it is structurally blind to this: a program with no
+fixture at all has nothing for it to find.
+
+`apps/clipmanager` is the case that showed the gap. It invents nothing, so the
+fixture scanner never looked at it. It also has no capture path -- nothing
+watches the clipboard and nothing can -- so the history is empty and stays
+empty however long the window is open. **An empty list under the word
+"History" is read as a statement about the user**: you have not copied
+anything.
+
+`scripts/find-silent-incapacity.py` asks the complementary question: does the
+crate reach anything outside its own process, and if not, does it admit that
+**in a string the user could read?** Matched on string literals only, because a
+comment is not an admission. That distinction is the whole sweep.
+
+**It accused two honest programs on its first run** -- `apps/diskanalyzer`
+("Could not scan: {err}") and `apps/pdfviewer` ("none can be opened") -- because
+its vocabulary was narrower than the language. A tool that accuses honest code
+is one the next reader learns to skip, so it was widened before a single line
+of its output was acted on.
+
+It reports 37 of 142 crates and says in its own docstring that this is **a list
+to read, not a list to empty**. A calculator owes nobody an explanation, and
+the tail of the list is games and converters.
+
+### What the ten were
+
+| app | the silence |
+|---|---|
+| `clipmanager` | nothing watches the clipboard; the history is empty forever |
+| `alarmclock` | the alarm fires, but there is no sound and no notification |
+| `diagram`, `whiteboard`, `mindmap` | drawings cannot be saved |
+| `logviewer` | no log can be read -- **an empty log view is not a quiet system** |
+| `defrag` | the drive list is empty and said only "No drive selected" |
+| `flashcards` | spaced repetition with no memory between runs |
+| `calendar` | events invented *and* not kept |
+
+### The three findings worth carrying
+
+**A deferred failure is the expensive kind.** `alarmclock` is the purest
+instance in the whole sweep: the alarm genuinely fires, sets `ringing`, changes
+the row. What the crate has no path for is sound or a system notification. **An
+alarm that changes a pixel in an unfocused window will not wake anyone**, and
+the user finds out by missing the thing they set it for. Same structure as
+`apps/weather`'s alert channel, `apps/podcast`'s Downloaded mark failing on a
+plane, and `apps/flashcards`, where **spaced repetition is defined by history**
+and a scheduler that forgets will show a card mastered last week while holding
+back one about to be forgotten -- invisibly, because not remembering is what
+the user came about.
+
+**An empty view is not always the same sentence.** `diagram`, `whiteboard` and
+`mindmap` lose work *prospectively*, when the window closes. `logviewer` fails
+*immediately* and its emptiness reads as evidence: "nothing was written" and
+"nothing was looked at" are opposite conclusions for somebody who opened a log
+viewer because something went wrong. They were fixed in one commit and worded
+separately for that reason.
+
+**Care taken nearby is not evidence about the thing in front of you.**
+`apps/defrag` was the near-miss. Its `main` explains that SlateOS cannot
+enumerate volumes, the Analyze button is greyed to match, the gap is tracked in
+this file, and its sample block map is test-only. I nearly dismissed the
+scanner's hit on the strength of that. The comment is in the source and the
+greyed button is a hint; the one sentence the user read was **"No drive
+selected"**, which is an *instruction* -- it asks them to pick a drive when
+there are none to pick, and an empty drive list under a defragmenter is read as
+"this machine has no drives".
+
+That is the same error as trusting a careful fixture (`reminders`' relative
+dates, `habits`' plausible 70%, `contacts`' reserved phone numbers), one level
+out: **thoughtfulness in the neighbourhood reads as thoughtfulness about the
+line you are looking at, and is not.**
+
+### And a note on having two scanners
+
+They are not redundant and they are not a majority vote. `apps/flashcards` was
+reached by both and they disagreed usefully: the fixture scanner flagged its
+three decks, which **stay** -- "the capital of France is Paris" is a true
+statement about the world, bundled as content -- while the silence scanner
+found the real defect. Where they overlap, the answer still has to be reasoned
+out per app.
+## TD-B-A-SHORT-OPTION-CAN-MEAN-SOMETHING-ELSE-THAN-IT-DOES-UPSTREAM -- OPEN 2026-09-15
+
+A defect class, not a single bug: a short option bound to the WRONG long
+option. The program accepts the flag, understands it as something else, and
+answers confidently. No existing gate can see it.
+
+**Found once, by accident.** `blkid -n` was bound to `--no-encoding` here and
+is `--match-types` in util-linux, so `blkid -n vfat,ext3 /dev/sda1` set a
+no-op flag, consumed `vfat,ext3` as a DEVICE PATH, and reported an ext2
+filesystem the caller had asked to exclude. Fixed 2026-09-15; the measurement
+and the repair are in that commit.
+
+**Why nothing catches it.** `check-help-vs-parser.py` compares our help text
+against our parser, and both were internally consistent -- the help said
+`-n, --no-encoding` and the parser agreed. `check-fields-written-never-read.py`
+saw only that `no_encoding` was never read, which reads as a missing feature.
+Every tool we own is self-consistent about a mapping that is wrong relative to
+the program it replaces. The only oracle is the REFERENCE's own flag table.
+
+**Method that works**, and it is cheap:
+
+    wsl -d Ubuntu -- bash -s <<'EOF'
+    <tool> --help | grep -E "^ +-[a-zA-Z],"
+    EOF
+    grep -oE '"-[A-Za-z]" \| "--[a-z-]+"' userspace/<tool>/src/main.rs | sort -u
+
+then compare the two pairings by eye. It needs the real tool, so it cannot be
+a pre-push gate on a machine without one -- which is why this is a tracked
+sweep rather than a check.
+
+**Checked so far -- 3 tools, 1 defect.** Cleared rows are recorded because a
+cleared list is worth more than a shorter one: it says where NOT to look
+again.
+
+| tool | pairings compared | result |
+|---|---|---|
+| `blkid` | `-c -d -n` | **`-n` WRONG** -- fixed 2026-09-15 |
+| `unshare` | all 16 (`-m -u -i -n -p -U -C -T -f -r -S -G -R -w -h -V`) | all match |
+| `nsenter` | all 10 (`-a -t -F -G -S -V -W -r -w -h`) | all match |
+
+**SWEPT 2026-09-15 by `scripts/compare-short-options.py`: 84 crates compared
+against their references, 71 clear, 24 collisions in 13 tools.** 65 crates
+have no reference available on this machine and were not compared.
+
+    chpasswd   -s   --sha256        here, --sha-rounds      upstream
+    dmesg      -T   --human-time    here, --ctime           upstream
+    dmesg      -c   --clear         here, --read-clear      upstream
+    dmesg      -f   --follow        here, --facility        upstream
+    dmesg      -s   --search        here, --buffer-size     upstream
+    eject      -f   --force         here, --floppy          upstream
+    findmnt    -d   --fs-devno      here, --direction       upstream
+    findmnt    -t   --type          here, --types           upstream
+    flock      -E   --conflict-exit here, --conflict-exit-code upstream
+    getty      -h   --help          here, --flow-control    upstream
+    getty      -o   --long-hostname here, --login-options   upstream
+    hardlink   -X   --exclude       here, --respect-xattrs  upstream
+    hardlink   -o   --respect-owner here, --ignore-owner    upstream
+    hardlink   -p   --respect-perm  here, --ignore-mode     upstream
+    hardlink   -t   --respect-time  here, --ignore-time     upstream
+    hardlink   -x   --respect-xattr here, --exclude         upstream
+    last       -t   --time          here, --until           upstream
+    locale     -k   --keyword       here, --keyword-name    upstream
+    logrotate  -d   --dry-run       here, --debug           upstream
+    mkfs       -V   --version       here, --verbose         upstream
+    pstree     -g   --numeric-uid   here, --show-pgids      upstream
+    pstree     -h   --help          here, --highlight-all   upstream
+    pstree     -t   --threads       here, --thread-names    upstream
+    sysctl     -n   --values-only   here, --values          upstream
+
+**Each row is a claim to check, and the first sweep proves why.** It reported
+26, and its two most severe --
+
+    mount   -f   --force   here, --fake          upstream
+    mount   -l   --lazy    here, --show-labels   upstream
+
+-- were WRONG. `mount -f` upstream is "dry run; skip the mount(2) syscall",
+which reads as a safety flag that performs the action instead of simulating
+it, and it was the first thing I went to fix. Those arms are in the `umount`
+branch: `userspace/mount` is two programs, and umount(8) really does define
+`-f, --force` and `-l, --lazy`. Acting on the report wholesale would have
+turned two correct bindings into incorrect ones. The checker now compares
+against every personality a crate answers to and its self-test carries that
+case in both directions.
+
+**Ranked by what being wrong costs**, which is not the order above:
+
+1. `hardlink -x`/`-X` are SWAPPED with each other. Upstream `-x <regex>`
+   excludes files and `-X` respects xattrs; here `-X` excludes and `-x`
+   respects. So `hardlink -x '\.git' dir` consumes the regex as a positional
+   and links files the caller meant to exclude -- on a tool whose whole job
+   is to merge files into one inode, and which is not reversible by re-running
+   with the flag spelled right.
+2. `hardlink -p`/`-o`/`-t` are INVERTED: `--ignore-mode` upstream versus
+   `--respect-perm` here, and likewise for owner and time. Ours is the
+   conservative direction (fewer links), so a script written upstream gets
+   safer behaviour than it asked for rather than more dangerous -- worth
+   fixing, not urgent.
+3. `dmesg -c` is `--read-clear` upstream (print, THEN clear) and `--clear`
+   here. If ours clears without printing, `dmesg -c` discards the buffer the
+   caller was trying to read. Needs checking before it is believed.
+4. `getty -h` and `pstree -h` print help where upstream they are
+   `--flow-control` and `--highlight-all`. Surprising, but visibly so.
+5. The rest change output or units and fail loudly enough to notice.
+
+**Unchecked:** the 65 crates with no reference on this machine.
+
+**Two near-misses worth keeping.** `unshare` has no `-c` for
+`--map-current-user` where util-linux does, and our `blkid -c` has no
+`--cache-file` long form. Neither is a collision -- a missing spelling fails
+visibly with "unknown option" -- so they are a different and much milder
+class than the above.
+
+## TD-C-FINISHED-SERIALISERS-THAT-NOBODY-COULD-REACH -- PARTLY FIXED 2026-09-15
+
+**In short:** the tree turned out to contain a large amount of completed,
+tested file-format code that no program could call. Four apps now can. The
+remaining 82 functions are listed by a scanner rather than by hand.
+
+**Date:** 2026-09-15. **Lane:** C. **Status:** four done, the rest OPEN and
+scanned. Third of a trio, after
+`TD-C-WHAT-THE-FABRICATION-SWEEP-ACTUALLY-TAUGHT` and
+`TD-C-THE-OTHER-HALF-PROGRAMS-THAT-SAY-TOO-LITTLE`.
+
+### The observation
+
+`apps/spreadsheet` said it in its own module doc, and had said it for a while:
+
+> CSV import and export are implemented (`Sheet::export_csv`,
+> `Sheet::import_csv`) and are not on that list, because **nothing can reach
+> them**: they take and return a `String`, and this program has no file
+> dialog, no command line and no clipboard beyond its own internal one, so
+> there is nowhere for the text to come from or go.
+
+That is an accurate description of a consumer with no producer, written by
+somebody who had understood the situation completely. **It had sat there as a
+description rather than as a task.** The serialiser was the hard part and it
+was already finished; what was missing was twenty lines of picker.
+
+`scripts/find-stranded-serialisers.py` asks the general question -- does a
+crate define something that turns its data into text or bytes while having no
+way to read or write a file -- and found **92 such functions across 37
+crates**, including several complete interchange formats:
+
+| app | format, already written |
+|---|---|
+| `contacts` | vCard, with CRLF joining per spec and `BEGIN:VCARD` block parsing |
+| `calendar` | iCalendar, with `VERSION:2.0`, a `PRODID` and `X-WR-CALNAME` |
+| `podcast`, `rssreader` | OPML |
+| `musicplayer` | M3U |
+| `dbviewer` | CSV, JSON and SQL inserts |
+| `diagram` | JSON and SVG |
+
+### What was done
+
+Four doors, all on `apps/editor`'s pattern -- `FileDialog` plus
+`safeio::write_str_atomically`, never `fs::write`, because `fs::write`
+truncates the target *before* writing and an interrupted save leaves a
+fragment where the user's only copy used to be.
+
+* **`notes`** -- Ctrl+S writes the selected note as Markdown. No format was
+  designed: a note is text and its title is a heading. Designing one would
+  mean deciding how a notebook *tree* is represented, which is a much larger
+  question than "write this note down".
+* **`spreadsheet`** -- Ctrl+S and Ctrl+O, through the CSV that was waiting.
+* **`contacts`** -- vCard.
+* **`calendar`** -- iCalendar.
+
+### What the doors needed that the formats did not
+
+**Refuse to write nothing.** `contacts` will not write an empty book and
+`calendar` will not write a header with no events. A zero-byte `.vcf` is
+indistinguishable from a failed export afterwards, and an `.ics` holding only
+`BEGIN:VCALENDAR` is *valid*, which is worse: it imports silently as nothing.
+
+**Add, do not replace.** Importing a colleague's calendar should not discard
+your own, and importing an address book is not a request to delete the one you
+have. Duplicates are the duplicate finder's problem, and `contacts` has one.
+
+**Bound the read, and say so when it bites.** All four cap at 8 MiB. The
+message is front-loaded with `INCOMPLETE` because it lands in a
+bounded-width status line and the clause that must survive an ellipsis is the
+one saying the file is not all there. This matters more than it sounds:
+`parse_ics` and `import_vcards` both stop at a truncation *without
+complaining*, so a cut file simply yields fewer entries -- and **a calendar
+missing an appointment looks exactly like a calendar that never had one.**
+
+**Report the read, not the parse.** `import_csv` takes any text and fills
+cells from it, so a file that is not really CSV produces cells rather than an
+error. Saying "could not read" about a file that *was* read points the user at
+the wrong thing.
+
+**A round-trip test is not a conformance test.** `calendar`'s asserts the
+written file starts with `BEGIN:VCALENDAR` as well as round-tripping, because
+a round-trip alone passes against any format that is its own inverse,
+including a wrong one. Same shape as the liveness-versus-correctness point in
+`apps/benchmark`: varying the input and watching the output vary proves the
+measurement is live and says nothing about whether it is right.
+
+### Why this is a different kind of finding
+
+The fabrication sweep removed claims. The silence sweep added explanations.
+This one is a list of things that **already work and are one picker away from
+being usable** -- unusually cheap leads, and every one of them would have been
+walked past if `spreadsheet`'s module doc had not stated its own problem so
+precisely.
+
+**A precise description of a gap is not a fix, and it reads like one.** That is
+the transferable part: `spreadsheet`, `credmanager`, `defrag` and
+`systemrestore` all documented their own missing capability accurately, in the
+source, and the accuracy is what made it look handled.
+
 ## A-THE-BOOT-TEST-NEVER-MOUNTS-FAT-SO-A-WHOLE-FILESYSTEMS-WRITE-PATHS-ARE-UNGATED (lane A, 2026-09-15) — **Status: FIXED** (the openat2 half; the coverage gap remains open)
 
 **What happened.** Validating an unrelated change through `scripts/run-qemu.ps1`
@@ -149807,3 +150941,4 @@ something says otherwise.
 **Still open, deliberately:** `dmevent` has no producer. Wiring real driver
 events into it is a separate piece of work; an empty, honest table is the
 correct state until then, and is now labelled as such rather than filled.
+

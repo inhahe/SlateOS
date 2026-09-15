@@ -57,6 +57,18 @@ const TAB_PADDING: f32 = 4.0;
 /// `std::time::Duration`, not this file's own millisecond `Duration`: the two
 /// share a name and only one of them is what the harness's clock speaks.
 const FRAME_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+/// What the window says instead of a picture.
+///
+/// Three lines. The third is about the playlist, which outlives the window:
+/// entries naming `/home/user/Videos/sample.mkv` are a claim that a file is at
+/// that path, and a playlist is the kind of thing somebody reads later to find
+/// out what they have.
+const CANNOT_PLAY_LINES: [&str; 3] = [
+    "This player cannot open or play a file.",
+    "It has no filesystem access, so nothing has been read and no video is decoding.",
+    "The playlist is empty because nothing was found -- it is not a list of files you have.",
+];
+
 const WINDOW_WIDTH: f32 = 1280.0;
 const WINDOW_HEIGHT: f32 = 720.0;
 /// A window smaller than this has no room left for the controls.
@@ -3013,6 +3025,34 @@ impl VideoPlayerApp {
             Surface::Card,
         );
 
+        // After the background, or it would be painted over.
+        //
+        // Keyed on there being no file, so it retires itself the day something
+        // can open one rather than becoming a stale claim of its own.
+        if self.current_file.is_none() {
+            for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: 10.0,
+                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                    y: 2.0 + i as f32 * 13.0,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 12.0 } else { 10.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(self.width - 20.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+
         match self.active_tab {
             PlayerTab::Player => self.render_player_view(&mut cmds),
             PlayerTab::Playlist => self.render_playlist_panel(&mut cmds),
@@ -4649,6 +4689,7 @@ impl VideoPlayerApp {
 // Sample data for testing
 // ============================================================================
 
+#[cfg(test)]
 fn sample_media_file() -> MediaFile {
     MediaFile {
         path: "/home/user/Videos/sample.mkv".to_string(),
@@ -4737,6 +4778,7 @@ fn sample_media_file() -> MediaFile {
     }
 }
 
+#[cfg(test)]
 fn sample_chapters() -> Vec<Chapter> {
     vec![
         Chapter {
@@ -4772,6 +4814,7 @@ fn sample_chapters() -> Vec<Chapter> {
     ]
 }
 
+#[cfg(test)]
 fn sample_subtitle_srt() -> &'static str {
     "1\n\
      00:00:05,000 --> 00:00:08,000\n\
@@ -4867,7 +4910,17 @@ impl App for VideoPlayerApp {
     }
 }
 
-/// Sample content, so the first window is not an empty black rectangle.
+/// Sample content, for tests.
+///
+/// `#[cfg(test)]` since 2026-09-15. Its own doc said it existed "so the first
+/// window is not an empty black rectangle", which is the fourth time that
+/// reasoning has turned up in this sweep -- the torrent client's "looks broken
+/// rather than idle", the photo manager's "so the first window is not an empty
+/// grid", the file searcher's "until a real index exists this is what there is
+/// to search". Every one of them was right that an empty window looks broken,
+/// and every one of them drew the wrong conclusion. **The answer to a window
+/// that looks broken is to say why it is empty, not to fill it.**
+#[cfg(test)]
 fn seeded_player() -> VideoPlayerApp {
     let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
     app.current_file = Some(sample_media_file());
@@ -4898,7 +4951,11 @@ fn seeded_player() -> VideoPlayerApp {
 }
 
 fn main() -> ExitCode {
-    let mut app = seeded_player();
+    // Opens empty. It used to call `seeded_player`, so every launch began with
+    // a two-hour "Sample Movie" at /home/user/Videos/sample.mkv, chapters,
+    // external subtitles and a playlist -- and the clock ran when you pressed
+    // play.
+    let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
     app::launch("videoplayer", &mut app)
 }
 
@@ -4917,6 +4974,68 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A fresh player holds no file and no playlist.
+    ///
+    /// `main` called `seeded_player`, so every launch opened on a two-hour
+    /// "Sample Movie" at `/home/user/Videos/sample.mkv`, with chapters,
+    /// external subtitles and a playlist -- and the clock ran when you pressed
+    /// play, with subtitles appearing on cue over a black rectangle.
+    ///
+    /// The playlist is the part that outlives the window. Entries naming a
+    /// path are a claim that a file is at that path, and a playlist is the
+    /// kind of thing somebody reads later to find out what they have.
+    ///
+    /// Note where the seeding lived: in `main`, not in `new`. This is the
+    /// second application of eighteen where that was true, and the second
+    /// where removing the fabrication broke no tests at all -- 151 passed
+    /// before and after. The other was `apps/email`.
+    #[test]
+    fn a_fresh_player_holds_no_file_and_no_playlist() {
+        let app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            app.current_file.is_none(),
+            "a media file appeared from nowhere"
+        );
+        assert!(app.chapters.is_empty(), "chapters appeared from nowhere");
+        assert!(
+            app.external_subtitles.is_empty(),
+            "subtitles appeared from nowhere"
+        );
+        assert!(app.playlist.is_empty(), "a playlist appeared from nowhere");
+    }
+
+    /// And the window says why, rather than showing a black rectangle.
+    ///
+    /// A black rectangle is what the sample content existed to avoid, and the
+    /// reasoning was right about the symptom: an empty window does look
+    /// broken. It was wrong about the remedy. This is the same shape as the
+    /// torrent client's "looks broken rather than idle" and the photo
+    /// manager's "so the first window is not an empty grid".
+    #[test]
+    fn the_window_says_it_cannot_play() {
+        let app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_PLAY_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_PLAY_LINES
+                .iter()
+                .any(|l| l.contains("not a list of files you have")),
+            "nothing forecloses reading the empty playlist as a library",
+        );
+    }
 
     // Duration tests
     #[test]

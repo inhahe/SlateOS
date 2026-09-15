@@ -717,6 +717,76 @@ pub fn setting_into<'o>(method: Method, salt: &[u8], out: &'o mut HashBuf) -> Op
     core::str::from_utf8(out.get(..len)?).ok()
 }
 
+/// Assemble a setting with an explicit rounds field:
+/// `"$N$rounds=R$<salt>$"`.
+///
+/// `hash_into` has always honoured a `rounds=` field when it found one in a
+/// setting; nothing could produce a setting that carried it. The buffer was
+/// even sized for `"$6$rounds=999999999$"` -- the capability was there and
+/// the way to ask for it was not.
+///
+/// `rounds` IS CLAMPED HERE, to the same bounds `hash_into` applies when it
+/// parses the field. That is the load-bearing part rather than a detail: if
+/// this wrote `rounds=10` and the hash was then computed with 1000, the
+/// stored entry would state a cost it was not produced at, and re-deriving
+/// from the entry's own text would give a different answer. This file already
+/// carries one such defect in its history -- a label and an algorithm
+/// declared in different places, and disagreeing -- and the rule that came
+/// out of it applies here too.
+///
+/// Returns `None` for [`Method::Md5`]: MD5 crypt has no rounds field, and
+/// `$1$rounds=N$` would be read as a SALT beginning with `rounds=`, quietly
+/// hashing a different password-salt pair than the caller asked for.
+pub fn setting_rounds_into<'o>(
+    method: Method,
+    rounds: u32,
+    salt: &[u8],
+    out: &'o mut HashBuf,
+) -> Option<&'o str> {
+    if matches!(method, Method::Md5) {
+        return None;
+    }
+    if salt.is_empty() || salt.len() > method.salt_max() || !salt.iter().copied().all(is_b64) {
+        return None;
+    }
+
+    let rounds = rounds.clamp(ROUNDS_MIN, ROUNDS_MAX);
+    let mut digits = [0u8; 10];
+    let mut n = rounds;
+    let mut at = digits.len();
+    while at > 0 {
+        at = at.checked_sub(1)?;
+        *digits.get_mut(at)? = b'0'.checked_add(u8::try_from(n % 10).ok()?)?;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let digits = digits.get(at..)?;
+
+    let prefix = method.prefix().as_bytes();
+    let tag = b"rounds=";
+    let mut end = 0usize;
+    for part in [prefix, tag, digits, b"$", salt, b"$"] {
+        let next = end.checked_add(part.len())?;
+        out.get_mut(end..next)?.copy_from_slice(part);
+        end = next;
+    }
+    core::str::from_utf8(out.get(..end)?).ok()
+}
+
+/// The rounds a SHA-crypt setting uses when it does not say.
+#[must_use]
+pub const fn rounds_default() -> u32 {
+    ROUNDS_DEFAULT
+}
+
+/// The bounds `rounds` is clamped to, low then high.
+#[must_use]
+pub const fn rounds_bounds() -> (u32, u32) {
+    (ROUNDS_MIN, ROUNDS_MAX)
+}
+
 /// Check `key` against a stored crypt hash, in constant time.
 ///
 /// The stored hash *is* the setting — crypt's defining property is that
@@ -1050,6 +1120,70 @@ mod tests {
     // -----------------------------------------------------------------------
     // rounds clamping
     // -----------------------------------------------------------------------
+
+    /// A setting carries the rounds it was actually hashed at.
+    ///
+    /// The clamp is the point. If this wrote `rounds=10` while `hash_into`
+    /// computed 1000, the stored entry would state a cost it was not produced
+    /// at -- and re-deriving from the entry's own text would give a different
+    /// answer than the tool that wrote it. So the assertion is not "it
+    /// clamped" but "what it SAYS is what re-hashing the same input uses".
+    #[test]
+    fn setting_rounds_states_the_cost_it_was_hashed_at() {
+        let mut out = buf();
+        let s = setting_rounds_into(Method::Sha512, 12345, b"abcdefgh", &mut out)
+            .expect("a valid salt and method");
+        assert_eq!(s, "$6$rounds=12345$abcdefgh$");
+
+        // Below the minimum: the field must say the clamped value, not the
+        // one that was asked for.
+        let mut out = buf();
+        let s = setting_rounds_into(Method::Sha256, 10, b"abcdefgh", &mut out)
+            .expect("a valid salt and method");
+        let (lo, hi) = rounds_bounds();
+        assert_eq!(s, format!("$5$rounds={lo}$abcdefgh$"));
+
+        let mut out = buf();
+        let s = setting_rounds_into(Method::Sha512, u32::MAX, b"abcdefgh", &mut out)
+            .expect("a valid salt and method");
+        assert_eq!(s, format!("$6$rounds={hi}$abcdefgh$"));
+
+        // THE ROUND TRIP: hashing with the clamped setting and hashing with
+        // the setting that names the clamped value must agree, or the entry
+        // is mislabelled.
+        let mut a = buf();
+        let asked = setting_rounds_into(Method::Sha512, 10, b"abcdefgh", &mut a)
+            .expect("valid")
+            .to_string();
+        let mut b = buf();
+        let explicit = setting_rounds_into(Method::Sha512, lo, b"abcdefgh", &mut b)
+            .expect("valid")
+            .to_string();
+        assert_eq!(asked, explicit);
+
+        let mut h1 = buf();
+        let mut h2 = buf();
+        assert_eq!(
+            hash_into(b"secret", asked.as_bytes(), &mut h1).map(str::to_string),
+            hash_into(b"secret", explicit.as_bytes(), &mut h2).map(str::to_string),
+        );
+    }
+
+    /// MD5 crypt has no rounds field, so asking for one is refused.
+    ///
+    /// `$1$rounds=N$` would be read as a SALT beginning with `rounds=`,
+    /// hashing a different password-salt pair than the caller asked for --
+    /// silently, and with a plausible-looking entry as the result.
+    #[test]
+    fn setting_rounds_refuses_md5_and_bad_salts() {
+        let mut out = buf();
+        assert!(setting_rounds_into(Method::Md5, 5000, b"abcdefgh", &mut out).is_none());
+        // The same salt rules as `setting_into`.
+        let mut out = buf();
+        assert!(setting_rounds_into(Method::Sha512, 5000, b"", &mut out).is_none());
+        let mut out = buf();
+        assert!(setting_rounds_into(Method::Sha512, 5000, b"has$dollar", &mut out).is_none());
+    }
 
     #[test]
     fn rounds_below_min_are_clamped() {

@@ -55,7 +55,7 @@ use guitk::{scroll_window, wheel};
 
 use oswindow::app::Response;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -833,131 +833,62 @@ impl DriveInfo {
 /// disagreeing about what disks exist, and the disagreement surfaces as a
 /// drive that one of them offers to erase and the other has never heard of.
 ///
-/// Nothing publishes this file yet: `kernel/src/blkdev.rs` and
-/// `kernel/src/nvme.rs` exist, but `devfs` exposes only character devices, so
-/// no block device reaches userspace at all. See
-/// `requests/c-a-expose-block-devices-to-userspace.md`.
-const SYSFS_BLOCK: &str = "/sys/hardware/block";
-
-/// The most partitions read from one drive's record.
+/// Where the kernel publishes one directory per registered block device.
 ///
-/// A bound rather than "until the keys run out" because the keys are
-/// `part0_`…`part{n}_` and a producer that emitted a gap would otherwise
-/// truncate the list at the gap without saying so. GPT's own minimum
-/// guaranteed table is 128 entries, and 128 rows is already past what the
-/// panel can show.
-const MAX_PARTITIONS: u32 = 128;
-
-/// Split a key=value record file into records at blank lines.
+/// Was `/sys/hardware/block`, a flat key=value file, until 2026-09-15. That
+/// path has no producer and is not getting one: design-decisions §850 put
+/// hardware facts under `/sys/devices` on the grounds that a second tree is a
+/// second answer to one question, and lane A built to that.
 ///
-/// `#` comments and blank-run collapsing are handled here so that both this
-/// and `apps/sysinfo` read the format the same way.
-fn parse_kv_records(content: &str) -> Vec<HashMap<String, String>> {
-    let mut records = Vec::new();
-    let mut current: HashMap<String, String> = HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            if !current.is_empty() {
-                records.push(core::mem::take(&mut current));
-            }
-            continue;
-        }
-        if line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            current.insert(key.trim().to_string(), value.trim().to_string());
-        }
-    }
-    if !current.is_empty() {
-        records.push(current);
-    }
-    records
-}
-
-/// Read a `key=value` field as a boolean, defaulting to `false`.
+/// Each device is a directory holding one fact per file:
 ///
-/// Absent means false rather than "unknown": every flag this reads
-/// (`removable`, `readonly`, `system`) is one whose false value is the safe
-/// assumption for *describing* a drive, and none of them is load-bearing for
-/// refusing a write on its own.
-fn record_flag(record: &HashMap<String, String>, key: &str) -> bool {
-    matches!(
-        record.get(key).map(String::as_str),
-        Some("1" | "true" | "yes")
-    )
-}
-
-/// Turn the kernel's block-device records into drives the UI can show.
+/// ```text
+/// /sys/devices/block/vda/sector_count   capacity in the device's own sectors
+/// /sys/devices/block/vda/sector_size    bytes per sector
+/// /sys/devices/block/vda/read_only      1 if write-protected, else 0
+/// ```
 ///
-/// Takes the file's text rather than its path so that the format has tests: no
-/// machine this runs on has a `/sys/hardware/block`, so a parser reachable only
-/// through the filesystem would be a parser nothing ever exercises — which is
-/// exactly how the hand-written checksum in this app stayed wrong for weeks.
-fn parse_block_records(content: &str) -> Vec<DriveInfo> {
-    parse_kv_records(content)
-        .into_iter()
-        .filter_map(|record| {
-            // A record with no node is dropped rather than shown with an
-            // empty path. A drive that cannot be opened is not a drive the
-            // user can do anything with, and listing it only invites a click
-            // that fails for a reason the row does not explain.
-            let node = record.get("node")?.clone();
-            let id = record
-                .get("id")
-                .cloned()
-                .unwrap_or_else(|| node.rsplit('/').next().unwrap_or(&node).to_string());
-            let mut partitions = Vec::new();
-            for i in 0..MAX_PARTITIONS {
-                let prefix = format!("part{i}_");
-                let Some(label) = record.get(&format!("{prefix}label")) else {
-                    continue;
-                };
-                partitions.push(Partition {
-                    index: i,
-                    label: label.clone(),
-                    filesystem: record
-                        .get(&format!("{prefix}fs"))
-                        .cloned()
-                        .unwrap_or_default(),
-                    offset_bytes: record
-                        .get(&format!("{prefix}offset_bytes"))
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0),
-                    size_bytes: record
-                        .get(&format!("{prefix}capacity_bytes"))
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0),
-                    is_boot: record_flag(&record, &format!("{prefix}boot")),
-                });
-            }
-            Some(DriveInfo {
-                name: record.get("name").cloned().unwrap_or_else(|| id.clone()),
-                id,
-                node,
-                model: record.get("model").cloned().unwrap_or_default(),
-                serial: record.get("serial").cloned().unwrap_or_default(),
-                size_bytes: record
-                    .get("capacity_bytes")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
-                drive_type: DriveType::from_kernel_name(
-                    record.get("type").map(String::as_str).unwrap_or_default(),
-                ),
-                partition_table: PartitionTable::from_kernel_name(
-                    record
-                        .get("partition_table")
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                ),
-                partitions,
-                is_system_drive: record_flag(&record, "system"),
-                is_removable: record_flag(&record, "removable"),
-                is_readonly: record_flag(&record, "readonly"),
-            })
-        })
-        .collect()
+/// **Capacity is `sector_count * sector_size`, unconditionally.** The names are
+/// deliberately not Linux's: Linux's `size` is always in 512-byte units
+/// regardless of the device's real sector size, so `size * sector_size`
+/// overstates an advanced-format drive eightfold — and every disk either lane
+/// can currently test on reports 512, which makes that product *accidentally
+/// correct on all available hardware*. A wrong unit that agrees with the truth
+/// everywhere it can be checked is untestable by construction, which is why
+/// the name was not taken.
+///
+/// An unregistered device has no directory at all rather than one reading
+/// zero, because a zero-sector answer cannot be told from a real empty disk.
+const SYSFS_DEVICES_BLOCK: &str = "/sys/devices/block";
+
+/// Why no partition is ever listed, in one line.
+///
+/// Lane A declined to publish partitions, and was right to. The kernel has
+/// `partmgr::list_partitions`, which looks exactly like the thing to publish
+/// and is not: its own module doc calls it "the data model for the Settings
+/// partition manager UI", and it returns the list that `create_partition` and
+/// `delete_partition` have written -- **the layout the user has planned**, not
+/// the layout the disk holds. Nothing parses a GPT or MBR off a sector.
+///
+/// Publishing it would show the installer's intentions as the drive's
+/// contents: no partitions on a drive nobody has touched, and the plan on one
+/// they had. That is the `speedtest` shape -- a plausible answer with no
+/// measurement behind it -- and worse here, because a disk imager acts on it.
+const PARTITIONS_UNREADABLE: &str =
+    "Partitions cannot be read: nothing in this system parses a partition table off a disk";
+
+/// Read one whole-number fact out of a block device's directory.
+///
+/// `None` for a missing file, an unreadable one, or contents that are not a
+/// number. Every caller treats `None` as "this fact is unavailable" rather
+/// than as zero, which is the point: a zero sector count and an unreadable one
+/// are different, and only one of them describes a disk.
+fn read_block_num(dir: &std::path::Path, file: &str) -> Option<u64> {
+    fs::read_to_string(dir.join(file))
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
 }
 
 // ============================================================================
@@ -1886,17 +1817,61 @@ impl DiskImagerApp {
     /// Write tab passed against it. An empty list is not a worse answer than a
     /// fictional one; it is the only true one this kernel can give today.
     fn detect_drives() -> Result<Vec<DriveInfo>, String> {
-        match fs::read_to_string(SYSFS_BLOCK) {
-            Ok(content) => Ok(parse_block_records(&content)),
-            // A missing node means this kernel publishes no block devices —
+        let entries = match fs::read_dir(SYSFS_DEVICES_BLOCK) {
+            Ok(entries) => entries,
+            // A missing tree means this kernel publishes no block devices —
             // a fact about the machine, not a failure of this run, and not
             // something to colour the status bar red over. Any *other* error
             // (a permission denial, an I/O fault) is a failure, and the user
             // needs to be told which, because the two call for opposite
             // responses.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(format!("Cannot read {SYSFS_BLOCK}: {e}")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("Cannot read {SYSFS_DEVICES_BLOCK}: {e}")),
+        };
+
+        let mut drives = Vec::new();
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                // A device name that is not UTF-8 is skipped rather than
+                // decoded lossily: a lossy name could collide with a real one,
+                // and this list decides which drive gets written to.
+                continue;
+            };
+
+            // Emit-or-omit, applied on the reading side: a directory missing
+            // either half of the capacity is not a drive this program can
+            // size, and a drive of unknown size is one it must not offer to
+            // write. Skipped, not listed as zero.
+            let (Some(sector_count), Some(sector_size)) = (
+                read_block_num(&dir, "sector_count"),
+                read_block_num(&dir, "sector_size"),
+            ) else {
+                continue;
+            };
+
+            drives.push(DriveInfo {
+                node: format!("/dev/{name}"),
+                name: name.clone(),
+                id: name,
+                model: String::new(),
+                serial: String::new(),
+                size_bytes: sector_count.saturating_mul(sector_size),
+                drive_type: DriveType::Unknown,
+                // `Unknown`, never `None`. Nothing in this system reads a
+                // partition table off a disk -- see `PARTITIONS_UNREADABLE` --
+                // so "no table" has not been established. For a disk imager
+                // that distinction is the whole game: `None` reads as a blank
+                // drive, and a blank drive is the one you overwrite.
+                partition_table: PartitionTable::Unknown,
+                partitions: Vec::new(),
+                is_system_drive: false,
+                is_removable: false,
+                is_readonly: read_block_num(&dir, "read_only").is_some_and(|v| v != 0),
+            });
         }
+        drives.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(drives)
     }
 
     // ========================================================================
@@ -4163,8 +4138,17 @@ impl DiskImagerApp {
             x: tx,
             y: y + 42.0,
             text: format!(
-                "{} partition(s) | Serial: {}",
-                drive.partitions.len(),
+                "{} | Serial: {}",
+                // Never "0 partition(s)" for a table nobody has read. That
+                // sentence says the drive is blank, and a blank drive is the
+                // one a person overwrites without thinking twice. `Unknown`
+                // and `None` are different answers and this is a program where
+                // the difference is measured in somebody's data.
+                if drive.partition_table == PartitionTable::Unknown {
+                    String::from("Partitions unknown")
+                } else {
+                    format!("{} partition(s)", drive.partitions.len())
+                },
                 if drive.serial.is_empty() {
                     "N/A"
                 } else {
@@ -4177,6 +4161,21 @@ impl DiskImagerApp {
             max_width: Some(width - PANEL_PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        // And why it is unknown, so "Partitions unknown" is not read as a
+        // shortcoming of this particular drive.
+        if drive.partition_table == PartitionTable::Unknown {
+            rt.push(RenderCommand::Text {
+                x: tx,
+                y: y + 58.0,
+                text: String::from(PARTITIONS_UNREADABLE),
+                color: self.palette.ink(self.palette.yellow),
+                font_size: SMALL_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width - PANEL_PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Warning badge for system drives
         if drive.write_blocked() {
@@ -6252,75 +6251,49 @@ mod tests {
         assert!(drives.is_empty());
     }
 
-    #[test]
-    fn block_records_become_drives() {
-        let drives = parse_block_records(
-            "\
-# the kernel's block device table
-node=/dev/nvme0n1
-id=disk0
-name=System NVMe
-model=Example 1TB
-serial=ABC123
-capacity_bytes=1000204886016
-type=nvme
-partition_table=gpt
-system=1
-part0_label=EFI System
-part0_fs=FAT32
-part0_offset_bytes=1048576
-part0_capacity_bytes=268435456
-part0_boot=1
-
-node=/dev/sda
-capacity_bytes=31457280000
-type=usb
-partition_table=mbr
-removable=true
-",
-        );
-        assert_eq!(drives.len(), 2);
-
-        let nvme = &drives[0];
-        assert_eq!(nvme.id, "disk0");
-        assert_eq!(nvme.node, "/dev/nvme0n1");
-        assert_eq!(nvme.name, "System NVMe");
-        assert_eq!(nvme.size_bytes, 1_000_204_886_016);
-        assert_eq!(nvme.drive_type, DriveType::Ssd);
-        assert_eq!(nvme.partition_table, PartitionTable::Gpt);
-        assert!(nvme.is_system_drive);
-        assert!(nvme.write_blocked(), "the system disk must refuse a write");
-        assert_eq!(nvme.partitions.len(), 1);
-        assert_eq!(nvme.partitions[0].label, "EFI System");
-        assert_eq!(nvme.partitions[0].offset_bytes, 1_048_576);
-        assert!(nvme.partitions[0].is_boot);
-
-        // A record with no `id` and no `name` falls back to the node's last
-        // component, so the row is never blank.
-        let usb = &drives[1];
-        assert_eq!(usb.id, "sda");
-        assert_eq!(usb.name, "sda");
-        assert_eq!(usb.drive_type, DriveType::Usb);
-        assert!(usb.is_removable);
-        assert!(!usb.write_blocked());
-    }
-
-    #[test]
-    fn a_record_with_no_node_is_dropped() {
-        // A drive with no path is a drive nothing can open. Listing it only
-        // invites a click that fails for a reason the row does not explain.
-        let drives = parse_block_records("id=ghost\nname=Nowhere\ncapacity_bytes=100\n");
-        assert!(drives.is_empty());
-    }
+    // `block_records_become_drives` and `a_record_with_no_node_is_dropped`
+    // were here. They exercised `parse_block_records`, a reader for a flat
+    // key=value file at /sys/hardware/block. That path has no producer and is
+    // not getting one -- design-decisions §850 put hardware facts under
+    // /sys/devices, and lane A built a directory tree there instead.
+    //
+    // Lane A offered to serve the flat form as well rather than have this app
+    // parse around them. Declining was the point: a parser with no producer is
+    // an invitation to write the producer to satisfy the parser, and the
+    // reason §850 gives for one tree is that a second tree is a second answer
+    // to one question.
+    //
+    // The property one of them guarded is kept below, pointed at the type
+    // rather than at the format, because it is the property that matters and
+    // it outlived the format by an afternoon.
 
     #[test]
     fn an_unknown_partition_table_is_not_the_same_as_no_partition_table() {
-        // "the kernel looked and found no table" and "nobody has said" must not
-        // fold together: one of the two disks is safe to overwrite unasked.
-        let none = parse_block_records("node=/dev/a\npartition_table=none\n");
-        let unread = parse_block_records("node=/dev/b\n");
-        assert_eq!(none[0].partition_table, PartitionTable::None);
-        assert_eq!(unread[0].partition_table, PartitionTable::Unknown);
+        // "the kernel looked and found no table" and "nobody has said" must
+        // not fold together: one of the two disks is safe to overwrite
+        // unasked, and this program is how a person overwrites a disk.
+        assert_ne!(PartitionTable::None, PartitionTable::Unknown);
+
+        // And nothing this app can currently produce claims the stronger one.
+        // No partition table is read anywhere in this system: the kernel's
+        // `partmgr::list_partitions` returns the layout the Settings UI has
+        // been told to *plan*, not the layout a disk holds.
+        let drive = DriveInfo {
+            id: String::from("vda"),
+            node: String::from("/dev/vda"),
+            name: String::from("vda"),
+            model: String::new(),
+            serial: String::new(),
+            size_bytes: 4_194_304,
+            drive_type: DriveType::Unknown,
+            partition_table: PartitionTable::Unknown,
+            partitions: Vec::new(),
+            is_system_drive: false,
+            is_removable: false,
+            is_readonly: false,
+        };
+        assert_eq!(drive.partition_table, PartitionTable::Unknown);
+        assert!(drive.partitions.is_empty());
     }
 
     #[test]

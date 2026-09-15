@@ -66,6 +66,23 @@ const PROGRESS_STEP: Duration = Duration::from_millis(400);
 /// an identical frame, anything longer leaves a countdown visibly stale.
 const CLOCK_STEP: Duration = Duration::from_mins(1);
 
+/// Why a restore cannot be performed.
+///
+/// The worst thing this program could do is the thing it was doing: run a
+/// progress bar through "Verifying snapshot integrity", "Restoring System
+/// Files" and "Applying changes", finish at **Complete**, and change nothing.
+/// Somebody who believes their system was rolled back stops troubleshooting --
+/// and may then undo the thing that would have actually fixed it.
+const CANNOT_RESTORE: &str =
+    "Cannot restore: this program has no filesystem access, so nothing was read or written";
+
+/// Why a snapshot cannot be taken.
+///
+/// The mirror image, and acted on the same way: somebody who believes a
+/// restore point exists proceeds with the risky change it was taken for.
+const CANNOT_CREATE: &str =
+    "Cannot create a snapshot: this program has no filesystem access, so nothing was captured";
+
 const WINDOW_WIDTH: f32 = 1050.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 const HEADER_HEIGHT: f32 = 48.0;
@@ -1813,6 +1830,10 @@ impl OperationProgress {
     }
 
     /// Simulate the full creation process, returning intermediate states.
+    /// The creation sequence, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15.
+    #[cfg(test)]
     pub fn simulate_create(components: &[SnapshotComponent]) -> Vec<Self> {
         let mut states = Vec::new();
         let mut progress = Self::new_create(components);
@@ -1839,6 +1860,12 @@ impl OperationProgress {
     }
 
     /// Simulate the full restore process, returning intermediate states.
+    /// The restore sequence, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. The step names and the byte accounting
+    /// are real work and stay tested; what was not real was that any of it
+    /// happened.
+    #[cfg(test)]
     pub fn simulate_restore(snap: &Snapshot) -> Vec<Self> {
         let mut states = Vec::new();
         let mut progress = Self::new_restore(snap);
@@ -2746,12 +2773,12 @@ impl SystemRestoreUI {
             // which is the same statement.
             return;
         }
-        let mut states = OperationProgress::simulate_create(&components).into_iter();
-        let Some(first) = states.next() else {
-            return;
-        };
-        self.progress = Some(first);
-        self.pending_steps = states.collect();
+        // Refused. `OperationProgress::fail` already existed for exactly this
+        // and had no caller on either path.
+        let mut progress = OperationProgress::new_create(&components);
+        progress.fail(CANNOT_CREATE);
+        self.progress = Some(progress);
+        self.pending_steps = std::collections::VecDeque::new();
 
         let name = if self.form_name.trim().is_empty() {
             format!("Snapshot {}", self.manager.tree.count().saturating_add(1))
@@ -2775,12 +2802,19 @@ impl SystemRestoreUI {
         let Some(snap) = self.manager.tree.get_snapshot(id) else {
             return;
         };
-        let mut states = OperationProgress::simulate_restore(snap).into_iter();
-        let Some(first) = states.next() else {
-            return;
-        };
-        self.progress = Some(first);
-        self.pending_steps = states.collect();
+        // Refused, and refused *before* the progress bar rather than during
+        // it. A bar that runs and then reports trouble has already told the
+        // user that something was happening to their system.
+        //
+        // The Export and Import paths in this same file were already honest --
+        // "Closing the dialog is honest; pretending to write a file would not
+        // be." Somebody applied exactly the right reasoning there and not
+        // here, which is the sweep's most common shape: the instance is easy
+        // to see, the class is not.
+        let mut progress = OperationProgress::new_restore(snap);
+        progress.fail(CANNOT_RESTORE);
+        self.progress = Some(progress);
+        self.pending_steps = std::collections::VecDeque::new();
         self.selected_id = Some(id);
     }
 
@@ -5268,7 +5302,15 @@ impl App for SystemRestoreUI {
     fn tick_interval(&self) -> Option<Duration> {
         // A running operation steps a frame at a time, which is what makes the
         // progress bar move rather than jump from empty to full.
-        if self.progress.is_some() {
+        //
+        // An overlay carrying a *refusal* is not running: there is nothing to
+        // advance, so asking to be woken every 400 ms would be a wakeup per
+        // frame in service of a bar that cannot move. Caught by
+        // `a_restore_steps_through_its_progress_and_then_finishes`, whose tail
+        // asserts the clock goes back to once a minute -- it was written for
+        // the end of a simulated restore and holds just as well for one that
+        // never starts.
+        if self.progress.as_ref().is_some_and(|p| p.error.is_none()) {
             Some(PROGRESS_STEP)
         } else {
             Some(CLOCK_STEP)
@@ -5806,20 +5848,21 @@ mod tests {
         assert!(matches!(ui.dialog, DialogKind::ConfirmRestore(_)));
         ui.handle_event(&press(Key::Enter));
 
-        assert!(ui.progress.is_some(), "the overlay should be up");
-        assert_eq!(
-            ui.tick_interval(),
-            Some(PROGRESS_STEP),
-            "and the clock should be running at the operation's rate"
+        // Was: the overlay stepped through "Verifying snapshot integrity",
+        // "Restoring System Files", "Applying changes" and finished at
+        // Complete, over several frames. It restored nothing at any point.
+        //
+        // The overlay is still raised, because a confirmed action that shows
+        // nothing reads as a button that did not work. What it carries now is
+        // the refusal.
+        let progress = ui.progress.as_ref().expect("the overlay should be up");
+        assert!(!progress.complete, "a restore reported itself complete");
+        let err = progress.error.as_ref().expect("no reason given");
+        assert!(err.contains("Cannot restore"), "{err}");
+        assert!(
+            ui.pending_steps.is_empty(),
+            "a refused restore queued steps to walk through",
         );
-
-        let mut steps = 0;
-        while ui.progress.is_some() {
-            ui.handle_event(&Event::Tick { elapsed_ms: 400 });
-            steps += 1;
-            assert!(steps < 100, "the operation never ended");
-        }
-        assert!(steps > 2, "a restore is more than one frame");
         assert_eq!(
             ui.tick_interval(),
             Some(CLOCK_STEP),

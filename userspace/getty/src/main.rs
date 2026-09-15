@@ -28,6 +28,7 @@ use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Personality detection
@@ -59,6 +60,13 @@ struct Config {
     personality: Personality,
     port: String,
     baud_rates: Vec<u32>,
+    /// Whether a baud rate came from the command line.
+    ///
+    /// `baud_rates` defaults to `[9600]`, so its VALUE cannot answer "did the
+    /// operator ask for this?" -- someone typing 9600 is indistinguishable
+    /// from someone typing nothing. That distinction is the difference
+    /// between a useful warning and one printed on every boot.
+    baud_explicit: bool,
     // Terminal settings parsed and not applied, and a path helper used only by
     // tests. Kept so the record matches what the tty layer will need.
     #[allow(dead_code)]
@@ -70,6 +78,13 @@ struct Config {
     no_hostname: bool,
     no_newline: bool,
     long_hostname: bool,
+    /// `-h, --flow-control`: enable hardware flow control.
+    ///
+    /// Parsed so the letter means what agetty means by it. Not applied --
+    /// there is no termios layer -- so it joins `unapplied_settings`.
+    flow_control: bool,
+    /// `-o, --login-options <opts>`: extra arguments for login(1).
+    login_options: Option<String>,
     local_line: bool,
     no_reset: bool,
     no_clear: bool,
@@ -94,6 +109,7 @@ impl Default for Config {
             personality: Personality::Getty,
             port: String::new(),
             baud_rates: vec![9600],
+            baud_explicit: false,
             term_type: String::from("linux"),
             autologin_user: None,
             no_issue: false,
@@ -102,6 +118,8 @@ impl Default for Config {
             no_hostname: false,
             no_newline: false,
             long_hostname: false,
+            flow_control: false,
+            login_options: None,
             local_line: false,
             no_reset: false,
             no_clear: false,
@@ -169,7 +187,14 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
     while i < args.len() {
         let Some(raw) = args.get(i) else { break };
         match raw.to_str().unwrap_or_default() {
-            "-h" | "--help" => cfg.show_help = true,
+            // `-h` is `--flow-control` in agetty, and `--help` there is
+            // LONG-ONLY. It matters more than it looks: an inittab or unit
+            // line reading `agetty -h ttyS0 115200` asks for hardware flow
+            // control, and here it used to print the help text and exit 0 --
+            // so that console got no login prompt at all, and the service
+            // looked like it had succeeded.
+            "-h" | "--flow-control" => cfg.flow_control = true,
+            "--help" => cfg.show_help = true,
             "-V" | "--version" => cfg.show_version = true,
             "-8" | "--8bits" => {} // accept but no-op in our implementation
             "-a" | "--autologin" => {
@@ -200,7 +225,17 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
             "-m" | "--extract-baud" => cfg.keep_baud = true,
             "-n" | "--skip-login" => cfg.skip_login = true,
             "-N" | "--nonewline" => cfg.no_newline = true,
-            "-o" | "--long-hostname" => cfg.long_hostname = true,
+            // `--long-hostname` is LONG-ONLY in agetty; `-o` there is
+            // `--login-options <opts>`, which CONSUMES AN ARGUMENT. So
+            // `agetty -o '-- \u' tty1` passed options to login upstream and
+            // here set the hostname flag, leaving `-- \u` to be read as the
+            // port name.
+            "--long-hostname" => cfg.long_hostname = true,
+            "-o" | "--login-options" => {
+                i += 1;
+                cfg.login_options =
+                    Some(text_at(args, i, "-o requires login options")?.to_string());
+            }
             "-p" | "--login-pause" => cfg.login_pause = true,
             "-r" | "--chroot" => {
                 i += 1;
@@ -267,6 +302,7 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
                 cfg.port = port.to_string_lossy().into_owned();
             }
             if positional.len() > 1 {
+                cfg.baud_explicit = true;
                 cfg.baud_rates.clear();
                 for baud in positional.iter().skip(1) {
                     // A baud rate is a number, so one that is not text is not
@@ -521,13 +557,15 @@ fn print_help(personality: Personality) {
             println!("  -N, --nonewline           Don't print newline before issue");
             println!("  -o, --long-hostname        Show full qualified hostname");
             println!("  -p, --login-pause          Wait for keypress before login prompt");
-            println!("  -r, --chroot <dir>        Chroot before login");
+            println!(
+                "  -r, --chroot <dir>        Chroot before login (REFUSED: no SYS_CHROOT ABI)"
+            );
             println!("  -s, --keep-baud           Keep existing baud rate");
             println!("  -t, --timeout <secs>      Timeout for login name input");
             println!("  --nohostname              Don't show hostname in prompt");
             println!("  --erase-chars <char>      Additional erase character");
             println!("  --kill-chars <char>       Additional kill character");
-            println!("  --delay <msecs>           Delay before opening tty");
+            println!("      --delay <number>      sleep seconds before prompt");
             println!("  --nice <value>            Run with adjusted nice value");
             println!("  -h, --help                Show this help");
             println!("  -V, --version             Show version");
@@ -604,14 +642,19 @@ fn run_getty(
 
     // Autologin mode
     if let Some(ref user) = cfg.autologin_user {
-        let mut login_args = vec![
-            cfg.login_program.display().to_string(),
-            String::from("-f"),
-            user.clone(),
-        ];
-        if let Some(ref host) = cfg.host {
-            login_args.push(String::from("-h"));
-            login_args.push(host.clone());
+        let mut login_args = vec![cfg.login_program.display().to_string()];
+        if let Some(ref opts) = cfg.login_options {
+            // `--login-options` REPLACES the argv this would have built,
+            // which is what makes it useful and what makes it the
+            // operator's responsibility. See `login_options_shield_the_name`.
+            login_args.extend(splice_login_options(opts, user));
+        } else {
+            login_args.push(String::from("-f"));
+            login_args.push(user.clone());
+            if let Some(ref host) = cfg.host {
+                login_args.push(String::from("-h"));
+                login_args.push(host.clone());
+            }
         }
         return Ok(Some((cfg.login_program.clone(), login_args)));
     }
@@ -632,6 +675,18 @@ fn run_getty(
         let mut one = [0u8; 1];
         let _ = std::io::stdin().read(&mut one);
         writeln!(writer).map_err(|e| format!("write: {e}"))?;
+    }
+
+    // Placed here because the reference says "before prompt", which is the
+    // only statement of placement I could measure -- agetty's source was not
+    // available to check whether it sleeps earlier, and guessing at that
+    // would be inventing a second fact after correcting the first.
+    //
+    // Tests do not reach this: none of them set `--delay`, and the pure
+    // `prompt_delay` above is what they assert on.
+    let delay = prompt_delay(cfg);
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
     }
 
     // Show login prompt and read username
@@ -656,14 +711,20 @@ fn run_getty(
         // Read login name
         match read_login_name(reader, writer) {
             Ok(Some(username)) => {
-                let mut login_args = vec![
-                    cfg.login_program.display().to_string(),
-                    String::from("--"),
-                    username,
-                ];
-                if let Some(ref host) = cfg.host {
-                    login_args.push(String::from("-h"));
-                    login_args.push(host.clone());
+                let mut login_args = vec![cfg.login_program.display().to_string()];
+                if let Some(ref opts) = cfg.login_options {
+                    login_args.extend(splice_login_options(opts, &username));
+                } else {
+                    // The `--` this build inserts unconditionally is the
+                    // protection agetty's SECURITY NOTICE recommends: a
+                    // username beginning with `-` must not be read by
+                    // login(1) as an option.
+                    login_args.push(String::from("--"));
+                    login_args.push(username);
+                    if let Some(ref host) = cfg.host {
+                        login_args.push(String::from("-h"));
+                        login_args.push(host.clone());
+                    }
                 }
                 return Ok(Some((cfg.login_program.clone(), login_args)));
             }
@@ -682,6 +743,135 @@ fn run_getty(
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+/// The argv for login(1) implied by `--login-options`, with `NAME` spliced in.
+///
+/// agetty: "Options and arguments that are passed to login(1). Where \u is
+/// replaced by the login name."
+///
+/// Substitution happens INSIDE a token rather than by re-splitting, which is
+/// the manual's stated protection: "agetty does check for a leading - and
+/// makes sure the logname gets passed as one parameter (so embedded spaces
+/// will not create yet another parameter)". A username of `alice bob` becomes
+/// one argument, not two.
+fn splice_login_options(opts: &str, username: &str) -> Vec<String> {
+    opts.split_whitespace()
+        .map(|tok| tok.replace("\\u", username))
+        .collect()
+}
+
+/// Whether `opts` shields the username from being read as an option.
+///
+/// The manual's own advice: "Some programs use -- to indicate that the rest
+/// of the command line should not be interpreted as options. Use this feature
+/// if available by passing -- before the username gets passed by \u."
+///
+/// Without `--login-options`, this build already does that unconditionally --
+/// it builds `[login, --, username]`. Supplying the option REPLACES that
+/// construction, so the guarantee becomes the operator's to keep, and they
+/// get told when they have not. agetty does not warn; this is ours, and it
+/// costs nothing because it is one line on stderr at startup.
+fn login_options_shield_the_name(opts: &str) -> bool {
+    let toks: Vec<&str> = opts.split_whitespace().collect();
+    match toks.iter().position(|t| t.contains("\\u")) {
+        Some(at) => toks.get(..at).is_some_and(|before| before.contains(&"--")),
+        // No `\u` at all: the username is not passed through these options,
+        // so there is nothing for a leading dash to be read as.
+        None => true,
+    }
+}
+
+/// Settings the operator asked for that this build parses and never applies.
+///
+/// `setup_terminal` builds a `TermSettings` and `run_getty` binds it to
+/// `_term`. Nothing applies it, because there is no termios layer to apply it
+/// to -- so the baud rate, the erase and kill characters, the local-line flag
+/// and keep-baud are computed and dropped. `--nice` is here for a different
+/// reason: there is no `setpriority`/`nice` in `posix/` to call.
+///
+/// Reported rather than refused, and the difference from `--chroot` is the
+/// point. An ignored chroot makes a session look confined when it is not, so
+/// continuing is unsafe. An ignored baud rate makes a serial console
+/// unreadable -- bad, visibly bad, and not a reason to refuse to offer a
+/// login prompt on the console that still works. Refusing here would turn a
+/// degraded console into no console.
+///
+/// Only what was ASKED for, so a plain `getty tty1` says nothing. A warning
+/// printed on every boot is one nobody reads by the third boot.
+fn unapplied_settings(cfg: &Config) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if cfg.baud_explicit {
+        out.push("baud rate");
+    }
+    if cfg.erase_char.is_some() {
+        out.push("--erase-chars");
+    }
+    if cfg.kill_char.is_some() {
+        out.push("--kill-chars");
+    }
+    if cfg.local_line {
+        out.push("--local-line");
+    }
+    if cfg.keep_baud {
+        out.push("--keep-baud");
+    }
+    if cfg.flow_control {
+        out.push("--flow-control");
+    }
+    if cfg.nice_value.is_some() {
+        out.push("--nice");
+    }
+    out
+}
+
+/// How long to wait before showing the login prompt.
+///
+/// Split from the sleep itself on purpose: the SLEEP has nothing to get wrong
+/// and cannot be tested without measuring wall-clock time, which is how a
+/// suite acquires a test that fails on a loaded machine. How long it should
+/// be is the part that can be wrong, and this is testable with no clock at
+/// all.
+///
+/// SECONDS, not milliseconds. Measured against util-linux 2.39.3 rather than
+/// recalled -- `agetty --help` says:
+///
+///     --delay <number>       sleep seconds before prompt
+///
+/// This crate's own help said "Delay before opening tty" and its test used
+/// `--delay 500`, which reads as milliseconds. Both were invented: the option
+/// had never been implemented, so nothing ever contradicted the description.
+/// An unimplemented option cannot have its documentation checked by use.
+fn prompt_delay(cfg: &Config) -> Duration {
+    Duration::from_secs(u64::from(cfg.delay.unwrap_or(0)))
+}
+
+/// The diagnostic for a configuration this build cannot carry out, if any.
+///
+/// Only `--chroot` qualifies today, and it qualifies because IGNORING IT IS
+/// UNSAFE rather than merely incomplete. getty execs a login program; with
+/// `--chroot` accepted and discarded, that program ran with the whole host
+/// filesystem visible while the operator's configuration said it was confined.
+/// An unconfined shell that looks confined is worse than a getty that will not
+/// start, because the mistake is invisible from the terminal it produces.
+///
+/// This is the same rule `userspace/chroot` already settled for itself, and
+/// deliberately the same rather than a second answer: there is no
+/// `SYS_CHROOT` ABI, so nothing can perform the confinement, and that file's
+/// own comment gives the reasoning -- "dropping privileges without changing
+/// the root would leave the caller believing they were sandboxed when they
+/// were not, which is a worse failure than refusing."
+///
+/// Returned rather than printed so it can be tested without a terminal.
+/// Delete this the day `SYS_CHROOT` lands and getty can call it.
+fn unsupported_request(cfg: &Config) -> Option<String> {
+    let dir = cfg.chroot_dir.as_ref()?;
+    Some(format!(
+        "--chroot {}: chroot is not implemented in this kernel (no SYS_CHROOT ABI yet), \
+and running login WITHOUT it would hand the session the whole host filesystem \
+while your configuration says it is confined",
+        dir.display()
+    ))
+}
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
@@ -706,6 +896,41 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     if cfg.show_version {
         print_version(cfg.personality);
         return 0;
+    }
+
+    // Checked AFTER --help and --version, so both still answer, and BEFORE
+    // the terminal is touched, so a getty that cannot do its job never
+    // presents a login prompt that implies it can.
+    if let Some(why) = unsupported_request(&cfg) {
+        eprintln!("getty: {why}");
+        eprintln!("getty: refusing to start.");
+        return 1;
+    }
+
+    if let Some(ref opts) = cfg.login_options
+        && !login_options_shield_the_name(opts)
+    {
+        eprintln!(
+            "getty: --login-options passes the login name without a preceding `--`, \
+so a name beginning with `-` will reach login(1) as an option."
+        );
+        eprintln!(
+            "getty: agetty's manual recommends `-- \\u`; this build cannot add it for you, \
+because where the name goes is what the option decides."
+        );
+    }
+
+    let unapplied = unapplied_settings(&cfg);
+    if !unapplied.is_empty() {
+        eprintln!(
+            "getty: these settings are parsed but NOT applied: {}",
+            unapplied.join(", ")
+        );
+        eprintln!(
+            "getty: this build has no termios layer and no setpriority, so the terminal \
+is left exactly as it was found. On a serial line that means the baud rate is whatever \
+the firmware set."
+        );
     }
 
     let stdin = io::stdin();
@@ -954,6 +1179,84 @@ mod tests {
         let args = argv(&["getty", "-c", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_reset);
+    }
+
+    /// Settings that were asked for are named; a plain getty says nothing.
+    #[test]
+    fn unapplied_settings_are_named_only_when_requested() {
+        let args = argv(&["getty", "tty1"]);
+        let cfg = parse_args(&args).expect("a plain getty parses");
+        assert!(
+            unapplied_settings(&cfg).is_empty(),
+            "a getty that asked for nothing must not warn about anything"
+        );
+
+        // The default baud rate is NOT a request. This is the case the
+        // `baud_explicit` flag exists for: `baud_rates` is `[9600]` either
+        // way, so its value cannot tell these two apart.
+        assert_eq!(cfg.baud_rates, vec![9600], "default baud is still set");
+
+        let args = argv(&["getty", "--local-line", "--keep-baud", "ttyS0", "115200"]);
+        let cfg = parse_args(&args).expect("flags parse");
+        assert_eq!(
+            unapplied_settings(&cfg),
+            vec!["baud rate", "--local-line", "--keep-baud"]
+        );
+
+        // An explicitly-typed 9600 is a request too, even though it matches
+        // the default -- the flag records that it was typed, not what it was.
+        let args = argv(&["getty", "ttyS0", "9600"]);
+        let cfg = parse_args(&args).expect("baud parses");
+        assert_eq!(unapplied_settings(&cfg), vec!["baud rate"]);
+    }
+
+    /// `--delay` is seconds, and absent means no wait at all.
+    ///
+    /// Asserted on the pure decision rather than by timing a sleep: a test
+    /// that measures elapsed time is a test that fails on a busy machine,
+    /// which this suite has been bitten by before.
+    #[test]
+    fn delay_is_seconds_before_the_prompt() {
+        let args = argv(&["getty", "--delay", "5", "tty1"]);
+        let cfg = parse_args(&args).expect("--delay parses");
+        assert_eq!(prompt_delay(&cfg), Duration::from_secs(5));
+
+        let args = argv(&["getty", "tty1"]);
+        let cfg = parse_args(&args).expect("a plain getty parses");
+        assert_eq!(
+            prompt_delay(&cfg),
+            Duration::ZERO,
+            "no --delay must mean no wait, not a default one"
+        );
+    }
+
+    /// `--chroot` is refused; a config without it is not.
+    ///
+    /// Both halves matter. Without the second, a `unsupported_request` that
+    /// returned `Some` for everything would pass -- and a getty that refuses
+    /// every invocation is not a fix, it is an outage.
+    #[test]
+    fn chroot_is_refused_because_ignoring_it_would_unconfine_the_session() {
+        let args = argv(&["getty", "--chroot", "/mnt/root", "tty1"]);
+        let cfg = parse_args(&args).expect("--chroot still parses");
+        let why = unsupported_request(&cfg).expect("--chroot must be refused");
+        assert!(
+            why.contains("/mnt/root"),
+            "the refusal must name the directory asked for, got: {why}"
+        );
+        assert!(
+            why.contains("SYS_CHROOT"),
+            "the refusal must say what is missing, got: {why}"
+        );
+
+        // The same command line without --chroot is something this build can
+        // actually do, and must not be refused.
+        let args = argv(&["getty", "tty1"]);
+        let cfg = parse_args(&args).expect("a plain getty parses");
+        assert!(
+            unsupported_request(&cfg).is_none(),
+            "a getty with no --chroot must start"
+        );
     }
 
     #[test]
@@ -1310,9 +1613,77 @@ mod tests {
 
     #[test]
     fn test_parse_args_long_hostname() {
-        let args = argv(&["getty", "-o", "tty1"]);
+        // LONG-ONLY, as in agetty. This test used to pass `-o` and assert the
+        // flag was set -- it proved the option was reachable, by the letter
+        // agetty gives to `--login-options`.
+        let args = argv(&["getty", "--long-hostname", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.long_hostname);
+
+        // `-o` now takes a value and does NOT set the hostname flag.
+        let args = argv(&["getty", "-o", "-- \\u", "tty1"]);
+        let cfg = parse_args(&args).unwrap();
+        assert!(!cfg.long_hostname);
+        assert_eq!(cfg.login_options.as_deref(), Some("-- \\u"));
+        assert_eq!(cfg.port, "tty1", "the port must not be eaten by -o");
+    }
+
+    /// `-h` is hardware flow control, not help.
+    ///
+    /// An inittab line reading `agetty -h ttyS0 115200` asks for flow
+    /// control. This build used to print help and exit 0 for it, so that
+    /// console got no login prompt and the service looked like it had
+    /// succeeded. `--help` still works, spelled in full.
+    #[test]
+    fn dash_h_is_flow_control_and_help_is_long_only() {
+        let cfg = parse_args(&argv(&["getty", "-h", "ttyS0"])).unwrap();
+        assert!(cfg.flow_control, "-h enables hardware flow control");
+        assert!(!cfg.show_help, "-h must not be help");
+        assert_eq!(cfg.port, "ttyS0");
+        assert!(
+            unapplied_settings(&cfg).contains(&"--flow-control"),
+            "flow control is parsed but not applied, so it must be reported"
+        );
+
+        let cfg = parse_args(&argv(&["getty", "--help"])).unwrap();
+        assert!(cfg.show_help);
+    }
+
+    /// `--login-options` splices the name in as ONE argument.
+    #[test]
+    fn login_options_substitute_the_name_as_a_single_argument() {
+        assert_eq!(
+            splice_login_options("-h darkstar -- \\u", "alice"),
+            vec!["-h", "darkstar", "--", "alice"]
+        );
+
+        // The manual's stated protection: "makes sure the logname gets passed
+        // as one parameter (so embedded spaces will not create yet another
+        // parameter)". Substituting inside the token rather than re-splitting
+        // is what delivers that.
+        assert_eq!(
+            splice_login_options("-- \\u", "alice bob"),
+            vec!["--", "alice bob"]
+        );
+
+        // No `\u` at all: the options are passed through unchanged.
+        assert_eq!(splice_login_options("-p", "alice"), vec!["-p"]);
+    }
+
+    /// The `--` shield is detected where it matters, and only there.
+    #[test]
+    fn login_options_shield_is_required_only_before_the_name() {
+        assert!(login_options_shield_the_name("-- \\u"));
+        assert!(login_options_shield_the_name("-h darkstar -- \\u"));
+        // No `\u`: the name is not passed through these options at all, so
+        // there is nothing for a leading dash to be read as.
+        assert!(login_options_shield_the_name("-p"));
+
+        // These are the ones that need the warning.
+        assert!(!login_options_shield_the_name("\\u"));
+        assert!(!login_options_shield_the_name("-h darkstar \\u"));
+        // `--` AFTER the name does not shield it.
+        assert!(!login_options_shield_the_name("\\u --"));
     }
 
     #[test]

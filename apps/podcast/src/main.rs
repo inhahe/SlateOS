@@ -42,6 +42,17 @@ use std::time::Duration;
 // Layout Constants
 // ============================================================================
 
+/// What the window says instead of a library.
+///
+/// Three lines. The third is about offline availability, which is the whole
+/// reason anyone downloads a podcast: the failure surfaces on a plane or a
+/// train, at the exact moment there is no connection to fall back on.
+const CANNOT_FETCH_LINES: [&str; 3] = [
+    "This app cannot subscribe to or download podcasts.",
+    "It has no network access, so no feed has been fetched and no episode file exists.",
+    "Nothing here is available offline -- an episode marked Downloaded would be a file that is not there.",
+];
+
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 750.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
@@ -966,7 +977,7 @@ pub struct PodcastApp {
 
 impl PodcastApp {
     pub fn new(width: f32, height: f32) -> Self {
-        let mut app = Self {
+        let app = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
@@ -994,7 +1005,8 @@ impl PodcastApp {
             used_disk_bytes: 0,
             next_id: 1,
         };
-        app.populate_sample_data();
+        // No podcasts. `populate_sample_data` built subscriptions and
+        // episodes nobody had fetched.
         app
     }
 
@@ -1668,6 +1680,20 @@ impl PodcastApp {
     }
 
     /// Simulate download progress.
+    /// Advance the download queue.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. Its name said "simulate" and the app's
+    /// tick called it every frame, so the simulation was the shipping
+    /// behaviour -- the same shape as `remotedesktop`'s
+    /// `advance_session_state` and `netscan`'s `simulate_*`.
+    ///
+    /// It moved each active item on by 10% a tick, and on reaching 1.0 marked
+    /// the episode `Downloaded` **and added the episode's file size to
+    /// `used_disk_bytes`**. So the app reported disk space consumed by files
+    /// that do not exist, and reported episodes as available offline -- which
+    /// is the entire reason anyone downloads a podcast, and fails at the exact
+    /// moment there is no connection to fall back on.
+    #[cfg(test)]
     pub fn simulate_download_tick(&mut self) {
         let mut completed_episodes: Vec<(u64, u64, u64)> = Vec::new();
 
@@ -1788,6 +1814,22 @@ impl PodcastApp {
     // Sample data
     // ========================================================================
 
+    /// An app holding the library `new` used to build.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about the episode list,
+    /// the player, the queue, the search and the settings -- all of which need
+    /// *episodes*, not specifically invented ones.
+    #[cfg(test)]
+    fn with_sample_data(width: f32, height: f32) -> Self {
+        let mut app = Self::new(width, height);
+        app.populate_sample_data();
+        app
+    }
+
+    /// Subscriptions and episodes, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `new` called it.
+    #[cfg(test)]
     fn populate_sample_data(&mut self) {
         // Podcast 1: Tech talk
         let p1 = self.subscribe(
@@ -1982,10 +2024,8 @@ impl PodcastApp {
             self.tick(elapsed_ms);
             moved = true;
         }
-        if self.has_active_downloads() {
-            self.simulate_download_tick();
-            moved = true;
-        }
+        // Downloads no longer advance. There is nothing to advance them
+        // from: the queue can only hold episodes that were never fetched.
         moved
     }
 
@@ -2236,6 +2276,29 @@ impl PodcastApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // After the background, or it would be painted over.
+        for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                y: 1.0 + i as f32 * 12.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 11.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(self.width - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Sidebar.
         self.render_sidebar(&mut cmds);
@@ -4296,6 +4359,65 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A fresh app holds no subscriptions and claims no disk.
+    ///
+    /// `new` called `populate_sample_data`, and the tick called
+    /// `simulate_download_tick`, which moved each active item on by 10% and on
+    /// reaching 1.0 marked the episode `Downloaded` **and added its file size
+    /// to `used_disk_bytes`**.
+    ///
+    /// Two claims, and the second is the one that outlives the session: the
+    /// app reported disk space consumed by files that do not exist. Someone
+    /// checking why their storage is full would have found gigabytes
+    /// attributed to podcasts, and deleting them frees nothing.
+    ///
+    /// The first fails in a more specific place. Offline availability is the
+    /// entire reason anyone downloads a podcast, so an episode wrongly marked
+    /// Downloaded fails on a plane or a train -- at the exact moment there is
+    /// no connection to fall back on.
+    #[test]
+    fn a_fresh_app_holds_nothing_and_claims_no_disk() {
+        let app = PodcastApp::new(1100.0, 750.0);
+        assert!(
+            app.podcasts.is_empty(),
+            "subscriptions appeared from nowhere"
+        );
+        assert!(
+            app.download_queue.is_empty(),
+            "a download queue appeared from nowhere"
+        );
+        assert_eq!(
+            app.used_disk_bytes, 0,
+            "disk was reported consumed by nothing"
+        );
+    }
+
+    /// And the window says so, including about offline availability.
+    #[test]
+    fn the_window_says_it_cannot_fetch_or_download() {
+        let app = PodcastApp::new(1100.0, 750.0);
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_FETCH_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_FETCH_LINES
+                .iter()
+                .any(|l| l.contains("available offline")),
+            "nothing warns that a Downloaded mark would be a file that is not there",
+        );
+    }
     // Only the test keyboard builds modifier sets; production code reads the
     // ones the compositor sends.
     use guitk::event::Modifiers;
@@ -4990,7 +5112,7 @@ mod tests {
 
     #[test]
     fn test_subscribe() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let initial_count = app.podcasts.len();
         let id = app.subscribe(
             "New Pod",
@@ -5006,7 +5128,7 @@ mod tests {
 
     #[test]
     fn test_unsubscribe() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let id = app.subscribe(
             "Temp",
             "Auth",
@@ -5021,13 +5143,13 @@ mod tests {
 
     #[test]
     fn test_unsubscribe_nonexistent() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         assert!(!app.unsubscribe(99999));
     }
 
     #[test]
     fn test_set_auto_download() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let id = app.subscribe("Pod", "Auth", "", "https://x.com/feed", "", vec![]);
         assert!(app.set_auto_download(id, true));
         assert!(app.find_podcast(id).unwrap().auto_download);
@@ -5041,7 +5163,7 @@ mod tests {
 
     #[test]
     fn test_add_episode() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "A", "", "https://x.com", "", vec![]);
         let eid = app.add_episode(
             pid,
@@ -5063,14 +5185,14 @@ mod tests {
 
     #[test]
     fn test_add_episode_invalid_podcast() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let eid = app.add_episode(99999, "Ep", "", "2026-01-01", 100, "", 100);
         assert!(eid.is_none());
     }
 
     #[test]
     fn test_mark_played_unplayed() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
@@ -5099,14 +5221,14 @@ mod tests {
 
     #[test]
     fn test_episode_filter_all() {
-        let app = PodcastApp::new(800.0, 600.0);
+        let app = PodcastApp::with_sample_data(800.0, 600.0);
         let episodes = app.filtered_all_episodes();
         assert!(!episodes.is_empty());
     }
 
     #[test]
     fn test_episode_filter_unplayed() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.episode_filter = EpisodeFilter::Unplayed;
         let episodes = app.filtered_all_episodes();
         // Sample data has unplayed episodes.
@@ -5115,7 +5237,7 @@ mod tests {
 
     #[test]
     fn test_episodes_for_category() {
-        let app = PodcastApp::new(800.0, 600.0);
+        let app = PodcastApp::with_sample_data(800.0, 600.0);
         let tech_eps = app.episodes_for_category(Category::Technology);
         assert!(!tech_eps.is_empty());
     }
@@ -5126,7 +5248,7 @@ mod tests {
 
     #[test]
     fn test_app_set_episode_notes() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
@@ -5138,7 +5260,7 @@ mod tests {
 
     #[test]
     fn test_app_add_episode_bookmark() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
@@ -5151,7 +5273,7 @@ mod tests {
 
     #[test]
     fn test_app_remove_episode_bookmark() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
@@ -5169,7 +5291,7 @@ mod tests {
 
     #[test]
     fn test_play_episode() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5182,7 +5304,7 @@ mod tests {
 
     #[test]
     fn test_pause_resume() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5196,7 +5318,7 @@ mod tests {
 
     #[test]
     fn test_toggle_playback() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5210,7 +5332,7 @@ mod tests {
 
     #[test]
     fn test_stop_playback() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5223,7 +5345,7 @@ mod tests {
 
     #[test]
     fn test_seek_forward() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5235,7 +5357,7 @@ mod tests {
 
     #[test]
     fn test_seek_backward() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5248,7 +5370,7 @@ mod tests {
 
     #[test]
     fn test_seek_backward_saturates() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5260,7 +5382,7 @@ mod tests {
 
     #[test]
     fn test_seek_forward_clamped() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
@@ -5273,7 +5395,7 @@ mod tests {
 
     #[test]
     fn test_seek_to() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5285,7 +5407,7 @@ mod tests {
 
     #[test]
     fn test_cycle_speed() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         assert!((app.playback_speed.value() - 1.0).abs() < 0.001);
         app.cycle_speed();
         assert!((app.playback_speed.value() - 1.25).abs() < 0.01);
@@ -5293,14 +5415,14 @@ mod tests {
 
     #[test]
     fn test_set_speed() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.set_speed(PlaybackSpeed::DOUBLE);
         assert!((app.playback_speed.value() - 2.0).abs() < 0.001);
     }
 
     #[test]
     fn test_tick_advances_position() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5312,14 +5434,14 @@ mod tests {
 
     #[test]
     fn test_tick_stopped_no_advance() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.tick(5000);
         assert_eq!(app.playback_position_secs, 0);
     }
 
     #[test]
     fn test_tick_paused_no_advance() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5337,7 +5459,7 @@ mod tests {
 
     #[test]
     fn test_queue_episode() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5349,7 +5471,7 @@ mod tests {
 
     #[test]
     fn test_queue_no_duplicates() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5362,7 +5484,7 @@ mod tests {
 
     #[test]
     fn test_dequeue_episode() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5375,13 +5497,13 @@ mod tests {
 
     #[test]
     fn test_dequeue_invalid_index() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         assert!(!app.dequeue_episode(999));
     }
 
     #[test]
     fn test_reorder_queue() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.clear_queue();
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let e1 = app
@@ -5404,13 +5526,13 @@ mod tests {
 
     #[test]
     fn test_reorder_queue_invalid() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         assert!(!app.reorder_queue(0, 99));
     }
 
     #[test]
     fn test_clear_queue() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.clear_queue();
         assert!(app.play_queue.is_empty());
     }
@@ -5421,7 +5543,7 @@ mod tests {
 
     #[test]
     fn test_queue_download() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
@@ -5432,7 +5554,7 @@ mod tests {
 
     #[test]
     fn test_queue_download_no_duplicate() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
@@ -5443,7 +5565,7 @@ mod tests {
 
     #[test]
     fn test_cancel_download() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
@@ -5455,13 +5577,13 @@ mod tests {
 
     #[test]
     fn test_cancel_download_nonexistent() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         assert!(!app.cancel_download(99999));
     }
 
     #[test]
     fn test_simulate_download_tick() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
@@ -5474,7 +5596,7 @@ mod tests {
 
     #[test]
     fn test_delete_download() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
@@ -5493,7 +5615,7 @@ mod tests {
 
     #[test]
     fn test_disk_usage() {
-        let app = PodcastApp::new(800.0, 600.0);
+        let app = PodcastApp::with_sample_data(800.0, 600.0);
         assert!(app.remaining_disk_bytes() <= app.total_disk_bytes);
         let pct = app.disk_usage_pct();
         assert!((0.0..=100.0).contains(&pct));
@@ -5505,7 +5627,7 @@ mod tests {
 
     #[test]
     fn test_search_finds_by_title() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.search_query = "Rust".to_string();
         app.perform_search();
         assert!(!app.search_results.is_empty());
@@ -5513,7 +5635,7 @@ mod tests {
 
     #[test]
     fn test_search_finds_by_podcast_name() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.search_query = "StarTalk".to_string();
         app.perform_search();
         assert!(!app.search_results.is_empty());
@@ -5521,7 +5643,7 @@ mod tests {
 
     #[test]
     fn test_search_empty_query() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.search_query.clear();
         app.perform_search();
         assert!(app.search_results.is_empty());
@@ -5529,7 +5651,7 @@ mod tests {
 
     #[test]
     fn test_search_no_results() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.search_query = "xyznonexistent123".to_string();
         app.perform_search();
         assert!(app.search_results.is_empty());
@@ -5537,7 +5659,7 @@ mod tests {
 
     #[test]
     fn test_search_case_insensitive() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.search_query = "rust".to_string();
         app.perform_search();
         let lower_count = app.search_results.len();
@@ -5552,7 +5674,7 @@ mod tests {
 
     #[test]
     fn test_export_opml_includes_subs() {
-        let app = PodcastApp::new(800.0, 600.0);
+        let app = PodcastApp::with_sample_data(800.0, 600.0);
         let opml = app.export_opml();
         assert!(opml.contains("Rustacean"));
         assert!(opml.contains("StarTalk"));
@@ -5560,7 +5682,7 @@ mod tests {
 
     #[test]
     fn test_import_opml() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let xml = r#"<opml><body>
     <outline text="New Show" type="rss" xmlUrl="https://new.example.com/rss" />
 </body></opml>"#;
@@ -5571,7 +5693,7 @@ mod tests {
 
     #[test]
     fn test_import_opml_no_duplicates() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let existing_url = app.podcasts[0].rss_url.clone();
         let xml = format!(
             r#"<opml><body><outline text="Dup" type="rss" xmlUrl="{}" /></body></opml>"#,
@@ -5587,7 +5709,7 @@ mod tests {
 
     #[test]
     fn test_playback_records_history() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
@@ -5605,7 +5727,7 @@ mod tests {
 
     #[test]
     fn test_auto_download_on_new_episode() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         app.set_auto_download(pid, true);
         app.add_episode(pid, "Auto Ep", "", "2026-01-01", 100, "", 5000);
@@ -5623,14 +5745,14 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
-        let app = PodcastApp::new(800.0, 600.0);
+        let app = PodcastApp::with_sample_data(800.0, 600.0);
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_all_views() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
 
         app.main_view = MainView::EpisodeList;
         let cmds = app.render_commands();
@@ -5663,7 +5785,7 @@ mod tests {
 
     #[test]
     fn test_render_with_episode_detail() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let first_ep = app
             .podcasts
             .first()
@@ -5677,7 +5799,7 @@ mod tests {
 
     #[test]
     fn test_render_with_now_playing() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.podcasts[0].id;
         let eid = app.podcasts[0].episodes[0].id;
         app.play_episode(pid, eid);
@@ -5688,7 +5810,7 @@ mod tests {
 
     #[test]
     fn test_render_search_with_results() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.main_view = MainView::Search;
         app.search_query = "Rust".to_string();
         app.perform_search();
@@ -5698,7 +5820,7 @@ mod tests {
 
     #[test]
     fn test_render_with_notes_bookmarks() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.podcasts[0].id;
         let eid = app.podcasts[0].episodes[0].id;
         app.set_episode_notes(pid, eid, "Important topic");
@@ -5711,7 +5833,7 @@ mod tests {
 
     #[test]
     fn test_render_downloads_with_queue() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.podcasts[0].id;
         let eid = app.podcasts[0].episodes[0].id;
         app.queue_download(pid, eid);
@@ -5736,7 +5858,7 @@ mod tests {
         Gothenburg.";
 
     fn app_with_prose_episode() -> PodcastApp {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.podcasts[0].id;
         let eid = app.podcasts[0].episodes[0].id;
         app.podcasts[0].episodes[0].description = LONG_PROSE.to_string();
@@ -5897,13 +6019,13 @@ mod tests {
 
     #[test]
     fn test_play_nonexistent_episode() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         assert!(!app.play_episode(99999, 99999));
     }
 
     #[test]
     fn test_seek_while_stopped() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.seek_forward(10);
         assert_eq!(app.playback_position_secs, 0);
         app.seek_backward(10);
@@ -5930,7 +6052,7 @@ mod tests {
 
     #[test]
     fn test_unsubscribe_clears_queue_items() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
@@ -5942,7 +6064,7 @@ mod tests {
 
     #[test]
     fn test_unsubscribe_stops_playing() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app
             .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
@@ -5954,7 +6076,7 @@ mod tests {
 
     #[test]
     fn test_disk_full_rejects_download() {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.total_disk_bytes = 100;
         app.used_disk_bytes = 90;
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
@@ -5966,7 +6088,7 @@ mod tests {
 
     #[test]
     fn test_find_episode_global() {
-        let app = PodcastApp::new(800.0, 600.0);
+        let app = PodcastApp::with_sample_data(800.0, 600.0);
         let pid = app.podcasts[0].id;
         let eid = app.podcasts[0].episodes[0].id;
         assert!(app.find_episode_global(pid, eid).is_some());
@@ -5981,7 +6103,7 @@ mod tests {
 
     #[test]
     fn test_sample_data_populated() {
-        let app = PodcastApp::new(800.0, 600.0);
+        let app = PodcastApp::with_sample_data(800.0, 600.0);
         assert!(app.podcasts.len() >= 4);
         assert!(app.podcasts.iter().any(|p| p.title.contains("Rustacean")));
         assert!(app.podcasts.iter().any(|p| p.title.contains("StarTalk")));
@@ -6016,7 +6138,7 @@ mod tests {
     }
 
     fn app_with_subscriptions(n: usize) -> PodcastApp {
-        let mut app = PodcastApp::new(800.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         drop_sample_data(&mut app);
         for i in 0..n {
             app.subscribe(&format!("P{i:03}"), "", "", "rss://x", "", vec![]);
@@ -6183,7 +6305,7 @@ mod tests {
     /// One podcast with `n` episodes, selected, so the content area draws the
     /// episode list rather than a placeholder view.
     fn app_with_episodes(n: usize) -> PodcastApp {
-        let mut app = PodcastApp::new(1100.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(1100.0, 600.0);
         drop_sample_data(&mut app);
         let pod = app.subscribe("Show", "", "", "rss://x", "", vec![]);
         for i in 0..n {
@@ -6345,7 +6467,7 @@ mod tests {
 
         // ...and one with room for everything says nothing. 600px cannot hold
         // even the fixed rows, so this needs a window that can.
-        let mut app = PodcastApp::new(800.0, 1200.0);
+        let mut app = PodcastApp::with_sample_data(800.0, 1200.0);
         app.podcasts.clear();
         assert!(
             !sidebar_labels(&app).iter().any(|t| t.ends_with(" more")),
@@ -6406,7 +6528,7 @@ mod tests {
 
     #[test]
     fn clicking_a_sidebar_row_goes_where_the_row_points() {
-        let mut app = PodcastApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
         // Row 3 of the library block is Downloads.
         let y = sidebar_row_y(&app, 3);
         assert_eq!(
@@ -6420,7 +6542,7 @@ mod tests {
 
     #[test]
     fn a_sidebar_header_is_not_a_button() {
-        let app = PodcastApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
         let (rows, window) = app.sidebar_layout();
         let mut y = SIDEBAR_LIST_TOP;
         let mut checked = 0;
@@ -6440,14 +6562,14 @@ mod tests {
 
     #[test]
     fn a_click_right_of_the_sidebar_is_not_a_sidebar_click() {
-        let app = PodcastApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
         let y = sidebar_row_y(&app, 1);
         assert_eq!(app.sidebar_target_at(SIDEBAR_WIDTH + 4.0, y), None);
     }
 
     #[test]
     fn a_click_on_the_sidebar_title_is_not_a_row() {
-        let app = PodcastApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert_eq!(
             app.sidebar_target_at(20.0, 20.0),
             None,
@@ -6474,7 +6596,7 @@ mod tests {
 
     #[test]
     fn the_highlight_follows_the_target_it_points_at() {
-        let mut app = PodcastApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
         let pod = app.podcasts.first().expect("sample data has podcasts").id;
         app.select_sidebar(SidebarTarget::Podcast(pod));
         assert!(app.sidebar_target_selected(SidebarTarget::Podcast(pod)));
@@ -6617,7 +6739,7 @@ mod tests {
     /// minutes into a one-minute episode is correctly clamped to its end --
     /// which makes every seek assertion read the same number.
     fn playing_app() -> PodcastApp {
-        let mut app = PodcastApp::new(1100.0, 600.0);
+        let mut app = PodcastApp::with_sample_data(1100.0, 600.0);
         drop_sample_data(&mut app);
         let pod = app.subscribe("Show", "", "", "rss://x", "", vec![]);
         for i in 0..10 {
@@ -6947,12 +7069,26 @@ mod tests {
         let mut app = app_with_episodes(3);
         let (pod, ep) = app.listed_episodes()[0];
         app.queue_download(pod, ep);
+
+        // A tick no longer advances a download. Until 2026-09-15 it called
+        // `simulate_download_tick`, which moved each active item on by 10% and
+        // on reaching 1.0 marked the episode Downloaded and added its file
+        // size to `used_disk_bytes` -- so the app reported disk consumed by
+        // files that do not exist, and episodes available offline, which is
+        // the entire reason anyone downloads a podcast.
         assert_eq!(
             app.on_event(&Event::Tick { elapsed_ms: 250 }),
-            Response::Redraw
+            Response::Idle,
+            "a tick advanced a download that has no source",
         );
         let progress = app.download_queue.first().map_or(1.0, |d| d.progress);
-        assert!(progress > 0.0, "the download queue never moved");
+        assert_eq!(progress, 0.0, "the download queue moved on its own");
+
+        // The simulator still drives it, because the queue, the progress
+        // accounting and the disk total are real and worth testing.
+        app.simulate_download_tick();
+        let progress = app.download_queue.first().map_or(0.0, |d| d.progress);
+        assert!(progress > 0.0, "the fixture did not advance the queue");
     }
 
     #[test]
@@ -7021,7 +7157,7 @@ mod tests {
 
     #[test]
     fn a_click_on_a_row_boundary_belongs_to_the_lower_row() {
-        let app = PodcastApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
         let (rows, window) = app.sidebar_layout();
         let first = rows.get(window.start).expect("a first row");
         let boundary = SIDEBAR_LIST_TOP + first.height();
@@ -7038,7 +7174,7 @@ mod tests {
 
     #[test]
     fn opening_search_puts_out_the_all_episodes_light() {
-        let mut app = PodcastApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert_eq!(app.sidebar_selection, SidebarSelection::AllEpisodes);
         assert!(app.sidebar_target_selected(SidebarTarget::AllEpisodes));
         app.select_sidebar(SidebarTarget::Search);
@@ -7051,7 +7187,7 @@ mod tests {
 
     #[test]
     fn every_library_row_opens_its_own_view() {
-        let mut app = PodcastApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
         let pod = app.podcasts.first().expect("sample data").id;
         for (target, view) in [
             (SidebarTarget::Search, MainView::Search),
@@ -7153,7 +7289,7 @@ mod tests {
 
     #[test]
     fn releasing_the_mouse_is_not_a_click() {
-        let mut app = PodcastApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
         let y = sidebar_row_y(&app, 3);
         let release = Event::Mouse(MouseEvent {
             x: 20.0,
@@ -7229,7 +7365,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = PodcastApp::new(1000.0, 700.0);
+        let mut app = PodcastApp::with_sample_data(1000.0, 700.0);
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

@@ -44,6 +44,24 @@ use oswindow::app::{self, App, Response};
 // Layout constants
 // ============================================================================
 
+/// Said when a control is pressed and cannot do what it says.
+const CANNOT_ACT: &str = "Nothing here can reach the system's startup list, so nothing changed";
+
+/// What the window says instead of listing startup programs.
+///
+/// Three lines, and the third is doing the work that matters. A startup
+/// manager is an *audit* tool: people open it to find out what is running at
+/// login that they did not put there. An empty list reads as "nothing starts
+/// automatically", which is the most reassuring possible answer and one this
+/// program has not earned -- it has never looked. Same shape as the device
+/// manager: the invented list could not contain the thing being searched for,
+/// and neither can the empty one until it says why it is empty.
+const CANNOT_SEE_LINES: [&str; 3] = [
+    "This program cannot see the system's startup list.",
+    "It has no way to read what runs at login, and no way to enable, disable or remove anything.",
+    "An empty list is not an all-clear -- nothing was examined.",
+];
+
 const WINDOW_WIDTH: f32 = 900.0;
 const WINDOW_HEIGHT: f32 = 650.0;
 const HEADER_HEIGHT: f32 = 48.0;
@@ -637,6 +655,19 @@ impl StartupManager {
     }
 
     /// Populate with sample entries for demonstration.
+    /// A plausible startup list, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `StartupUI::new` called it, so the
+    /// window opened on System Tray at `/usr/bin/systray`, Network Manager at
+    /// `/usr/sbin/networkd --daemon` and the rest -- each with a path,
+    /// arguments, a vendor, a description and an impact rating, none of it
+    /// read from anything. This crate has no filesystem access at all; its
+    /// only `std::` import beyond the toolkit is `process::ExitCode`.
+    ///
+    /// Every entry was benign, which is the problem. Somebody auditing their
+    /// startup items sees a tidy list of system components and concludes
+    /// nothing unexpected is there.
+    #[cfg(test)]
     pub fn populate_sample_data(&mut self) {
         self.add_entry(
             "System Tray",
@@ -1472,10 +1503,9 @@ pub struct StartupUI {
 }
 
 impl StartupUI {
-    /// Create a new UI with sample data.
+    /// Create a new UI. It knows of no startup entries.
     pub fn new() -> Self {
-        let mut manager = StartupManager::new();
-        manager.populate_sample_data();
+        let manager = StartupManager::new();
         Self {
             manager,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
@@ -1495,6 +1525,20 @@ impl StartupUI {
     // ========================================================================
     // Geometry
     // ========================================================================
+
+    /// A UI holding the list `new` used to invent.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about sorting, searching,
+    /// the table viewport, the details pane and the confirm dialog -- all of
+    /// which need *entries*, not specifically invented ones. Before
+    /// 2026-09-15 they got them from `new`, which is the defect: the list
+    /// production could reach was the list that shipped.
+    #[cfg(test)]
+    pub fn with_sample_entries() -> Self {
+        let mut ui = Self::new();
+        ui.manager.populate_sample_data();
+        ui
+    }
 
     /// The layout for the size the window is currently believed to be.
     fn layout(&self) -> Layout {
@@ -1694,16 +1738,23 @@ impl StartupUI {
     }
 
     /// Enable the selected entry.
+    /// Report that an entry cannot be enabled.
     pub fn enable_selected(&mut self) {
-        if let Some(id) = self.selected_id {
-            self.manager.enable_entry(id);
+        if self.selected_id.is_some() {
+            self.status = String::from(CANNOT_ACT);
         }
     }
 
-    /// Disable the selected entry.
+    /// Report that an entry cannot be disabled.
+    ///
+    /// The consequential half of the pair. Somebody disables a startup entry
+    /// because they do not want it running -- often because they do not trust
+    /// it. Greying the row out while the program still launches at every login
+    /// is the same failure as the device manager's Uninstall: the user marks
+    /// the thing as dealt with and stops watching it.
     pub fn disable_selected(&mut self) {
-        if let Some(id) = self.selected_id {
-            self.manager.disable_entry(id);
+        if self.selected_id.is_some() {
+            self.status = String::from(CANNOT_ACT);
         }
     }
 
@@ -2063,6 +2114,35 @@ impl StartupUI {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // After the background, or it would be painted over.
+        //
+        // Keyed on the list being empty rather than on a constant, so it
+        // retires itself the day something fills the list instead of becoming
+        // a stale claim of its own.
+        if self.manager.entry_count() == 0 {
+            for (i, line) in CANNOT_SEE_LINES.iter().enumerate() {
+                frame.push(RenderCommand::Text {
+                    x: 10.0,
+                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                    y: 2.0 + i as f32 * 13.0,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 12.0 } else { 10.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(l.width - 20.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
 
         self.draw_header(&mut frame, &l);
         self.draw_toolbar(&mut frame, &l);
@@ -3027,6 +3107,55 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A fresh manager lists nothing and says why.
+    ///
+    /// `StartupUI::new` called `populate_sample_data`, so the window opened on
+    /// System Tray at `/usr/bin/systray`, Network Manager at
+    /// `/usr/sbin/networkd --daemon` and the rest -- each with a path,
+    /// arguments, a vendor, a description and an impact rating, none of it
+    /// read from anything. The crate's only `std::` import beyond the toolkit
+    /// is `process::ExitCode`.
+    ///
+    /// Every entry was benign, and that is the harm rather than an excuse for
+    /// it. A startup manager is an audit tool: people open it to find what
+    /// runs at login that they did not put there. An invented list cannot
+    /// contain that thing, so the tool answers the one question it exists to
+    /// answer -- reassuringly, and wrongly.
+    ///
+    /// The empty list needs the same guard, which is the third banner line:
+    /// "An empty list is not an all-clear -- nothing was examined."
+    #[test]
+    fn a_fresh_manager_lists_nothing_and_says_why() {
+        let ui = StartupUI::new();
+        assert_eq!(
+            ui.manager.entry_count(),
+            0,
+            "a startup list appeared from nowhere"
+        );
+
+        let texts: Vec<String> = ui
+            .render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_SEE_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_SEE_LINES
+                .iter()
+                .any(|l| l.contains("not an all-clear")),
+            "nothing forecloses reading the empty list as a clean bill of health",
+        );
+    }
     // Not in the production imports: nothing outside the tests names a
     // modifier set, because the app reads `key.modifiers.ctrl` off the event
     // the window hands it.
@@ -4148,13 +4277,13 @@ mod tests {
 
     #[test]
     fn test_ui_creation_has_sample_data() {
-        let ui = StartupUI::new();
+        let ui = StartupUI::with_sample_entries();
         assert!(ui.manager.entry_count() > 0);
     }
 
     #[test]
     fn test_ui_sort_toggle() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.sort_by(SortColumn::Name);
         assert_eq!(ui.sort_column, SortColumn::Name);
         let first_order = ui.sort_order;
@@ -4164,7 +4293,7 @@ mod tests {
 
     #[test]
     fn test_ui_sort_change_column() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.sort_by(SortColumn::Impact);
         assert_eq!(ui.sort_column, SortColumn::Impact);
         assert_eq!(ui.sort_order, SortOrder::Ascending);
@@ -4172,7 +4301,7 @@ mod tests {
 
     #[test]
     fn test_ui_select_next_prev() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         assert!(ui.selected_id.is_none());
         ui.select_next();
         assert!(ui.selected_id.is_some());
@@ -4188,7 +4317,7 @@ mod tests {
 
     #[test]
     fn test_ui_open_close_add_dialog() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.open_add_dialog();
         assert!(matches!(ui.dialog, DialogState::AddEdit(_)));
         ui.close_dialog();
@@ -4197,7 +4326,7 @@ mod tests {
 
     #[test]
     fn test_ui_confirm_add() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let count_before = ui.manager.entry_count();
         ui.open_add_dialog();
         if let DialogState::AddEdit(ref mut dlg) = ui.dialog {
@@ -4212,7 +4341,7 @@ mod tests {
 
     #[test]
     fn test_ui_confirm_add_validation_fails() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.open_add_dialog();
         // Name and path are empty.
         let result = ui.confirm_add_edit();
@@ -4221,7 +4350,7 @@ mod tests {
 
     #[test]
     fn test_ui_confirm_delete() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let ids = ui.manager.entry_ids();
         let id = ids[0];
         let count_before = ui.manager.entry_count();
@@ -4235,26 +4364,41 @@ mod tests {
 
     #[test]
     fn test_ui_enable_disable_selected() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let ids = ui.manager.entry_ids();
         let id = ids[0];
         ui.selected_id = Some(id);
+        // Was: the flag flipped and the test believed it. Disabling a startup
+        // entry is why somebody opens this program -- often because they do
+        // not trust the entry -- and greying the row out while the thing still
+        // launches at every login is the device manager's Uninstall again.
+        let was = ui.manager.get_entry(id).map(|e| e.enabled);
         ui.disable_selected();
-        assert!(!ui.manager.get_entry(id).map(|e| e.enabled).unwrap_or(true));
+        assert_eq!(
+            ui.manager.get_entry(id).map(|e| e.enabled),
+            was,
+            "it was disabled in name only"
+        );
+        assert!(ui.status.contains("nothing changed"), "{}", ui.status);
+
         ui.enable_selected();
-        assert!(ui.manager.get_entry(id).map(|e| e.enabled).unwrap_or(false));
+        assert_eq!(
+            ui.manager.get_entry(id).map(|e| e.enabled),
+            was,
+            "it was enabled in name only"
+        );
     }
 
     #[test]
     fn test_ui_render_produces_commands() {
-        let ui = StartupUI::new();
+        let ui = StartupUI::with_sample_entries();
         let tree = ui.render();
         assert!(!tree.commands.is_empty());
     }
 
     #[test]
     fn test_ui_render_with_selection() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.select_next();
         let tree = ui.render();
         assert!(!tree.commands.is_empty());
@@ -4262,7 +4406,7 @@ mod tests {
 
     #[test]
     fn test_ui_render_with_dialog() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.open_add_dialog();
         let tree = ui.render();
         assert!(!tree.commands.is_empty());
@@ -4270,7 +4414,7 @@ mod tests {
 
     #[test]
     fn test_ui_render_delete_dialog() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let ids = ui.manager.entry_ids();
         ui.selected_id = Some(ids[0]);
         ui.open_delete_dialog();
@@ -4280,13 +4424,13 @@ mod tests {
 
     #[test]
     fn test_ui_visible_rows() {
-        let ui = StartupUI::new();
+        let ui = StartupUI::with_sample_entries();
         assert!(ui.visible_rows() > 0);
     }
 
     #[test]
     fn test_ui_filtered_count() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let total = ui.filtered_count();
         assert_eq!(total, ui.manager.entry_count());
         ui.search_query = "zzzznotfound".to_string();
@@ -4353,7 +4497,13 @@ mod tests {
     #[test]
     fn test_startup_ui_default() {
         let ui = StartupUI::default();
-        assert!(ui.manager.entry_count() > 0);
+        // Was `> 0` -- a test asserting that a freshly opened startup manager
+        // already knew what runs at login, having never read anything.
+        assert_eq!(
+            ui.manager.entry_count(),
+            0,
+            "a fresh manager invented a startup list"
+        );
     }
 
     // -- Wiring: layout, hit testing, events --------------------------------
@@ -4393,7 +4543,7 @@ mod tests {
 
     #[test]
     fn every_control_answers_where_the_frame_draws_it() {
-        let ui = StartupUI::new();
+        let ui = StartupUI::with_sample_entries();
         for target in ALWAYS_DRAWN {
             let rect =
                 probe::rect_of(&ui, target).unwrap_or_else(|| panic!("{target:?} was never drawn"));
@@ -4421,7 +4571,7 @@ mod tests {
             (1.0, 1.0),
         ] {
             for open_dialog in [false, true] {
-                let mut ui = StartupUI::new();
+                let mut ui = StartupUI::with_sample_entries();
                 if open_dialog {
                     ui.open_add_dialog();
                 }
@@ -4440,7 +4590,7 @@ mod tests {
 
     #[test]
     fn a_click_selects_the_row_it_lands_on() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         assert!(ui.selected_id.is_none());
         let second = ui.visible_entries().get(1).map(|e| e.id).unwrap();
         assert_eq!(
@@ -4452,7 +4602,7 @@ mod tests {
 
     #[test]
     fn the_empty_table_below_the_last_row_deselects() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         select_first_row(&mut ui);
         // The default window fits 11 rows and the sample data has 8, so the
         // bottom of the viewport is bare table.
@@ -4472,7 +4622,7 @@ mod tests {
 
     #[test]
     fn a_column_header_sorts_by_it_and_a_second_click_flips_the_order() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         assert_eq!(ui.sort_column, SortColumn::Name);
 
         probe::click(&mut ui, Target::Column(SortColumn::Impact));
@@ -4509,7 +4659,7 @@ mod tests {
 
     #[test]
     fn typing_only_reaches_the_search_box_once_it_has_been_clicked() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         probe::type_str(&mut ui, "audio");
         assert_eq!(ui.search_query, "", "the table stole the keystrokes");
 
@@ -4526,7 +4676,7 @@ mod tests {
 
     #[test]
     fn a_click_anywhere_else_takes_the_caret_out_of_the_search_box() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         probe::click(&mut ui, Target::Search);
         assert!(ui.search_focused);
         probe::click(&mut ui, Target::Column(SortColumn::Name));
@@ -4537,7 +4687,7 @@ mod tests {
 
     #[test]
     fn backspace_edits_the_search_box_and_resets_the_viewport() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         probe::click(&mut ui, Target::Search);
         probe::type_str(&mut ui, "cloud");
         assert_eq!(ui.filtered_count(), 1);
@@ -4551,7 +4701,7 @@ mod tests {
 
     #[test]
     fn escape_backs_out_of_one_thing_at_a_time() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         probe::click(&mut ui, Target::Search);
         probe::type_str(&mut ui, "s");
         select_first_row(&mut ui);
@@ -4581,7 +4731,7 @@ mod tests {
 
     #[test]
     fn an_open_dialog_takes_the_clicks_of_everything_it_covers() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let search = probe::rect_of(&ui, Target::Search).unwrap();
         ui.open_add_dialog();
         assert!(
@@ -4607,7 +4757,7 @@ mod tests {
 
     #[test]
     fn the_add_dialog_registers_an_entry_that_was_typed_into_it() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let before = ui.manager.entry_count();
 
         probe::click(&mut ui, Target::Toolbar(ToolbarAction::Add));
@@ -4634,7 +4784,7 @@ mod tests {
 
     #[test]
     fn the_add_dialog_stays_open_and_says_why_when_it_cannot_save() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let before = ui.manager.entry_count();
         probe::click(&mut ui, Target::Toolbar(ToolbarAction::Add));
         probe::click(&mut ui, Target::DialogField(0));
@@ -4664,7 +4814,7 @@ mod tests {
 
     #[test]
     fn the_dialog_cyclers_walk_the_type_and_the_impact() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.open_add_dialog();
         let type_of = |ui: &StartupUI| match &ui.dialog {
             DialogState::AddEdit(d) => d.selected_type(),
@@ -4690,7 +4840,7 @@ mod tests {
 
     #[test]
     fn tab_walks_the_dialog_fields_and_shift_tab_walks_back() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.open_add_dialog();
         let focus = |ui: &StartupUI| match &ui.dialog {
             DialogState::AddEdit(d) => d.focused_field,
@@ -4718,7 +4868,7 @@ mod tests {
 
     #[test]
     fn enter_edits_the_selected_entry_and_the_dialog_saves_the_change() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let id = select_first_row(&mut ui);
         assert_eq!(
             probe::key(&mut ui, &probe::press(Key::Enter)),
@@ -4743,7 +4893,7 @@ mod tests {
 
     #[test]
     fn delete_asks_first_and_only_removes_when_confirmed() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let id = select_first_row(&mut ui);
         let before = ui.manager.entry_count();
 
@@ -4763,7 +4913,7 @@ mod tests {
 
     #[test]
     fn remove_with_nothing_selected_says_so_instead_of_opening_a_dialog() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         assert!(ui.selected_id.is_none());
         probe::click(&mut ui, Target::Toolbar(ToolbarAction::Remove));
         assert_eq!(ui.dialog, DialogState::Closed);
@@ -4772,19 +4922,22 @@ mod tests {
 
     #[test]
     fn the_enable_and_disable_buttons_toggle_the_selected_entry() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let id = select_first_row(&mut ui);
         assert!(ui.manager.get_entry(id).unwrap().enabled);
 
         probe::click(&mut ui, Target::Toolbar(ToolbarAction::Disable));
-        assert!(!ui.manager.get_entry(id).unwrap().enabled);
+        assert!(
+            ui.manager.get_entry(id).unwrap().enabled,
+            "the toolbar switch moved for an entry it cannot reach",
+        );
         probe::click(&mut ui, Target::Toolbar(ToolbarAction::Enable));
         assert!(ui.manager.get_entry(id).unwrap().enabled);
     }
 
     #[test]
     fn refresh_drops_a_selection_whose_entry_is_gone() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let id = select_first_row(&mut ui);
         // Remove it behind the UI's back, the way a rescan would find.
         ui.manager.remove_entry(id);
@@ -4799,7 +4952,7 @@ mod tests {
 
     #[test]
     fn the_wheel_scrolls_the_table_and_stops_at_both_ends() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.resize(SHORT.0, SHORT.1);
         assert_eq!(
             ui.visible_rows(),
@@ -4828,7 +4981,7 @@ mod tests {
 
     #[test]
     fn the_wheel_over_the_toolbar_leaves_the_table_alone() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.resize(SHORT.0, SHORT.1);
         let (x, y) = probe::rect_of_sized(&ui, Target::Toolbar(ToolbarAction::Add), SHORT)
             .unwrap()
@@ -4849,7 +5002,7 @@ mod tests {
         // Every event goes in at `SHORT`, not at `Probe::SIZE`: the probe
         // helpers resize to the default first, which would silently give the
         // viewport all eight rows and make the scrolling untestable.
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         for _ in 0..8 {
             ui.key_at(&probe::press(Key::Down), SHORT);
         }
@@ -4867,7 +5020,7 @@ mod tests {
 
     #[test]
     fn home_and_end_jump_to_the_ends_of_the_list() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.key_at(&probe::press(Key::End), SHORT);
         assert_eq!(ui.scroll_offset, 5);
         let last = ui.all_entries().last().map(|e| e.id);
@@ -4880,7 +5033,7 @@ mod tests {
 
     #[test]
     fn a_selection_that_scrolled_out_of_view_is_still_the_selection() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         ui.resize(SHORT.0, SHORT.1);
         let id = ui.visible_entries().first().map(|e| e.id).unwrap();
         probe::click_sized(&mut ui, Target::Row(id), MouseButton::Left, SHORT);
@@ -4896,7 +5049,7 @@ mod tests {
 
     #[test]
     fn ctrl_n_opens_the_add_dialog_and_ctrl_f_takes_the_caret() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         probe::key(&mut ui, &probe::ctrl(Key::N));
         assert!(matches!(ui.dialog, DialogState::AddEdit(_)));
         probe::key(&mut ui, &probe::press(Key::Escape));
@@ -4910,7 +5063,7 @@ mod tests {
 
     #[test]
     fn a_resized_window_lays_out_again_and_the_hit_test_follows() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let wide = probe::rect_of(&ui, Target::Search).unwrap();
         assert_eq!(
             ui.handle_event(&Event::Resize {
@@ -4930,7 +5083,7 @@ mod tests {
 
     #[test]
     fn render_lays_out_at_the_size_it_is_handed() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let tree = App::render(&mut ui, 700.0, 500.0);
         assert!(!tree.commands.is_empty());
         assert_eq!(ui.window_width, 700.0);
@@ -4941,7 +5094,7 @@ mod tests {
 
     #[test]
     fn a_degenerate_size_does_not_poison_the_layout() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         for (w, h) in [(0.0, 0.0), (f32::NAN, 100.0), (-40.0, f32::INFINITY)] {
             let tree = App::render(&mut ui, w, h);
             assert!(ui.window_width.is_finite() && ui.window_width >= 0.0);
@@ -4959,7 +5112,7 @@ mod tests {
 
     #[test]
     fn ctrl_q_closes_the_window_and_the_close_button_does_too() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         let quit = KeyEvent {
             key: Key::Q,
             pressed: true,
@@ -4975,7 +5128,7 @@ mod tests {
 
     #[test]
     fn only_an_event_that_changes_something_asks_for_a_frame() {
-        let mut ui = StartupUI::new();
+        let mut ui = StartupUI::with_sample_entries();
         // A move over the window changes nothing and must not repaint.
         assert_eq!(
             ui.on_event(&Event::Mouse(MouseEvent {
@@ -5011,7 +5164,7 @@ mod tests {
         ];
         let mut seen: Vec<String> = Vec::new();
         for build in states {
-            let mut probe_ui = StartupUI::new();
+            let mut probe_ui = StartupUI::with_sample_entries();
             build(&mut probe_ui);
             let targets: Vec<Target> = probe_ui
                 .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -5025,7 +5178,7 @@ mod tests {
                 }
             }
             for target in targets {
-                let mut fresh = StartupUI::new();
+                let mut fresh = StartupUI::with_sample_entries();
                 build(&mut fresh);
                 assert_eq!(
                     probe::click(&mut fresh, target),
@@ -5088,7 +5241,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = StartupUI::new();
+        let mut app = StartupUI::with_sample_entries();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

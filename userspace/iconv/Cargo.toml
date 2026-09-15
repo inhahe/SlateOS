@@ -6,3 +6,6 @@ description = "SlateOS iconv - character encoding conversion"
 [dependencies]
 # Character-set names and file names come from argv.
 quoting = { path = "../quoting" }
+
+[lints]
+workspace = true

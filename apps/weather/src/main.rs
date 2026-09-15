@@ -683,6 +683,7 @@ pub fn format_time(h: u8, m: u8, fmt: TimeFormat) -> String {
 // ============================================================================
 
 /// Generate sample current weather data.
+#[cfg(test)]
 pub fn sample_current_weather() -> CurrentWeather {
     CurrentWeather {
         temp_c: 22.5,
@@ -702,6 +703,7 @@ pub fn sample_current_weather() -> CurrentWeather {
 }
 
 /// Generate sample hourly forecast (24 hours).
+#[cfg(test)]
 pub fn sample_hourly_forecast() -> Vec<HourForecast> {
     // One row per hour rather than three parallel arrays indexed in lockstep.
     // The arrays could not be checked against each other: adding a temperature
@@ -749,6 +751,7 @@ pub fn sample_hourly_forecast() -> Vec<HourForecast> {
 }
 
 /// Generate sample 7-day daily forecast.
+#[cfg(test)]
 pub fn sample_daily_forecast() -> Vec<DayForecast> {
     // One row per day, for the reason above: seven parallel arrays were seven
     // chances for one of them to be a different length than the rest. rustfmt
@@ -838,6 +841,7 @@ pub fn sample_daily_forecast() -> Vec<DayForecast> {
 }
 
 /// Generate sample alerts.
+#[cfg(test)]
 pub fn sample_alerts() -> Vec<WeatherAlert> {
     vec![WeatherAlert {
         alert_type: AlertType::Thunderstorm,
@@ -847,7 +851,24 @@ pub fn sample_alerts() -> Vec<WeatherAlert> {
     }]
 }
 
+/// What the window says instead of a forecast.
+///
+/// Four lines, one more than the other refusals in this sweep, and the extra
+/// one is about alerts. A weather app is the only program here with a channel
+/// whose entire purpose is to make somebody change their plans for safety.
+/// Showing a fabricated "Thunderstorm Watch" does two things: it is wrong
+/// today, and it teaches the user that this app *has* such a channel -- so its
+/// silence tomorrow reads as "no warnings in force" rather than "not
+/// connected". The second is the durable harm and it outlives the fake alert.
+const CANNOT_FETCH_LINES: [&str; 4] = [
+    "This app cannot fetch weather.",
+    "It has no network access, so no observation, forecast or warning has been retrieved.",
+    "Nothing shown here is a reading -- there is no temperature, no forecast and no location.",
+    "It cannot deliver severe-weather alerts either. Silence here is not an all-clear.",
+];
+
 /// Default saved locations.
+#[cfg(test)]
 pub fn default_locations() -> Vec<Location> {
     vec![
         Location {
@@ -882,7 +903,15 @@ pub enum ActiveView {
 
 /// Main application state.
 pub struct WeatherApp {
-    pub current: CurrentWeather,
+    /// The current observation, if anything has fetched one.
+    ///
+    /// `Option` since 2026-09-15. It was a bare `CurrentWeather` filled by
+    /// `sample_current_weather()`, so the dashboard always had a temperature,
+    /// a feels-like, a humidity, a UV index and an air-quality reading to
+    /// show. A plain struct has no way to say "not fetched", so the only
+    /// answer it could give was a made-up one -- the same shape as the sound
+    /// recorder's `available_bytes: u64`, which is why the fix is the same.
+    pub current: Option<CurrentWeather>,
     pub hourly: Vec<HourForecast>,
     pub daily: Vec<DayForecast>,
     pub alerts: Vec<WeatherAlert>,
@@ -902,15 +931,20 @@ pub struct WeatherApp {
 }
 
 impl WeatherApp {
-    /// Create a new app with sample data.
+    /// Create a new app. It knows no weather and no locations.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            current: sample_current_weather(),
-            hourly: sample_hourly_forecast(),
-            daily: sample_daily_forecast(),
-            alerts: sample_alerts(),
-            locations: default_locations(),
+            // All empty. Nothing here can reach a weather service.
+            //
+            // `locations` went with the rest: it defaulted to "New York, NY",
+            // marked as the user's default, which is a claim about where they
+            // are.
+            current: None,
+            hourly: Vec::new(),
+            daily: Vec::new(),
+            alerts: Vec::new(),
+            locations: Vec::new(),
             active_location_idx: 0,
             settings: Settings::default(),
             active_view: ActiveView::Dashboard,
@@ -918,6 +952,24 @@ impl WeatherApp {
             width,
             height,
         }
+    }
+
+    /// An app holding the observation and forecast `new` used to invent.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about the hourly strip,
+    /// the temperature graph, the alert cards, the location list and the
+    /// settings -- all of which need *weather*, not specifically invented
+    /// weather. Before 2026-09-15 they got it from `new`, which is the defect:
+    /// the forecast production could reach was the forecast that shipped.
+    #[cfg(test)]
+    pub fn with_sample_weather(width: f32, height: f32) -> Self {
+        let mut app = Self::new(width, height);
+        app.current = Some(sample_current_weather());
+        app.hourly = sample_hourly_forecast();
+        app.daily = sample_daily_forecast();
+        app.alerts = sample_alerts();
+        app.locations = default_locations();
+        app
     }
 
     /// Get the name of the currently active location.
@@ -1217,9 +1269,18 @@ impl WeatherApp {
         // Title bar
         let title_y = self.render_title_bar(&mut cmds, content_y);
 
+        // Nothing has been fetched, so there is no view to draw. Every panel
+        // below reports a reading, and a panel with no reading to report
+        // either shows a default -- 0 degrees, Clear -- or an empty space, and
+        // both are read as observations.
+        let Some(current) = self.current.clone() else {
+            self.render_cannot_fetch(&mut cmds, title_y);
+            return cmds;
+        };
+
         // Main content area depends on active view
         match self.active_view {
-            ActiveView::Dashboard => self.render_dashboard(&mut cmds, title_y),
+            ActiveView::Dashboard => self.render_dashboard(&mut cmds, title_y, &current),
             ActiveView::HourlyDetail => self.render_hourly_detail(&mut cmds, title_y),
             ActiveView::DailyDetail => self.render_daily_detail(&mut cmds, title_y),
             ActiveView::Alerts => self.render_alerts_view(&mut cmds, title_y),
@@ -1231,6 +1292,31 @@ impl WeatherApp {
     }
 
     /// Render alert banner at the top. Returns the Y position after the banner.
+    /// Say, in the window, that no weather has been fetched.
+    fn render_cannot_fetch(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+        for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 16.0,
+                #[expect(clippy::cast_precision_loss, reason = "four lines; index is 0..4")]
+                y: y + 16.0 + i as f32 * 20.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 15.0 } else { 12.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(self.width - 32.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+
     fn render_alerts_banner(&self, cmds: &mut Vec<RenderCommand>, y: f32) -> f32 {
         if self.alerts.is_empty() {
             return y;
@@ -1373,12 +1459,12 @@ impl WeatherApp {
     }
 
     /// Render the dashboard view (main overview).
-    fn render_dashboard(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+    fn render_dashboard(&self, cmds: &mut Vec<RenderCommand>, y: f32, current: &CurrentWeather) {
         let padding = 16.0;
         let mut cy = y + padding;
 
         // Current weather card
-        cy = self.render_current_weather_card(cmds, padding, cy);
+        cy = self.render_current_weather_card(cmds, padding, cy, current);
         cy += padding;
 
         // Hourly strip
@@ -1394,11 +1480,17 @@ impl WeatherApp {
         cy += padding;
 
         // Air quality card
-        self.render_air_quality_card(cmds, padding, cy);
+        self.render_air_quality_card(cmds, padding, cy, current);
     }
 
     /// Render the current weather card. Returns the Y after the card.
-    fn render_current_weather_card(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
+    fn render_current_weather_card(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        current: &CurrentWeather,
+    ) -> f32 {
         let card_w = self.width - x * 2.0;
         let card_h = 200.0;
 
@@ -1439,7 +1531,7 @@ impl WeatherApp {
         cmds.push(RenderCommand::Text {
             x: inner_x,
             y: inner_y + 24.0,
-            text: format_temp(self.current.temp_c, self.settings.temp_unit),
+            text: format_temp(current.temp_c, self.settings.temp_unit),
             font_size: 48.0,
             color: self.palette.text,
             font_weight: FontWeightHint::Bold,
@@ -1453,7 +1545,7 @@ impl WeatherApp {
             y: inner_y + 80.0,
             text: format!(
                 "Feels like {}",
-                format_temp(self.current.feels_like_c, self.settings.temp_unit)
+                format_temp(current.feels_like_c, self.settings.temp_unit)
             ),
             font_size: 13.0,
             color: self.palette.subtext0,
@@ -1466,7 +1558,7 @@ impl WeatherApp {
         cmds.push(RenderCommand::Text {
             x: inner_x,
             y: inner_y + 100.0,
-            text: self.current.condition.description().to_string(),
+            text: current.condition.description().to_string(),
             font_size: 14.0,
             color: self.palette.subtext1,
             font_weight: FontWeightHint::Regular,
@@ -1476,8 +1568,8 @@ impl WeatherApp {
 
         // Weather icon (ASCII art rendered as text lines)
         let icon_x = inner_x + 200.0;
-        let icon_color = self.current.condition.icon_color(&self.palette);
-        for (i, line) in self.current.condition.icon_lines().iter().enumerate() {
+        let icon_color = current.condition.icon_color(&self.palette);
+        for (i, line) in current.condition.icon_lines().iter().enumerate() {
             cmds.push(RenderCommand::Text {
                 x: icon_x,
                 y: inner_y + 30.0 + i as f32 * 16.0,
@@ -1492,7 +1584,7 @@ impl WeatherApp {
 
         // Details grid (right side of card)
         let detail_x = icon_x + 180.0;
-        let details = self.current_weather_details();
+        let details = self.current_weather_details(current);
         for (i, (label, value)) in details.iter().enumerate() {
             let row = i / 2;
             let col = i % 2;
@@ -1525,47 +1617,47 @@ impl WeatherApp {
     }
 
     /// Collect current weather detail label-value pairs.
-    fn current_weather_details(&self) -> Vec<(&'static str, String)> {
-        let uv_severity = UvSeverity::from_index(self.current.uv_index);
+    fn current_weather_details(&self, current: &CurrentWeather) -> Vec<(&'static str, String)> {
+        let uv_severity = UvSeverity::from_index(current.uv_index);
         vec![
-            ("Humidity", format!("{}%", self.current.humidity_pct)),
+            ("Humidity", format!("{}%", current.humidity_pct)),
             (
                 "Wind",
                 format!(
                     "{} {}",
-                    format_wind(self.current.wind_speed_kmh, self.settings.wind_unit),
-                    self.current.wind_dir.as_str()
+                    format_wind(current.wind_speed_kmh, self.settings.wind_unit),
+                    current.wind_dir.as_str()
                 ),
             ),
             (
                 "Pressure",
-                format_pressure(self.current.pressure_hpa, self.settings.pressure_unit),
+                format_pressure(current.pressure_hpa, self.settings.pressure_unit),
             ),
             (
                 "Visibility",
-                format_visibility(self.current.visibility_km, self.settings.temp_unit),
+                format_visibility(current.visibility_km, self.settings.temp_unit),
             ),
             (
                 "Dew Point",
-                format_temp(self.current.dew_point_c, self.settings.temp_unit),
+                format_temp(current.dew_point_c, self.settings.temp_unit),
             ),
             (
                 "UV Index",
-                format!("{} ({})", self.current.uv_index, uv_severity.label()),
+                format!("{} ({})", current.uv_index, uv_severity.label()),
             ),
             (
                 "Sunrise",
                 format_time(
-                    self.current.sunrise.0,
-                    self.current.sunrise.1,
+                    current.sunrise.0,
+                    current.sunrise.1,
                     self.settings.time_format,
                 ),
             ),
             (
                 "Sunset",
                 format_time(
-                    self.current.sunset.0,
-                    self.current.sunset.1,
+                    current.sunset.0,
+                    current.sunset.1,
                     self.settings.time_format,
                 ),
             ),
@@ -1995,10 +2087,16 @@ impl WeatherApp {
     }
 
     /// Render the air quality card. Returns Y after.
-    fn render_air_quality_card(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
+    fn render_air_quality_card(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        current: &CurrentWeather,
+    ) -> f32 {
         let card_w = self.width - x * 2.0;
         let card_h = 80.0;
-        let aq = AirQuality::from_aqi(self.current.aqi);
+        let aq = AirQuality::from_aqi(current.aqi);
 
         // Card
         self.palette
@@ -2020,7 +2118,7 @@ impl WeatherApp {
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 34.0,
-            text: format!("AQI: {}", self.current.aqi),
+            text: format!("AQI: {}", current.aqi),
             font_size: 24.0,
             color: self.palette.ink(aq.color(&self.palette)),
             font_weight: FontWeightHint::Bold,
@@ -2057,7 +2155,7 @@ impl WeatherApp {
         });
 
         // Filled portion (AQI 0-500 scale)
-        let fill_frac = (self.current.aqi as f32 / 500.0).min(1.0);
+        let fill_frac = (current.aqi as f32 / 500.0).min(1.0);
         let fill_w = bar_w * fill_frac;
         if fill_w > 0.0 {
             cmds.push(RenderCommand::FillRect {
@@ -2682,7 +2780,7 @@ mod tests {
 
     #[test]
     fn the_number_row_reaches_every_view() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         let expected = [
             (Key::Num2, ActiveView::HourlyDetail),
             (Key::Num3, ActiveView::DailyDetail),
@@ -2701,14 +2799,14 @@ mod tests {
     fn asking_for_the_view_already_shown_is_not_a_redraw() {
         // Answering `Consumed` here would redraw an identical frame on every
         // press of the key for the view already on screen.
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         assert_eq!(app.active_view, ActiveView::Dashboard);
         assert_eq!(app.handle_event(&press(Key::Num1)), EventResult::Ignored);
     }
 
     #[test]
     fn tab_cycles_the_views_and_comes_back_round() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         let first = app.active_view;
         let mut seen = vec![first];
         for _ in 0..5 {
@@ -2729,13 +2827,13 @@ mod tests {
     fn a_key_the_app_has_no_use_for_is_not_consumed() {
         // An app that consumes everything stops the compositor routing keys
         // anywhere else, and redraws on each one.
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
     }
 
     #[test]
     fn a_key_release_does_nothing() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         let release = Event::Key(KeyEvent {
             key: Key::Num5,
             pressed: false,
@@ -2748,7 +2846,7 @@ mod tests {
 
     #[test]
     fn the_horizontal_arrows_scroll_the_hourly_strip_and_stop_at_the_start() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         assert_eq!(app.handle_event(&press(Key::Left)), EventResult::Ignored);
         assert!(app.hourly_scroll_offset <= 0.0, "already at the start");
         assert_eq!(app.handle_event(&press(Key::Right)), EventResult::Consumed);
@@ -2762,7 +2860,7 @@ mod tests {
 
     #[test]
     fn home_returns_the_strip_to_its_first_hour() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         for _ in 0..5 {
             app.handle_event(&press(Key::Right));
         }
@@ -2775,7 +2873,7 @@ mod tests {
 
     #[test]
     fn the_vertical_arrows_walk_the_saved_locations_without_wrapping() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         let n = app.locations.len();
         assert!(n >= 2, "the default locations should have more than one");
         assert_eq!(app.active_location_idx, 0);
@@ -2793,7 +2891,7 @@ mod tests {
 
     #[test]
     fn the_unit_keys_change_the_units_they_are_named_for() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         let before = app.settings.clone();
         app.handle_event(&press(Key::U));
         assert_ne!(app.settings.temp_unit, before.temp_unit);
@@ -2811,7 +2909,7 @@ mod tests {
 
     #[test]
     fn a_resize_is_taken_but_is_not_itself_a_redraw() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         let ev = Event::Resize {
             width: 1280,
             height: 1024,
@@ -2825,7 +2923,7 @@ mod tests {
     fn the_title_names_the_location_on_screen() {
         // The window title is the only place the active city appears outside
         // the app's own chrome, so it has to follow the selection.
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         let first = app.title();
         assert!(first.contains(app.active_location_name()));
         app.handle_event(&press(Key::Down));
@@ -2846,7 +2944,7 @@ mod tests {
             ActiveView::SettingsView,
         ] {
             for (w, h) in [(1.0, 1.0), (320.0, 240.0), (3840.0, 2160.0)] {
-                let mut app = WeatherApp::new(w, h);
+                let mut app = WeatherApp::with_sample_weather(w, h);
                 app.active_view = view;
                 let tree = app.render(w, h);
                 assert!(
@@ -2857,6 +2955,75 @@ mod tests {
         }
     }
     use super::*;
+
+    /// A fresh app knows no weather, no location, and issues no alert.
+    ///
+    /// `new` used to fill all five: an observation, an hourly forecast, a
+    /// daily forecast, a saved location of "New York, NY" marked as the
+    /// user's default, and a "Thunderstorm Watch -- Thunderstorms expected
+    /// this afternoon. Stay alert."
+    ///
+    /// The alert is the one that matters beyond today. A weather app is the
+    /// only program in this sweep with a channel whose entire purpose is to
+    /// make somebody change their plans for safety, and a fabricated warning
+    /// teaches the user that this app *has* such a channel -- so its silence
+    /// tomorrow reads as "no warnings in force" rather than "not connected".
+    /// The false alert is a one-day problem; the false confidence in the
+    /// channel outlives it.
+    #[test]
+    fn a_fresh_app_knows_no_weather_and_issues_no_alert() {
+        let app = WeatherApp::new(900.0, 800.0);
+        assert!(
+            app.current.is_none(),
+            "an observation appeared from nowhere"
+        );
+        assert!(
+            app.hourly.is_empty(),
+            "an hourly forecast appeared from nowhere"
+        );
+        assert!(
+            app.daily.is_empty(),
+            "a daily forecast appeared from nowhere"
+        );
+        assert!(
+            app.locations.is_empty(),
+            "the app decided where the user lives"
+        );
+        assert!(app.alerts.is_empty(), "a severe-weather alert was invented");
+    }
+
+    /// And the window says so, including about alerts specifically.
+    #[test]
+    fn the_window_says_it_cannot_fetch_or_warn() {
+        let app = WeatherApp::new(900.0, 800.0);
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_FETCH_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_FETCH_LINES
+                .iter()
+                .any(|l| l.contains("Silence here is not an all-clear")),
+            "nothing tells the user the alert channel does not exist",
+        );
+
+        // And no temperature is drawn. A default `CurrentWeather` would render
+        // as a perfectly plausible 0 degrees and Clear, which is a reading.
+        assert!(
+            !texts.iter().any(|t| t.contains('\u{00B0}')),
+            "a temperature was drawn for an observation that was never taken",
+        );
+    }
 
     // --- WeatherCondition tests ---
 
@@ -3346,7 +3513,7 @@ mod tests {
 
     #[test]
     fn test_app_new() {
-        let app = WeatherApp::new(800.0, 600.0);
+        let app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert_eq!(app.width, 800.0);
         assert_eq!(app.height, 600.0);
         assert_eq!(app.active_view, ActiveView::Dashboard);
@@ -3355,27 +3522,27 @@ mod tests {
 
     #[test]
     fn test_app_active_location_name() {
-        let app = WeatherApp::new(800.0, 600.0);
+        let app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert_eq!(app.active_location_name(), "New York, NY");
     }
 
     #[test]
     fn test_app_set_active_location() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.set_active_location(1);
         assert_eq!(app.active_location_name(), "London, UK");
     }
 
     #[test]
     fn test_app_set_active_location_out_of_bounds() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.set_active_location(100);
         assert_eq!(app.active_location_idx, 0); // unchanged
     }
 
     #[test]
     fn test_app_add_location() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         let initial = app.locations.len();
         app.add_location("Paris, FR".to_string());
         assert_eq!(app.locations.len(), initial + 1);
@@ -3388,7 +3555,7 @@ mod tests {
 
     #[test]
     fn test_app_add_location_to_empty() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.locations.clear();
         app.add_location("Only City".to_string());
         assert!(app.locations[0].is_default);
@@ -3396,20 +3563,20 @@ mod tests {
 
     #[test]
     fn test_app_remove_location() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert!(app.remove_location(1));
         assert_eq!(app.locations.len(), 2);
     }
 
     #[test]
     fn test_app_remove_location_out_of_bounds() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert!(!app.remove_location(100));
     }
 
     #[test]
     fn test_app_remove_default_promotes_first() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         // locations[0] is default
         app.remove_location(0);
         assert!(app.locations[0].is_default);
@@ -3417,7 +3584,7 @@ mod tests {
 
     #[test]
     fn test_app_remove_active_clamps() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.set_active_location(2); // last
         app.remove_location(2);
         assert!(app.active_location_idx < app.locations.len());
@@ -3425,20 +3592,20 @@ mod tests {
 
     #[test]
     fn test_app_reorder_location() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert!(app.reorder_location(0, 2));
         assert_eq!(app.locations[2].name, "New York, NY");
     }
 
     #[test]
     fn test_app_reorder_out_of_bounds() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert!(!app.reorder_location(0, 100));
     }
 
     #[test]
     fn test_app_set_default_location() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert!(app.set_default_location(2));
         assert!(app.locations[2].is_default);
         assert!(!app.locations[0].is_default);
@@ -3446,13 +3613,13 @@ mod tests {
 
     #[test]
     fn test_app_set_default_out_of_bounds() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert!(!app.set_default_location(100));
     }
 
     #[test]
     fn test_app_toggle_temp_unit() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert_eq!(app.settings.temp_unit, TempUnit::Celsius);
         app.toggle_temp_unit();
         assert_eq!(app.settings.temp_unit, TempUnit::Fahrenheit);
@@ -3462,7 +3629,7 @@ mod tests {
 
     #[test]
     fn test_app_cycle_wind_unit() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert_eq!(app.settings.wind_unit, WindSpeedUnit::Kmh);
         app.cycle_wind_unit();
         assert_eq!(app.settings.wind_unit, WindSpeedUnit::Mph);
@@ -3476,7 +3643,7 @@ mod tests {
 
     #[test]
     fn test_app_cycle_pressure_unit() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert_eq!(app.settings.pressure_unit, PressureUnit::Hpa);
         app.cycle_pressure_unit();
         assert_eq!(app.settings.pressure_unit, PressureUnit::InHg);
@@ -3488,7 +3655,7 @@ mod tests {
 
     #[test]
     fn test_app_toggle_time_format() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         assert_eq!(app.settings.time_format, TimeFormat::H24);
         app.toggle_time_format();
         assert_eq!(app.settings.time_format, TimeFormat::H12);
@@ -3498,42 +3665,42 @@ mod tests {
 
     #[test]
     fn test_app_set_update_interval() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.set_update_interval(60);
         assert_eq!(app.settings.update_interval_min, 60);
     }
 
     #[test]
     fn test_app_set_update_interval_clamped_low() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.set_update_interval(1);
         assert_eq!(app.settings.update_interval_min, 5);
     }
 
     #[test]
     fn test_app_set_update_interval_clamped_high() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.set_update_interval(999);
         assert_eq!(app.settings.update_interval_min, 120);
     }
 
     #[test]
     fn test_app_scroll_hourly_positive() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.scroll_hourly(100.0);
         assert!((app.hourly_scroll_offset - 100.0).abs() < 0.01);
     }
 
     #[test]
     fn test_app_scroll_hourly_no_negative() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.scroll_hourly(-100.0);
         assert_eq!(app.hourly_scroll_offset, 0.0);
     }
 
     #[test]
     fn test_app_scroll_hourly_capped() {
-        let mut app = WeatherApp::new(800.0, 600.0);
+        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
         app.scroll_hourly(100_000.0);
         let max = app.hourly.len() as f32 * 80.0;
         assert!(app.hourly_scroll_offset <= max);
@@ -3543,7 +3710,7 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
@@ -3551,7 +3718,7 @@ mod tests {
     #[test]
     fn test_render_starts_with_background() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         match &cmds[0] {
             RenderCommand::FillRect { x, y, color, .. } => {
@@ -3565,7 +3732,7 @@ mod tests {
 
     #[test]
     fn test_render_has_text_commands() {
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         let has_text = cmds.iter().any(|c| matches!(c, RenderCommand::Text { .. }));
         assert!(has_text, "Render output should contain text commands");
@@ -3573,7 +3740,7 @@ mod tests {
 
     #[test]
     fn test_render_has_line_commands() {
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         let has_lines = cmds.iter().any(|c| matches!(c, RenderCommand::Line { .. }));
         assert!(has_lines, "Dashboard should have line commands (graph)");
@@ -3581,7 +3748,7 @@ mod tests {
 
     #[test]
     fn test_render_alert_banner_when_alerts() {
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         // Should have at least one text command with severity label
         let has_alert_text = cmds.iter().any(|c| {
@@ -3596,7 +3763,7 @@ mod tests {
 
     #[test]
     fn test_render_no_alert_banner_when_empty() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.alerts.clear();
         let cmds = app.render_commands();
         let has_alert_text = cmds.iter().any(|c| {
@@ -3613,7 +3780,7 @@ mod tests {
 
     #[test]
     fn test_render_dashboard_view() {
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         let has_current = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
@@ -3627,7 +3794,7 @@ mod tests {
 
     #[test]
     fn test_render_hourly_view() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.active_view = ActiveView::HourlyDetail;
         let cmds = app.render_commands();
         let has_hourly_label = cmds.iter().any(|c| {
@@ -3642,7 +3809,7 @@ mod tests {
 
     #[test]
     fn test_render_daily_view() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.active_view = ActiveView::DailyDetail;
         let cmds = app.render_commands();
         let has_daily = cmds.iter().any(|c| {
@@ -3657,7 +3824,7 @@ mod tests {
 
     #[test]
     fn test_render_alerts_view_empty() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.active_view = ActiveView::Alerts;
         app.alerts.clear();
         let cmds = app.render_commands();
@@ -3678,7 +3845,7 @@ mod tests {
 
     /// An app showing the alerts view, with one alert carrying `description`.
     fn app_with_alert(description: &str) -> WeatherApp {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.active_view = ActiveView::Alerts;
         app.alerts = vec![WeatherAlert {
             alert_type: AlertType::Thunderstorm,
@@ -3811,7 +3978,7 @@ mod tests {
 
     #[test]
     fn test_render_locations_view() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.active_view = ActiveView::Locations;
         let cmds = app.render_commands();
         let has_locations = cmds.iter().any(|c| {
@@ -3826,7 +3993,7 @@ mod tests {
 
     #[test]
     fn test_render_settings_view() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.active_view = ActiveView::SettingsView;
         let cmds = app.render_commands();
         let has_settings = cmds.iter().any(|c| {
@@ -3841,7 +4008,7 @@ mod tests {
 
     #[test]
     fn test_render_settings_shows_units() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.active_view = ActiveView::SettingsView;
         let cmds = app.render_commands();
         let has_temp_unit = cmds.iter().any(|c| {
@@ -3856,7 +4023,7 @@ mod tests {
 
     #[test]
     fn test_render_locations_shows_default_badge() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.active_view = ActiveView::Locations;
         let cmds = app.render_commands();
         let has_default_badge = cmds.iter().any(|c| {
@@ -3871,7 +4038,7 @@ mod tests {
 
     #[test]
     fn test_render_daily_table_has_header_labels() {
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         let headers = ["Day", "Condition", "High", "Low", "Precip", "Wind"];
         for hdr in &headers {
@@ -3888,7 +4055,7 @@ mod tests {
 
     #[test]
     fn test_render_air_quality_shows_aqi() {
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         let has_aqi = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
@@ -3902,7 +4069,7 @@ mod tests {
 
     #[test]
     fn test_render_dashboard_box_shadow() {
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         let has_shadow = cmds
             .iter()
@@ -3912,7 +4079,7 @@ mod tests {
 
     #[test]
     fn test_render_hourly_strip_clipping() {
-        let app = WeatherApp::new(900.0, 800.0);
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
         let cmds = app.render_commands();
         let has_push_clip = cmds
             .iter()
@@ -3924,15 +4091,15 @@ mod tests {
 
     #[test]
     fn test_current_weather_details_count() {
-        let app = WeatherApp::new(900.0, 800.0);
-        let details = app.current_weather_details();
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
+        let details = app.current_weather_details(&sample_current_weather());
         assert_eq!(details.len(), 8); // 8 detail pairs
     }
 
     #[test]
     fn test_current_weather_details_labels() {
-        let app = WeatherApp::new(900.0, 800.0);
-        let details = app.current_weather_details();
+        let app = WeatherApp::with_sample_weather(900.0, 800.0);
+        let details = app.current_weather_details(&sample_current_weather());
         let labels: Vec<&str> = details.iter().map(|(l, _)| *l).collect();
         assert!(labels.contains(&"Humidity"));
         assert!(labels.contains(&"Wind"));
@@ -3946,7 +4113,7 @@ mod tests {
 
     #[test]
     fn test_render_with_fahrenheit() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.settings.temp_unit = TempUnit::Fahrenheit;
         let cmds = app.render_commands();
         let has_f = cmds.iter().any(|c| {
@@ -3961,7 +4128,7 @@ mod tests {
 
     #[test]
     fn test_render_empty_hourly() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.hourly.clear();
         // Should not panic
         let cmds = app.render_commands();
@@ -3970,7 +4137,7 @@ mod tests {
 
     #[test]
     fn test_render_empty_daily() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.daily.clear();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -3978,7 +4145,7 @@ mod tests {
 
     #[test]
     fn test_render_single_hourly_entry() {
-        let mut app = WeatherApp::new(900.0, 800.0);
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
         app.hourly = vec![HourForecast {
             hour: 12,
             temp_c: 20.0,
@@ -4000,7 +4167,7 @@ mod tests {
             ActiveView::SettingsView,
         ];
         for view in &views {
-            let mut app = WeatherApp::new(900.0, 800.0);
+            let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
             app.active_view = *view;
             let cmds = app.render_commands();
             assert!(
@@ -4041,7 +4208,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = WeatherApp::new(1000.0, 700.0);
+        let mut app = WeatherApp::with_sample_weather(1000.0, 700.0);
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

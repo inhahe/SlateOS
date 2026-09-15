@@ -2355,31 +2355,51 @@ fn run_auditd(args: &[String]) -> i32 {
         }
     }
 
-    if foreground {
-        println!("auditd: running in foreground mode");
-        // In a real daemon we would enter event loop.
-        // For simulation, write a startup event and exit.
-        write_audit_event(
-            &config.log_file,
-            MessageType::DaemonStart,
-            &[("op", "start"), ("ver", VERSION), ("res", "success")],
-        );
-        println!("auditd: daemon event loop would run here");
-    } else {
-        println!("auditd: would fork to background (simulated)");
-        write_audit_event(
-            &config.log_file,
-            MessageType::DaemonStart,
-            &[("op", "start"), ("ver", VERSION), ("res", "success")],
-        );
-    }
+    // NO `DaemonStart` EVENT IS WRITTEN, and that is the fix.
+    //
+    // Both paths used to write `DaemonStart` with `res=success` and return 0,
+    // while the process exited immediately -- there is no event loop and no
+    // fork. The messages on stdout were honest about it ("would fork to
+    // background (simulated)", "daemon event loop would run here"), and the
+    // AUDIT LOG was not.
+    //
+    // That asymmetry is the whole defect. stdout is read by whoever ran the
+    // command, once; the audit log is read later, by someone reconstructing
+    // what happened, and its entire value is that it can be trusted without
+    // corroboration. A `res=success` start record for a daemon that never ran
+    // is exactly the kind of entry an audit log exists to make impossible, and
+    // it outlives the terminal that told the truth.
+    //
+    // Returning 0 compounded it: an init script would have counted the service
+    // as up.
+    //
+    // Refusing rather than simulating, on the same terms as `nsenter` and
+    // `unshare`: the honest answer to "start the audit daemon" on a system
+    // that cannot is a failure, not a log line saying it worked.
+    let _ = foreground;
+    eprintln!("auditd: cannot start: this build has no daemon event loop.");
+    eprintln!("auditd: no DaemonStart event has been written, because none happened.");
 
     // Clean up PID file on exit
     let _ = fs::remove_file(&pid_file);
 
-    0
+    1
 }
 
+/// Append one record to the audit log.
+///
+/// **Uncalled, and kept rather than deleted** -- the same treatment `gdb`
+/// gives its inferior-control helpers while there is no `ptrace`. It is the
+/// writer a real event source will need, and the format it encodes is the
+/// interesting part.
+///
+/// Worth recording WHY it became uncalled: its only two call sites were the
+/// fabricated `DaemonStart` events removed on 2026-09-15, one per daemon path.
+/// So until that day the only thing this program had ever written to the audit
+/// log was a record of a daemon start that did not happen. An audit log whose
+/// sole entry is false is worse than an empty one, because an empty one is
+/// obviously empty.
+#[allow(dead_code)]
 fn write_audit_event(log_file: &str, msg_type: MessageType, fields: &[(&str, &str)]) {
     let now = current_time();
     let serial = (now * 1000.0) as u64 % 1_000_000;

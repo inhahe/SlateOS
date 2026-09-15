@@ -11,5 +11,9 @@ guitk = { path = "../../gui/toolkit" }
 # commands, counts them, and exits before anybody can click a day.
 oswindow = { path = "../../gui/window" }
 
+# Ctrl+S writes through `safeio::write_str_atomically`, not `fs::write`, which
+# truncates the target before writing it.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

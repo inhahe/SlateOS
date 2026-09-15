@@ -34,7 +34,9 @@ use guitk::style::CornerRadii;
 use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::collections::VecDeque;
 
@@ -63,6 +65,23 @@ const WORK_STEP: Duration = Duration::from_millis(400);
 fn transfer_step(size: u64) -> u64 {
     (size / 20).max(1)
 }
+
+/// Said when Connect is pressed.
+const CANNOT_CONNECT: &str =
+    "Cannot connect: this program has no network access, so nothing was contacted";
+
+/// What the window says instead of a session list.
+///
+/// Three lines. The third is about the history, which is the part that
+/// outlives the session: `connect_profile` wrote an entry with
+/// `success: true` at the moment Connect was pressed, before any outcome was
+/// known, so the log recorded successful connections to machines nobody had
+/// reached.
+const CANNOT_CONNECT_LINES: [&str; 3] = [
+    "This program cannot connect to a remote machine.",
+    "It has no network access, so no host has been contacted and no session exists.",
+    "The connection history is empty for the same reason -- no attempt was ever made.",
+];
 
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 750.0;
@@ -516,6 +535,9 @@ pub struct ConnectionProfile {
 /// history entries carried unconditionally before -- with the comment "would
 /// use real time in production" beside it, so every connection in the history
 /// was stamped 1 January 1970 and they all sorted equal.
+/// `#[cfg(test)]` with the history entries it timestamped: nothing in
+/// production records a connection now, because none can be made.
+#[cfg(test)]
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -722,7 +744,7 @@ impl SidebarRow {
 
 impl RemoteDesktopApp {
     pub fn new() -> Self {
-        let mut app = Self {
+        Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             profiles: Vec::new(),
             selected_profile: None,
@@ -751,12 +773,28 @@ impl RemoteDesktopApp {
             confirm_delete: None,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
-        };
+        }
+    }
+
+    /// An app holding the profiles and session `new` used to invent.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about the sidebar, the
+    /// session list, the transfer table, the history view and the confirm
+    /// dialog -- all of which need *profiles*, not specifically invented ones.
+    #[cfg(test)]
+    fn with_sample_data() -> Self {
+        let mut app = Self::new();
         app.load_sample_data();
         app
     }
 
-    /// Populate with representative sample data for UI development.
+    /// Populate with representative sample data.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `new` called it, so the window opened
+    /// on saved profiles for machines nobody had configured and a session
+    /// already in `SessionState::Connected` -- a client asserting, before the
+    /// user had touched anything, that it was driving a remote desktop.
+    #[cfg(test)]
     fn load_sample_data(&mut self) {
         // Sample profiles
         let profiles = vec![
@@ -1111,7 +1149,32 @@ impl RemoteDesktopApp {
     // ========================================================================
 
     /// Start a new session from a profile.
+    /// Report that a connection cannot be made.
+    ///
+    /// It used to create a session in `Connecting`, which `handle_tick` walked
+    /// to `Authenticating` and then `Connected` -- and write a history entry
+    /// with `success: true` *at the moment Connect was pressed*, before any
+    /// outcome was known. Two separate fabrications: the connection, and the
+    /// record of its success.
+    ///
+    /// The second would be a defect even with a working network. An outcome
+    /// written at the start of an attempt is not a record of what happened; it
+    /// is a record of what was intended, filed where someone will later read
+    /// it as what happened.
     pub fn connect_profile(&mut self, profile_index: usize) -> Option<u32> {
+        if self.profiles.get(profile_index).is_some() {
+            self.status_message = Some(String::from(CANNOT_CONNECT));
+        }
+        None
+    }
+
+    /// Open a session the way Connect used to.
+    ///
+    /// `#[cfg(test)]`. The session list, its states, the duration accounting
+    /// and the history table are all real code worth keeping under test; what
+    /// is not worth shipping is a session that never contacted a host.
+    #[cfg(test)]
+    pub fn connect_profile_fixture(&mut self, profile_index: usize) -> Option<u32> {
         let profile = self.profiles.get(profile_index)?;
         let session = RemoteSession {
             id: self.next_session_id,
@@ -1160,7 +1223,13 @@ impl RemoteDesktopApp {
         }
     }
 
-    /// Advance session state (simulated for UI development).
+    /// Advance session state.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. Its own doc comment already said
+    /// "simulated for UI development", and `handle_tick` called it on every
+    /// tick -- so the simulation was the shipping behaviour, and the comment
+    /// saying so was read by nobody who was not already looking at this line.
+    #[cfg(test)]
     pub fn advance_session_state(&mut self, index: usize) {
         if let Some(session) = self.sessions.get_mut(index) {
             session.state = match session.state {
@@ -1400,9 +1469,9 @@ impl RemoteDesktopApp {
             return EventResult::Ignored;
         }
 
-        for index in 0..self.sessions.len() {
-            self.advance_session_state(index);
-        }
+        // Nothing to advance. `advance_session_state` walked Connecting to
+        // Authenticating to Connected, on a session that had contacted no
+        // host.
 
         for index in 0..self.transfers.len() {
             let Some(next) = self.transfers.get(index).and_then(|t| {
@@ -1736,6 +1805,29 @@ impl RemoteDesktopApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // After the background, or it would be painted over.
+        for (i, line) in CANNOT_CONNECT_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 10.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                y: 1.0 + i as f32 * 12.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 11.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(self.window_width - 20.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         self.render_title_bar(&mut cmds);
         self.render_toolbar(&mut cmds);
@@ -3510,6 +3602,80 @@ mod tests {
 
     use super::*;
 
+    /// Connect makes no session and files no history entry.
+    ///
+    /// Two separate fabrications lived here. `connect_profile` created a
+    /// session in `Connecting`, which `handle_tick` walked to `Authenticating`
+    /// and then `Connected` -- and it wrote a history entry with
+    /// `success: true` *at the moment Connect was pressed*, before any outcome
+    /// was known.
+    ///
+    /// The second would be a defect even with a working network. An outcome
+    /// written at the start of an attempt is not a record of what happened; it
+    /// is a record of what was intended, filed where somebody will later read
+    /// it as what happened.
+    #[test]
+    fn connect_makes_no_session_and_files_no_history() {
+        let mut app = RemoteDesktopApp::with_sample_data();
+        let history_before = app.history.len();
+        // A delta, not an absolute: the fixture itself carries a session in
+        // `Connected` -- which is precisely what `new` used to ship, and is
+        // the reason it is a fixture now.
+        let sessions_before = app.sessions.len();
+
+        assert!(app.connect_profile(0).is_none(), "a session was opened");
+        assert_eq!(app.sessions.len(), sessions_before, "a session was added");
+        assert_eq!(
+            app.history.len(),
+            history_before,
+            "a connection was recorded"
+        );
+
+        let why = app
+            .status_message
+            .clone()
+            .expect("Connect said nothing at all");
+        assert!(why.contains("Cannot connect"), "{why}");
+    }
+
+    /// A fresh client holds no profiles and no session.
+    #[test]
+    fn a_fresh_client_has_no_profiles_and_no_session() {
+        let app = RemoteDesktopApp::new();
+        assert!(app.profiles.is_empty(), "profiles appeared from nowhere");
+        assert!(app.sessions.is_empty(), "a session appeared from nowhere");
+        assert!(
+            app.history.is_empty(),
+            "a connection history appeared from nowhere"
+        );
+    }
+
+    /// And the window says why, including about the empty history.
+    #[test]
+    fn the_window_says_it_cannot_connect() {
+        let app = RemoteDesktopApp::new();
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_CONNECT_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_CONNECT_LINES
+                .iter()
+                .any(|l| l.contains("no attempt was ever made")),
+            "nothing explains the empty history",
+        );
+    }
+
     // ------------------------------------------------------------------
     // Wiring
     //
@@ -3544,7 +3710,7 @@ mod tests {
     /// the one it made. Several of these tests were written against
     /// `transfers[0]` on the assumption it was theirs; it was a sample.
     fn empty() -> RemoteDesktopApp {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.sessions.clear();
         app.selected_session = None;
         app.transfers.clear();
@@ -3557,7 +3723,9 @@ mod tests {
     fn a_connecting_session_works_through_to_connected() {
         let mut app = empty();
         app.selected_profile = Some(0);
-        let id = app.connect_profile(0).expect("a profile to connect");
+        let id = app
+            .connect_profile_fixture(0)
+            .expect("a profile to connect");
         let index = app
             .sessions
             .iter()
@@ -3572,6 +3740,9 @@ mod tests {
 
         let mut seen = vec![app.sessions[index].state];
         for _ in 0..8 {
+            // Advanced explicitly: `handle_tick` no longer walks sessions, so
+            // the simulated progression is the fixture's to drive.
+            app.advance_session_state(index);
             app.handle_event(&tick());
             seen.push(app.sessions[index].state);
             if app.sessions[index].state == SessionState::Connected {
@@ -3592,9 +3763,16 @@ mod tests {
         let mut app = empty();
         assert_eq!(app.tick_interval(), None);
 
-        app.connect_profile(0);
+        app.connect_profile_fixture(0);
         assert!(app.tick_interval().is_some());
         for _ in 0..8 {
+            // `handle_tick` stopped advancing sessions on 2026-09-15: the
+            // advance is a simulator -- its own doc said so -- and calling it
+            // from the tick made the simulation the shipping behaviour. The
+            // fixture drives it explicitly now.
+            for i in 0..app.sessions.len() {
+                app.advance_session_state(i);
+            }
             app.handle_event(&tick());
         }
         assert_eq!(
@@ -3673,7 +3851,7 @@ mod tests {
     /// there was no key that went through with it and none that dismissed it.
     #[test]
     fn the_delete_confirmation_can_be_answered_either_way() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let before = app.profiles.len();
         assert!(before > 1);
         app.selected_profile = Some(0);
@@ -3700,7 +3878,7 @@ mod tests {
     #[test]
     fn a_session_can_be_disconnected_reconnected_and_swept_up() {
         let mut app = empty();
-        app.connect_profile(0);
+        app.connect_profile_fixture(0);
         app.current_view = MainView::ActiveSessions;
         app.selected_session = Some(0);
 
@@ -3743,10 +3921,10 @@ mod tests {
     /// of one rule, each with its own number.
     #[test]
     fn the_history_is_trimmed_by_one_rule() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.clear_history();
         for _ in 0..150 {
-            app.connect_profile(0);
+            app.connect_profile_fixture(0);
         }
         assert_eq!(
             app.history.len(),
@@ -3759,9 +3937,9 @@ mod tests {
     /// used in production, so the whole history sorted equal at 1 January 1970.
     #[test]
     fn a_connection_is_recorded_with_the_time_it_happened() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.clear_history();
-        app.connect_profile(0);
+        app.connect_profile_fixture(0);
         let entry = app.history.front().expect("an entry");
         assert!(
             entry.timestamp > 1_700_000_000,
@@ -3772,8 +3950,8 @@ mod tests {
 
     #[test]
     fn delete_clears_the_history() {
-        let mut app = RemoteDesktopApp::new();
-        app.connect_profile(0);
+        let mut app = RemoteDesktopApp::with_sample_data();
+        app.connect_profile_fixture(0);
         app.current_view = MainView::History;
         assert!(!app.history.is_empty());
         app.handle_event(&press(Key::Delete));
@@ -3786,7 +3964,7 @@ mod tests {
     /// depth, refresh rate and scaling it was created with.
     #[test]
     fn q_cycles_the_quality_preset_of_the_selected_profile() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::Connections;
         app.selected_profile = Some(0);
 
@@ -3815,7 +3993,7 @@ mod tests {
 
     #[test]
     fn m_switches_between_one_monitor_and_all_of_them() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::ActiveSessions;
         let before = app.monitor_mode.clone();
         app.handle_event(&press(Key::M));
@@ -3846,7 +4024,7 @@ mod tests {
     /// window put the controls where the pointer could not find them.
     #[test]
     fn the_layout_follows_the_window_it_is_given() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let tall = app.content_height();
         let _ = App::render(&mut app, WINDOW_WIDTH, WINDOW_HEIGHT + 300.0);
         assert!(
@@ -3864,8 +4042,15 @@ mod tests {
             "Remote Desktop",
             "with nothing connected there is nothing to name"
         );
-        app.connect_profile(0);
+        app.connect_profile_fixture(0);
         for _ in 0..8 {
+            // `handle_tick` stopped advancing sessions on 2026-09-15: the
+            // advance is a simulator -- its own doc said so -- and calling it
+            // from the tick made the simulation the shipping behaviour. The
+            // fixture drives it explicitly now.
+            for i in 0..app.sessions.len() {
+                app.advance_session_state(i);
+            }
             app.handle_event(&tick());
         }
         assert!(
@@ -3881,7 +4066,7 @@ mod tests {
 
     #[test]
     fn test_add_profile_assigns_unique_id() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let initial_count = app.profiles.len();
         let profile = ConnectionProfile::new_default(0);
         let id = app.add_profile(profile);
@@ -3891,7 +4076,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_profiles_unique_ids() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let id1 = app.add_profile(ConnectionProfile::new_default(0));
         let id2 = app.add_profile(ConnectionProfile::new_default(0));
         let id3 = app.add_profile(ConnectionProfile::new_default(0));
@@ -3902,7 +4087,7 @@ mod tests {
 
     #[test]
     fn test_delete_profile_valid_index() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let initial_count = app.profiles.len();
         assert!(app.delete_profile(0));
         assert_eq!(app.profiles.len(), initial_count - 1);
@@ -3910,13 +4095,13 @@ mod tests {
 
     #[test]
     fn test_delete_profile_invalid_index() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         assert!(!app.delete_profile(999));
     }
 
     #[test]
     fn test_delete_all_profiles_clears_selection() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         while !app.profiles.is_empty() {
             app.delete_profile(0);
         }
@@ -3925,7 +4110,7 @@ mod tests {
 
     #[test]
     fn test_update_profile_valid() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let mut updated = app.profiles[0].clone();
         updated.display_name = "Updated Name".into();
         assert!(app.update_profile(0, updated));
@@ -3934,26 +4119,26 @@ mod tests {
 
     #[test]
     fn test_update_profile_invalid_index() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let profile = ConnectionProfile::new_default(0);
         assert!(!app.update_profile(999, profile));
     }
 
     #[test]
     fn test_get_profile_valid() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         assert!(app.get_profile(0).is_some());
     }
 
     #[test]
     fn test_get_profile_invalid() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         assert!(app.get_profile(999).is_none());
     }
 
     #[test]
     fn test_find_profile_by_id() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         let idx = app.find_profile_by_id(1);
         assert!(idx.is_some());
         assert_eq!(idx.unwrap(), 0);
@@ -3961,13 +4146,13 @@ mod tests {
 
     #[test]
     fn test_find_profile_by_id_missing() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         assert!(app.find_profile_by_id(9999).is_none());
     }
 
     #[test]
     fn test_groups_returns_unique_sorted() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         let groups = app.groups();
         // Should be deduplicated and sorted
         let mut sorted = groups.clone();
@@ -3978,7 +4163,7 @@ mod tests {
 
     #[test]
     fn test_profiles_in_group() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         let dev_profiles = app.profiles_in_group("Development");
         assert!(!dev_profiles.is_empty());
         for &idx in &dev_profiles {
@@ -3988,7 +4173,7 @@ mod tests {
 
     #[test]
     fn test_profiles_in_nonexistent_group() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         let profiles = app.profiles_in_group("NonExistent");
         assert!(profiles.is_empty());
     }
@@ -4102,7 +4287,7 @@ mod tests {
 
     #[test]
     fn test_apply_quality_preset() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.selected_profile = Some(0);
         app.apply_quality_preset(QualityPreset::HighQuality);
         let profile = &app.profiles[0];
@@ -4128,31 +4313,31 @@ mod tests {
 
     #[test]
     fn test_connect_profile_creates_session() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let initial_sessions = app.sessions.len();
-        let result = app.connect_profile(0);
+        let result = app.connect_profile_fixture(0);
         assert!(result.is_some());
         assert_eq!(app.sessions.len(), initial_sessions + 1);
     }
 
     #[test]
     fn test_connect_invalid_profile() {
-        let mut app = RemoteDesktopApp::new();
-        assert!(app.connect_profile(999).is_none());
+        let mut app = RemoteDesktopApp::with_sample_data();
+        assert!(app.connect_profile_fixture(999).is_none());
     }
 
     #[test]
     fn test_session_initial_state_connecting() {
-        let mut app = RemoteDesktopApp::new();
-        let _id = app.connect_profile(0);
+        let mut app = RemoteDesktopApp::with_sample_data();
+        let _id = app.connect_profile_fixture(0);
         let session = app.sessions.last().unwrap();
         assert_eq!(session.state, SessionState::Connecting);
     }
 
     #[test]
     fn test_advance_session_connecting_to_authenticating() {
-        let mut app = RemoteDesktopApp::new();
-        let _id = app.connect_profile(0);
+        let mut app = RemoteDesktopApp::with_sample_data();
+        let _id = app.connect_profile_fixture(0);
         let last_idx = app.sessions.len() - 1;
         app.advance_session_state(last_idx);
         assert_eq!(app.sessions[last_idx].state, SessionState::Authenticating);
@@ -4160,8 +4345,8 @@ mod tests {
 
     #[test]
     fn test_advance_session_authenticating_to_connected() {
-        let mut app = RemoteDesktopApp::new();
-        let _id = app.connect_profile(0);
+        let mut app = RemoteDesktopApp::with_sample_data();
+        let _id = app.connect_profile_fixture(0);
         let last_idx = app.sessions.len() - 1;
         app.advance_session_state(last_idx); // -> Authenticating
         app.advance_session_state(last_idx); // -> Connected
@@ -4170,20 +4355,20 @@ mod tests {
 
     #[test]
     fn test_disconnect_session() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         assert!(app.disconnect_session(0));
         assert_eq!(app.sessions[0].state, SessionState::Disconnected);
     }
 
     #[test]
     fn test_disconnect_invalid_session() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         assert!(!app.disconnect_session(999));
     }
 
     #[test]
     fn test_reconnect_session() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.disconnect_session(0);
         assert!(app.reconnect_session(0));
         assert_eq!(app.sessions[0].state, SessionState::Reconnecting);
@@ -4191,7 +4376,7 @@ mod tests {
 
     #[test]
     fn test_reconnect_advances_to_connected() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.sessions[0].state = SessionState::Reconnecting;
         app.advance_session_state(0);
         assert_eq!(app.sessions[0].state, SessionState::Connected);
@@ -4199,7 +4384,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_sessions_removes_disconnected() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.disconnect_session(0);
         app.cleanup_sessions();
         assert!(
@@ -4233,13 +4418,13 @@ mod tests {
 
     #[test]
     fn test_clipboard_default_bidirectional() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         assert_eq!(app.clipboard.mode, ClipboardSyncMode::Bidirectional);
     }
 
     #[test]
     fn test_clipboard_sync_updates_state() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.sync_clipboard("local->remote", ClipboardContentType::Text, 256);
         assert_eq!(app.clipboard.last_sync_direction, Some("local->remote"));
         assert_eq!(app.clipboard.content_type, ClipboardContentType::Text);
@@ -4249,7 +4434,7 @@ mod tests {
 
     #[test]
     fn test_clipboard_sync_disabled_noop() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.clipboard.mode = ClipboardSyncMode::Disabled;
         app.sync_clipboard("local->remote", ClipboardContentType::Text, 100);
         assert!(app.clipboard.last_sync_direction.is_none());
@@ -4258,7 +4443,7 @@ mod tests {
 
     #[test]
     fn test_clipboard_sync_increments_count() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.sync_clipboard("local->remote", ClipboardContentType::Text, 10);
         app.sync_clipboard("remote->local", ClipboardContentType::Image, 5000);
         assert_eq!(app.clipboard.sync_count, 2);
@@ -4279,7 +4464,7 @@ mod tests {
 
     #[test]
     fn test_queue_transfer() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let initial = app.transfers.len();
         let id = app.queue_transfer("test.txt".into(), 1024, TransferDirection::Upload);
         assert!(id > 0);
@@ -4288,7 +4473,7 @@ mod tests {
 
     #[test]
     fn test_transfer_initial_state_queued() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let _id = app.queue_transfer("test.txt".into(), 1024, TransferDirection::Upload);
         let transfer = app.transfers.last().unwrap();
         assert_eq!(transfer.state, TransferState::Queued);
@@ -4297,7 +4482,7 @@ mod tests {
 
     #[test]
     fn test_update_transfer_progress() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let _id = app.queue_transfer("test.txt".into(), 1000, TransferDirection::Download);
         let idx = app.transfers.len() - 1;
         app.update_transfer_progress(idx, 500);
@@ -4307,7 +4492,7 @@ mod tests {
 
     #[test]
     fn test_transfer_completes_at_full() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let _id = app.queue_transfer("test.txt".into(), 100, TransferDirection::Upload);
         let idx = app.transfers.len() - 1;
         app.update_transfer_progress(idx, 100);
@@ -4316,7 +4501,7 @@ mod tests {
 
     #[test]
     fn test_transfer_progress_clamped() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let _id = app.queue_transfer("test.txt".into(), 100, TransferDirection::Upload);
         let idx = app.transfers.len() - 1;
         app.update_transfer_progress(idx, 200); // over the size
@@ -4325,7 +4510,7 @@ mod tests {
 
     #[test]
     fn test_cancel_transfer() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let _id = app.queue_transfer("test.txt".into(), 1000, TransferDirection::Upload);
         let idx = app.transfers.len() - 1;
         assert!(app.cancel_transfer(idx));
@@ -4334,7 +4519,7 @@ mod tests {
 
     #[test]
     fn test_cancel_completed_transfer_fails() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let _id = app.queue_transfer("test.txt".into(), 100, TransferDirection::Upload);
         let idx = app.transfers.len() - 1;
         app.update_transfer_progress(idx, 100);
@@ -4343,7 +4528,7 @@ mod tests {
 
     #[test]
     fn test_clear_finished_transfers() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         // has sample data with various states
         app.clear_finished_transfers();
         for t in &app.transfers {
@@ -4393,13 +4578,13 @@ mod tests {
 
     #[test]
     fn test_history_loaded_from_sample() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         assert!(!app.history.is_empty());
     }
 
     #[test]
     fn test_add_history_entry() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let initial = app.history.len();
         app.add_history_entry(HistoryEntry {
             profile_name: "Test".into(),
@@ -4415,21 +4600,21 @@ mod tests {
 
     #[test]
     fn test_clear_history() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.clear_history();
         assert!(app.history.is_empty());
     }
 
     #[test]
     fn test_recent_history() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         let recent = app.recent_history(2);
         assert!(recent.len() <= 2);
     }
 
     #[test]
     fn test_history_trimmed_at_cap() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         for i in 0..110 {
             app.add_history_entry(HistoryEntry {
                 profile_name: format!("Entry {i}"),
@@ -4445,9 +4630,9 @@ mod tests {
 
     #[test]
     fn test_connect_profile_adds_history() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let old_len = app.history.len();
-        let _id = app.connect_profile(0);
+        let _id = app.connect_profile_fixture(0);
         assert_eq!(app.history.len(), old_len + 1);
     }
 
@@ -4474,7 +4659,7 @@ mod tests {
 
     #[test]
     fn test_key_event_navigation_up() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.selected_profile = Some(2);
         app.current_view = MainView::Connections;
         let event = Event::Key(KeyEvent {
@@ -4489,7 +4674,7 @@ mod tests {
 
     #[test]
     fn test_key_event_navigation_down() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.selected_profile = Some(0);
         app.current_view = MainView::Connections;
         let event = Event::Key(KeyEvent {
@@ -4504,7 +4689,7 @@ mod tests {
 
     #[test]
     fn test_key_event_navigation_up_at_top() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.selected_profile = Some(0);
         app.current_view = MainView::Connections;
         let event = Event::Key(KeyEvent {
@@ -4519,7 +4704,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_n_creates_profile() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let initial = app.profiles.len();
         let event = Event::Key(KeyEvent {
             key: Key::N,
@@ -4549,20 +4734,20 @@ mod tests {
 
     #[test]
     fn test_set_monitor_mode() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.set_monitor_mode(MonitorMode::SingleMonitor(1));
         assert_eq!(app.monitor_mode, MonitorMode::SingleMonitor(1));
     }
 
     #[test]
     fn test_remote_monitors_loaded() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         assert!(!app.remote_monitors.is_empty());
     }
 
     #[test]
     fn test_remote_monitor_has_primary() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         assert!(app.remote_monitors.iter().any(|m| m.primary));
     }
 
@@ -4572,7 +4757,7 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
@@ -4583,7 +4768,7 @@ mod tests {
     #[test]
     fn test_render_starts_with_background() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         let cmds = app.render_commands();
         match &cmds[0] {
             RenderCommand::FillRect {
@@ -4606,7 +4791,7 @@ mod tests {
 
     #[test]
     fn test_render_connections_view() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::Connections;
         let cmds = app.render_commands();
         // Should produce a reasonable number of commands
@@ -4615,7 +4800,7 @@ mod tests {
 
     #[test]
     fn test_render_sessions_view() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::ActiveSessions;
         let cmds = app.render_commands();
         assert!(cmds.len() > 10);
@@ -4623,7 +4808,7 @@ mod tests {
 
     #[test]
     fn test_render_file_transfer_view() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::FileTransfer;
         let cmds = app.render_commands();
         assert!(cmds.len() > 10);
@@ -4631,7 +4816,7 @@ mod tests {
 
     #[test]
     fn test_render_history_view() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::History;
         let cmds = app.render_commands();
         assert!(cmds.len() > 10);
@@ -4639,7 +4824,7 @@ mod tests {
 
     #[test]
     fn test_render_perf_overlay() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.show_perf_overlay = true;
         let cmds = app.render_commands();
         // Should include overlay rendering (more commands)
@@ -4648,7 +4833,7 @@ mod tests {
 
     #[test]
     fn test_render_empty_sessions_view() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.sessions.clear();
         app.current_view = MainView::ActiveSessions;
         let cmds = app.render_commands();
@@ -4665,7 +4850,7 @@ mod tests {
 
     #[test]
     fn test_render_no_profile_selected() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.selected_profile = None;
         app.current_view = MainView::Connections;
         let cmds = app.render_commands();
@@ -4681,7 +4866,7 @@ mod tests {
 
     #[test]
     fn test_render_fullscreen_indicator() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.fullscreen = true;
         let cmds = app.render_commands();
         let has_indicator = cmds.iter().any(|c| {
@@ -4700,7 +4885,7 @@ mod tests {
 
     #[test]
     fn test_capture_screenshot() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let name = app.capture_screenshot();
         assert!(name.contains("screenshot"));
         assert!(name.contains(".png"));
@@ -4709,7 +4894,7 @@ mod tests {
 
     #[test]
     fn test_toggle_fullscreen() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         assert!(!app.fullscreen);
         app.toggle_fullscreen();
         assert!(app.fullscreen);
@@ -4719,14 +4904,14 @@ mod tests {
 
     #[test]
     fn test_set_escape_hotkey() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.set_escape_hotkey(Key::Escape);
         assert_eq!(app.escape_hotkey, Key::Escape);
     }
 
     #[test]
     fn test_fullscreen_exit_via_hotkey() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.fullscreen = true;
         app.escape_hotkey = Key::F11;
         let event = Event::Key(KeyEvent {
@@ -4831,7 +5016,7 @@ mod tests {
 
     #[test]
     fn test_view_switching_ctrl_keys() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         let views = [
             (Key::Num1, MainView::Connections),
             (Key::Num2, MainView::ActiveSessions),
@@ -4852,7 +5037,7 @@ mod tests {
 
     #[test]
     fn test_delete_key_sets_confirm() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.selected_profile = Some(1);
         app.current_view = MainView::Connections;
         let event = Event::Key(KeyEvent {
@@ -4875,7 +5060,7 @@ mod tests {
     /// click tests below rest on this exact geometry.
     #[test]
     fn sidebar_rows_interleave_headings_with_their_group() {
-        let app = RemoteDesktopApp::new();
+        let app = RemoteDesktopApp::with_sample_data();
         assert_eq!(
             app.sidebar_rows(),
             vec![
@@ -4919,7 +5104,7 @@ mod tests {
             (160.0, 1, "Production DB"),
             (240.0, 3, "Staging Web"),
         ] {
-            let mut app = RemoteDesktopApp::new();
+            let mut app = RemoteDesktopApp::with_sample_data();
             app.current_view = MainView::Connections;
             app.handle_sidebar_click(10.0, y);
             assert_eq!(
@@ -4934,7 +5119,7 @@ mod tests {
     /// than sliding to whichever row happens to be adjacent.
     #[test]
     fn clicking_a_group_heading_selects_nothing() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::Connections;
         app.selected_profile = None;
         app.handle_sidebar_click(10.0, 10.0);
@@ -4944,7 +5129,7 @@ mod tests {
     /// Clicking below the last row is not a click on the last row.
     #[test]
     fn clicking_past_the_end_of_the_sidebar_selects_nothing() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::Connections;
         app.selected_profile = None;
         app.handle_sidebar_click(10.0, 5_000.0);
@@ -4963,7 +5148,7 @@ mod tests {
     #[test]
     fn a_sidebar_coordinate_that_is_not_a_number_selects_nothing() {
         for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            let mut app = RemoteDesktopApp::new();
+            let mut app = RemoteDesktopApp::with_sample_data();
             app.current_view = MainView::ActiveSessions;
             app.selected_session = None;
             app.handle_sidebar_click(10.0, y);
@@ -4980,7 +5165,7 @@ mod tests {
     /// the top of the list.
     #[test]
     fn a_scrolled_sidebar_selects_by_what_is_visible() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::Connections;
         // Skip the "Development" heading, so the top row on screen is
         // Profile(0); skip one more and it is Profile(2).
@@ -5018,7 +5203,7 @@ mod tests {
     /// so a scroll test built on it would be asserting about a list that
     /// cannot move.
     fn app_with_long_history() -> RemoteDesktopApp {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::History;
         let seed = app
             .history
@@ -5107,7 +5292,7 @@ mod tests {
     /// A list that fits in its pane has nowhere to go.
     #[test]
     fn a_list_that_fits_cannot_be_scrolled() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::History;
         assert_eq!(
             app.max_content_scroll(),
@@ -5122,7 +5307,7 @@ mod tests {
     /// ignored the offset outright and drew every session under the clip.
     #[test]
     fn the_sidebar_wheel_scrolls_the_session_list() {
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
         app.current_view = MainView::ActiveSessions;
         let seed = app
             .sessions
@@ -5167,7 +5352,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = RemoteDesktopApp::new();
+        let mut app = RemoteDesktopApp::with_sample_data();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

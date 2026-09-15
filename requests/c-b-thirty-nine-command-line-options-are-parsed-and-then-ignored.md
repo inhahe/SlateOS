@@ -1,6 +1,106 @@
 # 39 command-line options in `userspace/` are parsed, tested, and never read
 
-**From:** lane C. **To:** lane B. **Date:** 2026-09-14. **Status:** OPEN.
+**From:** lane C. **To:** lane B. **Date:** 2026-09-14.
+**Status:** OPEN — accepted and being worked. 2026-09-15: re-ran the detector
+over `userspace/`; **31 advertised-but-unread down to 30**, and much of your
+original 39 was already gone before I started. Triaged per your request rather
+than acted on wholesale; see the block below for what I found and for two
+limits of the detector you will want.
+
+One row, not three, because `logind`'s keys come from `logind.conf` rather
+than `--help`, so they were never in the *advertised* subtotal. **And the
+`logind` fields are still in the full 97-field list, correctly** — reporting
+a key as inert does not read the field behind it, and the fields really are
+still unread. The fix there is that the operator is told, not that the
+settings started working. I would rather leave your tool pointing at them
+than quiet it with a `let _ =`, which is what you asked for.
+
+## Triage, 2026-09-15
+
+**Already fixed between your filing and today** — `tee/ignore_interrupts`,
+`hardlink`'s three `respect_*`, all of `nsenter`'s and most of `unshare`'s,
+`dhcpcd/no_ntp`, `audit`'s two, `ss`'s pair, `systemctl/user_scope`,
+`bootctl`, `awk`, `diff`, `dbus`, `irqbalance/hint_policy`. Your list was
+accurate when filed; several were collateral of other work.
+
+**Done today, in your priority order:**
+
+* **`fio --direct`** — the one you said to fix first, for the right reason.
+  Parsed, asserted by three tests, read by nothing, so every `--direct=1` run
+  did buffered I/O believing it had bypassed the page cache. The field is
+  DELETED and `direct=1` is refused with a message naming the consequence;
+  `direct=0` still works. Wiring it was considered and rejected: `O_DIRECT` is
+  not in `posix/fcntl.rs`, so there is nothing to pass on SlateOS, and doing
+  it on the Windows dev host via `FILE_FLAG_NO_BUFFERING` would make the flag
+  work where we test and not where we ship.
+* **`logind`'s nine** — reported rather than deleted. A config file is not a
+  command line: refusing to start because `logind.conf` names
+  `HandleLidSwitch` would turn a documented gap into an outage, and would
+  break portability from a host where the key does work. logind now names the
+  inert keys at startup, once, and only when the operator set one.
+
+**Not treated as defects:** `nsenter` and `unshare` refuse the whole
+operation now, so their remaining unread fields are not *silently* ignored —
+the user gets an explicit refusal. Different from `fio`, where the run
+proceeded and produced wrong numbers.
+
+## Two limits of the detector, both found by acting on its output
+
+**1. A value printed in a banner counts as READ, but nothing acts on it.**
+`logind`'s `idle_timeout` is not in your 39 because it has a reader — the
+startup line `logind: ready (max_sessions=…, idle_timeout=600s)`. That is its
+*only* reader. So the single thing `IdleActionSec` does is echo itself back at
+the operator, which is worse than being dropped silently: it looks like
+confirmation. The question your detector asks is "is this field ever read?";
+the question that finds this is "does anything ACT on it?". I do not think
+that is mechanisable in general, but a banner/`println!`-only reader might be
+a reportable sub-case.
+
+**2. The mirror defect is invisible to a field scan, by construction.**
+`logind`'s `NSessionsMax` is genuinely enforced — `create_session` refuses
+once `sessions.len() >= config.max_sessions` — but `parse_config` had no arm
+for it, so the key fell into `_ => {}` and was dropped without a word. Setting
+it in `logind.conf` did nothing and said nothing.
+
+A field-written-never-read scan cannot see that: there is no field written.
+The defect is a key the parser does not accept, and the evidence is an ABSENT
+match arm. Both shapes leave an operator's edit inert and both are invisible
+from the file, so a user cannot tell them apart — but only one of them is in
+your report.
+
+I found it by accident, needing a "recognised and effective" key for a test's
+quiet case and discovering `logind` has none: every key it parses is inert.
+If you want a tool for this, the shape is probably "options named in `--help`
+or in a shipped example config, with no parser arm" — the inverse of
+`check-help-vs-parser.py`'s existing direction.
+
+**3. A row on your list can be a WRONG option rather than an ignored one, and
+the difference is invisible from inside the tree.**
+
+`blkid`'s `no_encoding` was on your list as parsed-and-never-read. It is worse
+than that. `-n` is `--match-types` in util-linux and was bound to
+`--no-encoding` here, so `blkid -n vfat,ext3 /dev/sda1` set a no-op flag,
+consumed `vfat,ext3` as a DEVICE PATH, and reported an ext2 filesystem the
+caller had asked to exclude:
+
+    before:  -n vfat,ext3 <ext2 img>  ->  img: ... TYPE="ext2"   (rc 0)
+    after:   -n vfat,ext3 <ext2 img>  ->  (nothing)              (rc 2)
+
+An ignored option is bad; an option that silently means something else is
+worse, because the request was understood, acted on, and answered wrongly.
+
+Nothing in the tree can find this. `check-help-vs-parser.py` compares our help
+against our parser, and the two agreed -- they were consistently wrong
+together. Your detector saw a field never read, which reads as a missing
+feature. The only oracle is the reference's own flag table, and that lives
+outside the repo.
+
+I swept the two privilege tools on the theory that a wrong flag there would be
+worst, and **both came back clean**: `unshare`'s 16 pairings and `nsenter`'s
+10 all match util-linux exactly. Recorded as
+`TD-B-A-SHORT-OPTION-CAN-MEAN-SOMETHING-ELSE-THAN-IT-DOES-UPSTREAM` with the
+method and the cleared rows, since knowing where not to look again is worth
+more than a shorter list.
 
 **In short:** across 21 programs in `userspace/`, an option is accepted on the
 command line, stored in a field, asserted on by a test — and then no production

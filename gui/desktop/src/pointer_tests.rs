@@ -1540,17 +1540,20 @@ fn double_clicking_an_icon_launches_what_it_points_at() {
         let mut shell = shell_with_icons();
         // An icon whose action is a path, since those are the ones the shell
         // can act on: `LaunchSystem` names nothing runnable yet.
-        let id = shell
-            .icons
-            .icon_ids()
-            .into_iter()
-            .find(|id| {
-                matches!(
-                    shell.icons.get_icon(*id).map(|i| &i.action),
-                    Some(icons::IconAction::OpenPath(_))
-                )
-            })
-            .expect("no icon opens a path");
+        //
+        // Added here rather than found among the defaults. Since 2026-09-15
+        // the Home and Documents icons appear only when `HOME` is set -- they
+        // used to point at the literal `/home/user`, which is correct for a
+        // user named "user" and wrong for everyone else. A test that needs an
+        // OpenPath icon should make one rather than depend on the environment
+        // the runner happens to have.
+        let id = shell.icons.add_icon(
+            "Somewhere",
+            icons::IconType::Folder,
+            icons::IconAction::OpenPath("/somewhere".to_string()),
+            40,
+            40,
+        );
         let (x, y, want) = {
             let icon = shell.icons.get_icon(id).expect("just found");
             let icons::IconAction::OpenPath(path) = &icon.action else {

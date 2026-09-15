@@ -788,6 +788,45 @@ fn format_addr_port(addr: &str, port: u16, numeric: bool, proto_str: &str) -> St
     }
 }
 
+/// Display options that are accepted and add nothing to the output.
+///
+/// All four are parsed into fields that no production code reads, and each
+/// one is inert because the DATA is missing rather than the formatting:
+///
+///   * `-m/--memory` -- there are no `skmem` counters on `SocketEntry`, and
+///     no syscall that would supply them.
+///   * `-o/--options` -- `SocketEntry::timer` exists, and is `None` at every
+///     one of its four construction sites. It is a placeholder recording the
+///     netlink `INET_DIAG` vocabulary, not a value.
+///   * `-i/--info` -- TCP internals (cwnd, rtt) need `NETLINK_SOCK_DIAG`;
+///     `SYS_TCP_LIST`, which is what actually feeds this tool, does not
+///     carry them.
+///   * `-r/--resolve` -- reverse name lookup needs a resolver. Note that
+///     `-n/--numeric` DOES work: service-name lookup goes through
+///     `resolve_port`, so ports resolve and hostnames do not. Those are two
+///     different features and only one of them is missing.
+///
+/// Reported rather than refused: these are additive columns on a listing
+/// that is otherwise correct, so refusing would withhold working output to
+/// protest a missing extra. Nothing here can mislead the way an ignored
+/// `--chroot` does -- a column that is absent is visibly absent.
+fn unavailable_views(cfg: &Config) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if cfg.show_memory {
+        out.push("-m/--memory");
+    }
+    if cfg.show_timer {
+        out.push("-o/--options");
+    }
+    if cfg.show_info {
+        out.push("-i/--info");
+    }
+    if cfg.resolve_names {
+        out.push("-r/--resolve");
+    }
+    out
+}
+
 fn run_ss(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
     if cfg.show_summary {
         return print_summary(writer);
@@ -948,11 +987,11 @@ fn print_help(personality: Personality) {
             println!("  -a, --all         Show all sockets (listening and non-listening)");
             println!("  -p, --processes   Show process using socket");
             println!("  -n, --numeric     Don't resolve service names");
-            println!("  -r, --resolve     Resolve hostnames");
+            println!("  -r, --resolve     Resolve hostnames (no resolver in this build)");
             println!("  -e, --extended    Show extended info (UID, inode)");
-            println!("  -m, --memory      Show socket memory usage");
-            println!("  -o, --options     Show timer information");
-            println!("  -i, --info        Show TCP internal info");
+            println!("  -m, --memory      Show socket memory usage (no data in this build)");
+            println!("  -o, --options     Show timer information (no data in this build)");
+            println!("  -i, --info        Show TCP internal info (no data in this build)");
             println!("  -H, --no-header   Suppress header line");
             println!("  -4, --ipv4        Show IPv4 sockets only");
             println!("  -6, --ipv6        Show IPv6 sockets only");
@@ -1020,6 +1059,21 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
+    // STDERR, deliberately: `ss` output is parsed by scripts, and a notice
+    // on stdout would become a row. This is also why it is not written
+    // through `writer` -- that is the listing, and the listing stays clean.
+    let unavailable = unavailable_views(&cfg);
+    if !unavailable.is_empty() {
+        eprintln!(
+            "ss: these options are accepted but add nothing to the output: {}",
+            unavailable.join(", ")
+        );
+        eprintln!(
+            "ss: the data behind them is not available from this kernel -- see the \
+comment on `unavailable_views` for which source each one would need."
+        );
+    }
+
     let result = match cfg.personality {
         Personality::Ss => run_ss(&cfg, &mut writer),
         Personality::Sockstat => run_sockstat(&cfg, &mut writer),
@@ -1040,6 +1094,46 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    /// Options with no data behind them are named; the rest say nothing.
+    #[test]
+    fn unavailable_views_names_only_what_was_asked_for() {
+        let cfg = Config::default();
+        assert!(
+            unavailable_views(&cfg).is_empty(),
+            "a default ss asks for nothing unavailable"
+        );
+
+        // `-n/--numeric` is the control. It is a display option in the same
+        // family, it IS implemented -- `resolve_port` does service names --
+        // and it must not appear. Without this, a function that returned
+        // every display flag would pass the assertions below.
+        let cfg = Config {
+            show_numeric: true,
+            ..Config::default()
+        };
+        assert!(
+            unavailable_views(&cfg).is_empty(),
+            "-n works, so it must not be reported as unavailable"
+        );
+
+        let cfg = Config {
+            show_memory: true,
+            show_info: true,
+            ..Config::default()
+        };
+        assert_eq!(unavailable_views(&cfg), vec!["-m/--memory", "-i/--info"]);
+
+        let cfg = Config {
+            show_timer: true,
+            resolve_names: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            unavailable_views(&cfg),
+            vec!["-o/--options", "-r/--resolve"]
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -53,6 +53,19 @@ const FALLBACK_SEED: u64 = 0x4D55_5349_4350_4C52;
 // Layout Constants
 // ============================================================================
 
+/// What the window says instead of a library.
+///
+/// Three lines. The third names the distinction the old comment here already
+/// identified and then resolved the wrong way: **an empty library reads as a
+/// broken player rather than an unimplemented one.** That is exactly right,
+/// and the remedy is to say which of the two it is -- not to fill the library
+/// so the question never comes up.
+const CANNOT_SCAN_LINES: [&str; 3] = [
+    "This player has no music library.",
+    "It has no filesystem access, so nothing has been scanned and no track can be opened or played.",
+    "The library is empty because this is unfinished, not because the player is broken.",
+];
+
 const WINDOW_WIDTH: f32 = 1000.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 const TAB_BAR_HEIGHT: f32 = 44.0;
@@ -1243,6 +1256,32 @@ pub fn render(state: &PlayerState) -> RenderTree {
 
     // Background
     tree.fill_rect(0.0, 0.0, state.width, state.height, state.palette.base);
+
+    // After the background, or it would be painted over. Keyed on the library
+    // being empty so it retires itself when a scanner lands.
+    if state.library.is_empty() {
+        for (i, line) in CANNOT_SCAN_LINES.iter().enumerate() {
+            tree.push(RenderCommand::Text {
+                x: 10.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                y: 2.0 + i as f32 * 13.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    state.palette.ink(state.palette.yellow)
+                } else {
+                    state.palette.subtext0
+                },
+                font_size: if i == 0 { 12.0 } else { 10.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(state.width - 20.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
 
     // Tab bar at top
     render_tab_bar(state, &mut tree);
@@ -2706,16 +2745,27 @@ impl App for PlayerState {
 }
 
 fn main() -> ExitCode {
+    // Opens empty. It used to call `load_demo_library`.
     let mut state = PlayerState::new();
-    load_demo_library(&mut state);
     app::launch("musicplayer", &mut state)
 }
 
-/// The library the window opens on.
+/// A handful of tracks, for tests.
 ///
-/// Until there is a filesystem to scan, this is what there is to show, and
-/// the window is worth opening on it: an empty library would read as a
-/// broken player rather than an unimplemented one.
+/// `#[cfg(test)]` since 2026-09-15. Its previous doc comment read: *"Until
+/// there is a filesystem to scan, this is what there is to show, and the
+/// window is worth opening on it: an empty library would read as a broken
+/// player rather than an unimplemented one."*
+///
+/// **That is the fifth time this reasoning appears in this sweep, and it is
+/// the sharpest version of it.** The other four -- `videoplayer`, `torrent`,
+/// `photomanager`, `filesearch` -- said an empty window "looks broken". This
+/// one names the actual ambiguity: broken *versus unimplemented*. Having
+/// identified precisely the question the user cannot answer, it answered it
+/// by removing the evidence.
+///
+/// The remedy is to say which of the two it is. See `CANNOT_SCAN_LINES`.
+#[cfg(test)]
 fn load_demo_library(state: &mut PlayerState) {
     // Add some demo tracks to show the UI populated
     let demo_tracks = [
@@ -2834,6 +2884,82 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A fresh player has no library.
+    ///
+    /// `main` called `load_demo_library`, so every launch opened on five
+    /// tracks -- "Midnight Drive" by Neon Waves and the rest -- with artists,
+    /// albums, durations and formats. The crate has no filesystem access.
+    #[test]
+    fn a_fresh_player_has_no_library() {
+        let state = PlayerState::new();
+        assert!(state.library.is_empty(), "a library appeared from nowhere");
+    }
+
+    /// And the window says which kind of empty it is.
+    ///
+    /// The comment that justified the demo library got the diagnosis exactly
+    /// right -- "an empty library would read as a broken player rather than an
+    /// unimplemented one" -- and then answered the question by removing the
+    /// evidence. Saying which of the two it is costs three lines.
+    #[test]
+    fn the_window_says_which_kind_of_empty_it_is() {
+        let state = PlayerState::new();
+        let texts: Vec<String> = render(&state)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_SCAN_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_SCAN_LINES
+                .iter()
+                .any(|l| l.contains("unfinished, not because the player is broken")),
+            "nothing distinguishes an unimplemented player from a broken one",
+        );
+    }
+
+    /// The library view draws the tracks it is given.
+    ///
+    /// This exists partly to give `load_demo_library` a caller. It had none
+    /// once `main` stopped calling it, which would have made it dead code
+    /// rather than a fixture -- and a fixture nothing uses is not a fixture.
+    /// The library view was previously only ever exercised against the demo
+    /// data by way of the shipping path, which is to say never on purpose.
+    #[test]
+    fn the_library_view_draws_the_tracks_it_is_given() {
+        let mut state = PlayerState::new();
+        load_demo_library(&mut state);
+        assert!(!state.library.is_empty(), "the fixture loaded nothing");
+        state.active_tab = Tab::Library;
+
+        let texts: Vec<String> = render(&state)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        let first = state.library.first().expect("a track").title.clone();
+        assert!(
+            texts.iter().any(|t| t.contains(&first)),
+            "the library view drew no track titles",
+        );
+        // And the banner is gone, because the library is no longer empty.
+        assert!(
+            !texts.iter().any(|t| t == CANNOT_SCAN_LINES[0]),
+            "the empty-library banner survived a library",
+        );
+    }
 
     /// Every colour the music player draws comes from the user's palette.
     ///

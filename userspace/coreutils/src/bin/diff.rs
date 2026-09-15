@@ -54,6 +54,8 @@
 //!   -Z, --ignore-trailing-space Ignore whitespace at line end
 //!   -a, --text                  Treat all files as text
 //!   -B, --ignore-blank-lines    Ignore blank line insertions/deletions
+//!   -t, --expand-tabs           Expand tabs to spaces in the output
+//!   -T, --initial-tab           Put a tab, not a space, after the marker
 //!       --color                 Force color output
 //!       --no-color              Force no color
 //!   -r, --recursive             Recursively compare directories
@@ -69,6 +71,7 @@
 //! - 2: error occurred
 
 use quoting::{quoteaf_os, quotef_os};
+use std::borrow::Cow;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -134,6 +137,19 @@ struct Config {
     ignore_trailing_space: bool,
     /// `-a`: compare even a file holding NUL bytes as text.
     text_mode: bool,
+    /// `-t`: expand tabs in the OUTPUT to 8-column stops.
+    ///
+    /// The stops are counted from the start of the line's own text, NOT from
+    /// the start of the output line -- the `< ` marker is not counted. So
+    /// `a<TAB>b` comes back as `< a` plus seven spaces, exactly as it would
+    /// without a marker at all.
+    expand_tabs: bool,
+    /// `-T`: separate the marker from the text with a tab rather than a space.
+    ///
+    /// The point is alignment: `<` plus a tab is eight columns wide, which is
+    /// one tab stop, so tabs inside the text still land where they would in
+    /// the file itself. Pairs with `-t`, but works on its own.
+    initial_tab: bool,
     /// The option words exactly as the user typed them, for the `diff -r
     /// da/x.txt db/x.txt` line GNU prints ahead of each file in a directory
     /// walk.
@@ -253,6 +269,8 @@ fn parse_args(args: &[OsString]) -> ParseResult {
     let mut new_file = false;
     let mut ignore_trailing_space = false;
     let mut text_mode = false;
+    let mut expand_tabs = false;
+    let mut initial_tab = false;
     let mut positional: Vec<OsString> = Vec::new();
     // Tracked by INDEX, not by value: an operand can be spelled the same as
     // an option's value -- `diff -U 5 5 other` names a file called `5` -- and
@@ -345,6 +363,10 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                 ignore_trailing_space = true;
             } else if a == "--text" {
                 text_mode = true;
+            } else if a == "--expand-tabs" {
+                expand_tabs = true;
+            } else if a == "--initial-tab" {
+                initial_tab = true;
             } else if a == "--ignore-all-space" {
                 ignore_all_space = true;
             } else if a == "--ignore-blank-lines" {
@@ -480,6 +502,8 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                 'w' => ignore_all_space = true,
                 'Z' => ignore_trailing_space = true,
                 'a' => text_mode = true,
+                't' => expand_tabs = true,
+                'T' => initial_tab = true,
                 'B' => ignore_blank_lines = true,
                 'r' => recursive = true,
                 'N' => new_file = true,
@@ -552,6 +576,8 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         new_file,
         ignore_trailing_space,
         text_mode,
+        expand_tabs,
+        initial_tab,
         option_words,
     })
 }
@@ -1214,6 +1240,123 @@ fn write_body_line(w: &mut impl Write, marker: &[u8], text: &[u8], color: Option
     let _ = w.write_all(&line);
 }
 
+/// Write one body line with `-T` and `-t` applied.
+///
+/// Separate from `write_body_line` because the `---`/`+++` and `*** `/`--- `
+/// file headers go through that one too, and GNU applies NEITHER option to
+/// them: measured, `-t -u` leaves the tab between the filename and its mtime
+/// unexpanded. `-y` is excluded for a different reason -- it computes its own
+/// column layout and pads the gutter itself.
+fn write_text_line(
+    w: &mut impl Write,
+    config: &Config,
+    marker: &[u8],
+    text: &[u8],
+    color: Option<&str>,
+) {
+    // An EMPTY marker stays empty. GNU emits the separator only when there is
+    // a flag to separate it from (`if (line_flag && *line_flag)`), so `-T`
+    // must not turn "no marker" into a line that begins with a lone tab.
+    let marker: Cow<[u8]> = if config.initial_tab && !marker.is_empty() {
+        let mut m = marker.to_vec();
+        // The space the marker already carries is REPLACED, not appended to:
+        // `< ` becomes `<\t`, and unified's `-`, which has no space, just
+        // gains one. Both measured.
+        while m.last() == Some(&b' ') {
+            m.pop();
+        }
+        m.push(b'\t');
+        Cow::Owned(m)
+    } else {
+        Cow::Borrowed(marker)
+    };
+    let text: Cow<[u8]> = if config.expand_tabs {
+        Cow::Owned(expand_output_tabs(text, &marker))
+    } else {
+        Cow::Borrowed(text)
+    };
+    write_body_line(w, &marker, &text, color);
+}
+
+/// Expand tabs in one output line to 8-column stops, the way the reference
+/// does it.
+///
+/// **Columns are counted over BYTES, and a byte advances the column only when
+/// it is printable ASCII.** That is not this implementation simplifying a
+/// character-based rule -- it is what GNU does, and it is measured. A line
+/// holding `e` with an acute accent (`0xC3 0xA9`) followed by a tab comes back
+/// with a FULL eight spaces, identical to a line that begins with the tab:
+/// both bytes count as zero columns, because neither is printable in the C
+/// locale. A three-byte CJK character behaves the same, so the rule is not
+/// "count characters" either, and the answer does not move under
+/// `LC_ALL=C.UTF-8`.
+///
+/// This is one of the rare places where the byte-oriented reading is both the
+/// faithful one and the one this project wants anyway.
+///
+/// Three bytes are special, all three measured rather than recalled:
+///
+/// | byte | effect |
+/// |---|---|
+/// | `\t` | pad with spaces to the next multiple of 8 |
+/// | `\r` | print it, RE-EMIT the marker, and reset the column to 0 |
+/// | `\b` | back up one column -- but at column 0 it is DROPPED, not printed |
+///
+/// The carriage-return rule is the surprising one, and it is deliberate: on a
+/// file with CRLF endings the terminal would return to the left margin and the
+/// text would overprint the `<`, so GNU writes the marker again behind it.
+fn expand_output_tabs(text: &[u8], marker: &[u8]) -> Vec<u8> {
+    /// GNU's default `--tabsize`, which this build does not yet let you change.
+    const TAB_STOP: usize = 8;
+
+    let mut out: Vec<u8> = Vec::with_capacity(text.len().saturating_add(TAB_STOP));
+    let mut column: usize = 0;
+    let mut rest = text;
+
+    while let Some((&b, tail)) = rest.split_first() {
+        rest = tail;
+        match b {
+            b'\t' => {
+                // Never zero: `column % TAB_STOP` is at most 7, so a tab
+                // already sitting on a stop still advances a full eight.
+                let pad = TAB_STOP.saturating_sub(column % TAB_STOP);
+                out.resize(out.len().saturating_add(pad), b' ');
+                column = column.saturating_add(pad);
+            }
+            b'\r' => {
+                out.push(b);
+                // Only when text follows. A line that ENDS in a carriage
+                // return gets no second marker -- there is nothing left to
+                // overprint. (`text` excludes the newline, so "bytes remain"
+                // is the whole test.)
+                if !rest.is_empty() {
+                    out.extend_from_slice(marker);
+                }
+                column = 0;
+            }
+            // 0x08 is BS; Rust has no `\b` escape.
+            b'\x08' => {
+                // Dropped at column 0 rather than printed, so that a line
+                // starting with a backspace cannot back over the marker.
+                if column > 0 {
+                    column = column.saturating_sub(1);
+                    out.push(b);
+                }
+            }
+            // `0x20..=0x7E` is C-locale `isprint` exactly. Everything else --
+            // control bytes, DEL, and every byte of every multi-byte
+            // character -- is printed but counts as no width at all.
+            _ => {
+                if (0x20..=0x7E).contains(&b) {
+                    column = column.saturating_add(1);
+                }
+                out.push(b);
+            }
+        }
+    }
+    out
+}
+
 /// `Some(code)` when colour is on, so `write_body_line` takes one argument
 /// rather than a colour and a flag that must agree.
 fn when(color: bool, code: &str) -> Option<&str> {
@@ -1299,7 +1442,7 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         } in &hunk.lines
         {
             if *op == Op::Delete {
-                write_body_line(&mut w, b"< ", text, when(config.color, RED));
+                write_text_line(&mut w, config, b"< ", text, when(config.color, RED));
                 if *no_final_newline {
                     write_no_newline_marker(&mut w);
                 }
@@ -1319,7 +1462,7 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         } in &hunk.lines
         {
             if *op == Op::Insert {
-                write_body_line(&mut w, b"> ", text, when(config.color, GREEN));
+                write_text_line(&mut w, config, b"> ", text, when(config.color, GREEN));
                 if *no_final_newline {
                     write_no_newline_marker(&mut w);
                 }
@@ -1495,19 +1638,19 @@ fn print_unified(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
                     // the change is above it -- which is precisely the case
                     // where both files lack a final newline, since then the
                     // last line is unchanged and stays an `Equal`.
-                    write_body_line(&mut w, b" ", text, None);
+                    write_text_line(&mut w, config, b" ", text, None);
                     if *no_final_newline {
                         write_no_newline_marker(&mut w);
                     }
                 }
                 Op::Delete => {
-                    write_body_line(&mut w, b"-", text, when(config.color, RED));
+                    write_text_line(&mut w, config, b"-", text, when(config.color, RED));
                     if *no_final_newline {
                         write_no_newline_marker(&mut w);
                     }
                 }
                 Op::Insert => {
-                    write_body_line(&mut w, b"+", text, when(config.color, GREEN));
+                    write_text_line(&mut w, config, b"+", text, when(config.color, GREEN));
                     if *no_final_newline {
                         write_no_newline_marker(&mut w);
                     }
@@ -1609,14 +1752,14 @@ fn print_context(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
             {
                 match op {
                     Op::Equal => {
-                        write_body_line(&mut w, b"  ", text, None);
+                        write_text_line(&mut w, config, b"  ", text, None);
                         if *no_final_newline {
                             write_no_newline_marker(&mut w);
                         }
                     }
                     Op::Delete => {
                         let marker = context_marker(Op::Delete, changed);
-                        write_body_line(&mut w, marker, text, when(config.color, RED));
+                        write_text_line(&mut w, config, marker, text, when(config.color, RED));
                         if *no_final_newline {
                             write_no_newline_marker(&mut w);
                         }
@@ -1653,14 +1796,14 @@ fn print_context(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
             {
                 match op {
                     Op::Equal => {
-                        write_body_line(&mut w, b"  ", text, None);
+                        write_text_line(&mut w, config, b"  ", text, None);
                         if *no_final_newline {
                             write_no_newline_marker(&mut w);
                         }
                     }
                     Op::Insert => {
                         let marker = context_marker(Op::Insert, changed);
-                        write_body_line(&mut w, marker, text, when(config.color, GREEN));
+                        write_text_line(&mut w, config, marker, text, when(config.color, GREEN));
                         if *no_final_newline {
                             write_no_newline_marker(&mut w);
                         }
@@ -1689,34 +1832,65 @@ fn print_side_by_side(ops: &[Edit], config: &Config) {
         30
     };
 
-    for Edit {
-        op,
-        text,
-        // NOT bound: side-by-side prints no no-newline marker.
-        // Measured -- GNU's `-y` on a file lacking its final
-        // newline shows the line and nothing else, and simply
-        // omits the newline from its own last line of output.
-        ..
-    } in ops
-    {
-        match op {
+    // A RUN OF DELETES IS ZIPPED WITH THE INSERTS THAT FOLLOW IT, which is
+    // the whole point of the format and is what this did not do.
+    //
+    // It walked the edit list one operation at a time, so a changed line came
+    // out as a `<` line and then a `>` line -- the old text and the new text on
+    // separate rows, which is the one thing `-y` exists to avoid. GNU pairs
+    // them: `charlie | CHANGED` on one row, with the surplus of whichever run
+    // is longer trailing as `<` or `>`. Measured
+    // (scripts/probe-diff-side-by-side.sh): two removed against one added
+    // gives `x1 | y1` then `x2 <`, and one against two gives `y1 | x1` then
+    // `> x2`.
+    //
+    // No-final-newline markers are deliberately absent: GNU's `-y` on a file
+    // lacking its final newline shows the line and nothing else, and simply
+    // omits the newline from its own last line of output.
+    let mut i = 0;
+    while i < ops.len() {
+        match ops[i].op {
             Op::Equal => {
+                let text = &ops[i].text;
                 let left = truncate_or_pad(text, col_width);
                 let right = truncate_or_pad(text, col_width);
                 let line = [left.as_slice(), b"   ", &right].concat();
                 write_body_line(&mut w, b"", &line, None);
+                i += 1;
             }
-            Op::Delete => {
-                let left = truncate_or_pad(text, col_width);
-                let right = vec![b' '; col_width];
-                let line = [left.as_slice(), b" < ", &right].concat();
-                write_body_line(&mut w, b"", &line, when(config.color, RED));
-            }
-            Op::Insert => {
-                let left = vec![b' '; col_width];
-                let right = truncate_or_pad(text, col_width);
-                let line = [left.as_slice(), b" > ", &right].concat();
-                write_body_line(&mut w, b"", &line, when(config.color, GREEN));
+            Op::Delete | Op::Insert => {
+                // Collect this run of deletes and the run of inserts that
+                // follows it, then pair them off.
+                let del_start = i;
+                while i < ops.len() && matches!(ops[i].op, Op::Delete) {
+                    i += 1;
+                }
+                let del = &ops[del_start..i];
+                let ins_start = i;
+                while i < ops.len() && matches!(ops[i].op, Op::Insert) {
+                    i += 1;
+                }
+                let ins = &ops[ins_start..i];
+
+                let pairs = del.len().min(ins.len());
+                for k in 0..pairs {
+                    let left = truncate_or_pad(&del[k].text, col_width);
+                    let right = truncate_or_pad(&ins[k].text, col_width);
+                    let line = [left.as_slice(), b" | ", &right].concat();
+                    write_body_line(&mut w, b"", &line, when(config.color, RED));
+                }
+                for d in del.iter().skip(pairs) {
+                    let left = truncate_or_pad(&d.text, col_width);
+                    let right = vec![b' '; col_width];
+                    let line = [left.as_slice(), b" < ", &right].concat();
+                    write_body_line(&mut w, b"", &line, when(config.color, RED));
+                }
+                for a in ins.iter().skip(pairs) {
+                    let left = vec![b' '; col_width];
+                    let right = truncate_or_pad(&a.text, col_width);
+                    let line = [left.as_slice(), b" > ", &right].concat();
+                    write_body_line(&mut w, b"", &line, when(config.color, GREEN));
+                }
             }
         }
     }
@@ -2551,6 +2725,8 @@ mod tests {
             new_file: false,
             ignore_trailing_space: false,
             text_mode: false,
+            expand_tabs: false,
+            initial_tab: false,
             option_words: Vec::new(),
         }
     }
@@ -2560,6 +2736,155 @@ mod tests {
             ParseResult::Run(c) => c,
             _ => panic!("expected Run"),
         }
+    }
+
+    // ---------------- -t / -T ----------------
+
+    /// Render one body line through the real writer, so the marker rules are
+    /// tested where they actually live rather than in a copy of them.
+    fn marked(config: &Config, marker: &[u8], text: &[u8]) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        write_text_line(&mut out, config, marker, text, None);
+        out
+    }
+
+    /// Tab stops are counted from the start of the TEXT, not of the output
+    /// line -- the `< ` marker does not shift them. Measured against GNU.
+    #[test]
+    fn expand_tabs_counts_columns_from_the_text_not_the_marker() {
+        assert_eq!(
+            expand_output_tabs(b"a\tb", b"< ").as_slice(),
+            &b"a       b"[..]
+        );
+        assert_eq!(
+            expand_output_tabs(b"ab\tz", b"< ").as_slice(),
+            &b"ab      z"[..]
+        );
+        // A tab already sitting ON a stop still advances a full eight.
+        assert_eq!(
+            expand_output_tabs(b"abcdefgh\tz", b"< ").as_slice(),
+            &b"abcdefgh        z"[..]
+        );
+        // Control: a line with no tab comes back byte-identical.
+        assert_eq!(
+            expand_output_tabs(b"plain", b"< ").as_slice(),
+            &b"plain"[..]
+        );
+    }
+
+    /// Only printable ASCII has width. Every byte of a multi-byte character
+    /// counts as ZERO, so `e`-acute then a tab yields a full eight spaces --
+    /// the same as a line that opens with the tab. Measured, and unchanged
+    /// under `LC_ALL=C.UTF-8`; this is not a shortcut for character counting.
+    #[test]
+    fn a_byte_that_is_not_printable_ascii_has_no_width() {
+        // 0xC3 0xA9 is U+00E9. One character, two bytes, zero columns.
+        assert_eq!(
+            expand_output_tabs(b"\xc3\xa9\tz", b"< ").as_slice(),
+            &b"\xc3\xa9        z"[..]
+        );
+        // Two of them: still zero, so still eight. Not "one column each".
+        assert_eq!(
+            expand_output_tabs(b"\xc3\xa9\xc3\xa9\tz", b"< ").as_slice(),
+            &b"\xc3\xa9\xc3\xa9        z"[..]
+        );
+        // Control bytes and DEL are printed but weightless.
+        assert_eq!(
+            expand_output_tabs(b"a\x01\tz", b"< ").as_slice(),
+            &b"a\x01       z"[..]
+        );
+        assert_eq!(
+            expand_output_tabs(b"a\x7f\tz", b"< ").as_slice(),
+            &b"a\x7f       z"[..]
+        );
+        // A space, by contrast, is printable and does have width.
+        assert_eq!(
+            expand_output_tabs(b"a \tz", b"< ").as_slice(),
+            &b"a       z"[..]
+        );
+    }
+
+    /// A backspace backs up one column -- but at column 0 it is DROPPED
+    /// rather than printed, so a line cannot back over its own marker.
+    #[test]
+    fn a_backspace_backs_up_a_column_and_at_column_zero_is_dropped() {
+        assert_eq!(
+            expand_output_tabs(b"ab\x08\tz", b"< ").as_slice(),
+            &b"ab\x08       z"[..]
+        );
+        // All three vanish, and the tab then spans a full eight.
+        assert_eq!(
+            expand_output_tabs(b"\x08\x08\x08\tz", b"< ").as_slice(),
+            &b"        z"[..]
+        );
+    }
+
+    /// A carriage return re-emits the marker and restarts the column. On a
+    /// CRLF file the terminal returns to the left margin, so without this the
+    /// text would overprint the `<`.
+    #[test]
+    fn a_carriage_return_reprints_the_marker_and_restarts_the_column() {
+        assert_eq!(
+            expand_output_tabs(b"ab\rz", b"< ").as_slice(),
+            &b"ab\r< z"[..]
+        );
+        // The column really did reset: the tab that follows spans a full
+        // eight, not the six it would span from column 2.
+        let mut want: Vec<u8> = b"ab\r< ".to_vec();
+        want.extend_from_slice(&[b' '; 8]);
+        want.push(b'z');
+        assert_eq!(
+            expand_output_tabs(b"ab\r\tz", b"< ").as_slice(),
+            want.as_slice()
+        );
+        // A line ENDING in a carriage return gets no second marker: there is
+        // nothing left to overprint.
+        assert_eq!(expand_output_tabs(b"ab\r", b"< ").as_slice(), &b"ab\r"[..]);
+    }
+
+    /// `-T` replaces the space the marker already carries; a marker with no
+    /// space simply gains a tab. An EMPTY marker stays empty -- side-by-side
+    /// passes one, and GNU prints no separator at all when there is no flag.
+    #[test]
+    fn initial_tab_replaces_the_markers_space_and_leaves_an_empty_marker_empty() {
+        let mut c = cfg();
+        c.initial_tab = true;
+        assert_eq!(marked(&c, b"< ", b"x").as_slice(), &b"<\tx\n"[..]);
+        assert_eq!(marked(&c, b"-", b"x").as_slice(), &b"-\tx\n"[..]);
+        assert_eq!(marked(&c, b"", b"x").as_slice(), &b"x\n"[..]);
+        // Control: off by default, the space stays a space.
+        assert_eq!(marked(&cfg(), b"< ", b"x").as_slice(), &b"< x\n"[..]);
+    }
+
+    /// The marker reprinted after a carriage return carries the tab too --
+    /// it is the same marker, so `-T` cannot apply to only the first one.
+    #[test]
+    fn the_marker_reprinted_after_a_carriage_return_carries_the_initial_tab() {
+        let mut c = cfg();
+        c.expand_tabs = true;
+        c.initial_tab = true;
+        assert_eq!(
+            marked(&c, b"< ", b"ab\rz").as_slice(),
+            &b"<\tab\r<\tz\n"[..]
+        );
+    }
+
+    /// Both spellings of both options, and neither implies the other.
+    #[test]
+    fn expand_tabs_and_initial_tab_parse_and_are_independent() {
+        assert!(run(&["diff", "-t", "a", "b"]).expand_tabs);
+        assert!(run(&["diff", "--expand-tabs", "a", "b"]).expand_tabs);
+        assert!(run(&["diff", "-T", "a", "b"]).initial_tab);
+        assert!(run(&["diff", "--initial-tab", "a", "b"]).initial_tab);
+
+        let both = run(&["diff", "-tT", "a", "b"]);
+        assert!(both.expand_tabs && both.initial_tab);
+
+        assert!(!run(&["diff", "-t", "a", "b"]).initial_tab);
+        assert!(!run(&["diff", "-T", "a", "b"]).expand_tabs);
+        // Control: neither is on when neither is asked for.
+        let neither = run(&["diff", "a", "b"]);
+        assert!(!neither.expand_tabs && !neither.initial_tab);
     }
 
     // ---------------- parse_args ----------------

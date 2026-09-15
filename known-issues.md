@@ -940,7 +940,7 @@ work is real but it is not research.
 and because a reader looking at a 176-line baseline needs to know it is one
 wall and not 176 separate jobs.
 
-## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) — OPEN
+## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) -- FIXED; ELF symbol names are a separate layer and stay text
 
 `ar` no longer dies on an operand that is not valid UTF-8, but it does not
 handle one either: it **refuses**, naming the bytes, at `decode_operand`.
@@ -958,6 +958,26 @@ boundary is the honest place to say so.
 is a literal `unwrap` and the process died first. The refusal is strictly
 better and is not the end state.
 
+**It is worse than "cannot represent" — it cannot READ, either.** Found
+2026-09-14 while scoping the conversion, at `main.rs:227`:
+
+```rust
+let raw_name = std::str::from_utf8(&hdr_bytes[0..16])
+    .map_err(|e| format!("invalid name field: {e}"))?
+```
+
+That `?` aborts the whole archive parse. So `ar t` on a **valid archive** —
+one GNU `ar` produced, containing one member whose name holds a byte that is
+not UTF-8 — fails outright with `invalid name field`, and every member in it
+becomes unreachable. Not the member: the archive. This is not a limit of our
+own output, it is a refusal to read other people's, and it is the strongest
+argument for doing the conversion rather than leaving the boundary refusal in
+place.
+
+The structural markers do **not** need decoding to keep working: `//`, `/`,
+`#1/N` and `/N` are ASCII by the format's definition, so they can be matched on
+bytes and the 16-byte field never has to be text at all.
+
 **The fix** is to carry member names as bytes through the format layer —
 `name: Vec<u8>`, comparisons on bytes, and `escape_unprintable` at the
 display sites (`t` listing, `v` output, diagnostics). It is a real piece of
@@ -968,6 +988,29 @@ members.
 
 **Reachability:** `ar` is one of only three argv-baseline binaries on the
 image, so this one is worth doing, unlike most of that backlog.
+
+**Done 2026-09-14 for `ar` itself.** `ArHeader.name` is `Vec<u8>`, and all
+three fatal decodes are gone — the 16-byte field, the GNU `//` table entry, and
+the BSD `#1/N` tail. The structural markers match on bytes, as the format
+defines them, so nothing in the parser needs the name to be text. A test builds
+an archive whose member name holds `0xE9`, parses it, and finds the member by
+those bytes; reintroducing the first decode makes it fail with the original
+`invalid name field`, which is how the test is known to measure something.
+
+Display sites go through `escape_unprintable`, so an unprintable byte in a
+member name cannot forge a line of `ar t` output. `ar x` writes the member out
+under its own name as an `OsString` rather than any text form.
+
+**And done for `ranlib` and `strip` too, 2026-09-14.** Both held their file-path
+operands as `String`. They carry `OsString` now, and `decode_operand` — which
+by then served only them — is **deleted** rather than left as a refusal nothing
+calls. Its two tests went with it: they asserted a refusal that no longer
+happens, and a test that cannot fail is worse than no test.
+
+`strip -K` still takes its symbol names as text, deliberately. Those are ELF
+symbol names matched against a symbol table this file carries as `String`, and
+that layer — `ElfSection.name`, `ElfSymbol.name`, both from ELF string tables —
+is a different question from the `ar` member name and is not converted here.
 
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
@@ -76206,6 +76249,40 @@ named on the command line, and GNU reserves 2 for the latter.
 
 ### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
 
+> **Measured 2026-09-12, and it dwarfs the 626 this is blocked on.** Our own
+> terminal (`apps/terminal`) has **no notion of character width at all**: it
+> advances the cursor one column for every character, unconditionally, and does
+> not depend on `charwidth`. So table and screen disagree about **185,074**
+> characters — 182,712 the table calls two cells wide and the terminal draws in
+> one, and 2,362 zero-width marks given a cell of their own.
+>
+> That is every one of the 20,992 Chinese characters, all 11,172 Korean
+> syllables, the Japanese kana, the fullwidth forms and the 80 emoticon emoji.
+> In the other direction, 1,281 combining marks — the accent in a decomposed
+> `é` — take a cell where every layout calculation reserved none.
+>
+> **Consequence for B-Q8:** on SlateOS, *both* candidate tables are wrong
+> against our own screen for 296 times more characters than they disagree with
+> each other about. Choosing between them is still right for matching upstream
+> byte-for-byte, which is what the harnesses measure, but it is not what makes
+> our screens correct. The renderer is filed to lane C as
+> `requests/b-c-the-terminal-gives-every-character-one-cell.md`; the two do not
+> block each other.
+>
+> **FIXED by lane C — on `main` since 2026-09-15**, checked here rather than
+> taken from the report. They took the better direction: instead of rewriting the table to
+> describe the renderer, they pointed the renderer at the table. `put_char`
+> advances by `charwidth::char_width`, a wide character occupies two cells with
+> the second flagged as a continuation, a combining mark occupies none, and a
+> wide character that will not fit at the margin wraps rather than straddling
+> it. Writing onto either half of a pair breaks it first, in both directions,
+> so no orphaned half survives to overdraw its neighbour.
+>
+> The two can no longer drift, because there is now one source rather than two
+> descriptions of the same thing. The 2,362 zero-width figure above was
+> re-derived from the table's own 368 ranges when lane C flagged that they had
+> not verified it; it holds.
+
 **What it is.** `userspace/charwidth` holds the system's only table of terminal
 column widths, and it was generated and verified against **bash 5.2.37**, which
 gets its widths from glibc's `wcwidth`. Coreutils **9.5** does not use glibc's
@@ -141115,11 +141192,30 @@ suppressed everything, so a script running `patch -s` and reading stdout was
 told nothing at all about a failure. Silent means do not narrate the work; it
 does not mean hide that the work did not happen.
 
-**`-l`/`--ignore-whitespace` is accepted and inert**, on the same terms as
-`-N`/`-f`/`-F`/`-Z` above: it changes an answer only where a hunk differs from
-the target in whitespace alone, and no case in this tree does. Correct today,
-incomplete rather than wrong, and recorded so a passing harness is not read as
-evidence that whitespace-insensitive matching exists. It does not.
+**`-l`/`--ignore-whitespace` IS IMPLEMENTED as of 2026-09-15.** It was accepted
+and inert, on the same terms as `-N`/`-f`/`-F`/`-Z` above: it changes an answer
+only where a hunk differs from the target in whitespace alone, and no case in
+this tree did.
+
+That argument was wrong, and the way it was wrong is worth keeping. Lane C's
+dead-field detector found the flag was parsed and read by nothing, and the
+defect is not the inertness -- it is that `--help` advertised "Match ignoring
+whitespace." with no hint of it. Of the four places the option was written
+down, three said inert and the only one a user reads said it worked. **An inert
+option is defensible exactly as long as nothing promises otherwise.**
+
+The matching rule is measured, not guessed: strip trailing whitespace, then
+treat any run of whitespace as equal to any other run -- a run matches a
+different run but never matches nothing. Whitespace is SPACE and TAB only;
+`\v`, `\f` and `\r` all fail against a space, so `is_ascii_whitespace()` would
+have been wrong three ways with every fixture still green. Eighteen measured
+cases, in `loose_eq`'s doc comment and its tests.
+
+`patch-diff.sh` had an `--ignore-whitespace` case throughout, and it passed
+throughout, because its fixture's target and patch agree about whitespace. A
+flag-bearing case whose fixture makes the flag irrelevant is not coverage. The
+three cases added alongside this fix use a tab-indented target against a
+space-indented patch, and two of them fail if the flag goes inert again.
 
 ### A-OPTION-REFUSAL-PASS-LINE-CLAIMS-MORE-THAN-ITS-DETECTORS-ESTABLISH — 2026-09-12 — FIXED by lane B (lane A)
 

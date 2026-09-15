@@ -86,6 +86,10 @@ MACRO = re.compile(
 )
 # A run of 4+ spaces that is maximal: starting the match one space in would
 # defeat the "not after a newline escape" test below.
+# The directories this scans. Everything outside them is invisible to it,
+# which is a statement the summary line has to make rather than imply.
+CORPUS = ("gui", "apps", "scripts")
+
 RUN = re.compile(r"(?<!" + SP + r")" + SP + r"{4,}")
 
 
@@ -341,7 +345,19 @@ def main(argv):
     # That is the fix, and it is lane C's to make: it changes what this tool
     # considers a message, which is its whole design. Filed back to them with
     # these numbers.
-    for top in ("gui", "apps", "scripts"):
+    # NAMED, and named in the output too. Lane A read "ok (382 source file(s))"
+    # after every merge as reassurance about their tree, and it never scanned
+    # their tree: no kernel/, no deflate/, no bench/, no netproto/. The 382
+    # files were not too few, **they were the wrong 382** -- the same shape as
+    # the hardcoded ROOT one screen up, and the count was the one number that
+    # would have exposed it. A total that does not say what it counted invites
+    # exactly that reading, so the summary below says which directories.
+    #
+    # Widening this is lane B's call, not a change to smuggle in alongside a
+    # predicate fix: it decides what a shared gate refuses for all three lanes.
+    # The measurement that unblocks the decision is in
+    # requests/c-b-the-argument-position-question-answered-and-six-in-your-globs.md
+    for top in CORPUS:
         for path in sorted((ROOT / top).rglob("*.rs")):
             files += 1
             for ln, text in repair(path, apply):
@@ -360,7 +376,10 @@ def main(argv):
             file=sys.stderr,
         )
         return 1
-    print(f"ok -- no collapsed assertion messages ({files} source file(s)).")
+    print(
+        f"ok -- no collapsed assertion messages "
+        f"({files} source file(s) under {', '.join(CORPUS)})."
+    )
     return 0
 
 

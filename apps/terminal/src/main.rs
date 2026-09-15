@@ -3358,8 +3358,7 @@ mod tests {
         t.resize(2, 3);
 
         assert_ne!(
-            t.screen[row].cells[1].ch,
-            '\u{4E2D}',
+            t.screen[row].cells[1].ch, '\u{4E2D}',
             "the lead outlived the continuation it needed"
         );
         assert!(

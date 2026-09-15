@@ -91,10 +91,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     };
 
     let mut positional = Vec::new();
-    let mut i = 1;
-
-    while i < args.len() {
-        let arg = &args[i];
+    for arg in args.iter().skip(1) {
         match arg.as_str() {
             "-h" | "--help" => cfg.show_help = true,
             "-V" | "--version" => cfg.show_version = true,
@@ -114,7 +111,6 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             }
             _ => positional.push(arg.clone()),
         }
-        i += 1;
     }
 
     match personality {
@@ -284,9 +280,15 @@ fn find_user_tty(username: &str, tty_hint: Option<&str>) -> Option<PathBuf> {
     // Search utmp for the user's tty
     if let Ok(content) = std::fs::read_to_string("/var/run/utmp") {
         for line in content.lines() {
-            let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 2 && fields[0] == username {
-                let tty = fields[1];
+            // Taken with two `next()` calls rather than collected and
+            // indexed. The old form asked `fields.len() >= 2` and then read
+            // `[0]` and `[1]`, so the guard and the reads were two separate
+            // statements that had to agree; here they cannot disagree, and
+            // the `Vec` allocation goes with them.
+            let mut fields = line.split(':');
+            if let (Some(user), Some(tty)) = (fields.next(), fields.next())
+                && user == username
+            {
                 let path = if tty.starts_with("/dev/") {
                     PathBuf::from(tty)
                 } else {
@@ -602,6 +604,17 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+// CLAUDE.md: the five defensive lints are for production code and are allowed
+// in `#[cfg(test)]`, where panicking on bad data is the point of the test.
+// Spelled out here the same way every already-converted crate spells it, so
+// the exemption is visible at the module it applies to rather than inferred.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use std::io::Cursor;

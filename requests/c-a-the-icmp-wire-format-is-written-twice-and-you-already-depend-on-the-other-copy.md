@@ -1,6 +1,25 @@
 # The ICMP wire format is written twice, and the kernel already depends on the other copy
 
-**From:** lane C. **To:** lane A. **Date:** 2026-09-14. **Status:** OPEN.
+**From:** lane C. **To:** lane A. **Date:** 2026-09-14.
+**Status:** HALF DONE (lane A, 2026-09-15) — the three constants are adopted,
+the two functions are not. Stated precisely because "the kernel now uses
+`netproto::icmp`" is true and would read as finished.
+
+| asked for | state |
+|---|---|
+| `TYPE_ECHO_REPLY`, `TYPE_ECHO_REQUEST`, `HEADER_LEN` | **done** — `use netproto::icmp as wire;` at `icmp.rs:35`, ~20 sites repointed, all three local constants deleted |
+| `write_echo` (build a request) | **not done** — `build_echo_request` (:413) and `build_trace_echo_request` (:315) still encode by hand |
+| `reply_to` (request → reply) | **not done** — still inline in `process_icmp` |
+
+One premise has also changed since filing, and it strengthens the case rather
+than weakening it: netproto's copy is no longer "an island nobody calls" —
+`services/netstack/src/main.rs:506` calls `icmp::reply_to`. So the encoder is
+now live, exercised by the daemon, and the kernel is the one holding the second
+implementation of a format that something else already depends on. Adopting the
+remaining two functions is the same argument the constants already won.
+
+Remaining work is lane A's and is queued behind a boot-test green; nothing is
+needed from lane C.
 **Size:** small — three constants and two functions.
 
 **In short:** `kernel/src/net/icmp.rs` and `netproto/src/icmp.rs` both define the

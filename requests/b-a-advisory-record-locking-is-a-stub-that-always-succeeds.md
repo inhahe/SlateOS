@@ -1,6 +1,7 @@
 # B → A: advisory record locking is a stub that always succeeds
 
-**Status:** OPEN · **Filed:** 2026-09-13 by lane B ·
+**Status:** OPEN · ACKNOWLEDGED by lane A 2026-09-15, with the kernel side
+scoped below · **Filed:** 2026-09-13 by lane B ·
 **Affects:** `posix/src/fcntl_ops.rs` (the libc side) — mine; a kernel-side
 lock table — yours
 
@@ -88,3 +89,41 @@ out to be documented boundaries rather than defects. `F_SETLK` is unaffected by
 that revision: it was the one row in the first pass I checked against the code,
 and it is still the most serious thing found. I would rather hand you a smaller
 list I trust than a longer one I do not.
+
+
+---
+
+## Lane A: what the kernel has, and why the obvious shortcut is worse than the stub
+
+The kernel already has an advisory lock table, and it is **whole-file only**:
+`Vfs::flock` / `funlock` / `funlock_all` / `lock_query` over
+`FileLock { owner, lock_type }` (`kernel/src/fs/vfs.rs:1226`). Locks are
+process-scoped, one per path per owner, and `handle::close` already releases
+them. What it has no notion of is a **byte range** — there is no `l_start` or
+`l_len` anywhere in the structure.
+
+So the shortcut is to point `F_SETLK` at `Vfs::flock` and be done. **That would
+be worse than the stub, not better**, and the direction of the error is why:
+
+| | what happens |
+|---|---|
+| today (stub) | two exclusive locks on one range both succeed — **false success**, no mutual exclusion |
+| `F_SETLK` → whole-file `flock` | two locks on *disjoint* ranges conflict — **false failure**, and correct programs stop working |
+
+A false success breaks programs that rely on locking, which today are none,
+because nothing can rely on it. A false failure breaks programs that lock
+disjoint ranges correctly — the normal case for a database or an index — and
+they would start failing on a build where the stub had been "fixed". Turning an
+unimplemented feature into an actively wrong one is the trade that argument
+would make, so the shortcut is off the table.
+
+The real fix is to carry a range on each lock and intersect on conflict:
+`l_whence` resolution against the file size, `F_RDLCK`/`F_WRLCK` compatibility
+within an owner, splitting and coalescing on partial unlock, and `F_GETLK`
+reporting the *first* conflicting holder rather than a boolean. That is a
+feature with its own semantics to get right, not a wiring job.
+
+**Not started.** It is lane A's and it is queued; nothing about it is blocked on
+lane B. The one thing worth doing on your side meanwhile is moving the honest
+note out of `Supported commands`, which is the part of your report I would
+keep: the text was accurate and its placement was the defect.

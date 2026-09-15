@@ -163,7 +163,6 @@ pub fn init_defaults() {
     if guard.is_some() {
         return;
     }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         events: Vec::new(),
         rules: alloc::vec![

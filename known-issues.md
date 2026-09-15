@@ -147926,7 +147926,19 @@ is not an empty grid"*. That sentence is not unique to it:
   *"…through Slate OS syscalls; stubbed with representative data for initial
   development."*
 * `apps/netscan`, `apps/speedtest`, `apps/procexplorer`, `apps/rssreader`,
-  `apps/sysmonitor` carry the same admission in other forms. Ten apps in total.
+  `apps/sysmonitor` carry the same admission in other forms.
+
+**CORRECTION, same day: the count above said "ten apps in total" and the real
+figure is 32.** Recounted with the pattern written out properly rather than
+typed from memory: **14** apps carry a module-level `//!` self-declaration and
+**24** carry one in a function or comment, for a union of 32. The ten I first
+listed were the ones the first grep happened to surface.
+
+The correction is worth more than the number. I published a count from a
+narrower pattern than the one I had just argued was the better instrument, and
+nothing would have caught it — a count has no test. What caught it was
+re-running the search before relying on the figure again, which is the only
+check available for a number in prose.
 
 **This is a better detector than the one that found the 63**, and it is worth
 saying why rather than just switching to it. A name grep asks whether somebody
@@ -148009,3 +148021,27 @@ The app's own types will need `Option` where a category can be absent, the same
 move `apps/benchmark`'s `SubTestResult::score` needed today and for the same
 reason: a zero-filled `CpuInfo` reads as a processor with no cores rather than
 as an unanswered question.
+
+**AND THE FIRST THING THE RECOUNT FOUND WAS MY OWN.**
+
+`apps/benchmark` is on the module-level list — after being fixed. Its `//!`
+doc still reads:
+
+> simulated with representative computation; on real Slate OS hardware the
+> stubs would be replaced with timed kernel/driver calls.
+
+Thirteen of its sixteen tests measure the machine now and the other three say
+why they do not. So the code was corrected and the documentation that described
+the old behaviour was left, which is the same defect as the one being fixed,
+pointing the other way: before, the source admitted a fabrication the window
+denied; now the source claims a fabrication the code has stopped committing.
+
+Both directions mislead the next reader, and the second is the one more likely
+to survive — a doc that *understates* what the code does attracts no complaints
+from anyone. Fixed in the same commit as this note.
+
+The general form, for the checklist: **a fix is not finished until the prose
+that described the defect has been re-read.** Every one of the six settings
+pages got this right because rewriting the page forced the comment to be
+rewritten with it. `benchmark` got it wrong because the stale claim lived in a
+module header twelve hundred lines away from anything I edited.

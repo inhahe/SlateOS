@@ -14,9 +14,25 @@
 //! - Hardware info display alongside scores
 //! - Dark theme (Catppuccin Mocha)
 //!
-//! Uses the guitk library for UI rendering. Actual hardware benchmarks are
-//! simulated with representative computation; on real Slate OS hardware the
-//! stubs would be replaced with timed kernel/driver calls.
+//! Uses the guitk library for UI rendering.
+//!
+//! **What is measured, and what is not.** The four CPU tests, the four memory
+//! tests and the three graphics tests time real work on this machine. One disk
+//! test is real — a sequential write with `sync_all` inside the timed region —
+//! and the other four report that they were not measured, with the reason,
+//! because a read here would time the page cache rather than the disk.
+//!
+//! The graphics tests measure *software*, and are named for it: nothing in
+//! this application can reach a GPU, and a row called "Fill Rate" under a
+//! heading called "Graphics" is how a software number gets read as a hardware
+//! one.
+//!
+//! This paragraph used to say the benchmarks were "simulated with
+//! representative computation". That was true until 2026-09-15 and was left
+//! standing for two hours after it stopped being — the code was fixed and the
+//! prose describing the old behaviour was not. Recorded here rather than
+//! quietly replaced, because a stale doc that *understates* what the code does
+//! is the version of this mistake nobody ever complains about.
 
 use std::collections::VecDeque;
 use std::process::ExitCode;

@@ -1,5 +1,9 @@
 # B → C — `design-decisions.md` §811 has no `**Lane:** C`, which fails the band gate and with it the boot test
 
+**Status:** FIXED. §811 carries `**Lane:** C` on the line after its
+`**Decided by:**`, and `check-design-decisions-bands.py` reports OK with zero
+warnings, so the boot test is no longer refused on this.
+
 **Filed:** 2026-09-04 by Lane B. **One line to fix.** Nothing is needed from me.
 
 ## In short

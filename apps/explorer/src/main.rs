@@ -1505,46 +1505,98 @@ impl ExplorerState {
         Some((done as f32 / total as f32).clamp(0.0, 1.0))
     }
 
-    /// Put the operation's progress where the status bar will find it.
+    /// The whole status line for a running operation.
     ///
-    /// The waiting count is part of it and not a second line, because there is
-    /// only one status bar: an operation the user started and cannot see is
-    /// one they will start again.
-    fn update_operation_status(&mut self) {
+    /// Separated from `update_operation_status` so that what it *says* can be
+    /// checked without arranging for a copy slow enough to still be running
+    /// when the assertion happens. That timing is why the ETA went unnoticed
+    /// for so long: every test copies a few bytes, finishes inside one tick,
+    /// and sees an estimate of zero, which is indistinguishable from an
+    /// estimate that is never shown.
+    fn operation_line(
+        verb: &str,
+        progress: &OperationProgress,
+        total_files: u32,
+        others: usize,
+        waiting: usize,
+    ) -> String {
         use std::fmt::Write as _;
 
-        let Some(running) = self.operations.first() else {
-            return;
-        };
-        let progress = running.executor.progress();
         let current = Path::new(&progress.current_file)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut line = format!(
-            "{} {} of {}",
-            running.verb, progress.completed_files, running.total_files
-        );
+        let mut line = format!("{verb} {} of {total_files}", progress.completed_files);
         if !current.is_empty() {
             line.push_str(" — ");
             line.push_str(&current);
+        }
+        if let Some(eta) = Self::eta_text(progress.eta_secs) {
+            line.push_str(" — ");
+            line.push_str(&eta);
         }
         // The others are counted rather than named. One line cannot carry
         // three operations' filenames, and the count is what a user needs to
         // know they did not lose one. Every `write!` result here is discarded
         // deliberately: writing into a `String` cannot fail, and `?` would
         // mean this returns a `Result` nobody has anything to do with.
-        let others = self.operations.len().saturating_sub(1);
         if others > 0 {
             let _ = write!(line, " (+{others} running");
-            if !self.pending.is_empty() {
-                let _ = write!(line, ", {} waiting", self.pending.len());
+            if waiting > 0 {
+                let _ = write!(line, ", {waiting} waiting");
             }
             line.push(')');
-        } else if !self.pending.is_empty() {
-            let _ = write!(line, " ({} waiting)", self.pending.len());
+        } else if waiting > 0 {
+            let _ = write!(line, " ({waiting} waiting)");
         }
-        self.status_message = line;
+        line
+    }
+
+    /// How much longer, in words, or `None` when saying would be worse.
+    ///
+    /// `OperationProgress::update_rates` has computed this on every tick since
+    /// the executor was written, and until 2026-09-14 the only thing that ever
+    /// read it was `progress_update_rates`, its own test. A copy dialog that
+    /// knows how long it has left and does not say is the same defect as one
+    /// that does not know.
+    ///
+    /// Bounded at both ends because an estimate is not always worth making:
+    /// under a second it rounds to "0s left", which reads as finished while
+    /// the bar is still moving, and over a day it is a number nobody acts on
+    /// -- both cases are better served by the file count that is already on
+    /// the line. Zero is also what `update_rates` stores when it has no
+    /// throughput to divide by, so the lower bound doubles as "not known yet".
+    fn eta_text(secs: f64) -> Option<String> {
+        if !(1.0..=86_400.0).contains(&secs) {
+            return None;
+        }
+        // Bounded above by the check, so the cast cannot truncate, and bounded
+        // below by 1.0, so it cannot go negative.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let whole = secs.round() as u64;
+        Some(match whole {
+            0..60 => format!("{whole}s left"),
+            60..3600 => format!("{}m {}s left", whole / 60, whole % 60),
+            _ => format!("{}h {}m left", whole / 3600, (whole % 3600) / 60),
+        })
+    }
+
+    /// Put the operation's progress where the status bar will find it.
+    ///
+    /// The waiting count is part of it and not a second line, because there is
+    /// only one status bar: an operation the user started and cannot see is
+    /// one they will start again.
+    fn update_operation_status(&mut self) {
+        let Some(running) = self.operations.first() else {
+            return;
+        };
+        self.status_message = Self::operation_line(
+            running.verb,
+            running.executor.progress(),
+            running.total_files,
+            self.operations.len().saturating_sub(1),
+            self.pending.len(),
+        );
     }
 
     /// Where the Transfers view is, or `None` when there is nothing in it.
@@ -4306,6 +4358,76 @@ mod tests {
     use super::*;
     use scratchdir::ScratchDir;
     use std::time::Duration;
+
+    /// A copy part-way through, with `secs` of work left.
+    fn mid_copy(secs: f64) -> OperationProgress {
+        OperationProgress {
+            total_bytes: 1_000_000,
+            copied_bytes: 400_000,
+            total_files: 9,
+            completed_files: 3,
+            current_file: "/home/u/photos/holiday.png".to_string(),
+            elapsed_secs: 4.0,
+            eta_secs: secs,
+            bytes_per_sec: 100_000,
+            state: fileops::OperationState::Running,
+        }
+    }
+
+    fn line_for(secs: f64) -> String {
+        ExplorerState::operation_line("Copying", &mid_copy(secs), 9, 0, 0)
+    }
+
+    /// **The status bar says how much longer.**
+    ///
+    /// `OperationProgress::update_rates` has computed `eta_secs` on every tick
+    /// since the executor was written, and the only thing that had ever read
+    /// it was its own test. The user watched a bar move with no idea whether
+    /// it meant ten seconds or ten minutes.
+    #[test]
+    fn a_running_copy_says_how_much_longer() {
+        let line = line_for(125.0);
+        assert!(line.contains("2m 5s left"), "{line:?}");
+        assert!(line.contains("holiday.png"), "the file is still named: {line:?}");
+        assert!(line.contains("3 of 9"), "the count is still there: {line:?}");
+    }
+
+    #[test]
+    fn a_short_estimate_is_given_in_seconds() {
+        assert!(line_for(12.4).contains("12s left"));
+    }
+
+    #[test]
+    fn a_long_estimate_is_given_in_hours_and_minutes() {
+        assert!(line_for(7_530.0).contains("2h 5m left"));
+    }
+
+    /// Zero is what `update_rates` stores before it has any throughput to
+    /// divide by, so it means "not known yet", not "finished".
+    #[test]
+    fn an_unknown_estimate_is_not_shown_as_zero() {
+        let line = line_for(0.0);
+        assert!(!line.contains("left"), "{line:?}");
+        assert!(line.contains("3 of 9"), "the rest of the line survives: {line:?}");
+    }
+
+    /// Over a day is a number nobody acts on, and it is usually a throughput
+    /// figure distorted by a slow first second rather than a real forecast.
+    #[test]
+    fn an_absurd_estimate_is_withheld() {
+        assert!(!line_for(90_000.0).contains("left"));
+    }
+
+    /// The parenthetical about other operations stays at the end, after the
+    /// estimate -- it is about the queue, not about this copy.
+    #[test]
+    fn the_estimate_comes_before_the_queue_count() {
+        let line = ExplorerState::operation_line("Copying", &mid_copy(30.0), 9, 2, 1);
+        let eta = line.find("30s left").expect("no estimate");
+        let queue = line.find("(+2 running").expect("no queue count");
+        assert!(eta < queue, "{line:?}");
+        assert!(line.contains("1 waiting"), "{line:?}");
+    }
 
     /// Every colour the file manager draws comes from the user's palette.
     ///

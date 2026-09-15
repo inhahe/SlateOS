@@ -19,6 +19,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -42,6 +43,11 @@ use std::time::Duration;
 // ============================================================================
 // Layout constants
 // ============================================================================
+
+/// Blank space left around the drawing in an exported SVG.
+const SVG_MARGIN: f32 = 20.0;
+/// Where a sticky note's text sits inside its rectangle.
+const STICKY_TEXT_INSET: f32 = 16.0;
 
 const TOOLBAR_WIDTH: f32 = 52.0;
 const TOP_BAR_HEIGHT: f32 = 40.0;
@@ -728,6 +734,14 @@ pub enum DragState {
 /// The whiteboard application.
 pub struct WhiteboardApp {
     // Window dimensions
+    /// The save picker.
+    ///
+    /// Until 2026-09-15 this program had no `std::fs`, no `safeio` and no
+    /// dialog of any kind: **a drawing lived exactly as long as the window
+    /// did.** `export_svg` was written and tested and had no caller.
+    pub picker: FilePicker,
+    /// What the last save did, shown in the status bar.
+    pub status_message: Option<String>,
     pub win_width: f32,
     pub win_height: f32,
 
@@ -805,6 +819,8 @@ impl WhiteboardApp {
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: FilePicker::default(),
+            status_message: None,
             win_width: width,
             win_height: height,
             pages: vec![first_page],
@@ -1684,134 +1700,187 @@ impl WhiteboardApp {
     // ========================================================================
 
     /// Export the current page as an SVG-like text representation.
-    pub fn export_svg_text(&self) -> String {
+    /// The current page as a standalone SVG document.
+    ///
+    /// **This was named `svg` and no SVG reader could have drawn it.** It
+    /// emitted a `<whiteboard>` root with `<page>` and `<layer>` inside, and
+    /// of the six shape kinds only `<line>` and `<text>` were elements SVG
+    /// has. The rest failed in three different ways:
+    ///
+    /// * `<path points="...">` — `<path>` takes `d`; `points` belongs to
+    ///   `<polyline>`. **Every freehand stroke silently vanished**, which is
+    ///   most of what a whiteboard holds.
+    /// * `<arrow>` and `<sticky>` are not SVG elements at all, so an arrow and
+    ///   a sticky note drew nothing.
+    /// * `<rect>` and `<ellipse>` carried no `fill`, and SVG's initial fill is
+    ///   **black** — so the two shapes that did survive came out as solid
+    ///   black boxes over whatever they had been drawn around.
+    ///
+    /// A file that opens and is wrong is worse than one that does not open: a
+    /// reader who sees a page of black rectangles concludes the drawing was
+    /// lost, and a reader who sees their freehand notes missing may not notice
+    /// at all.
+    ///
+    /// Colours go out as `rgb()` plus a separate opacity attribute rather than
+    /// `rgba()`. Browsers accept `rgba()` in a presentation attribute; SVG 1.1
+    /// does not, and the point of this format is the readers that are not a
+    /// browser.
+    pub fn export_svg(&self) -> String {
         let page = self.current_page();
+        let (w, h) = Self::svg_extent(page);
+
         let mut out = String::new();
-        out.push_str("<whiteboard>\n");
-        // Page, layer and shape text are all user-typed, and all land inside a
-        // markup document: unescaped, a `<` or `&` makes the export
-        // unparseable and a `</text>` injects arbitrary elements.
+        out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         out.push_str(&format!(
-            "  <page name=\"{}\">\n",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" \
+             viewBox=\"0 0 {w:.0} {h:.0}\">\n"
+        ));
+        // The page name is user-typed and lands inside markup: unescaped, a
+        // `<` or `&` makes the document unparseable and a `</title>` injects
+        // arbitrary elements. `<title>` is SVG's own name for this and is what
+        // a viewer shows in its window bar.
+        out.push_str(&format!(
+            "  <title>{}</title>\n",
             guitk::escape::xml(&page.name)
         ));
+        out.push_str(
+            "  <defs>\n    <marker id=\"arrowhead\" markerWidth=\"10\" markerHeight=\"7\" \
+             refX=\"9\" refY=\"3.5\" orient=\"auto\">\n      \
+             <polygon points=\"0,0 10,3.5 0,7\" fill=\"context-stroke\" />\n    \
+             </marker>\n  </defs>\n",
+        );
 
         for layer in &page.layers {
+            // A hidden layer is left out rather than written with
+            // `display="none"`: the export is what the user is looking at.
+            if !layer.visible {
+                continue;
+            }
             out.push_str(&format!(
-                "    <layer name=\"{}\" visible=\"{}\" locked=\"{}\" opacity=\"{:.2}\">\n",
+                "  <g id=\"{}\" opacity=\"{:.2}\">\n",
                 guitk::escape::xml(&layer.name),
-                layer.visible,
-                layer.locked,
                 layer.opacity
             ));
 
-            for shape in &page.shapes {
-                if shape.layer_id != layer.id {
-                    continue;
-                }
-                let color = shape.stroke.effective_color();
-                let color_str = format!(
-                    "rgba({},{},{},{:.2})",
-                    color.r,
-                    color.g,
-                    color.b,
-                    color.a as f32 / 255.0
-                );
-                let thickness = shape.stroke.thickness;
-                let dash = match shape.stroke.style {
-                    StrokeStyle::Solid => "none",
-                    StrokeStyle::Dashed => "5,5",
-                };
-
-                match &shape.kind {
-                    ShapeKind::Freehand { points } => {
-                        let pts: Vec<String> = points
-                            .iter()
-                            .map(|p| format!("{:.1},{:.1}", p.x, p.y))
-                            .collect();
-                        out.push_str(&format!(
-                            "      <path stroke=\"{}\" stroke-width=\"{}\" \
-                             stroke-dasharray=\"{}\" points=\"{}\" />\n",
-                            color_str,
-                            thickness,
-                            dash,
-                            pts.join(" ")
-                        ));
-                    }
-                    ShapeKind::Line { start, end } => {
-                        out.push_str(&format!(
-                            "      <line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" \
-                             stroke=\"{}\" stroke-width=\"{}\" stroke-dasharray=\"{}\" />\n",
-                            start.x, start.y, end.x, end.y, color_str, thickness, dash
-                        ));
-                    }
-                    ShapeKind::Rectangle { bounds } => {
-                        out.push_str(&format!(
-                            "      <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" \
-                             height=\"{:.1}\" stroke=\"{}\" stroke-width=\"{}\" \
-                             stroke-dasharray=\"{}\" />\n",
-                            bounds.x,
-                            bounds.y,
-                            bounds.width,
-                            bounds.height,
-                            color_str,
-                            thickness,
-                            dash
-                        ));
-                    }
-                    ShapeKind::Ellipse { bounds } => {
-                        let cx = bounds.x + bounds.width / 2.0;
-                        let cy = bounds.y + bounds.height / 2.0;
-                        let rx = bounds.width / 2.0;
-                        let ry = bounds.height / 2.0;
-                        out.push_str(&format!(
-                            "      <ellipse cx=\"{:.1}\" cy=\"{:.1}\" rx=\"{:.1}\" \
-                             ry=\"{:.1}\" stroke=\"{}\" stroke-width=\"{}\" \
-                             stroke-dasharray=\"{}\" />\n",
-                            cx, cy, rx, ry, color_str, thickness, dash
-                        ));
-                    }
-                    ShapeKind::Arrow { start, end } => {
-                        out.push_str(&format!(
-                            "      <arrow x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" \
-                             stroke=\"{}\" stroke-width=\"{}\" stroke-dasharray=\"{}\" />\n",
-                            start.x, start.y, end.x, end.y, color_str, thickness, dash
-                        ));
-                    }
-                    ShapeKind::TextLabel { position, content } => {
-                        out.push_str(&format!(
-                            "      <text x=\"{:.1}\" y=\"{:.1}\" fill=\"{}\">{}</text>\n",
-                            position.x,
-                            position.y,
-                            color_str,
-                            guitk::escape::xml(content)
-                        ));
-                    }
-                    ShapeKind::StickyNote {
-                        bounds,
-                        content,
-                        bg_color,
-                    } => {
-                        out.push_str(&format!(
-                            "      <sticky x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" \
-                             height=\"{:.1}\" fill=\"rgba({},{},{},1.00)\">{}</sticky>\n",
-                            bounds.x,
-                            bounds.y,
-                            bounds.width,
-                            bounds.height,
-                            bg_color.r,
-                            bg_color.g,
-                            bg_color.b,
-                            guitk::escape::xml(content)
-                        ));
-                    }
-                }
+            for shape in page.shapes.iter().filter(|s| s.layer_id == layer.id) {
+                out.push_str(&Self::svg_shape(shape));
             }
-            out.push_str("    </layer>\n");
+            out.push_str("  </g>\n");
         }
-        out.push_str("  </page>\n");
-        out.push_str("</whiteboard>\n");
+        out.push_str("</svg>\n");
         out
+    }
+
+    /// The size of the document: everything drawn, plus a margin.
+    ///
+    /// A fixed canvas would clip a drawing that ran past it, and a zero-size
+    /// viewBox makes a viewer show nothing at all -- so an empty page still
+    /// gets a positive extent.
+    fn svg_extent(page: &Page) -> (f32, f32) {
+        let mut w: f32 = 0.0;
+        let mut h: f32 = 0.0;
+        for shape in &page.shapes {
+            let (x, y) = match &shape.kind {
+                ShapeKind::Freehand { points } => points
+                    .iter()
+                    .fold((0.0_f32, 0.0_f32), |a, p| (a.0.max(p.x), a.1.max(p.y))),
+                ShapeKind::Line { start, end } | ShapeKind::Arrow { start, end } => {
+                    (start.x.max(end.x), start.y.max(end.y))
+                }
+                ShapeKind::Rectangle { bounds }
+                | ShapeKind::Ellipse { bounds }
+                | ShapeKind::StickyNote { bounds, .. } => {
+                    (bounds.x + bounds.width, bounds.y + bounds.height)
+                }
+                ShapeKind::TextLabel { position, .. } => (position.x, position.y),
+            };
+            w = w.max(x);
+            h = h.max(y);
+        }
+        (
+            (w + SVG_MARGIN).max(SVG_MARGIN),
+            (h + SVG_MARGIN).max(SVG_MARGIN),
+        )
+    }
+
+    /// One shape as an SVG element.
+    fn svg_shape(shape: &Shape) -> String {
+        let color = shape.stroke.effective_color();
+        let stroke = format!("rgb({},{},{})", color.r, color.g, color.b);
+        let opacity = f32::from(color.a) / 255.0;
+        let thickness = shape.stroke.thickness;
+        let dash = match shape.stroke.style {
+            StrokeStyle::Solid => "none",
+            StrokeStyle::Dashed => "5,5",
+        };
+        // `fill="none"` on every stroked shape. SVG's initial fill is black,
+        // so leaving it off is what turned rectangles into filled boxes.
+        let pen = format!(
+            "fill=\"none\" stroke=\"{stroke}\" stroke-opacity=\"{opacity:.2}\" \
+             stroke-width=\"{thickness}\" stroke-dasharray=\"{dash}\""
+        );
+
+        match &shape.kind {
+            ShapeKind::Freehand { points } => {
+                let pts: Vec<String> = points
+                    .iter()
+                    .map(|p| format!("{:.1},{:.1}", p.x, p.y))
+                    .collect();
+                format!(
+                    "    <polyline points=\"{}\" {pen} stroke-linecap=\"round\" \
+                     stroke-linejoin=\"round\" />\n",
+                    pts.join(" ")
+                )
+            }
+            ShapeKind::Line { start, end } => format!(
+                "    <line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" {pen} />\n",
+                start.x, start.y, end.x, end.y
+            ),
+            ShapeKind::Arrow { start, end } => format!(
+                "    <line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" {pen} \
+                 marker-end=\"url(#arrowhead)\" />\n",
+                start.x, start.y, end.x, end.y
+            ),
+            ShapeKind::Rectangle { bounds } => format!(
+                "    <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" {pen} />\n",
+                bounds.x, bounds.y, bounds.width, bounds.height
+            ),
+            ShapeKind::Ellipse { bounds } => format!(
+                "    <ellipse cx=\"{:.1}\" cy=\"{:.1}\" rx=\"{:.1}\" ry=\"{:.1}\" {pen} />\n",
+                bounds.x + bounds.width / 2.0,
+                bounds.y + bounds.height / 2.0,
+                bounds.width / 2.0,
+                bounds.height / 2.0
+            ),
+            ShapeKind::TextLabel { position, content } => format!(
+                "    <text x=\"{:.1}\" y=\"{:.1}\" fill=\"{stroke}\" \
+                 fill-opacity=\"{opacity:.2}\">{}</text>\n",
+                position.x,
+                position.y,
+                guitk::escape::xml(content)
+            ),
+            // A sticky note is a filled rectangle with the note on top -- two
+            // elements, because SVG has no element that is both.
+            ShapeKind::StickyNote {
+                bounds,
+                content,
+                bg_color,
+            } => format!(
+                "    <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" \
+                 fill=\"rgb({},{},{})\" stroke=\"none\" />\n    \
+                 <text x=\"{:.1}\" y=\"{:.1}\" fill=\"{stroke}\">{}</text>\n",
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height,
+                bg_color.r,
+                bg_color.g,
+                bg_color.b,
+                bounds.x + STICKY_TEXT_INSET,
+                bounds.y + STICKY_TEXT_INSET,
+                guitk::escape::xml(content)
+            ),
+        }
     }
 
     // ========================================================================
@@ -1953,10 +2022,38 @@ impl WhiteboardApp {
 
     /// Handle one input event. Returns whether anything changed.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The picker takes input first while it is up, or a filename is drawn
+        // onto the canvas behind it.
+        match self.picker.handle(event, self.win_width, self.win_height) {
+            Picked::Chose(path) => {
+                self.status_message = Some(self.write_svg(&path));
+                return true;
+            }
+            Picked::Handled | Picked::Cancelled => return true,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => false,
+        }
+    }
+
+    /// Ask where to put the drawing.
+    pub fn save_as(&mut self) {
+        self.picker.open_to_write("whiteboard.svg");
+    }
+
+    /// Write the current page to `path`, and say what happened.
+    pub fn write_svg(&mut self, path: &std::path::Path) -> String {
+        let text = self.export_svg();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!(
+                "Saved {} shape(s) to {}",
+                self.current_page().shapes.len(),
+                path.display()
+            ),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
         }
     }
 
@@ -2046,6 +2143,10 @@ impl WhiteboardApp {
                 }
                 Key::A => {
                     self.select_all();
+                    true
+                }
+                Key::S => {
+                    self.save_as();
                     true
                 }
                 Key::L => {
@@ -2192,6 +2293,12 @@ impl WhiteboardApp {
             self.render_layers_panel(&mut cmds);
         }
         self.render_status_bar(&mut cmds);
+
+        // The picker last, so it draws over the canvas rather than under it.
+        cmds.extend(
+            self.picker
+                .render(&self.palette, self.win_width, self.win_height),
+        );
 
         cmds
     }
@@ -4488,15 +4595,134 @@ mod tests {
         assert!(app.zoom < old_zoom);
     }
 
+    // ---- The door ----
+
+    /// The drawing reaches the disk, and reads back as what was drawn.
+    ///
+    /// `export_svg` was written and tested and had no caller: this program had
+    /// no `std::fs`, no `safeio` and no dialog of any kind, so **a drawing
+    /// lived exactly as long as the window did.**
+    #[test]
+    fn a_drawing_reaches_the_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "whiteboard-save-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("board.svg");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.add_shape(ShapeKind::Line {
+            start: Point::new(1.0, 2.0),
+            end: Point::new(3.0, 4.0),
+        });
+        let expected = app.export_svg();
+        let said = app.write_svg(&path);
+
+        let back = std::fs::read_to_string(&path).expect("the file it said it wrote");
+        assert_eq!(back, expected, "what was read back is not what was drawn");
+        assert!(said.starts_with("Saved 1 shape(s)"), "said: {said}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl+S asks where to put it rather than saving somewhere of its own.
+    #[test]
+    fn ctrl_s_opens_the_save_picker() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        assert!(!app.picker.is_open(), "nothing should be open at rest");
+
+        assert!(app.handle_event(&press_with(Key::S, ctrl())));
+        assert!(app.picker.is_open(), "Ctrl+S should ask for a destination");
+    }
+
+    /// The open picker is drawn, not merely routed to.
+    #[test]
+    fn the_open_picker_is_drawn() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        let closed = app.render_commands().len();
+        app.handle_event(&press_with(Key::S, ctrl()));
+        let own = app.render_commands().len().saturating_sub(closed);
+        assert!(
+            own > 0,
+            "the open picker contributed {own} commands; it is not being drawn"
+        );
+    }
+
     // ---- Export ----
 
+    /// An empty page is still a valid, openable SVG document.
+    ///
+    /// It asserted a `<whiteboard>` root, which is what made the old export
+    /// un-openable: no SVG reader has any idea what that element is.
     #[test]
     fn test_export_empty_page() {
         let app = WhiteboardApp::new(800.0, 600.0);
-        let svg = app.export_svg_text();
-        assert!(svg.contains("<whiteboard>"));
-        assert!(svg.contains("</whiteboard>"));
-        assert!(svg.contains("Board 1"));
+        let svg = app.export_svg();
+        assert!(svg.starts_with("<?xml"), "{svg}");
+        assert!(
+            svg.contains("<svg xmlns=\"http://www.w3.org/2000/svg\""),
+            "without the namespace it is markup, not an SVG: {svg}"
+        );
+        assert!(svg.contains("</svg>"));
+        assert!(svg.contains("<title>Board 1</title>"));
+        assert!(
+            !svg.contains("viewBox=\"0 0 0 0\""),
+            "a zero viewBox shows a viewer nothing at all: {svg}"
+        );
+    }
+
+    /// Every shape kind comes out as an element SVG actually has.
+    ///
+    /// **Three of the six did not.** `<path points="...">` took an attribute
+    /// `<path>` does not have -- `points` belongs to `<polyline>` -- so every
+    /// freehand stroke silently vanished, which is most of what a whiteboard
+    /// holds. `<arrow>` and `<sticky>` are not SVG elements at all. And the
+    /// two that did survive, `<rect>` and `<ellipse>`, carried no `fill`,
+    /// whose SVG initial value is **black**, so they came out as solid boxes
+    /// over whatever they had been drawn around.
+    #[test]
+    fn every_shape_kind_uses_an_element_svg_has() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.add_shape(ShapeKind::Freehand {
+            points: vec![Point { x: 1.0, y: 2.0 }, Point { x: 3.0, y: 4.0 }],
+        });
+        app.add_shape(ShapeKind::Arrow {
+            start: Point { x: 0.0, y: 0.0 },
+            end: Point { x: 9.0, y: 9.0 },
+        });
+        app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect {
+                x: 1.0,
+                y: 1.0,
+                width: 5.0,
+                height: 5.0,
+            },
+        });
+        let svg = app.export_svg();
+
+        assert!(
+            svg.contains("<polyline points=\"1.0,2.0 3.0,4.0\""),
+            "{svg}"
+        );
+        assert!(
+            !svg.contains("<path"),
+            "path takes `d`, never `points`: {svg}"
+        );
+        assert!(!svg.contains("<arrow"), "not an SVG element: {svg}");
+        assert!(
+            svg.contains("marker-end=\"url(#arrowhead)\"")
+                && svg.contains("<marker id=\"arrowhead\""),
+            "a marker-end whose id is defined nowhere draws no head, and nothing in the document complains: {svg}"
+        );
+        // Every stroked element says so, or SVG fills it black.
+        assert_eq!(
+            svg.matches("fill=\"none\"").count(),
+            3,
+            "a stroked shape without fill=\"none\" is a filled black one: {svg}"
+        );
     }
 
     /// Text a user types must not be able to change the structure of the
@@ -4519,14 +4745,22 @@ mod tests {
             content: "</sticky><rect x=\"0\"/><sticky>".to_string(),
             bg_color: Color::rgb(1, 2, 3),
         });
-        let svg = app.export_svg_text();
+        let svg = app.export_svg();
 
-        // Exactly the elements we meant to write, and no injected `rect`.
-        assert_eq!(svg.matches("<text ").count(), 1, "{svg}");
-        assert_eq!(svg.matches("</text>").count(), 1, "{svg}");
-        assert_eq!(svg.matches("<sticky ").count(), 1, "{svg}");
-        assert_eq!(svg.matches("</sticky>").count(), 1, "{svg}");
-        assert_eq!(svg.matches("<rect").count(), 0, "injected element: {svg}");
+        // Exactly the elements the two shapes imply and no more: a text label
+        // is one `<text>`, and a sticky note is a `<rect>` with a `<text>` on
+        // it, because SVG has no element that is both. The old assertion of
+        // zero `<rect>` cannot be reused for that reason -- what it was really
+        // checking is that the user's `<rect x="0"/>` did not become a third
+        // element, which is what these counts say now.
+        assert_eq!(svg.matches("<text ").count(), 2, "{svg}");
+        assert_eq!(svg.matches("</text>").count(), 2, "{svg}");
+        assert_eq!(svg.matches("<rect ").count(), 1, "injected element: {svg}");
+        assert!(!svg.contains("<sticky"), "{svg}");
+        assert!(
+            svg.contains("&lt;/text&gt;") && svg.contains("&lt;/sticky&gt;"),
+            "the typed markup should appear escaped, not dropped: {svg}"
+        );
     }
 
     /// The same for an attribute: a quote in a page or layer name must not be
@@ -4535,17 +4769,16 @@ mod tests {
     fn a_quote_in_a_page_name_cannot_close_the_attribute() {
         let mut app = WhiteboardApp::new(800.0, 600.0);
         app.current_page_mut().name = "My\" evil=\"yes".to_string();
-        let svg = app.export_svg_text();
+        let svg = app.export_svg();
 
+        // The page name is an element's text now, not an attribute value, so
+        // a quote cannot close anything -- but it still must not be able to
+        // open an element, which is what this checks.
         let line = svg
             .lines()
-            .find(|l| l.trim_start().starts_with("<page "))
-            .expect("a page line");
-        assert_eq!(
-            line.matches('"').count(),
-            2,
-            "the name attribute was closed early: {line}"
-        );
+            .find(|l| l.trim_start().starts_with("<title>"))
+            .expect("a title line");
+        assert!(line.contains("&quot;") || !line.contains('"'), "{line}");
         assert!(!line.contains("evil=\""), "{line}");
     }
 
@@ -4558,7 +4791,7 @@ mod tests {
             position: Point { x: 0.0, y: 0.0 },
             content: "Tom & Jerry".to_string(),
         });
-        let svg = app.export_svg_text();
+        let svg = app.export_svg();
         assert!(svg.contains("Tom &amp; Jerry"), "{svg}");
     }
 
@@ -4572,7 +4805,7 @@ mod tests {
         app.add_shape(ShapeKind::Rectangle {
             bounds: Rect::new(10.0, 10.0, 50.0, 30.0),
         });
-        let svg = app.export_svg_text();
+        let svg = app.export_svg();
         assert!(svg.contains("<line"));
         assert!(svg.contains("<rect"));
     }
@@ -4584,7 +4817,7 @@ mod tests {
             position: Point::new(50.0, 50.0),
             content: "Hello".to_string(),
         });
-        let svg = app.export_svg_text();
+        let svg = app.export_svg();
         assert!(svg.contains("<text"));
         assert!(svg.contains("Hello"));
     }
@@ -4598,9 +4831,16 @@ mod tests {
             content: "Important".to_string(),
             bg_color: pal.yellow,
         });
-        let svg = app.export_svg_text();
-        assert!(svg.contains("<sticky"));
-        assert!(svg.contains("Important"));
+        let svg = app.export_svg();
+        // `<sticky>` is not an SVG element and never was, so a sticky note
+        // drew nothing at all. It is a filled rectangle with the note on top.
+        assert!(!svg.contains("<sticky"), "{svg}");
+        assert!(svg.contains("<rect "), "{svg}");
+        assert!(svg.contains("Important"), "{svg}");
+        assert!(
+            svg.contains("fill=\"rgb(") && svg.contains("stroke=\"none\""),
+            "the note's paper is filled and unstroked: {svg}"
+        );
     }
 
     #[test]
@@ -4610,8 +4850,15 @@ mod tests {
             start: Point::new(0.0, 0.0),
             end: Point::new(50.0, 50.0),
         });
-        let svg = app.export_svg_text();
-        assert!(svg.contains("<arrow"));
+        let svg = app.export_svg();
+        // `<arrow>` is not an SVG element. A line with a marker on its end is.
+        assert!(!svg.contains("<arrow"), "{svg}");
+        assert!(svg.contains("<line "), "{svg}");
+        assert!(svg.contains("marker-end=\"url(#arrowhead)\""), "{svg}");
+        assert!(
+            svg.contains("<marker id=\"arrowhead\""),
+            "a marker-end pointing at nothing draws no head: {svg}"
+        );
     }
 
     #[test]
@@ -4620,7 +4867,7 @@ mod tests {
         app.add_shape(ShapeKind::Ellipse {
             bounds: Rect::new(0.0, 0.0, 80.0, 60.0),
         });
-        let svg = app.export_svg_text();
+        let svg = app.export_svg();
         assert!(svg.contains("<ellipse"));
     }
 
@@ -4634,8 +4881,15 @@ mod tests {
                 Point::new(10.0, 0.0),
             ],
         });
-        let svg = app.export_svg_text();
-        assert!(svg.contains("<path"));
+        let svg = app.export_svg();
+        // `<path points=...>` was the worst of the three: `<path>` is a real
+        // element, so the document parsed, and `points` is simply ignored --
+        // **the stroke vanished without any error anywhere.**
+        assert!(!svg.contains("<path"), "{svg}");
+        assert!(
+            svg.contains("<polyline points=\"0.0,0.0 5.0,5.0 10.0,0.0\""),
+            "{svg}"
+        );
     }
 
     #[test]
@@ -4646,7 +4900,7 @@ mod tests {
             start: Point::new(0.0, 0.0),
             end: Point::new(50.0, 50.0),
         });
-        let svg = app.export_svg_text();
+        let svg = app.export_svg();
         assert!(svg.contains("5,5"));
     }
 

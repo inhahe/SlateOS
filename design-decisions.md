@@ -67872,6 +67872,21 @@ callee's own documentation, where the next caller will read it, and is why
 `writeback_entry` now carries "NOT safe from interrupt context" in its doc
 comment rather than only in this entry.
 
+**Amended the same day, with evidence from lane B that this is necessary and
+NOT sufficient.** Their `pre-push` header list contains the sentence *"FIVE OUT
+OF FIVE RECENT ADDITIONS"* had a particular fault -- and they read that line
+while committing the sixth instance of it. A warning about a trap, sitting in
+the file where the trap is, in the paragraph you are editing, did not prevent
+the trap. What caught it was `test-pre-push-gates.py` refusing the push.
+
+So the doc comment above should be read as documentation, not as a control. The
+constraint it states -- do not reach a blocking lock from interrupt context --
+is the kind a checker could enforce, by walking the call graph out from the
+known softirq and IRQ entry points and refusing a blocking `lock()` reachable
+from any of them. That is real work and is recorded in `todo.txt` rather than
+claimed here; what is claimed is only that the comment will not do the job by
+itself, on evidence rather than on principle.
+
 ## 941. A known limitation is declared and checked, not left as a permanent red boot
 
 **Date:** 2026-09-15 · **Decided by:** Claude (autonomous) · **Lane:** A ·

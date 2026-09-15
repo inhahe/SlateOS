@@ -204,6 +204,29 @@ one lane, and can be done without coordinating two trees. The independence B buy
 real but theoretical here: nothing in this OS yet drives enough traffic for one
 connection to starve another, and if that day comes the measurement will say so.
 
+**A named program is already queued behind this, so "nothing is broken today"
+is too generous.** Nothing is *red*, which is a different claim.
+
+The emoji picker stores a chosen emoji in a field whose doc comment says it is
+"for clipboard / IPC output". That program contains no clipboard code and no
+IPC code. The clipboard *service* exists -- `gui/clipboard`, whose own doc says
+"all applications communicate with this service via IPC" -- but its `src/`
+holds a single `main.rs` with no library beside it, so nothing can link to it,
+and the desktop's clipboard viewer claims to integrate with it while containing
+zero connects, sends or sockets. (Both checked here, not taken on report.)
+
+The fix is a client that talks to that service, and that client opens a socket.
+Under this bug that is socket number two, and socket number one is the
+compositor connection. So the first program to reach for the clipboard does not
+get a failed clipboard call -- it gets its window destroyed. **"The emoji picker
+closes itself when I click an emoji"** is the bug report, and the hunt goes to
+the picker, then the compositor, then the toolkit, and never to the network
+daemon.
+
+That work is queued now rather than hypothetical, which is the difference
+between "fix this before something needs it" and "fix this before the next
+thing ships broken".
+
 **If this is never answered:** networking keeps working exactly as well as it does
 today, which is one connection at a time. Nothing breaks that was not already
 broken, and no data is at risk. What stays blocked is anything needing two at once —

@@ -16,6 +16,12 @@ inputsettings = { path = "../../gui/inputsettings" }
 
 # Which programs may interrupt the user. The desktop shell reads what
 # this page writes; see gui/notifsettings.
+# The machine's real user accounts, for the Accounts page. The same crate the
+# login screen and apps/lockscreen read, because two answers to "which accounts
+# does this machine have" drift and a person cannot tell a hidden account from
+# a deleted one. This page used to carry three invented ones.
+loginusers = { path = "../../gui/loginusers" }
+
 notifsettings = { path = "../../gui/notifsettings" }
 # The window and the event loop. Settings names `oswindow`, never `guiremote` —
 # an application should no more name the display protocol than a Unix program

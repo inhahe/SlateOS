@@ -40,9 +40,21 @@
 //! makes that decision cheap to act on: when it is answered there is one
 //! function to replace instead of one per caller.
 //!
-//! `userspace/cryptsetup` deliberately does **not** use this crate. It
-//! implements real PBKDF2-SHA256 because the LUKS on-disk format requires
-//! exactly that; its duplication is a format obligation, not a copy.
+//! **A format-mandated KDF is not a duplicate of this crate.** Where an
+//! on-disk or on-wire format specifies its own key derivation -- LUKS
+//! requires real PBKDF2-SHA256, and a volume written with anything else
+//! cannot be opened by anything else -- the implementation is obliged to
+//! match the format, not this crate. Anyone auditing the tree for duplicate
+//! KDFs should expect to find such a thing and leave it alone.
+//!
+//! The rule is stated without an example on purpose. It named
+//! `userspace/cryptsetup` until 2026-09-10, when lane B deleted that crate
+//! under `design-decisions.md` 1006 -- not for duplicating anything, but
+//! because it reported work it had not done: `cmd_luks_format` printed
+//! `LUKS2 formatted successfully on /dev/sda1.` and exited 0 having written
+//! nothing to the device. So the exemption currently has no holder. The
+//! reason it exists outlives its instance, which is why the rule stayed and
+//! the example went.
 //!
 //! # Example
 //!

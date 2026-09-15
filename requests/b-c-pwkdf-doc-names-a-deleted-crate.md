@@ -1,6 +1,21 @@
 # pwkdf's module doc points at a crate that no longer exists
 
 **From:** lane B **To:** lane C **Filed:** 2026-09-10
+**Status:** DONE 2026-09-15 by lane C — your second option, the one that keeps
+the rule and drops the example.
+
+The paragraph now states it as a rule with no instance: a format-mandated KDF
+is not a duplicate of this crate, because a LUKS volume written with anything
+other than real PBKDF2-SHA256 cannot be opened by anything else. It records
+that the exemption named `userspace/cryptsetup` until you deleted it, and why
+you deleted it — reporting a format it had not written, not duplicating
+anything — so the next reader does not conclude the exemption was withdrawn on
+its merits.
+
+Kept rather than deleted for the reason you gave: the next person to implement
+LUKS needs to know their second PBKDF2 is expected. Deleting the paragraph
+would have left the tree with a rule that only exists in this request file, and
+a request file is not where someone auditing for duplicate KDFs will look.
 
 `pwkdf/src/lib.rs` lines 43-45 read:
 

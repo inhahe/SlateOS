@@ -147510,3 +147510,348 @@ taking `(value, default_width, default_pad)` with the flags and width
 overriding both — which is a real change to a ~40-arm function shared by
 `date`, `ls` and `diff`'s header, and wants doing with attention rather than at
 the end of a tick.
+
+## TD-C-FOUR-NOTIFICATION-BEHAVIOURS-HAVE-A-SETTINGS-MODEL-AND-NO-IMPLEMENTATION
+
+**In short:** the desktop can show you a notification and let you dismiss it,
+and that is all it can do. It cannot put the banner somewhere else, make it
+disappear on its own after a while, group several from one program together,
+or forget old ones. A 2,526-line module in the shell described settings for all
+four as though they existed. That module was deleted on 2026-09-15 because
+nothing anywhere read it; this entry is what it knew, kept so the next person
+builds the behaviour rather than a second copy of the settings for it.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**What was deleted.** `gui/desktop/src/notification_settings.rs` -- an island
+under `scripts/orphan-modules-baseline.txt`, referenced by nothing but its own
+`pub mod` line. It defined `BannerStyle`, `BannerPosition`, `GroupingMode`,
+`NotificationPriority`, `AppNotificationPrefs`, `HistoryRetention`,
+`AutoDismissDelay`, `NotificationConfig`, `NotificationHistoryEntry`,
+`NotificationSettings` and a tabbed UI over them.
+
+**Why deleting was right rather than porting.** Notifications already have a
+live settings model with five consumers -- `gui/notifsettings`, read by
+`apps/settings`, `gui/daywindow`, and the shell's own `focus_assist.rs` and
+`notif_pane.rs`. It carries quiet hours, per-app rules and importance, and the
+Settings app's Notifications page is built from it. So this was a second model
+of a thing already modelled, which `design-decisions.md` 815 settles: a screen
+you *open* lives in the Settings app and the shell's copy goes.
+
+**The four concepts that had no counterpart, and why they are not lost work.**
+`BannerPosition`, `AutoDismissDelay`, `GroupingMode` and `HistoryRetention`
+exist in neither model now. Checked against `notif_pane.rs`, the live pane, at
+3,809 lines: it has manual dismissal and grouping *by time* (today, yesterday,
+this week, older) and no notion of where a banner sits, of a timer that removes
+one, of collapsing several from one program, or of a retention policy. So these
+were settings for behaviour that does not exist -- which is the thing the Mouse
+page and the Startup Apps page each already refuse to ship in so many words:
+a control that saves a value to a file, looks as though it worked, and changes
+nothing. Building the behaviour is the work; the settings are the easy half and
+should follow it.
+
+**What the fix needs**, when someone does it: pick one of the four, implement it
+in `notif_pane.rs` first, add the field to `gui/notifsettings` second, and give
+it a control in `apps/settings`'s Notifications page third. In that order, so
+that at no point does a setting exist that nothing reads. Of the four,
+`AutoDismissDelay` is the one a user would miss first -- a notification that
+never goes away on its own is the complaint the others are downstream of.
+
+## TD-C-THE-UPDATE-PAGE-INVENTED-ITS-HISTORY-AND-A-FAILURE -- FIXED 2026-09-15
+
+**In short:** the Settings app's System Updates page told the user their
+machine was up to date, listed four updates it claimed to have installed, and
+said one of them had failed. None of it was real. There is no updater on this
+system, nothing had been checked, and the four entries were written into the
+source as constants. Fixed by making the page say what is true: this system
+cannot update itself yet.
+
+**Date:** 2026-09-15. **Lane:** C. **Found by:** working through
+`design-decisions.md` 815's list of settings screens that exist twice -- this
+was the live copy, not the dead one.
+
+**What it did.** Four separate claims, in `apps/settings/src/main.rs`:
+
+1. **"Check for Updates"** ran `self.checking_for_updates =
+   !self.checking_for_updates` and nothing else. It flipped the label to
+   "Checking..." and checked nothing; pressing it again flipped it back.
+2. **"Your device is up to date"**, in green, drawn unconditionally whenever a
+   check was not "running" -- an assurance about the user's machine from code
+   that had never looked at it.
+3. **Four update-history entries** hard-coded at construction, with
+   Windows-style KB numbers (`KB5032100`), May 2026 dates, and one described as
+   "Cumulative update for .NET runtime" on a system that has no .NET.
+4. **Automatic updates, active hours, and two deferral sliders** -- settings
+   stored in fields nothing else read.
+
+**The entry that decided it.** One of the four was `UpdateStatus::Failed`: a
+"Driver update for GPU" that had failed. A fabricated success is a lie about
+nothing. A fabricated *failure* sends someone looking for a problem on their
+own machine that never happened, with no way to discover it was never real.
+That is a worse defect than the button, and it is the one that made this
+urgent rather than untidy.
+
+**Why it was not wired up instead.** An update needs a source. There are two in
+the tree -- `userspace/pkg` and `kernel/src/fs/updatemgr.rs` -- and both are in
+other lanes with no service between them and a GUI application. The version
+string had the same problem: `os_version` was the constant
+`"Slate OS 1.0.0 Build 2600"`, and 2600 is Windows XP's build number. Nothing
+in this tree reports an OS version to a userspace program.
+
+**The fix.** The page now states that the system cannot update itself, shows
+"Last checked: Never" and "Available updates: Unknown", and says plainly that
+no component reports a version yet. The dead state went with it: `UpdateStatus`,
+`UpdateEntry`, `update_history`, `os_version`, `checking_for_updates`,
+`auto_update_enabled`, `active_hours_start`/`_end`,
+`defer_feature_days`/`_quality_days`, `ButtonId::CheckForUpdates`,
+`ToggleId::AutoUpdate` and two `SliderId` variants -- 179 lines deleted against
+54 added. Same treatment as the Sound page received on 2026-09-14, for the
+reason the Mouse page states: a control that writes a value nothing reads is
+worse than an absent control, because the absent one does not claim the setting
+took effect.
+
+**One thing worth knowing for the next page.** `cargo build` was clean with the
+page rewritten and every field still present -- the fields are `pub` on a `pub`
+struct and some are read by tests, so nothing warned. `cargo test` was what
+caught the leftover (`SliderId::FIXED` is `[Self; 6]` behind `#[cfg(test)]` and
+had to become `[Self; 4]`). A build passing is not evidence that removed code
+left nothing behind, and `scripts/check-fields-written-never-read.py` exists
+for exactly the residue a build cannot see.
+
+## TD-C-THE-ACCOUNTS-PAGE-INVENTED-THREE-PEOPLE -- FIXED 2026-09-15
+
+**In short:** the Settings app's Accounts page listed three users who do not
+exist on the machine -- Alice, Bob and Charlie -- with email addresses, login
+counts and last-login times, and told you one of them was a child account with
+screen-time limits in force. All of it was written into the source as
+constants. The page now reads the machine's real account database.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**What it claimed.** `SettingsState::new` carried three `UserAccount` values:
+Alice (Administrator, `alice@example.com`, 142 logins, last seen
+2026-05-17 09:34), Bob (Standard, 56 logins) and Charlie (Child, 23 logins).
+Selecting Charlie drew a "Family Safety" section reading *"Screen time limits
+and content filters are active"* over a "Manage Family Settings" button. There
+are no child accounts in this system, no screen-time limits, and no content
+filters.
+
+**The fix, which is a wiring rather than a deletion.** `gui/loginusers` already
+reads the real account database and is what the login screen and
+`apps/lockscreen` use. `SettingsState::new` now starts with an empty list and
+`main` calls `load_user_accounts`, following the same split as
+`load_appearance`, `load_input` and `load_notifications`: a constructor that
+reads a file makes every test depend on the machine it runs on, and this app's
+tests are pure `(w, h) -> RenderTree` functions by design. The mapping half is
+`set_user_accounts`, which takes a slice, so a test can supply accounts without
+a filesystem.
+
+**Three things had no source and are gone rather than mapped:** the email
+address and the login count -- the database records neither -- and the child
+account, which is not a concept it has. Last-login is real and now comes from
+the database as a timestamp, rendered "Never" when it is zero rather than as
+1 January 1970, and labelled UTC because a settings window has no way to ask
+for the machine's local zone.
+
+**Nothing says which account is signed in**, so none is marked. That was
+already the documented fallback in `current_account_picture` -- *"a machine
+with nobody signed in does not claim a choice was made"* -- rather than a new
+compromise invented for this change.
+
+**The tests are the part worth reading.** Six went red at once, because every
+one of them silently used the three invented accounts as its fixture. A fixture
+that lives in production code is a fixture nobody can see they are using: the
+tests looked self-contained and were not, and the only reason this surfaced is
+that the list became empty rather than merely different. They now build their
+own three accounts in `account_fixture`. Two of them also asserted hardcoded
+emoji that happened to be the invented accounts' pictures, and now read the
+expected icons back out of `ACCOUNT_PICTURES`.
+
+## TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED
+
+**In short:** you can pick a picture for your account in Settings, the list
+updates, and nothing writes it down. Close the window and the choice is gone.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+`handle_click` sets `account.picture = index` on the in-memory `Vec` and there
+is no writer anywhere -- the value reaches no file and no other program. The
+account database does carry a real per-account avatar
+(`loginusers::Account::avatar`, an identifier string), so the place for the
+choice exists; what is missing is a write path to the user database and a
+mapping between that identifier and this page's fixed grid of pictures.
+
+**Deliberately not fixed in the same change that wired the accounts up.** The
+picker's own logic is correct and carefully tested -- clicking a tile selects
+that tile, and the edit lands on the signed-in account rather than the
+highlighted one, each pinned by its own test. Deleting a working control and
+wiring a data source are separate decisions, and doing both at once would have
+meant deciding the second one in the middle of the first. It is recorded here
+so the choice is made deliberately rather than by momentum.
+
+## TD-C-THE-PRIVACY-PAGE-TOLD-YOU-A-BROWSER-HAD-YOUR-CAMERA -- FIXED 2026-09-15
+
+**In short:** the Settings app's Privacy page listed nine applications and
+showed, with green ticks and red crosses, which of them could use your
+location, camera and microphone. None of those applications exist on this
+system, nothing on this system asks anything whether an application may use a
+device, and every tick and cross was written into the source as a constant.
+A privacy page is the one screen a user is entitled to believe.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**What it claimed.** Three per-device sections, each with a master toggle and a
+list of applications with allow switches: Location (Maps, Weather, Camera,
+Browser), Camera (Video Chat, Browser, Social Media), Microphone (Video Chat,
+Voice Recorder, Browser). Then a Capabilities sub-page drawing a summary table
+over nine named programs and four permissions -- a tick in green, a cross in
+red, a dash where a program had not asked. `Browser` was ticked for Camera.
+Also a diagnostic-data-collection level to choose, and a "Clear Activity
+History" button.
+
+**Why this could not be finished rather than removed.** `design.txt` specifies
+capability-based security with no ambient authority: a program may use a device
+because it holds an unforgeable handle to it, not because a central table has
+its name ticked. A per-application permission list is therefore not this
+system's model half-built -- it is a different system's model, borrowed from
+Windows and Android. Completing the page would have meant building a permission
+store that the kernel does not consult and could not be made to consult without
+abandoning the capability design.
+
+**The detail that shows the cost of leaving it.** One of the tests deleted with
+this change was
+`test_every_per_app_permission_switch_is_clickable`, and its comment reads:
+*"Only the Location list had a handler; Camera, Microphone and Background were
+drawn and inert."* Somebody had already found a bug in this page and fixed it
+-- real effort spent making fabricated switches respond, on a page where
+responding was never the problem. That is what a convincing fabrication costs:
+not just the user's trust when they find out, but the next person's afternoon.
+
+**The fix.** The page now says that this system does not record per-application
+permissions, and why -- in the plain terms the design deserves: *"a program
+here reaches a device by holding a handle to it, which it can only have been
+given -- there is no central table of names to tick, and nothing has authority
+simply because of what it is called."* The dead state went with it: the four
+app lists, the three master toggles, `PermissionKind`, `AppPermission`,
+`DiagnosticLevel`, `build_permission_list`, `render_capabilities_summary`,
+`PageSink::app_toggle_row`, four `ToggleId` variants and one `DropdownId`.
+
+**Still outstanding:** `gui/desktop/src/privacy_settings.rs` holds a second
+copy of the same borrowed model -- `PermissionKind`, `AppPermission`,
+`PrivacySettings`, with `is_allowed` and `revoke_all` and nothing calling
+either. It is left alone deliberately, because it is a different question:
+this change was about a page that lied to the user, and that file is a model
+nobody uses. It belongs to the `design-decisions.md` 815 sweep of shell copies,
+where the test is whether the behaviour exists rather than whether the screen
+does. The answer there will be the same, for the same reason.
+
+## TD-C-THE-NETWORK-PAGE-LISTED-THREE-ADAPTERS-THIS-SYSTEM-CANNOT-SEE -- FIXED 2026-09-15
+
+**In short:** the Settings app's Network page listed `eth0` as connected at
+192.168.1.100, `wlan0` as disconnected, and `lo` at 127.0.0.1, each with a
+green or grey dot for its link state. This system cannot list its network
+interfaces at all -- nothing in the tree asks the kernel what hardware is
+present -- so all three were constants in the source. The page now says it
+cannot look.
+
+**Date:** 2026-09-15. **Lane:** C. The fourth and last of the fabricated
+Settings pages found by sweeping after the update page: Sound (fixed
+2026-09-14), Updates, Accounts, Privacy and now Network.
+
+**Why a status page is the worst place for this.** A green dot beside an
+interface name and an address is the strongest claim a page can make: it says
+*I looked, and this is what is there*. Every other invented control at least
+described a setting. This described the machine.
+
+**Two separate reasons the controls went, and the second outlives the first.**
+The adapter list cannot be built: `net/` carries a DNS resolver and an HTTP
+client and nothing that enumerates interfaces, and there is no service between
+a GUI application and the kernel's own. But the address, DNS and proxy fields
+would have been dead even with a list, because **nothing reads them**. The
+nearest thing to a consumer is `net/dns`, which defines a `ResolverConfig` and
+parses `resolv.conf` -- so the *format* exists -- and no program in this tree
+loads one. A nameserver typed into that page lived in the window's memory until
+it closed. `net/httpclient` takes no proxy at all.
+
+**Removed with the pages:** `NetworkAdapter`, `AdapterType`, `IpConfigMode`,
+`adapters`, `selected_adapter`, `ip_config_mode`, `static_ip`,
+`static_gateway`, `dns_primary`, `dns_secondary`, `proxy_enabled`,
+`proxy_address`, `proxy_port`, `SelectId::Adapter`, `ToggleId::ProxyEnabled`,
+`DropdownId::IpConfig`, `render_text_field` and `PageSink::field_row`. 260
+lines deleted against 96 added.
+
+**A note on the tests, which is where the real risk was.** Three tests died with
+the feature. Six more did not: they clicked an adapter row as a *vehicle* for
+testing the event loop -- when a frame is drawn, which events are ours, when
+the loop stops -- and the adapter was incidental to all of them. Those were
+re-pointed at an account row, which is the same shape of control and is backed
+by something. Deleting them along with the feature would have been the easy
+mistake and would have quietly removed the coverage of the shipped `run` loop,
+which has nothing to do with networking.
+
+**The remaining pages of this app are honest as far as this sweep goes**, but
+the sweep was "read every page", not a check anything runs. The shape to look
+for is a `Vec` of plausible-looking records built in a constructor: every one of
+the five was found that way, in `SettingsState::new`.
+
+## TD-C-THE-POWER-MANAGER-IS-A-DEAD-HALF-OF-A-LIVE-MODULE
+
+**In short:** the desktop's power file contains a whole battery and sleep
+manager -- idle timeouts, low-battery and critical thresholds, suspend and
+hibernate transitions, a list of things blocking sleep, a log of what happened
+and why -- and nothing anywhere creates one. The same file also draws the power
+menu you click on, and *that* part is live, which is why no tool has reported
+the dead half.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**The evidence.** `PowerManager` occurs 28 times, every one of them inside
+`gui/desktop/src/power.rs`. `gui/desktop/src/lib.rs` uses the same file's
+`render_power_menu`, `PowerMenuRow` and `PowerMenuStyle`, so the module has
+real callers and is correctly absent from
+`scripts/orphan-modules-baseline.txt`.
+
+**Why no gate can see this, and it is not an oversight in any of them.**
+`scan-orphan-modules.py` asks whether a *module* has a caller, and this one
+does. A module can be half-dead and that scan will always answer for the whole
+file. The finding needs a different question -- "which public items of this
+module are reached?" -- which nothing here asks and which is a genuinely bigger
+scan, since it needs per-item reachability rather than per-file.
+
+**Inside the dead half, a second finding.** The low-battery *warning* was never
+written. The file's own module doc advertises "Battery monitoring with
+low-battery warnings", `PowerConfig::low_battery_pct` defaults to 20 and is
+parsed and re-serialised by the config code, and `low_battery_warned` is
+initialised, documented as "whether a low-battery warning has been shown this
+discharge cycle", and reset when charging begins. Nothing ever sets it true.
+
+Its sibling shows exactly what is missing. `critical_action_taken` has the same
+initialisation and the same reset-on-charging, and at `power.rs:837` it has the
+guard-once block that actually does the work:
+
+    if !self.critical_action_taken && self.battery.is_critical(&self.config) {
+        self.critical_action_taken = true;
+        ...
+    }
+
+There is no such block for `low_battery_warned`, and no `is_low` to go with
+`is_critical`. So one of two symmetric features was finished and the other left
+as bookkeeping only.
+
+**What the fix needs, in order.** The warning is not a `PowerAction` -- the
+existing `check_battery_thresholds` returns one of those and a notification is
+not one -- so it wants a `take_low_battery_warning()` in the style of
+`SettingsState::take_notifications_change`, which the shell polls and turns
+into a notification through `gui/notifications`. But that is the *second* step.
+The first is giving `PowerManager` a constructor call at all: writing the
+warning now would add a feature to a state machine nothing drives, which is the
+defect this entry is about rather than a fix for it.
+
+**One note on how this was found**, because the first attempt got it wrong.
+`check-fields-written-never-read.py` reported `low_battery_warned` and I wrote
+in its baseline that it was "probably a live bug -- either warns every tick or
+never warns". Neither happens: nothing constructs the manager, so the
+thresholds are never evaluated. I had inferred a severity from the shape of the
+code without asking whether anything ran it. The corrected note is in
+`scripts/fields-written-never-read-baseline.txt`; the question that was skipped
+is the same one that makes every other finding in this file worth acting on.

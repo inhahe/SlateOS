@@ -104,7 +104,6 @@ pub mod multimon;
 pub mod network_indicator;
 pub mod network_settings;
 pub mod notif_pane;
-pub mod notification_settings;
 pub mod osd;
 pub mod overview;
 /// The sweep that proves a module was converted off its own colour constants.

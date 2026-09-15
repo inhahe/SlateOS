@@ -354,48 +354,6 @@ impl ScalePercent {
 // Network types
 // ============================================================================
 
-/// Network adapter entry for the network page.
-#[derive(Clone, Debug)]
-pub struct NetworkAdapter {
-    pub name: String,
-    pub adapter_type: AdapterType,
-    pub connected: bool,
-    pub ip_address: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdapterType {
-    Ethernet,
-    WiFi,
-    Loopback,
-}
-
-impl AdapterType {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Ethernet => "Ethernet",
-            Self::WiFi => "Wi-Fi",
-            Self::Loopback => "Loopback",
-        }
-    }
-}
-
-/// IP configuration mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IpConfigMode {
-    Dhcp,
-    Static,
-}
-
-impl IpConfigMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Dhcp => "DHCP (Automatic)",
-            Self::Static => "Static",
-        }
-    }
-}
-
 // ============================================================================
 // Sound types
 // ============================================================================
@@ -434,9 +392,7 @@ impl AccountType {
 #[derive(Clone, Debug)]
 pub struct UserAccount {
     pub name: String,
-    pub email: String,
     pub account_type: AccountType,
-    pub login_count: u32,
     pub last_login: String,
     pub is_current: bool,
     /// Index into [`ACCOUNT_PICTURES`] of the picture this account shows.
@@ -450,33 +406,6 @@ pub struct UserAccount {
 // ============================================================================
 // Privacy types
 // ============================================================================
-
-/// Per-app permission entry.
-#[derive(Clone, Debug)]
-pub struct AppPermission {
-    pub app_name: String,
-    pub allowed: bool,
-}
-
-/// Diagnostic data collection level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiagnosticLevel {
-    None,
-    Basic,
-    Full,
-}
-
-impl DiagnosticLevel {
-    const ALL: &[Self] = &[Self::None, Self::Basic, Self::Full];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Basic => "Basic",
-            Self::Full => "Full",
-        }
-    }
-}
 
 // ============================================================================
 // Accessibility types
@@ -527,41 +456,6 @@ impl NarratorVerbosity {
 // ============================================================================
 // Update types
 // ============================================================================
-
-/// Status of an installed update.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UpdateStatus {
-    Installed,
-    Failed,
-    Pending,
-}
-
-impl UpdateStatus {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Installed => "Installed",
-            Self::Failed => "Failed",
-            Self::Pending => "Pending",
-        }
-    }
-
-    fn color(self, pal: &Palette) -> Color {
-        match self {
-            Self::Installed => pal.green,
-            Self::Failed => pal.red,
-            Self::Pending => pal.peach,
-        }
-    }
-}
-
-/// A historical update entry.
-#[derive(Clone, Debug)]
-pub struct UpdateEntry {
-    pub date: String,
-    pub kb_number: String,
-    pub description: String,
-    pub status: UpdateStatus,
-}
 
 // ============================================================================
 // Main application state
@@ -640,16 +534,6 @@ pub struct SettingsState {
     input_dirty: bool,
 
     // Network
-    pub adapters: Vec<NetworkAdapter>,
-    pub selected_adapter: usize,
-    pub ip_config_mode: IpConfigMode,
-    pub static_ip: String,
-    pub static_gateway: String,
-    pub dns_primary: String,
-    pub dns_secondary: String,
-    pub proxy_enabled: bool,
-    pub proxy_address: String,
-    pub proxy_port: String,
 
     // Accounts settings
     pub user_accounts: Vec<UserAccount>,
@@ -657,14 +541,6 @@ pub struct SettingsState {
     pub auto_login_enabled: bool,
 
     // Privacy settings
-    pub location_enabled: bool,
-    pub location_apps: Vec<AppPermission>,
-    pub camera_enabled: bool,
-    pub camera_apps: Vec<AppPermission>,
-    pub microphone_enabled: bool,
-    pub microphone_apps: Vec<AppPermission>,
-    pub background_apps: Vec<AppPermission>,
-    pub diagnostic_level: DiagnosticLevel,
 
     // Accessibility settings
     /// Range stated by [`SliderId::range`], not repeated here.
@@ -687,16 +563,6 @@ pub struct SettingsState {
     /// Slow at 0.0, fast at 1.0. Range stated by [`SliderId::range`].
     pub narrator_rate: f32,
     pub narrator_verbosity: NarratorVerbosity,
-
-    // Update settings
-    pub os_version: String,
-    pub update_history: Vec<UpdateEntry>,
-    pub auto_update_enabled: bool,
-    pub active_hours_start: u8, // 0-23
-    pub active_hours_end: u8,   // 0-23
-    pub defer_feature_days: u16,
-    pub defer_quality_days: u16,
-    pub checking_for_updates: bool,
 
     // Dropdown state
     pub open_dropdown: Option<DropdownId>,
@@ -819,8 +685,6 @@ pub enum DropdownId {
     Resolution,
     RefreshRate,
     Scale,
-    IpConfig,
-    DiagnosticLevel,
     ColorFilter,
     CursorSize,
     NarratorVerbosity,
@@ -845,15 +709,13 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 12] = [
+    pub const FIXED: [Self; 10] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
         Self::Scale,
-        Self::IpConfig,
-        Self::DiagnosticLevel,
         Self::ColorFilter,
         Self::CursorSize,
         Self::NarratorVerbosity,
@@ -1009,6 +871,62 @@ impl SettingsState {
         self.notif = notifsettings::NotifFile::load();
     }
 
+    /// Read the machine's real accounts from the system account database.
+    ///
+    /// Separate from [`SettingsState::new`] and called by `main`, the same as
+    /// the other `load_*` methods: a constructor that reads a file makes every
+    /// test of this type depend on the machine it runs on, and the tests here
+    /// are pure `(w, h) -> RenderTree` functions by design.
+    ///
+    /// `gui/loginusers` is the shared source, already read by the login screen
+    /// and `apps/lockscreen`. Two answers to "which accounts does this machine
+    /// have" would drift, and a person cannot tell a hidden account from a
+    /// deleted one.
+    ///
+    /// **Three fields this page used to show have no source and are gone:**
+    /// an email address, a login count, and -- for one invented account -- a
+    /// child account with "Screen time limits and content filters are active"
+    /// beneath it. The database carries no email, counts no logins, and has no
+    /// notion of a child account, so all three were written into the source as
+    /// constants: Alice, Bob and Charlie, with `@example.com` addresses and
+    /// login counts of 142, 56 and 23.
+    ///
+    /// Nothing says which account is *signed in*, so none is marked. That is
+    /// the documented fallback in [`SettingsState::current_account_picture`] --
+    /// "a machine with nobody signed in does not claim a choice was made" --
+    /// rather than a new compromise.
+    pub fn load_user_accounts(&mut self) {
+        self.set_user_accounts(&loginusers::offered_from_system());
+    }
+
+    /// The mapping half of [`SettingsState::load_user_accounts`], with the read
+    /// lifted out so a test can supply accounts without a filesystem.
+    pub fn set_user_accounts(&mut self, accounts: &[loginusers::Account]) {
+        self.user_accounts = accounts
+            .iter()
+            .map(|a| UserAccount {
+                name: a.display_name.clone(),
+                account_type: if a.is_admin {
+                    AccountType::Admin
+                } else {
+                    AccountType::Standard
+                },
+                last_login: format_last_login(a.last_login),
+                // No source for "who is signed in"; see the doc above.
+                is_current: false,
+                // The database's avatar is a name, and this page offers a fixed
+                // grid of pictures. Until something maps one to the other, every
+                // account shows the same placeholder rather than a picture
+                // chosen by an index that means nothing.
+                picture: 0,
+            })
+            .collect();
+        // A stale selection would index past a shorter list on the next reload.
+        if self.selected_account >= self.user_accounts.len() {
+            self.selected_account = 0;
+        }
+    }
+
     /// The palette this application draws itself with.
     ///
     /// Bound as `pal` at every use site, not `p` as the shell names it. This
@@ -1121,142 +1039,13 @@ impl SettingsState {
             appearance: AppearanceFile::new(),
 
             // Network defaults
-            adapters: vec![
-                NetworkAdapter {
-                    name: "eth0".into(),
-                    adapter_type: AdapterType::Ethernet,
-                    connected: true,
-                    ip_address: "192.168.1.100".into(),
-                },
-                NetworkAdapter {
-                    name: "wlan0".into(),
-                    adapter_type: AdapterType::WiFi,
-                    connected: false,
-                    ip_address: String::new(),
-                },
-                NetworkAdapter {
-                    name: "lo".into(),
-                    adapter_type: AdapterType::Loopback,
-                    connected: true,
-                    ip_address: "127.0.0.1".into(),
-                },
-            ],
-            selected_adapter: 0,
-            ip_config_mode: IpConfigMode::Dhcp,
-            static_ip: "192.168.1.100".into(),
-            static_gateway: "192.168.1.1".into(),
-            dns_primary: "1.1.1.1".into(),
-            dns_secondary: "8.8.8.8".into(),
-            proxy_enabled: false,
-            proxy_address: String::new(),
-            proxy_port: String::new(),
 
-            // Accounts defaults
-            user_accounts: vec![
-                UserAccount {
-                    name: "Alice".into(),
-                    email: "alice@example.com".into(),
-                    account_type: AccountType::Admin,
-                    login_count: 142,
-                    last_login: "2026-05-17 09:34".into(),
-                    is_current: true,
-                    picture: 2,
-                },
-                UserAccount {
-                    name: "Bob".into(),
-                    email: "bob@example.com".into(),
-                    account_type: AccountType::Standard,
-                    login_count: 56,
-                    last_login: "2026-05-16 18:20".into(),
-                    is_current: false,
-                    picture: 1,
-                },
-                UserAccount {
-                    name: "Charlie".into(),
-                    email: "charlie@example.com".into(),
-                    account_type: AccountType::Child,
-                    login_count: 23,
-                    last_login: "2026-05-15 14:05".into(),
-                    is_current: false,
-                    picture: 5,
-                },
-            ],
+            // Accounts: empty until `load_user_accounts` reads the database.
+            user_accounts: Vec::new(),
             selected_account: 0,
             auto_login_enabled: false,
 
             // Privacy defaults
-            location_enabled: true,
-            location_apps: vec![
-                AppPermission {
-                    app_name: "Maps".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Weather".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Camera".into(),
-                    allowed: false,
-                },
-                AppPermission {
-                    app_name: "Browser".into(),
-                    allowed: true,
-                },
-            ],
-            camera_enabled: true,
-            camera_apps: vec![
-                AppPermission {
-                    app_name: "Video Chat".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Browser".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Social Media".into(),
-                    allowed: false,
-                },
-            ],
-            microphone_enabled: true,
-            microphone_apps: vec![
-                AppPermission {
-                    app_name: "Video Chat".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Voice Recorder".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Browser".into(),
-                    allowed: false,
-                },
-            ],
-            background_apps: vec![
-                AppPermission {
-                    app_name: "Email".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Music Player".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Updater".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Social Media".into(),
-                    allowed: false,
-                },
-                AppPermission {
-                    app_name: "News Reader".into(),
-                    allowed: false,
-                },
-            ],
-            diagnostic_level: DiagnosticLevel::Basic,
 
             // Accessibility defaults
             text_size_percent: 100,
@@ -1272,41 +1061,6 @@ impl SettingsState {
             narrator_rate: 0.5,
             narrator_verbosity: NarratorVerbosity::Medium,
 
-            // Update defaults
-            os_version: "Slate OS 1.0.0 Build 2600".into(),
-            update_history: vec![
-                UpdateEntry {
-                    date: "2026-05-15".into(),
-                    kb_number: "KB5032100".into(),
-                    description: "Security update for kernel".into(),
-                    status: UpdateStatus::Installed,
-                },
-                UpdateEntry {
-                    date: "2026-05-10".into(),
-                    kb_number: "KB5031980".into(),
-                    description: "Cumulative update for .NET runtime".into(),
-                    status: UpdateStatus::Installed,
-                },
-                UpdateEntry {
-                    date: "2026-05-08".into(),
-                    kb_number: "KB5031875".into(),
-                    description: "Driver update for GPU".into(),
-                    status: UpdateStatus::Failed,
-                },
-                UpdateEntry {
-                    date: "2026-05-01".into(),
-                    kb_number: "KB5031700".into(),
-                    description: "Feature update: compositor improvements".into(),
-                    status: UpdateStatus::Installed,
-                },
-            ],
-            auto_update_enabled: true,
-            active_hours_start: 8,
-            active_hours_end: 22,
-            defer_feature_days: 0,
-            defer_quality_days: 0,
-            checking_for_updates: false,
-
             // Dropdown state
             open_dropdown: None,
             dropdown_scroll: 0,
@@ -1321,6 +1075,34 @@ impl SettingsState {
 // ============================================================================
 
 /// Push a rounded rectangle fill command.
+/// When an account last logged in, as the page shows it.
+///
+/// Zero means never -- `gui/loginusers` documents it that way so a never-used
+/// account sorts last -- and "Never" is the honest rendering rather than
+/// 1 January 1970, which is what a bare conversion produces and what a reader
+/// would take for a real date.
+///
+/// UTC, and it says so in the string. The alternative is the machine's local
+/// zone, which this application has no way to ask for: the shell's clock gets
+/// it from a `Tz` it loads itself, and there is no service a settings window
+/// can consult. A time labelled UTC is checkable; an unlabelled one that might
+/// be either is not.
+fn format_last_login(secs: u64) -> String {
+    let Ok(secs) = i64::try_from(secs) else {
+        return "Never".to_string();
+    };
+    if secs == 0 {
+        return "Never".to_string();
+    }
+    let dt = guitk::datetime::DateTime::at(secs, &guitk::tzrules::Tz::utc());
+    let (y, m, day) = dt.date().ymd();
+    format!(
+        "{y:04}-{m:02}-{day:02} {:02}:{:02} UTC",
+        dt.hour(),
+        dt.minute()
+    )
+}
+
 fn fill_rounded(tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32) {
     tree.fill_rounded_rect(x, y, w, h, color, CornerRadii::all(radius));
 }
@@ -1628,38 +1410,6 @@ fn render_disabled_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, 
         6.0,
     );
     tree.text(x + 12.0, y + 8.0, label, pal.overlay0, 13.0);
-}
-
-/// Draw a read-only text field showing `value`, inset within a row at `y`.
-fn render_text_field(
-    tree: &mut RenderTree,
-    pal: &Palette,
-    x: f32,
-    y: f32,
-    value: &str,
-    width: f32,
-) {
-    let field_y = y + 6.0;
-    let field_h = 32.0;
-    fill_rounded(tree, x, field_y, width, field_h, pal.surface0, 6.0);
-    tree.push(RenderCommand::StrokeRect {
-        x,
-        y: field_y,
-        width,
-        height: field_h,
-        color: pal.overlay0,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(6.0),
-    });
-    text_clipped(
-        tree,
-        x + 8.0,
-        field_y + 8.0,
-        value,
-        pal.text,
-        13.0,
-        width - 16.0,
-    );
 }
 
 // --- Theme cards and colour swatches ---------------------------------------
@@ -1977,27 +1727,12 @@ const BUTTON_HEIGHT: f32 = 32.0;
 /// How far below a row's top edge a button inside that row is drawn.
 const BUTTON_ROW_INSET_Y: f32 = 6.0;
 
-/// Which of a page's per-application permission lists a toggle belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PermissionKind {
-    Location,
-    Camera,
-    Microphone,
-    Background,
-}
-
 /// A boolean setting, named so a click can find its field without the click
 /// handler knowing where on the page the row was drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToggleId {
     NightLight,
-    ProxyEnabled,
     AutoLogin,
-    LocationEnabled,
-    CameraEnabled,
-    MicrophoneEnabled,
-    /// The per-app switch at `index` of `kind`'s list.
-    AppPermission(PermissionKind, usize),
     /// Whether the `n`-th program in the notification list makes a sound.
     NotifSound(usize),
     /// Whether it shows a banner rather than only appearing in the list.
@@ -2014,7 +1749,6 @@ enum ToggleId {
     MouseKeys,
     ReduceAnimations,
     ReduceTransparency,
-    AutoUpdate,
     /// Slide the taskbar out of the way when it is not in use.
     ///
     /// Unlike its neighbours here, the field behind this one lives in the
@@ -2190,7 +1924,6 @@ enum PillId {
 enum SelectId {
     ThemeMode,
     AccentColor,
-    Adapter,
     Account,
     PointerSize,
     AccountPicture,
@@ -2208,8 +1941,6 @@ enum SliderId {
     NightLightTemperature,
     NarratorRate,
     TextSize,
-    DeferFeatureDays,
-    DeferQualityDays,
     /// How long the pointer has between two clicks for them to be one
     /// double click, in milliseconds.
     DoubleClickMs,
@@ -2224,12 +1955,10 @@ impl SliderId {
     /// a test walks it to check each one is draggable, the way
     /// [`DropdownId::FIXED`] does for dropdowns.
     #[cfg(test)]
-    const FIXED: [Self; 6] = [
+    const FIXED: [Self; 4] = [
         Self::NightLightTemperature,
         Self::NarratorRate,
         Self::TextSize,
-        Self::DeferFeatureDays,
-        Self::DeferQualityDays,
         Self::DoubleClickMs,
     ];
 
@@ -2250,8 +1979,6 @@ impl SliderId {
         match self {
             Self::NightLightTemperature | Self::NarratorRate => (0.0, 1.0),
             Self::TextSize => (50.0, 250.0),
-            Self::DeferFeatureDays => (0.0, 365.0),
-            Self::DeferQualityDays => (0.0, 30.0),
             #[allow(clippy::cast_precision_loss)]
             Self::DoubleClickMs => (MIN_DOUBLE_CLICK_MS as f32, MAX_DOUBLE_CLICK_MS as f32),
         }
@@ -2268,7 +1995,6 @@ impl SliderId {
         match self {
             Self::NightLightTemperature | Self::NarratorRate => None,
             Self::TextSize => Some(format!("{whole}%")),
-            Self::DeferFeatureDays | Self::DeferQualityDays => Some(format!("{whole} days")),
             // In milliseconds, the unit the setting is actually stored and
             // applied in, rather than as a "speed" the user would have to guess
             // the direction of. The ends are labelled Fast and Slow by the page.
@@ -2295,13 +2021,12 @@ enum AnchorId {
 /// A push button that does something when pressed.
 ///
 /// Only buttons with an effect are listed. The rest of the page's buttons —
-/// Change Password, Add/Remove Account, Clear Activity History, Go Back, Fresh
-/// Start, Manage Family Settings — have no state behind them yet, so they
-/// register no click target rather than swallowing a click and doing nothing.
+/// Change Password, Add/Remove Account, Go Back, Fresh Start — have no state
+/// behind them yet, so they register no click target rather than swallowing a
+/// click and doing nothing.
 /// See known-issues.md `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonId {
-    CheckForUpdates,
     /// Open the picker and choose a desktop picture.
     ChooseWallpaper,
     /// Go back to the plain background that follows the theme.
@@ -2465,21 +2190,6 @@ trait PageSink {
         );
     }
 
-    /// An indented per-application switch, as used by the permission lists.
-    /// Tighter than a full row, and its own label rather than a setting row's.
-    fn app_toggle_row(&mut self, label: &str, id: ToggleId, on: bool) {
-        let pal = &self.palette();
-        let height = ITEM_HEIGHT - 8.0;
-        let control_x = self.control_x();
-        let (x, y) = (self.x(), self.y());
-        self.hit_rect(x, y, ROW_HIT_WIDTH, height, RowHit::Toggle(id));
-        self.draw(|tree, x, y| {
-            tree.text(x + 16.0, y + 14.0, label, pal.subtext1, 13.0);
-            render_toggle(tree, pal, control_x, y + 12.0, on);
-        });
-        self.advance(height);
-    }
-
     /// A row whose control is a draggable slider, plus whatever else the page
     /// wants drawn beside it. `extra` is given the render tree and the control
     /// column's `(x, y)` — the same origin the track is drawn from.
@@ -2511,14 +2221,6 @@ trait PageSink {
     fn value_row(&mut self, label: &str, value: &str, color: Color) {
         self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
             tree.text(cx, y + 14.0, value, color, 13.0);
-        });
-    }
-
-    /// A row whose control is a read-only text field.
-    fn field_row(&mut self, label: &str, value: &str, width: f32) {
-        let pal = &self.palette();
-        self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
-            render_text_field(tree, pal, cx, y, value, width);
         });
     }
 
@@ -2695,21 +2397,6 @@ impl PageSink for AnchorSink {
         if self.found.is_none() && id == self.want {
             self.found = Some((x, y));
         }
-    }
-}
-
-/// The indented run of per-app switches beneath a permission's master toggle.
-///
-/// One function for all four lists, taking the list it is describing, so a
-/// click on a Camera row cannot resolve against the Location list's indices —
-/// which is what a per-list copy of this loop invites.
-fn build_permission_list<S: PageSink>(s: &mut S, kind: PermissionKind, apps: &[AppPermission]) {
-    for (idx, app) in apps.iter().enumerate() {
-        s.app_toggle_row(
-            &app.app_name,
-            ToggleId::AppPermission(kind, idx),
-            app.allowed,
-        );
     }
 }
 
@@ -3265,7 +2952,7 @@ impl SettingsState {
     fn build_sound_page<S: PageSink>(&self, s: &mut S) {
         s.section("Output");
         s.note(
-            "Audio is not wired up yet: this system has no sound service and no way              to enumerate devices, so these settings would not reach anything.",
+            "Audio is not wired up yet: this system has no sound service and no way to enumerate devices, so these settings would not reach anything.",
             44.0,
         );
         s.unavailable_row("Output Device", "No devices detected");
@@ -3404,10 +3091,10 @@ impl SettingsState {
         s.note(
             match style {
                 SurfaceStyle::Borders => {
-                    "Outlined. A selected thing is outlined in the accent colour,                      which means the same everywhere it appears."
+                    "Outlined. A selected thing is outlined in the accent colour, which means the same everywhere it appears."
                 }
                 SurfaceStyle::Cards => {
-                    "Filled with a shade. Note that some text does not reach the                      4.5:1 contrast floor on the darker cards."
+                    "Filled with a shade. Note that some text does not reach the 4.5:1 contrast floor on the darker cards."
                 }
             },
             30.0,
@@ -3427,10 +3114,10 @@ impl SettingsState {
         s.note(
             match strip {
                 StripStyle::Filled => {
-                    "Shaded. A toolbar or status bar is a band of a different                      shade from the page, as it is today."
+                    "Shaded. A toolbar or status bar is a band of a different shade from the page, as it is today."
                 }
                 StripStyle::Separator => {
-                    "A line. The bar is the same colour as the page, with a                      hairline along the edge that faces the content."
+                    "A line. The bar is the same colour as the page, with a hairline along the edge that faces the content."
                 }
             },
             30.0,
@@ -3562,80 +3249,65 @@ impl SettingsState {
 
     // --- Network status page ---
 
+    /// The Network Status page.
+    ///
+    /// It used to list three network adapters -- `eth0`, Ethernet, connected,
+    /// 192.168.1.100; `wlan0`, Wi-Fi, disconnected; `lo`, loopback,
+    /// 127.0.0.1 -- each with a green or grey dot for its link state. All
+    /// three were written into the source as constants. **This system cannot
+    /// enumerate its network interfaces**: there is no such call in `net/`,
+    /// which carries a DNS resolver and an HTTP client and nothing that asks
+    /// the kernel what hardware is present, and no service between a GUI
+    /// application and the kernel's own interfaces.
+    ///
+    /// A green dot beside a name and an address is the strongest claim a
+    /// status page can make -- it says "I looked, and this is what is there".
+    ///
+    /// The address fields went for a second reason, which outlasts the first.
+    /// Nothing reads them. `net/dns` does define a `ResolverConfig` and parse
+    /// `resolv.conf`, so the *format* exists, but no program in this tree
+    /// loads one -- so a nameserver typed here would be stored in this
+    /// window's memory until it closed. Same for the proxy, whose page below
+    /// says so in its own words.
     fn build_network_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
         s.section("Network Adapters");
-        let control_x = s.control_x();
-        for (idx, adapter) in self.adapters.iter().enumerate() {
-            let selected = idx == self.selected_adapter;
-            s.list_row(
-                SelectId::Adapter,
-                idx,
-                ITEM_HEIGHT,
-                ITEM_HEIGHT + 4.0,
-                move |tree, x, y| {
-                    let row_bg = if selected {
-                        pal.surface0
-                    } else {
-                        Color::TRANSPARENT
-                    };
-                    fill_rounded(tree, x - 8.0, y, 600.0, ITEM_HEIGHT, row_bg, 6.0);
-
-                    let status_color = if adapter.connected {
-                        pal.green
-                    } else {
-                        pal.overlay0
-                    };
-                    fill_rounded(tree, x, y + 18.0, 10.0, 10.0, status_color, 5.0);
-
-                    tree.text(x + 20.0, y + 8.0, &adapter.name, pal.text, 14.0);
-                    tree.text(
-                        x + 20.0,
-                        y + 26.0,
-                        adapter.adapter_type.label(),
-                        pal.subtext0,
-                        11.0,
-                    );
-
-                    let status_text = if adapter.connected {
-                        &adapter.ip_address
-                    } else {
-                        "Disconnected"
-                    };
-                    tree.text(control_x, y + 14.0, status_text, pal.subtext0, 13.0);
-                },
-            );
-        }
+        s.note(
+            "This system cannot list its network interfaces yet. Nothing here              can ask which are present, whether any is connected, or what              address it holds.",
+            44.0,
+        );
+        s.unavailable_row("Interfaces", "Cannot be listed");
         s.gap();
 
         s.section("IP Configuration");
-        s.dropdown_row("Mode", DropdownId::IpConfig, self.ip_config_mode.label());
-
-        if self.ip_config_mode == IpConfigMode::Static {
-            s.field_row("IP Address", &self.static_ip, 180.0);
-            s.field_row("Gateway", &self.static_gateway, 180.0);
-        }
+        s.note(
+            "There is no interface to configure, and nothing on this system              reads an address typed here.",
+            28.0,
+        );
+        s.unavailable_row("IPv4 address", "Unknown");
+        s.unavailable_row("Gateway", "Unknown");
         s.gap();
 
-        s.section("DNS Servers");
-        s.field_row("Primary DNS", &self.dns_primary, 180.0);
-        s.field_row("Secondary DNS", &self.dns_secondary, 180.0);
+        s.section("DNS");
+        s.note(
+            "No program on this system loads a resolver configuration, so a              nameserver set here would reach nothing. The format is defined --              `net/dns` parses `resolv.conf` -- but nothing reads the file.",
+            44.0,
+        );
+        s.unavailable_row("Preferred DNS", "Not configured");
+        s.unavailable_row("Alternate DNS", "Not configured");
     }
 
-    // --- Proxy page ---
-
+    /// The Proxy page.
+    ///
+    /// Empty of controls for the same reason as the page above: the address
+    /// and port were held in this window and read by nothing. `net/httpclient`
+    /// takes no proxy, so even a stored value would have had no consumer.
     fn build_proxy_page<S: PageSink>(&self, s: &mut S) {
-        s.section("Proxy Configuration");
-        s.toggle_row(
-            "Use Proxy Server",
-            ToggleId::ProxyEnabled,
-            self.proxy_enabled,
+        s.section("Proxy");
+        s.note(
+            "Nothing on this system routes through a proxy. `net/httpclient`              connects directly and takes no proxy setting, so an address              entered here would be read by nothing.",
+            44.0,
         );
-
-        if self.proxy_enabled {
-            s.field_row("Proxy Address", &self.proxy_address, 220.0);
-            s.field_row("Port", &self.proxy_port, 80.0);
-        }
+        s.unavailable_row("HTTP proxy", "Not supported");
     }
 
     // --- Accounts page ---
@@ -3649,6 +3321,18 @@ impl SettingsState {
 
         // User account list (default UserAccounts page)
         s.section("User Accounts");
+
+        // An empty list means the database was unreadable or holds no human
+        // account, and saying so beats an empty panel that looks like a page
+        // still loading. It is also what this page shows in every test, which
+        // is deliberate: `load_user_accounts` is called by `main`, so a test
+        // never touches the machine's real accounts.
+        if self.user_accounts.is_empty() {
+            s.note(
+                "No accounts to show. Either the system account database could                  not be read, or it holds no ordinary user account.",
+                28.0,
+            );
+        }
 
         let control_x = s.control_x();
         for (idx, account) in self.user_accounts.iter().enumerate() {
@@ -3676,7 +3360,6 @@ impl SettingsState {
                 tree.text(x + 16.0, y + 20.0, avatar, pal.text, 16.0);
 
                 text_bold(tree, x + 56.0, y + 12.0, &account.name, pal.text, 14.0);
-                tree.text(x + 56.0, y + 32.0, &account.email, pal.subtext0, 12.0);
 
                 let badge_color = account.account_type.color(pal);
                 fill_rounded(tree, control_x, y + 18.0, 90.0, 22.0, badge_color, 4.0);
@@ -3704,22 +3387,12 @@ impl SettingsState {
         if let Some(account) = self.user_accounts.get(self.selected_account) {
             s.section("Account Details");
             s.value_row("Name", &account.name, pal.text);
-            s.value_row("Email", &account.email, pal.text);
             s.value_row(
                 "Account Type",
                 account.account_type.label(),
                 account.account_type.color(pal),
             );
-            s.value_row("Login Count", &account.login_count.to_string(), pal.text);
             s.value_row("Last Login", &account.last_login, pal.text);
-
-            // Family safety for child accounts
-            if account.account_type == AccountType::Child {
-                s.gap();
-                s.section("Family Safety");
-                s.note("Screen time limits and content filters are active", 24.0);
-                s.button_at(0.0, 0.0, "Manage Family Settings", pal.peach, None);
-            }
         }
     }
 
@@ -3763,172 +3436,63 @@ impl SettingsState {
 
     // --- Privacy page ---
 
-    /// The Capabilities sub-page: a read-only summary of which apps hold
-    /// which permissions. Nothing on it is clickable, so it is pure drawing.
-    fn render_capabilities_summary(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let pal = &self.palette();
-        let mut y = start_y;
-        // App permissions summary sub-page
-        y = render_section_header(tree, pal, x, y, "App Permissions Summary");
-        tree.text(
-            x,
-            y + 4.0,
-            "Overview of which apps have access to sensitive resources:",
-            pal.subtext0,
-            13.0,
-        );
-        y += 32.0;
-
-        // Summary table header
-        text_bold(tree, x, y, "App", pal.text, 13.0);
-        text_bold(tree, x + 200.0, y, "Location", pal.text, 13.0);
-        text_bold(tree, x + 290.0, y, "Camera", pal.text, 13.0);
-        text_bold(tree, x + 370.0, y, "Mic", pal.text, 13.0);
-        text_bold(tree, x + 440.0, y, "Background", pal.text, 13.0);
-        y += 24.0;
-
-        // Divider
-        tree.push(RenderCommand::Line {
-            x1: x,
-            y1: y,
-            x2: x + 560.0,
-            y2: y,
-            color: pal.surface1,
-            width: 1.0,
-        });
-        y += 8.0;
-
-        // Build summary from all apps mentioned
-        let all_apps = [
-            "Maps",
-            "Weather",
-            "Camera",
-            "Browser",
-            "Video Chat",
-            "Social Media",
-            "Voice Recorder",
-            "Email",
-            "Music Player",
-        ];
-        for app_name in all_apps {
-            let loc = self.location_apps.iter().find(|a| a.app_name == app_name);
-            let cam = self.camera_apps.iter().find(|a| a.app_name == app_name);
-            let mic = self.microphone_apps.iter().find(|a| a.app_name == app_name);
-            let bg = self.background_apps.iter().find(|a| a.app_name == app_name);
-
-            tree.text(x, y + 4.0, app_name, pal.text, 12.0);
-
-            let check = "\u{2713}";
-            let cross = "\u{2717}";
-
-            // Location
-            if let Some(p) = loc {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 220.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-            // Camera
-            if let Some(p) = cam {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 310.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-            // Mic
-            if let Some(p) = mic {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 385.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-            // Background
-            if let Some(p) = bg {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 465.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-
-            y += 28.0;
-        }
-    }
-
     // --- Privacy page ---
 
+    /// The Permissions and Capabilities pages.
+    ///
+    /// Both say this system does not record per-application permissions, and
+    /// that is a statement about its architecture rather than about unfinished
+    /// work.
+    ///
+    /// What was here before: toggles for location, camera and microphone, each
+    /// revealing a list of applications with an allow switch, and a summary
+    /// table drawing a green tick or a red cross for nine named applications
+    /// across four permissions. Maps, Weather, Camera, Browser, Video Chat,
+    /// Social Media, Voice Recorder, Email, Music Player. None of those
+    /// programs exist in this tree, no component asks anything whether an
+    /// application may use a device, and every allow-or-deny state was written
+    /// into the source as a constant. A privacy page is the one screen where a
+    /// user is entitled to believe what it says, and this one told them a
+    /// browser had their camera.
+    ///
+    /// **Why this is not simply unbuilt.** `design.txt` specifies
+    /// capability-based security with no ambient authority: a program can use
+    /// a device because it holds an unforgeable handle to it, not because a
+    /// central table has its name ticked. So a per-application permission list
+    /// is not this system's model half-finished -- it is a different system's
+    /// model, borrowed. Building the page that was here would mean building a
+    /// permission store the kernel does not consult.
+    ///
+    /// `gui/desktop/src/privacy_settings.rs` holds a second copy of that same
+    /// borrowed model, with `is_allowed` and `revoke_all` and nothing calling
+    /// either. It is left alone here; see `known-issues.md`.
     fn build_privacy_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
-        if self.current_page == SettingsPage::Capabilities {
-            s.draw(|tree, x, y| self.render_capabilities_summary(tree, x, y));
-            return;
-        }
-
-        // Location access (default Permissions page)
-        s.section("Location");
-        s.toggle_row(
-            "Allow apps to access location",
-            ToggleId::LocationEnabled,
-            self.location_enabled,
+        s.section("App Permissions");
+        s.note(
+            "This system does not keep a list of which applications may use              the camera, the microphone or your location, and nothing here              could grant or withdraw such a permission.",
+            44.0,
         );
-        if self.location_enabled {
-            build_permission_list(s, PermissionKind::Location, &self.location_apps);
-        }
-        s.gap();
-
-        s.section("Camera");
-        s.toggle_row(
-            "Allow apps to access camera",
-            ToggleId::CameraEnabled,
-            self.camera_enabled,
+        s.note(
+            "That is by design rather than unfinished. A program here reaches              a device by holding a handle to it, which it can only have been              given -- there is no central table of names to tick, and nothing              has authority simply because of what it is called.",
+            44.0,
         );
-        if self.camera_enabled {
-            build_permission_list(s, PermissionKind::Camera, &self.camera_apps);
-        }
-        s.gap();
-
-        s.section("Microphone");
-        s.toggle_row(
-            "Allow apps to access microphone",
-            ToggleId::MicrophoneEnabled,
-            self.microphone_enabled,
-        );
-        if self.microphone_enabled {
-            build_permission_list(s, PermissionKind::Microphone, &self.microphone_apps);
-        }
-        s.gap();
-
-        s.section("Background Apps");
-        s.note("Choose which apps can run in the background:", 28.0);
-        build_permission_list(s, PermissionKind::Background, &self.background_apps);
+        s.unavailable_row("Location", "Not recorded per application");
+        s.unavailable_row("Camera", "Not recorded per application");
+        s.unavailable_row("Microphone", "Not recorded per application");
         s.gap();
 
         s.section("Diagnostics & Data");
-        s.dropdown_row(
-            "Diagnostic data collection",
-            DropdownId::DiagnosticLevel,
-            self.diagnostic_level.label(),
+        s.note(
+            "Nothing on this system collects diagnostic data, so there is no              collection level to choose.",
+            28.0,
         );
         s.gap();
 
         s.section("Activity History");
-        s.note("Clear your activity history stored on this device.", 28.0);
-        s.button_at(0.0, 0.0, "Clear Activity History", pal.red, None);
+        s.note(
+            "Nothing records an activity history, so there is none to clear.",
+            28.0,
+        );
     }
 
     // --- Accessibility page ---
@@ -4121,104 +3685,76 @@ impl SettingsState {
         }
     }
 
+    /// The System Updates page.
+    ///
+    /// Everything here is a statement that this system cannot update itself
+    /// yet, which is a change from what it used to say. It previously drew a
+    /// "Check for Updates" button whose entire handler was
+    /// `self.checking_for_updates = !self.checking_for_updates` -- it flipped
+    /// the label to "Checking..." and checked nothing -- beside the words
+    /// "Your device is up to date" in green, unconditionally, from code that
+    /// had never looked. Under it sat four invented history entries with
+    /// Windows-style KB numbers, one of them a *failed* GPU driver update,
+    /// and a "Cumulative update for .NET runtime" on a system with no .NET.
+    ///
+    /// The failed entry is the one that decided this. A fabricated success is
+    /// a lie about nothing; a fabricated failure sends someone looking for a
+    /// problem that never happened, on their own machine, with no way to find
+    /// out it was never real.
+    ///
+    /// There is no honest version of the old page available. An update needs
+    /// a source, and the two that exist -- `userspace/pkg` and
+    /// `kernel/src/fs/updatemgr.rs` -- are in other lanes with no service
+    /// between them and a GUI application. The same is true of the version
+    /// string: `os_version` read "Slate OS 1.0.0 Build 2600", and 2600 is
+    /// Windows XP's build number. Nothing in this tree reports an OS version
+    /// to a userspace program, so this page no longer claims one.
+    ///
+    /// Same treatment as the Sound page above and for the same reason, which
+    /// the Mouse page states plainly: a control that writes a value nothing
+    /// reads is worse than an absent control, because the absent one does not
+    /// claim the setting took effect.
     fn build_update_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
         match self.current_page {
             SettingsPage::Recovery => {
                 self.build_recovery_page(s);
                 return;
             }
             SettingsPage::Snapshots => {
-                Self::build_snapshots_page(s, pal);
+                Self::build_snapshots_page(s, &self.palette());
                 return;
             }
             _ => {} // SystemUpdates (default)
         }
 
-        s.section("System Information");
-        let version = self.os_version.clone();
-        s.draw(move |tree, x, y| {
-            fill_rounded(tree, x, y, 580.0, 60.0, pal.surface0, 8.0);
-            text_bold(tree, x + 16.0, y + 12.0, "Slate OS", pal.text, 16.0);
-            tree.text(x + 16.0, y + 36.0, &version, pal.subtext0, 13.0);
-        });
-        s.advance(72.0);
-
-        // The button's label changes while a check is running, and the label is
-        // what `button_width` measures — so the click band follows the wider
-        // "Check for Updates" down to the narrower "Checking...", rather than
-        // staying at whichever width happened to be hard-coded.
-        let checking = self.checking_for_updates;
-        let btn_label = if checking {
-            "Checking..."
-        } else {
-            "Check for Updates"
-        };
-        s.button_at(
-            0.0,
-            0.0,
-            btn_label,
-            pal.accent,
-            Some(RowHit::Press(ButtonId::CheckForUpdates)),
+        s.section("System Updates");
+        s.note(
+            "This system cannot update itself yet. There is no update service to ask, so nothing here could check, download or install anything, and this page will not say that it has.",
+            44.0,
         );
-        if !checking {
-            s.draw(|tree, x, y| {
-                tree.text(
-                    x + 160.0,
-                    y + 10.0,
-                    "Your device is up to date",
-                    pal.green,
-                    13.0,
-                );
-            });
-        }
-        s.advance(44.0);
+        s.unavailable_row("Last checked", "Never");
+        s.unavailable_row("Available updates", "Unknown");
+        s.gap();
+
+        s.section("System Information");
+        s.note(
+            "No component of this system reports a version number to a program yet, so none is shown here rather than one being invented.",
+            28.0,
+        );
         s.gap();
 
         s.section("Update Preferences");
-        s.toggle_row(
-            "Automatic updates",
-            ToggleId::AutoUpdate,
-            self.auto_update_enabled,
-        );
-        let hours_label = format!(
-            "{:02}:00 - {:02}:00",
-            self.active_hours_start, self.active_hours_end
-        );
-        s.value_row("Active hours (no restart)", &hours_label, pal.text);
-        s.gap();
-
-        s.section("Advanced");
-        self.slider(
-            s,
-            "Defer feature updates (days)",
-            SliderId::DeferFeatureDays,
-        );
-        self.slider(
-            s,
-            "Defer quality updates (days)",
-            SliderId::DeferQualityDays,
+        s.note(
+            "Automatic updates, active hours and deferral periods are settings for an updater that does not exist. They return when there is one to configure.",
+            44.0,
         );
         s.gap();
 
         s.section("Update History");
-        for entry in &self.update_history {
-            let (kb, desc, date) = (
-                entry.kb_number.clone(),
-                entry.description.clone(),
-                entry.date.clone(),
-            );
-            let (status_color, status_label) = (entry.status.color(pal), entry.status.label());
-            s.draw(move |tree, x, y| {
-                fill_rounded(tree, x, y, 580.0, 44.0, pal.surface0, 6.0);
-                tree.text(x + 12.0, y + 8.0, &kb, pal.text, 13.0);
-                tree.text(x + 120.0, y + 8.0, &desc, pal.subtext0, 12.0);
-                tree.text(x + 12.0, y + 26.0, &date, pal.subtext0, 11.0);
-                fill_rounded(tree, x + 490.0, y + 12.0, 72.0, 20.0, status_color, 4.0);
-                tree.text(x + 500.0, y + 15.0, status_label, pal.crust, 11.0);
-            });
-            s.advance(52.0);
-        }
+        s.note(
+            "Nothing has been installed by an updater, because there is no updater.",
+            28.0,
+        );
     }
 
     /// The Recovery sub-page: two cards, each with a button that has no state
@@ -4610,29 +4146,6 @@ impl SettingsState {
                     .position(|f| *f == self.appearance.settings.wallpaper_fit)
                     .unwrap_or(0);
                 (items, current)
-            }
-            DropdownId::IpConfig => {
-                let items = vec![
-                    IpConfigMode::Dhcp.label().to_string(),
-                    IpConfigMode::Static.label().to_string(),
-                ];
-                let sel = if self.ip_config_mode == IpConfigMode::Dhcp {
-                    0
-                } else {
-                    1
-                };
-                (items, sel)
-            }
-            DropdownId::DiagnosticLevel => {
-                let items: Vec<String> = DiagnosticLevel::ALL
-                    .iter()
-                    .map(|d| d.label().to_string())
-                    .collect();
-                let sel = DiagnosticLevel::ALL
-                    .iter()
-                    .position(|d| *d == self.diagnostic_level)
-                    .unwrap_or(0);
-                (items, sel)
             }
             DropdownId::ColorFilter => {
                 let items: Vec<String> = ColorFilter::ALL
@@ -5166,11 +4679,6 @@ impl SettingsState {
                     self.appearance.settings.accent_color = *accent;
                 }
             }
-            RowHit::Select(SelectId::Adapter, idx) => {
-                if idx < self.adapters.len() {
-                    self.selected_adapter = idx;
-                }
-            }
             RowHit::Select(SelectId::Account, idx) => {
                 if idx < self.user_accounts.len() {
                     self.selected_account = idx;
@@ -5181,9 +4689,6 @@ impl SettingsState {
             }
             RowHit::Select(SelectId::AccountPicture, idx) => {
                 self.set_current_account_picture(idx);
-            }
-            RowHit::Press(ButtonId::CheckForUpdates) => {
-                self.checking_for_updates = !self.checking_for_updates;
             }
             RowHit::Press(ButtonId::ChooseWallpaper) => self.open_wallpaper_dialog(),
             RowHit::Press(ButtonId::ClearWallpaper) => {
@@ -5253,8 +4758,6 @@ impl SettingsState {
             SliderId::NightLightTemperature => self.appearance.settings.night_light_strength,
             SliderId::NarratorRate => self.narrator_rate,
             SliderId::TextSize => f32::from(self.text_size_percent),
-            SliderId::DeferFeatureDays => f32::from(self.defer_feature_days),
-            SliderId::DeferQualityDays => f32::from(self.defer_quality_days),
             // Exact: the value is at most `MAX_DOUBLE_CLICK_MS`, far inside the
             // integers an `f32` represents without rounding.
             #[allow(clippy::cast_precision_loss)]
@@ -5301,8 +4804,6 @@ impl SettingsState {
             }
             SliderId::NarratorRate => self.narrator_rate = value,
             SliderId::TextSize => self.text_size_percent = round_u16(value),
-            SliderId::DeferFeatureDays => self.defer_feature_days = round_u16(value),
-            SliderId::DeferQualityDays => self.defer_quality_days = round_u16(value),
             // Through the model's setter, not by assignment: the clamp belongs
             // to whoever owns the file, and this way a track that ever grew
             // wider than the permitted range cannot store a value the
@@ -5324,20 +4825,7 @@ impl SettingsState {
     fn toggle_mut(&mut self, id: ToggleId) -> Option<&mut bool> {
         Some(match id {
             ToggleId::NightLight => &mut self.appearance.settings.night_light,
-            ToggleId::ProxyEnabled => &mut self.proxy_enabled,
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
-            ToggleId::LocationEnabled => &mut self.location_enabled,
-            ToggleId::CameraEnabled => &mut self.camera_enabled,
-            ToggleId::MicrophoneEnabled => &mut self.microphone_enabled,
-            ToggleId::AppPermission(kind, index) => {
-                let list = match kind {
-                    PermissionKind::Location => &mut self.location_apps,
-                    PermissionKind::Camera => &mut self.camera_apps,
-                    PermissionKind::Microphone => &mut self.microphone_apps,
-                    PermissionKind::Background => &mut self.background_apps,
-                };
-                &mut list.get_mut(index)?.allowed
-            }
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
             ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
             ToggleId::QuietHours => &mut self.notif.settings.quiet_hours.enabled,
@@ -5351,7 +4839,6 @@ impl SettingsState {
             ToggleId::MouseKeys => &mut self.input.settings.accessibility.mouse.enabled,
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
-            ToggleId::AutoUpdate => &mut self.auto_update_enabled,
             ToggleId::TaskbarAutohide => &mut self.appearance.settings.taskbar_autohide,
         })
     }
@@ -5471,18 +4958,6 @@ impl SettingsState {
             DropdownId::WallpaperFit => {
                 if let Some(fit) = appearance::ImageFit::ALL.get(index) {
                     self.appearance.settings.wallpaper_fit = *fit;
-                }
-            }
-            DropdownId::IpConfig => {
-                self.ip_config_mode = if index == 0 {
-                    IpConfigMode::Dhcp
-                } else {
-                    IpConfigMode::Static
-                };
-            }
-            DropdownId::DiagnosticLevel => {
-                if let Some(level) = DiagnosticLevel::ALL.get(index) {
-                    self.diagnostic_level = *level;
                 }
             }
             DropdownId::ColorFilter => {
@@ -5676,6 +5151,10 @@ fn main() -> ExitCode {
     // deleting the rest, because a save splices the model into the document it
     // was loaded from and an unloaded model has nothing in it.
     state.load_notifications();
+
+    // The machine's real accounts. Empty if the database cannot be read, which
+    // the Accounts page says rather than drawing a blank panel.
+    state.load_user_accounts();
 
     // `launch` rather than `launch_with`: Settings takes no file and no page
     // name, so it wants exactly the shared command line and nothing more —
@@ -6543,26 +6022,6 @@ mod tests {
     }
 
     #[test]
-    fn test_network_adapter_selection() {
-        let mut state = SettingsState::new();
-        assert_eq!(state.selected_adapter, 0);
-        state.selected_adapter = 1;
-        state.current_page = SettingsPage::NetworkStatus;
-        let tree = state.render_tree();
-        assert!(!tree.is_empty());
-    }
-
-    #[test]
-    fn test_proxy_toggle() {
-        let mut state = SettingsState::new();
-        assert!(!state.proxy_enabled);
-        state.proxy_enabled = true;
-        state.current_page = SettingsPage::Proxy;
-        let tree = state.render_tree();
-        assert!(!tree.is_empty());
-    }
-
-    #[test]
     fn test_accent_color_selection() {
         let mut state = SettingsState::new();
         assert_eq!(state.appearance.settings.accent_color, AccentColor::Blue);
@@ -6579,17 +6038,6 @@ mod tests {
             assert!(label.contains('x'));
             assert!(!label.is_empty());
         }
-    }
-
-    #[test]
-    fn test_ip_config_mode_toggle() {
-        let mut state = SettingsState::new();
-        state.open_dropdown = Some(DropdownId::IpConfig);
-        state.apply_dropdown_selection(1); // Static
-        assert_eq!(state.ip_config_mode, IpConfigMode::Static);
-        state.open_dropdown = Some(DropdownId::IpConfig);
-        state.apply_dropdown_selection(0); // DHCP
-        assert_eq!(state.ip_config_mode, IpConfigMode::Dhcp);
     }
 
     #[test]
@@ -6872,9 +6320,41 @@ mod tests {
     /// the narrator's verbosity, the per-app permission lists — and a sweep
     /// over the default state would report those as unreachable when they are
     /// merely not shown yet.
+    /// Three accounts with distinct pictures, one of them signed in.
+    ///
+    /// Built by the tests rather than by `SettingsState::new`, which now starts
+    /// with an empty list: real accounts arrive from `load_user_accounts`,
+    /// which `main` calls, so no test depends on the machine it runs on.
+    ///
+    /// This used to be production data. `new` carried Alice, Bob and Charlie
+    /// with `@example.com` addresses, login counts of 142, 56 and 23, and one
+    /// marked as a child account with "Screen time limits and content filters
+    /// are active" drawn beneath it. Every test in this section relied on them
+    /// without saying so, which is why they all went red at once when the list
+    /// became empty -- a fixture that lives in production code is a fixture
+    /// nobody can see they are using.
+    fn account_fixture() -> Vec<UserAccount> {
+        ["Ada", "Grace", "Alan"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| UserAccount {
+                name: (*name).to_string(),
+                account_type: if i == 0 {
+                    AccountType::Admin
+                } else {
+                    AccountType::Standard
+                },
+                last_login: "Never".to_string(),
+                is_current: i == 0,
+                picture: i,
+            })
+            .collect()
+    }
+
     fn fully_expanded(page: SettingsPage) -> SettingsState {
         let mut state = SettingsState::new();
         state.current_page = page;
+        state.user_accounts = account_fixture();
         // Not every hidden row is hidden behind a *switch*. The Wallpaper
         // page's fit chooser and its Remove button appear once a picture is
         // set, because a control whose every option does the same nothing
@@ -6976,10 +6456,16 @@ mod tests {
     /// Every state worth sweeping for painted buttons: each page with its
     /// switches turned on, and one such state per user account.
     ///
-    /// The per-account repetition is not padding. "Manage Family Settings" is
-    /// drawn only while a child account is selected, so a sweep that took the
-    /// default selection would report six inert buttons where there are seven
-    /// and would go on passing if the seventh were wired wrongly.
+    /// The per-account repetition is not padding: it is what catches a button
+    /// drawn only for *some* account, which a sweep taking the default
+    /// selection would miss and then go on passing over.
+    ///
+    /// The example it was written for is gone. "Manage Family Settings"
+    /// appeared only while a child account was selected -- and the only child
+    /// account was Charlie, one of three invented accounts `SettingsState::new`
+    /// used to carry, under the words "Screen time limits and content filters
+    /// are active" for a system that has neither. The sweep shape stays because
+    /// the hazard is general, not because that button is coming back.
     fn states_to_sweep() -> Vec<(SettingsPage, SettingsState)> {
         let mut out = Vec::new();
         for page in all_pages() {
@@ -7077,9 +6563,7 @@ mod tests {
                 "+ Add Account",
                 "- Remove Account",
                 "Change Password",
-                "Clear Activity History",
                 "Go Back",
-                "Manage Family Settings",
                 "Reset",
             ]
         );
@@ -7106,6 +6590,7 @@ mod tests {
                 let cy = by + BUTTON_HEIGHT / 2.0;
                 let mut after = SettingsState::new();
                 after.current_page = page;
+                after.user_accounts = account_fixture();
                 after.selected_account = state.selected_account;
                 let before = after.render_tree().commands.len();
                 after.handle_click(cx, cy);
@@ -7229,6 +6714,7 @@ mod tests {
     fn login_options() -> SettingsState {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::LoginOptions;
+        state.user_accounts = account_fixture();
         state
     }
 
@@ -7408,10 +6894,9 @@ mod tests {
     fn the_account_list_draws_each_account_s_own_picture() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::UserAccounts;
-        assert_eq!(
-            account_list_avatars(&state),
-            ["\u{1F469}", "\u{1F468}", "\u{1F476}"]
-        );
+        state.user_accounts = account_fixture();
+        let expected: Vec<String> = (0..3).map(|i| ACCOUNT_PICTURES[i].to_string()).collect();
+        assert_eq!(account_list_avatars(&state), expected);
     }
 
     /// Choosing a picture is visible where the picture is used, not only on
@@ -7422,9 +6907,13 @@ mod tests {
         let (icon, x, y, _) = painted_picture_tiles(&state)[4].clone();
         state.handle_click(x + PICTURE_TILE_SIZE / 2.0, y + PICTURE_TILE_SIZE / 2.0);
         state.current_page = SettingsPage::UserAccounts;
+        // The other two are whatever the fixture gave them, read back from
+        // ACCOUNT_PICTURES rather than spelled out: this test is about the
+        // *chosen* tile reaching the list, and hardcoding its neighbours only
+        // re-states the fixture.
         assert_eq!(
             account_list_avatars(&state),
-            [icon.as_str(), "\u{1F468}", "\u{1F476}"]
+            [icon.as_str(), ACCOUNT_PICTURES[1], ACCOUNT_PICTURES[2]]
         );
     }
 
@@ -7890,35 +7379,6 @@ mod tests {
                 "the file names {written:?} rather than the picture chosen"
             );
         });
-    }
-
-    #[test]
-    fn test_every_per_app_permission_switch_is_clickable() {
-        // Only the Location list had a handler; Camera, Microphone and
-        // Background were drawn and inert.
-        let mut state = fully_expanded(SettingsPage::Permissions);
-        for kind in [
-            PermissionKind::Location,
-            PermissionKind::Camera,
-            PermissionKind::Microphone,
-            PermissionKind::Background,
-        ] {
-            let count = match kind {
-                PermissionKind::Location => state.location_apps.len(),
-                PermissionKind::Camera => state.camera_apps.len(),
-                PermissionKind::Microphone => state.microphone_apps.len(),
-                PermissionKind::Background => state.background_apps.len(),
-            };
-            assert!(count > 0, "{kind:?} has no apps to test with");
-            for idx in 0..count {
-                let id = ToggleId::AppPermission(kind, idx);
-                let before = *state.toggle_mut(id).expect("app exists");
-                let (cx, cy) = center_of(&state, RowHit::Toggle(id))
-                    .unwrap_or_else(|| panic!("{kind:?} app {idx} has no click target"));
-                state.handle_click(cx, cy);
-                assert_ne!(before, *state.toggle_mut(id).expect("app exists"));
-            }
-        }
     }
 
     // ---- Personalization: the shared appearance model ----
@@ -9155,7 +8615,10 @@ mod loop_tests {
     use oswindow::app::{App as _, drive, open};
 
     use super::tests::center_of;
-    use super::{EventResult, RowHit, SelectId, SettingsPage, SettingsState, SliderId, ThemeMode};
+    use super::{
+        AccountType, EventResult, RowHit, SelectId, SettingsPage, SettingsState, SliderId,
+        ThemeMode, UserAccount,
+    };
 
     /// A left click at a point, as the compositor would deliver it.
     fn click_at(x: f32, y: f32) -> Event {
@@ -9187,9 +8650,38 @@ mod loop_tests {
     /// written down, so a test aims at a control and not at a pixel: a layout
     /// change moves the target with it instead of silently making the click
     /// land on nothing while the test still passes.
+    /// A page with a real control on it, and where to click it.
+    ///
+    /// The accounts are installed here because `SettingsState::new` no longer
+    /// carries any -- they come from the system database via
+    /// `load_user_accounts`, which `main` calls. The tests below used to click
+    /// a *network adapter* row instead, and those are gone: this system cannot
+    /// enumerate its interfaces, so the three it listed were constants. An
+    /// account row is the same shape of control and is backed by something.
+    /// Two accounts, so a list row exists to click.
+    ///
+    /// `mod tests` has its own `account_fixture`; this is a second one rather
+    /// than a shared helper because these two modules deliberately share
+    /// nothing -- `mod tests` drives the model directly and this one drives the
+    /// shipped event loop, and a fixture reaching across would tie the two
+    /// together at exactly the seam that makes them worth having separately.
+    fn two_accounts() -> Vec<UserAccount> {
+        ["Ada", "Grace"]
+            .iter()
+            .map(|name| UserAccount {
+                name: (*name).to_string(),
+                account_type: AccountType::Standard,
+                last_login: "Never".to_string(),
+                is_current: false,
+                picture: 0,
+            })
+            .collect()
+    }
+
     fn control_on(page: SettingsPage, what: RowHit) -> (SettingsState, (f32, f32)) {
         let mut state = SettingsState::new();
         state.current_page = page;
+        state.user_accounts = two_accounts();
         let at = center_of(&state, what)
             .unwrap_or_else(|| panic!("{} has no click target for {what:?}", page.label()));
         (state, at)
@@ -9199,8 +8691,8 @@ mod loop_tests {
     fn settings_draws_once_at_startup_and_then_only_when_something_changed() {
         let (mut events, desktop) = testing::desktop();
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
         // Opened through the harness rather than by hand, so this one test
         // covers the whole path Settings actually ships: `open` asks on the
@@ -9224,7 +8716,7 @@ mod loop_tests {
 
         drive(&mut events, window, &mut state).expect("the loopback connection cannot fail");
 
-        assert_eq!(state.selected_adapter, 1, "the click reached the control");
+        assert_eq!(state.selected_account, 1, "the click reached the control");
         let drawn = desktop.borrow_mut().drawn();
         assert_eq!(
             drawn.len(),
@@ -9250,8 +8742,8 @@ mod loop_tests {
         assert_ne!(mine, theirs);
 
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
 
         {
@@ -9265,7 +8757,7 @@ mod loop_tests {
         drive(&mut events, mine, &mut state).unwrap();
 
         assert_eq!(
-            state.selected_adapter, 0,
+            state.selected_account, 0,
             "a click addressed to another window must not work this one's controls"
         );
         let drawn = desktop.borrow_mut().drawn();
@@ -9280,8 +8772,8 @@ mod loop_tests {
             .unwrap();
 
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
 
         {
@@ -9300,7 +8792,7 @@ mod loop_tests {
         drive(&mut events, window, &mut state).unwrap();
 
         assert_eq!(
-            state.selected_adapter, 0,
+            state.selected_account, 0,
             "the loop went on running after the window was closed"
         );
     }
@@ -9392,8 +8884,8 @@ mod loop_tests {
             // page, which is what makes "notify whenever an event was consumed"
             // the wrong rule.
             let (mut state, at) = control_on(
-                SettingsPage::NetworkStatus,
-                RowHit::Select(SelectId::Adapter, 1),
+                SettingsPage::UserAccounts,
+                RowHit::Select(SelectId::Account, 1),
             );
 
             {
@@ -9406,7 +8898,7 @@ mod loop_tests {
 
             drive(&mut events, window, &mut state).unwrap();
 
-            assert_eq!(state.selected_adapter, 1, "the click was consumed");
+            assert_eq!(state.selected_account, 1, "the click was consumed");
             let asked = desktop.borrow_mut().asked();
             assert!(
                 !asked.contains(&"ReloadAppearance"),
@@ -9679,8 +9171,8 @@ mod loop_tests {
     #[test]
     fn an_event_that_changes_a_control_asks_for_a_frame() {
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
         assert_eq!(
             state.on_event(&click_at(at.0, at.1)),

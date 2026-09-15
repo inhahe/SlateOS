@@ -2130,12 +2130,19 @@ command was deleted has to reconstruct the argument as I just did.
 
 ## B-Q17 — [B] `sbctl` said it signed your kernel and did not. It refuses now — should the commands be deleted instead? — Status: OPEN
 
-**Added 2026-09-15: this answer governs more than `sbctl`, and a gate is now
-blocked on the ambiguity.**
+**Added 2026-09-15: this answer governs more than `sbctl`.**
 
-`scripts/audit-cli-fabrication.py --check` is red on `main`, and
-`scripts/pre-boot.py` runs it, so no lane can currently get past pre-boot. It
-names two commands. One, `passwd`, is the audit being wrong -- its work is real
+*(Corrected the same day: I first wrote that a gate was BLOCKED on this and
+that no lane could get past pre-boot. That was wrong. The audit runs only in
+`scripts/pre-boot.py`, which the tree's own comment calls "a ~40-minute local
+pre-flight nobody is obliged to run"; `scripts/boot-test.sh`, the shared
+blocking gate, does not run it at all. I inferred the blast radius from where
+the gate was WIRED rather than from what that wiring does, and one `grep` of
+boot-test.sh would have settled it before I raised the alarm. Nothing else in
+this entry changes -- the question is as real as it was, just not urgent.)*
+
+`scripts/audit-cli-fabrication.py --check` is red on `main`. It names two
+commands. One, `passwd`, is the audit being wrong -- its work is real
 and delegated to helper crates the audit does not follow, and lane C has been
 told. The other is `unshare`, and it is red for exactly the reason this
 question asks about: **it refuses now, and §1006 as quoted says a command that
@@ -2168,8 +2175,9 @@ them?"* Taken literally that settles it -- delete all of the above. I have not,
 because deleting eleven more commands on my reading of a sentence written about
 a different set is exactly the kind of inference worth checking first.
 
-**If you do not answer:** the gate stays red, which blocks boot tests for all
-three lanes. I can unblock it today by teaching the audit that "refuses" is not
+**If you do not answer:** the audit stays red in the optional pre-flight,
+which costs whoever runs it one failed line in a report and blocks nothing. I
+can clear it by teaching the audit that "refuses" is not
 "states a fact it did not measure" -- those are genuinely different things and
 its own error text says the first. That leaves the deletion question open
 rather than answering it by default, which is why I would rather do that than

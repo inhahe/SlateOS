@@ -144596,14 +144596,15 @@ That is strictly better than before -- it used to be true of *every* copy --
 and it is worth knowing that the remaining case exists rather than wondering
 why one copy behaves differently from another.
 
-## TD-C-FOUR-CLIPBOARDS-AND-NONE-OF-THEM-IS-CONNECTED
+## TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO
 
 **Date:** 2026-09-14. **Lane:** C. **OPEN.**
 
 **In short:** copying something in one program and pasting it into another does
 not work anywhere in this system, and the reason is not a bug in the copying.
-There are four separate pieces of clipboard code in the tree, written to
-different plans, and not one of them talks to any other. The clearest symptom:
+**Fifteen** programs each keep a private clipboard of their own, and the one
+clipboard *service* that exists is connected to none of them. Copy and paste
+works perfectly inside any single program and cannot cross between two. The clearest symptom:
 the emoji picker cannot give you an emoji. You can browse them, tint them and
 pick one, and nothing leaves the program.
 
@@ -144615,6 +144616,25 @@ pick one, and nothing leaves the program.
 | `gui/desktop/src/clipboard_viewer.rs` | history viewer with preview, search, pinning. Its doc says "Integrates with the gui/clipboard service" | nobody. It contains no IPC, no socket, no connect and no send. It views an in-process model of its own |
 | `apps/credmanager` | `ClipboardState` with auto-clear, marked "(simulated)" | itself |
 | `apps/emojipicker` | `last_selected`, documented "for clipboard / IPC output" | nothing. There is no clipboard or IPC code in that program at all |
+| `apps/remotedesktop` | clipboard **sync** state -- mode, direction, content type, size, count -- with a settings panel that displays four of them | nothing. `sync_clipboard` is called only from its own tests, so the panel shows "Never / Text / 0" for ever |
+
+Those are the five that were examined closely. **The real count is fifteen**,
+and getting there took three tries, which is the part worth keeping:
+
+* "four" -- the ones I had opened while tracing one field;
+* "five" -- after triaging one more baselined field, and I wrote beside it that
+  the number now came "from a sweep", which was **false when I typed it**. No
+  sweep had been run. It was the same sentence-shaped confidence that made
+  "only `sysinfo` collides" wrong earlier in the day;
+* "fifteen" -- from actually running it.
+  `grep -rlnE "^\s*(pub )?clipboard: |struct [A-Za-z]*Clipboard"` over `apps/`
+  and `gui/` returns fifteen crates, and a looser grep for the word returns
+  twenty-three. Among them `apps/clipmanager`, an entire second clipboard
+  *manager* program, and `apps/editor`, whose `self.clipboard` means you can
+  copy inside the editor and nowhere else.
+
+A count is a measurement. Three times in one entry I reported one without
+taking it.
 
 **How this was found.** `scripts/check-fields-written-never-read.py` reported
 `last_selected` as written in production and read only by tests. The field's own
@@ -144643,6 +144663,13 @@ front of that, and the second is not lane C's:
    would read "the emoji picker closes itself when I click an emoji".
 
    `services/**` is lane B's, so the daemon fix is not lane C's to make.
+
+**`gui/toolkit` is not a sixteenth, and that was worth checking.** It mentions
+the clipboard in comments and in one `textview` method that "optionally returns
+a clipboard string (on Ctrl+C)" -- the widget hands the host a string and the
+host decides what to do with it, which is the toolkit's usual pure-widget
+contract. So there is genuinely no client anywhere, rather than one I had not
+found.
 
 **The shape is familiar and worth naming.** This is the same defect as C-Q20's
 four separate lists of installed programs: several complete implementations of

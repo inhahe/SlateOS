@@ -119,6 +119,12 @@ apps/diskcleanup/src/main.rs:min_age_days
 # give you an emoji, and the field is the last correct step before a gap.
 apps/emojipicker/src/main.rs:last_selected
 apps/netmanager/src/main.rs:diagnostics_running
+# TRIAGED 2026-09-14, ISLAND. `sync_clipboard` sets this and is called only
+# from its own tests, so remotedesktop's whole clipboard-sync feature has no
+# production caller and its settings panel shows "Never / Text / 0" for
+# ever. Adding the missing Size row would print a permanent zero, which is
+# worse than the omission. This is the fifth disconnected clipboard --
+# see TD-C-FIVE-CLIPBOARDS-AND-NONE-OF-THEM-IS-CONNECTED.
 apps/remotedesktop/src/main.rs:content_size_bytes
 apps/videoplayer/src/main.rs:seek_preview_position
 gui/desktop/src/backup_settings.rs:last_backup_timestamp

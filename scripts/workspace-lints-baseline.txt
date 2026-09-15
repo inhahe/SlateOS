@@ -98,7 +98,6 @@ userspace/ss
 userspace/sysctl
 userspace/syslogd
 userspace/tac
-userspace/tcpdump
 userspace/timeout
 userspace/top
 userspace/tput

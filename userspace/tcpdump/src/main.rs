@@ -185,22 +185,25 @@ const TCP_URG: u8 = 0x20;
 // ============================================================================
 
 fn read_u16_be(data: &[u8], offset: usize) -> u16 {
-    if offset + 2 > data.len() {
-        return 0;
+    // The guard used to be `offset + 2 > data.len()`. That addition is
+    // itself unchecked: in debug it panics, and in release it wraps, so a
+    // near-`usize::MAX` offset yields a small sum, passes the check, and
+    // panics at the indexing instead -- a bounds test that fails open at
+    // the one input it exists to reject.
+    //
+    // NOT reachable today: every caller passes a small constant offset, so
+    // this is the construct being wrong rather than a live defect. `get`
+    // cannot overflow and the chunk makes `from_be_bytes` provable, so the
+    // correct version costs nothing over the incorrect one.
+    //
+    // The zero on a short read is deliberate and UNCHANGED. Every `parse_*`
+    // caller guards with a length covering its own reads, so it is not
+    // reachable from them either; pinned by
+    // `read_u32_be_reads_and_reports_zero_past_the_end`.
+    match data.get(offset..).and_then(<[u8]>::first_chunk::<2>) {
+        Some(b) => u16::from_be_bytes(*b),
+        None => 0,
     }
-    u16::from_be_bytes([data[offset], data[offset + 1]])
-}
-
-fn read_u32_be(data: &[u8], offset: usize) -> u32 {
-    if offset + 4 > data.len() {
-        return 0;
-    }
-    u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
 }
 
 /// The transport-layer bytes following an IPv4 header, or `None` when the
@@ -222,107 +225,92 @@ fn transport_after_ipv4(packet: &[u8], link_hdr_len: usize, ihl: u8) -> Option<&
 }
 
 fn parse_ethernet(data: &[u8]) -> Option<EthernetHeader> {
-    if data.len() < 14 {
-        return None;
-    }
-    let mut dst_mac = [0u8; 6];
-    let mut src_mac = [0u8; 6];
-    dst_mac.copy_from_slice(&data[0..6]);
-    src_mac.copy_from_slice(&data[6..12]);
-    let ethertype = read_u16_be(data, 12);
+    // `first_chunk` IS the length check -- it returns `None` for a short
+    // frame exactly as `if data.len() < 14` did -- and it returns a
+    // `&[u8; 14]`, so every index below is checked when this compiles
+    // rather than argued for in a comment. Same substitution in the five
+    // parsers under this one.
+    let h: &[u8; 14] = data.first_chunk()?;
     Some(EthernetHeader {
-        dst_mac,
-        src_mac,
-        ethertype,
+        dst_mac: [h[0], h[1], h[2], h[3], h[4], h[5]],
+        src_mac: [h[6], h[7], h[8], h[9], h[10], h[11]],
+        ethertype: u16::from_be_bytes([h[12], h[13]]),
     })
 }
 
 fn parse_ipv4(data: &[u8]) -> Option<Ipv4Header> {
-    if data.len() < 20 {
-        return None;
-    }
-    let version = (data[0] >> 4) & 0xF;
-    let ihl = data[0] & 0xF;
+    let h: &[u8; 20] = data.first_chunk()?;
+    let version = (h[0] >> 4) & 0xF;
+    let ihl = h[0] & 0xF;
+    // Length is not the only way this can be malformed: an IHL below 5
+    // describes a header shorter than the fixed part it sits in.
     if version != 4 || ihl < 5 {
         return None;
     }
     Some(Ipv4Header {
         version,
         ihl,
-        tos: data[1],
-        total_length: read_u16_be(data, 2),
-        identification: read_u16_be(data, 4),
-        flags: (data[6] >> 5) & 0x7,
-        fragment_offset: read_u16_be(data, 6) & 0x1FFF,
-        ttl: data[8],
-        protocol: data[9],
-        header_checksum: read_u16_be(data, 10),
-        src_ip: read_u32_be(data, 12),
-        dst_ip: read_u32_be(data, 16),
+        tos: h[1],
+        total_length: u16::from_be_bytes([h[2], h[3]]),
+        identification: u16::from_be_bytes([h[4], h[5]]),
+        flags: (h[6] >> 5) & 0x7,
+        fragment_offset: u16::from_be_bytes([h[6], h[7]]) & 0x1FFF,
+        ttl: h[8],
+        protocol: h[9],
+        header_checksum: u16::from_be_bytes([h[10], h[11]]),
+        src_ip: u32::from_be_bytes([h[12], h[13], h[14], h[15]]),
+        dst_ip: u32::from_be_bytes([h[16], h[17], h[18], h[19]]),
     })
 }
 
 fn parse_tcp(data: &[u8]) -> Option<TcpHeader> {
-    if data.len() < 20 {
-        return None;
-    }
-    let data_offset = (data[12] >> 4) & 0xF;
+    let h: &[u8; 20] = data.first_chunk()?;
     Some(TcpHeader {
-        src_port: read_u16_be(data, 0),
-        dst_port: read_u16_be(data, 2),
-        seq_num: read_u32_be(data, 4),
-        ack_num: read_u32_be(data, 8),
-        data_offset,
-        flags: data[13],
-        window: read_u16_be(data, 14),
-        checksum: read_u16_be(data, 16),
-        urgent_ptr: read_u16_be(data, 18),
+        src_port: u16::from_be_bytes([h[0], h[1]]),
+        dst_port: u16::from_be_bytes([h[2], h[3]]),
+        seq_num: u32::from_be_bytes([h[4], h[5], h[6], h[7]]),
+        ack_num: u32::from_be_bytes([h[8], h[9], h[10], h[11]]),
+        data_offset: (h[12] >> 4) & 0xF,
+        flags: h[13],
+        window: u16::from_be_bytes([h[14], h[15]]),
+        checksum: u16::from_be_bytes([h[16], h[17]]),
+        urgent_ptr: u16::from_be_bytes([h[18], h[19]]),
     })
 }
 
 fn parse_udp(data: &[u8]) -> Option<UdpHeader> {
-    if data.len() < 8 {
-        return None;
-    }
+    let h: &[u8; 8] = data.first_chunk()?;
     Some(UdpHeader {
-        src_port: read_u16_be(data, 0),
-        dst_port: read_u16_be(data, 2),
-        length: read_u16_be(data, 4),
-        checksum: read_u16_be(data, 6),
+        src_port: u16::from_be_bytes([h[0], h[1]]),
+        dst_port: u16::from_be_bytes([h[2], h[3]]),
+        length: u16::from_be_bytes([h[4], h[5]]),
+        checksum: u16::from_be_bytes([h[6], h[7]]),
     })
 }
 
 fn parse_icmp(data: &[u8]) -> Option<IcmpHeader> {
-    if data.len() < 8 {
-        return None;
-    }
+    let h: &[u8; 8] = data.first_chunk()?;
     Some(IcmpHeader {
-        icmp_type: data[0],
-        code: data[1],
-        checksum: read_u16_be(data, 2),
-        id: read_u16_be(data, 4),
-        seq: read_u16_be(data, 6),
+        icmp_type: h[0],
+        code: h[1],
+        checksum: u16::from_be_bytes([h[2], h[3]]),
+        id: u16::from_be_bytes([h[4], h[5]]),
+        seq: u16::from_be_bytes([h[6], h[7]]),
     })
 }
 
 fn parse_arp(data: &[u8]) -> Option<ArpHeader> {
-    if data.len() < 28 {
-        return None;
-    }
-    let mut sender_mac = [0u8; 6];
-    let mut target_mac = [0u8; 6];
-    sender_mac.copy_from_slice(&data[8..14]);
-    target_mac.copy_from_slice(&data[18..24]);
+    let h: &[u8; 28] = data.first_chunk()?;
     Some(ArpHeader {
-        hw_type: read_u16_be(data, 0),
-        proto_type: read_u16_be(data, 2),
-        hw_len: data[4],
-        proto_len: data[5],
-        operation: read_u16_be(data, 6),
-        sender_mac,
-        sender_ip: read_u32_be(data, 14),
-        target_mac,
-        target_ip: read_u32_be(data, 24),
+        hw_type: u16::from_be_bytes([h[0], h[1]]),
+        proto_type: u16::from_be_bytes([h[2], h[3]]),
+        hw_len: h[4],
+        proto_len: h[5],
+        operation: u16::from_be_bytes([h[6], h[7]]),
+        sender_mac: [h[8], h[9], h[10], h[11], h[12], h[13]],
+        sender_ip: u32::from_be_bytes([h[14], h[15], h[16], h[17]]),
+        target_mac: [h[18], h[19], h[20], h[21], h[22], h[23]],
+        target_ip: u32::from_be_bytes([h[24], h[25], h[26], h[27]]),
     })
 }
 
@@ -412,19 +400,20 @@ fn format_timestamp(ns: u64, mode: TimestampMode) -> String {
 // ============================================================================
 
 fn hex_dump(data: &[u8], max_bytes: usize) {
-    let limit = data.len().min(max_bytes);
-    let mut offset = 0;
+    // `chunks` carries the row cursor, so the offset arithmetic that used to
+    // be written out by hand -- `offset + 16`, `offset..offset + 16`,
+    // `offset += 16`, and a `row_end` to clamp the final row -- is gone,
+    // along with the chance of getting one of them wrong.
+    let shown = data.get(..data.len().min(max_bytes)).unwrap_or(data);
+    for (row, chunk) in shown.chunks(16).enumerate() {
+        print!("\t0x{:04x}:  ", row.saturating_mul(16));
 
-    while offset < limit {
-        print!("\t0x{:04x}:  ", offset);
-
-        // Hex bytes (groups of 2).
-        let row_end = (offset + 16).min(limit);
-        for i in offset..offset + 16 {
-            if let Some(b) = data.get(i).filter(|_| i < row_end) {
-                print!("{:02x}", b);
-            } else {
-                print!("  ");
+        // Sixteen slots whether or not the row is full, so the ASCII column
+        // stays aligned under a short last row.
+        for i in 0..16 {
+            match chunk.get(i) {
+                Some(b) => print!("{b:02x}"),
+                None => print!("  "),
             }
             if i % 2 == 1 {
                 print!(" ");
@@ -433,8 +422,7 @@ fn hex_dump(data: &[u8], max_bytes: usize) {
 
         print!(" ");
 
-        // ASCII printable.
-        for &ch in data.get(offset..row_end).unwrap_or(&[]) {
+        for &ch in chunk {
             if (0x20..=0x7E).contains(&ch) {
                 print!("{}", ch as char);
             } else {
@@ -442,8 +430,6 @@ fn hex_dump(data: &[u8], max_bytes: usize) {
             }
         }
         println!();
-
-        offset += 16;
     }
 }
 
@@ -579,7 +565,7 @@ impl PcapWriter {
         let incl_len = data.len() as u32;
         let orig_len = incl_len;
 
-        let mut rec = Vec::with_capacity(16 + data.len());
+        let mut rec = Vec::with_capacity(16usize.saturating_add(data.len()));
         rec.extend_from_slice(&ts_sec.to_le_bytes());
         rec.extend_from_slice(&ts_usec.to_le_bytes());
         rec.extend_from_slice(&incl_len.to_le_bytes());
@@ -602,17 +588,21 @@ struct PcapReader {
 impl PcapReader {
     fn open(path: &str) -> Result<Self, String> {
         let data = fs::read(path).map_err(|e| format!("cannot read {}: {}", path, e))?;
-        if data.len() < 24 {
-            return Err("not a pcap file (too short)".to_string());
-        }
 
-        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        // A pcap file is input like any other -- nothing here wrote it. The
+        // 24-byte global header comes out as a fixed-size chunk, so the
+        // length test and the reads below are the same operation.
+        let h: &[u8; 24] = data
+            .first_chunk()
+            .ok_or_else(|| "not a pcap file (too short)".to_string())?;
+
+        let magic = u32::from_le_bytes([h[0], h[1], h[2], h[3]]);
         if magic != PCAP_MAGIC {
-            return Err(format!("not a pcap file (bad magic: 0x{:08x})", magic));
+            return Err(format!("not a pcap file (bad magic: 0x{magic:08x})"));
         }
 
-        let snaplen = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
-        let linktype = u32::from_le_bytes([data[20], data[21], data[22], data[23]]);
+        let snaplen = u32::from_le_bytes([h[16], h[17], h[18], h[19]]);
+        let linktype = u32::from_le_bytes([h[20], h[21], h[22], h[23]]);
         if linktype != PCAP_LINKTYPE_ETHERNET {
             return Err(format!("unsupported link type: {}", linktype));
         }
@@ -625,37 +615,29 @@ impl PcapReader {
     }
 
     fn next_packet(&mut self) -> Option<(u32, u32, &[u8])> {
-        if self.offset + 16 > self.data.len() {
-            return None;
-        }
+        // The 16-byte record header, copied out before anything is advanced
+        // so the borrow ends here.
+        let (ts_sec, ts_usec, incl_len) = {
+            let r: &[u8; 16] = self.data.get(self.offset..)?.first_chunk()?;
+            (
+                u32::from_le_bytes([r[0], r[1], r[2], r[3]]),
+                u32::from_le_bytes([r[4], r[5], r[6], r[7]]),
+                u32::from_le_bytes([r[8], r[9], r[10], r[11]]) as usize,
+            )
+        };
 
-        let ts_sec = u32::from_le_bytes([
-            self.data[self.offset],
-            self.data[self.offset + 1],
-            self.data[self.offset + 2],
-            self.data[self.offset + 3],
-        ]);
-        let ts_usec = u32::from_le_bytes([
-            self.data[self.offset + 4],
-            self.data[self.offset + 5],
-            self.data[self.offset + 6],
-            self.data[self.offset + 7],
-        ]);
-        let incl_len = u32::from_le_bytes([
-            self.data[self.offset + 8],
-            self.data[self.offset + 9],
-            self.data[self.offset + 10],
-            self.data[self.offset + 11],
-        ]) as usize;
+        // `incl_len` is a length the FILE declares, not one measured from it,
+        // so `start + incl_len` is an attacker-chosen sum. `checked_add`
+        // rather than `+`: on a 32-bit target that addition can wrap, and a
+        // wrapped end would then pass a `<= len` test.
+        let start = self.offset.saturating_add(16);
+        let end = start.checked_add(incl_len)?;
 
-        self.offset += 16;
-
-        if self.offset + incl_len > self.data.len() {
-            return None;
-        }
-
-        let pkt_data = &self.data[self.offset..self.offset + incl_len];
-        self.offset += incl_len;
+        // Taken BEFORE the cursor moves, so a record whose declared length
+        // runs past the end of the file stops the iteration instead of
+        // leaving `offset` beyond the data.
+        let pkt_data = self.data.get(start..end)?;
+        self.offset = end;
 
         Some((ts_sec, ts_usec, pkt_data))
     }
@@ -701,7 +683,9 @@ fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) 
         }
     };
 
-    let payload = &data[14..];
+    let Some(payload) = data.get(14..) else {
+        return;
+    };
 
     match eth.ethertype {
         ETHER_IPV4 => {
@@ -713,7 +697,7 @@ fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) 
                 }
             };
 
-            let ip_hdr_len = (ip.ihl as usize) * 4;
+            let ip_hdr_len = (ip.ihl as usize).saturating_mul(4);
             let Some(transport) = transport_after_ipv4(payload, 0, ip.ihl) else {
                 println!("{ts_str}IP [truncated header]");
                 return;
@@ -725,10 +709,13 @@ fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) 
                 PROTO_TCP => {
                     if let Some(tcp) = parse_tcp(transport) {
                         let flags = tcp_flags_string(tcp.flags);
-                        let payload_len = ip.total_length as i32
-                            - ip_hdr_len as i32
-                            - (tcp.data_offset as i32 * 4);
-                        let payload_len = payload_len.max(0) as u32;
+                        // Every term is off the wire, so each step is
+                        // saturating; the `.max(0)` that was already here
+                        // says the result cannot be negative either.
+                        let payload_len = (ip.total_length as i32)
+                            .saturating_sub(ip_hdr_len as i32)
+                            .saturating_sub((tcp.data_offset as i32).saturating_mul(4))
+                            .max(0) as u32;
 
                         print!(
                             "{}IP {}.{} > {}.{}: Flags {}, seq {}, ack {}, win {}, length {}",
@@ -931,7 +918,10 @@ fn capture_live(
         }
     };
 
-    let mut buf = vec![0u8; opts.snaplen as usize + 4]; // +4 for length prefix
+    // +4 for the length prefix. `snaplen` comes from `-s` on the command
+    // line, so the sum saturates rather than wrapping to a buffer smaller
+    // than the caller asked for.
+    let mut buf = vec![0u8; (opts.snaplen as usize).saturating_add(4)];
 
     loop {
         if let Some(max) = count
@@ -955,12 +945,18 @@ fn capture_live(
             continue;
         }
 
-        let pkt_len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-        let pkt_data = if pkt_len > 0 && n >= 4 + pkt_len {
-            &buf[4..4 + pkt_len]
-        } else {
+        let pkt_len = match buf.first_chunk::<4>() {
+            Some(p) => u32::from_le_bytes(*p) as usize,
+            None => continue,
+        };
+        let framed = pkt_len
+            .checked_add(4)
+            .filter(|end| pkt_len > 0 && n >= *end)
+            .and_then(|end| buf.get(4..end));
+        let pkt_data = match framed {
+            Some(p) => p,
             // No length prefix — treat entire read as raw frame.
-            &buf[..n]
+            None => buf.get(..n).unwrap_or(&[]),
         };
 
         let ts_ns = clock_monotonic_ns();
@@ -969,7 +965,7 @@ fn capture_live(
         let eth = parse_ethernet(pkt_data);
         let (ip_hdr, sport, dport) = if let Some(ref eth) = eth {
             if eth.ethertype == ETHER_IPV4 && pkt_data.len() > 14 {
-                let ip = parse_ipv4(&pkt_data[14..]);
+                let ip = pkt_data.get(14..).and_then(parse_ipv4);
                 let (sp, dp) = if let Some(ref ip) = ip {
                     let transport = transport_after_ipv4(pkt_data, 14, ip.ihl).unwrap_or(&[]);
                     match ip.protocol {
@@ -1006,7 +1002,7 @@ fn capture_live(
         }
 
         prev_ts = ts_ns;
-        captured += 1;
+        captured = captured.saturating_add(1);
     }
 
     eprintln!();
@@ -1044,9 +1040,9 @@ fn capture_from_proc_net(
             continue;
         }
 
-        let proto = fields[0];
-        let _src = fields[1];
-        let _dst_raw = if fields.len() > 3 { fields[3] } else { "" };
+        // `_src` and `_dst_raw` were bound and never read; they are gone
+        // rather than silenced, which is what the underscore was doing.
+        let proto = fields.first().copied().unwrap_or("");
 
         // Apply protocol filter.
         if let Some(proto_num) = filter.protocol {
@@ -1063,7 +1059,7 @@ fn capture_from_proc_net(
 
         let ts_str = format_timestamp(clock_monotonic_ns(), opts.timestamp);
         println!("{}{}", ts_str, line);
-        displayed += 1;
+        displayed = displayed.saturating_add(1);
     }
 
     eprintln!("{} packets displayed", displayed);
@@ -1092,13 +1088,17 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
             break;
         }
 
-        let ts_ns = (ts_sec as u64) * 1_000_000_000 + (ts_usec as u64) * 1000;
+        // Both come from the pcap record, so neither multiplication is
+        // bounded by anything this program chose.
+        let ts_ns = (ts_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add((ts_usec as u64).saturating_mul(1000));
 
         // Parse and filter.
         let eth = parse_ethernet(pkt_data);
         let (ip_hdr, sport, dport) = if let Some(ref eth) = eth {
             if eth.ethertype == ETHER_IPV4 && pkt_data.len() > 14 {
-                let ip = parse_ipv4(&pkt_data[14..]);
+                let ip = pkt_data.get(14..).and_then(parse_ipv4);
                 let (sp, dp) = if let Some(ref ip) = ip {
                     let transport = transport_after_ipv4(pkt_data, 14, ip.ihl).unwrap_or(&[]);
                     if transport.len() >= 4 {
@@ -1130,7 +1130,7 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
 
         display_packet(pkt_data, opts, ts_ns, prev_ts_ns);
         prev_ts_ns = ts_ns;
-        displayed += 1;
+        displayed = displayed.saturating_add(1);
     }
 
     eprintln!();
@@ -1143,74 +1143,70 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
 // ============================================================================
 
 fn parse_ipv4_addr(s: &str) -> Option<u32> {
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
+    // Four parts and no more: the trailing `next().is_some()` is the
+    // `parts.len() != 4` half that an iterator does not give for free, and
+    // without it "1.2.3.4.5" would parse as 1.2.3.4.
+    let mut it = s.split('.');
+    let a: u8 = it.next()?.parse().ok()?;
+    let b: u8 = it.next()?.parse().ok()?;
+    let c: u8 = it.next()?.parse().ok()?;
+    let d: u8 = it.next()?.parse().ok()?;
+    if it.next().is_some() {
         return None;
     }
-    let a: u8 = parts[0].parse().ok()?;
-    let b: u8 = parts[1].parse().ok()?;
-    let c: u8 = parts[2].parse().ok()?;
-    let d: u8 = parts[3].parse().ok()?;
     Some(u32::from_be_bytes([a, b, c, d]))
 }
 
 fn parse_filter(args: &[String]) -> Filter {
     let mut filter = Filter::default();
-    let mut idx = 0;
+    // An iterator rather than a hand-rolled `idx`. Every arm below read
+    // `idx += 1; if idx < args.len() { args[idx] }` -- the same
+    // increment-then-bounded-read pairing written out eleven times, which is
+    // eleven chances to advance without checking. `next()` IS that pairing.
+    let mut it = args.iter();
 
-    while idx < args.len() {
-        let arg = args[idx].as_str();
-        match arg {
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
             "tcp" => filter.protocol = Some(PROTO_TCP),
             "udp" => filter.protocol = Some(PROTO_UDP),
             "icmp" => filter.protocol = Some(PROTO_ICMP),
             "arp" => filter.arp_only = true,
             "host" => {
-                idx += 1;
-                if idx < args.len() {
-                    filter.host = parse_ipv4_addr(&args[idx]);
+                if let Some(v) = it.next() {
+                    filter.host = parse_ipv4_addr(v);
                 }
             }
-            "src" => {
-                idx += 1;
-                if idx < args.len() {
-                    if args[idx] == "host" {
-                        idx += 1;
-                        if idx < args.len() {
-                            filter.src_host = parse_ipv4_addr(&args[idx]);
-                        }
-                    } else if args[idx] == "port" {
-                        idx += 1;
-                        if idx < args.len() {
-                            filter.src_port = args[idx].parse().ok();
-                        }
-                    } else {
-                        filter.src_host = parse_ipv4_addr(&args[idx]);
+            "src" => match it.next().map(String::as_str) {
+                Some("host") => {
+                    if let Some(v) = it.next() {
+                        filter.src_host = parse_ipv4_addr(v);
                     }
                 }
-            }
-            "dst" => {
-                idx += 1;
-                if idx < args.len() {
-                    if args[idx] == "host" {
-                        idx += 1;
-                        if idx < args.len() {
-                            filter.dst_host = parse_ipv4_addr(&args[idx]);
-                        }
-                    } else if args[idx] == "port" {
-                        idx += 1;
-                        if idx < args.len() {
-                            filter.dst_port = args[idx].parse().ok();
-                        }
-                    } else {
-                        filter.dst_host = parse_ipv4_addr(&args[idx]);
+                Some("port") => {
+                    if let Some(v) = it.next() {
+                        filter.src_port = v.parse().ok();
                     }
                 }
-            }
+                Some(v) => filter.src_host = parse_ipv4_addr(v),
+                None => {}
+            },
+            "dst" => match it.next().map(String::as_str) {
+                Some("host") => {
+                    if let Some(v) = it.next() {
+                        filter.dst_host = parse_ipv4_addr(v);
+                    }
+                }
+                Some("port") => {
+                    if let Some(v) = it.next() {
+                        filter.dst_port = v.parse().ok();
+                    }
+                }
+                Some(v) => filter.dst_host = parse_ipv4_addr(v),
+                None => {}
+            },
             "port" => {
-                idx += 1;
-                if idx < args.len() {
-                    filter.port = args[idx].parse().ok();
+                if let Some(v) = it.next() {
+                    filter.port = v.parse().ok();
                 }
             }
             "and" | "or" | "not" => {
@@ -1229,7 +1225,6 @@ fn parse_filter(args: &[String]) -> Filter {
                 }
             }
         }
-        idx += 1;
     }
 
     filter
@@ -1289,9 +1284,9 @@ fn main() {
     let mut read_path: Option<String> = None;
     let mut filter_args: Vec<String> = Vec::new();
 
-    let mut idx = 1;
-    while idx < args.len() {
-        match args[idx].as_str() {
+    let mut it = args.iter().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
             "-h" | "--help" | "help" => {
                 print_usage();
                 return;
@@ -1301,15 +1296,13 @@ fn main() {
                 return;
             }
             "-i" => {
-                idx += 1;
-                if idx < args.len() {
-                    iface = args[idx].clone();
+                if let Some(v) = it.next() {
+                    iface = v.clone();
                 }
             }
             "-c" => {
-                idx += 1;
-                if idx < args.len() {
-                    count = args[idx].parse().ok();
+                if let Some(v) = it.next() {
+                    count = v.parse().ok();
                 }
             }
             "-n" => numeric = true,
@@ -1321,28 +1314,24 @@ fn main() {
             "-ttt" => timestamp = TimestampMode::Delta,
             "-X" | "-x" | "-xx" => hex_dump = true,
             "-s" => {
-                idx += 1;
-                if idx < args.len() {
-                    snaplen = args[idx].parse().unwrap_or(262144);
+                if let Some(v) = it.next() {
+                    snaplen = v.parse().unwrap_or(262144);
                 }
             }
             "-w" => {
-                idx += 1;
-                if idx < args.len() {
-                    write_path = Some(args[idx].clone());
+                if let Some(v) = it.next() {
+                    write_path = Some(v.clone());
                 }
             }
             "-r" => {
-                idx += 1;
-                if idx < args.len() {
-                    read_path = Some(args[idx].clone());
+                if let Some(v) = it.next() {
+                    read_path = Some(v.clone());
                 }
             }
             other => {
                 filter_args.push(other.to_string());
             }
         }
-        idx += 1;
     }
 
     let filter = parse_filter(&filter_args);
@@ -1362,6 +1351,13 @@ fn main() {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
 
     // ---- Header parsers -------------------------------------------------
@@ -1484,18 +1480,22 @@ mod tests {
         assert_eq!(arp.target_ip, 0xc0a8_0001);
     }
 
-    /// `read_u32_be` had no test, and its short-read branch returns 0 --
-    /// which is indistinguishable from a genuine zero. Pinned so that if
-    /// anyone makes it fallible, every caller is revisited deliberately.
+    /// `read_u16_be`'s short-read branch returns 0, which is
+    /// indistinguishable from a genuine zero. Pinned so that if anyone makes
+    /// it fallible, every caller is revisited deliberately rather than
+    /// re-typed. (`read_u32_be` was deleted when the header parsers stopped
+    /// needing it; this covers the survivor.)
     #[test]
-    fn read_u32_be_reads_and_reports_zero_past_the_end() {
-        let data = [0xde, 0xad, 0xbe, 0xef, 0x11];
-        assert_eq!(read_u32_be(&data, 0), 0xdead_beef);
-        assert_eq!(read_u32_be(&data, 1), 0xadbe_ef11);
-        // Two bytes short of a u32: currently 0, and unreachable from the
-        // parsers because each checks a length that covers its own reads.
-        assert_eq!(read_u32_be(&data, 2), 0);
-        assert_eq!(read_u32_be(&data, 99), 0);
+    fn read_u16_be_reads_and_reports_zero_past_the_end() {
+        let data = [0xde, 0xad, 0xbe];
+        assert_eq!(read_u16_be(&data, 0), 0xdead);
+        assert_eq!(read_u16_be(&data, 1), 0xadbe);
+        // One byte short of a u16: 0, and unreachable from the parsers,
+        // which each check a length covering their own reads.
+        assert_eq!(read_u16_be(&data, 2), 0);
+        assert_eq!(read_u16_be(&data, 99), 0);
+        // The offset that used to wrap the old `offset + 2 > len` guard.
+        assert_eq!(read_u16_be(&data, usize::MAX), 0);
     }
 
     /// A frame shorter than the IP header it DECLARES must not slice past

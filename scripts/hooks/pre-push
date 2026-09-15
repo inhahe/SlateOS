@@ -124,6 +124,15 @@
 #      `newline=`. On Windows text mode turns every `\n` into `\r\n`
 #      silently, so the most obvious spelling of "write this file" is
 #      wrong by default on the platform this tree is developed on.
+#  45. Refuse an assertion message carrying a collapsed line continuation.
+#      A message written with a trailing backslash relies on Rust stripping
+#      the newline AND the indentation after it; `rustfmt` later joins the
+#      lines and the indentation stays inside the literal, so the message
+#      prints with a gap mid-sentence at the moment somebody is reading a
+#      failure quickly. Cosmetic, and wired here because the check costs a
+#      second while the boot test that used to catch it costs thirty-five
+#      minutes -- and the cost of catching it late lands on whichever lane
+#      merges next, not on whoever wrote it.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -4260,7 +4269,7 @@ EOF
     exit 1
 fi
 
-# Gate 46 -- collapsed assertion messages.  `scripts/check-collapsed-messages.py`,
+# Gate 45 -- collapsed assertion messages.  `scripts/check-collapsed-messages.py`,
 # run HERE as well as in boot-test.sh.
 #
 # WIRED ON LANE C'S PROPOSAL of 2026-09-15, and for the reason they gave rather

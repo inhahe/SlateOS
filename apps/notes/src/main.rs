@@ -34,6 +34,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -58,8 +59,14 @@ use std::collections::HashMap;
 /// about the fabrication: nothing here survives the window closing.
 const NOTHING_YET_LINES: [&str; 2] = [
     "No notes yet.",
-    "Nothing is saved between runs -- this app has no filesystem access, so anything you write here is gone when the window closes.",
+    "Notebooks are not kept between runs, but Ctrl+S writes the selected note to a file.",
 ];
+
+/// What the status line says after a save, or after one fails.
+///
+/// A save that reports nothing is a save the user cannot rely on, and this is
+/// the one place in the app where their work leaves the process.
+const SAVE_FAILED_PREFIX: &str = "Could not write";
 
 const SIDEBAR_WIDTH: f32 = 200.0;
 const NOTE_LIST_WIDTH: f32 = 260.0;
@@ -1267,6 +1274,34 @@ pub enum ActivePanel {
 // ============================================================================
 
 /// The main notes/wiki application.
+/// Fold a note title into something a filesystem will take.
+///
+/// Path separators and NUL are the two characters this system's filesystem
+/// forbids, per `design.txt`. Everything else is allowed through, including
+/// spaces and non-ASCII: a filename is bytes, and narrowing it further would
+/// mangle titles that are perfectly legal.
+///
+/// An empty or all-separator title becomes `Untitled`, so the picker never
+/// opens on a filename of `.md`.
+fn sanitise_filename(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c == '\0' {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('-').trim();
+    if trimmed.is_empty() {
+        String::from("Untitled")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub struct NotesApp {
     pub notebooks: Vec<Notebook>,
     pub notes: Vec<Note>,
@@ -1282,6 +1317,10 @@ pub struct NotesApp {
     /// Without it, typing "s" to search would re-sort the list under the box.
     /// The app had no input at all, so nothing had needed the distinction.
     pub searching: bool,
+    /// The save picker, while one is up.
+    pub file_dialog: Option<FileDialog>,
+    /// What the last save attempt did, for the status line.
+    pub last_save: Option<String>,
     pub window_width: f32,
     pub window_height: f32,
     note_id_gen: IdGen,
@@ -1316,6 +1355,8 @@ impl NotesApp {
             active_panel: ActivePanel::NoteList,
             show_favorites_only: false,
             searching: false,
+            file_dialog: None,
+            last_save: None,
             window_width: 1280.0,
             window_height: 800.0,
             note_id_gen: IdGen::new(1),
@@ -1828,6 +1869,19 @@ impl NotesApp {
 
     /// Route a compositor event into the app.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes the event first while it is up, or a keystroke
+        // meant for a filename lands in the note behind it.
+        if self.file_dialog.is_some() {
+            let (w, h) = (self.window_width, self.window_height);
+            let action = match (event, self.file_dialog.as_mut()) {
+                (Event::Key(key_ev), Some(dialog)) if key_ev.pressed => {
+                    dialog.handle_event(key_ev, h)
+                }
+                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
+                _ => return EventResult::Ignored,
+            };
+            return self.apply_dialog_action(action);
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Resize { width, height } => {
@@ -1851,6 +1905,78 @@ impl NotesApp {
     /// The app had no input handling at all before it was wired to the
     /// compositor: every notebook, note, tag filter and sort order it can show
     /// was reachable only by a caller invoking the method directly.
+    /// Put the save picker up, named after the selected note.
+    ///
+    /// Refuses when nothing is selected, and says so: a picker that opens with
+    /// nothing to write would ask the user to choose a filename for a file
+    /// that is never created.
+    pub fn open_save_dialog(&mut self) {
+        let Some(note) = self.selected_note.and_then(|id| self.find_note(id)) else {
+            self.last_save = Some(String::from("Select a note first -- nothing to write"));
+            return;
+        };
+        let name = format!("{}.md", sanitise_filename(&note.title));
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::save()
+            .with_initial_path(start)
+            .with_filename(name);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.file_dialog = Some(dialog);
+    }
+
+    /// Write the selected note to `path` as Markdown.
+    ///
+    /// Through [`safeio::write_str_atomically`], not `fs::write`: `fs::write`
+    /// truncates the target *before* writing, so an interrupted save leaves a
+    /// fragment or an empty file. Once a note has been exported that file may
+    /// be the user's only copy, which is the same reasoning `apps/editor`
+    /// gives for the same choice.
+    ///
+    /// Markdown because a note is text and the title is its heading. No format
+    /// was designed for this: designing one would mean deciding how a notebook
+    /// tree is represented, and that is a larger question than "write this
+    /// note down", which is what the user asked for.
+    pub fn save_selected_note(&mut self, path: &std::path::Path) -> String {
+        let Some(note) = self.selected_note.and_then(|id| self.find_note(id)) else {
+            return String::from("Select a note first -- nothing to write");
+        };
+        let body = if note.content.is_empty() {
+            format!("# {}\n", note.title)
+        } else {
+            format!("# {}\n\n{}\n", note.title, note.content)
+        };
+        match safeio::write_str_atomically(path, &body) {
+            Ok(()) => format!("Wrote {}", path.display()),
+            // Named, not swallowed. The user needs to know which of the two
+            // happened: a note that was not written and a note that was are
+            // opposite states and only one of them is safe to close on.
+            Err(err) => format!("{SAVE_FAILED_PREFIX} {}: {err}", path.display()),
+        }
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
+        match action {
+            DialogAction::None => EventResult::Consumed,
+            DialogAction::Cancelled => {
+                self.file_dialog = None;
+                EventResult::Consumed
+            }
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+                EventResult::Consumed
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                self.last_save = Some(self.save_selected_note(&path));
+                EventResult::Consumed
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
@@ -1884,6 +2010,10 @@ impl NotesApp {
             }
             Key::F if ctrl => {
                 self.searching = true;
+                EventResult::Consumed
+            }
+            Key::S if ctrl => {
+                self.open_save_dialog();
                 EventResult::Consumed
             }
             Key::S => {
@@ -2068,6 +2198,35 @@ impl NotesApp {
         let editor_x = SIDEBAR_WIDTH + NOTE_LIST_WIDTH;
         let editor_w = width - editor_x;
         self.render_editor_area(&mut cmds, editor_x, content_y, editor_w, content_h);
+
+        // What the last save did, where the empty-state banner sits. This is
+        // the one place the user's work leaves the process, so a save that
+        // reports nothing is a save they cannot rely on.
+        if let Some(note) = &self.last_save {
+            let avail = (width - 16.0).max(0.0);
+            if avail > 0.0 {
+                cmds.push(RenderCommand::Text {
+                    x: 8.0,
+                    y: 24.0,
+                    text: note.clone(),
+                    color: if note.starts_with(SAVE_FAILED_PREFIX) {
+                        self.palette.ink(self.palette.red)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: 9.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(avail),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+
+        // Last, so it is above everything -- the same order in which
+        // `handle_event` gives it the keystroke.
+        if let Some(dialog) = &self.file_dialog {
+            cmds.extend(dialog.render(&self.palette, width, height));
+        }
 
         cmds
     }
@@ -3651,6 +3810,69 @@ mod tests {
     }
 
     use super::*;
+
+    /// Ctrl+S writes the selected note, and says where.
+    ///
+    /// The first real door in this app. Notebooks still are not kept between
+    /// runs -- that needs a format for the tree, which is a larger question
+    /// than "write this note down" -- but a note is text and a title is a
+    /// heading, so Markdown needs no format designed for it.
+    ///
+    /// Through `safeio::write_str_atomically`, not `fs::write`: `fs::write`
+    /// truncates before writing, so an interrupted save leaves a fragment.
+    /// Once a note has been exported that file may be the user's only copy,
+    /// which is the reasoning `apps/editor` gives for the same choice.
+    #[test]
+    fn ctrl_s_writes_the_selected_note_as_markdown() {
+        let dir = std::env::temp_dir().join("slateos-notes-save-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("note.md");
+
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("Work");
+        let id = app.create_note("Release checklist", nb);
+        app.update_note_content(id, "one\ntwo");
+        app.selected_note = Some(id);
+
+        let said = app.save_selected_note(&path);
+        assert!(said.starts_with("Wrote"), "{said}");
+
+        let body = std::fs::read_to_string(&path).expect("the note was written");
+        assert_eq!(body, "# Release checklist\n\none\ntwo\n");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// With nothing selected it refuses rather than opening a picker.
+    ///
+    /// A picker that opens with nothing to write asks the user to choose a
+    /// filename for a file that is never created.
+    #[test]
+    fn saving_with_no_selection_refuses_and_says_why() {
+        let mut app = NotesApp::new();
+        app.selected_note = None;
+        app.open_save_dialog();
+        assert!(
+            app.file_dialog.is_none(),
+            "a picker opened with nothing to write"
+        );
+        let said = app.last_save.clone().expect("refused silently");
+        assert!(said.contains("Select a note first"), "{said}");
+    }
+
+    /// A title that looks like a path does not become one.
+    ///
+    /// A filename is bytes and a title is whatever the user typed. Separators
+    /// and NUL are the two characters this filesystem forbids; everything else
+    /// goes through, including spaces and non-ASCII, because narrowing further
+    /// would mangle titles that are perfectly legal.
+    #[test]
+    fn a_title_that_looks_like_a_path_is_folded_into_a_filename() {
+        assert_eq!(sanitise_filename("../etc/passwd"), "..-etc-passwd");
+        assert_eq!(sanitise_filename("Q3 plan"), "Q3 plan");
+        assert_eq!(sanitise_filename("  "), "Untitled");
+        assert_eq!(sanitise_filename("/"), "Untitled");
+        assert_eq!(sanitise_filename("caf\u{e9} notes"), "caf\u{e9} notes");
+    }
 
     // --- Measured-width tests ---
 

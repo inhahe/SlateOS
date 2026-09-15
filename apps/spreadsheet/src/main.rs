@@ -28,7 +28,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -2766,10 +2766,9 @@ pub const MAX_CSV_BYTES: usize = 8 * 1024 * 1024;
 const FILE_FAILED_PREFIX: &str = "Could not";
 
 pub struct SpreadsheetApp {
-    /// The open or save picker, while one is up.
-    pub file_dialog: Option<FileDialog>,
-    /// Whether the picker that is up is saving rather than opening.
-    pub dialog_saves: bool,
+    /// The open or save picker. Holds the dialog, the saving flag and
+    /// the routing eleven applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the last open or save did, for the status line.
     pub last_file_action: Option<String>,
     /// All worksheets, and which one is active.
@@ -2816,8 +2815,7 @@ impl SpreadsheetApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            file_dialog: None,
-            dialog_saves: false,
+            picker: FilePicker::new(),
             last_file_action: None,
             sheets: SheetBook::new(Sheet::new("Sheet1")),
             mode: InteractionMode::Normal,
@@ -3733,44 +3731,10 @@ impl SpreadsheetApp {
     /// serialiser was the hard part and it was already finished. What was
     /// missing was the picker.
     pub fn open_file_dialog(&mut self, saving: bool) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = if saving {
-            FileDialog::save()
-                .with_initial_path(start)
-                .with_filename(format!("{}.csv", self.sheets.active().name))
+        if saving {
+            self.picker.open_to_write("sheet.csv");
         } else {
-            FileDialog::open().with_initial_path(start)
-        };
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.dialog_saves = saving;
-        self.file_dialog = Some(dialog);
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
-        match action {
-            DialogAction::None => EventResult::Consumed,
-            DialogAction::Cancelled => {
-                self.file_dialog = None;
-                EventResult::Consumed
-            }
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-                EventResult::Consumed
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                let saving = self.dialog_saves;
-                self.last_file_action = Some(if saving {
-                    self.write_csv(&path)
-                } else {
-                    self.read_csv(&path)
-                });
-                EventResult::Consumed
-            }
+            self.picker.open_to_read();
         }
     }
 
@@ -4557,16 +4521,21 @@ impl SpreadsheetApp {
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in a cell behind it.
-        if self.file_dialog.is_some() {
-            let (w, h) = (self.window_width, self.window_height);
-            let action = match (event, self.file_dialog.as_mut()) {
-                (Event::Key(key_ev), Some(dialog)) if key_ev.pressed => {
-                    dialog.handle_event(key_ev, h)
-                }
-                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
-                _ => return EventResult::Ignored,
-            };
-            return self.apply_dialog_action(action);
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_csv(&path)
+                } else {
+                    self.read_csv(&path)
+                });
+                return EventResult::Consumed;
+            }
+            Picked::Handled => return EventResult::Consumed,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(key_event) => {
@@ -4701,9 +4670,10 @@ impl SpreadsheetApp {
 
         // Last, so it is above everything -- the same order in which
         // `handle_event` gives it the keystroke.
-        if let Some(dialog) = &self.file_dialog {
-            cmds.extend(dialog.render(&self.palette, self.window_width, self.window_height));
-        }
+        cmds.extend(
+            self.picker
+                .render(&self.palette, self.window_width, self.window_height),
+        );
 
         cmds
     }

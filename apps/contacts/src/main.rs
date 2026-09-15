@@ -18,7 +18,7 @@
 
 use appearance::Palette;
 use guitk::color::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 use guitk::frame::{Frame, Rect};
 // The shared civil-date arithmetic. This app's own copy was *correct* --
 // unlike the calendar's, whose ISO week number was wrong on 38.5% of all
@@ -2067,10 +2067,9 @@ pub const MAX_VCARD_BYTES: usize = 8 * 1024 * 1024;
 const FILE_FAILED_PREFIX: &str = "Could not";
 
 pub struct ContactsApp {
-    /// The open or save picker, while one is up.
-    pub file_dialog: Option<FileDialog>,
-    /// Whether the picker that is up is saving rather than opening.
-    pub dialog_saves: bool,
+    /// The open or save picker. Holds the dialog, the saving flag and
+    /// the routing eleven applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the last open or save did, for the status line.
     pub last_file_action: Option<String>,
     pub store: ContactStore,
@@ -2129,8 +2128,7 @@ impl ContactsApp {
     pub fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            file_dialog: None,
-            dialog_saves: false,
+            picker: FilePicker::new(),
             last_file_action: None,
             store: ContactStore::new(),
             view: DetailView::Empty,
@@ -2378,11 +2376,7 @@ impl ContactsApp {
 
         // Last, so it is above everything -- the same order in which
         // `handle_event` gives it the keystroke.
-        if let Some(dialog) = &self.file_dialog {
-            for cmd in dialog.render(&self.palette, l.window.w, l.window.h) {
-                f.push(cmd);
-            }
-        }
+        f.extend(self.picker.render(&self.palette, l.window.w, l.window.h));
 
         f
     }
@@ -3709,14 +3703,18 @@ impl ContactsApp {
     fn handle_event(&mut self, event: &Event, size: (f32, f32)) {
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in the search box behind it.
-        if self.file_dialog.is_some() {
-            let action = match (event, self.file_dialog.as_mut()) {
-                (Event::Key(ke), Some(dialog)) if ke.pressed => dialog.handle_event(ke, size.1),
-                (Event::Mouse(me), Some(dialog)) => dialog.handle_mouse(me, size.0, size.1),
-                _ => return,
-            };
-            self.apply_dialog_action(action);
-            return;
+        match self.picker.handle(event, size.0, size.1) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_vcards(&path)
+                } else {
+                    self.read_vcards(&path)
+                });
+                return;
+            }
+            Picked::Handled => return,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(ke) => self.handle_key(ke),
@@ -4013,39 +4011,10 @@ impl ContactsApp {
     /// `BEGIN:VCARD` block parsing. The format was the hard part and it was
     /// already finished.
     pub fn open_file_dialog(&mut self, saving: bool) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = if saving {
-            FileDialog::save()
-                .with_initial_path(start)
-                .with_filename(String::from("contacts.vcf"))
+        if saving {
+            self.picker.open_to_write("contacts.vcf");
         } else {
-            FileDialog::open().with_initial_path(start)
-        };
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.dialog_saves = saving;
-        self.file_dialog = Some(dialog);
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) {
-        match action {
-            DialogAction::None => {}
-            DialogAction::Cancelled => self.file_dialog = None,
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                let saving = self.dialog_saves;
-                self.last_file_action = Some(if saving {
-                    self.write_vcards(&path)
-                } else {
-                    self.read_vcards(&path)
-                });
-            }
+            self.picker.open_to_read();
         }
     }
 

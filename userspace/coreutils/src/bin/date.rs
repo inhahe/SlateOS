@@ -663,10 +663,11 @@ fn parse_date_spec(raw: &[u8], zone: &Zone, now: i64) -> Option<i64> {
             if offset.replace(z).is_some() {
                 return None;
             }
-        } else if let Some(n) = num(tok) {
-            bare.push(n);
         } else {
-            return None;
+            // `?` rather than `if let ... else { return None }`: the two are
+            // the same control flow, and `clippy::question_mark` is
+            // deny-level here through `clippy::all`.
+            bare.push(num(tok)?);
         }
     }
 

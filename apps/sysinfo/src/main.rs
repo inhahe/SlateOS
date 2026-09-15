@@ -20,9 +20,11 @@ pub mod hwquery;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::fold;
+use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
@@ -572,7 +574,27 @@ pub struct StartupEntry {
 // ============================================================================
 
 /// Main application state for the System Information Explorer.
+/// Said when the user asks for a clipboard copy.
+///
+/// The old text was "Value copied to clipboard", printed by a handler whose
+/// own comment read `(simulated)`. **A note to the next programmer was
+/// standing in for a sentence addressed to the user.** Nothing in this
+/// process can reach a clipboard -- `gui/clipboard` is a service this app does
+/// not talk to -- so it names the thing that does work rather than denying
+/// flatly.
+const CLIPBOARD_UNAVAILABLE: &str =
+    "Nothing here can reach the clipboard yet -- press Ctrl+E to write a file instead";
+
+/// The toolbar's clickable geometry. See `SysInfoState::toolbar_layout`.
+struct ToolbarLayout {
+    search: Rect,
+    export: Rect,
+    copy: Rect,
+}
+
 pub struct SysInfoState {
+    /// The save picker, shared with sixteen other applications.
+    pub picker: FilePicker,
     /// The user's colours, handed over by the framework (§822).
     ///
     /// Defaulted rather than `Option`, so the first frame has *a* palette on
@@ -674,6 +696,7 @@ impl SysInfoState {
         use hwquery::HardwareProvider;
         let provider = hwquery::SyscallProvider::new();
         Self {
+            picker: FilePicker::default(),
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected_category: SysInfoCategory::SystemSummary,
             expanded: vec![
@@ -1477,6 +1500,18 @@ impl SysInfoState {
     }
 
     /// Export all system information as a text report.
+    /// Write the report to `path`, and say what happened.
+    ///
+    /// `export_text` was written, tested, and its result assigned to
+    /// `let _report`. This is the half that was missing.
+    pub fn write_report(&mut self, path: &std::path::Path) -> String {
+        let text = self.export_text();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!("Wrote {} bytes to {}", text.len(), path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
     pub fn export_text(&self) -> String {
         let mut out = String::with_capacity(4096);
         out.push_str("=== Slate OS System Information Report ===\n\n");
@@ -1549,6 +1584,23 @@ impl SysInfoState {
 
     /// Process an incoming event. Returns whether the event was consumed.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up, or a filename is typed
+        // into the search box behind it. `Picked::Ignored` covers `Resize`, so
+        // the app still learns its own size with a dialog open -- which it
+        // needs, because it is the app that draws the dialog.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.status_message = self.write_report(&path);
+                return EventResult::Consumed;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -1611,15 +1663,17 @@ impl SysInfoState {
                 self.search_focused = true;
                 EventResult::Consumed
             }
-            // Ctrl+C = copy selected value (simulated)
             Key::C if key.modifiers.ctrl => {
-                self.status_message = "Value copied to clipboard".to_string();
+                self.status_message = CLIPBOARD_UNAVAILABLE.to_string();
                 EventResult::Consumed
             }
-            // Ctrl+E = export
+            // This read `let _report = self.export_text();` and then said
+            // "Exported system info to file". The report was composed in full,
+            // dropped on the floor, and announced. **The status line is the
+            // only evidence a user has that an export happened**, so a false
+            // one is worse than no control at all.
             Key::E if key.modifiers.ctrl => {
-                let _report = self.export_text();
-                self.status_message = "Exported system info to file".to_string();
+                self.picker.open_to_write("system-info.txt");
                 EventResult::Consumed
             }
             // Escape = close search
@@ -1674,6 +1728,25 @@ impl SysInfoState {
     }
 
     fn handle_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
+        // The toolbar buttons, which were drawn and never hit-tested. Tested
+        // ahead of the sidebar branch below: they sit well clear of
+        // `SIDEBAR_WIDTH`, but putting the specific region before the general
+        // one is what keeps that true if either moves.
+        if let MouseEventKind::Press(MouseButton::Left) = &mouse.kind {
+            let layout = Self::toolbar_layout();
+            if layout.export.contains(mouse.x, mouse.y) {
+                self.picker.open_to_write("system-info.txt");
+                return EventResult::Consumed;
+            }
+            if layout.copy.contains(mouse.x, mouse.y) {
+                self.status_message = CLIPBOARD_UNAVAILABLE.to_string();
+                return EventResult::Consumed;
+            }
+            if layout.search.contains(mouse.x, mouse.y) {
+                self.search_focused = true;
+                return EventResult::Consumed;
+            }
+        }
         match &mouse.kind {
             MouseEventKind::Press(MouseButton::Left) if mouse.x < SIDEBAR_WIDTH => {
                 if let Some(row) = self.tree_hit_test(mouse.y) {
@@ -1758,6 +1831,14 @@ impl SysInfoState {
         // Status bar.
         self.render_status_bar(&mut tree);
 
+        // The picker last, so it draws over everything. A dialog that takes
+        // input but is painted under the pane behind it is invisible and still
+        // swallowing keys -- which looks exactly like an app that has frozen.
+        tree.extend(
+            self.picker
+                .render(&self.palette, self.window_width, self.window_height),
+        );
+
         tree
     }
 
@@ -1793,8 +1874,46 @@ impl SysInfoState {
         });
     }
 
+    /// Where the toolbar's controls sit.
+    ///
+    /// These were locals inside `render_toolbar`, and `handle_mouse` never
+    /// mentioned the buttons at all: Export and Copy were **pictures**.
+    /// Clicking either did nothing -- no action, and not even the false status
+    /// line the keyboard printed. Deriving the rectangles once and using them
+    /// for both the drawing and the hit-test is what stops the drawn button
+    /// and the clickable region drifting apart, and is the same discipline
+    /// `tree_hit_test` already applies to the click and the hover.
+    fn toolbar_layout() -> ToolbarLayout {
+        let y = TITLE_BAR_HEIGHT + 5.0;
+        let h = 22.0;
+        let search = Rect {
+            x: 8.0,
+            y,
+            w: 220.0,
+            h,
+        };
+        let export = Rect {
+            x: search.x + search.w + 16.0,
+            y,
+            w: 70.0,
+            h,
+        };
+        let copy = Rect {
+            x: export.x + export.w + 8.0,
+            y,
+            w: 70.0,
+            h,
+        };
+        ToolbarLayout {
+            search,
+            export,
+            copy,
+        }
+    }
+
     fn render_toolbar(&self, tree: &mut RenderTree) {
         let y = TITLE_BAR_HEIGHT;
+        let layout = Self::toolbar_layout();
         tree.fill_rect(
             0.0,
             y,
@@ -1804,10 +1923,10 @@ impl SysInfoState {
         );
 
         // Search box.
-        let search_x = 8.0;
-        let search_y = y + 5.0;
-        let search_w = 220.0;
-        let search_h = 22.0;
+        let search_x = layout.search.x;
+        let search_y = layout.search.y;
+        let search_w = layout.search.w;
+        let search_h = layout.search.h;
 
         tree.push(RenderCommand::FillRect {
             x: search_x,
@@ -1855,8 +1974,8 @@ impl SysInfoState {
         });
 
         // Export button.
-        let export_x = search_x + search_w + 16.0;
-        let btn_w = 70.0;
+        let export_x = layout.export.x;
+        let btn_w = layout.export.w;
         self.palette.push_surface(
             tree,
             export_x,
@@ -1878,7 +1997,7 @@ impl SysInfoState {
         });
 
         // Copy button.
-        let copy_x = export_x + btn_w + 8.0;
+        let copy_x = layout.copy.x;
         self.palette
             .push_surface(tree, copy_x, search_y, btn_w, search_h, 3.0, Surface::Card);
         tree.push(RenderCommand::Text {
@@ -2632,6 +2751,175 @@ mod tests {
             y,
             kind: MouseEventKind::Move,
         })
+    }
+
+    fn ctrl(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    fn door_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("slateos-sysinfo-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// The report reaches the disk.
+    ///
+    /// `export_text` was written and tested, and its one caller read
+    /// `let _report = self.export_text();` followed by a status line saying
+    /// "Exported system info to file". The report was composed, dropped, and
+    /// announced. **This test is the half that was missing:** the bytes a
+    /// reader gets back are the bytes the app composed.
+    #[test]
+    fn the_exported_report_reaches_the_disk() {
+        let path = door_dir().join("system-info.txt");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = SysInfoState::new();
+        let expected = app.export_text();
+        let said = app.write_report(&path);
+
+        let back = std::fs::read_to_string(&path).expect("the file the app said it wrote");
+        assert_eq!(
+            back, expected,
+            "what was read back is not what was composed"
+        );
+        assert!(
+            said.contains(&format!("{} bytes", expected.len())),
+            "the status line should report the size actually written, said: {said}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Ctrl+E asks where to put it rather than claiming it already has.
+    #[test]
+    fn ctrl_e_opens_the_picker() {
+        let mut app = SysInfoState::new();
+        assert!(!app.picker.is_open(), "nothing should be open at rest");
+
+        assert_eq!(app.handle_event(&ctrl(Key::E)), EventResult::Consumed);
+        assert!(app.picker.is_open(), "Ctrl+E should ask for a destination");
+        assert!(
+            !app.status_message.contains("Exported"),
+            "nothing has been exported yet, said: {}",
+            app.status_message
+        );
+    }
+
+    /// An open picker is drawn, not merely routed to.
+    #[test]
+    fn the_open_picker_is_drawn() {
+        let mut app = SysInfoState::new();
+        let closed = app.render_tree().commands.len();
+
+        app.handle_event(&ctrl(Key::E));
+        let open = app.render_tree().commands.len();
+
+        let own = open.saturating_sub(closed);
+        assert!(
+            own > 0,
+            "the open picker contributed {own} commands; it is not being drawn"
+        );
+    }
+
+    /// A resize still reaches the app while the picker is up.
+    ///
+    /// The app is what draws the dialog, so a picker that swallowed `Resize`
+    /// would leave itself being drawn at the old size.
+    #[test]
+    fn a_resize_reaches_the_app_under_an_open_picker() {
+        let mut app = SysInfoState::new();
+        app.handle_event(&ctrl(Key::E));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(&Event::Resize {
+            width: 1400,
+            height: 900,
+        });
+        assert!(
+            (app.window_width - 1400.0).abs() < f32::EPSILON,
+            "the resize did not reach the app: width is {}",
+            app.window_width
+        );
+        assert!(app.picker.is_open(), "a resize should not close the dialog");
+    }
+
+    /// Ctrl+C no longer reports an act it cannot perform.
+    #[test]
+    fn ctrl_c_does_not_claim_a_copy_that_did_not_happen() {
+        let mut app = SysInfoState::new();
+        app.handle_event(&ctrl(Key::C));
+        assert!(
+            !app.status_message.contains("copied"),
+            "still claiming a copy: {}",
+            app.status_message
+        );
+        assert!(
+            app.status_message.contains("Ctrl+E"),
+            "a denial should name what does work, said: {}",
+            app.status_message
+        );
+    }
+
+    /// The toolbar buttons are controls, not pictures.
+    ///
+    /// Neither appeared anywhere in `handle_mouse`: clicking either did
+    /// nothing at all. The click here is aimed with the same `toolbar_layout`
+    /// the drawing uses, so this cannot pass against a rectangle the renderer
+    /// does not actually use.
+    #[test]
+    fn the_export_and_copy_buttons_respond_to_a_click() {
+        let layout = SysInfoState::toolbar_layout();
+
+        let mut app = SysInfoState::new();
+        let mid = |r: Rect| click_at(r.x + r.w / 2.0, r.y + r.h / 2.0);
+
+        assert_eq!(app.handle_event(&mid(layout.export)), EventResult::Consumed);
+        assert!(app.picker.is_open(), "the Export button did nothing");
+
+        let mut app = SysInfoState::new();
+        app.handle_event(&mid(layout.copy));
+        assert_eq!(
+            app.status_message, CLIPBOARD_UNAVAILABLE,
+            "the Copy button did nothing"
+        );
+    }
+
+    /// The drawn buttons sit where the hit-test looks.
+    #[test]
+    fn the_drawn_buttons_sit_where_the_click_looks() {
+        let app = SysInfoState::new();
+        let layout = SysInfoState::toolbar_layout();
+        let mut tree = RenderTree::new();
+        app.render_toolbar(&mut tree);
+
+        for (label, rect) in [("Export", layout.export), ("Copy", layout.copy)] {
+            let drawn = tree
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == label => Some((*x, *y)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} is not drawn at all"));
+            assert!(
+                rect.contains(drawn.0, drawn.1),
+                "{label} is drawn at {drawn:?}, outside the rectangle the click tests: {rect:?}"
+            );
+        }
     }
 
     fn press(key: Key) -> Event {

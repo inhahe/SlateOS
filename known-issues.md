@@ -130,6 +130,175 @@ program does not control.
 
 ---
 
+## TD-B-BIGNAT-ADD-BACK-IS-UNREACHED-BY-ANY-TEST — 2026-09-15 — FIXED same day
+
+**In short:** the big-number division in `coreutils` has a rare correction step
+that fixes up an answer which came out one too big. No test in the suite ever
+makes it run. Deleting the line that does the fixing leaves all 23 tests
+passing, so if that step is wrong, nothing here would say so.
+
+**Where.** `userspace/coreutils/src/bignat.rs`, `Nat::divmod` -- Knuth 4.2
+Algorithm D, step D6, the `if t < 0` branch that does `q[j] -= 1` and adds the
+divisor back into the running remainder.
+
+**How it was found, and it was not by looking for it.** I was about to put a
+narrow `#[allow(clippy::indexing_slicing)]` on `divmod`, justified by "the
+algorithm's loop bounds keep the indices in range, and the tests check the
+outcome". Before writing that I checked what the tests actually cover. Two
+probes:
+
+    delete `q[j] -= 1`            -> 23/23 tests still pass
+    put `panic!()` in the branch  -> 23/23 tests still pass
+
+The second is conclusive: the branch does not execute during the suite.
+
+**It is not reachable by chance, either.** Knuth puts the probability of
+needing D6 at about `2/b`, which for 32-bit limbs is one division in two
+billion. A search of 20,000 divisions shaped to be hard -- divisor's top limb
+in the upper half of its range, dividend one limb longer -- fired it zero
+times, which is what that probability predicts.
+
+**What the two new tests DO cover, measured rather than assumed.** Disabling
+D3's estimate-correction loop fails
+`long_division_corrects_an_estimate_of_a_whole_limb` and
+`long_division_identity_holds_beyond_u128`, and no other test in the module.
+So before those two, D3's correction was as untested as D6 is now. The
+`u128`-based tests cannot reach either: they cap at four limbs because they
+need a native reference to compare against.
+
+**A correction worth recording.** Hacker's Delight gives `u = 2^95`,
+`v = 2^63 + 1` as its `divmnu` ADD-BACK vector, and I added it under that
+name. It is not an add-back case for this implementation: after D3 walks the
+estimate back from `2^32` to `0xFFFF_FFFF`, the multiply-subtract stays
+non-negative and D6 never runs. The test is renamed to what it demonstrably
+exercises. Had the probe not been run, the suite would carry a test whose name
+claims coverage it does not have -- which is worse than the gap, because it
+stops anyone else looking.
+
+**FIXED** by `long_division_exercises_the_add_back`, and the reason the first
+attempt failed is the useful part.
+
+**D6 IS UNREACHABLE FOR A TWO-LIMB DIVISOR, for a structural reason.** D3's
+correction loop tests `qhat * v[n-2]` against `rhat * b + u[j+n-2]`. When
+`n == 2` those are `v[0]` and `u[j]` -- the whole of the divisor and the
+whole of the window -- so the estimate D3 leaves is exact and the
+multiply-subtract cannot go negative. No pair of two-limb operands can reach
+D6. That is why Hacker's Delight's `2^95 / (2^63 + 1)`, which that book gives
+as an add-back vector for its own `divmnu`, only exercises D3 here. **Three
+limbs is the smallest divisor that leaves a limb D3 cannot see.**
+
+**The vector**, found by enumerating the corners of that shape rather than by
+random search, since D6's probability is about `2/b`:
+
+    n = 170141183381241069217422966122340155392   (4 limbs)
+    d =          39614081257132168801066942463    (3 limbs)
+    estimate 4294967294, true digit 4294967293 -> D6 gives back exactly 1
+    q = 4294967293, r = 39614081238685424740242292733
+
+**Verified by the same two probes that found the gap**, now reversed:
+
+    panic!() inside the branch  -> 23 pass, ONLY this test fails
+    delete `q[j] -= 1`          -> 23 pass, ONLY this test fails
+
+The first says the test reaches D6; the second says it would notice if D6 were
+wrong. Nothing else in the module does either.
+
+**A method note worth keeping.** Before committing the vector I re-simulated
+`divmod` in Python -- normalisation, the real correction loop, the borrow
+arithmetic -- and checked it against the case whose answer was already
+measured: it predicted 0 firings for the Hacker's Delight vector and 1 for
+this one. A model that reproduces a result you have independently confirmed is
+worth believing about a result you have not. The first simulation, which
+clamped `qhat` to `b - 1` instead of decrementing, would have found nothing.
+
+**Where it lives:** `userspace/coreutils/src/bignat.rs`, `Nat::divmod`.
+
+---
+
+## TD-B-COREUTILS-HAS-913-DEFENSIVE-LINT-FINDINGS — 2026-09-15 — OPEN
+
+**In short:** the 83 commands in `userspace/coreutils` are now checked by the
+warnings that point at code which can crash on bad input. They report 913
+places worth looking at. Nothing is broken that was not broken yesterday --
+the checks were simply not running over this crate until today, and now they
+are, so the list is visible instead of hypothetical.
+
+**Why it was invisible.** `userspace/coreutils` carried a bare
+`#![deny(clippy::all)]` and no `[lints]` table. `clippy::all` is the default
+group: it excludes `pedantic` and all five of CLAUDE.md's defensive lints. The
+gate accepted that attribute as coverage until `213341d27`, so the largest
+crate in lane B -- 83 binaries, 197,806 lines -- was absent from the very
+report that exists to find it. See
+`TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
+
+**Enabling it surfaced exactly ONE deny-level error, and my first
+measurement missed it.** I ran `cargo clippy -p coreutils --all-targets
+--target x86_64-pc-windows-gnu`, got zero errors, and wrote that enabling
+"cannot break a build". The `coreutils-unix-half` pre-push gate then refused
+the push: `src/bin/date.rs:666` trips `clippy::question_mark`, which is
+deny-level through `clippy::all`.
+
+The gate's own diagnostic explains such differences as `cfg(unix)` code that a
+Windows-target build never type-checks -- but that is NOT what happened here.
+`date.rs` contains no `cfg(unix)` at all and the site is in plain
+`parse_date_spec`. The two builds run different clippies: mine cites
+`rust-clippy/rust-1.95.0`, the gate's cites `rust-clippy/main`. So "clippy
+clean" is a claim about a toolchain AND a target, and a measurement on one
+pair does not transfer to the other.
+
+Fixed in the same commit (the `if let ... else { return None }` became `?`,
+which is what the lint asks for and is simpler). The unix half then reports
+`clean (linux half checked)`.
+
+Every other finding is `warn`-level, joining the ~18,000 the workspace already
+carries by deliberate policy (see the clippy gate's comment in
+`scripts/boot-test.sh`). So the crate is subject to the policy from today, new
+code in it is checked from today, and the backlog is worked down after --
+rather than the crate staying outside the policy until someone finds a week.
+
+**Where the work is. 913 production findings across 48 targets**, of which
+756 sit in six of them. A further **276 are `#[cfg(test)]`-only** and want the
+allow list CLAUDE.md prescribes for test modules, not fixes.
+
+| Target | Production findings | Character |
+|---|---|---|
+| `lib` | 254 | mostly `extfloat.rs` and `bignat.rs` |
+| `bin "diff"` | 181 | index/offset arithmetic over two files |
+| `bin "cal"` | 148 | date arithmetic |
+| `bin "dd"` | 88 | block counts and seek offsets |
+| `bin "od"` | 50 | offsets into a byte dump |
+| `bin "df"` | 35 | size and percentage arithmetic |
+| everything else | 157 | across 42 targets, 1-16 each |
+
+**The first count of this was wrong and the correction is instructive.** I
+read the per-file totals out of clippy's output and got 1,306, because a
+finding inside a `#[cfg(test)]` module is reported against the file like any
+other -- and cargo lints each crate TWICE, once as `bin "x"` and once as
+`bin "x" test`, the second including the test module. `src/getopt.rs` is the
+clean example: all 25 of its findings are in its test module, and its
+production code has none. Counting by TARGET rather than by file, and dropping
+the `... test` twins, gives 913. The lesson generalises past this entry: in
+clippy output a file is not a unit of anything.
+
+**`extfloat.rs` and `bignat.rs` need a different answer from the rest, and it
+should be argued rather than assumed.** They implement arbitrary-precision
+arithmetic; `arithmetic_side_effects` firing on a bignum kernel is not the
+same finding as it firing on a packet parser, because deliberate wrapping and
+carry propagation is what the code is FOR. A narrow, module-level allow with a
+specific justification may be right there. That is a different thing from the
+crate-wide allow removed in `213341d27`, whose justification was "every site is
+gated" -- a claim nobody could check and which turned out to be false. Any
+allow added here must name what makes the module safe and be checkable against
+the module's own tests.
+
+**Do not fix these by making them `.unwrap_or(0)`.** A saturating or defaulted
+value in a command that reports a number to a script is how `wc` starts
+printing a plausible wrong count. The sites want reading, not a sweep.
+
+**Where it lives:** `userspace/coreutils/`, everything under `src/`.
+
+---
+
 ## TD-B-AUDITD-LOGGED-A-DAEMON-START-THAT-NEVER-HAPPENED — 2026-09-15 — FIXED by refusing
 
 **In short:** `auditd` wrote `DaemonStart … res=success` into the audit log and
@@ -61062,8 +61231,18 @@ a work tree", while the same commands work fine in `os-lane-a/b/c`. The check is
 
 ### TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING — 2026-09-04 — OPEN
 
-**In short.** The bulk renamer can now be given files and rules, and can
-actually rename. What it still cannot do is add any rule that needs a *string*
+**Corrected 2026-09-15.** The paragraph below said the renamer "can actually
+rename". It could not: `apply_plan` edited a `Vec<FileEntry>` and the crate
+contained no `std::fs` at all, while the status line said "Renamed {count}
+files". The sentence was written to mean *the rename action is reachable from
+a key*, and what it says is that the program renames files. It is left visible
+rather than quietly edited, because the entry crediting a program with an act
+it cannot perform is the finding, and `scripts/find-overstated-records.py`
+exists now to catch the next one. The renamer does rename real files as of
+`TD-C-RENAMER-SAID-RENAMED-N-FILES-AND-RENAMED-NOTHING` below.
+
+~~**In short.** The bulk renamer can now be given files and rules, and can
+actually rename.~~ What it still cannot do is add any rule that needs a *string*
 typed in — find/replace, insert, remove-at, regex, replace-extension — because
 the app draws no text field anywhere.
 
@@ -151973,3 +152152,219 @@ The general form: **a convention is evidence about the codebase you learned it
 in, and every app is a different codebase until you check.** The scanners in
 `scripts/` all carry a version of that warning in their docstrings; this is the
 same rule applied to the person rather than the tool.
+
+## TD-C-TWO-EXPORT-BUTTONS-THAT-COMPOSED-A-REPORT-AND-DROPPED-IT -- FIXED 2026-09-15
+
+**In short:** `apps/benchmark` and `apps/sysinfo` each had an Export button.
+Pressing either built the whole report in memory and then threw it away, so no
+file was ever written. sysinfo went further and printed "Exported system info
+to file" afterwards, and its Copy button printed "Value copied to clipboard"
+without copying anything. sysinfo's two toolbar buttons were worse still: they
+were drawn but never wired to the mouse at all, so clicking them did nothing
+whatsoever.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**The shape, in one line of source.** Both apps, at both call sites:
+
+```rust
+if !self.history.is_empty() {
+    let _report = self.export_report();   // composed, then dropped
+}
+EventResult::Consumed
+```
+
+`let _name = ...` is the discard that names what it discards, which is why it
+reads as deliberate. The `Consumed` is the part that makes it invisible: the
+framework is told the event was handled, so nothing downstream can notice that
+nothing happened.
+
+| control | claimed | did |
+|---|---|---|
+| benchmark Ctrl+E / Export button | nothing (silent) | built the report, dropped it |
+| benchmark Export with no history | nothing (silent) | nothing |
+| sysinfo Ctrl+E | "Exported system info to file" | built the report, dropped it |
+| sysinfo Ctrl+C | "Value copied to clipboard" | nothing |
+| sysinfo Export button (mouse) | nothing (silent) | nothing -- never hit-tested |
+| sysinfo Copy button (mouse) | nothing (silent) | nothing -- never hit-tested |
+
+**Why this is a recurrence and not a new finding.** `sysinfo` is an app already
+repaired once in this sweep, under
+`TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`: its fabricated hardware
+readings were removed and the entry closed. **That audit looked at what the app
+*displayed* and never at what its *controls claimed*.** The two are separate
+surfaces and a pass over one reads exactly like a pass over both -- the app was
+on a FIXED list while three of its controls were still lying. When an app is
+revisited, the question is which surface was audited last time, not whether it
+appears in the list.
+
+**The comment that was the tell.** sysinfo's clipboard handler was headed
+`// Ctrl+C = copy selected value (simulated)`. The word was right there, in the
+file, for however long it stood. **A note to the next programmer was standing in
+for a sentence addressed to the user** -- the parenthetical makes the code
+honest to a reader while the string it guards stays false to the person holding
+the machine. A `(simulated)` in a comment beside a user-visible claim is worth
+grepping for on its own.
+
+**The fix.** Both now route through `guitk::dialog::FilePicker` -- the same door
+seventeen applications share -- and write through `safeio::write_str_atomically`.
+The status lines report what was actually written (`Wrote N bytes to <path>`) or
+why it failed. sysinfo's clipboard message now says nothing here can reach the
+clipboard and names Ctrl+E, which does work: **a false denial is cheaper than a
+false promise but it is the same defect pointed the other way.** benchmark grew
+a `status_message` because its status bar derived its entire text from the
+progress phase, leaving an action nowhere to report a result -- which is part of
+how a discarded export stayed invisible. Exporting an empty history now says
+so instead of going quiet.
+
+sysinfo's toolbar geometry is now `SysInfoState::toolbar_layout()`, used by both
+the drawing and the hit-test, so a moved button cannot leave its clickable
+region behind. A test asserts the drawn label falls inside the rectangle the
+click tests.
+
+**Verified by sabotage**, six claims, each broken in turn with an edit that
+still compiles: the write silenced, the picker undrawn, the hit-test displaced,
+the picker made to swallow every event, the empty-history notice removed, and a
+`Tick` under an open picker. All six went red.
+
+---
+
+## TD-C-A-SCRATCH-BACKUP-KEYED-BY-BASENAME-OVERWROTE-THE-FILE-IT-WAS-PROTECTING
+
+**In short:** a throwaway verification script backed up two files before
+breaking them on purpose, then restored them afterwards. Both files were named
+`main.rs`, the backup was keyed by that name alone, so the second file's copy
+silently replaced the first's -- and the restore wrote one app's entire source
+over the other's. No error was raised at any point.
+
+**Date:** 2026-09-15. **Lane:** C. Not a defect in the OS; a hazard in the
+scripts written to work on it, recorded because the layout that causes it is
+this project's universal one.
+
+```python
+for f in ["apps/sysinfo/src/main.rs", "apps/benchmark/src/main.rs"]:
+    shutil.copy(f, backup / pathlib.Path(f).name)   # both are "main.rs"
+```
+
+Every application here is `apps/<name>/src/main.rs`. **Any sweep script that
+touches two apps and keys anything by file *name* aliases them**, and
+`shutil.copy` reports success on the collision. The failure is silent at write
+time and destructive at restore time, so the damage surfaces long after the
+line that caused it -- here, as a `grep` for a function that had been added
+minutes earlier returning nothing, in a file that had become another app.
+
+**What makes it recoverable is unrelated to the script:** the overwritten file
+was committed, so `git checkout --` brought it back, and the work lost was the
+uncommitted change the script existed to verify. That is the argument for
+committing before running a harness that writes to the tree, not for writing a
+better harness.
+
+**The fix in the rewritten harness:** back up by full relative path, refuse to
+start if two inputs are byte-identical, and assert the post-restore SHA-256 of
+every file matches the pre-run one before exiting. The last of these is the one
+that matters -- a restore that is not verified is not a restore, which is the
+same `**absent != empty**` reasoning that an export you cannot read back is not
+a backup.
+
+## TD-C-RENAMER-SAID-RENAMED-N-FILES-AND-RENAMED-NOTHING -- FIXED 2026-09-15
+
+**In short:** the bulk renamer opened showing six files that did not exist,
+let you build up rename rules against them, and when you pressed Rename it
+said "Renamed 6 files" and changed nothing on the disk. Undo said "Undid
+rename of 6 files" and also changed nothing. The program had no filesystem
+access of any kind. It now opens a real folder, renames real files, and says
+what actually happened to each.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**This is the `undelete`/`partmanager`/`netscan` family**, recorded under
+`TD-C-THE-THREE-TOOLS-THAT-REPORT-ACTS-THEY-DID-NOT-PERFORM`, and it was missed
+by that sweep for a reason worth keeping: **that sweep looked for fabricated
+readings, and the renamer's fabrication was its input list while its false
+claim was its status line.** A scanner looking for invented *data* finds a
+program that shows you numbers it made up. It does not find one whose invented
+data is a plausible list of filenames and whose lie is a past-tense verb.
+
+What believing it costs is the same as the other three, and in the same
+direction: a person told a batch rename **failed** looks for their files under
+the old names. One told it **succeeded** looks under the new ones, finds
+nothing, and may well conclude the files are lost -- or delete the copy they
+kept, the rename having "worked".
+
+| control | claimed | did |
+|---|---|---|
+| Enter (Rename) | "Renamed 6 files" | edited `Vec<FileEntry>` |
+| Ctrl+Z (Undo) | "Undid rename of 6 files" | edited `Vec<FileEntry>` |
+| Ctrl+Y (Redo) | "Redid rename of 6 files" | edited `Vec<FileEntry>` |
+| the file list | six files under `/home/user/...` | invented at startup by `seed_sample_files` |
+
+**The undo is the dangerous one and it nearly survived the fix.** Repairing
+`execute_rename` alone would have left the identical defect in `undo` and
+`redo`, which both called the same memory-only `apply_plan` -- and an undo that
+reports success while restoring nothing is worse than a rename that does
+nothing, because by then the files really have moved and the user has been told
+they are back.
+
+**What the fix did NOT have to build.** `rename_plan` was already there,
+already correct, and already tested: it orders a batch so no step overwrites a
+name a later step still needs, and parks a name under a temporary when a cycle
+makes that impossible. It was written against a comment reading "when this is
+wired to `fs::rename`". **The hard half was done and the easy half was
+missing** -- which is the stranded-serialiser shape, one level up: not a
+serialiser with no door, but an entire correct algorithm with no filesystem
+under it.
+
+**What changed:**
+
+* `Ctrl+O` opens a folder through `guitk::dialog::FileDialog::select_folder`.
+  Until one is chosen the list is empty and the status line says so. The six
+  invented files are now a `#[cfg(test)]` fixture, which is what they always
+  were in substance.
+* `perform` walks the plan calling `std::fs::rename`, updating each entry only
+  when its own rename succeeded, so the list keeps describing the directory.
+  A failure does not stop the batch: the plan's *order* is what makes it safe,
+  so abandoning it midway is what creates the collision it was built to avoid.
+* `describe` reports both halves -- "Renamed 3 file(s); 2 failed. a -> b: ..."
+  -- rather than a count that hides the failures or an error that hides the
+  successes.
+* Undo and redo go through the same `perform`, and push onto the opposite
+  stack **only if something actually moved**.
+* `FileEntry` is keyed by `raw_name: OsString`, the name as the filesystem gave
+  it, with the text form used for the rules and the display. A name that is not
+  valid UTF-8 is listed, marked unrenameable and left unticked, because every
+  rename rule reads text and writes text: renaming from a lossy form would
+  write a name **nobody asked for**, since `to_string_lossy` substitutes U+FFFD
+  and that is a different name.
+* `original_path: String` and its `replace_file_name` helper are gone. The path
+  is `folder.join(raw_name)`, derived, so the class of bug that helper existed
+  to fix -- `path.replace(old, new)` rewriting a *directory* whose name
+  contains the file's name -- cannot occur at all now.
+
+**The tests changed more than the code did, and that is the finding.**
+`app_with(&["a.txt", "b.txt"])` used to build a `Vec` of names and no files.
+Every test that called `execute_rename` was therefore checking a memory shuffle
+-- against a program whose status line said it had renamed things. They now
+build a real scratch directory, and `on_disk()` reads the folder back. Two
+consequences surfaced immediately:
+
+1. `test_app_execute_rename` went red, because with no folder open nothing is
+   renamed and nothing is pushed to the undo stack. **That is the defect, found
+   by its own test suite the moment the suite was made to touch a disk.**
+2. `a_case_only_rename_is_not_a_conflict` could not be given a real fixture at
+   all. It writes `photo.JPG` and `PHOTO.jpg`, and **the host these tests run
+   on is Windows, whose filesystem is case-insensitive**, so the two collapse
+   into one file. The rule under test is a property of the *target*
+   filesystem, which `design.txt` specifies as case-sensitive, and the host
+   cannot hold the fixture that would demonstrate it. It keeps a name list,
+   with the reason written at the test, because conflict detection is a
+   function of the names alone.
+
+The fixture guard -- `assert_eq!(app.files.len(), names.len(), "the fixture did
+not load, or this test asserts nothing")` -- is what turned (2) from a silently
+weaker test into a failure with an explanation. That is the same guard lane B
+found five copies of in `userspace/`, and it earned its place again here.
+
+**Verified by sabotage**, eight claims, each broken with an edit that still
+compiles: the rename silenced, a failure counted as a success, a non-text name
+treated as text, the picker undrawn, an undo queued for a rename that did not
+happen, and folders listed as files. All eight went red.

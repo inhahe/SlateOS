@@ -4628,7 +4628,7 @@ kept being followed in spirit and broken in practice.
   backslashes that is a valid escape and there is no warning. So one level was
   consumed before Python ever saw the text, despite the quoted delimiter.
 
-  What it cost: a sed backreference  //p  arrived as  //p  -- the capture
+  What it cost: a sed backreference  /\1/p  arrived as  //p  -- the capture
   silently replaced with nothing. The extractor returned an empty string, so
   the stale-lock branch it fed could never fire. Fail-safe by luck, not by
   design, and it would have read as 'the feature works, no lock was ever
@@ -4650,6 +4650,23 @@ kept being followed in spirit and broken in practice.
   string. That is how this very entry was repaired -- the first attempt to
   write it was itself mangled, turning its two-backslash example into one and
   inverting the evidence it existed to record.
+
+  THIRD FORM, and it is the one reading cannot catch. This entry did not just
+  lose a backslash -- it committed a raw 0x01 byte. `\1` in the transmitted
+  string reached Python as the escape for chr(1), so the file contained the
+  control character itself. `cat` shows nothing wrong. `grep` matches nothing
+  unusual. Every review of the text reads correctly, because the byte IS the
+  thing being described and it renders as empty.
+
+  It was caught by `check-control-bytes` refusing the push -- a gate looking at
+  bytes rather than at text -- and its message names this exact cause:
+  "almost always a shell heredoc: \0, \b and \n are collapsed into the byte
+  they name before the receiving program sees them." The gate had the diagnosis
+  written down before I arrived at it.
+
+  So the rule has a corollary: proof-reading does not detect this class. Only a
+  byte-level check does, and one already exists and runs at push time. Do not
+  trust a visual inspection of anything written through a heredoc.
 
 Buffer-cache writeback belongs in a kernel thread, not a timer softirq
 (lane A, 2026-09-15). Deferred deliberately; design-decisions 940 names this

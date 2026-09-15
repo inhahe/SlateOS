@@ -20,7 +20,7 @@ the shape this looks for: not a missing option, which fails visibly with
 
     python scripts/compare-short-options.py            # every crate
     python scripts/compare-short-options.py blkid ss   # named crates
-    python scripts/compare-short-options.py --selftest
+    python scripts/compare-short-options.py --selftest  # or --self-test
 
 Exit status is 0 whatever it finds; it is a report.
 """
@@ -29,6 +29,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import selftestflag  # noqa: E402  (needs the path above)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -173,8 +176,19 @@ def selftest() -> int:
 
 
 def main(argv: list[str]) -> int:
-    if "--selftest" in argv:
+    # `selftestflag`, not `"--selftest" in argv`: both spellings must reach
+    # the self-test. When only one does, the other falls through to the real
+    # scan and exits 0, so a mistyped invocation reports success without
+    # having tested anything -- indistinguishable from a genuine pass. The
+    # pre-push gate `check-selftest-flag-spellings.py` refused this script
+    # until it used the helper, which is the gate working.
+    if selftestflag.wants_selftest(argv):
         return selftest()
+
+    unknown = selftestflag.unknown_options(argv)
+    if unknown:
+        print(f"unrecognised option(s): {', '.join(unknown)}", file=sys.stderr)
+        return 2
 
     names = [a for a in argv if not a.startswith("-")]
     crates = (

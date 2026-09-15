@@ -1336,7 +1336,11 @@ fn format_normal(stats: &mut JobStats, show_percentiles: bool) -> String {
     }
 
     out.push_str(&format!(
-        "\nRun status:\n  {rw}: io={io}, bw={bw}KiB/s, iops={iops:.0}, run={elapsed:.0}msec\n",
+        // `{bw:.0}`: it was the only value on this line without a
+        // precision, so an f64 divide printed its full repr --
+        // `bw=9319.935925440514KiB/s` in a real run. `iops` and `elapsed`
+        // beside it were already `:.0`.
+        "\nRun status:\n  {rw}: io={io}, bw={bw:.0}KiB/s, iops={iops:.0}, run={elapsed:.0}msec\n",
         rw = stats.rw,
         io = format_size(stats.read_bytes.saturating_add(stats.write_bytes)),
         bw = stats.read_bw_kib() + stats.write_bw_kib(),

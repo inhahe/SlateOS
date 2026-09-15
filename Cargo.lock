@@ -2879,6 +2879,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "procinfo",
  "safeio",
 ]
 

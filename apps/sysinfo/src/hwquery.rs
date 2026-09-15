@@ -116,8 +116,9 @@ const SYSDEV_MEMORY: &str = "/sys/devices/system/memory";
 /// A directory of scalar files, one value per file -- not the `key=value`
 /// file the older constants below still name.
 const SYSDEV_BLOCK: &str = "/sys/devices/block";
-/// Network interfaces directory.
-const SYSFS_NET: &str = sysfs!("/net");
+// `/sys/hardware/net` is gone with the query that read it. Interfaces come
+// from `/proc/net/dev`, and lane A has declined to serve a `/sys/devices/net/`
+// because the kernel's `InterfaceInfo` carries no name to key it on.
 /// PCI devices directory.
 const SYSFS_PCI: &str = sysfs!("/pci");
 /// USB devices directory.
@@ -239,6 +240,16 @@ impl SyscallProvider {
     /// `path` as this provider should actually open it.
     fn rooted(&self, path: &str) -> String {
         format!("{}{path}", self.root)
+    }
+
+    /// The kernel's `/proc`, under the same root.
+    ///
+    /// A reader rather than a parser here: `procinfo` exists so that the two
+    /// system-information programs in this tree do not grow two parsers of
+    /// `/proc/meminfo` between them, and its module docs name this window by
+    /// name as one of the two.
+    fn procfs(&self) -> procinfo::ProcFs {
+        procinfo::ProcFs::at(self.rooted("/proc"))
     }
 
     /// Create a new syscall-based provider.
@@ -603,28 +614,45 @@ impl HardwareProvider for SyscallProvider {
         Ok(disks)
     }
 
+    /// Read the network interfaces from `/proc/net/dev`.
+    ///
+    /// This read `/sys/hardware/net`, which the kernel has never served, so
+    /// the category reported "cannot read". `/proc/net/dev` is published and
+    /// gives the interface names and their traffic counters.
+    ///
+    /// **Everything else stays empty, and that is deliberate.** A MAC address,
+    /// an IPv4 lease, a gateway, a DNS server, a link speed and a duplex mode
+    /// are not published by anything in this tree. Lane A declined to add a
+    /// `/sys/devices/net/` for the same reason, in their own words: the
+    /// kernel's `InterfaceInfo` "has no name field, so both would be
+    /// invented". An adapter row with a plausible `192.168.1.x` in it is worse
+    /// than one with a blank, because the blank is legible as absent.
     fn query_network(&self) -> Result<Vec<NetworkAdapterInfo>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_NET)?;
-        let mut adapters = Vec::new();
+        let devices = self.procfs().net_devices().ok().flatten().ok_or_else(|| {
+            HwQueryError::NotAvailable {
+                path: self.rooted("/proc/net/dev"),
+            }
+        })?;
 
-        for entry in &entries {
-            adapters.push(NetworkAdapterInfo {
-                name: entry.get("name").cloned().unwrap_or_default(),
-                adapter_type: entry.get("type").cloned().unwrap_or_default(),
-                mac_address: entry.get("mac").cloned().unwrap_or_default(),
-                ipv4: entry.get("ipv4").cloned().unwrap_or_default(),
-                ipv6: entry.get("ipv6").cloned().unwrap_or_default(),
-                subnet: entry.get("subnet").cloned().unwrap_or_default(),
-                gateway: entry.get("gateway").cloned().unwrap_or_default(),
-                dns: entry.get("dns").cloned().unwrap_or_default(),
-                speed_mbps: Self::field(entry, "speed_mbps", 0)?,
-                duplex: entry.get("duplex").cloned().unwrap_or_default(),
-                bytes_sent: Self::field(entry, "bytes_sent", 0)?,
-                bytes_received: Self::field(entry, "bytes_received", 0)?,
-            });
-        }
-
-        Ok(adapters)
+        Ok(devices
+            .iter()
+            .map(|d| NetworkAdapterInfo {
+                // The name is the one field `/proc/net/dev` keys on, and it is
+                // bytes there; it becomes text only to be drawn.
+                name: String::from_utf8_lossy(&d.name).into_owned(),
+                adapter_type: String::new(),
+                mac_address: String::new(),
+                ipv4: String::new(),
+                ipv6: String::new(),
+                subnet: String::new(),
+                gateway: String::new(),
+                dns: String::new(),
+                speed_mbps: 0,
+                duplex: String::new(),
+                bytes_sent: d.tx_bytes.unwrap_or(0),
+                bytes_received: d.rx_bytes.unwrap_or(0),
+            })
+            .collect())
     }
 
     fn query_display(&self) -> Result<DisplayInfo, HwQueryError> {

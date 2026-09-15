@@ -2867,6 +2867,75 @@ mod tests {
         );
     }
 
+    /// The interfaces come from `/proc/net/dev`, with nothing filled in around them.
+    ///
+    /// `query_network` read `/sys/hardware/net`, which the kernel has never
+    /// served. `/proc/net/dev` is published and carries the names and the
+    /// traffic counters.
+    ///
+    /// The empty fields are the point of the test as much as the full ones. A
+    /// MAC address, an IPv4 lease, a gateway, a DNS server, a link speed and a
+    /// duplex mode are published by nothing in this tree, and lane A declined
+    /// to add a `/sys/devices/net/` in the same words: the kernel's
+    /// `InterfaceInfo` "has no name field, so both would be invented". **A row
+    /// carrying a plausible 192.168.1.x is worse than one carrying a blank**,
+    /// because the blank is legible as absent.
+    #[test]
+    fn the_network_interfaces_are_read_and_nothing_is_filled_in_around_them() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-net-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc/net")).expect("fixture");
+        std::fs::write(
+            root.join("proc/net/dev"),
+            b"Inter-|   Receive                    |  Transmit\n\
+             face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets\n\
+                lo:    1234       9    0    0    0     0          0         0     5678      11\n\
+              eth0:  900000     700    0    0    0     0          0         0   400000     300\n",
+        )
+        .unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let mut adapters = provider.query_network().expect("the fixture is readable");
+        adapters.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(adapters.len(), 2, "one row per interface");
+        let eth0 = adapters.first().expect("eth0");
+        assert_eq!(eth0.name, "eth0");
+        assert_eq!(eth0.bytes_received, 900_000, "rx is the receive column");
+        assert_eq!(eth0.bytes_sent, 400_000, "tx is the transmit column");
+
+        for a in &adapters {
+            assert!(a.mac_address.is_empty(), "invented a MAC address");
+            assert!(a.ipv4.is_empty(), "invented an address lease");
+            assert!(a.gateway.is_empty(), "invented a gateway");
+            assert!(a.dns.is_empty(), "invented a resolver");
+            assert_eq!(a.speed_mbps, 0, "invented a link speed");
+            assert!(a.duplex.is_empty(), "invented a duplex mode");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no `/proc/net/dev`, it says so rather than reporting no interfaces.
+    #[test]
+    fn an_absent_net_dev_is_an_error_not_an_empty_list() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-net-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        assert!(
+            provider.query_network().is_err(),
+            "an unreadable /proc/net/dev reported as a machine with no interfaces"
+        );
+    }
+
     fn ctrl(key: Key) -> Event {
         Event::Key(KeyEvent {
             key,

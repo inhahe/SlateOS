@@ -7067,6 +7067,29 @@ mod tests {
         }
     }
 
+    /// **Every row on the Sound page is inert, and nothing has to refuse it.**
+    ///
+    /// `unavailable_row` registers no hit band at all, so there is no handler
+    /// that could forget. This asserts the page offers *no* click target
+    /// whatsoever, which is the strongest form of that claim and the one that
+    /// cannot rot when a handler is edited: a test that clicked each row and
+    /// checked nothing changed would still pass if a band reappeared and its
+    /// handler happened to be a no-op today.
+    ///
+    /// It also fails the day somebody adds a working control here, which is
+    /// correct -- that is the day the page stops being unavailable, and the
+    /// doc comment on `build_sound_page` stops being true.
+    #[test]
+    fn the_sound_page_offers_nothing_to_click() {
+        let state = fully_expanded(SettingsPage::Sound);
+        let bands = hit_bands(&state);
+        let named: Vec<RowHit> = bands.iter().map(|(what, _)| *what).collect();
+        assert!(
+            bands.is_empty(),
+            "audio reaches nothing, so the page must offer nothing: {named:?}"
+        );
+    }
+
     #[test]
     fn test_every_slider_has_a_page_that_draws_it_draggable() {
         // All the sliders painted correctly and none of them moved: the pages

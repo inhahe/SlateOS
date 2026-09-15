@@ -3589,6 +3589,30 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+    /// The picker is not merely open: it is DRAWN.
+    ///
+    /// `is_open()` returning true is not the same claim, and assuming it was
+    /// is how `apps/flashcards` shipped a dialog that took every keystroke and
+    /// painted nothing. Deleting the `picker.render` line in the renderer
+    /// leaves `is_open()` true and every other test green; this is the one
+    /// that notices.
+    #[test]
+    fn the_picker_is_drawn_when_it_is_open() {
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        let before = app.render_commands().len();
+        app.open_save_dialog();
+        assert!(app.picker.is_open(), "no picker came up");
+        let after = app.render_commands().len();
+        let own = app.picker.render(&app.palette, 1280.0, 800.0).len();
+        assert!(
+            own > 0,
+            "the picker itself draws nothing, so this proves nothing"
+        );
+        assert!(
+            after >= before + own,
+            "the frame does not contain the picker's own {own} command(s) ({before} before, {after} after) -- something else grew instead"
+        );
+    }
 
     fn diagram_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("slateos-diagram-door-test");

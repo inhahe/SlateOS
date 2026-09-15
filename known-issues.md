@@ -130,7 +130,7 @@ program does not control.
 
 ---
 
-## TD-B-BIGNAT-ADD-BACK-IS-UNREACHED-BY-ANY-TEST — 2026-09-15 — OPEN
+## TD-B-BIGNAT-ADD-BACK-IS-UNREACHED-BY-ANY-TEST — 2026-09-15 — FIXED same day
 
 **In short:** the big-number division in `coreutils` has a rare correction step
 that fixes up an answer which came out one too big. No test in the suite ever
@@ -175,17 +175,41 @@ exercises. Had the probe not been run, the suite would carry a test whose name
 claims coverage it does not have -- which is worse than the gap, because it
 stops anyone else looking.
 
-**The proper fix** is a constructed D6 vector. It needs `qhat` to still be one
-too large *after* D3, which requires the divisor's top two limbs and the
-dividend's leading three to sit in a specific relation; Knuth exercise 4.2.2-21
-and the `divmnu` test suite both carry such vectors. Until one is in place,
-`divmod`'s D6 arm is code that has never run in this tree.
+**FIXED** by `long_division_exercises_the_add_back`, and the reason the first
+attempt failed is the useful part.
 
-**If never fixed:** no regression -- the branch is as exercised as it has ever
-been, which is not at all. The risk is that a future edit to `divmod` breaks
-D6 and every test still passes. That is precisely the condition an
-`#[allow]` on this function would have been justified by, which is why the
-allow is not being added yet.
+**D6 IS UNREACHABLE FOR A TWO-LIMB DIVISOR, for a structural reason.** D3's
+correction loop tests `qhat * v[n-2]` against `rhat * b + u[j+n-2]`. When
+`n == 2` those are `v[0]` and `u[j]` -- the whole of the divisor and the
+whole of the window -- so the estimate D3 leaves is exact and the
+multiply-subtract cannot go negative. No pair of two-limb operands can reach
+D6. That is why Hacker's Delight's `2^95 / (2^63 + 1)`, which that book gives
+as an add-back vector for its own `divmnu`, only exercises D3 here. **Three
+limbs is the smallest divisor that leaves a limb D3 cannot see.**
+
+**The vector**, found by enumerating the corners of that shape rather than by
+random search, since D6's probability is about `2/b`:
+
+    n = 170141183381241069217422966122340155392   (4 limbs)
+    d =          39614081257132168801066942463    (3 limbs)
+    estimate 4294967294, true digit 4294967293 -> D6 gives back exactly 1
+    q = 4294967293, r = 39614081238685424740242292733
+
+**Verified by the same two probes that found the gap**, now reversed:
+
+    panic!() inside the branch  -> 23 pass, ONLY this test fails
+    delete `q[j] -= 1`          -> 23 pass, ONLY this test fails
+
+The first says the test reaches D6; the second says it would notice if D6 were
+wrong. Nothing else in the module does either.
+
+**A method note worth keeping.** Before committing the vector I re-simulated
+`divmod` in Python -- normalisation, the real correction loop, the borrow
+arithmetic -- and checked it against the case whose answer was already
+measured: it predicted 0 firings for the Hacker's Delight vector and 1 for
+this one. A model that reproduces a result you have independently confirmed is
+worth believing about a result you have not. The first simulation, which
+clamped `qhat` to `b - 1` instead of decrementing, would have found nothing.
 
 **Where it lives:** `userspace/coreutils/src/bignat.rs`, `Nat::divmod`.
 

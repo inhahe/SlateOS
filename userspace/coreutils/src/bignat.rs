@@ -627,6 +627,46 @@ mod tests {
         }
     }
 
+    /// Step D6 -- the add-back. The estimate survives D3 still one too
+    /// large, the multiply-subtract goes negative, and the divisor has to be
+    /// added back in while the quotient limb is given up.
+    ///
+    /// THIS BRANCH USED TO BE REACHED BY NOTHING. A `panic!()` inside it left
+    /// all 23 tests passing, and deleting its `q[j] -= 1` did too.
+    ///
+    /// WHY IT IS HARD TO HIT, and why the obvious attempts fail. D3's
+    /// correction loop consults `v[n-2]` and `u[j+n-2]`, so for a TWO-limb
+    /// divisor it sees the whole of `v` and the estimate it leaves is exact:
+    /// D6 is unreachable for `n == 2` no matter what the operands are. That
+    /// is why Hacker's Delight's 2^95 / (2^63+1) vector -- which that book
+    /// labels an add-back case for its own `divmnu` -- only exercises D3
+    /// here. A THREE-limb divisor is the smallest that leaves a limb D3
+    /// cannot see.
+    ///
+    /// Found by enumerating the corners of that shape rather than by random
+    /// search: Knuth puts D6's probability near `2/b`, one division in two
+    /// billion, and 20,000 random hard-shaped divisions fired it zero times.
+    ///
+    /// The estimate here comes out as 4294967294 and the true digit is
+    /// 4294967293, so D6 gives back exactly one.
+    #[test]
+    fn long_division_exercises_the_add_back() {
+        // Checkable against `python -c "print(divmod(n, d))"`.
+        let n = dec("170141183381241069217422966122340155392");
+        let d = dec("39614081257132168801066942463");
+
+        let (q, r) = n.divmod(&d);
+
+        assert_eq!(text(&q), "4294967293", "quotient after the give-back");
+        assert_eq!(
+            text(&r),
+            "39614081238685424740242292733",
+            "remainder after the divisor was added back"
+        );
+        assert_eq!(r.cmp(&d), Ordering::Less, "remainder must be below divisor");
+        assert_eq!(text(&q.mul(&d).add(&r)), text(&n), "q*d + r == n");
+    }
+
     /// Algorithm D's step D3, where the first estimate of a quotient limb
     /// comes out as `b` itself and has to be walked back.
     ///

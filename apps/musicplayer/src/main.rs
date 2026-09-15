@@ -3898,6 +3898,44 @@ mod tests {
         })
     }
 
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The other door test pins that the key *opens* the picker -- but the key
+    /// handler is what opens it, so cutting the picker's event routing
+    /// entirely leaves that assertion true. This is the half routing actually
+    /// decides: with a dialog up, a keystroke belongs to the dialog, and a
+    /// window that scrolls underneath one is a modal that is not modal.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_playlist() {
+        let mut state = PlayerState::new();
+        state.add_track(Track::from_path(PathBuf::from("/music/one.mp3")));
+        state.add_track(Track::from_path(PathBuf::from("/music/two.mp3")));
+        state.current_track_index = Some(0);
+
+        handle_event(&mut state, &ctrl_key(Key::O));
+        assert!(state.picker.is_open(), "control: the picker must be up");
+
+        // `n` is the next-track shortcut, and a letter somebody might type
+        // into a filename.
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::N,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::from("n"),
+            }),
+        );
+        assert_eq!(
+            state.current_track_index,
+            Some(0),
+            "a letter typed at the open dialog changed the track behind it"
+        );
+    }
+
     /// A playlist survives a save and an open.
     ///
     /// `load_m3u` and `export_m3u` were both written, both tested, and neither

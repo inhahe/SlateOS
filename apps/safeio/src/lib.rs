@@ -121,6 +121,101 @@ pub fn copies_performed() -> u64 {
 ///
 /// Returns the underlying [`io::Error`] if the directory cannot be written,
 /// the data cannot be flushed, or the rename fails.
+/// What a bounded read actually returned.
+///
+/// The three fields exist because a caller needs all three to say something
+/// true, and eight apps had each worked that out separately.
+#[derive(Clone, Debug)]
+pub struct CappedRead {
+    /// The text that was read, cut at a character boundary.
+    pub text: String,
+    /// The file's full length in bytes, whether or not all of it was read.
+    pub whole: usize,
+    /// Whether `text` is shorter than the file.
+    pub truncated: bool,
+}
+
+impl CappedRead {
+    /// A prefix to put in front of whatever the caller was going to say, or
+    /// the empty string when nothing was cut.
+    ///
+    /// **Front-loaded, deliberately.** A truncated document usually fails to
+    /// parse -- its closing tags or its last record were in the part that was
+    /// dropped -- so a caller that reports the parse error first tells the
+    /// user their file is malformed when it is merely long.
+    #[must_use]
+    pub fn note(&self, max: usize) -> String {
+        if self.truncated {
+            format!("INCOMPLETE ({max} of {} bytes read): ", self.whole)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Drop any final partial line.
+    ///
+    /// For line-oriented formats, where a half-record is worse than a missing
+    /// one: `apps/dbviewer` imports CSV, and a cut in the middle of a row
+    /// yields a record with half its columns that the parser accepts.
+    #[must_use]
+    pub fn to_last_line(mut self) -> Self {
+        if self.truncated {
+            let keep = self.text.rfind('\n').map_or(0, |nl| nl);
+            self.text.truncate(keep);
+        }
+        self
+    }
+}
+
+/// Read `path` as text, stopping after `max` bytes.
+///
+/// # Why a bounded read is its own function
+///
+/// Eight applications had written this loop, and they agree -- I checked all
+/// eight before replacing them. That is the moment to collect it, not after
+/// one of them drifts: the same file held twelve hand-rolled Rust maskers and
+/// three of them were wrong about raw strings.
+///
+/// The cut is moved back to a character boundary because slicing a `String`
+/// anywhere else panics, and the loop terminates because offset 0 is always a
+/// boundary.
+///
+/// # What this does NOT do
+///
+/// It does not decide what to say. A truncation means different things to
+/// different formats -- a cut calendar silently loses appointments, a cut CSV
+/// silently loses rows, a cut XML document usually fails to parse outright --
+/// and only the caller knows which. [`CappedRead::note`] offers the wording
+/// that suits most of them.
+///
+/// # Errors
+///
+/// Whatever `std::fs::read_to_string` returns: the file is missing, is not
+/// readable, or is not UTF-8.
+pub fn read_to_string_capped(path: &Path, max: usize) -> io::Result<CappedRead> {
+    let text = std::fs::read_to_string(path)?;
+    let whole = text.len();
+    if whole <= max {
+        return Ok(CappedRead {
+            text,
+            whole,
+            truncated: false,
+        });
+    }
+    let mut end = max;
+    // Terminates: offset 0 is always a character boundary.
+    while end > 0 && !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let mut text = text;
+    text.truncate(end);
+    Ok(CappedRead {
+        text,
+        whole,
+        truncated: true,
+    })
+}
+
 pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     // Resolve a symlink to the file it points at. `canonicalize` fails when
     // the path does not exist yet, which is the ordinary "save a new file"
@@ -304,6 +399,107 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// An under-cap read returns the file and says nothing was cut.
+    #[test]
+    fn a_short_file_is_read_whole_and_reports_no_truncation() {
+        let dir = std::env::temp_dir().join("slateos-safeio-capped");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("short.txt");
+        std::fs::write(&path, "hello\n").expect("write");
+
+        let got = read_to_string_capped(&path, 1024).expect("read");
+        assert_eq!(got.text, "hello\n");
+        assert_eq!(got.whole, 6);
+        assert!(!got.truncated);
+        assert_eq!(got.note(1024), "", "nothing was cut, so say nothing");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The cut lands on a character boundary.
+    ///
+    /// Slicing a `String` anywhere else panics. The cap here falls in the
+    /// middle of a three-byte character on purpose.
+    #[test]
+    fn the_cut_moves_back_to_a_character_boundary() {
+        let dir = std::env::temp_dir().join("slateos-safeio-capped");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("wide.txt");
+        // "aa" then twenty three-byte characters.
+        let body = format!("aa{}", "\u{65e5}".repeat(20));
+        std::fs::write(&path, &body).expect("write");
+
+        // 6 bytes in: "aa" plus one whole character (3) lands at 5, and 6 is
+        // one byte into the second character.
+        let got = read_to_string_capped(&path, 6).expect("read");
+        assert!(got.truncated);
+        assert_eq!(got.text, "aa\u{65e5}", "cut in the middle of a character");
+        assert_eq!(got.whole, body.len());
+        assert!(
+            got.note(6).starts_with("INCOMPLETE ("),
+            "a truncation must be reported first: {}",
+            got.note(6)
+        );
+    }
+
+    /// A cap larger than the file is not a truncation.
+    #[test]
+    fn a_cap_at_exactly_the_file_length_does_not_truncate() {
+        let dir = std::env::temp_dir().join("slateos-safeio-capped");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("exact.txt");
+        std::fs::write(&path, "abcd").expect("write");
+
+        let got = read_to_string_capped(&path, 4).expect("read");
+        assert!(!got.truncated, "a file that fits is not cut");
+        assert_eq!(got.text, "abcd");
+    }
+
+    /// `to_last_line` drops a half-record.
+    ///
+    /// For line-oriented formats a partial final line is worse than a missing
+    /// one, because a parser accepts it and the row silently loses columns.
+    #[test]
+    fn to_last_line_drops_a_partial_final_record() {
+        let dir = std::env::temp_dir().join("slateos-safeio-capped");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("rows.csv");
+        std::fs::write(&path, "a,b\n1,2\n3,4\n").expect("write");
+
+        // Cut inside the third line.
+        let got = read_to_string_capped(&path, 9)
+            .expect("read")
+            .to_last_line();
+        assert_eq!(got.text, "a,b\n1,2", "the half row should be gone");
+        assert!(got.truncated);
+    }
+
+    /// An untruncated read is left alone by `to_last_line`.
+    #[test]
+    fn to_last_line_does_not_touch_a_whole_file() {
+        let dir = std::env::temp_dir().join("slateos-safeio-capped");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("whole.csv");
+        std::fs::write(&path, "a,b\n1,2\n").expect("write");
+
+        let got = read_to_string_capped(&path, 4096)
+            .expect("read")
+            .to_last_line();
+        assert_eq!(
+            got.text, "a,b\n1,2\n",
+            "a complete file keeps its last line"
+        );
+    }
+
+    /// A missing file is an error, not an empty read.
+    #[test]
+    fn a_missing_file_is_an_error_rather_than_an_empty_string() {
+        let path = std::env::temp_dir().join("slateos-safeio-absent-file.txt");
+        let _ = std::fs::remove_file(&path);
+        assert!(read_to_string_capped(&path, 16).is_err());
+    }
+
     use scratchdir::ScratchDir;
 
     /// A private temporary directory for one test, removed when the returned

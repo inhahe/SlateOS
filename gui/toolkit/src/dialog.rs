@@ -53,7 +53,7 @@
 //! layout, and the bug then lives in whichever copy you are not reading.
 
 use crate::date::Date;
-use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::{Frame, Rect};
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1971,6 +1971,171 @@ pub fn parent_of(path: impl AsRef<Path>) -> PathBuf {
 /// it the key to a different file, or to none. The only decode is at the draw
 /// call, which wants glyphs rather than a key.
 #[must_use]
+/// What [`FilePicker::handle`] did with an event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Picked {
+    /// The picker dealt with it. Redraw and do nothing else.
+    Handled,
+    /// The picker is closed and the user chose this path.
+    Chose(PathBuf),
+    /// Not an event the picker wants. The caller may handle it.
+    Ignored,
+}
+
+/// A [`FileDialog`] plus the three lines of plumbing every caller wrote.
+///
+/// # Why this exists
+///
+/// Ten applications each held an `Option<FileDialog>`, a `saving: bool`, an
+/// `apply_dialog_action` matching the same four arms, and an intercept at the
+/// top of their event handler. Only ONE arm of those ten matches differed --
+/// what to do with the chosen path -- and that is the arm this returns rather
+/// than handles.
+///
+/// Seventeen of them also computed the starting directory as `$HOME` or the
+/// temporary directory, identically.
+///
+/// # The intercept is the part worth centralising
+///
+/// While a picker is up it must take the keyboard, or a keystroke meant for a
+/// filename reaches the window behind it. That is not a cosmetic problem:
+/// `apps/podcast` binds Space to play, so a filename with a space in it starts
+/// an episode behind the dialog. The bug is invisible in any application whose
+/// tests happen not to have a selected item, and a test asserting "playback
+/// did not start" passes in that state whether or not the intercept is there.
+/// One implementation with one test is worth ten chances to get that wrong.
+#[derive(Debug, Default)]
+pub struct FilePicker {
+    dialog: Option<FileDialog>,
+    saving: bool,
+}
+
+impl FilePicker {
+    /// A picker with nothing up.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            dialog: None,
+            saving: false,
+        }
+    }
+
+    /// Whether a dialog is up. While it is, the caller must route events here
+    /// first.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.dialog.is_some()
+    }
+
+    /// Whether the dialog that is up is saving rather than opening.
+    ///
+    /// For callers that write several formats and choose by what was asked
+    /// for; most callers do not need it.
+    #[must_use]
+    pub fn is_saving(&self) -> bool {
+        self.saving
+    }
+
+    /// Where a picker starts when the caller has no better idea.
+    ///
+    /// `$HOME` if it is set, and the temporary directory if it is not.
+    /// **Emit or omit**: an unset `HOME` is not guessed at with a made-up
+    /// path, because a picker opening somewhere the user does not recognise
+    /// is a picker that looks broken.
+    #[must_use]
+    pub fn default_start() -> PathBuf {
+        std::env::var_os("HOME").map_or_else(std::env::temp_dir, PathBuf::from)
+    }
+
+    /// Put an open dialog up.
+    pub fn open_to_read(&mut self) {
+        self.put_up(
+            FileDialog::open().with_initial_path(Self::default_start()),
+            false,
+        );
+    }
+
+    /// Put a save dialog up, pre-filled with `filename`.
+    pub fn open_to_write(&mut self, filename: impl AsRef<OsStr>) {
+        let dialog = FileDialog::save()
+            .with_initial_path(Self::default_start())
+            .with_filename(filename);
+        self.put_up(dialog, true);
+    }
+
+    /// Put a dialog the caller built up, for the cases the two helpers above
+    /// do not cover -- a filter, a different starting directory, folder
+    /// selection.
+    pub fn put_up(&mut self, mut dialog: FileDialog, saving: bool) {
+        dialog.set_entries(list_directory(dialog.current_path()));
+        self.saving = saving;
+        self.dialog = Some(dialog);
+    }
+
+    /// Take it down without choosing anything.
+    pub fn close(&mut self) {
+        self.dialog = None;
+    }
+
+    /// Offer `event` to the dialog.
+    ///
+    /// Returns [`Picked::Ignored`] when no dialog is up, so a caller may call
+    /// this unconditionally at the top of its event handler and fall through
+    /// on `Ignored`.
+    ///
+    /// # What a dialog does and does not take
+    ///
+    /// **Input** -- key presses, key releases and mouse events -- is taken
+    /// while a dialog is up, including the release of a key whose press the
+    /// dialog handled, so the window behind never acts on half a keystroke.
+    ///
+    /// **Time and geometry** -- `Tick` and `Resize` -- are NOT taken. An
+    /// application's clock must keep running behind a dialog: `apps/podcast`
+    /// advances playback and its download queue on the tick, and swallowing
+    /// it would stop the audio because someone opened Save. A window that
+    /// resizes while a dialog is up still has to lay itself out.
+    pub fn handle(&mut self, event: &Event, width: f32, height: f32) -> Picked {
+        let Some(dialog) = self.dialog.as_mut() else {
+            return Picked::Ignored;
+        };
+        let action = match event {
+            Event::Key(key) if key.pressed => dialog.handle_event(key, height),
+            Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
+            // A key release, whose press the dialog took.
+            Event::Key(_) => return Picked::Handled,
+            // A tick or a resize: the application still needs these.
+            _ => return Picked::Ignored,
+        };
+        match action {
+            DialogAction::None => Picked::Handled,
+            DialogAction::Cancelled => {
+                self.dialog = None;
+                Picked::Handled
+            }
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.dialog.as_mut() {
+                    dialog.set_entries(list_directory(&path));
+                }
+                Picked::Handled
+            }
+            DialogAction::Selected(path) => {
+                self.dialog = None;
+                Picked::Chose(path)
+            }
+        }
+    }
+
+    /// The dialog's commands, or none when nothing is up.
+    ///
+    /// Push these LAST, so the dialog is drawn above the window it covers.
+    #[must_use]
+    pub fn render(&self, palette: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
+        self.dialog
+            .as_ref()
+            .map_or_else(Vec::new, |d| d.render(palette, width, height))
+    }
+}
+
 pub fn list_directory(path: impl AsRef<Path>) -> Vec<DirEntry> {
     let Ok(iter) = std::fs::read_dir(path.as_ref()) else {
         return Vec::new();
@@ -2016,6 +2181,140 @@ mod tests {
     )]
 
     use super::*;
+
+    fn press(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// A picker with nothing up ignores everything, so a caller may route
+    /// events to it unconditionally.
+    #[test]
+    fn a_closed_picker_ignores_events() {
+        let mut picker = FilePicker::new();
+        assert!(!picker.is_open());
+        assert_eq!(picker.handle(&press(Key::A), 800.0, 600.0), Picked::Ignored);
+        assert!(
+            picker
+                .render(&Palette::for_mode(false), 800.0, 600.0)
+                .is_empty()
+        );
+    }
+
+    /// An open picker takes the keyboard.
+    ///
+    /// This is the whole reason the type exists. Ten applications wrote this
+    /// intercept by hand, and a keystroke that escapes it reaches the window
+    /// behind the dialog -- `apps/podcast` binds Space to play, so a filename
+    /// with a space in it starts an episode.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_window_behind_it() {
+        let mut picker = FilePicker::new();
+        picker.open_to_write("notes.txt");
+        assert!(picker.is_open());
+        assert!(picker.is_saving());
+
+        assert_ne!(
+            picker.handle(&press(Key::Space), 800.0, 600.0),
+            Picked::Ignored,
+            "a space reached the window behind the dialog"
+        );
+    }
+
+    /// A key RELEASE is consumed too, not passed through.
+    ///
+    /// The dialog acts on presses. If the matching release were returned as
+    /// `Ignored`, the window behind would act on half a keystroke whose press
+    /// it never saw.
+    #[test]
+    fn a_key_release_does_not_escape_to_the_window_behind() {
+        let mut picker = FilePicker::new();
+        picker.open_to_read();
+        let release = Event::Key(KeyEvent {
+            key: Key::Space,
+            pressed: false,
+            modifiers: crate::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(picker.handle(&release, 800.0, 600.0), Picked::Handled);
+    }
+
+    /// A tick is NOT taken, so the application's clock keeps running.
+    ///
+    /// `apps/podcast` advances playback and its download queue on the tick.
+    /// Swallowing it while a dialog is up would stop the audio because
+    /// somebody opened Save, and a resize would leave the window behind
+    /// laid out for its old size.
+    #[test]
+    fn a_tick_and_a_resize_still_reach_the_application() {
+        let mut picker = FilePicker::new();
+        picker.open_to_read();
+        assert_eq!(
+            picker.handle(&Event::Tick { elapsed_ms: 16 }, 800.0, 600.0),
+            Picked::Ignored,
+            "the application's clock stopped because a dialog was open"
+        );
+        assert_eq!(
+            picker.handle(
+                &Event::Resize {
+                    width: 640,
+                    height: 480
+                },
+                800.0,
+                600.0
+            ),
+            Picked::Ignored,
+            "the window behind cannot lay itself out"
+        );
+        assert!(picker.is_open(), "neither should have closed the dialog");
+    }
+
+    /// Escape takes the picker down and chooses nothing.
+    #[test]
+    fn escape_closes_the_picker_without_choosing() {
+        let mut picker = FilePicker::new();
+        picker.open_to_read();
+        assert_eq!(
+            picker.handle(&press(Key::Escape), 800.0, 600.0),
+            Picked::Handled
+        );
+        assert!(!picker.is_open(), "Escape left the dialog up");
+    }
+
+    /// Confirming a save returns the path the caller asked about.
+    #[test]
+    fn confirming_a_save_returns_the_chosen_path() {
+        let dir = std::env::temp_dir().join("slateos-picker-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let mut picker = FilePicker::new();
+        picker.put_up(
+            FileDialog::save()
+                .with_initial_path(&dir)
+                .with_filename("chosen.txt"),
+            true,
+        );
+        match picker.handle(&press(Key::Enter), 800.0, 600.0) {
+            Picked::Chose(path) => {
+                assert_eq!(path, dir.join("chosen.txt"));
+                assert!(!picker.is_open(), "choosing left the dialog up");
+            }
+            other => panic!("expected a chosen path, got {other:?}"),
+        }
+    }
+
+    /// `close` takes it down.
+    #[test]
+    fn close_takes_the_picker_down() {
+        let mut picker = FilePicker::new();
+        picker.open_to_read();
+        picker.close();
+        assert!(!picker.is_open());
+    }
 
     /// The size the tests render and dispatch at. The dialog stores no size of
     /// its own — every handler is *given* one, exactly as a host gives it — so

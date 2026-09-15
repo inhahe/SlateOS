@@ -127,6 +127,67 @@ fn files_identical(path_a: &str, path_b: &str) -> bool {
     a == b
 }
 
+/// Replace `dup_path` with a hard link to `master_path`, without ever
+/// leaving the duplicate's data unreachable.
+///
+/// **This replaces a sequence that destroyed files.** It was:
+///
+/// ```text
+/// fs::remove_file(dup_path)?;          // the data is now gone
+/// fs::hard_link(master_path, dup_path) // ...and if THIS fails,
+///     // Try to restore the original file.
+///     continue;                        // it stays gone
+/// ```
+///
+/// The comment said "Try to restore the original file" and no restore was
+/// written — the next line was `continue`. So any failure between the unlink
+/// and the link lost the duplicate outright: a full disk, a cross-device
+/// master, a read-only directory, the link count already at its maximum, or
+/// simply losing the race with another writer. The content was identical to
+/// the master's *at the moment it was compared*, which is the only reason this
+/// was survivable at all, and it is not a guarantee: `files_identical` reads
+/// both files separately and the master can change afterwards.
+///
+/// Link-then-rename has no such window. `hard_link` creates a NEW name, so
+/// nothing is removed until it has succeeded, and `rename` over the duplicate
+/// is atomic on both filesystems this ships on. If the link fails there is
+/// nothing to undo; if the rename fails, the temporary is cleaned up and the
+/// duplicate is still there.
+///
+/// Returns whether the link was made, and counts its own errors.
+fn link_over(master_path: &str, dup_path: &str, opts: &HardlinkOpts, stats: &mut Stats) -> bool {
+    // The temporary must be in the SAME directory as the duplicate: `rename`
+    // is only atomic within a filesystem, and a `/tmp` staging path would
+    // cross one on any normal layout.
+    let tmp_path = format!("{dup_path}.hardlink-tmp");
+
+    // A leftover from an interrupted earlier run would make `hard_link` fail
+    // with EEXIST forever. Removing it is safe precisely because this name is
+    // ours: it is derived from the duplicate's own path.
+    let _ = fs::remove_file(&tmp_path);
+
+    if let Err(e) = fs::hard_link(master_path, &tmp_path) {
+        if !opts.quiet {
+            eprintln!("hardlink: cannot link {dup_path}: {e}");
+        }
+        stats.errors += 1;
+        return false;
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, dup_path) {
+        if !opts.quiet {
+            eprintln!("hardlink: cannot replace {dup_path}: {e}");
+        }
+        // The duplicate is untouched; only our temporary needs clearing.
+        let _ = fs::remove_file(&tmp_path);
+        stats.errors += 1;
+        return false;
+    }
+
+    stats.links_created += 1;
+    true
+}
+
 // ============================================================================
 // Directory scanning
 // ============================================================================
@@ -261,26 +322,8 @@ fn deduplicate(opts: &HardlinkOpts) -> Stats {
                     eprintln!("  {} => {}", dup_path, master_path);
                 }
 
-                if !opts.dry_run {
-                    // Create hardlink: remove dup, link to master.
-                    if let Err(e) = fs::remove_file(dup_path) {
-                        if !opts.quiet {
-                            eprintln!("hardlink: cannot remove {dup_path}: {e}");
-                        }
-                        stats.errors += 1;
-                        continue;
-                    }
-
-                    if let Err(e) = fs::hard_link(master_path, dup_path) {
-                        if !opts.quiet {
-                            eprintln!("hardlink: cannot link {dup_path}: {e}");
-                        }
-                        stats.errors += 1;
-                        // Try to restore the original file.
-                        continue;
-                    }
-
-                    stats.links_created += 1;
+                if !opts.dry_run && !link_over(master_path, dup_path, opts, &mut stats) {
+                    continue;
                 }
             }
         }
@@ -431,6 +474,119 @@ fn main() {
 mod tests {
     use super::*;
 
+    // ---------------- link_over ----------------
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "slateos-hardlink-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&p);
+        p
+    }
+
+    fn opts_for_test() -> HardlinkOpts {
+        let mut o = parse_args(&[]);
+        o.quiet = true;
+        o
+    }
+
+    fn zero_stats() -> Stats {
+        Stats {
+            files_scanned: 0,
+            duplicates_found: 0,
+            bytes_saved: 0,
+            links_created: 0,
+            errors: 0,
+        }
+    }
+
+    /// THE PROPERTY THE OLD CODE DID NOT HAVE. A link that cannot be made must
+    /// leave the duplicate exactly where it was. The previous sequence removed
+    /// the duplicate FIRST and carried a comment promising a restore that was
+    /// never written, so every failure between the two steps destroyed the
+    /// file.
+    #[test]
+    fn a_failed_link_leaves_the_duplicate_intact() {
+        let dir = scratch("failed-link");
+        let dup = dir.join("dup.txt");
+        fs::write(&dup, b"irreplaceable").expect("scratch write");
+
+        let mut stats = zero_stats();
+        let ok = link_over(
+            // A master that does not exist: `hard_link` must fail.
+            &dir.join("no-such-master").to_string_lossy(),
+            &dup.to_string_lossy(),
+            &opts_for_test(),
+            &mut stats,
+        );
+
+        assert!(!ok, "it must report failure");
+        assert_eq!(stats.links_created, 0);
+        assert_eq!(stats.errors, 1);
+        assert!(dup.exists(), "THE DUPLICATE MUST STILL EXIST");
+        assert_eq!(
+            fs::read(&dup).expect("read back"),
+            b"irreplaceable",
+            "and still hold its own bytes"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A failed link must not leave its scratch name behind either, or the
+    /// next run trips over `EEXIST` on a path it chose itself.
+    #[test]
+    fn a_failed_link_leaves_no_temporary_behind() {
+        let dir = scratch("no-temp");
+        let dup = dir.join("dup.txt");
+        fs::write(&dup, b"x").expect("scratch write");
+
+        let mut stats = zero_stats();
+        let _ = link_over(
+            &dir.join("no-such-master").to_string_lossy(),
+            &dup.to_string_lossy(),
+            &opts_for_test(),
+            &mut stats,
+        );
+
+        let tmp = dir.join("dup.txt.hardlink-tmp");
+        assert!(!tmp.exists(), "left {tmp:?} behind");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The ordinary path: the duplicate ends up sharing the master's content,
+    /// and the master is untouched.
+    #[test]
+    fn a_successful_link_replaces_the_duplicate_and_spares_the_master() {
+        let dir = scratch("success");
+        let master = dir.join("master.txt");
+        let dup = dir.join("dup.txt");
+        fs::write(&master, b"shared bytes").expect("scratch write");
+        fs::write(&dup, b"shared bytes").expect("scratch write");
+
+        let mut stats = zero_stats();
+        let ok = link_over(
+            &master.to_string_lossy(),
+            &dup.to_string_lossy(),
+            &opts_for_test(),
+            &mut stats,
+        );
+
+        assert!(ok);
+        assert_eq!(stats.links_created, 1);
+        assert_eq!(stats.errors, 0);
+        assert!(master.exists(), "the master is never the one removed");
+        assert_eq!(fs::read(&dup).expect("read back"), b"shared bytes");
+        assert!(
+            !dir.join("dup.txt.hardlink-tmp").exists(),
+            "the temporary is renamed away, not left"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
     #[test]
     fn test_sha256_bytes_deterministic() {
         let data = b"hello world";

@@ -84,6 +84,38 @@ terminator before comparing — and the formatter has to emit the
 and context output alike. Upstream diffutils carries a flag per side for exactly
 this.
 
+## TD-B-HARDLINK-MERGES-ON-CONTENT-ALONE-AND-ALL-FIVE-RESPECT-FLAGS-ARE-INERT — 2026-09-15 — OPEN
+
+**In short:** `hardlink` decides two files are the same from their **contents
+only**. Every flag that exists to narrow that — `-f/--respect-name`,
+`-t/--respect-time`, `-p/--respect-perm`, `-o/--respect-owner`,
+`-x/--respect-xattr` — is parsed, stored, advertised, and read by nothing. A
+user who passes `-o` to avoid merging across owners gets the merge anyway.
+
+**Why it matters more than an ordinary inert flag.** Linking is destructive and
+collapses metadata. Two files with identical bytes but different modes become
+one inode with the *master's* mode, so `hardlink -p` failing to respect
+permissions can turn a `0600` file into a `0644` one — a privacy regression
+the user explicitly asked to prevent. `-o` does the same for ownership.
+
+**What implementing them needs.** `FileInfo` carries the path and size;
+deciding these flags needs `st_mode`, `st_uid`, `st_gid`, `st_mtime` and the
+xattr set captured at scan time, then compared before a group is linked rather
+than after. That is a change to what the scan records, not a condition bolted
+onto the link step — the grouping happens by content hash long before
+`link_over` is reached, so filtering at the link is too late to be cheap and
+too early to be correct.
+
+**Not fixed in the same change as the data-loss repair**, deliberately: that
+commit's claim is "a failed link no longer destroys the duplicate", and
+widening it to "and the right files are chosen" would make one commit answer
+two questions. The destructive window was the urgent half.
+
+**Where it lives:** `userspace/hardlink/src/main.rs` — `HardlinkOpts`'s five
+`respect_*` fields, `files_identical`, and the grouping in `deduplicate`.
+
+---
+
 ## TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED — 2026-09-15 — OPEN
 
 **In short:** `shred --random-source=FILE` now fails before touching the file

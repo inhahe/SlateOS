@@ -223,53 +223,72 @@ fn read_magic_bytes(path: &str) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+// ---------------------------------------------------------------------------
+// Bounded reads
+//
+// Each of these used to guard itself with `offset + N`, which is an addition
+// that can overflow, and each now uses `get(offset..)`, which cannot.
+//
+// **This is defence in depth, NOT the repair of a live bug, and the first
+// version of this comment said otherwise.** It claimed the guard "was bypassed
+// on exactly the inputs it existed for". That is false on this target and the
+// reason is worth keeping: every offset `file` passes in comes from a `u32`
+// field widened to `usize` -- `pe_offset` is `read_u32_le(buf, 0x3C) as usize`
+// -- so on x86_64 the operands are bounded by 2^32 and their sum cannot reach
+// `usize::MAX`. The shape is the classic wrappable bounds check; the TYPES
+// make it unreachable here.
+//
+// What is true, and why the rewrite stays:
+//
+//   * the functions are public to the rest of this file and nothing in their
+//     signatures says "offsets must be u32-bounded" -- the next caller to
+//     compute an offset rather than read one restores the hazard silently;
+//   * the same shape IS live on a 32-bit target, where `u32 as usize` spans
+//     the whole range;
+//   * `get(offset..)?.get(..N)?` is shorter than the guard it replaces and has
+//     no arithmetic to audit, so the safe version costs nothing.
+//
+// The test below pins the behaviour at `usize::MAX` directly, which is the
+// honest way to state it: the FUNCTION is now total over its argument domain,
+// whatever its callers happen to pass today.
+//
+// Found while putting this crate under the workspace lint policy, which had
+// never applied to it. `arithmetic_side_effects` flagged the additions; it
+// does not, and cannot, say whether a caller can reach them.
+// ---------------------------------------------------------------------------
+
 /// Check whether the buffer starts with the given byte sequence.
 #[inline]
 fn starts_with(buf: &[u8], magic: &[u8]) -> bool {
-    buf.len() >= magic.len() && buf[..magic.len()] == *magic
+    buf.starts_with(magic)
 }
 
 /// Check whether `needle` appears at `offset` in `buf`.
 #[inline]
 fn has_at(buf: &[u8], offset: usize, needle: &[u8]) -> bool {
-    if buf.len() < offset + needle.len() {
-        return false;
-    }
-    buf[offset..offset + needle.len()] == *needle
+    buf.get(offset..)
+        .is_some_and(|tail| tail.starts_with(needle))
+}
+
+/// The `N` bytes at `offset`, or `None` if they are not all there.
+#[inline]
+fn bytes_at<const N: usize>(buf: &[u8], offset: usize) -> Option<[u8; N]> {
+    buf.get(offset..)?.get(..N)?.try_into().ok()
 }
 
 /// Read a little-endian u16 from a buffer at the given offset.
 fn read_u16_le(buf: &[u8], offset: usize) -> Option<u16> {
-    if buf.len() < offset + 2 {
-        return None;
-    }
-    Some(u16::from_le_bytes([buf[offset], buf[offset + 1]]))
+    bytes_at::<2>(buf, offset).map(u16::from_le_bytes)
 }
 
 /// Read a little-endian u32 from a buffer at the given offset.
 fn read_u32_le(buf: &[u8], offset: usize) -> Option<u32> {
-    if buf.len() < offset + 4 {
-        return None;
-    }
-    Some(u32::from_le_bytes([
-        buf[offset],
-        buf[offset + 1],
-        buf[offset + 2],
-        buf[offset + 3],
-    ]))
+    bytes_at::<4>(buf, offset).map(u32::from_le_bytes)
 }
 
 /// Read a big-endian u32 from a buffer at the given offset.
 fn read_u32_be(buf: &[u8], offset: usize) -> Option<u32> {
-    if buf.len() < offset + 4 {
-        return None;
-    }
-    Some(u32::from_be_bytes([
-        buf[offset],
-        buf[offset + 1],
-        buf[offset + 2],
-        buf[offset + 3],
-    ]))
+    bytes_at::<4>(buf, offset).map(u32::from_be_bytes)
 }
 
 // ============================================================================
@@ -1244,6 +1263,48 @@ mod tests {
         b
     }
 
+    /// The readers are TOTAL over their argument domain: any offset, including
+    /// `usize::MAX`, gets `None` rather than a panic.
+    ///
+    /// Against the old code every assertion here panics rather than failing,
+    /// because `offset + N` overflows. **That does not mean a caller could
+    /// reach it** -- every offset this file passes in is a `u32` widened to
+    /// `usize`, so on x86_64 the sum is bounded well below `usize::MAX`. The
+    /// first version of this comment claimed a live bug; it is defence in
+    /// depth, and the distinction is the difference between reading a shape
+    /// and reading the types.
+    #[test]
+    fn a_huge_offset_cannot_wrap_the_bounds_check() {
+        let buf = [0u8; 8];
+
+        assert_eq!(read_u16_le(&buf, usize::MAX), None);
+        assert_eq!(read_u16_le(&buf, usize::MAX - 1), None);
+        assert_eq!(read_u32_le(&buf, usize::MAX - 3), None);
+        assert_eq!(read_u32_be(&buf, usize::MAX - 3), None);
+        assert!(!has_at(&buf, usize::MAX, b"xy"));
+        assert!(!has_at(&buf, usize::MAX - 1, b"xy"));
+
+        // ...and an offset just past the end, which is the ordinary case the
+        // guard was always right about.
+        assert_eq!(read_u16_le(&buf, 7), None);
+        assert_eq!(read_u16_le(&buf, 6), Some(0));
+    }
+
+    /// The readers still read. A wrong answer here would be a worse outcome
+    /// than the panic they replace.
+    #[test]
+    fn the_bounded_readers_still_read_the_right_bytes() {
+        let buf = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+        assert_eq!(read_u16_le(&buf, 0), Some(0x0201));
+        assert_eq!(read_u16_le(&buf, 1), Some(0x0302));
+        assert_eq!(read_u32_le(&buf, 0), Some(0x0403_0201));
+        assert_eq!(read_u32_be(&buf, 0), Some(0x0102_0304));
+        assert_eq!(read_u32_le(&buf, 2), Some(0x0605_0403));
+        assert!(has_at(&buf, 2, &[0x03, 0x04]));
+        assert!(!has_at(&buf, 2, &[0x03, 0x05]));
+        assert!(starts_with(&buf, &[0x01, 0x02]));
+        assert!(!starts_with(&buf, &[0x02]));
+    }
     #[test]
     fn an_elf_executable_is_described_and_typed() {
         let t = detect_elf(&elf64_exec()).expect("an ELF header must be recognised");

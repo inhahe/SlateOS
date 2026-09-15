@@ -47,10 +47,24 @@ fn detect_personality(argv0: &str) -> Personality {
 struct BlkidInfo {
     device: PathBuf,
     fs_type: String,
-    label: String,
+    /// The volume label, EXACTLY as it sits on the device.
+    ///
+    /// Bytes, not `String`, because a label is OS-boundary data: the on-disk
+    /// field is a fixed-width run of bytes and no filesystem promises it is
+    /// UTF-8. Decoding it with `from_utf8_lossy` replaced every invalid
+    /// sequence with U+FFFD, which made DIFFERENT labels compare EQUAL --
+    /// `41 ff fe 42` and `41 fe ff 42` both became `A<fffd><fffd>B`. That is
+    /// the same collision the all-zero UUID caused, from a different cause,
+    /// and it broke `findfs LABEL=` in both directions: it could never match
+    /// a label it had corrupted, and it could match the wrong device among
+    /// several that corrupted to the same string.
+    ///
+    /// Self-review item 7: never force UTF-8 on OS-boundary data, and no
+    /// `from_utf8_lossy` -- that is silent data corruption.
+    label: Vec<u8>,
     uuid: String,
     partuuid: String,
-    part_label: String,
+    part_label: Vec<u8>,
     block_size: u64,
     // Filesystem size, read and not printed by the current columns.
     #[allow(dead_code)]
@@ -168,10 +182,10 @@ fn detect_filesystem(device_path: &Path) -> Option<BlkidInfo> {
     let mut info = BlkidInfo {
         device: device_path.to_path_buf(),
         fs_type: String::new(),
-        label: String::new(),
+        label: Vec::new(),
         uuid: String::new(),
         partuuid: String::new(),
-        part_label: String::new(),
+        part_label: Vec::new(),
         block_size: 0,
         fs_size: 0,
     };
@@ -244,6 +258,19 @@ fn u64_le(buf: &[u8], offset: usize) -> Option<u64> {
     bytes_at::<8>(buf, offset).map(u64::from_le_bytes)
 }
 
+/// A fixed-width on-disk label field, trimmed to its content.
+///
+/// `pad` is the byte the filesystem pads with: NUL for ext4, XFS and swap.
+/// The result is still raw bytes -- trimming is the only processing a label
+/// gets on the way through.
+fn trim_pad(field: &[u8], pad: u8) -> &[u8] {
+    let end = field
+        .iter()
+        .rposition(|&b| b != pad)
+        .map_or(0, |i| i.saturating_add(1));
+    field.get(..end).unwrap_or_default()
+}
+
 /// Format 16 raw bytes as a canonical 8-4-4-4-12 lowercase UUID.
 ///
 /// ext4, XFS and swap all store a UUID this way and all three used to format
@@ -276,9 +303,7 @@ fn parse_ext4_info(buf: &[u8], info: &mut BlkidInfo) {
 
     // Volume label: offset 0x78, 16 bytes
     if let Some(label) = field_at(sb, 0x78, 16) {
-        info.label = String::from_utf8_lossy(label)
-            .trim_end_matches('\0')
-            .to_string();
+        info.label = trim_pad(label, 0).to_vec();
     }
 
     // UUID: offset 0x68, 16 bytes
@@ -318,7 +343,8 @@ fn parse_fat_info(buf: &[u8], info: &mut BlkidInfo) {
     };
 
     if let Some(label) = field_at(buf, label_off, 11) {
-        info.label = String::from_utf8_lossy(label).trim().to_string();
+        // FAT pads its label with spaces rather than NUL.
+        info.label = label.trim_ascii().to_vec();
     }
     if let Some([b0, b1, b2, b3]) = bytes_at::<4>(buf, serial_off) {
         // Shown high half first, as blkid(8) prints it.
@@ -346,9 +372,7 @@ fn parse_xfs_info(buf: &[u8], info: &mut BlkidInfo) {
 
     // Label at offset 0x6C, 12 bytes
     if let Some(label) = field_at(buf, 0x6C, 12) {
-        info.label = String::from_utf8_lossy(label)
-            .trim_end_matches('\0')
-            .to_string();
+        info.label = trim_pad(label, 0).to_vec();
     }
 }
 
@@ -360,9 +384,7 @@ fn parse_swap_info(buf: &[u8], info: &mut BlkidInfo) {
     }
     // Label at offset 0x41C, 16 bytes
     if let Some(label) = field_at(buf, 0x41C, 16) {
-        info.label = String::from_utf8_lossy(label)
-            .trim_end_matches('\0')
-            .to_string();
+        info.label = trim_pad(label, 0).to_vec();
     }
 }
 
@@ -529,6 +551,20 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 // Output
 // ---------------------------------------------------------------------------
 
+/// Write one `TAG="value"` pair, where `value` is raw bytes off the device.
+///
+/// `write!` cannot be used for the value: it goes through `Display`, which
+/// only speaks `str`. The bytes are handed to `write_all` untouched.
+fn write_tag(writer: &mut dyn Write, first: &mut bool, tag: &str, value: &[u8]) -> io::Result<()> {
+    if !*first {
+        writer.write_all(b" ")?;
+    }
+    *first = false;
+    write!(writer, "{tag}=\"")?;
+    writer.write_all(value)?;
+    writer.write_all(b"\"")
+}
+
 fn run_blkid(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     let devices = if cfg.devices.is_empty() {
         enumerate_block_devices()
@@ -542,14 +578,16 @@ fn run_blkid(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
         if let Some(info) = detect_filesystem(device) {
             // Tag filter
             if let Some((ref tag, ref val)) = cfg.tag_filter {
-                let tag_val = match tag.to_uppercase().as_str() {
-                    "TYPE" => &info.fs_type,
+                let tag_val: &[u8] = match tag.to_uppercase().as_str() {
+                    "TYPE" => info.fs_type.as_bytes(),
                     "LABEL" => &info.label,
-                    "UUID" => &info.uuid,
-                    "PARTUUID" => &info.partuuid,
+                    "UUID" => info.uuid.as_bytes(),
+                    "PARTUUID" => info.partuuid.as_bytes(),
                     _ => continue,
                 };
-                if !val.is_empty() && tag_val != val {
+                // Compared as bytes so a label that is not UTF-8 can still be
+                // matched exactly, rather than never.
+                if !val.is_empty() && tag_val != val.as_bytes() {
                     continue;
                 }
             }
@@ -557,34 +595,36 @@ fn run_blkid(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
             match cfg.output_format {
                 OutputFormat::Default | OutputFormat::Full => {
                     write!(writer, "{}: ", info.device.display())?;
-                    let mut parts = Vec::new();
+                    let mut first = true;
                     if !info.label.is_empty() {
-                        parts.push(format!("LABEL=\"{}\"", info.label));
+                        write_tag(writer, &mut first, "LABEL", &info.label)?;
                     }
                     if !info.uuid.is_empty() {
-                        parts.push(format!("UUID=\"{}\"", info.uuid));
+                        write_tag(writer, &mut first, "UUID", info.uuid.as_bytes())?;
                     }
                     if !info.partuuid.is_empty() {
-                        parts.push(format!("PARTUUID=\"{}\"", info.partuuid));
+                        write_tag(writer, &mut first, "PARTUUID", info.partuuid.as_bytes())?;
                     }
                     if info.block_size > 0 {
-                        parts.push(format!("BLOCK_SIZE=\"{}\"", info.block_size));
+                        let size = info.block_size.to_string();
+                        write_tag(writer, &mut first, "BLOCK_SIZE", size.as_bytes())?;
                     }
-                    parts.push(format!("TYPE=\"{}\"", info.fs_type));
-                    writeln!(writer, "{}", parts.join(" "))?;
+                    write_tag(writer, &mut first, "TYPE", info.fs_type.as_bytes())?;
+                    writer.write_all(b"\n")?;
                 }
                 OutputFormat::ValueOnly => {
                     if let Some((ref tag, _)) = cfg.tag_filter {
-                        let val = match tag.to_uppercase().as_str() {
-                            "TYPE" => &info.fs_type,
+                        let val: &[u8] = match tag.to_uppercase().as_str() {
                             "LABEL" => &info.label,
-                            "UUID" => &info.uuid,
-                            _ => &info.fs_type,
+                            "UUID" => info.uuid.as_bytes(),
+                            _ => info.fs_type.as_bytes(),
                         };
-                        writeln!(writer, "{val}")?;
+                        writer.write_all(val)?;
+                        writer.write_all(b"\n")?;
                     } else {
                         if !info.label.is_empty() {
-                            writeln!(writer, "{}", info.label)?;
+                            writer.write_all(&info.label)?;
+                            writer.write_all(b"\n")?;
                         }
                         if !info.uuid.is_empty() {
                             writeln!(writer, "{}", info.uuid)?;
@@ -593,19 +633,24 @@ fn run_blkid(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
                     }
                 }
                 OutputFormat::List => {
-                    writeln!(
+                    // The label is written separately because it is bytes; it
+                    // is last in the row, so nothing needs padding after it.
+                    write!(
                         writer,
-                        "{:<20} {:<10} {:<36} {}",
+                        "{:<20} {:<10} {:<36} ",
                         info.device.display(),
                         info.fs_type,
                         info.uuid,
-                        info.label
                     )?;
+                    writer.write_all(&info.label)?;
+                    writer.write_all(b"\n")?;
                 }
                 OutputFormat::Export => {
                     writeln!(writer, "DEVNAME={}", info.device.display())?;
                     if !info.label.is_empty() {
-                        writeln!(writer, "LABEL={}", info.label)?;
+                        writer.write_all(b"LABEL=")?;
+                        writer.write_all(&info.label)?;
+                        writer.write_all(b"\n")?;
                     }
                     if !info.uuid.is_empty() {
                         writeln!(writer, "UUID={}", info.uuid)?;
@@ -646,10 +691,10 @@ fn run_findfs(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     for device in &devices {
         if let Some(info) = detect_filesystem(device) {
             let matches = match tag.as_str() {
-                "LABEL" => info.label == value,
+                "LABEL" => info.label == value.as_bytes(),
                 "UUID" => info.uuid == value,
                 "PARTUUID" => info.partuuid == value,
-                "PARTLABEL" => info.part_label == value,
+                "PARTLABEL" => info.part_label == value.as_bytes(),
                 "TYPE" => info.fs_type == value,
                 _ => false,
             };
@@ -855,17 +900,17 @@ mod tests {
         let mut info = BlkidInfo {
             device: PathBuf::from("/dev/test"),
             fs_type: "ext4".to_string(),
-            label: String::new(),
+            label: Vec::new(),
             uuid: String::new(),
             partuuid: String::new(),
-            part_label: String::new(),
+            part_label: Vec::new(),
             block_size: 0,
             fs_size: 0,
         };
         parse_ext4_info(&buf, &mut info);
         assert_eq!(info.block_size, 4096);
         assert_eq!(info.fs_type, "ext4");
-        assert!(info.label.starts_with("TEST"));
+        assert!(info.label.starts_with(b"TEST"));
     }
 
     /// A device that stops short of a field must not report that field.
@@ -898,13 +943,45 @@ mod tests {
         BlkidInfo {
             device: PathBuf::from("/dev/test"),
             fs_type: fs_type.to_string(),
-            label: String::new(),
+            label: Vec::new(),
             uuid: String::new(),
             partuuid: String::new(),
-            part_label: String::new(),
+            part_label: Vec::new(),
             block_size: 0,
             fs_size: 0,
         }
+    }
+
+    /// Two devices whose labels DIFFER on disk must not report the same
+    /// label, and must be told apart by `-t LABEL=`.
+    ///
+    /// Neither byte string is valid UTF-8, and both used to decode to
+    /// `A<U+FFFD><U+FFFD>B`. The collision is the bug: a label is an
+    /// identifier, and an identifier that merges distinct values is worse
+    /// than one that is merely unreadable.
+    #[test]
+    fn labels_that_are_not_utf8_stay_distinct() {
+        let parse = |label: &[u8]| {
+            let mut info = blank("ext4");
+            parse_ext4_info(&image(0x500, &[(0x478, label)]), &mut info);
+            info.label
+        };
+        let a = parse(b"A\xff\xfeB");
+        let b = parse(b"A\xfe\xffB");
+        assert_eq!(a, b"A\xff\xfeB".to_vec(), "label was not preserved verbatim");
+        assert_eq!(b, b"A\xfe\xffB".to_vec(), "label was not preserved verbatim");
+        assert_ne!(a, b, "two different on-disk labels collided");
+    }
+
+    /// Padding is trimmed, and a label that is ALL padding is empty rather
+    /// than a run of NULs -- the output path keys off `is_empty`.
+    #[test]
+    fn trim_pad_keeps_interior_bytes() {
+        assert_eq!(trim_pad(b"AB\0\0", 0), b"AB");
+        assert_eq!(trim_pad(b"A\0B\0", 0), b"A\0B");
+        assert_eq!(trim_pad(b"\0\0\0", 0), b"");
+        assert_eq!(trim_pad(b"", 0), b"");
+        assert_eq!(trim_pad(b"AB", 0), b"AB");
     }
 
     #[test]
@@ -940,7 +1017,7 @@ mod tests {
         );
         assert_eq!(info.block_size, 4096);
         assert_eq!(info.uuid, UUID_TEXT);
-        assert_eq!(info.label, "XFSLABEL");
+        assert_eq!(info.label, b"XFSLABEL".to_vec());
 
         // Ends at 40: the block size (needs 8) is there, the UUID (needs 48)
         // is not. The fields degrade one at a time, not all together.
@@ -959,7 +1036,7 @@ mod tests {
             &mut info,
         );
         assert_eq!(info.uuid, UUID_TEXT);
-        assert_eq!(info.label, "SWAPLBL");
+        assert_eq!(info.label, b"SWAPLBL".to_vec());
 
         let mut info = blank("swap");
         parse_swap_info(&image(0x410, &[]), &mut info);
@@ -997,7 +1074,7 @@ mod tests {
             ),
             &mut info,
         );
-        assert_eq!(info.label, "FATLABEL");
+        assert_eq!(info.label, b"FATLABEL".to_vec());
         assert_eq!(info.uuid, "1234-5678");
 
         // FAT16: a non-zero count moves both fields, and reading the FAT32
@@ -1015,7 +1092,7 @@ mod tests {
             ),
             &mut info,
         );
-        assert_eq!(info.label, "FAT16LBL");
+        assert_eq!(info.label, b"FAT16LBL".to_vec());
         assert_eq!(info.uuid, "1234-5678");
 
         // Ends before the sector count at 19: nothing is knowable but the
@@ -1085,7 +1162,7 @@ mod tests {
         // against a blkid that simply never parsed anything.
         let got = detect_filesystem(&full).expect("full image is detected");
         assert_eq!(got.uuid, UUID_TEXT);
-        assert_eq!(got.label, "REALLABEL");
+        assert_eq!(got.label, b"REALLABEL".to_vec());
 
         // Probe two: the parser REFUSES. The fields are not on the device, so
         // no value may be reported for them -- least of all a zero one.

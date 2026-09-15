@@ -56,6 +56,14 @@ WHAT IT CANNOT SEE, and this matters because most of its hits are fine:
     are correct by construction and are not reported, which is the right
     answer for the right reason: every other event still meets its own arm.
 
+WHAT HAS BEEN CHECKED, so nobody repeats it: `apps/` on 2026-09-15 (72
+dispatchers, 6 reported, 5 of them correct guards and one real -- `explorer`)
+and `gui/` the same day (8 dispatchers, 2 reported, both correct:
+`gui/desktop`'s `login_event` returns only when no login screen is up, and
+`gui/toolkit`'s modal returns only when its overlay is inactive). **The default
+root is `apps` alone, which is the narrowing that hid `explorer` in the first
+place** -- pass `--roots=apps,gui` unless you have a reason not to.
+
 Report-only. Read the guard before changing anything.
 
 Usage:  python scripts/find-swallowed-ticks.py [--roots=apps,gui]

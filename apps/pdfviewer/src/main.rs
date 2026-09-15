@@ -2568,14 +2568,39 @@ impl PdfViewerApp {
             overflow: TextOverflow::Ellipsis,
         });
 
+        // "Open a PDF to begin" is an instruction, and an instruction is a
+        // promise that following it will work. `can_open` is false in this
+        // build -- `main` installs no `OpenFn` -- so the invitation was for a
+        // capability that is not present.
+        //
+        // This app is otherwise the model the other no-door programs should
+        // copy: the opener is an injected capability, `can_open` reports
+        // whether one is installed, and the window opens on an empty tab
+        // rather than an invented document. Only the last line of the empty
+        // state had drifted ahead of what the build can do.
+        //
+        // Same defect as the one `apps/finance` nearly shipped this morning
+        // ("add an account and a transaction, and every figure below will be
+        // yours", in an app with no control that adds an account). A fix, or a
+        // placeholder, that promises a capability the program does not have is
+        // the same defect it was fixing, pointed one step further into the
+        // future.
+        let (hint, hint_wide) = if self.can_open() {
+            ("Open a PDF to begin", 200.0)
+        } else {
+            (
+                "No PDF reader is installed in this build, so none can be opened",
+                280.0,
+            )
+        };
         frame.push(RenderCommand::Text {
             x: cx,
             y: cy + 36.0,
-            text: "Open a PDF to begin".to_string(),
+            text: hint.to_string(),
             color: self.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
+            max_width: Some(hint_wide),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -4249,6 +4274,60 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The empty state does not invite an action the build cannot perform.
+    ///
+    /// It read "Open a PDF to begin" unconditionally. An instruction is a
+    /// promise that following it will work, and `can_open` is false in this
+    /// build -- `main` installs no `OpenFn`.
+    ///
+    /// The rest of this app is the model the other no-door programs should
+    /// copy: the opener is an injected capability, `can_open` reports whether
+    /// one is installed, and the window opens on an empty tab rather than an
+    /// invented document. Only the hint had drifted ahead of the build.
+    #[test]
+    fn the_empty_state_does_not_invite_an_open_that_cannot_happen() {
+        let app = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(!app.can_open(), "this build installs no opener");
+
+        let texts: Vec<String> = app
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !texts.iter().any(|t| t == "Open a PDF to begin"),
+            "the window invites an open it cannot perform",
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("No PDF reader is installed")),
+            "and does not say why: {texts:?}",
+        );
+
+        // And with an opener installed, the invitation comes back.
+        let mut with_opener = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        with_opener.set_opener(|_path| None);
+        assert!(with_opener.can_open());
+        let texts: Vec<String> = with_opener
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "Open a PDF to begin"),
+            "the invitation did not return when an opener was installed",
+        );
+    }
 
     /// Every colour the viewer's chrome draws comes from the user's palette.
     ///

@@ -940,7 +940,7 @@ work is real but it is not research.
 and because a reader looking at a 176-line baseline needs to know it is one
 wall and not 176 separate jobs.
 
-## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) -- member names now carry as bytes; ranlib/strip operands still do not
+## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) -- FIXED; ELF symbol names are a separate layer and stay text
 
 `ar` no longer dies on an operand that is not valid UTF-8, but it does not
 handle one either: it **refuses**, naming the bytes, at `decode_operand`.
@@ -1001,10 +1001,16 @@ Display sites go through `escape_unprintable`, so an unprintable byte in a
 member name cannot forge a line of `ar t` output. `ar x` writes the member out
 under its own name as an `OsString` rather than any text form.
 
-**Still open, and narrower than the heading:** the `ranlib` and `strip`
-personalities in the same binary hold their file-path operands as `String` and
-route them through `decode_operand`, which now serves only them. Same defect,
-one program over; a separate change with its own tests.
+**And done for `ranlib` and `strip` too, 2026-09-14.** Both held their file-path
+operands as `String`. They carry `OsString` now, and `decode_operand` — which
+by then served only them — is **deleted** rather than left as a refusal nothing
+calls. Its two tests went with it: they asserted a refusal that no longer
+happens, and a test that cannot fail is worse than no test.
+
+`strip -K` still takes its symbol names as text, deliberately. Those are ELF
+symbol names matched against a symbol table this file carries as `String`, and
+that layer — `ElfSection.name`, `ElfSymbol.name`, both from ELF string tables —
+is a different question from the `ar` member name and is not converted here.
 
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 

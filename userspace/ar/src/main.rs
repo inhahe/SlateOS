@@ -961,7 +961,7 @@ struct StripOptions {
     strip_debug: bool,
     strip_unneeded: bool,
     keep_symbols: Vec<String>,
-    output_file: Option<String>,
+    output_file: Option<OsString>,
     preserve_dates: bool,
     verbose: bool,
 }
@@ -1218,25 +1218,10 @@ impl ArOptions {
 }
 
 /// Parse ar command-line flags and return (options, archive_path, member_files).
-/// One operand as text, or a refusal naming the bytes.
 ///
-/// **Only `ranlib` and `strip` still need this.** `ar` itself no longer does:
-/// its archive paths, member files and member names are carried as bytes end
-/// to end, so it neither refuses nor decodes them.
-///
-/// The two remaining personalities take file paths and still hold them as
-/// `String`, which is the same defect one binary over. Converting them is the
-/// obvious follow-up and is not done here only because it is a separate
-/// change with its own tests.
-fn decode_operand(arg: &OsStr) -> Result<String, String> {
-    arg.to_str().map(str::to_string).ok_or_else(|| {
-        format!(
-            "this build cannot represent a member or archive name that is not              valid UTF-8: {}",
-            quoteaf_os(arg)
-        )
-    })
-}
-
+/// Operands are `OsString` throughout: the archive is a path, the member files
+/// are paths, and a member NAME is whatever bytes the archive holds. None of
+/// the three is required to be text.
 fn parse_ar_args(args: &[OsString]) -> Result<(ArOptions, OsString, Vec<OsString>), String> {
     if args.is_empty() {
         return Err("no operation specified".into());
@@ -1660,23 +1645,21 @@ fn format_timestamp(ts: u64) -> String {
 
 /// Parse ranlib arguments and run.
 fn run_ranlib(args: &[OsString]) -> Result<(), String> {
-    // Decoded at the boundary; see `decode_operand` for why this
-    // build cannot carry the bytes further in.
-    let args: Vec<String> = args
-        .iter()
-        .map(|a| decode_operand(a))
-        .collect::<Result<_, _>>()?;
-    let args: &[String] = &args;
-    let mut archive_path = None;
+    // No decode. The one operand is an archive PATH, and `ar_update_symtab`
+    // already takes an `&OsStr`.
+    let mut archive_path: Option<OsString> = None;
     let mut _deterministic = false;
 
     for arg in args {
-        if arg == "-D" {
+        // `""` for a word that is not valid Unicode: it matches no option and
+        // falls to the operand arm, which keeps `arg` itself.
+        let s: &str = arg.to_str().unwrap_or("");
+        if s == "-D" {
             _deterministic = true;
-        } else if arg.starts_with('-') {
-            return Err(format!("unknown option: {arg}"));
+        } else if s.starts_with('-') {
+            return Err(format!("unknown option: {}", quoteaf_os(arg)));
         } else {
-            archive_path = Some(OsString::from(arg));
+            archive_path = Some(arg.clone());
         }
     }
 
@@ -1689,14 +1672,18 @@ fn run_ranlib(args: &[OsString]) -> Result<(), String> {
 // ============================================================================
 
 /// Parse strip command-line arguments.
-fn parse_strip_args(args: &[String]) -> Result<(StripOptions, Vec<String>), String> {
+fn parse_strip_args(args: &[OsString]) -> Result<(StripOptions, Vec<OsString>), String> {
     let mut opts = StripOptions::new();
     let mut files = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
         let arg = &args[i];
-        match arg.as_str() {
+        // `""` for a word that is not valid Unicode: it matches no option and
+        // falls to the operand arm, which keeps `arg` -- and the operands here
+        // are the files being stripped.
+        let s: &str = arg.to_str().unwrap_or("");
+        match s {
             "-s" | "--strip-all" => {
                 opts.strip_all = true;
                 opts.strip_debug = false;
@@ -1717,7 +1704,12 @@ fn parse_strip_args(args: &[String]) -> Result<(StripOptions, Vec<String>), Stri
                 if i >= args.len() {
                     return Err("-K requires a symbol name".into());
                 }
-                opts.keep_symbols.push(args[i].clone());
+                // An ELF symbol name, not a path: it is matched against the
+                // symbol table, which this file carries as text. Scoped out of
+                // the bytes conversion deliberately -- see the `ar` entry in
+                // known-issues.md.
+                opts.keep_symbols
+                    .push(args[i].to_str().unwrap_or("").to_string());
             }
             "-o" => {
                 i += 1;
@@ -1736,9 +1728,10 @@ fn parse_strip_args(args: &[String]) -> Result<(StripOptions, Vec<String>), Stri
                 if let Some(sym) = other.strip_prefix("--keep-symbol=") {
                     opts.keep_symbols.push(sym.to_string());
                 } else if other.starts_with('-') {
-                    return Err(format!("unknown option: {other}"));
+                    return Err(format!("unknown option: {}", quoteaf_os(arg)));
                 } else {
-                    files.push(other.to_string());
+                    // `arg`, not the decoded view: this operand is a FILE.
+                    files.push(arg.clone());
                 }
             }
         }
@@ -1754,13 +1747,7 @@ fn parse_strip_args(args: &[String]) -> Result<(StripOptions, Vec<String>), Stri
 
 /// Run strip on the given files.
 fn run_strip(args: &[OsString]) -> Result<(), String> {
-    // Decoded at the boundary; see `decode_operand` for why this
-    // build cannot carry the bytes further in.
-    let args: Vec<String> = args
-        .iter()
-        .map(|a| decode_operand(a))
-        .collect::<Result<_, _>>()?;
-    let args: &[String] = &args;
+    // No decode. The operands are file PATHS.
     let (opts, files) = parse_strip_args(args)?;
 
     for file_path in &files {
@@ -1769,10 +1756,10 @@ fn run_strip(args: &[OsString]) -> Result<(), String> {
 
         let stripped = strip_elf(&data, &opts)?;
 
-        let output_path = opts.output_file.as_deref().unwrap_or(file_path.as_str());
+        let output_path: &OsStr = opts.output_file.as_deref().unwrap_or(file_path.as_os_str());
 
         if opts.verbose {
-            eprintln!("strip: {file_path}");
+            eprintln!("strip: {}", quoteaf_os(file_path));
         }
 
         // Read access/modification times before writing if preserve_dates
@@ -1899,36 +1886,6 @@ fn main() {
     clippy::indexing_slicing
 )]
 mod tests {
-    /// An operand that is not valid UTF-8 is REFUSED, with its bytes named.
-    ///
-    /// Before 2026-09-14 this input killed the process: `env::args()`'s
-    /// iterator unwraps. Refusing is not the end state -- the `ar` format
-    /// stores member names as bytes and this build carries them as `String`
-    /// -- but a refusal that says which layer is the obstacle is strictly
-    /// better than a panic that says nothing.
-    #[cfg(unix)]
-    #[test]
-    fn an_operand_that_is_not_utf8_is_refused_not_decoded() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        let bad = OsStr::from_bytes(b"lib\xe9.o");
-        let err = super::decode_operand(bad).unwrap_err();
-        assert!(err.contains("not"), "{err}");
-        // The bytes must appear, or the message names nothing the caller can
-        // act on -- which was the complaint against the panic.
-        assert!(err.contains("lib"), "{err}");
-    }
-
-    /// The control: an ordinary operand decodes and is returned unchanged.
-    #[test]
-    fn an_ordinary_operand_decodes() {
-        use std::ffi::OsStr;
-        assert_eq!(
-            super::decode_operand(OsStr::new("libfoo.o")).unwrap(),
-            "libfoo.o"
-        );
-    }
 
     use super::*;
 
@@ -3268,7 +3225,7 @@ mod tests {
 
     #[test]
     fn test_parse_strip_args_defaults() {
-        let args: Vec<String> = ["binary"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<OsString> = ["binary"].iter().map(OsString::from).collect();
         let (opts, files) = parse_strip_args(&args).unwrap();
         assert!(opts.strip_all);
         assert!(!opts.strip_debug);
@@ -3277,7 +3234,7 @@ mod tests {
 
     #[test]
     fn test_parse_strip_args_debug() {
-        let args: Vec<String> = ["-g", "binary"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<OsString> = ["-g", "binary"].iter().map(OsString::from).collect();
         let (opts, _) = parse_strip_args(&args).unwrap();
         assert!(opts.strip_debug);
         assert!(!opts.strip_all);
@@ -3285,9 +3242,9 @@ mod tests {
 
     #[test]
     fn test_parse_strip_args_keep_symbol() {
-        let args: Vec<String> = ["-K", "main", "binary"]
+        let args: Vec<OsString> = ["-K", "main", "binary"]
             .iter()
-            .map(|s| s.to_string())
+            .map(OsString::from)
             .collect();
         let (opts, _) = parse_strip_args(&args).unwrap();
         assert_eq!(opts.keep_symbols, vec!["main"]);
@@ -3295,9 +3252,9 @@ mod tests {
 
     #[test]
     fn test_parse_strip_args_keep_symbol_equals() {
-        let args: Vec<String> = ["--keep-symbol=main", "binary"]
+        let args: Vec<OsString> = ["--keep-symbol=main", "binary"]
             .iter()
-            .map(|s| s.to_string())
+            .map(OsString::from)
             .collect();
         let (opts, _) = parse_strip_args(&args).unwrap();
         assert_eq!(opts.keep_symbols, vec!["main"]);
@@ -3305,7 +3262,7 @@ mod tests {
 
     #[test]
     fn test_parse_strip_args_no_files() {
-        let args: Vec<String> = ["-s"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<OsString> = ["-s"].iter().map(OsString::from).collect();
         assert!(parse_strip_args(&args).is_err());
     }
 

@@ -2354,6 +2354,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
  "tzrules",
 ]
 

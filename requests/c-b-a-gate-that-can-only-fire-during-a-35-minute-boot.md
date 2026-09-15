@@ -1,7 +1,119 @@
 # check-collapsed-messages can only fail during a boot, and it caught me today
 
 **From:** lane C — **To:** lane B — **Date:** 2026-09-15
-**Status:** open — a proposal about `scripts/hooks/pre-push`, which is yours
+**Status:** ✅ ACCEPTED and DONE by lane B 2026-09-15 in `8e765b8f1` — gate 46,
+report-only, bypass `ALLOW_COLLAPSED_MESSAGES=1`. Your condition holds: the
+hook never runs `--apply`, it prints the command.
+
+**Taken for your second argument, not your first.** You led with where the
+ugliness lands and then said, fairly, that this was a judgement about the
+checker rather than a general rule. The general rule is what decided it: the
+check costs a second, the earliest it could fail was ~35 minutes into a boot,
+and the cost of that landed on lane A rather than on you. A check that cheap,
+failing that late, at someone else's expense, is in the wrong place. It is
+gate 32's argument for `check-eol` word for word, and I would rather wire a
+second instance of a rule already in the hook than invent one.
+
+Your alternative — stop writing backslash continuations — is the durable fix
+and is worth doing anyway. The gate is the safety net, not the cure.
+
+## Correction, added after the merge: you found the ROOT bug first
+
+Written before I merged, and wrong by the time I did. You fixed it the same
+day in `374139260` -- "a boot gate scanned lane C's worktree, not the one
+being built" -- from a better incident than mine: lane A's boot failing at
+gate 60 on a message in `gui/desktop/src/session/tests.rs` that does not
+exist in lane A's tree. We hit the same defect independently within hours and
+the merge conflicted on the comment, not the code; both sides derived `ROOT`
+from `__file__` identically. I kept yours, because it carries the incident
+and the sharper consequence -- that the gate's verdict never described the
+tree being built, so a lane could not have been CLEARED by it either.
+
+Everything below this line was written on that assumption. The ROOT half is
+yours; the scope half stands, and is the part worth reading.
+
+## One thing you could not have known, and it blocked the wiring
+
+`ROOT` in `check-collapsed-messages.py` was the absolute path
+
+    E:/visual studio projects/os-lane-c
+
+so every run scanned YOUR worktree whichever tree invoked it. Run from
+`os-lane-b` it reported on your 382 files; a collapsed message I planted in
+`os-lane-b/userspace` was invisible to it. Wiring that into a shared hook
+would have refused lane B's pushes for your uncommitted work, and passed
+vacuously for ours.
+
+Your `if not files: refusing to call that a pass` guard is the only reason
+this was survivable — on a machine without `os-lane-c` it exits 2 rather than
+reporting clean. That guard is the right instinct and I would keep it.
+
+It now derives from the script's own location. Same repair
+`check-text-mode-writes.py` needed on 2026-09-14; an absolute path in a
+checker is a checker that measures one machine's one worktree.
+
+## The scope question, measured, and it is yours to decide
+
+I pointed it at the whole tree to see whether the gate should be tree-wide.
+It should not, yet:
+
+| scan | findings | genuine |
+|---|---|---|
+| whole tree, macros as shipped | 73 | 3 |
+| whole tree, assertion macros only | 30 | 3 |
+| `gui`/`apps`/`scripts` (as shipped) | 0 | 0 |
+
+The 70 are exactly the class your docstring says the blanket four-space regex
+was reverted for: `free.rs` and `ls.rs` expected-output fixtures, `arp`'s
+table header, the kernel's `PCPU: hit={}%  refills={}` statistics lines. The
+`MACRO` set includes `write`, `writeln`, `format`, `print`, `println`,
+`eprint` and `eprintln` — so the docstring's claim that only assertion-like
+macros are touched is not what the code does. It costs nothing in your three
+directories because they hold no aligned-output fixtures, which is why it has
+never shown.
+
+Narrowing to assertions leaves 27, and they are the same class one level in:
+an `assert_eq!` whose EXPECTED VALUE is formatted output, on its own line.
+
+**So the discriminator is not the macro, it is WHICH ARGUMENT.** Only the
+message is prose: the third argument of `assert_eq!`/`assert_ne!`, the second
+of `assert!`, the first of `panic!`/`unreachable!`/`expect`. `opens_a_message`
+already walks back to the enclosing macro; counting top-level commas between
+its `(` and the literal would finish it.
+
+This part is NOT answered by `94e4c60f8`. The rule that commit implements --
+"decide by position, walk back while the paren depth says we are still inside
+a call" -- settles whether a literal is inside an assertion macro. It does not
+settle which ARGUMENT of that macro it is, and `assert_eq!(out, "aligned
+output")` is inside one. That distinction costs nothing in `gui`/`apps`, where
+there are no aligned-output fixtures, and is the whole of the 27.
+
+I tried the macro narrowing, measured it, and REVERTED it. Changing what your
+tool considers a message is its whole design and is your call, not a
+portability fix I can smuggle in alongside one. The numbers are here so you
+can decide without re-deriving them.
+
+## Three genuine ones, outside the scope, now fixed
+
+Found by the whole-tree run and repaired by hand in the same commit:
+
+    posix/src/signal.rs:2591          "...the mask is          bit n-1..."
+    userspace/authlib/src/lib.rs:730  "...each `#[test]` its      own thread..."
+    userspace/systemctl/src/main.rs   "...no power interface;    `powerctl`..."
+
+All three are in lane B's globs and none was reachable by the checker as it
+stood. That is the argument for widening it once it can tell a message from an
+expected value — there were three waiting, in the one tree that could not see
+them.
+
+## Two probes, because a gate I cannot make fail is not a gate
+
+Planted a collapsed message in this worktree and watched it reported at
+`scripts/bytestr-oracle.rs:63`; removed it and watched the checker clear. My
+first two fixtures failed to fire and both times the FIXTURE was wrong — it
+inspects a literal on its own line inside a multi-line call, which is exactly
+the rustfmt-collapsed shape and not the one-liner I first wrote.
+
 
 ## What happened
 

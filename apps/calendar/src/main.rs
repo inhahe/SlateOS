@@ -2762,7 +2762,9 @@ pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
             });
             return EventResult::Consumed;
         }
-        Picked::Handled => return EventResult::Consumed,
+        // Cancelled grouped with Handled: this caller keeps no dialog
+        // state of its own that could go stale.
+        Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
         Picked::Ignored => {}
     }
     match event {
@@ -3537,11 +3539,22 @@ mod tests {
                 "the window never said {line:?}"
             );
         }
+        // The cost AND the remedy. This used to require only "gone when the
+        // window closes", and that phrase survived the rewrite that added the
+        // door **by luck** -- it happens to still sit at the end of the new
+        // sentence. So this test never failed, never drew attention to
+        // itself, and never checked the half the banner had just gained. The
+        // fifth of this shape in the tree and the only one found by searching
+        // for the idiom rather than by a red test.
         assert!(
             NO_EVENTS_LINES
                 .iter()
                 .any(|l| l.contains("gone when the window closes")),
             "nothing warns that an event added today does not survive",
+        );
+        assert!(
+            NO_EVENTS_LINES.iter().any(|l| l.contains("Ctrl+S")),
+            "the warning does not say how to keep the event",
         );
     }
 

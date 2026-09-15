@@ -61,13 +61,23 @@ WHAT IT CANNOT SEE, stated plainly:
     with the error messages and not printed. "Cannot open {path}: this program
     has no file access" would be missed.
 
-THE ONE IT STILL REPORTS, so nobody investigates it twice: `gui/compositor`
-[network], for "the mode-set the kernel would have refused was never sent".
-That is a display mode-set, not a packet; "never sent" is network vocabulary
-here and the sentence is not about the network. Tightening the phrase to
-require a network noun nearby was tried and rejected -- it is one readable
-line, and narrowing vocabulary to silence a single true-by-the-rules entry is
-how a check starts missing real ones.
+THE THREE IT STILL REPORTS, so nobody investigates them twice. All three are
+correct code, and two of them are the documented blind spot above -- a crate
+holding one capability and truthfully denying another:
+
+  * `apps/dbviewer` [file] -- "a .db or .sqlite file cannot be read; one CSV
+    becomes one table". It reads CSV and genuinely has no database driver.
+  * `apps/diskimager` [file] -- "Partitions cannot be read: nothing in this
+    system parses a partition table off a disk". It reads `/sys` and genuinely
+    does not parse partition tables.
+  * `gui/compositor` [network] -- "the mode-set the kernel would have refused
+    was never sent". A display mode-set, not a packet; "never sent" is network
+    vocabulary and this sentence is not about the network.
+
+Tightening the vocabulary to silence any of them was rejected. These are three
+readable lines, and **narrowing to silence a true-by-the-rules entry is how a
+check starts missing real ones** -- the passive forms above were missing until
+`apps/diagram` showed what that costs.
 
 Report-only, no --check, for the reason the others have none: several entries
 will be legitimate, and a gate teaches the next reader to silence it rather
@@ -87,6 +97,16 @@ PAIRS = {
         re.compile(r"FileDialog|safeio::|std::fs::(read|write)|list_directory"),
         re.compile(
             r"cannot open|can't open|cannot save|can't save|cannot write|cannot read"
+            # PASSIVE VOICE, added 2026-09-15 after `apps/diagram`. Its banner
+            # says "Diagrams cannot be saved or opened", which the active forms
+            # above do not match. The crate was still reported, because its
+            # SECOND line says "no filesystem access" -- and that is the worse
+            # outcome, not a lucky escape: **a check that names a crate but not
+            # all of its offending sentences invites a partial fix**, and the
+            # sentence left behind is false in exactly the way this exists to
+            # catch.
+            r"|cannot be (saved|opened|written|kept|read|stored)"
+            r"|nothing is (written|saved|kept|stored) to"
             r"|no (filesystem|file system|disk) access|nothing (here )?can (open|save|read|write)"
             r"|no way to (open|save|read|write)|has no file|no file (dialog|picker)",
             re.I,

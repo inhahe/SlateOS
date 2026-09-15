@@ -46,6 +46,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -739,6 +740,11 @@ impl Clipboard {
 /// The diagram editor application.
 #[derive(Debug)]
 pub struct DiagramApp {
+    /// The save picker. Holds the dialog and the routing thirteen
+    /// applications used to write out by hand.
+    pub picker: FilePicker,
+    /// What the last save did, for the status line.
+    pub last_save: Option<String>,
     /// Window width.
     pub window_w: f32,
     /// Window height.
@@ -808,8 +814,8 @@ pub struct DiagramApp {
 /// found by `scripts/find-silent-incapacity.py`: a program that reaches
 /// nothing outside its own process and never says so.
 const NOTHING_KEPT_LINES: [&str; 2] = [
-    "Diagrams cannot be saved or opened.",
-    "Nothing is saved -- this app has no filesystem access, so your work is gone when the window closes.",
+    "A diagram can be saved, but not opened again.",
+    "Press Ctrl+S for an SVG you can view anywhere, or a .json that keeps the shapes -- nothing here reads either back yet.",
 ];
 
 impl DiagramApp {
@@ -825,6 +831,8 @@ impl DiagramApp {
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: FilePicker::new(),
+            last_save: None,
             window_w,
             window_h,
             nodes: Vec::new(),
@@ -1909,7 +1917,67 @@ impl DiagramApp {
     // ------------------------------------------------------------------
 
     /// Route a compositor event into the app.
+    /// Put the save picker up.
+    ///
+    /// `export_svg` and `export_json` were both written, both tested, and
+    /// neither could be called.
+    ///
+    /// **There is no importer, and the banner says so rather than implying
+    /// one.** An export you cannot read back is not a backup. It is still
+    /// worth having here, for a reason specific to these two formats: an SVG
+    /// opens in anything -- a browser, a viewer, a document -- so the drawing
+    /// survives in a form the user can actually use, and the JSON keeps the
+    /// shapes for an importer that does not exist yet. What would be wrong is
+    /// letting either look like a save the program could reload.
+    pub fn open_save_dialog(&mut self) {
+        self.picker.open_to_write("diagram.svg");
+    }
+
+    /// Write the diagram to `path`, in the format the filename asks for.
+    ///
+    /// The extension decides, because **on the way out there is no content to
+    /// inspect and the name the user typed is the only statement of intent
+    /// there is**. That is the opposite of the rule for opening a file, where
+    /// the extension is a claim by whoever named it and the content is the
+    /// fact. Anything that is not `.json` is written as SVG, since that is
+    /// what the picker offers and what a viewer can open.
+    pub fn write_diagram(&mut self, path: &std::path::Path) -> String {
+        if self.nodes.is_empty() && self.edges.is_empty() {
+            return String::from("Nothing drawn yet -- nothing to write");
+        }
+        let json = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+        let text = if json {
+            self.export_json()
+        } else {
+            self.export_svg()
+        };
+        let what = if json { "JSON" } else { "SVG" };
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!(
+                "Wrote {} node(s) as {what} to {}",
+                self.nodes.len(),
+                path.display()
+            ),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up, or a keystroke meant
+        // for a filename reaches the canvas -- where single letters select
+        // tools and Delete removes the selected shape.
+        match self.picker.handle(event, self.window_w, self.window_h) {
+            Picked::Chose(path) => {
+                self.last_save = Some(self.write_diagram(&path));
+                return EventResult::Consumed;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
@@ -1994,6 +2062,10 @@ impl DiagramApp {
         }
         let ctrl = key.modifiers.ctrl;
         match key.key {
+            Key::S if ctrl => {
+                self.open_save_dialog();
+                EventResult::Consumed
+            }
             Key::Z if ctrl => {
                 if !self.undo.can_undo() {
                     return EventResult::Ignored;
@@ -2119,6 +2191,12 @@ impl DiagramApp {
             self.render_properties_panel(&mut cmds);
         }
         self.render_status_bar(&mut cmds);
+
+        // Last, so it is above everything.
+        cmds.extend(
+            self.picker
+                .render(&self.palette, self.window_w, self.window_h),
+        );
 
         cmds
     }
@@ -3512,6 +3590,122 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    fn diagram_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("slateos-diagram-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn drawn() -> DiagramApp {
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        app.add_node(NodeShape::Rectangle, 40.0, 40.0);
+        let second = app.add_node(NodeShape::Ellipse, 200.0, 120.0);
+        // Selected, so that Delete has something to remove. Without this the
+        // keyboard test below has no control: Delete would change nothing
+        // whether or not the picker intercepted it.
+        app.selection.select_single_node(second);
+        app
+    }
+
+    /// The extension the user types picks the format.
+    ///
+    /// On the way OUT there is no content to inspect and the typed name is the
+    /// only statement of intent there is -- the opposite of opening a file,
+    /// where the content is the fact and the extension is a claim by whoever
+    /// named it.
+    #[test]
+    fn the_typed_extension_decides_the_format() {
+        let dir = diagram_dir();
+        let svg = dir.join("shapes.svg");
+        let json = dir.join("shapes.json");
+        let _ = std::fs::remove_file(&svg);
+        let _ = std::fs::remove_file(&json);
+
+        let mut app = drawn();
+        let said = app.write_diagram(&svg);
+        assert!(said.contains("as SVG"), "said: {said}");
+        let body = std::fs::read_to_string(&svg).expect("svg written");
+        assert!(
+            body.contains("<svg"),
+            "not an SVG: {:?}",
+            &body[..40.min(body.len())]
+        );
+
+        let said = app.write_diagram(&json);
+        assert!(said.contains("as JSON"), "said: {said}");
+        let body = std::fs::read_to_string(&json).expect("json written");
+        assert!(
+            body.contains("\"nodes\""),
+            "not our JSON: {:?}",
+            &body[..40.min(body.len())]
+        );
+
+        let _ = std::fs::remove_file(&svg);
+        let _ = std::fs::remove_file(&json);
+    }
+
+    /// An unfamiliar extension gets SVG, which is what the picker offers and
+    /// what a viewer can open.
+    #[test]
+    fn an_unknown_extension_is_written_as_svg() {
+        let path = diagram_dir().join("shapes.drawing");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = drawn();
+        let said = app.write_diagram(&path);
+        assert!(said.contains("as SVG"), "said: {said}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An empty canvas is refused rather than written.
+    ///
+    /// An SVG with no shapes in it is a valid document that opens to nothing,
+    /// which the user cannot tell apart from a save that failed -- and by then
+    /// it has replaced whatever was at that path. See design-decisions 854.
+    #[test]
+    fn an_empty_canvas_is_not_written() {
+        let path = std::env::temp_dir().join("slateos-diagram-should-not-exist.svg");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        assert!(app.nodes.is_empty(), "the fixture drew something");
+        let said = app.write_diagram(&path);
+        assert_eq!(said, "Nothing drawn yet -- nothing to write");
+        assert!(!path.exists(), "nothing should have been created");
+    }
+
+    /// Ctrl+S opens the picker, and while it is up the canvas does not act.
+    ///
+    /// Single letters select tools here and Delete removes the selected shape,
+    /// so a filename typed at an unintercepted picker would redraw the user's
+    /// diagram behind it. The control is the first half: it proves the key
+    /// DOES reach the canvas when no picker is up, so the second half means
+    /// something.
+    #[test]
+    fn the_picker_takes_the_keyboard_from_the_canvas() {
+        // The control: with no picker up, Delete removes the selected node.
+        let mut control = drawn();
+        let before = control.nodes.len();
+        control.handle_event(&press(Key::Delete));
+        assert_eq!(
+            control.nodes.len(),
+            before - 1,
+            "the control is broken: Delete does not change the canvas here, so the assertion below would hold for the wrong reason"
+        );
+
+        let mut app = drawn();
+        app.handle_event(&press_ctrl(Key::S));
+        assert!(app.picker.is_open(), "Ctrl+S did not open the picker");
+        let before = app.nodes.len();
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            app.nodes.len(),
+            before,
+            "a keystroke at the picker reached the canvas behind it"
+        );
+    }
+
     /// The window says what this program cannot do.
     ///
     /// Nothing here is invented, so `find-reachable-fixtures.py` never looked
@@ -3535,11 +3729,22 @@ mod tests {
                 "the window never said {line:?}"
             );
         }
+        // The PROPERTY, not the sentence. This used to require the words
+        // "gone when the window closes", which stayed true of the test long
+        // after it stopped being true of the program: a save door means the
+        // work is gone only if you do not save it. What has to hold is that
+        // the banner names the remedy AND the limit that remains -- a reader
+        // who believes it should know both what to do and what still cannot
+        // be done.
+        assert!(
+            NOTHING_KEPT_LINES.iter().any(|l| l.contains("Ctrl+S")),
+            "the banner does not say how to keep the work",
+        );
         assert!(
             NOTHING_KEPT_LINES
                 .iter()
-                .any(|l| l.contains("gone when the window closes")),
-            "the message states a mechanism but not its consequence",
+                .any(|l| l.contains("not opened again") || l.contains("reads either back")),
+            "the banner does not say the diagram cannot be reopened",
         );
     }
 

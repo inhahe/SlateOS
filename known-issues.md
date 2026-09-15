@@ -151047,6 +151047,34 @@ Leaving the modal path to repeat the two calls is precisely how the two copies
 would drift, which is the lesson from the eleven hand-written intercepts one
 level down.
 
+### The abstraction then lost something too
+
+Worth recording beside the rest, because it is the same failure one level up
+and it was found the same way.
+
+`FilePicker::handle` returned `Picked::Handled` both when the dialog had
+consumed a keystroke and was still up, and when the dialog had **closed
+itself**. Twelve of the thirteen callers cannot tell those apart and do not
+need to. `apps/fileassoc` keeps an `ActiveDialog` enum beside the picker, so
+Escape closed the dialog, the caller was told only "handled", and that enum
+stayed on `ChooseFile` **with no picker on screen**.
+
+Its own cancel test caught it -- and that test exists because somebody had
+already noticed it would otherwise pass against a button that opened nothing:
+
+    // Without this the test passes when the button does nothing at all:
+    // "no picker is up" is what it asserts afterwards, and that is also
+    // true of a button that never opened one.
+
+`Picked::Cancelled` is a separate variant rather than folded into `Handled`,
+so that **a caller with parallel state is made to say what it does about
+cancellation** rather than inheriting a default that is wrong for it. The
+twelve with no such state write `Picked::Handled | Picked::Cancelled` and are
+right; the one that has it clears its enum, and its arm says why.
+
+A wrapper that answers a narrower question than its callers ask is not
+obviously wrong from inside the wrapper. Every one of its own tests passed.
+
 ### The transferable part
 
 **Collecting duplicated code is how you find out the copies disagree.** In the
@@ -151185,9 +151213,32 @@ exit. `collect_dir`, `extract_tags_from_file`, `read_existing_ctags`,
 `run_lp` and `run_lprm` are ordinary logic with inputs and outputs, hidden
 from the suite for no reason that shows at the call site.
 
-`lp` is the one to look at next: `userspace/lp`'s `cancel_purge` is also on
-the written-never-read list, which is the same pair of symptoms dbus had --
-a dead field in a crate whose entry point nothing can call.
+**ALL SEVEN CHECKED, 2026-09-15. Two were fabricating; five were not.** The
+cleared rows are here because they are the more useful half: they say the gate
+is a testability smell rather than a reliable predictor of a lie, and where
+not to look again.
+
+| crate | outcome |
+|---|---|
+| `dbus` | **FIXED.** All three personalities fabricated. The daemon announced a bus it never listened on and wrote a pid file naming PID 1; `dbus-send` printed a method call "on wire" that went nowhere; `dbus-monitor` claimed to be monitoring and exited 0. All ungated and refusing. |
+| `lp` | **FIXED.** Reported queued print jobs and never captured the document -- for `-` it drained stdin, measured it, and dropped it. Predicted from this list plus a written-never-read field, which is how it was found. |
+| `ctags` | **CLEAN.** A real tool: `File::create`, writes ctags/etags format, reports write errors. Probed end to end -- three source items in, three correct tag lines out, sorted. The gated functions are a testability gap, not a lie. |
+| `lex` | **CLEAN.** Two write sites, six refusal messages. Does real work and says so when it cannot. |
+| `yacc` | **CLEAN.** Three write sites, four refusal messages. Same. |
+| `chpasswd` | **CLEAN.** `print_help` / `print_version` only. |
+| `mesg` | **CLEAN.** `print_help` / `print_version` only. |
+
+**What the gate predicted, and what it did not.** Two of seven were
+fabricating -- so the gate is a useful place to look and a poor place to
+conclude. What sharpened it was the PAIR: a gated entry point *plus* a field
+on the written-never-read list. Both crates that had both were lying; none of
+the five with only the gate was. That pairing is worth more than either list
+alone, and it is cheap to compute.
+
+**Still open:** the five clean crates keep code the suite cannot reach.
+`ctags`'s `collect_dir`, `extract_tags_from_file` and `read_existing_ctags`
+are parsers with inputs and outputs and no tests, which is a real gap even
+though nothing is currently wrong behind it.
 
 **Why the gate is usually there at all.** These crates build `#![no_main]`
 for the real target and define a `main` the test harness must not duplicate.
@@ -151484,3 +151535,131 @@ something says otherwise.
 events into it is a separate piece of work; an empty, honest table is the
 correct state until then, and is now labelled as such rather than filled.
 
+
+## TD-C-A-TEST-THAT-PINS-WORDING-PASSES-UNTIL-THE-WORDING-IS-WRONG -- FIXED 2026-09-15
+
+**In short:** four apps had a test asserting that a warning message contained a
+particular phrase. Each of those phrases later became untrue, and every one of
+those tests went on passing — because the words were still there. The test was
+guarding the sentence rather than the thing the sentence was for. All four now
+assert the property instead.
+
+### The four
+
+| app | the phrase it pinned | what made it false |
+|---|---|---|
+| `contacts` | "Nothing is saved between runs" | a vCard door |
+| `diagram` | "gone when the window closes" | a save door |
+| `flashcards` | "review schedule resets" | a deck door that keeps schedules |
+| `mindmap` | "gone when the window closes" | an outline door |
+
+In each case the app gained a way to save, the banner had to change, and the
+assertion that was supposed to protect the banner **was the last thing to
+notice**. Three of the four were found only because the banner edit made the
+test fail; the fourth was found by reading the other three.
+
+### Why the shape is so easy to write
+
+The message is a constant a few lines above the test:
+
+```rust
+const NO_CONTACTS_LINES: [&str; 2] = [
+    "No contacts.",
+    "Nothing is saved between runs -- this app has no filesystem access, ...",
+];
+```
+
+so the literal is *right there*, and asserting on it feels like asserting on
+the thing. It is not. **A phrase is an implementation of a promise, and a test
+that pins the implementation cannot fail when the promise stops being kept.**
+
+It is worse than an untested banner, because it reads as coverage. Someone
+changing the wording sees a test named
+`the_window_says_what_it_cannot_do`, sees it pass, and concludes the window
+still says what it cannot do.
+
+### What to assert instead
+
+Ask what has to be true for the message to do its job, and assert that:
+
+```rust
+// before: the phrase
+assert!(LINES.iter().any(|l| l.contains("gone when the window closes")));
+
+// after: the property -- the reader must learn both halves
+assert!(LINES.iter().any(|l| l.contains("Ctrl+S")),
+        "the banner does not say how to keep the work");
+assert!(LINES.iter().any(|l| l.contains("not opened again")),
+        "the banner does not say the diagram cannot be reopened");
+```
+
+Those still match on substrings — there is no way to assert "this sentence is
+true" — but they match on the **load-bearing** part, the bit whose absence is
+the defect. Changing "press Ctrl+S" to "use Ctrl+S" keeps them green, which is
+right: that edit does not break the promise. Removing the remedy breaks them,
+which is also right.
+
+### A fifth, found by searching rather than by a red test
+
+`apps/calendar` pinned "gone when the window closes". It gained an iCalendar
+door hours before the other four were found, and its test **never failed** —
+because that phrase happens to still sit at the end of the rewritten sentence:
+
+    "Nothing is saved automatically -- press Ctrl+S to write an .ics file,
+     or an event added today is gone when the window closes."
+
+So the assertion survived by luck, drew no attention to itself, and never
+checked the half the banner had just gained. It is the most instructive of the
+five for exactly that reason: **the other four were found because they broke.
+This one could only be found by looking.** A test that pins a phrase does not
+reliably fail when the promise changes; whether it fails is an accident of
+which words the rewrite happened to keep.
+
+### Where else this shape lives, and why it is a checklist rather than a backlog
+
+Fifteen tests in `apps/` use the idiom `LINES.iter().any(|l| l.contains("..."))`
+against a banner constant. The eleven not listed above are **true today**:
+
+    alarmclock   "nothing will wake you"
+    clipmanager  "however much you copy"
+    credmanager  "Do not rely on it"
+    devicemanager "not because the machine has no devices"
+    email        "nothing was ever fetched"
+    filediff     "no left file and no right file"
+    finance      "no way to add an account"
+    logviewer    "not a quiet system"
+    mediaconvert "do not delete an original"
+    habits       "Nothing is saved between runs"
+    whiteboard   (drawings cannot be kept)
+
+Rewriting them now would be churn against assertions that are not yet wrong,
+and each rewrite risks weakening a check that currently works. They are left
+alone deliberately.
+
+What they are is a **list of the exact tests that will go stale on the day each
+of those apps gains the capability its banner denies** — which, for most of
+them, is the day it gets a door. `habits` is the clearest: its phrase is
+word-for-word the one `contacts` had, and `contacts` needed it rewritten within
+an hour of its vCard door landing.
+
+So the entry to act on is not "fix these fifteen". It is: **when adding a
+capability to an app, grep its tests for `contains(` before editing its banner**
+— the assertion that was supposed to protect the banner is the last thing that
+will tell you.
+
+### The general form, which is not about banners
+
+This is the same failure as a test that passes because its fixture had nothing
+to act on, and as a checker whose green result was computed over the wrong
+corpus. In all three the result is *true* and answers a question nobody asked:
+
+* the fixture had no selected item, so "nothing was deleted" held trivially;
+* the gate scanned `gui`/`apps`/`scripts`, so "no collapsed messages" said
+  nothing about `kernel/`;
+* the phrase was still in the constant, so "the window says it" held while the
+  window said something false.
+
+**Green is only as meaningful as the question it answers.** The check worth
+making on any passing assertion is: *what would have to change in the program
+for this to fail?* If the answer is "an edit that does not matter", the
+assertion is pinned to the wrong thing.

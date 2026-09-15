@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use guitk::color::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FileDialog, FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::probe::Probe;
@@ -1499,8 +1499,10 @@ pub struct FileAssocUI {
     ///
     /// `import_config` had the matching problem from the other side -- fully
     /// tested, reachable from nothing. Both are this dialog now.
-    pub file_dialog: Option<FileDialog>,
-    /// Which direction `file_dialog` is serving.
+    /// The picker. Holds the dialog and the routing thirteen
+    /// applications used to write out by hand.
+    pub picker: FilePicker,
+    /// Which direction the picker is serving.
     pub transfer: Transfer,
     /// Window dimensions.
     pub window_width: f32,
@@ -1619,7 +1621,7 @@ impl FileAssocUI {
             new_category: FileCategory::Other,
             new_field: NewField::Extension,
             status: String::new(),
-            file_dialog: None,
+            picker: FilePicker::new(),
             transfer: Transfer::Export,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
@@ -1770,7 +1772,7 @@ impl FileAssocUI {
     /// Shut whichever dialog is open, changing nothing.
     pub fn cancel_dialog(&mut self) {
         self.active_dialog = ActiveDialog::None;
-        self.file_dialog = None;
+        self.picker.close();
     }
 
     /// Put up the file picker for an import or an export.
@@ -1781,18 +1783,18 @@ impl FileAssocUI {
     /// dialog opened without this step draws its chrome and lists nothing for
     /// ever.
     fn open_transfer_dialog(&mut self, transfer: Transfer) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = match transfer {
+        let start = FilePicker::default_start();
+        let dialog = match transfer {
             Transfer::Import => FileDialog::open().with_initial_path(start),
             Transfer::Export => FileDialog::save()
                 .with_initial_path(start)
                 .with_filename("associations.conf"),
         };
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
         self.transfer = transfer;
-        self.file_dialog = Some(dialog);
+        // `put_up` rather than the two named openers: this caller chooses
+        // between open and save *and* pre-fills a name. `put_up` still does
+        // the listing, which is the step the doc above warns about.
+        self.picker.put_up(dialog, transfer == Transfer::Export);
         self.active_dialog = ActiveDialog::ChooseFile;
     }
 
@@ -1836,35 +1838,6 @@ impl FileAssocUI {
                 Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
             },
         }
-    }
-
-    /// Give the picker an event; `None` when there is no picker up.
-    fn file_dialog_event(&mut self, event: &Event) -> Option<EventResult> {
-        let (width, height) = (self.window_width, self.window_height);
-        let action = {
-            let dialog = self.file_dialog.as_mut()?;
-            match event {
-                Event::Key(key) if key.pressed => dialog.handle_event(key, height),
-                Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
-                _ => DialogAction::None,
-            }
-        };
-        match action {
-            DialogAction::Selected(path) => {
-                self.cancel_dialog();
-                self.transfer_with(&path);
-            }
-            DialogAction::Cancelled => self.cancel_dialog(),
-            // It has moved and is still showing the old directory's contents
-            // until it is told what is in the new one.
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-            }
-            DialogAction::None => {}
-        }
-        Some(EventResult::Consumed)
     }
 
     /// Select a category in the sidebar.
@@ -1982,10 +1955,30 @@ impl FileAssocUI {
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         // The picker is modal and answers everything but a resize, which
         // belongs to the surface rather than to what is drawn on it.
-        if !matches!(event, Event::Resize { .. })
-            && let Some(result) = self.file_dialog_event(event)
+        //
+        // A tick and a resize come back as `Ignored` and fall through. The
+        // helper this replaced returned `Some(Consumed)` for everything that
+        // was not input, so both were swallowed; nothing here currently asks
+        // for a tick, which made it latent rather than live.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
         {
-            return result;
+            Picked::Chose(path) => {
+                self.cancel_dialog();
+                self.transfer_with(&path);
+                return EventResult::Consumed;
+            }
+            // NOT grouped with Handled. This caller keeps an ActiveDialog
+            // enum beside the picker, and Escape closing the dialog
+            // without telling it left that enum on ChooseFile with no
+            // picker on screen -- caught by its own cancel test.
+            Picked::Cancelled => {
+                self.cancel_dialog();
+                return EventResult::Consumed;
+            }
+            Picked::Handled => return EventResult::Consumed,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
@@ -2143,7 +2136,7 @@ impl FileAssocUI {
             }
             // The picker decides for itself what Enter means -- a directory
             // row opens it, a file row chooses it -- and it sees the key
-            // first, in `file_dialog_event`. Nothing here can improve on
+            // first, in `FilePicker::handle`. Nothing here can improve on
             // that, and guessing would mean confirming a selection the
             // dialog had not made.
             ActiveDialog::ChooseFile => {}
@@ -2405,10 +2398,8 @@ impl FileAssocUI {
                 ActiveDialog::OpenWith => self.draw_open_with_dialog(&mut frame, &l),
                 ActiveDialog::AddFileType => self.draw_add_file_type_dialog(&mut frame, &l),
                 ActiveDialog::ChooseFile => {
-                    if let Some(dialog) = &self.file_dialog {
-                        for cmd in dialog.render(&self.palette, l.width, l.height) {
-                            frame.push(cmd);
-                        }
+                    for cmd in self.picker.render(&self.palette, l.width, l.height) {
+                        frame.push(cmd);
                     }
                 }
                 ActiveDialog::None => {}
@@ -4812,10 +4803,11 @@ mod tests {
 
     /// Point the picker at `dir` and list it, as the program does on opening.
     fn showing<'a>(ui: &'a mut FileAssocUI, dir: &std::path::Path) -> &'a mut FileDialog {
-        let dialog = ui.file_dialog.as_mut().expect("no picker is up");
-        dialog.navigate_to(dir);
-        dialog.set_entries(guitk::dialog::list_directory(dir));
-        dialog
+        // `navigate_to` on the picker does both halves: navigating without
+        // re-listing leaves the previous directory's contents under the new
+        // directory's name, which is a listing that is wrong rather than empty.
+        ui.picker.navigate_to(dir);
+        ui.picker.dialog_mut().expect("no picker is up")
     }
 
     /// Type a name and confirm it. **A save picker only.**
@@ -4857,7 +4849,7 @@ mod tests {
         assert_eq!(ui.active_dialog, ActiveDialog::ChooseFile);
         save_as(&mut ui, dir.dir(), "assoc.conf");
 
-        assert!(ui.file_dialog.is_none(), "the picker stayed up");
+        assert!(!ui.picker.is_open(), "the picker stayed up");
         let written = std::fs::read_to_string(dir.path("assoc.conf"))
             .unwrap_or_else(|e| panic!("nothing was written: {e}; status {:?}", ui.status));
         assert!(written.contains("mp3"), "exported {written:?}");
@@ -4910,7 +4902,7 @@ mod tests {
             probe::click(&mut to, Target::ImportButton);
             pick(&mut to, dir.dir(), "carried.conf");
 
-            assert!(to.file_dialog.is_none(), "the picker stayed up");
+            assert!(!to.picker.is_open(), "the picker stayed up");
             assert_eq!(
                 to.registry.get_default_app("zip").map(|a| a.id.as_str()),
                 Some("explorer"),
@@ -4935,7 +4927,7 @@ mod tests {
 
         probe::key(&mut ui, &probe::press(Key::Escape));
 
-        assert!(ui.file_dialog.is_none(), "Escape did not dismiss it");
+        assert!(!ui.picker.is_open(), "Escape did not dismiss it");
         assert_eq!(ui.active_dialog, ActiveDialog::None);
         assert_eq!(ui.registry.export_config(), before);
     }

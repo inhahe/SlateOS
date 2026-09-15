@@ -37,6 +37,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -628,6 +629,57 @@ impl MindMap {
             .collect()
     }
 
+    /// Build a map from an indented outline, or `None` if there is nothing
+    /// in it.
+    ///
+    /// The inverse of [`export_text`](Self::export_text) for the two things an
+    /// outline actually carries: the words and the branches. It is NOT a full
+    /// inverse and the caller says so -- colour, shape and collapse state are
+    /// not in the file, and positions do not need to be, because `auto_layout`
+    /// computes them.
+    ///
+    /// # How depth is read
+    ///
+    /// Two spaces per level, as `export_text` writes, and a leading `- ` on
+    /// everything below the root. A line indented further than one level past
+    /// its predecessor is clamped to one level deeper rather than rejected:
+    /// hand-written outlines skip levels, and refusing the file would lose
+    /// the whole map over a cosmetic slip. A line indented *less* closes as
+    /// many levels as it needs to.
+    pub fn from_outline(name: &str, text: &str, id_gen: &mut IdGenerator) -> Option<Self> {
+        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+        let first = lines.next()?;
+        let mut map = Self::new(name.to_owned(), id_gen);
+        let root_id = map.root_id;
+        if let Some(root) = map.nodes.get_mut(&root_id) {
+            root.text = outline_body(first).to_owned();
+        }
+        // `stack[d]` is the node that a line at depth `d + 1` hangs from.
+        let mut stack = vec![root_id];
+        for line in lines {
+            let depth = outline_depth(line).max(1);
+            // Clamped, not rejected: see the doc above.
+            let depth = depth.min(stack.len());
+            stack.truncate(depth);
+            let parent = *stack.last()?;
+            // The same cycle `MindMapApp::color_at` uses, reached directly:
+            // that one is an associated function on the app and this is on the
+            // map. `% len()` is why the index is always in range.
+            // `checked_rem` and `get`, not `%` and `[]`: the defensive lints
+            // are on in this crate and an empty palette would otherwise be a
+            // panic in a file reader, which is the worst place for one.
+            let slot = depth.checked_rem(NODE_COLORS.len()).unwrap_or(0);
+            let colour = NODE_COLORS
+                .get(slot)
+                .copied()
+                .unwrap_or(FALLBACK_NODE_COLOR);
+            let colour_index = u8::try_from(slot).unwrap_or(0);
+            let id = map.add_child(parent, outline_body(line).to_owned(), colour, colour_index)?;
+            stack.push(id);
+        }
+        Some(map)
+    }
+
     /// Export the map as an indented text outline.
     pub fn export_text(&self) -> String {
         let mut output = String::new();
@@ -703,6 +755,61 @@ fn outline_text(s: &str) -> String {
     }
     out
 }
+
+/// What a node is coloured when the palette is somehow empty.
+///
+/// `NODE_COLORS` has eight entries and cannot be empty, so this is never
+/// reached. It exists because the alternative is indexing, and a panic in a
+/// file reader is the worst place for one.
+const FALLBACK_NODE_COLOR: Color = Color::rgb(0x88, 0x88, 0x88);
+
+/// A map name reduced to something that can be a filename.
+///
+/// Only the three characters a path cannot contain are replaced: the name is
+/// the user's, and rewriting more of it than necessary means they cannot find
+/// the file by the name they gave the map.
+fn sanitise_map_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | '\0') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        String::from("map")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// How many levels deep an outline line sits: two spaces per level.
+fn outline_depth(line: &str) -> usize {
+    // `saturating_sub` and `checked_div`: the trimmed string is never longer
+    // than the original, so neither can bite -- but the defensive lints do not
+    // know that, and proving it in a comment is cheaper than an allow.
+    let spaces = line
+        .len()
+        .saturating_sub(line.trim_start_matches(' ').len());
+    spaces.checked_div(2).unwrap_or(0)
+}
+
+/// The text of an outline line, without its indent or its bullet.
+fn outline_body(line: &str) -> &str {
+    let t = line.trim_start_matches(' ');
+    t.strip_prefix("- ").unwrap_or(t).trim_end()
+}
+
+/// The most of an outline one open will read.
+///
+/// Reported when it bites. A cut outline parses -- every whole line in it is a
+/// node -- so the tail is simply missing, and **a map short of a branch looks
+/// like a map that never had one.**
+pub const MAX_OUTLINE_BYTES: usize = 8 * 1024 * 1024;
 
 // ============================================================================
 // Radial auto-layout
@@ -875,6 +982,11 @@ pub enum DragState {
 /// The mind map application.
 #[derive(Debug)]
 pub struct MindMapApp {
+    /// The open or save picker. Holds the dialog, the saving flag and the
+    /// routing thirteen applications used to write out by hand.
+    pub picker: FilePicker,
+    /// What the last open or save did, for the status line.
+    pub last_file_action: Option<String>,
     /// Window dimensions.
     pub win_width: f32,
     pub win_height: f32,
@@ -940,8 +1052,8 @@ impl Default for MindMapApp {
 /// found by `scripts/find-silent-incapacity.py`: a program that reaches
 /// nothing outside its own process and never says so.
 const NOTHING_KEPT_LINES: [&str; 2] = [
-    "Maps cannot be saved or opened.",
-    "Nothing is saved -- this app has no filesystem access, so your work is gone when the window closes.",
+    "Nothing is saved automatically -- press Ctrl+S to write an outline, Ctrl+O to read one back.",
+    "An outline keeps the words and the branches. Colours, shapes and which branches you folded are not in it.",
 ];
 
 impl MindMapApp {
@@ -951,6 +1063,8 @@ impl MindMapApp {
         let map = MindMap::new("Mind Map 1".to_string(), &mut id_gen);
         let mut app = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: FilePicker::new(),
+            last_file_action: None,
             win_width: 1280.0,
             win_height: 800.0,
             maps: vec![map],
@@ -1706,7 +1820,94 @@ impl MindMapApp {
     // ========================================================================
 
     /// Route a compositor event into the app.
+    /// Write the active map to `path` as an indented outline.
+    ///
+    /// **Says what the format does not carry**, and there are two different
+    /// losses. Colours, shapes and which branches are folded are not in an
+    /// outline at all. And a node whose text contains a line break is written
+    /// with that break turned into a space, because the format puts one node
+    /// on one line -- `outline_text` has always done this and it was never
+    /// reported, which is the part worth fixing: a silent flattening looks
+    /// exactly like a node that was typed on one line.
+    pub fn write_outline(&mut self, path: &std::path::Path) -> String {
+        let map = self.active_map_ref();
+        let text = map.export_text();
+        let flattened = map
+            .nodes
+            .values()
+            .filter(|n| n.text.chars().any(|c| c.is_control() || c == '\t'))
+            .count();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => {
+                let note = if flattened > 0 {
+                    format!(
+                        "; {flattened} node(s) had line breaks, which an outline stores as spaces"
+                    )
+                } else {
+                    String::new()
+                };
+                format!(
+                    "Wrote {} node(s) to {}{note}",
+                    map.nodes.len(),
+                    path.display()
+                )
+            }
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` as an outline and open it as a new map.
+    ///
+    /// The words and the branches come back; the nodes are laid out afresh by
+    /// `auto_layout`, which is why losing their positions costs nothing. What
+    /// an outline cannot return is stated rather than left to be noticed:
+    /// colour, shape and collapse state are not in the file.
+    pub fn read_outline(&mut self, path: &std::path::Path) -> String {
+        let read = match safeio::read_to_string_capped(path, MAX_OUTLINE_BYTES) {
+            Ok(read) => read,
+            Err(err) => return format!("Could not read {}: {err}", path.display()),
+        };
+        let note = read.note(MAX_OUTLINE_BYTES);
+        let title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .map_or_else(|| String::from("Imported map"), str::to_owned);
+        let Some(map) = MindMap::from_outline(&title, &read.text, &mut self.id_gen) else {
+            return format!(
+                "{note}{} has no outline in it -- every line was blank",
+                path.display()
+            );
+        };
+        let count = map.nodes.len();
+        self.maps.push(map);
+        self.active_map = self.maps.len().saturating_sub(1);
+        let (cx, cy) = (self.win_width / 2.0, self.win_height / 2.0);
+        auto_layout(self.active_map_mut(), cx, cy);
+        format!(
+            "{note}Opened {count} node(s) from {}. Colours, shapes and folded branches are not in an outline.",
+            path.display()
+        )
+    }
+
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up, or a filename is typed
+        // into the node being edited behind it.
+        match self.picker.handle(event, self.win_width, self.win_height) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_outline(&path)
+                } else {
+                    self.read_outline(&path)
+                });
+                return EventResult::Consumed;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
@@ -1796,6 +1997,15 @@ impl MindMapApp {
         }
         let ctrl = key.modifiers.ctrl;
         match key.key {
+            Key::S if ctrl => {
+                let name = sanitise_map_name(&self.active_map_ref().name);
+                self.picker.open_to_write(format!("{name}.outline"));
+                EventResult::Consumed
+            }
+            Key::O if ctrl => {
+                self.picker.open_to_read();
+                EventResult::Consumed
+            }
             // Structure.
             Key::Tab => {
                 self.add_child_to_selected(String::from("New Node"));
@@ -2016,6 +2226,15 @@ impl MindMapApp {
             self.render_search_bar(&mut cmds);
         }
         self.render_status_bar(&mut cmds);
+
+        // Last, so it is above everything. Forgetting this is how a picker
+        // ends up open and invisible, taking every keystroke with nothing on
+        // screen to say why -- apps/flashcards shipped exactly that this
+        // afternoon and its own test caught it.
+        cmds.extend(
+            self.picker
+                .render(&self.palette, self.win_width, self.win_height),
+        );
 
         cmds
     }
@@ -3272,6 +3491,152 @@ mod tests {
     }
     use super::*;
 
+    fn mm_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("slateos-mindmap-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// The words and the branches survive a write and a read.
+    ///
+    /// `export_text` was written, tested and unreachable, and there was no
+    /// reader at all. An outline is not a full inverse -- colour, shape and
+    /// collapse state are not in it -- but it carries the two things a mind
+    /// map is actually made of, and `auto_layout` puts the nodes back where
+    /// they belong, which is why losing their positions costs nothing.
+    #[test]
+    fn the_words_and_the_branches_survive_a_write_and_a_read() {
+        let path = mm_dir().join("tree.outline");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.active_map_mut()
+            .nodes
+            .get_mut(&root)
+            .expect("root")
+            .text = String::from("Topic");
+        let child = app
+            .active_map_mut()
+            .add_child(root, String::from("Branch"), NODE_COLORS[1], 1)
+            .expect("a child");
+        app.active_map_mut()
+            .add_child(child, String::from("Twig"), NODE_COLORS[2], 2)
+            .expect("a grandchild");
+
+        let said = app.write_outline(&path);
+        assert!(said.starts_with("Wrote 3 node(s)"), "said: {said}");
+
+        let before = app.maps.len();
+        let said = app.read_outline(&path);
+        assert!(said.starts_with("Opened 3 node(s)"), "said: {said}");
+        assert_eq!(app.maps.len(), before + 1, "no map was opened");
+
+        let opened = app.active_map_ref();
+        let texts: Vec<&str> = opened.nodes.values().map(|n| n.text.as_str()).collect();
+        for want in ["Topic", "Branch", "Twig"] {
+            assert!(texts.contains(&want), "lost {want:?}: {texts:?}");
+        }
+        // The shape, not just the words: Twig hangs off Branch, not off Topic.
+        let branch = opened
+            .nodes
+            .values()
+            .find(|n| n.text == "Branch")
+            .expect("Branch");
+        let twig = opened
+            .nodes
+            .values()
+            .find(|n| n.text == "Twig")
+            .expect("Twig");
+        assert_eq!(twig.parent, Some(branch.id), "the tree was flattened");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The import says what an outline does not carry.
+    ///
+    /// Without it the map comes back in default colours with every branch
+    /// unfolded, and that looks like the map -- the user has no way to tell a
+    /// format that dropped their choices from a map that never had any.
+    #[test]
+    fn the_import_says_what_an_outline_leaves_behind() {
+        let path = mm_dir().join("plain.outline");
+        std::fs::write(&path, "Topic\n  - Branch\n").expect("write outline");
+
+        let mut app = MindMapApp::new();
+        let said = app.read_outline(&path);
+        assert!(
+            said.contains("Colours, shapes and folded branches are not in an outline"),
+            "said: {said}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A node holding a line break is written flat, and the write says so.
+    ///
+    /// `outline_text` has always replaced control characters with a space --
+    /// one node, one line -- and never reported it. A silent flattening looks
+    /// exactly like a node that was typed on one line.
+    #[test]
+    fn a_node_with_a_line_break_is_flattened_and_the_write_says_so() {
+        let path = mm_dir().join("flat.outline");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.active_map_mut()
+            .nodes
+            .get_mut(&root)
+            .expect("root")
+            .text = String::from("two\nlines");
+
+        let said = app.write_outline(&path);
+        assert!(
+            said.contains("line breaks, which an outline stores as spaces"),
+            "the flattening went unreported: {said}"
+        );
+        let body = std::fs::read_to_string(&path).expect("written");
+        assert!(body.contains("two lines"), "not flattened: {body:?}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An outline that skips a level is clamped, not rejected.
+    ///
+    /// Hand-written outlines indent by four spaces, or by eight. Refusing the
+    /// file would lose the whole map over a cosmetic slip, so a line deeper
+    /// than one level past its predecessor hangs off that predecessor.
+    #[test]
+    fn an_outline_that_skips_a_level_is_clamped_rather_than_refused() {
+        // `gen` is a reserved keyword in edition 2024.
+        let mut ids = IdGenerator::new();
+        let map = MindMap::from_outline("M", "Root\n      - Deep\n", &mut ids)
+            .expect("an outline with a line in it");
+        assert_eq!(map.nodes.len(), 2, "the skipped level lost a node");
+        let deep = map.nodes.values().find(|n| n.text == "Deep").expect("Deep");
+        assert_eq!(
+            deep.parent,
+            Some(map.root_id),
+            "it did not hang off the root"
+        );
+    }
+
+    /// A file with nothing in it is reported, not opened as an empty map.
+    #[test]
+    fn an_outline_of_blank_lines_opens_nothing() {
+        let path = mm_dir().join("blank.outline");
+        std::fs::write(&path, "\n   \n\n").expect("write blanks");
+
+        let mut app = MindMapApp::new();
+        let before = app.maps.len();
+        let said = app.read_outline(&path);
+        assert!(said.contains("every line was blank"), "said: {said}");
+        assert_eq!(app.maps.len(), before, "an empty map was opened anyway");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The window says what this program cannot do.
     ///
     /// Nothing here is invented, so `find-reachable-fixtures.py` never looked
@@ -3295,11 +3660,25 @@ mod tests {
                 "the window never said {line:?}"
             );
         }
+        // The PROPERTY, not the phrase. This required the words "gone when the
+        // window closes", which stayed true of the test after it stopped being
+        // true of the program. The FOURTH banner assertion in this tree to pin
+        // wording that way -- apps/contacts, apps/diagram and apps/flashcards
+        // were the others -- so the shape is a habit rather than an accident:
+        // the literal is right there in the constant, and asserting on it feels
+        // like asserting on the thing.
+        //
+        // What has to hold is that the banner names the remedy AND what the
+        // format does not carry.
+        assert!(
+            NOTHING_KEPT_LINES.iter().any(|l| l.contains("Ctrl+S")),
+            "the message does not say how to keep the work",
+        );
         assert!(
             NOTHING_KEPT_LINES
                 .iter()
-                .any(|l| l.contains("gone when the window closes")),
-            "the message states a mechanism but not its consequence",
+                .any(|l| l.contains("Colours, shapes")),
+            "the message does not say what an outline leaves behind",
         );
     }
 

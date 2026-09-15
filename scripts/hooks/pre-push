@@ -120,6 +120,10 @@
 #      `from_utf8_lossy` on a name, then used. A decoded name is one
 #      nobody can open, and `diff -r` already reported `No such file`
 #      for a file it had itself listed.
+#  44. Refuse a text-mode write under `scripts/` that does not pass
+#      `newline=`. On Windows text mode turns every `\n` into `\r\n`
+#      silently, so the most obvious spelling of "write this file" is
+#      wrong by default on the platform this tree is developed on.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -787,6 +791,59 @@ if [ "$skip_lossy" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 44: refuse a text-mode write under `scripts/` with no `newline=`.
+#
+# check-text-mode-writes.py.
+#
+# On Windows a file opened in text mode translates every `\n` the program
+# writes into `\r\n`, silently, by documented default. `open(p, "w")`,
+# `Path.write_text(...)` and `os.fdopen(fd, "w")` all do it. So the most
+# obvious spelling of "write this text to this file" is wrong by default on
+# the platform this tree is developed on, and nothing warns.
+#
+# The tree has paid for it: on 2026-09-03 `scripts/boot-test.sh` and twelve
+# other files declared `text eol=lf` sat wholly CRLF in the worktree while
+# every git command reported it clean. `check-eol.py` catches that
+# CONSEQUENCE; this gate catches the CAUSE.
+#
+# WIRED ON LANE A'S PROPOSAL of 2026-09-14, and the measurement changed the
+# shape of it. Lane A reported the gate at 16 s and asked whether it should be
+# narrowed to the pushed range to pay for that. Measured here it is 2.7 s over
+# 224 files, so there is nothing to buy with narrowing -- and a blanket run is
+# strictly STRONGER, because a gate scoped to what changed cannot see a file
+# that was already wrong.
+#
+# The baseline is ZERO -- 281 text-mode write sites, none without `newline=`
+# -- which is what makes a blanket scan fair to whoever happens to push next:
+# any finding is new. Lane A lost two boot runs to findings that were
+# byte-identical to origin/main and so belonged to nobody in particular;
+# refusing at push time is what stops that class reaching main at all.
+#
+# Scoped to pushes that touch scripts/, which is all the checker looks at. A
+# push that touches no script pays nothing.
+skip_tmw=0
+tmw="${repo_root:-.}/scripts/check-text-mode-writes.py"
+[ -f "$tmw" ] || skip_tmw=1
+# No `pushed_shas` guard, for the same reason gates 42 and 43 have none: this
+# runs once against the working tree rather than looping over shas, so there is
+# no loop that could degrade to zero runs while `note_gate` recorded a run.
+touches scripts/ || skip_tmw=1
+note_gate text-mode-writes "$skip_tmw"
+
+tmw_failed=0
+if [ "$skip_tmw" != "1" ]; then
+    # The checker before the check: a detector that has broken its own parsing
+    # reports a clean tree rather than a broken one. This one carries 47
+    # self-test cases, including its own source.
+    if ! run_checker text-mode-writes-selftest "$py" "$tmw" --self-test; then
+        echo "pre-push: check-text-mode-writes.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
+        tmw_failed=1
+    elif ! run_checker text-mode-writes "$py" "$tmw"; then
+        tmw_failed=1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # check-read-defaults.py -- a read whose failure is indistinguishable from an
 # empty file.
 #
@@ -1296,6 +1353,51 @@ To push anyway:
 EOF
     if [ "${ALLOW_LOSSY_DECODE:-0}" = "1" ]; then
         echo "pre-push: ALLOW_LOSSY_DECODE=1 — continuing anyway." >&2
+    else
+        exit 1
+    fi
+fi
+
+if [ "$tmw_failed" = "1" ]; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — a text-mode write does not say what a newline is.
+
+The call is named above. On Windows a file opened in text mode translates
+every `\n` written into `\r\n`, silently and by documented default. The file
+this machine produces is not the file a Linux reader produces from the same
+source, and nothing warns you either way.
+
+This tree has paid for it. On 2026-09-03 scripts/boot-test.sh and twelve other
+files declared `text eol=lf` sat wholly CRLF in the worktree while every git
+command reported it clean -- see check-eol.py's docstring for why git cannot
+see that, and known-issues.md ->
+TD-A-A-DECLARED-LF-FILES-WERE-CRLF-ON-DISK-AND-GIT-SAID-NOTHING.
+
+The fix is one keyword, and it costs nothing anywhere:
+
+    open(p, "w", newline="")            # not open(p, "w")
+    path.write_text(s, newline="")      # not path.write_text(s)
+    os.fdopen(fd, "w", newline="")      # not os.fdopen(fd, "w")
+
+`newline=""` writes exactly the bytes you built. `newline="\n"` is equally
+fine and says the same thing out loud. What is not fine is the default, which
+differs by platform.
+
+A binary-mode write needs nothing: `open(p, "wb")` never translates.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-text-mode-writes.py
+    python scripts/check-text-mode-writes.py --list   # every file checked
+    python scripts/check-text-mode-writes.py --all    # survey the whole tree
+
+To push anyway:
+
+    ALLOW_TEXT_MODE_WRITES=1 git push origin ...
+EOF
+    if [ "${ALLOW_TEXT_MODE_WRITES:-0}" = "1" ]; then
+        echo "pre-push: ALLOW_TEXT_MODE_WRITES=1 — continuing anyway." >&2
     else
         exit 1
     fi

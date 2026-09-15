@@ -30,7 +30,7 @@
 //!    because the two modes disagree about them.
 //! 4. **Headings are a two-rung hierarchy.** A section heading is
 //!    `p.lavender` at 15pt Bold — the convention already established by
-//!    `datetime_settings` and `notification_settings` — and a sub-heading
+//!    `datetime_settings` — and a sub-heading
 //!    inside a section is `p.subtext1` at 13pt Bold. Lavender here is
 //!    structure, not decoration, and specifically is *not* the accent: a
 //!    heading does not move when the selection does.

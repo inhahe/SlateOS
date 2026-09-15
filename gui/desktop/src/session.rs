@@ -1431,6 +1431,7 @@ impl<T: Transport> ShellSession<T> {
     /// to fix, and it would be a shame to leave a second door into it.
     pub fn load_appearance(&mut self) {
         self.shell.load_appearance();
+        self.sync_wallpaper();
         self.sync_animation_speed();
         self.sync_autohide();
         // The widget layout comes in on the same call. It is not an appearance
@@ -1565,6 +1566,52 @@ impl<T: Transport> ShellSession<T> {
             screen_height: sh,
             ..AutoHideConfig::default()
         });
+    }
+
+    /// Adopt the wallpaper named in the appearance settings.
+    ///
+    /// `WallpaperManager` could already crop, tile, tint and rotate pictures
+    /// before this existed, and `set_image` was called four times in the whole
+    /// tree -- all four in this file's tests. Nothing in production had ever
+    /// set a wallpaper, because there was nowhere for a user to say which one.
+    ///
+    /// **Guarded on the path, and that is not an optimisation.** `set_image`
+    /// issues a fresh image id every time it is called, and `paint_background`
+    /// re-reads and re-inflates whatever id it has not seen before. This runs
+    /// on every `load_appearance`, which the shell calls whenever
+    /// `appearance.yaml` changes for any reason at all -- a comment edited, a
+    /// key this desktop does not read. Unguarded, changing the accent colour
+    /// would re-decode a full-screen photograph.
+    ///
+    /// `follow_desktop_base` rather than a solid colour for "no wallpaper":
+    /// the two draw the same pixels today and diverge the moment the user
+    /// switches between light and dark, and only one of them is a decision the
+    /// user made.
+    fn sync_wallpaper(&mut self) {
+        let wanted = self.shell.appearance.wallpaper.clone();
+        match wanted.as_deref() {
+            Some(path) => {
+                let fit = self.shell.appearance.wallpaper_fit;
+                if self.wallpaper.current_image_path() != Some(path) {
+                    self.wallpaper.set_image(path, fit);
+                    self.dirty = true;
+                } else if self.wallpaper.config.fit != fit {
+                    // The picture has not changed, only where it sits. Through
+                    // `set_fit`, which does not issue a new image id: the fit
+                    // is applied when the wallpaper is drawn, so re-reading the
+                    // file to move it would decode a full-screen photograph to
+                    // learn nothing new about it.
+                    self.wallpaper.set_fit(fit);
+                    self.dirty = true;
+                }
+            }
+            None => {
+                if self.wallpaper.current_image_path().is_some() {
+                    self.wallpaper.follow_desktop_base();
+                    self.dirty = true;
+                }
+            }
+        }
     }
 
     fn sync_animation_speed(&mut self) {
@@ -1786,6 +1833,13 @@ impl<T: Transport> ShellSession<T> {
                     // to know which fields matter.
                     self.sync_animation_speed();
                     self.sync_autohide();
+                    // And the wallpaper, on the same argument the comment
+                    // above makes: this is the live path, and a setting
+                    // adopted only at startup is one that appears to need a
+                    // logout. Unlike the two above, this one *is* guarded --
+                    // see `sync_wallpaper`, where the guard stops an unrelated
+                    // settings change re-decoding a full-screen photograph.
+                    self.sync_wallpaper();
                     self.dirty = true;
                 }
             }

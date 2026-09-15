@@ -11,6 +11,12 @@ guitk = { path = "../../gui/toolkit" }
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
+# The export writes a file of passwords; a half-written one looks complete.
+safeio = { path = "../safeio" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# A directory to export into and read back.
+scratchdir = { path = "../../userspace/scratchdir" }

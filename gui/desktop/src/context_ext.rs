@@ -202,8 +202,6 @@ pub struct ContextMenuExtension {
     response_time_avg_ms: f64,
     /// Number of invocations (for tracking).
     invocation_count: u64,
-    /// Whether currently loading (took too long last time).
-    pub loading_timeout: bool,
 }
 
 impl ContextMenuExtension {
@@ -231,7 +229,6 @@ impl ContextMenuExtension {
             submenu: Vec::new(),
             response_time_avg_ms: 0.0,
             invocation_count: 0,
-            loading_timeout: false,
         }
     }
 
@@ -270,10 +267,15 @@ impl ContextMenuExtension {
         // Exponential moving average.
         let alpha = 0.3;
         self.response_time_avg_ms = alpha * duration_ms + (1.0 - alpha) * self.response_time_avg_ms;
-        self.loading_timeout = self.response_time_avg_ms > 200.0;
     }
 
     /// Whether this extension is slow (avg > 200ms).
+    ///
+    /// The single source. A `loading_timeout: bool` beside this used to cache
+    /// the identical comparison, updated only by `record_invocation` -- so a
+    /// caller that set `response_time_avg_ms` any other way got a cache that
+    /// disagreed with the method, and the three production callers all asked
+    /// the method. The cache was read by one test and nothing else.
     pub fn is_slow(&self) -> bool {
         self.response_time_avg_ms > 200.0
     }
@@ -1288,7 +1290,6 @@ mod tests {
             e.record_invocation(500.0);
         }
         assert!(e.is_slow());
-        assert!(e.loading_timeout);
     }
 
     // ---- Extension matching ----

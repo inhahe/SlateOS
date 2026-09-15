@@ -17,6 +17,7 @@ use appearance::{
 };
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -353,66 +354,9 @@ impl ScalePercent {
 // Network types
 // ============================================================================
 
-/// Network adapter entry for the network page.
-#[derive(Clone, Debug)]
-pub struct NetworkAdapter {
-    pub name: String,
-    pub adapter_type: AdapterType,
-    pub connected: bool,
-    pub ip_address: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdapterType {
-    Ethernet,
-    WiFi,
-    Loopback,
-}
-
-impl AdapterType {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Ethernet => "Ethernet",
-            Self::WiFi => "Wi-Fi",
-            Self::Loopback => "Loopback",
-        }
-    }
-}
-
-/// IP configuration mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IpConfigMode {
-    Dhcp,
-    Static,
-}
-
-impl IpConfigMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Dhcp => "DHCP (Automatic)",
-            Self::Static => "Static",
-        }
-    }
-}
-
 // ============================================================================
 // Sound types
 // ============================================================================
-
-/// Audio device for output/input selection.
-#[derive(Clone, Debug)]
-pub struct AudioDevice {
-    pub name: String,
-    pub is_default: bool,
-}
-
-/// Per-application volume entry.
-#[derive(Clone, Debug)]
-pub struct AppVolume {
-    pub app_name: String,
-    pub volume: u8,
-    pub muted: bool,
-}
 
 // ============================================================================
 // Accounts types
@@ -448,9 +392,7 @@ impl AccountType {
 #[derive(Clone, Debug)]
 pub struct UserAccount {
     pub name: String,
-    pub email: String,
     pub account_type: AccountType,
-    pub login_count: u32,
     pub last_login: String,
     pub is_current: bool,
     /// Index into [`ACCOUNT_PICTURES`] of the picture this account shows.
@@ -464,33 +406,6 @@ pub struct UserAccount {
 // ============================================================================
 // Privacy types
 // ============================================================================
-
-/// Per-app permission entry.
-#[derive(Clone, Debug)]
-pub struct AppPermission {
-    pub app_name: String,
-    pub allowed: bool,
-}
-
-/// Diagnostic data collection level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiagnosticLevel {
-    None,
-    Basic,
-    Full,
-}
-
-impl DiagnosticLevel {
-    const ALL: &[Self] = &[Self::None, Self::Basic, Self::Full];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Basic => "Basic",
-            Self::Full => "Full",
-        }
-    }
-}
 
 // ============================================================================
 // Accessibility types
@@ -542,41 +457,6 @@ impl NarratorVerbosity {
 // Update types
 // ============================================================================
 
-/// Status of an installed update.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UpdateStatus {
-    Installed,
-    Failed,
-    Pending,
-}
-
-impl UpdateStatus {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Installed => "Installed",
-            Self::Failed => "Failed",
-            Self::Pending => "Pending",
-        }
-    }
-
-    fn color(self, pal: &Palette) -> Color {
-        match self {
-            Self::Installed => pal.green,
-            Self::Failed => pal.red,
-            Self::Pending => pal.peach,
-        }
-    }
-}
-
-/// A historical update entry.
-#[derive(Clone, Debug)]
-pub struct UpdateEntry {
-    pub date: String,
-    pub kb_number: String,
-    pub description: String,
-    pub status: UpdateStatus,
-}
-
 // ============================================================================
 // Main application state
 // ============================================================================
@@ -593,6 +473,12 @@ pub struct SettingsState {
     // Window dimensions
     pub window_width: f32,
     pub window_height: f32,
+    /// The file picker, when the user is choosing a wallpaper.
+    ///
+    /// The only dialog in this window. Settings pages otherwise ask closed
+    /// questions -- a switch, a value from a list -- and a wallpaper is the one
+    /// answer that comes from the filesystem.
+    pub dialog: Option<FileDialog>,
 
     // Display settings
     pub resolution_index: usize,
@@ -600,17 +486,6 @@ pub struct SettingsState {
     pub scale: ScalePercent,
     /// Warm at 0.0, cool at 1.0. Range stated by [`SliderId::range`].
     pub monitor_count: u8,
-
-    // Sound settings
-    pub output_devices: Vec<AudioDevice>,
-    pub output_device_index: usize,
-    pub output_volume: u8,
-    pub output_muted: bool,
-    pub input_devices: Vec<AudioDevice>,
-    pub input_device_index: usize,
-    pub input_volume: u8,
-    pub system_sounds_enabled: bool,
-    pub app_volumes: Vec<AppVolume>,
 
     // Personalization — the whole shared model, not a subset, and carrying
     // the file it was read from. These pages edit only some of the settings
@@ -659,16 +534,6 @@ pub struct SettingsState {
     input_dirty: bool,
 
     // Network
-    pub adapters: Vec<NetworkAdapter>,
-    pub selected_adapter: usize,
-    pub ip_config_mode: IpConfigMode,
-    pub static_ip: String,
-    pub static_gateway: String,
-    pub dns_primary: String,
-    pub dns_secondary: String,
-    pub proxy_enabled: bool,
-    pub proxy_address: String,
-    pub proxy_port: String,
 
     // Accounts settings
     pub user_accounts: Vec<UserAccount>,
@@ -676,14 +541,6 @@ pub struct SettingsState {
     pub auto_login_enabled: bool,
 
     // Privacy settings
-    pub location_enabled: bool,
-    pub location_apps: Vec<AppPermission>,
-    pub camera_enabled: bool,
-    pub camera_apps: Vec<AppPermission>,
-    pub microphone_enabled: bool,
-    pub microphone_apps: Vec<AppPermission>,
-    pub background_apps: Vec<AppPermission>,
-    pub diagnostic_level: DiagnosticLevel,
 
     // Accessibility settings
     /// Range stated by [`SliderId::range`], not repeated here.
@@ -706,16 +563,6 @@ pub struct SettingsState {
     /// Slow at 0.0, fast at 1.0. Range stated by [`SliderId::range`].
     pub narrator_rate: f32,
     pub narrator_verbosity: NarratorVerbosity,
-
-    // Update settings
-    pub os_version: String,
-    pub update_history: Vec<UpdateEntry>,
-    pub auto_update_enabled: bool,
-    pub active_hours_start: u8, // 0-23
-    pub active_hours_end: u8,   // 0-23
-    pub defer_feature_days: u16,
-    pub defer_quality_days: u16,
-    pub checking_for_updates: bool,
 
     // Dropdown state
     pub open_dropdown: Option<DropdownId>,
@@ -838,14 +685,12 @@ pub enum DropdownId {
     Resolution,
     RefreshRate,
     Scale,
-    OutputDevice,
-    InputDevice,
-    IpConfig,
-    DiagnosticLevel,
     ColorFilter,
     CursorSize,
     NarratorVerbosity,
     HighContrast,
+    /// How the desktop picture is placed on the screen.
+    WallpaperFit,
 }
 
 impl DropdownId {
@@ -864,16 +709,13 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 13] = [
+    pub const FIXED: [Self; 10] = [
         Self::QuietStart,
         Self::QuietEnd,
+        Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
         Self::Scale,
-        Self::OutputDevice,
-        Self::InputDevice,
-        Self::IpConfig,
-        Self::DiagnosticLevel,
         Self::ColorFilter,
         Self::CursorSize,
         Self::NarratorVerbosity,
@@ -928,6 +770,64 @@ impl SettingsState {
     /// is in effect in this process either way, and there is nowhere in this
     /// UI to surface an error yet. When there is a status line, this is the
     /// call site that should feed it.
+    /// Put up the picker, starting where the current picture lives.
+    ///
+    /// The filter is the formats `gui/imagecodec` can actually decode. A
+    /// picker that offered every file would let a user choose a `.txt` and
+    /// meet a failure the desktop reports somewhere they are not looking.
+    fn open_wallpaper_dialog(&mut self) {
+        let start = self
+            .appearance
+            .settings
+            .wallpaper
+            .as_deref()
+            .and_then(|p| {
+                std::path::Path::new(p)
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::open()
+            .with_initial_path(start)
+            // Globs, not bare extensions: `FileFilter::patterns` is
+            // documented as glob patterns and `matches_any_pattern` compares
+            // the whole name, so "png" matches a file *called* png and nothing
+            // else. Passing the extensions bare made every directory list as
+            // empty -- caught by the round-trip test below, which could not
+            // find its own fixture.
+            .with_filter("Pictures", &["*.png", "*.jpg", "*.jpeg", "*.bmp"]);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.dialog = Some(dialog);
+    }
+
+    /// Give the picker an event; `None` when there is no picker up.
+    fn dialog_event(&mut self, event: &Event) -> Option<bool> {
+        let (width, height) = (self.window_width, self.window_height);
+        let action = {
+            let dialog = self.dialog.as_mut()?;
+            match event {
+                Event::Key(key) if key.pressed => dialog.handle_event(key, height),
+                Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
+                _ => DialogAction::None,
+            }
+        };
+        match action {
+            DialogAction::Selected(path) => {
+                self.dialog = None;
+                self.appearance.settings.wallpaper = Some(path.to_string_lossy().into_owned());
+            }
+            DialogAction::Cancelled => self.dialog = None,
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+            }
+            DialogAction::None => {}
+        }
+        Some(true)
+    }
+
     fn save_appearance(&mut self) {
         if let Err(err) = self.appearance.save() {
             eprintln!("settings: could not save appearance.yaml: {err}");
@@ -969,6 +869,62 @@ impl SettingsState {
     /// the machine it ran on.
     pub fn load_notifications(&mut self) {
         self.notif = notifsettings::NotifFile::load();
+    }
+
+    /// Read the machine's real accounts from the system account database.
+    ///
+    /// Separate from [`SettingsState::new`] and called by `main`, the same as
+    /// the other `load_*` methods: a constructor that reads a file makes every
+    /// test of this type depend on the machine it runs on, and the tests here
+    /// are pure `(w, h) -> RenderTree` functions by design.
+    ///
+    /// `gui/loginusers` is the shared source, already read by the login screen
+    /// and `apps/lockscreen`. Two answers to "which accounts does this machine
+    /// have" would drift, and a person cannot tell a hidden account from a
+    /// deleted one.
+    ///
+    /// **Three fields this page used to show have no source and are gone:**
+    /// an email address, a login count, and -- for one invented account -- a
+    /// child account with "Screen time limits and content filters are active"
+    /// beneath it. The database carries no email, counts no logins, and has no
+    /// notion of a child account, so all three were written into the source as
+    /// constants: Alice, Bob and Charlie, with `@example.com` addresses and
+    /// login counts of 142, 56 and 23.
+    ///
+    /// Nothing says which account is *signed in*, so none is marked. That is
+    /// the documented fallback in [`SettingsState::current_account_picture`] --
+    /// "a machine with nobody signed in does not claim a choice was made" --
+    /// rather than a new compromise.
+    pub fn load_user_accounts(&mut self) {
+        self.set_user_accounts(&loginusers::offered_from_system());
+    }
+
+    /// The mapping half of [`SettingsState::load_user_accounts`], with the read
+    /// lifted out so a test can supply accounts without a filesystem.
+    pub fn set_user_accounts(&mut self, accounts: &[loginusers::Account]) {
+        self.user_accounts = accounts
+            .iter()
+            .map(|a| UserAccount {
+                name: a.display_name.clone(),
+                account_type: if a.is_admin {
+                    AccountType::Admin
+                } else {
+                    AccountType::Standard
+                },
+                last_login: format_last_login(a.last_login),
+                // No source for "who is signed in"; see the doc above.
+                is_current: false,
+                // The database's avatar is a name, and this page offers a fixed
+                // grid of pictures. Until something maps one to the other, every
+                // account shows the same placeholder rather than a picture
+                // chosen by an index that means nothing.
+                picture: 0,
+            })
+            .collect();
+        // A stale selection would index past a shorter list on the next reload.
+        if self.selected_account >= self.user_accounts.len() {
+            self.selected_account = 0;
+        }
     }
 
     /// The palette this application draws itself with.
@@ -1058,66 +1014,13 @@ impl SettingsState {
 
             window_width: 1200.0,
             window_height: 800.0,
+            dialog: None,
 
             // Display defaults
             resolution_index: 2,   // 1920x1080
             refresh_rate_index: 1, // 60 Hz
             scale: ScalePercent::S100,
             monitor_count: 1,
-
-            // Sound defaults
-            output_devices: vec![
-                AudioDevice {
-                    name: "Speakers (Built-in)".into(),
-                    is_default: true,
-                },
-                AudioDevice {
-                    name: "HDMI Audio Output".into(),
-                    is_default: false,
-                },
-                AudioDevice {
-                    name: "Bluetooth Headphones".into(),
-                    is_default: false,
-                },
-            ],
-            output_device_index: 0,
-            output_volume: 75,
-            output_muted: false,
-            input_devices: vec![
-                AudioDevice {
-                    name: "Microphone (Built-in)".into(),
-                    is_default: true,
-                },
-                AudioDevice {
-                    name: "USB Microphone".into(),
-                    is_default: false,
-                },
-            ],
-            input_device_index: 0,
-            input_volume: 80,
-            system_sounds_enabled: true,
-            app_volumes: vec![
-                AppVolume {
-                    app_name: "System".into(),
-                    volume: 100,
-                    muted: false,
-                },
-                AppVolume {
-                    app_name: "Browser".into(),
-                    volume: 85,
-                    muted: false,
-                },
-                AppVolume {
-                    app_name: "Music Player".into(),
-                    volume: 60,
-                    muted: false,
-                },
-                AppVolume {
-                    app_name: "Video Player".into(),
-                    volume: 90,
-                    muted: false,
-                },
-            ],
 
             // Nothing has been written yet, so there is nothing to notify.
             appearance_dirty: false,
@@ -1136,142 +1039,13 @@ impl SettingsState {
             appearance: AppearanceFile::new(),
 
             // Network defaults
-            adapters: vec![
-                NetworkAdapter {
-                    name: "eth0".into(),
-                    adapter_type: AdapterType::Ethernet,
-                    connected: true,
-                    ip_address: "192.168.1.100".into(),
-                },
-                NetworkAdapter {
-                    name: "wlan0".into(),
-                    adapter_type: AdapterType::WiFi,
-                    connected: false,
-                    ip_address: String::new(),
-                },
-                NetworkAdapter {
-                    name: "lo".into(),
-                    adapter_type: AdapterType::Loopback,
-                    connected: true,
-                    ip_address: "127.0.0.1".into(),
-                },
-            ],
-            selected_adapter: 0,
-            ip_config_mode: IpConfigMode::Dhcp,
-            static_ip: "192.168.1.100".into(),
-            static_gateway: "192.168.1.1".into(),
-            dns_primary: "1.1.1.1".into(),
-            dns_secondary: "8.8.8.8".into(),
-            proxy_enabled: false,
-            proxy_address: String::new(),
-            proxy_port: String::new(),
 
-            // Accounts defaults
-            user_accounts: vec![
-                UserAccount {
-                    name: "Alice".into(),
-                    email: "alice@example.com".into(),
-                    account_type: AccountType::Admin,
-                    login_count: 142,
-                    last_login: "2026-05-17 09:34".into(),
-                    is_current: true,
-                    picture: 2,
-                },
-                UserAccount {
-                    name: "Bob".into(),
-                    email: "bob@example.com".into(),
-                    account_type: AccountType::Standard,
-                    login_count: 56,
-                    last_login: "2026-05-16 18:20".into(),
-                    is_current: false,
-                    picture: 1,
-                },
-                UserAccount {
-                    name: "Charlie".into(),
-                    email: "charlie@example.com".into(),
-                    account_type: AccountType::Child,
-                    login_count: 23,
-                    last_login: "2026-05-15 14:05".into(),
-                    is_current: false,
-                    picture: 5,
-                },
-            ],
+            // Accounts: empty until `load_user_accounts` reads the database.
+            user_accounts: Vec::new(),
             selected_account: 0,
             auto_login_enabled: false,
 
             // Privacy defaults
-            location_enabled: true,
-            location_apps: vec![
-                AppPermission {
-                    app_name: "Maps".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Weather".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Camera".into(),
-                    allowed: false,
-                },
-                AppPermission {
-                    app_name: "Browser".into(),
-                    allowed: true,
-                },
-            ],
-            camera_enabled: true,
-            camera_apps: vec![
-                AppPermission {
-                    app_name: "Video Chat".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Browser".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Social Media".into(),
-                    allowed: false,
-                },
-            ],
-            microphone_enabled: true,
-            microphone_apps: vec![
-                AppPermission {
-                    app_name: "Video Chat".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Voice Recorder".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Browser".into(),
-                    allowed: false,
-                },
-            ],
-            background_apps: vec![
-                AppPermission {
-                    app_name: "Email".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Music Player".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Updater".into(),
-                    allowed: true,
-                },
-                AppPermission {
-                    app_name: "Social Media".into(),
-                    allowed: false,
-                },
-                AppPermission {
-                    app_name: "News Reader".into(),
-                    allowed: false,
-                },
-            ],
-            diagnostic_level: DiagnosticLevel::Basic,
 
             // Accessibility defaults
             text_size_percent: 100,
@@ -1287,41 +1061,6 @@ impl SettingsState {
             narrator_rate: 0.5,
             narrator_verbosity: NarratorVerbosity::Medium,
 
-            // Update defaults
-            os_version: "Slate OS 1.0.0 Build 2600".into(),
-            update_history: vec![
-                UpdateEntry {
-                    date: "2026-05-15".into(),
-                    kb_number: "KB5032100".into(),
-                    description: "Security update for kernel".into(),
-                    status: UpdateStatus::Installed,
-                },
-                UpdateEntry {
-                    date: "2026-05-10".into(),
-                    kb_number: "KB5031980".into(),
-                    description: "Cumulative update for .NET runtime".into(),
-                    status: UpdateStatus::Installed,
-                },
-                UpdateEntry {
-                    date: "2026-05-08".into(),
-                    kb_number: "KB5031875".into(),
-                    description: "Driver update for GPU".into(),
-                    status: UpdateStatus::Failed,
-                },
-                UpdateEntry {
-                    date: "2026-05-01".into(),
-                    kb_number: "KB5031700".into(),
-                    description: "Feature update: compositor improvements".into(),
-                    status: UpdateStatus::Installed,
-                },
-            ],
-            auto_update_enabled: true,
-            active_hours_start: 8,
-            active_hours_end: 22,
-            defer_feature_days: 0,
-            defer_quality_days: 0,
-            checking_for_updates: false,
-
             // Dropdown state
             open_dropdown: None,
             dropdown_scroll: 0,
@@ -1336,6 +1075,34 @@ impl SettingsState {
 // ============================================================================
 
 /// Push a rounded rectangle fill command.
+/// When an account last logged in, as the page shows it.
+///
+/// Zero means never -- `gui/loginusers` documents it that way so a never-used
+/// account sorts last -- and "Never" is the honest rendering rather than
+/// 1 January 1970, which is what a bare conversion produces and what a reader
+/// would take for a real date.
+///
+/// UTC, and it says so in the string. The alternative is the machine's local
+/// zone, which this application has no way to ask for: the shell's clock gets
+/// it from a `Tz` it loads itself, and there is no service a settings window
+/// can consult. A time labelled UTC is checkable; an unlabelled one that might
+/// be either is not.
+fn format_last_login(secs: u64) -> String {
+    let Ok(secs) = i64::try_from(secs) else {
+        return "Never".to_string();
+    };
+    if secs == 0 {
+        return "Never".to_string();
+    }
+    let dt = guitk::datetime::DateTime::at(secs, &guitk::tzrules::Tz::utc());
+    let (y, m, day) = dt.date().ymd();
+    format!(
+        "{y:04}-{m:02}-{day:02} {:02}:{:02} UTC",
+        dt.hour(),
+        dt.minute()
+    )
+}
+
 fn fill_rounded(tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32) {
     tree.fill_rounded_rect(x, y, w, h, color, CornerRadii::all(radius));
 }
@@ -1587,23 +1354,16 @@ fn render_pill_row(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, items: 
     }
 }
 
-/// `value` rounded to the nearest `u8`.
+/// `value` rounded to the nearest `u16`.
 ///
 /// Callers pass a value already clamped to the slider's range, so the
-/// saturation below is belt-and-braces; it is written out because a float that
+/// saturation is belt-and-braces; it is written out because a float that
 /// escaped its range would otherwise wrap silently to the wrong end of the
-/// scale, and a volume that reads 3% when the handle is at the far right is
-/// worse than one that reads 100%.
-fn round_u8(value: f32) -> u8 {
-    // Float-to-integer `as` saturates at the bounds and maps NaN to 0 in Rust,
-    // which is exactly the behaviour wanted for a pointer-derived value.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    {
-        value.round().clamp(0.0, f32::from(u8::MAX)) as u8
-    }
-}
-
-/// `value` rounded to the nearest `u16`. See [`round_u8`].
+/// scale, and a text size that reads 50% with the handle at the far right is
+/// worse than one that reads 250%.
+///
+/// Had a `round_u8` beside it until 2026-09-14. Every one of its callers was a
+/// sound slider, and those went with the Sound page's controls.
 fn round_u16(value: f32) -> u16 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
@@ -1650,38 +1410,6 @@ fn render_disabled_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, 
         6.0,
     );
     tree.text(x + 12.0, y + 8.0, label, pal.overlay0, 13.0);
-}
-
-/// Draw a read-only text field showing `value`, inset within a row at `y`.
-fn render_text_field(
-    tree: &mut RenderTree,
-    pal: &Palette,
-    x: f32,
-    y: f32,
-    value: &str,
-    width: f32,
-) {
-    let field_y = y + 6.0;
-    let field_h = 32.0;
-    fill_rounded(tree, x, field_y, width, field_h, pal.surface0, 6.0);
-    tree.push(RenderCommand::StrokeRect {
-        x,
-        y: field_y,
-        width,
-        height: field_h,
-        color: pal.overlay0,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(6.0),
-    });
-    text_clipped(
-        tree,
-        x + 8.0,
-        field_y + 8.0,
-        value,
-        pal.text,
-        13.0,
-        width - 16.0,
-    );
 }
 
 // --- Theme cards and colour swatches ---------------------------------------
@@ -1999,29 +1727,12 @@ const BUTTON_HEIGHT: f32 = 32.0;
 /// How far below a row's top edge a button inside that row is drawn.
 const BUTTON_ROW_INSET_Y: f32 = 6.0;
 
-/// Which of a page's per-application permission lists a toggle belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PermissionKind {
-    Location,
-    Camera,
-    Microphone,
-    Background,
-}
-
 /// A boolean setting, named so a click can find its field without the click
 /// handler knowing where on the page the row was drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToggleId {
     NightLight,
-    OutputMuted,
-    SystemSounds,
-    ProxyEnabled,
     AutoLogin,
-    LocationEnabled,
-    CameraEnabled,
-    MicrophoneEnabled,
-    /// The per-app switch at `index` of `kind`'s list.
-    AppPermission(PermissionKind, usize),
     /// Whether the `n`-th program in the notification list makes a sound.
     NotifSound(usize),
     /// Whether it shows a banner rather than only appearing in the list.
@@ -2038,7 +1749,6 @@ enum ToggleId {
     MouseKeys,
     ReduceAnimations,
     ReduceTransparency,
-    AutoUpdate,
     /// Slide the taskbar out of the way when it is not in use.
     ///
     /// Unlike its neighbours here, the field behind this one lives in the
@@ -2214,7 +1924,6 @@ enum PillId {
 enum SelectId {
     ThemeMode,
     AccentColor,
-    Adapter,
     Account,
     PointerSize,
     AccountPicture,
@@ -2230,35 +1939,26 @@ enum SelectId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SliderId {
     NightLightTemperature,
-    OutputVolume,
-    InputVolume,
-    /// The volume of `app_volumes[index]`.
-    AppVolume(usize),
     NarratorRate,
     TextSize,
-    DeferFeatureDays,
-    DeferQualityDays,
     /// How long the pointer has between two clicks for them to be one
     /// double click, in milliseconds.
     DoubleClickMs,
 }
 
 impl SliderId {
-    /// Every slider whose identity does not depend on a list index.
+    /// Every slider there is.
     ///
-    /// The per-application volumes are left out because how many of them there
-    /// are is state, not a constant; a test that wants those enumerates
-    /// `app_volumes` instead. Exists so a test can walk the rest and check each
-    /// one is draggable, the way [`DropdownId::FIXED`] does for dropdowns.
+    /// Named `FIXED` from when the per-application volumes were indexed and so
+    /// could not be listed as constants. They are gone -- the Sound page had no
+    /// consumer for any of them -- so this is now simply the complete set, and
+    /// a test walks it to check each one is draggable, the way
+    /// [`DropdownId::FIXED`] does for dropdowns.
     #[cfg(test)]
-    const FIXED: [Self; 8] = [
+    const FIXED: [Self; 4] = [
         Self::NightLightTemperature,
-        Self::OutputVolume,
-        Self::InputVolume,
         Self::NarratorRate,
         Self::TextSize,
-        Self::DeferFeatureDays,
-        Self::DeferQualityDays,
         Self::DoubleClickMs,
     ];
 
@@ -2278,10 +1978,7 @@ impl SliderId {
     fn range(self) -> (f32, f32) {
         match self {
             Self::NightLightTemperature | Self::NarratorRate => (0.0, 1.0),
-            Self::OutputVolume | Self::InputVolume | Self::AppVolume(_) => (0.0, 100.0),
             Self::TextSize => (50.0, 250.0),
-            Self::DeferFeatureDays => (0.0, 365.0),
-            Self::DeferQualityDays => (0.0, 30.0),
             #[allow(clippy::cast_precision_loss)]
             Self::DoubleClickMs => (MIN_DOUBLE_CLICK_MS as f32, MAX_DOUBLE_CLICK_MS as f32),
         }
@@ -2297,10 +1994,7 @@ impl SliderId {
         let whole = round_u16(value);
         match self {
             Self::NightLightTemperature | Self::NarratorRate => None,
-            Self::OutputVolume | Self::InputVolume | Self::AppVolume(_) | Self::TextSize => {
-                Some(format!("{whole}%"))
-            }
-            Self::DeferFeatureDays | Self::DeferQualityDays => Some(format!("{whole} days")),
+            Self::TextSize => Some(format!("{whole}%")),
             // In milliseconds, the unit the setting is actually stored and
             // applied in, rather than as a "speed" the user would have to guess
             // the direction of. The ends are labelled Fast and Slow by the page.
@@ -2327,13 +2021,16 @@ enum AnchorId {
 /// A push button that does something when pressed.
 ///
 /// Only buttons with an effect are listed. The rest of the page's buttons —
-/// Change Password, Add/Remove Account, Clear Activity History, Go Back, Fresh
-/// Start, Manage Family Settings — have no state behind them yet, so they
-/// register no click target rather than swallowing a click and doing nothing.
+/// Change Password, Add/Remove Account, Go Back, Fresh Start — have no state
+/// behind them yet, so they register no click target rather than swallowing a
+/// click and doing nothing.
 /// See known-issues.md `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonId {
-    CheckForUpdates,
+    /// Open the picker and choose a desktop picture.
+    ChooseWallpaper,
+    /// Go back to the plain background that follows the theme.
+    ClearWallpaper,
 }
 
 /// What a click on a page landed on.
@@ -2445,6 +2142,26 @@ trait PageSink {
     /// ignores it, which is why it costs a draw or a hit-test nothing.
     fn anchor(&mut self, _id: AnchorId, _x: f32, _y: f32) {}
 
+    /// A row that shows what a setting will be, and cannot be used yet.
+    ///
+    /// Passes `None` for the hit band, so `row` registers no click at all: the
+    /// control is inert *by construction* rather than by a handler remembering
+    /// to refuse it. Two predicates for one state is how a control comes to
+    /// look disabled and act enabled, which this tree has already been bitten
+    /// by -- see the `can_clean` note in `apps/diskcleanup`.
+    ///
+    /// `subtext0` and not `overlay0`: `overlay0` is the separator/placeholder
+    /// role and is documented as not carrying text, excluded by name from the
+    /// palette's own WCAG floor (`every_role_a_user_reads_is_legible_on_the_
+    /// base_of_its_own_palette`). A greyed row is still a row somebody reads.
+    fn unavailable_row(&mut self, label: &str, value: &str) {
+        let pal = &self.palette();
+        let text = value.to_string();
+        self.row(label, None, ITEM_HEIGHT, move |tree, cx, y| {
+            tree.text(cx, y + 8.0, &text, pal.subtext0, 13.0);
+        });
+    }
+
     /// A row whose control is a closed dropdown button.
     fn dropdown_row(&mut self, label: &str, id: DropdownId, value: &str) {
         let pal = &self.palette();
@@ -2471,21 +2188,6 @@ trait PageSink {
                 render_toggle(tree, pal, cx, y + 12.0, on);
             },
         );
-    }
-
-    /// An indented per-application switch, as used by the permission lists.
-    /// Tighter than a full row, and its own label rather than a setting row's.
-    fn app_toggle_row(&mut self, label: &str, id: ToggleId, on: bool) {
-        let pal = &self.palette();
-        let height = ITEM_HEIGHT - 8.0;
-        let control_x = self.control_x();
-        let (x, y) = (self.x(), self.y());
-        self.hit_rect(x, y, ROW_HIT_WIDTH, height, RowHit::Toggle(id));
-        self.draw(|tree, x, y| {
-            tree.text(x + 16.0, y + 14.0, label, pal.subtext1, 13.0);
-            render_toggle(tree, pal, control_x, y + 12.0, on);
-        });
-        self.advance(height);
     }
 
     /// A row whose control is a draggable slider, plus whatever else the page
@@ -2519,14 +2221,6 @@ trait PageSink {
     fn value_row(&mut self, label: &str, value: &str, color: Color) {
         self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
             tree.text(cx, y + 14.0, value, color, 13.0);
-        });
-    }
-
-    /// A row whose control is a read-only text field.
-    fn field_row(&mut self, label: &str, value: &str, width: f32) {
-        let pal = &self.palette();
-        self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
-            render_text_field(tree, pal, cx, y, value, width);
         });
     }
 
@@ -2706,21 +2400,6 @@ impl PageSink for AnchorSink {
     }
 }
 
-/// The indented run of per-app switches beneath a permission's master toggle.
-///
-/// One function for all four lists, taking the list it is describing, so a
-/// click on a Camera row cannot resolve against the Location list's indices —
-/// which is what a per-list copy of this loop invites.
-fn build_permission_list<S: PageSink>(s: &mut S, kind: PermissionKind, apps: &[AppPermission]) {
-    for (idx, app) in apps.iter().enumerate() {
-        s.app_toggle_row(
-            &app.app_name,
-            ToggleId::AppPermission(kind, idx),
-            app.allowed,
-        );
-    }
-}
-
 // ============================================================================
 // Page renderers
 // ============================================================================
@@ -2738,6 +2417,9 @@ impl SettingsState {
     pub fn render_tree(&self) -> RenderTree {
         let pal = &self.palette();
         let mut tree = RenderTree::new();
+        // The picker is drawn last, at the bottom of this function, over
+        // everything: it is modal, and one drawn under the page it belongs to
+        // would be a picker the user could not read.
 
         // Background
         tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, pal.base);
@@ -2764,6 +2446,14 @@ impl SettingsState {
         // Dropdown overlay (rendered on top of everything)
         if self.open_dropdown.is_some() {
             self.render_open_dropdown(&mut tree);
+        }
+
+        // And the file picker over even that: it is the only modal thing in
+        // this window, and a dropdown drawn over it would be a list the user
+        // could not dismiss.
+        if let Some(dialog) = &self.dialog {
+            tree.commands
+                .extend(dialog.render(pal, self.window_width, self.window_height));
         }
 
         tree
@@ -2809,8 +2499,8 @@ impl SettingsState {
     const CATEGORY_ROW_PAINTED_HEIGHT: f32 = CATEGORY_ITEM_HEIGHT - 4.0;
 
     /// Y just past the last category row -- the bottom of the whole list.
-    fn category_list_bottom() -> f32 {
-        Self::category_row_top(SettingsCategory::ALL.len().saturating_sub(1))
+    fn category_list_bottom(&self) -> f32 {
+        Self::category_row_top(self.filtered_categories().len().saturating_sub(1))
             + Self::CATEGORY_ROW_PAINTED_HEIGHT
     }
 
@@ -2822,12 +2512,12 @@ impl SettingsState {
     /// oversight: the renderer paints nothing there, and a hit test that
     /// answers for a pixel the renderer left blank is how a hover highlight
     /// ends up sitting a few pixels above the pointer that summoned it.
-    fn category_at(mx: f32, my: f32) -> Option<usize> {
+    fn category_at(&self, mx: f32, my: f32) -> Option<usize> {
         if !mx.is_finite() || mx < 0.0 || mx >= SIDEBAR_WIDTH {
             return None;
         }
         let from_top = my - Self::category_list_top();
-        if !from_top.is_finite() || from_top < 0.0 || my >= Self::category_list_bottom() {
+        if !from_top.is_finite() || from_top < 0.0 || my >= self.category_list_bottom() {
             return None;
         }
         // Truncating rather than rounding: a point 43.9px below the first
@@ -2837,7 +2527,7 @@ impl SettingsState {
         // `category_list_bottom` has already ruled this out. It stays because
         // the cast above saturates rather than wrapping, and an index into
         // `ALL` is not a thing to leave to a float's rounding.
-        if idx >= SettingsCategory::ALL.len() {
+        if idx >= self.filtered_categories().len() {
             return None;
         }
         if my >= Self::category_row_top(idx) + Self::CATEGORY_ROW_PAINTED_HEIGHT {
@@ -2887,7 +2577,7 @@ impl SettingsState {
         }
 
         // Category list
-        for (idx, category) in SettingsCategory::ALL.iter().enumerate() {
+        for (idx, category) in self.filtered_categories().iter().enumerate() {
             let item_y = Self::category_row_top(idx);
             let is_selected = *category == self.current_category;
             let is_hovered = self.sidebar_hovered == Some(idx);
@@ -3005,6 +2695,7 @@ impl SettingsState {
             SettingsPage::Display => self.build_display_page(sink),
             SettingsPage::Notifications => self.build_notifications_page(sink),
             SettingsPage::Sound => self.build_sound_page(sink),
+            SettingsPage::Wallpaper => self.build_wallpaper_page(sink),
             SettingsPage::Mouse => self.build_mouse_page(sink),
             SettingsPage::Themes => self.build_themes_page(sink),
             SettingsPage::Colors => self.build_colors_page(sink),
@@ -3023,6 +2714,25 @@ impl SettingsState {
             SettingsPage::SystemUpdates | SettingsPage::Recovery | SettingsPage::Snapshots => {
                 self.build_update_page(sink);
             }
+            // WHY `StartupApps` IS STILL A PLACEHOLDER, deliberately.
+            //
+            // design-decisions 815 says a screen you *open* moves here and the
+            // shell's copy is deleted, and `gui/desktop/src/startup_settings.rs`
+            // is 2,129 lines of exactly such a screen. It is not ported because
+            // **nothing launches user startup applications.** Checked
+            // 2026-09-14: the shell's session start never mentions them,
+            // `apps/startupmanager` spawns nothing but its own window, and
+            // `services/init` reads `/etc/startup.conf` to start *system
+            // services*, which is a different thing and lane B's.
+            //
+            // So three user interfaces manage a list no launcher reads. Porting
+            // the fourth would "save a value to a file, look as though it had
+            // worked, and change nothing" -- the Mouse page above refuses that
+            // in the same words, and `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-
+            // NOTHING` is what it was filed about. This page gets its controls
+            // when the list gets a consumer, and not before.
+            //
+            // See `TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`.
             _ => self.build_placeholder_page(sink),
         }
     }
@@ -3071,10 +2781,8 @@ impl SettingsState {
         extra: impl FnOnce(&mut RenderTree, f32, f32),
     ) {
         let pal = &self.palette();
-        let (Some(raw), Some(value)) = (self.slider_raw(id), self.slider_fraction(id)) else {
-            return;
-        };
-        let readout = id.readout(raw);
+        let readout = id.readout(self.slider_raw(id));
+        let value = self.slider_fraction(id);
         s.slider_row(label, id, value, move |tree, cx, y| {
             if let Some(readout) = &readout {
                 tree.text(
@@ -3208,49 +2916,116 @@ impl SettingsState {
 
     // --- Sound page ---
 
+    /// The Sound page: the shape of the settings, and none of them usable.
+    ///
+    /// Until 2026-09-14 this page offered an output device chooser, a volume
+    /// slider, a mute switch, an input device chooser, an input volume slider,
+    /// a system-sounds switch and a per-application volume section. Every one
+    /// of them worked on screen and reached nothing:
+    ///
+    /// * the two output devices and the input device were **written into the
+    ///   source as constants** -- "Speakers (Built-in)", "HDMI Audio Output".
+    ///   Nothing in this tree enumerates audio hardware, so the machine was
+    ///   never asked what it has;
+    /// * the four per-application entries were constants too -- "System",
+    ///   "Browser", "Music Player", "Video Player". There is no browser in
+    ///   this tree at all, and nothing was asked what is playing;
+    /// * `apps/mixer` reads no configuration and there is no audio service, so
+    ///   even a slider that persisted correctly would have nothing to persist
+    ///   *to*.
+    ///
+    /// So a user set their volume, closed the window, and nothing had
+    /// happened. See `TD-C-THE-SOUND-PAGE-INVENTS-ITS-DEVICES-AND-ITS-
+    /// APPLICATIONS`.
+    ///
+    /// **Why the rows are still drawn, rather than the page emptied.** The
+    /// Mouse page below omits what it cannot deliver, and that is right for one
+    /// slider among fifteen. A whole subsystem is a different case: an empty
+    /// page says "there is nothing here", which is less true and less useful
+    /// than "this is what will be here". The rows are inert by construction --
+    /// `unavailable_row` passes no hit band, so there is no handler that could
+    /// forget to refuse them.
+    ///
+    /// Each row gets its real control when audio gets a consumer, and not
+    /// before -- the same rule the Mouse page states, applied to a page that
+    /// had not been following it.
     fn build_sound_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
         s.section("Output");
-        let output_name = self
-            .output_devices
-            .get(self.output_device_index)
-            .map_or("None", |d| d.name.as_str());
-        s.dropdown_row("Output Device", DropdownId::OutputDevice, output_name);
-
-        self.slider(s, "Volume", SliderId::OutputVolume);
-        s.toggle_row("Mute", ToggleId::OutputMuted, self.output_muted);
+        s.note(
+            "Audio is not wired up yet: this system has no sound service and no way to enumerate devices, so these settings would not reach anything.",
+            44.0,
+        );
+        s.unavailable_row("Output Device", "No devices detected");
+        s.unavailable_row("Volume", "Unavailable");
+        s.unavailable_row("Mute", "Unavailable");
         s.gap();
 
         s.section("Input");
-        let input_name = self
-            .input_devices
-            .get(self.input_device_index)
-            .map_or("None", |d| d.name.as_str());
-        s.dropdown_row("Input Device", DropdownId::InputDevice, input_name);
-
-        self.slider(s, "Input Volume", SliderId::InputVolume);
+        s.unavailable_row("Input Device", "No devices detected");
+        s.unavailable_row("Input Volume", "Unavailable");
         s.gap();
 
         s.section("System Sounds");
-        s.toggle_row(
-            "Enable System Sounds",
-            ToggleId::SystemSounds,
-            self.system_sounds_enabled,
-        );
+        s.unavailable_row("Enable System Sounds", "Unavailable");
         s.gap();
 
         s.section("Per-Application Volume");
-        for (index, app_vol) in self.app_volumes.iter().enumerate() {
-            let muted = app_vol.muted;
-            self.slider_with(
-                s,
-                &app_vol.app_name,
-                SliderId::AppVolume(index),
-                move |tree, cx, y| {
-                    if muted {
-                        tree.text(cx + SLIDER_WIDTH + 50.0, y + 14.0, "(muted)", pal.red, 11.0);
-                    }
-                },
+        s.note("Nothing is playing audio, and nothing here can ask.", 28.0);
+    }
+
+    /// The Wallpaper page: which picture the desktop shows.
+    ///
+    /// The shell could already crop, letterbox, tile, centre and span a
+    /// wallpaper across monitors, tint it by time of day and rotate a
+    /// slideshow. `set_image` was called four times in the whole tree and all
+    /// four were in the shell's own tests: the feature was complete except
+    /// that no user could reach it.
+    ///
+    /// Only the picture is offered, not the fit mode, the slideshow or the
+    /// dynamic tint. Those are settings `appearance.yaml` does not carry yet,
+    /// and a control that writes a value nothing reads is the defect the Mouse
+    /// page below refuses in its own words.
+    fn build_wallpaper_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Desktop Picture");
+
+        match self.appearance.settings.wallpaper.as_deref() {
+            Some(path) => {
+                s.note(path, 28.0);
+            }
+            None => {
+                s.note(
+                    "No picture. The desktop is the plain background, which follows your theme.",
+                    28.0,
+                );
+            }
+        }
+
+        let pal = self.palette();
+        s.button_row(
+            "Desktop picture",
+            "Choose...",
+            pal.accent,
+            Some(RowHit::Press(ButtonId::ChooseWallpaper)),
+        );
+        // Offered only with a picture to place, for the reason Remove is:
+        // a control whose every option does the same nothing is one a user
+        // reads as broken rather than as inapplicable.
+        if self.appearance.settings.wallpaper.is_some() {
+            s.dropdown_row(
+                "How it is placed",
+                DropdownId::WallpaperFit,
+                self.appearance.settings.wallpaper_fit.label(),
+            );
+        }
+        // Offered only when there is one to remove. A "Remove" that is always
+        // there is a button whose press does nothing most of the time, and a
+        // user cannot tell that from one that failed.
+        if self.appearance.settings.wallpaper.is_some() {
+            s.button_row(
+                "Remove the picture",
+                "Remove",
+                pal.surface1,
+                Some(RowHit::Press(ButtonId::ClearWallpaper)),
             );
         }
     }
@@ -3316,10 +3091,10 @@ impl SettingsState {
         s.note(
             match style {
                 SurfaceStyle::Borders => {
-                    "Outlined. A selected thing is outlined in the accent colour,                      which means the same everywhere it appears."
+                    "Outlined. A selected thing is outlined in the accent colour, which means the same everywhere it appears."
                 }
                 SurfaceStyle::Cards => {
-                    "Filled with a shade. Note that some text does not reach the                      4.5:1 contrast floor on the darker cards."
+                    "Filled with a shade. Note that some text does not reach the 4.5:1 contrast floor on the darker cards."
                 }
             },
             30.0,
@@ -3339,10 +3114,10 @@ impl SettingsState {
         s.note(
             match strip {
                 StripStyle::Filled => {
-                    "Shaded. A toolbar or status bar is a band of a different                      shade from the page, as it is today."
+                    "Shaded. A toolbar or status bar is a band of a different shade from the page, as it is today."
                 }
                 StripStyle::Separator => {
-                    "A line. The bar is the same colour as the page, with a                      hairline along the edge that faces the content."
+                    "A line. The bar is the same colour as the page, with a hairline along the edge that faces the content."
                 }
             },
             30.0,
@@ -3474,80 +3249,65 @@ impl SettingsState {
 
     // --- Network status page ---
 
+    /// The Network Status page.
+    ///
+    /// It used to list three network adapters -- `eth0`, Ethernet, connected,
+    /// 192.168.1.100; `wlan0`, Wi-Fi, disconnected; `lo`, loopback,
+    /// 127.0.0.1 -- each with a green or grey dot for its link state. All
+    /// three were written into the source as constants. **This system cannot
+    /// enumerate its network interfaces**: there is no such call in `net/`,
+    /// which carries a DNS resolver and an HTTP client and nothing that asks
+    /// the kernel what hardware is present, and no service between a GUI
+    /// application and the kernel's own interfaces.
+    ///
+    /// A green dot beside a name and an address is the strongest claim a
+    /// status page can make -- it says "I looked, and this is what is there".
+    ///
+    /// The address fields went for a second reason, which outlasts the first.
+    /// Nothing reads them. `net/dns` does define a `ResolverConfig` and parse
+    /// `resolv.conf`, so the *format* exists, but no program in this tree
+    /// loads one -- so a nameserver typed here would be stored in this
+    /// window's memory until it closed. Same for the proxy, whose page below
+    /// says so in its own words.
     fn build_network_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
         s.section("Network Adapters");
-        let control_x = s.control_x();
-        for (idx, adapter) in self.adapters.iter().enumerate() {
-            let selected = idx == self.selected_adapter;
-            s.list_row(
-                SelectId::Adapter,
-                idx,
-                ITEM_HEIGHT,
-                ITEM_HEIGHT + 4.0,
-                move |tree, x, y| {
-                    let row_bg = if selected {
-                        pal.surface0
-                    } else {
-                        Color::TRANSPARENT
-                    };
-                    fill_rounded(tree, x - 8.0, y, 600.0, ITEM_HEIGHT, row_bg, 6.0);
-
-                    let status_color = if adapter.connected {
-                        pal.green
-                    } else {
-                        pal.overlay0
-                    };
-                    fill_rounded(tree, x, y + 18.0, 10.0, 10.0, status_color, 5.0);
-
-                    tree.text(x + 20.0, y + 8.0, &adapter.name, pal.text, 14.0);
-                    tree.text(
-                        x + 20.0,
-                        y + 26.0,
-                        adapter.adapter_type.label(),
-                        pal.subtext0,
-                        11.0,
-                    );
-
-                    let status_text = if adapter.connected {
-                        &adapter.ip_address
-                    } else {
-                        "Disconnected"
-                    };
-                    tree.text(control_x, y + 14.0, status_text, pal.subtext0, 13.0);
-                },
-            );
-        }
+        s.note(
+            "This system cannot list its network interfaces yet. Nothing here              can ask which are present, whether any is connected, or what              address it holds.",
+            44.0,
+        );
+        s.unavailable_row("Interfaces", "Cannot be listed");
         s.gap();
 
         s.section("IP Configuration");
-        s.dropdown_row("Mode", DropdownId::IpConfig, self.ip_config_mode.label());
-
-        if self.ip_config_mode == IpConfigMode::Static {
-            s.field_row("IP Address", &self.static_ip, 180.0);
-            s.field_row("Gateway", &self.static_gateway, 180.0);
-        }
+        s.note(
+            "There is no interface to configure, and nothing on this system              reads an address typed here.",
+            28.0,
+        );
+        s.unavailable_row("IPv4 address", "Unknown");
+        s.unavailable_row("Gateway", "Unknown");
         s.gap();
 
-        s.section("DNS Servers");
-        s.field_row("Primary DNS", &self.dns_primary, 180.0);
-        s.field_row("Secondary DNS", &self.dns_secondary, 180.0);
+        s.section("DNS");
+        s.note(
+            "No program on this system loads a resolver configuration, so a              nameserver set here would reach nothing. The format is defined --              `net/dns` parses `resolv.conf` -- but nothing reads the file.",
+            44.0,
+        );
+        s.unavailable_row("Preferred DNS", "Not configured");
+        s.unavailable_row("Alternate DNS", "Not configured");
     }
 
-    // --- Proxy page ---
-
+    /// The Proxy page.
+    ///
+    /// Empty of controls for the same reason as the page above: the address
+    /// and port were held in this window and read by nothing. `net/httpclient`
+    /// takes no proxy, so even a stored value would have had no consumer.
     fn build_proxy_page<S: PageSink>(&self, s: &mut S) {
-        s.section("Proxy Configuration");
-        s.toggle_row(
-            "Use Proxy Server",
-            ToggleId::ProxyEnabled,
-            self.proxy_enabled,
+        s.section("Proxy");
+        s.note(
+            "Nothing on this system routes through a proxy. `net/httpclient`              connects directly and takes no proxy setting, so an address              entered here would be read by nothing.",
+            44.0,
         );
-
-        if self.proxy_enabled {
-            s.field_row("Proxy Address", &self.proxy_address, 220.0);
-            s.field_row("Port", &self.proxy_port, 80.0);
-        }
+        s.unavailable_row("HTTP proxy", "Not supported");
     }
 
     // --- Accounts page ---
@@ -3561,6 +3321,18 @@ impl SettingsState {
 
         // User account list (default UserAccounts page)
         s.section("User Accounts");
+
+        // An empty list means the database was unreadable or holds no human
+        // account, and saying so beats an empty panel that looks like a page
+        // still loading. It is also what this page shows in every test, which
+        // is deliberate: `load_user_accounts` is called by `main`, so a test
+        // never touches the machine's real accounts.
+        if self.user_accounts.is_empty() {
+            s.note(
+                "No accounts to show. Either the system account database could                  not be read, or it holds no ordinary user account.",
+                28.0,
+            );
+        }
 
         let control_x = s.control_x();
         for (idx, account) in self.user_accounts.iter().enumerate() {
@@ -3588,7 +3360,6 @@ impl SettingsState {
                 tree.text(x + 16.0, y + 20.0, avatar, pal.text, 16.0);
 
                 text_bold(tree, x + 56.0, y + 12.0, &account.name, pal.text, 14.0);
-                tree.text(x + 56.0, y + 32.0, &account.email, pal.subtext0, 12.0);
 
                 let badge_color = account.account_type.color(pal);
                 fill_rounded(tree, control_x, y + 18.0, 90.0, 22.0, badge_color, 4.0);
@@ -3616,22 +3387,12 @@ impl SettingsState {
         if let Some(account) = self.user_accounts.get(self.selected_account) {
             s.section("Account Details");
             s.value_row("Name", &account.name, pal.text);
-            s.value_row("Email", &account.email, pal.text);
             s.value_row(
                 "Account Type",
                 account.account_type.label(),
                 account.account_type.color(pal),
             );
-            s.value_row("Login Count", &account.login_count.to_string(), pal.text);
             s.value_row("Last Login", &account.last_login, pal.text);
-
-            // Family safety for child accounts
-            if account.account_type == AccountType::Child {
-                s.gap();
-                s.section("Family Safety");
-                s.note("Screen time limits and content filters are active", 24.0);
-                s.button_at(0.0, 0.0, "Manage Family Settings", pal.peach, None);
-            }
         }
     }
 
@@ -3675,172 +3436,63 @@ impl SettingsState {
 
     // --- Privacy page ---
 
-    /// The Capabilities sub-page: a read-only summary of which apps hold
-    /// which permissions. Nothing on it is clickable, so it is pure drawing.
-    fn render_capabilities_summary(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let pal = &self.palette();
-        let mut y = start_y;
-        // App permissions summary sub-page
-        y = render_section_header(tree, pal, x, y, "App Permissions Summary");
-        tree.text(
-            x,
-            y + 4.0,
-            "Overview of which apps have access to sensitive resources:",
-            pal.subtext0,
-            13.0,
-        );
-        y += 32.0;
-
-        // Summary table header
-        text_bold(tree, x, y, "App", pal.text, 13.0);
-        text_bold(tree, x + 200.0, y, "Location", pal.text, 13.0);
-        text_bold(tree, x + 290.0, y, "Camera", pal.text, 13.0);
-        text_bold(tree, x + 370.0, y, "Mic", pal.text, 13.0);
-        text_bold(tree, x + 440.0, y, "Background", pal.text, 13.0);
-        y += 24.0;
-
-        // Divider
-        tree.push(RenderCommand::Line {
-            x1: x,
-            y1: y,
-            x2: x + 560.0,
-            y2: y,
-            color: pal.surface1,
-            width: 1.0,
-        });
-        y += 8.0;
-
-        // Build summary from all apps mentioned
-        let all_apps = [
-            "Maps",
-            "Weather",
-            "Camera",
-            "Browser",
-            "Video Chat",
-            "Social Media",
-            "Voice Recorder",
-            "Email",
-            "Music Player",
-        ];
-        for app_name in all_apps {
-            let loc = self.location_apps.iter().find(|a| a.app_name == app_name);
-            let cam = self.camera_apps.iter().find(|a| a.app_name == app_name);
-            let mic = self.microphone_apps.iter().find(|a| a.app_name == app_name);
-            let bg = self.background_apps.iter().find(|a| a.app_name == app_name);
-
-            tree.text(x, y + 4.0, app_name, pal.text, 12.0);
-
-            let check = "\u{2713}";
-            let cross = "\u{2717}";
-
-            // Location
-            if let Some(p) = loc {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 220.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-            // Camera
-            if let Some(p) = cam {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 310.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-            // Mic
-            if let Some(p) = mic {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 385.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-            // Background
-            if let Some(p) = bg {
-                let (sym, col) = if p.allowed {
-                    (check, pal.green)
-                } else {
-                    (cross, pal.red)
-                };
-                tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
-            } else {
-                tree.text(x + 465.0, y + 4.0, "-", pal.subtext0, 13.0);
-            }
-
-            y += 28.0;
-        }
-    }
-
     // --- Privacy page ---
 
+    /// The Permissions and Capabilities pages.
+    ///
+    /// Both say this system does not record per-application permissions, and
+    /// that is a statement about its architecture rather than about unfinished
+    /// work.
+    ///
+    /// What was here before: toggles for location, camera and microphone, each
+    /// revealing a list of applications with an allow switch, and a summary
+    /// table drawing a green tick or a red cross for nine named applications
+    /// across four permissions. Maps, Weather, Camera, Browser, Video Chat,
+    /// Social Media, Voice Recorder, Email, Music Player. None of those
+    /// programs exist in this tree, no component asks anything whether an
+    /// application may use a device, and every allow-or-deny state was written
+    /// into the source as a constant. A privacy page is the one screen where a
+    /// user is entitled to believe what it says, and this one told them a
+    /// browser had their camera.
+    ///
+    /// **Why this is not simply unbuilt.** `design.txt` specifies
+    /// capability-based security with no ambient authority: a program can use
+    /// a device because it holds an unforgeable handle to it, not because a
+    /// central table has its name ticked. So a per-application permission list
+    /// is not this system's model half-finished -- it is a different system's
+    /// model, borrowed. Building the page that was here would mean building a
+    /// permission store the kernel does not consult.
+    ///
+    /// `gui/desktop/src/privacy_settings.rs` holds a second copy of that same
+    /// borrowed model, with `is_allowed` and `revoke_all` and nothing calling
+    /// either. It is left alone here; see `known-issues.md`.
     fn build_privacy_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
-        if self.current_page == SettingsPage::Capabilities {
-            s.draw(|tree, x, y| self.render_capabilities_summary(tree, x, y));
-            return;
-        }
-
-        // Location access (default Permissions page)
-        s.section("Location");
-        s.toggle_row(
-            "Allow apps to access location",
-            ToggleId::LocationEnabled,
-            self.location_enabled,
+        s.section("App Permissions");
+        s.note(
+            "This system does not keep a list of which applications may use              the camera, the microphone or your location, and nothing here              could grant or withdraw such a permission.",
+            44.0,
         );
-        if self.location_enabled {
-            build_permission_list(s, PermissionKind::Location, &self.location_apps);
-        }
-        s.gap();
-
-        s.section("Camera");
-        s.toggle_row(
-            "Allow apps to access camera",
-            ToggleId::CameraEnabled,
-            self.camera_enabled,
+        s.note(
+            "That is by design rather than unfinished. A program here reaches              a device by holding a handle to it, which it can only have been              given -- there is no central table of names to tick, and nothing              has authority simply because of what it is called.",
+            44.0,
         );
-        if self.camera_enabled {
-            build_permission_list(s, PermissionKind::Camera, &self.camera_apps);
-        }
-        s.gap();
-
-        s.section("Microphone");
-        s.toggle_row(
-            "Allow apps to access microphone",
-            ToggleId::MicrophoneEnabled,
-            self.microphone_enabled,
-        );
-        if self.microphone_enabled {
-            build_permission_list(s, PermissionKind::Microphone, &self.microphone_apps);
-        }
-        s.gap();
-
-        s.section("Background Apps");
-        s.note("Choose which apps can run in the background:", 28.0);
-        build_permission_list(s, PermissionKind::Background, &self.background_apps);
+        s.unavailable_row("Location", "Not recorded per application");
+        s.unavailable_row("Camera", "Not recorded per application");
+        s.unavailable_row("Microphone", "Not recorded per application");
         s.gap();
 
         s.section("Diagnostics & Data");
-        s.dropdown_row(
-            "Diagnostic data collection",
-            DropdownId::DiagnosticLevel,
-            self.diagnostic_level.label(),
+        s.note(
+            "Nothing on this system collects diagnostic data, so there is no              collection level to choose.",
+            28.0,
         );
         s.gap();
 
         s.section("Activity History");
-        s.note("Clear your activity history stored on this device.", 28.0);
-        s.button_at(0.0, 0.0, "Clear Activity History", pal.red, None);
+        s.note(
+            "Nothing records an activity history, so there is none to clear.",
+            28.0,
+        );
     }
 
     // --- Accessibility page ---
@@ -4033,104 +3685,76 @@ impl SettingsState {
         }
     }
 
+    /// The System Updates page.
+    ///
+    /// Everything here is a statement that this system cannot update itself
+    /// yet, which is a change from what it used to say. It previously drew a
+    /// "Check for Updates" button whose entire handler was
+    /// `self.checking_for_updates = !self.checking_for_updates` -- it flipped
+    /// the label to "Checking..." and checked nothing -- beside the words
+    /// "Your device is up to date" in green, unconditionally, from code that
+    /// had never looked. Under it sat four invented history entries with
+    /// Windows-style KB numbers, one of them a *failed* GPU driver update,
+    /// and a "Cumulative update for .NET runtime" on a system with no .NET.
+    ///
+    /// The failed entry is the one that decided this. A fabricated success is
+    /// a lie about nothing; a fabricated failure sends someone looking for a
+    /// problem that never happened, on their own machine, with no way to find
+    /// out it was never real.
+    ///
+    /// There is no honest version of the old page available. An update needs
+    /// a source, and the two that exist -- `userspace/pkg` and
+    /// `kernel/src/fs/updatemgr.rs` -- are in other lanes with no service
+    /// between them and a GUI application. The same is true of the version
+    /// string: `os_version` read "Slate OS 1.0.0 Build 2600", and 2600 is
+    /// Windows XP's build number. Nothing in this tree reports an OS version
+    /// to a userspace program, so this page no longer claims one.
+    ///
+    /// Same treatment as the Sound page above and for the same reason, which
+    /// the Mouse page states plainly: a control that writes a value nothing
+    /// reads is worse than an absent control, because the absent one does not
+    /// claim the setting took effect.
     fn build_update_page<S: PageSink>(&self, s: &mut S) {
-        let pal = &self.palette();
         match self.current_page {
             SettingsPage::Recovery => {
                 self.build_recovery_page(s);
                 return;
             }
             SettingsPage::Snapshots => {
-                Self::build_snapshots_page(s, pal);
+                Self::build_snapshots_page(s, &self.palette());
                 return;
             }
             _ => {} // SystemUpdates (default)
         }
 
-        s.section("System Information");
-        let version = self.os_version.clone();
-        s.draw(move |tree, x, y| {
-            fill_rounded(tree, x, y, 580.0, 60.0, pal.surface0, 8.0);
-            text_bold(tree, x + 16.0, y + 12.0, "Slate OS", pal.text, 16.0);
-            tree.text(x + 16.0, y + 36.0, &version, pal.subtext0, 13.0);
-        });
-        s.advance(72.0);
-
-        // The button's label changes while a check is running, and the label is
-        // what `button_width` measures — so the click band follows the wider
-        // "Check for Updates" down to the narrower "Checking...", rather than
-        // staying at whichever width happened to be hard-coded.
-        let checking = self.checking_for_updates;
-        let btn_label = if checking {
-            "Checking..."
-        } else {
-            "Check for Updates"
-        };
-        s.button_at(
-            0.0,
-            0.0,
-            btn_label,
-            pal.accent,
-            Some(RowHit::Press(ButtonId::CheckForUpdates)),
+        s.section("System Updates");
+        s.note(
+            "This system cannot update itself yet. There is no update service to ask, so nothing here could check, download or install anything, and this page will not say that it has.",
+            44.0,
         );
-        if !checking {
-            s.draw(|tree, x, y| {
-                tree.text(
-                    x + 160.0,
-                    y + 10.0,
-                    "Your device is up to date",
-                    pal.green,
-                    13.0,
-                );
-            });
-        }
-        s.advance(44.0);
+        s.unavailable_row("Last checked", "Never");
+        s.unavailable_row("Available updates", "Unknown");
+        s.gap();
+
+        s.section("System Information");
+        s.note(
+            "No component of this system reports a version number to a program yet, so none is shown here rather than one being invented.",
+            28.0,
+        );
         s.gap();
 
         s.section("Update Preferences");
-        s.toggle_row(
-            "Automatic updates",
-            ToggleId::AutoUpdate,
-            self.auto_update_enabled,
-        );
-        let hours_label = format!(
-            "{:02}:00 - {:02}:00",
-            self.active_hours_start, self.active_hours_end
-        );
-        s.value_row("Active hours (no restart)", &hours_label, pal.text);
-        s.gap();
-
-        s.section("Advanced");
-        self.slider(
-            s,
-            "Defer feature updates (days)",
-            SliderId::DeferFeatureDays,
-        );
-        self.slider(
-            s,
-            "Defer quality updates (days)",
-            SliderId::DeferQualityDays,
+        s.note(
+            "Automatic updates, active hours and deferral periods are settings for an updater that does not exist. They return when there is one to configure.",
+            44.0,
         );
         s.gap();
 
         s.section("Update History");
-        for entry in &self.update_history {
-            let (kb, desc, date) = (
-                entry.kb_number.clone(),
-                entry.description.clone(),
-                entry.date.clone(),
-            );
-            let (status_color, status_label) = (entry.status.color(pal), entry.status.label());
-            s.draw(move |tree, x, y| {
-                fill_rounded(tree, x, y, 580.0, 44.0, pal.surface0, 6.0);
-                tree.text(x + 12.0, y + 8.0, &kb, pal.text, 13.0);
-                tree.text(x + 120.0, y + 8.0, &desc, pal.subtext0, 12.0);
-                tree.text(x + 12.0, y + 26.0, &date, pal.subtext0, 11.0);
-                fill_rounded(tree, x + 490.0, y + 12.0, 72.0, 20.0, status_color, 4.0);
-                tree.text(x + 500.0, y + 15.0, status_label, pal.crust, 11.0);
-            });
-            s.advance(52.0);
-        }
+        s.note(
+            "Nothing has been installed by an updater, because there is no updater.",
+            28.0,
+        );
     }
 
     /// The Recovery sub-page: two cards, each with a button that has no state
@@ -4512,38 +4136,16 @@ impl SettingsState {
                     at,
                 )
             }
-            DropdownId::OutputDevice => {
-                let items: Vec<String> =
-                    self.output_devices.iter().map(|d| d.name.clone()).collect();
-                (items, self.output_device_index)
-            }
-            DropdownId::InputDevice => {
-                let items: Vec<String> =
-                    self.input_devices.iter().map(|d| d.name.clone()).collect();
-                (items, self.input_device_index)
-            }
-            DropdownId::IpConfig => {
-                let items = vec![
-                    IpConfigMode::Dhcp.label().to_string(),
-                    IpConfigMode::Static.label().to_string(),
-                ];
-                let sel = if self.ip_config_mode == IpConfigMode::Dhcp {
-                    0
-                } else {
-                    1
-                };
-                (items, sel)
-            }
-            DropdownId::DiagnosticLevel => {
-                let items: Vec<String> = DiagnosticLevel::ALL
+            DropdownId::WallpaperFit => {
+                let items: Vec<String> = appearance::ImageFit::ALL
                     .iter()
-                    .map(|d| d.label().to_string())
+                    .map(|f| f.label().to_string())
                     .collect();
-                let sel = DiagnosticLevel::ALL
+                let current = appearance::ImageFit::ALL
                     .iter()
-                    .position(|d| *d == self.diagnostic_level)
+                    .position(|f| *f == self.appearance.settings.wallpaper_fit)
                     .unwrap_or(0);
-                (items, sel)
+                (items, current)
             }
             DropdownId::ColorFilter => {
                 let items: Vec<String> = ColorFilter::ALL
@@ -4812,6 +4414,19 @@ impl SettingsState {
     /// so the routing can be exercised without writing to the user's home
     /// directory.
     fn dispatch_event(&mut self, event: &Event) -> EventResult {
+        // The picker answers first, and everything but a resize. It is modal,
+        // and a keystroke meant for a filename would otherwise reach the page
+        // behind it -- where, on this window, every key is a setting.
+        //
+        // Inside `handle_event`'s snapshot bracket deliberately: choosing a
+        // wallpaper changes `appearance`, and the save is the whole-struct
+        // comparison that wraps this call rather than an explicit write. A
+        // handler that saved for itself would be a second way to persist, and
+        // the one that forgets is the one that loses a setting.
+        if !matches!(event, Event::Resize { .. }) && self.dialog.is_some() {
+            self.dialog_event(event);
+            return EventResult::Consumed;
+        }
         match event {
             Event::Key(key_evt) => self.handle_key(key_evt),
             Event::Mouse(mouse_evt) => self.handle_mouse(mouse_evt),
@@ -4901,14 +4516,20 @@ impl SettingsState {
     /// at the top that jumps to the bottom moves the highlight further than the
     /// eye follows.
     fn step_category(&mut self, delta: isize) {
-        let current = SettingsCategory::ALL
+        // The *visible* list, so an arrow key cannot walk onto a category
+        // the search has hidden. `position` failing means the current category
+        // is not among them -- which happens the moment a query excludes it --
+        // and starting from 0 then puts the first press on the first visible
+        // row, which is where the eye already is.
+        let visible = self.filtered_categories();
+        let current = visible
             .iter()
             .position(|c| *c == self.current_category)
             .unwrap_or(0);
         let Some(next) = current.checked_add_signed(delta) else {
             return;
         };
-        if let Some(&new_cat) = SettingsCategory::ALL.get(next) {
+        if let Some(&new_cat) = visible.get(next) {
             self.current_category = new_cat;
             self.current_page = new_cat.default_page();
         }
@@ -4957,8 +4578,8 @@ impl SettingsState {
 
         // Sidebar category clicks
         if mx < SIDEBAR_WIDTH {
-            if let Some(idx) = Self::category_at(mx, my) {
-                if let Some(&new_cat) = SettingsCategory::ALL.get(idx) {
+            if let Some(idx) = self.category_at(mx, my) {
+                if let Some(&new_cat) = self.filtered_categories().get(idx) {
                     self.current_category = new_cat;
                     self.current_page = new_cat.default_page();
                     return EventResult::Consumed;
@@ -5058,11 +4679,6 @@ impl SettingsState {
                     self.appearance.settings.accent_color = *accent;
                 }
             }
-            RowHit::Select(SelectId::Adapter, idx) => {
-                if idx < self.adapters.len() {
-                    self.selected_adapter = idx;
-                }
-            }
             RowHit::Select(SelectId::Account, idx) => {
                 if idx < self.user_accounts.len() {
                     self.selected_account = idx;
@@ -5074,8 +4690,9 @@ impl SettingsState {
             RowHit::Select(SelectId::AccountPicture, idx) => {
                 self.set_current_account_picture(idx);
             }
-            RowHit::Press(ButtonId::CheckForUpdates) => {
-                self.checking_for_updates = !self.checking_for_updates;
+            RowHit::Press(ButtonId::ChooseWallpaper) => self.open_wallpaper_dialog(),
+            RowHit::Press(ButtonId::ClearWallpaper) => {
+                self.appearance.settings.wallpaper = None;
             }
         }
     }
@@ -5130,24 +4747,22 @@ impl SettingsState {
 
     /// The current value of `id`, in the units the state stores it in.
     ///
-    /// `None` when the slider is a per-application volume whose index no longer
-    /// exists; the list is editable in principle and a stale index must not
-    /// panic.
-    fn slider_raw(&self, id: SliderId) -> Option<f32> {
-        Some(match id {
+    /// Returned an `Option` until 2026-09-14, for the per-application volumes:
+    /// their identity was a list index, the list was editable in principle, and
+    /// a stale index must not panic. Those sliders went with the Sound page's
+    /// controls, every remaining slider names a single field, and so there is
+    /// no longer a way for this to fail. An `Option` nothing can put `None` in
+    /// teaches its callers to handle a case that cannot arise.
+    fn slider_raw(&self, id: SliderId) -> f32 {
+        match id {
             SliderId::NightLightTemperature => self.appearance.settings.night_light_strength,
             SliderId::NarratorRate => self.narrator_rate,
-            SliderId::OutputVolume => f32::from(self.output_volume),
-            SliderId::InputVolume => f32::from(self.input_volume),
-            SliderId::AppVolume(index) => f32::from(self.app_volumes.get(index)?.volume),
             SliderId::TextSize => f32::from(self.text_size_percent),
-            SliderId::DeferFeatureDays => f32::from(self.defer_feature_days),
-            SliderId::DeferQualityDays => f32::from(self.defer_quality_days),
             // Exact: the value is at most `MAX_DOUBLE_CLICK_MS`, far inside the
             // integers an `f32` represents without rounding.
             #[allow(clippy::cast_precision_loss)]
             SliderId::DoubleClickMs => self.input.settings.mouse.double_click_ms as f32,
-        })
+        }
     }
 
     /// How far along its track `id`'s handle sits, 0.0–1.0.
@@ -5156,9 +4771,9 @@ impl SettingsState {
     /// pages used to spell out `(f32::from(self.text_size_percent) - 50.0) /
     /// 200.0` at the call site, which is a second copy of a range that
     /// [`SliderId::range`] already states.
-    fn slider_fraction(&self, id: SliderId) -> Option<f32> {
+    fn slider_fraction(&self, id: SliderId) -> f32 {
         let (lo, hi) = id.range();
-        Some(((self.slider_raw(id)? - lo) / (hi - lo)).clamp(0.0, 1.0))
+        ((self.slider_raw(id) - lo) / (hi - lo)).clamp(0.0, 1.0)
     }
 
     /// Set `id` from a position along its track, clamped to 0.0–1.0.
@@ -5188,16 +4803,7 @@ impl SettingsState {
                 self.appearance.settings.night_light_strength = value;
             }
             SliderId::NarratorRate => self.narrator_rate = value,
-            SliderId::OutputVolume => self.output_volume = round_u8(value),
-            SliderId::InputVolume => self.input_volume = round_u8(value),
-            SliderId::AppVolume(index) => {
-                if let Some(app) = self.app_volumes.get_mut(index) {
-                    app.volume = round_u8(value);
-                }
-            }
             SliderId::TextSize => self.text_size_percent = round_u16(value),
-            SliderId::DeferFeatureDays => self.defer_feature_days = round_u16(value),
-            SliderId::DeferQualityDays => self.defer_quality_days = round_u16(value),
             // Through the model's setter, not by assignment: the clamp belongs
             // to whoever owns the file, and this way a track that ever grew
             // wider than the permitted range cannot store a value the
@@ -5219,22 +4825,7 @@ impl SettingsState {
     fn toggle_mut(&mut self, id: ToggleId) -> Option<&mut bool> {
         Some(match id {
             ToggleId::NightLight => &mut self.appearance.settings.night_light,
-            ToggleId::OutputMuted => &mut self.output_muted,
-            ToggleId::SystemSounds => &mut self.system_sounds_enabled,
-            ToggleId::ProxyEnabled => &mut self.proxy_enabled,
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
-            ToggleId::LocationEnabled => &mut self.location_enabled,
-            ToggleId::CameraEnabled => &mut self.camera_enabled,
-            ToggleId::MicrophoneEnabled => &mut self.microphone_enabled,
-            ToggleId::AppPermission(kind, index) => {
-                let list = match kind {
-                    PermissionKind::Location => &mut self.location_apps,
-                    PermissionKind::Camera => &mut self.camera_apps,
-                    PermissionKind::Microphone => &mut self.microphone_apps,
-                    PermissionKind::Background => &mut self.background_apps,
-                };
-                &mut list.get_mut(index)?.allowed
-            }
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
             ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
             ToggleId::QuietHours => &mut self.notif.settings.quiet_hours.enabled,
@@ -5248,7 +4839,6 @@ impl SettingsState {
             ToggleId::MouseKeys => &mut self.input.settings.accessibility.mouse.enabled,
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
-            ToggleId::AutoUpdate => &mut self.auto_update_enabled,
             ToggleId::TaskbarAutohide => &mut self.appearance.settings.taskbar_autohide,
         })
     }
@@ -5287,7 +4877,7 @@ impl SettingsState {
 
         // Sidebar hover
         if mx < SIDEBAR_WIDTH {
-            self.sidebar_hovered = Self::category_at(mx, my);
+            self.sidebar_hovered = self.category_at(mx, my);
             return EventResult::Consumed;
         }
 
@@ -5365,26 +4955,9 @@ impl SettingsState {
                     rule.importance = *chosen;
                 }
             }
-            DropdownId::OutputDevice => {
-                if index < self.output_devices.len() {
-                    self.output_device_index = index;
-                }
-            }
-            DropdownId::InputDevice => {
-                if index < self.input_devices.len() {
-                    self.input_device_index = index;
-                }
-            }
-            DropdownId::IpConfig => {
-                self.ip_config_mode = if index == 0 {
-                    IpConfigMode::Dhcp
-                } else {
-                    IpConfigMode::Static
-                };
-            }
-            DropdownId::DiagnosticLevel => {
-                if let Some(level) = DiagnosticLevel::ALL.get(index) {
-                    self.diagnostic_level = *level;
+            DropdownId::WallpaperFit => {
+                if let Some(fit) = appearance::ImageFit::ALL.get(index) {
+                    self.appearance.settings.wallpaper_fit = *fit;
                 }
             }
             DropdownId::ColorFilter => {
@@ -5444,7 +5017,16 @@ impl SettingsState {
         !stripped_query.is_empty() && strip(&text_lower).contains(&stripped_query)
     }
 
-    /// Get filtered categories based on search query.
+    /// The categories the sidebar is showing.
+    ///
+    /// **This is the list, and everything that touches the sidebar asks for
+    /// it.** The renderer iterated `SettingsCategory::ALL` while this function
+    /// existed, was tested, and was called by nothing but its own test -- so
+    /// the search box accepted typing, drew what you typed, and filtered
+    /// nothing. Rendering, hit-testing, hovering and arrow-key navigation now
+    /// all index into this, because a row drawn at index 3 and a click
+    /// resolved against a different list is how a click lands on the wrong
+    /// category.
     pub fn filtered_categories(&self) -> Vec<SettingsCategory> {
         if self.search_query.is_empty() {
             return SettingsCategory::ALL.to_vec();
@@ -5569,6 +5151,10 @@ fn main() -> ExitCode {
     // deleting the rest, because a save splices the model into the document it
     // was loaded from and an unloaded model has nothing in it.
     state.load_notifications();
+
+    // The machine's real accounts. Empty if the database cannot be read, which
+    // the Accounts page says rather than drawing a blank panel.
+    state.load_user_accounts();
 
     // `launch` rather than `launch_with`: Settings takes no file and no page
     // name, so it wants exactly the shared command line and nothing more —
@@ -6197,6 +5783,83 @@ mod tests {
         state.sidebar_hovered
     }
 
+    /// **Typing in the search box removes rows from the sidebar.**
+    ///
+    /// `filtered_categories` and `matches_search` were written, tested and
+    /// called by nothing but their own tests; the renderer iterated
+    /// `SettingsCategory::ALL`. So the box took typing, drew it, and filtered
+    /// nothing. This asserts on the strings the sidebar actually draws, not on
+    /// what `filtered_categories` returns -- the function was never the part
+    /// that was missing.
+    #[test]
+    fn searching_removes_rows_from_the_sidebar() {
+        fn sidebar_labels(state: &SettingsState) -> Vec<String> {
+            state
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    guitk::render::RenderCommand::Text { text, x, .. } if *x < SIDEBAR_WIDTH => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut state = SettingsState::new();
+        let all = sidebar_labels(&state);
+        assert!(
+            all.iter().any(|t| t == "Network"),
+            "the unfiltered sidebar does not draw Network: {all:?}"
+        );
+
+        state.search_query = "network".to_string();
+        let filtered = sidebar_labels(&state);
+
+        assert!(
+            filtered.iter().any(|t| t == "Network"),
+            "the search hid the thing it was searching for: {filtered:?}"
+        );
+        assert!(
+            filtered.len() < all.len(),
+            "the sidebar drew the same rows with a query as without one"
+        );
+    }
+
+    /// **A click on a filtered sidebar selects the row it landed on.**
+    ///
+    /// The row at index 0 of a filtered list is not the row at index 0 of
+    /// `ALL`. Rendering from one list and resolving a click against another is
+    /// how a click lands on the wrong category -- two predicates for one state,
+    /// which this tree has been bitten by before.
+    #[test]
+    fn a_click_on_a_filtered_sidebar_lands_on_the_row_it_hit() {
+        let mut state = SettingsState::new();
+        // A query that certainly excludes the first category, so an index into
+        // `ALL` and an index into the filtered list cannot agree by accident.
+        state.search_query = "network".to_string();
+        let visible = state.filtered_categories();
+        assert!(!visible.is_empty(), "the query matched nothing at all");
+        assert_ne!(
+            visible[0],
+            SettingsCategory::ALL[0],
+            "the fixture proves nothing if the first visible row is the first row"
+        );
+
+        let y = SettingsState::category_row_top(0) + 4.0;
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: 20.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+
+        assert_eq!(
+            state.current_category, visible[0],
+            "the click selected a category the sidebar was not showing there"
+        );
+    }
+
     #[test]
     fn every_category_is_clickable_exactly_where_it_was_painted() {
         for (idx, category) in SettingsCategory::ALL.iter().enumerate() {
@@ -6285,7 +5948,7 @@ mod tests {
         }
 
         // Below the last row, all the way to the bottom of the window.
-        let mut y = SettingsState::category_list_bottom();
+        let mut y = state.category_list_bottom();
         while y < state.window_height {
             click_sidebar(&mut state, y);
             assert_eq!(
@@ -6299,11 +5962,11 @@ mod tests {
         // And to the right of the sidebar, level with a row that would
         // otherwise answer.
         let inside = SettingsState::category_row_top(3) + 4.0;
-        assert_eq!(SettingsState::category_at(SIDEBAR_WIDTH, inside), None);
-        assert_eq!(SettingsState::category_at(f32::NAN, inside), None);
-        assert_eq!(SettingsState::category_at(100.0, f32::NAN), None);
-        assert_eq!(SettingsState::category_at(100.0, f32::INFINITY), None);
-        assert_eq!(SettingsState::category_at(100.0, f32::NEG_INFINITY), None);
+        assert_eq!(state.category_at(SIDEBAR_WIDTH, inside), None);
+        assert_eq!(state.category_at(f32::NAN, inside), None);
+        assert_eq!(state.category_at(100.0, f32::NAN), None);
+        assert_eq!(state.category_at(100.0, f32::INFINITY), None);
+        assert_eq!(state.category_at(100.0, f32::NEG_INFINITY), None);
     }
 
     #[test]
@@ -6337,10 +6000,10 @@ mod tests {
         // the notification pane's, not to shrink the row height.
         let state = SettingsState::new();
         assert!(
-            SettingsState::category_list_bottom() <= state.window_height,
+            state.category_list_bottom() <= state.window_height,
             "{} categories need {}px but the window is {}px tall",
             SettingsCategory::ALL.len(),
-            SettingsState::category_list_bottom(),
+            state.category_list_bottom(),
             state.window_height
         );
     }
@@ -6359,26 +6022,6 @@ mod tests {
     }
 
     #[test]
-    fn test_network_adapter_selection() {
-        let mut state = SettingsState::new();
-        assert_eq!(state.selected_adapter, 0);
-        state.selected_adapter = 1;
-        state.current_page = SettingsPage::NetworkStatus;
-        let tree = state.render_tree();
-        assert!(!tree.is_empty());
-    }
-
-    #[test]
-    fn test_proxy_toggle() {
-        let mut state = SettingsState::new();
-        assert!(!state.proxy_enabled);
-        state.proxy_enabled = true;
-        state.current_page = SettingsPage::Proxy;
-        let tree = state.render_tree();
-        assert!(!tree.is_empty());
-    }
-
-    #[test]
     fn test_accent_color_selection() {
         let mut state = SettingsState::new();
         assert_eq!(state.appearance.settings.accent_color, AccentColor::Blue);
@@ -6389,33 +6032,12 @@ mod tests {
     }
 
     #[test]
-    fn test_volume_bounds() {
-        let state = SettingsState::new();
-        assert!(state.output_volume <= 100);
-        assert!(state.input_volume <= 100);
-        for app in &state.app_volumes {
-            assert!(app.volume <= 100);
-        }
-    }
-
-    #[test]
     fn test_resolution_labels() {
         for res in RESOLUTIONS {
             let label = res.label();
             assert!(label.contains('x'));
             assert!(!label.is_empty());
         }
-    }
-
-    #[test]
-    fn test_ip_config_mode_toggle() {
-        let mut state = SettingsState::new();
-        state.open_dropdown = Some(DropdownId::IpConfig);
-        state.apply_dropdown_selection(1); // Static
-        assert_eq!(state.ip_config_mode, IpConfigMode::Static);
-        state.open_dropdown = Some(DropdownId::IpConfig);
-        state.apply_dropdown_selection(0); // DHCP
-        assert_eq!(state.ip_config_mode, IpConfigMode::Dhcp);
     }
 
     #[test]
@@ -6429,6 +6051,173 @@ mod tests {
         });
         state.handle_event(&hover);
         assert_eq!(state.sidebar_hovered, Some(0));
+    }
+
+    /// **The Wallpaper page is a page now, not a placeholder.**
+    #[test]
+    fn the_wallpaper_page_offers_a_way_to_choose_one() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper)).is_some(),
+            "the page draws no way to choose a picture"
+        );
+    }
+
+    /// **Remove actually removes it, and the removal reaches the file.**
+    ///
+    /// The other two Remove tests check only that the button is *drawn* when
+    /// there is a picture and not when there is none. A button that is drawn,
+    /// clickable and does nothing would pass both of them -- which is the
+    /// shape of half the defects found in this tree today, so it is not a
+    /// hypothetical worth leaving open in my own change.
+    #[test]
+    fn removing_the_wallpaper_reaches_the_file_the_desktop_reads() {
+        with_scratch_config("settings-wallpaper-remove", |root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+
+            let (cx, cy) = center_of(&state, RowHit::Press(ButtonId::ClearWallpaper))
+                .expect("the page draws no Remove button");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            assert_eq!(
+                state.appearance.settings.wallpaper, None,
+                "the press did not clear the picture"
+            );
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "removing should have written {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(
+                saved.wallpaper, None,
+                "the desktop will still be showing a picture the user removed"
+            );
+        });
+    }
+
+    /// **Choosing a fit reaches `appearance.yaml`.**
+    ///
+    /// Through the dropdown a user would use, and read back off disk rather
+    /// than from this process's own model, which would agree with itself
+    /// whether or not anything was written.
+    #[test]
+    fn choosing_a_fit_reaches_the_file_the_desktop_reads() {
+        with_scratch_config("settings-wallpaper-fit", |root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+            assert_eq!(
+                state.appearance.settings.wallpaper_fit,
+                appearance::ImageFit::Fill,
+                "the test's premise is that it starts at the default"
+            );
+
+            let (cx, cy) = center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit))
+                .expect("the page draws no fit chooser");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(state.open_dropdown, Some(DropdownId::WallpaperFit));
+
+            // The second entry is `Fit`, per `ImageFit::ALL`. Clicked where
+            // the popup drew it rather than set directly: the point is that a
+            // user can reach it, and the row the renderer drew and the row the
+            // hit-test names are the same answer.
+            let wanted = appearance::ImageFit::ALL[1];
+            let layout = state.dropdown_layout().expect("a dropdown is open");
+            let row = 1usize
+                .checked_sub(layout.window.start)
+                .expect("the six fits fit in the default window");
+            let y = layout.row_top(row) + DROPDOWN_ITEM_HEIGHT / 2.0;
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: layout.x + 20.0,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert!(state.open_dropdown.is_none(), "choosing closes the popup");
+
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "choosing should have written {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(
+                saved.wallpaper_fit, wanted,
+                "the fit did not survive the round trip to disk"
+            );
+        });
+    }
+
+    /// The chooser is offered only with a picture to place.
+    ///
+    /// A control whose every option does the same nothing reads as broken
+    /// rather than as inapplicable.
+    #[test]
+    fn the_fit_chooser_appears_only_with_a_picture() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_none(),
+            "a fit chooser with nothing to place"
+        );
+
+        state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_some(),
+            "no way to say how the picture is placed"
+        );
+    }
+
+    /// Remove is offered only when there is something to remove.
+    ///
+    /// A button that is always there is one whose press does nothing most of
+    /// the time, and a user cannot tell that from one that failed.
+    #[test]
+    fn remove_appears_only_once_a_picture_is_set() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ClearWallpaper)).is_none(),
+            "Remove is offered with no picture to remove"
+        );
+
+        state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ClearWallpaper)).is_some(),
+            "Remove is missing when there is a picture"
+        );
+    }
+
+    /// Pressing Choose puts the picker up, and it is drawn.
+    ///
+    /// Both halves: a picker that is open and not painted is the defect this
+    /// tree keeps finding, and `is_some()` alone would not have noticed.
+    #[test]
+    fn choosing_puts_up_a_picker_and_draws_it() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        let before = state.render_tree().len();
+        let (cx, cy) = center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper))
+            .expect("the page draws a Choose button");
+
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+
+        assert!(state.dialog.is_some(), "no picker came up");
+        assert!(
+            state.render_tree().len() > before,
+            "the picker is open and nothing is drawn for it"
+        );
     }
 
     #[test]
@@ -6531,9 +6320,52 @@ mod tests {
     /// the narrator's verbosity, the per-app permission lists — and a sweep
     /// over the default state would report those as unreachable when they are
     /// merely not shown yet.
+    /// Three accounts with distinct pictures, one of them signed in.
+    ///
+    /// Built by the tests rather than by `SettingsState::new`, which now starts
+    /// with an empty list: real accounts arrive from `load_user_accounts`,
+    /// which `main` calls, so no test depends on the machine it runs on.
+    ///
+    /// This used to be production data. `new` carried Alice, Bob and Charlie
+    /// with `@example.com` addresses, login counts of 142, 56 and 23, and one
+    /// marked as a child account with "Screen time limits and content filters
+    /// are active" drawn beneath it. Every test in this section relied on them
+    /// without saying so, which is why they all went red at once when the list
+    /// became empty -- a fixture that lives in production code is a fixture
+    /// nobody can see they are using.
+    fn account_fixture() -> Vec<UserAccount> {
+        ["Ada", "Grace", "Alan"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| UserAccount {
+                name: (*name).to_string(),
+                account_type: if i == 0 {
+                    AccountType::Admin
+                } else {
+                    AccountType::Standard
+                },
+                last_login: "Never".to_string(),
+                is_current: i == 0,
+                picture: i,
+            })
+            .collect()
+    }
+
     fn fully_expanded(page: SettingsPage) -> SettingsState {
         let mut state = SettingsState::new();
         state.current_page = page;
+        state.user_accounts = account_fixture();
+        // Not every hidden row is hidden behind a *switch*. The Wallpaper
+        // page's fit chooser and its Remove button appear once a picture is
+        // set, because a control whose every option does the same nothing
+        // reads as broken rather than as inapplicable -- so the loop below,
+        // which only turns toggles on, cannot reveal them.
+        //
+        // Set here rather than excluded from `DropdownId::FIXED`, which is the
+        // tempting fix and the wrong one: the sweep exists to catch a dropdown
+        // nothing can open, and a dropdown excluded for being hard to reach is
+        // exactly the one it should be checking.
+        state.appearance.settings.wallpaper = Some("/pictures/example.png".to_string());
         // Turning one switch on can reveal another, so repeat until the set
         // stops growing. Bounded because nothing here turns a switch back off.
         for _ in 0..8 {
@@ -6624,10 +6456,16 @@ mod tests {
     /// Every state worth sweeping for painted buttons: each page with its
     /// switches turned on, and one such state per user account.
     ///
-    /// The per-account repetition is not padding. "Manage Family Settings" is
-    /// drawn only while a child account is selected, so a sweep that took the
-    /// default selection would report six inert buttons where there are seven
-    /// and would go on passing if the seventh were wired wrongly.
+    /// The per-account repetition is not padding: it is what catches a button
+    /// drawn only for *some* account, which a sweep taking the default
+    /// selection would miss and then go on passing over.
+    ///
+    /// The example it was written for is gone. "Manage Family Settings"
+    /// appeared only while a child account was selected -- and the only child
+    /// account was Charlie, one of three invented accounts `SettingsState::new`
+    /// used to carry, under the words "Screen time limits and content filters
+    /// are active" for a system that has neither. The sweep shape stays because
+    /// the hazard is general, not because that button is coming back.
     fn states_to_sweep() -> Vec<(SettingsPage, SettingsState)> {
         let mut out = Vec::new();
         for page in all_pages() {
@@ -6725,9 +6563,7 @@ mod tests {
                 "+ Add Account",
                 "- Remove Account",
                 "Change Password",
-                "Clear Activity History",
                 "Go Back",
-                "Manage Family Settings",
                 "Reset",
             ]
         );
@@ -6754,6 +6590,7 @@ mod tests {
                 let cy = by + BUTTON_HEIGHT / 2.0;
                 let mut after = SettingsState::new();
                 after.current_page = page;
+                after.user_accounts = account_fixture();
                 after.selected_account = state.selected_account;
                 let before = after.render_tree().commands.len();
                 after.handle_click(cx, cy);
@@ -6877,6 +6714,7 @@ mod tests {
     fn login_options() -> SettingsState {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::LoginOptions;
+        state.user_accounts = account_fixture();
         state
     }
 
@@ -7056,10 +6894,9 @@ mod tests {
     fn the_account_list_draws_each_account_s_own_picture() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::UserAccounts;
-        assert_eq!(
-            account_list_avatars(&state),
-            ["\u{1F469}", "\u{1F468}", "\u{1F476}"]
-        );
+        state.user_accounts = account_fixture();
+        let expected: Vec<String> = (0..3).map(|i| ACCOUNT_PICTURES[i].to_string()).collect();
+        assert_eq!(account_list_avatars(&state), expected);
     }
 
     /// Choosing a picture is visible where the picture is used, not only on
@@ -7070,9 +6907,13 @@ mod tests {
         let (icon, x, y, _) = painted_picture_tiles(&state)[4].clone();
         state.handle_click(x + PICTURE_TILE_SIZE / 2.0, y + PICTURE_TILE_SIZE / 2.0);
         state.current_page = SettingsPage::UserAccounts;
+        // The other two are whatever the fixture gave them, read back from
+        // ACCOUNT_PICTURES rather than spelled out: this test is about the
+        // *chosen* tile reaching the list, and hardcoding its neighbours only
+        // re-states the fixture.
         assert_eq!(
             account_list_avatars(&state),
-            [icon.as_str(), "\u{1F468}", "\u{1F476}"]
+            [icon.as_str(), ACCOUNT_PICTURES[1], ACCOUNT_PICTURES[2]]
         );
     }
 
@@ -7160,28 +7001,38 @@ mod tests {
         }
     }
 
+    /// **Every row on the Sound page is inert, and nothing has to refuse it.**
+    ///
+    /// `unavailable_row` registers no hit band at all, so there is no handler
+    /// that could forget. This asserts the page offers *no* click target
+    /// whatsoever, which is the strongest form of that claim and the one that
+    /// cannot rot when a handler is edited: a test that clicked each row and
+    /// checked nothing changed would still pass if a band reappeared and its
+    /// handler happened to be a no-op today.
+    ///
+    /// It also fails the day somebody adds a working control here, which is
+    /// correct -- that is the day the page stops being unavailable, and the
+    /// doc comment on `build_sound_page` stops being true.
+    #[test]
+    fn the_sound_page_offers_nothing_to_click() {
+        let state = fully_expanded(SettingsPage::Sound);
+        let bands = hit_bands(&state);
+        let named: Vec<RowHit> = bands.iter().map(|(what, _)| *what).collect();
+        assert!(
+            bands.is_empty(),
+            "audio reaches nothing, so the page must offer nothing: {named:?}"
+        );
+    }
+
     #[test]
     fn test_every_slider_has_a_page_that_draws_it_draggable() {
-        // All eight sliders painted correctly and none of them moved: the pages
+        // All the sliders painted correctly and none of them moved: the pages
         // registered no click band for a slider at all. Walking the enum is what
         // makes this catch the ninth as well.
         for id in SliderId::FIXED {
             assert!(
                 state_showing(RowHit::Slider(id)).is_some(),
                 "no page offers a grab band for {id:?}"
-            );
-        }
-        // The per-application volumes are indexed, so they are checked against
-        // the list the Sound page actually shows rather than a constant.
-        let state = fully_expanded(SettingsPage::Sound);
-        assert!(
-            !state.app_volumes.is_empty(),
-            "the Sound page has no per-app volumes to check"
-        );
-        for index in 0..state.app_volumes.len() {
-            assert!(
-                center_of(&state, RowHit::Slider(SliderId::AppVolume(index))).is_some(),
-                "per-app volume {index} has no grab band"
             );
         }
     }
@@ -7241,14 +7092,14 @@ mod tests {
                 drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
                 assert_eq!(
                     state.slider_raw(id),
-                    Some(hi),
+                    hi,
                     "{id:?} dragged to the right end did not reach its maximum"
                 );
 
                 drag(&mut state, track_x + SLIDER_WIDTH, cy, track_x);
                 assert_eq!(
                     state.slider_raw(id),
-                    Some(lo),
+                    lo,
                     "{id:?} dragged to the left end did not reach its minimum"
                 );
             }
@@ -7260,8 +7111,15 @@ mod tests {
         // The pointer routinely leaves the six-pixel bar mid-gesture. A drag
         // that stopped there — or that clamped to the wrong end — would make
         // the control unusable in exactly the way a user would first try it.
-        let id = SliderId::OutputVolume;
-        let mut state = state_showing(RowHit::Slider(id)).expect("Sound draws the volume slider");
+        // Was `OutputVolume`, until the Sound page's controls were removed for
+        // having no consumer. The test is about *slider mechanics*, not about
+        // volume, so it moved to another slider rather than being deleted with
+        // the page: `TextSize` spans 50..250, which gives the same round
+        // numbers to assert on -- midpoint 150, past-the-end 250, a quarter
+        // along 100.
+        let id = SliderId::TextSize;
+        let mut state =
+            state_showing(RowHit::Slider(id)).expect("a page draws the text-size slider");
         let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
         let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
 
@@ -7273,7 +7131,7 @@ mod tests {
             kind: MouseEventKind::Press(MouseButton::Left),
         }));
         assert_eq!(
-            state.output_volume, 50,
+            state.text_size_percent, 150,
             "the press did not jump to midpoint"
         );
         state.handle_event(&Event::Mouse(MouseEvent {
@@ -7282,7 +7140,7 @@ mod tests {
             kind: MouseEventKind::Move,
         }));
         assert_eq!(
-            state.output_volume, 100,
+            state.text_size_percent, 250,
             "the drag did not follow past the end"
         );
         state.handle_event(&Event::Mouse(MouseEvent {
@@ -7290,7 +7148,7 @@ mod tests {
             y: 10_000.0,
             kind: MouseEventKind::Move,
         }));
-        assert_eq!(state.output_volume, 25, "the drag stopped following");
+        assert_eq!(state.text_size_percent, 100, "the drag stopped following");
 
         // After release the pointer moves freely again.
         state.handle_event(&Event::Mouse(MouseEvent {
@@ -7303,7 +7161,10 @@ mod tests {
             y: cy,
             kind: MouseEventKind::Move,
         }));
-        assert_eq!(state.output_volume, 25, "a released slider still followed");
+        assert_eq!(
+            state.text_size_percent, 100,
+            "a released slider still followed"
+        );
     }
 
     #[test]
@@ -7328,9 +7189,7 @@ mod tests {
                         cy,
                         SLIDER_WIDTH.mul_add(wanted, track_x),
                     );
-                    let drawn = state
-                        .slider_fraction(id)
-                        .unwrap_or_else(|| panic!("{id:?} has no value"));
+                    let drawn = state.slider_fraction(id);
                     // Rounding to a whole percent or a whole day moves the
                     // handle by at most half a step, which is what this
                     // tolerance allows for.
@@ -7357,15 +7216,9 @@ mod tests {
         let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
 
         drag(&mut state, track_x, cy, track_x);
-        assert_eq!(
-            id.readout(state.slider_raw(id).unwrap()).as_deref(),
-            Some("50%")
-        );
+        assert_eq!(id.readout(state.slider_raw(id)).as_deref(), Some("50%"));
         drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
-        assert_eq!(
-            id.readout(state.slider_raw(id).unwrap()).as_deref(),
-            Some("250%")
-        );
+        assert_eq!(id.readout(state.slider_raw(id)).as_deref(), Some("250%"));
     }
 
     #[test]
@@ -7386,38 +7239,6 @@ mod tests {
             state.dragging.is_none(),
             "clicking the label started a drag"
         );
-    }
-
-    #[test]
-    fn test_dragging_one_per_app_volume_leaves_the_others_alone() {
-        // Indexed controls are where a shared handler goes wrong quietly: every
-        // row looks right, and the wrong application gets muted.
-        let id = SliderId::AppVolume(1);
-        let mut state = fully_expanded(SettingsPage::Sound);
-        assert!(
-            state.app_volumes.len() >= 2,
-            "need two apps to tell them apart"
-        );
-        let others: Vec<u8> = state
-            .app_volumes
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != 1)
-            .map(|(_, a)| a.volume)
-            .collect();
-        let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("app 1 has a band");
-        let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
-
-        drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
-        assert_eq!(state.app_volumes[1].volume, 100);
-        let after: Vec<u8> = state
-            .app_volumes
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != 1)
-            .map(|(_, a)| a.volume)
-            .collect();
-        assert_eq!(after, others, "dragging one app's volume moved another's");
     }
 
     #[test]
@@ -7494,33 +7315,70 @@ mod tests {
         });
     }
 
+    /// **A chosen wallpaper reaches the file the desktop reads.**
+    ///
+    /// Checked by reading `appearance.yaml` back off disk, not by asking this
+    /// process's own model, which would agree with itself whether or not
+    /// anything was written. The desktop is the consumer, not this app.
+    ///
+    /// Also checks there is no explicit save in the handler: the write happens
+    /// because `handle_event` compares a snapshot around the dispatch, and a
+    /// handler that saved for itself would be a second way to persist. The one
+    /// that forgets is the one that loses a setting.
     #[test]
-    fn test_every_per_app_permission_switch_is_clickable() {
-        // Only the Location list had a handler; Camera, Microphone and
-        // Background were drawn and inert.
-        let mut state = fully_expanded(SettingsPage::Permissions);
-        for kind in [
-            PermissionKind::Location,
-            PermissionKind::Camera,
-            PermissionKind::Microphone,
-            PermissionKind::Background,
-        ] {
-            let count = match kind {
-                PermissionKind::Location => state.location_apps.len(),
-                PermissionKind::Camera => state.camera_apps.len(),
-                PermissionKind::Microphone => state.microphone_apps.len(),
-                PermissionKind::Background => state.background_apps.len(),
-            };
-            assert!(count > 0, "{kind:?} has no apps to test with");
-            for idx in 0..count {
-                let id = ToggleId::AppPermission(kind, idx);
-                let before = *state.toggle_mut(id).expect("app exists");
-                let (cx, cy) = center_of(&state, RowHit::Toggle(id))
-                    .unwrap_or_else(|| panic!("{kind:?} app {idx} has no click target"));
-                state.handle_click(cx, cy);
-                assert_ne!(before, *state.toggle_mut(id).expect("app exists"));
-            }
-        }
+    fn a_chosen_wallpaper_reaches_the_file_the_desktop_reads() {
+        with_scratch_config("settings-wallpaper-file", |root| {
+            // A picture to choose. The picker lists a real directory, so the
+            // file has to exist for a row to select.
+            let picture = root.join("sunset.png");
+            std::fs::write(&picture, b"not really a png").expect("write the fixture");
+
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            assert!(
+                state.appearance.settings.wallpaper.is_none(),
+                "the test's premise is that it starts unset"
+            );
+
+            let (cx, cy) = center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper))
+                .expect("the page draws a Choose button");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            let dialog = state.dialog.as_mut().expect("no picker came up");
+            dialog.navigate_to(root);
+            dialog.set_entries(guitk::dialog::list_directory(root));
+            let index = dialog
+                .entries()
+                .iter()
+                .position(|e| e.name == *std::ffi::OsStr::new("sunset.png"))
+                .expect("the fixture is not in the listing");
+            dialog.select_entry(index);
+            state.handle_event(&Event::Key(KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }));
+
+            assert!(state.dialog.is_none(), "the picker stayed up");
+
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "choosing should have written {path:?}");
+
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            let written = saved
+                .wallpaper
+                .expect("no wallpaper survived the round trip");
+            assert!(
+                written.ends_with("sunset.png"),
+                "the file names {written:?} rather than the picture chosen"
+            );
+        });
     }
 
     // ---- Personalization: the shared appearance model ----
@@ -7749,7 +7607,7 @@ mod tests {
                 state.input.settings.mouse.double_click_ms,
                 MIN_DOUBLE_CLICK_MS
             );
-            assert_eq!(id.readout(state.slider_raw(id).unwrap()).as_deref(), {
+            assert_eq!(id.readout(state.slider_raw(id)).as_deref(), {
                 assert_eq!(MIN_DOUBLE_CLICK_MS, 100);
                 Some("100 ms")
             });
@@ -7759,7 +7617,7 @@ mod tests {
                 state.input.settings.mouse.double_click_ms,
                 MAX_DOUBLE_CLICK_MS
             );
-            assert_eq!(id.readout(state.slider_raw(id).unwrap()).as_deref(), {
+            assert_eq!(id.readout(state.slider_raw(id)).as_deref(), {
                 assert_eq!(MAX_DOUBLE_CLICK_MS, 2000);
                 Some("2000 ms")
             });
@@ -8757,7 +8615,10 @@ mod loop_tests {
     use oswindow::app::{App as _, drive, open};
 
     use super::tests::center_of;
-    use super::{EventResult, RowHit, SelectId, SettingsPage, SettingsState, SliderId, ThemeMode};
+    use super::{
+        AccountType, EventResult, RowHit, SelectId, SettingsPage, SettingsState, SliderId,
+        ThemeMode, UserAccount,
+    };
 
     /// A left click at a point, as the compositor would deliver it.
     fn click_at(x: f32, y: f32) -> Event {
@@ -8789,9 +8650,38 @@ mod loop_tests {
     /// written down, so a test aims at a control and not at a pixel: a layout
     /// change moves the target with it instead of silently making the click
     /// land on nothing while the test still passes.
+    /// A page with a real control on it, and where to click it.
+    ///
+    /// The accounts are installed here because `SettingsState::new` no longer
+    /// carries any -- they come from the system database via
+    /// `load_user_accounts`, which `main` calls. The tests below used to click
+    /// a *network adapter* row instead, and those are gone: this system cannot
+    /// enumerate its interfaces, so the three it listed were constants. An
+    /// account row is the same shape of control and is backed by something.
+    /// Two accounts, so a list row exists to click.
+    ///
+    /// `mod tests` has its own `account_fixture`; this is a second one rather
+    /// than a shared helper because these two modules deliberately share
+    /// nothing -- `mod tests` drives the model directly and this one drives the
+    /// shipped event loop, and a fixture reaching across would tie the two
+    /// together at exactly the seam that makes them worth having separately.
+    fn two_accounts() -> Vec<UserAccount> {
+        ["Ada", "Grace"]
+            .iter()
+            .map(|name| UserAccount {
+                name: (*name).to_string(),
+                account_type: AccountType::Standard,
+                last_login: "Never".to_string(),
+                is_current: false,
+                picture: 0,
+            })
+            .collect()
+    }
+
     fn control_on(page: SettingsPage, what: RowHit) -> (SettingsState, (f32, f32)) {
         let mut state = SettingsState::new();
         state.current_page = page;
+        state.user_accounts = two_accounts();
         let at = center_of(&state, what)
             .unwrap_or_else(|| panic!("{} has no click target for {what:?}", page.label()));
         (state, at)
@@ -8801,8 +8691,8 @@ mod loop_tests {
     fn settings_draws_once_at_startup_and_then_only_when_something_changed() {
         let (mut events, desktop) = testing::desktop();
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
         // Opened through the harness rather than by hand, so this one test
         // covers the whole path Settings actually ships: `open` asks on the
@@ -8826,7 +8716,7 @@ mod loop_tests {
 
         drive(&mut events, window, &mut state).expect("the loopback connection cannot fail");
 
-        assert_eq!(state.selected_adapter, 1, "the click reached the control");
+        assert_eq!(state.selected_account, 1, "the click reached the control");
         let drawn = desktop.borrow_mut().drawn();
         assert_eq!(
             drawn.len(),
@@ -8852,8 +8742,8 @@ mod loop_tests {
         assert_ne!(mine, theirs);
 
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
 
         {
@@ -8867,7 +8757,7 @@ mod loop_tests {
         drive(&mut events, mine, &mut state).unwrap();
 
         assert_eq!(
-            state.selected_adapter, 0,
+            state.selected_account, 0,
             "a click addressed to another window must not work this one's controls"
         );
         let drawn = desktop.borrow_mut().drawn();
@@ -8882,8 +8772,8 @@ mod loop_tests {
             .unwrap();
 
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
 
         {
@@ -8902,7 +8792,7 @@ mod loop_tests {
         drive(&mut events, window, &mut state).unwrap();
 
         assert_eq!(
-            state.selected_adapter, 0,
+            state.selected_account, 0,
             "the loop went on running after the window was closed"
         );
     }
@@ -8994,8 +8884,8 @@ mod loop_tests {
             // page, which is what makes "notify whenever an event was consumed"
             // the wrong rule.
             let (mut state, at) = control_on(
-                SettingsPage::NetworkStatus,
-                RowHit::Select(SelectId::Adapter, 1),
+                SettingsPage::UserAccounts,
+                RowHit::Select(SelectId::Account, 1),
             );
 
             {
@@ -9008,7 +8898,7 @@ mod loop_tests {
 
             drive(&mut events, window, &mut state).unwrap();
 
-            assert_eq!(state.selected_adapter, 1, "the click was consumed");
+            assert_eq!(state.selected_account, 1, "the click was consumed");
             let asked = desktop.borrow_mut().asked();
             assert!(
                 !asked.contains(&"ReloadAppearance"),
@@ -9281,8 +9171,8 @@ mod loop_tests {
     #[test]
     fn an_event_that_changes_a_control_asks_for_a_frame() {
         let (mut state, at) = control_on(
-            SettingsPage::NetworkStatus,
-            RowHit::Select(SelectId::Adapter, 1),
+            SettingsPage::UserAccounts,
+            RowHit::Select(SelectId::Account, 1),
         );
         assert_eq!(
             state.on_event(&click_at(at.0, at.1)),

@@ -237,6 +237,26 @@ enum WpaState {
     /// 4-way handshake in progress (WPA/WPA2).
     FourWayHandshake,
     /// Group key handshake in progress.
+    ///
+    /// **A REPORTED STATE, NOT A STAGE OF CONNECTING.** A group rekey happens
+    /// while the link is up and carrying data: the access point sends group
+    /// message 1 at its own cadence for the whole life of the association, and
+    /// nothing about it suspends traffic or unmakes the pairwise keys. So a
+    /// station in the middle of a routine rekey is still associated, and the
+    /// transition table below allows `Completed` -> here -> `Completed`.
+    ///
+    /// It used to allow only `FourWayHandshake` -> here -> `Completed`, which
+    /// said a rekey was a step on the way to being connected and made a rekey
+    /// after association unrepresentable. Lane C flagged it while declining
+    /// this table for `net80211`
+    /// (`requests/c-b-declining-the-wpa-state-machine-and-the-one-state-of-it-that-is-wrong.md`).
+    ///
+    /// `net80211` is the implementation that will actually drive a radio, and
+    /// it models a group rekey as an EVENT handled inside `Established` rather
+    /// than as a state at all. That is the better model for behaviour. This
+    /// enum's remaining job is the `wpa_cli`-compatible status STRING, which
+    /// does have a `GROUP_HANDSHAKE` spelling — so the state stays here and
+    /// the behaviour lives there.
     GroupHandshake,
     /// Fully connected and authenticated.
     Completed,
@@ -1056,7 +1076,13 @@ impl SupplicantState {
             // From group handshake: complete or fail.
             (WpaState::GroupHandshake, WpaState::Completed) => true,
             (WpaState::GroupHandshake, WpaState::Disconnected) => true,
-            // From Completed: can disconnect or re-scan.
+            // From Completed: can disconnect, re-scan, or REKEY.
+            //
+            // The rekey edge is the one this table was missing. A group rekey
+            // happens while associated, so without it a station that receives
+            // group message 1 after the link is up has nowhere legal to go --
+            // see the note on `WpaState::GroupHandshake`.
+            (WpaState::Completed, WpaState::GroupHandshake) => true,
             (WpaState::Completed, WpaState::Disconnected) => true,
             (WpaState::Completed, WpaState::Scanning) => true,
             // Same-state is always okay.
@@ -1516,6 +1542,37 @@ mod tests {
         assert!(state.transition(WpaState::GroupHandshake));
         assert!(state.transition(WpaState::Completed));
         assert_eq!(state.wpa_state, WpaState::Completed);
+    }
+
+    /// A group rekey happens while associated, and returns to associated.
+    ///
+    /// This is the edge the table was missing. Before 2026-09-15 the only way
+    /// into `GroupHandshake` was from `FourWayHandshake`, which modelled a
+    /// rekey as a step on the way to being connected -- so a station that
+    /// received group message 1 after the link came up had nowhere legal to
+    /// go, and the model said a rekeying station was not `Completed`.
+    ///
+    /// Raised by lane C while declining this table for `net80211`, which
+    /// handles a rekey as an event inside `Established` rather than as a state.
+    #[test]
+    fn a_group_rekey_leaves_and_returns_to_completed() {
+        let mut state = SupplicantState::new();
+        assert!(state.transition(WpaState::Associating));
+        assert!(state.transition(WpaState::FourWayHandshake));
+        assert!(state.transition(WpaState::Completed));
+
+        // The rekey: out of Completed and back, with the link up throughout.
+        assert!(
+            state.transition(WpaState::GroupHandshake),
+            "a group rekey must be reachable from an established link"
+        );
+        assert!(state.transition(WpaState::Completed));
+        assert_eq!(state.wpa_state, WpaState::Completed);
+
+        // ...and it must be repeatable, because the access point rekeys on its
+        // own cadence for the life of the association.
+        assert!(state.transition(WpaState::GroupHandshake));
+        assert!(state.transition(WpaState::Completed));
     }
 
     #[test]

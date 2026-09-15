@@ -24,6 +24,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SecretSource, SeededRng, SystemRandom};
@@ -1141,6 +1142,19 @@ pub struct PasswordApp {
     pub bulk_results: Vec<String>,
     pub window_width: f32,
     pub window_height: f32,
+    /// The save dialog, when the user is choosing where to export to.
+    ///
+    /// `export_history` has rendered the generated passwords as text since the
+    /// program was written and was called by nothing but its own test: the
+    /// string had nowhere to go. This is the somewhere.
+    pub dialog: Option<FileDialog>,
+    /// What the last export did, shown in the status bar until the next one.
+    ///
+    /// Writing a file is the one thing this program does that the window does
+    /// not already show. A generated password is visible; a file either
+    /// appeared or did not, and the user is looking at the wrong window to
+    /// find out.
+    pub status: Option<String>,
     /// Set when a generation was refused because the kernel CSPRNG was not
     /// available. Shown in place of the password, so that the refusal is
     /// visible rather than looking like a button that did nothing.
@@ -1201,6 +1215,8 @@ impl PasswordApp {
             bulk_results: Vec::new(),
             window_width: 1100.0,
             window_height: 700.0,
+            dialog: None,
+            status: None,
             last_error: None,
             rng,
             timestamp: 1000,
@@ -1348,6 +1364,15 @@ impl PasswordApp {
 
     /// Route a compositor event into the app.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker is modal and answers everything but a resize. Every key
+        // on the generator tab produces a password, so a keystroke that fell
+        // through to the tab behind would generate one while the user was
+        // typing a filename.
+        if !matches!(event, Event::Resize { .. })
+            && let Some(result) = self.dialog_event(event)
+        {
+            return result;
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Resize { width, height } => {
@@ -1373,9 +1398,75 @@ impl PasswordApp {
     /// analyser tab every printable key is the password being analysed, which
     /// is why that branch comes first — otherwise typing a "p" into a password
     /// would generate a new one instead of measuring the one being typed.
+    /// Put up the save dialog for the generated-password history.
+    ///
+    /// Refused when there is nothing to write: a file picker for an empty
+    /// export is a question with one useless answer, and an empty file on disk
+    /// is worse than no file.
+    fn open_export_dialog(&mut self) -> EventResult {
+        if self.history.is_empty() {
+            self.status = Some("Nothing generated yet, so nothing to export".to_string());
+            return EventResult::Consumed;
+        }
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::save()
+            .with_initial_path(start)
+            .with_filename("passwords.txt");
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.dialog = Some(dialog);
+        EventResult::Consumed
+    }
+
+    /// Write the history to `path`, and say what happened.
+    ///
+    /// Atomic, because a half-written export is a file of passwords that looks
+    /// complete and is not -- and the reader has no way to tell, since a
+    /// truncated list of random strings is indistinguishable from a short one.
+    fn export_to(&mut self, path: &std::path::Path) {
+        let text = self.export_history();
+        self.status = Some(match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!("Exported {} to {}", self.history.len(), path.display()),
+            Err(e) => format!("Could not write {}: {e}", path.display()),
+        });
+    }
+
+    /// Give the picker an event; `None` when there is no picker up.
+    fn dialog_event(&mut self, event: &Event) -> Option<EventResult> {
+        let (width, height) = (self.window_width, self.window_height);
+        let action = {
+            let dialog = self.dialog.as_mut()?;
+            match event {
+                Event::Key(key) if key.pressed => dialog.handle_event(key, height),
+                Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
+                _ => DialogAction::None,
+            }
+        };
+        match action {
+            DialogAction::Selected(path) => {
+                self.dialog = None;
+                self.export_to(&path);
+            }
+            DialogAction::Cancelled => self.dialog = None,
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+            }
+            DialogAction::None => {}
+        }
+        Some(EventResult::Consumed)
+    }
+
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
+        }
+        // Before the analyser branch: on that tab every printable key is the
+        // password being measured, and Ctrl+E must not be typed into it.
+        if key.modifiers.ctrl && key.key == Key::E {
+            return self.open_export_dialog();
         }
         if self.active_tab == ActiveTab::Analyzer {
             match key.key {
@@ -1627,15 +1718,23 @@ impl PasswordApp {
             Surface::Strip(Edge::Top),
         );
 
-        let status = format!(
-            "{} passwords generated  |  Policy: {}",
-            self.history.len(),
-            if self.policy.is_compliant(&self.current_password) {
-                "Compliant"
-            } else {
-                "Non-compliant"
-            },
-        );
+        // The export's outcome displaces the counts while it is showing.
+        // Both would not fit, and of the two, "did the file get written" is
+        // the one the window cannot otherwise answer: a generated password is
+        // on screen, a file on disk is not.
+        let status = if let Some(message) = &self.status {
+            message.clone()
+        } else {
+            format!(
+                "{} passwords generated  |  Policy: {}",
+                self.history.len(),
+                if self.policy.is_compliant(&self.current_password) {
+                    "Compliant"
+                } else {
+                    "Non-compliant"
+                },
+            )
+        };
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: bar_y + 6.0,
@@ -2151,9 +2250,13 @@ impl App for PasswordApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.window_width = width;
         self.window_height = height;
-        RenderTree {
-            commands: self.render_commands(width, height),
+        let mut commands = self.render_commands(width, height);
+        // Over everything the app draws: it is modal, and a picker drawn under
+        // the history list would be a picker the user could not read.
+        if let Some(dialog) = &self.dialog {
+            commands.extend(dialog.render(&self.palette, width, height));
         }
+        RenderTree { commands }
     }
 }
 
@@ -2218,6 +2321,122 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: c.to_string(),
         })
+    }
+
+    fn ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// Every string the app draws.
+    fn drawn(app: &mut PasswordApp) -> Vec<String> {
+        app.render(900.0, 700.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The generated passwords reach a file the user chose.**
+    ///
+    /// `export_history` rendered them as text from the day it was written and
+    /// was called by nothing but its own test: the string had nowhere to go.
+    /// This drives the whole path -- shortcut, picker, write -- and reads the
+    /// file back off the disk rather than asking the app what it thinks it
+    /// did.
+    #[test]
+    fn ctrl_e_exports_the_history_to_the_chosen_file() {
+        let dir = scratchdir::ScratchDir::new("passwordgen_export");
+        let mut app = seeded_app();
+        app.gen_password();
+        app.gen_password();
+        assert_eq!(app.history.len(), 2, "the fixture generated nothing");
+
+        app.handle_event(&ctrl(Key::E));
+        let dialog = app.dialog.as_mut().expect("Ctrl+E put up no picker");
+        dialog.navigate_to(dir.dir());
+        dialog.set_entries(guitk::dialog::list_directory(dir.dir()));
+        dialog.set_filename("out.txt");
+        app.handle_event(&press(Key::Enter));
+
+        assert!(app.dialog.is_none(), "the picker stayed up");
+        let written = std::fs::read_to_string(dir.path("out.txt"))
+            .unwrap_or_else(|e| panic!("nothing was written: {e}; status {:?}", app.status));
+        for entry in &app.history {
+            assert!(
+                written.contains(&entry.password),
+                "a generated password is missing from the export"
+            );
+        }
+    }
+
+    /// The status bar says the export happened, because the window cannot
+    /// otherwise show that a file appeared.
+    #[test]
+    fn the_status_bar_reports_the_export() {
+        let dir = scratchdir::ScratchDir::new("passwordgen_export_status");
+        let mut app = seeded_app();
+        app.gen_password();
+
+        app.handle_event(&ctrl(Key::E));
+        let dialog = app.dialog.as_mut().expect("no picker");
+        dialog.navigate_to(dir.dir());
+        dialog.set_entries(guitk::dialog::list_directory(dir.dir()));
+        dialog.set_filename("out.txt");
+        app.handle_event(&press(Key::Enter));
+
+        let texts = drawn(&mut app);
+        assert!(
+            texts.iter().any(|t| t.starts_with("Exported")),
+            "the export is invisible: {texts:?}"
+        );
+    }
+
+    /// Exporting nothing is refused, and says why.
+    ///
+    /// A picker for an empty export is a question with one useless answer, and
+    /// an empty file of passwords is worse than no file.
+    #[test]
+    fn exporting_an_empty_history_is_refused_with_a_reason() {
+        let mut app = seeded_app();
+        app.clear_history();
+
+        app.handle_event(&ctrl(Key::E));
+
+        assert!(app.dialog.is_none(), "a picker came up for an empty export");
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Nothing generated"),
+            "status was {:?}",
+            app.status
+        );
+    }
+
+    /// While the picker is up, a keystroke does not generate a password.
+    #[test]
+    fn the_generator_does_not_run_while_the_picker_is_up() {
+        let mut app = seeded_app();
+        app.gen_password();
+        let before = app.history.len();
+
+        app.handle_event(&ctrl(Key::E));
+        app.handle_event(&typed('p'));
+        app.handle_event(&press(Key::Space));
+
+        assert_eq!(
+            app.history.len(),
+            before,
+            "a keystroke meant for the filename generated a password"
+        );
     }
 
     #[test]

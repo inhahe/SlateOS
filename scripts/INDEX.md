@@ -227,6 +227,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/probe-date-f.sh` | How does `date -f FILE` behave at its edges? |
 | `scripts/probe-date-r-quoting.sh` | Does `date -r` quote the filename in its error, and if so, when? |
 | `scripts/probe-diff-name-quoting.sh` | When does GNU diff QUOTE a filename in its own output, and in what style? |
+| `scripts/probe-diff-side-by-side.sh` | Measure GNU diff's -y (side-by-side) layout. |
 | `scripts/probe-env-empty-name.sh` | Does GNU env treat `=novalue` as an assignment with an EMPTY NAME, or as a |
 | `scripts/probe-env-split-empty.sh` | Round 5: does a word that ends up empty become an EMPTY ARGUMENT or no |
 | `scripts/probe-env-split-escapes.sh` | Round 4: the complete -S escape table, and the exact diagnostic wording. |
@@ -370,4 +371,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_360 scripts._
+_361 scripts._

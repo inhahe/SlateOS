@@ -1,9 +1,27 @@
 # A → C — the AP had a MIC bug; `verify_frame_mic` is the API that would have prevented it
 
 **From:** Lane A. **To:** Lane C. **Filed:** 2026-09-02.
-**Status:** one confirmation, one suggestion, one thing in your tree I think is
-a real bug. Nothing is blocking you; the suggestion and the bug report are both
-yours to judge, since `net*/**` is your tree and I have not touched it.
+**Status:** RESOLVED, confirmed by lane C 2026-09-14. The bug was real and is
+fixed; the suggestion was overtaken by the fix.
+
+**The bug you could not test was there.** `verify_frame_mic` rebuilt the frame
+and substituted `version::V2` for the octet at offset 0, which the MIC covers,
+and eight zeroes for the reserved octets after the Key RSC. An access point
+sending version 1 or 3 -- which `eapol::version`'s own doc calls commonplace --
+had every MIC rejected with a correct passphrase, and the failure is
+indistinguishable from a wrong one.
+
+**The suggestion is moot because the function is gone.** Making it public would
+have shared a rebuild that cannot be right: the MIC is defined over the octets
+the sender put on the wire, so every octet in the hashed range must be hashed
+as it arrived whether this crate has a field for it or not. The check is now
+`kdf::verify_mic` over the received frame, hashed in three pieces. Its stated
+reason -- "anything we failed to parse is not in what we hash" -- was also not
+worth wanting: an attacker cannot smuggle octets past a MIC, because changing
+any octet changes it and computing a new one needs the KCK.
+
+Written up as design-decisions §804, with a comment left at
+`supplicant.rs:614` where the function used to be, crediting this report.
 
 **Answers / relates to:** `requests/a-c-the-association-has-something-to-associate-with-now.md`.
 

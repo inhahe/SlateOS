@@ -1037,6 +1037,7 @@ dependencies = [
 name = "guitk"
 version = "0.1.0"
 dependencies = [
+ "civildate",
  "osfont",
  "randrange",
  "textfind",
@@ -2086,6 +2087,8 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
+ "scratchdir",
 ]
 
 [[package]]
@@ -2532,6 +2535,7 @@ dependencies = [
  "compositor",
  "guitk",
  "inputsettings",
+ "loginusers",
  "notifsettings",
  "oswindow",
  "settingsfile",
@@ -2946,6 +2950,7 @@ name = "terminal"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "charwidth",
  "guitk",
  "oswindow",
 ]

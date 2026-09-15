@@ -92231,7 +92231,13 @@ st=1
         );
         // …and a converted `RANDOM` stops varying.
         let varies = "a=$RANDOM; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo stable || echo varying";
-        assert_eq!(run(varies).0, "varying\n");
+        // Seeded for the reason given in full in
+        // `declaring_a_dynamic_variable_keeps_its_value_function`: unseeded,
+        // this line calls two clock-seeded draws unequal and is wrong once in
+        // 32770 runs. The `declare -a` case below needs no seed -- a converted
+        // `RANDOM` is frozen at element 0, so both reads return the same bytes
+        // however the generator happened to be seeded.
+        assert_eq!(run(&format!("RANDOM=1; {varies}")).0, "varying\n");
         assert_eq!(run(&format!("declare -a RANDOM; {varies}")).0, "stable\n");
         // The binding is gone in the sense `unset` means it: nothing comes back.
         assert_eq!(
@@ -95178,9 +95184,23 @@ st=1
                 .0
                 .starts_with("declare -irx PPID=\"")
         );
-        // The value function is still doing the computing.
-        let (out, _) =
-            run("declare RANDOM; a=$RANDOM; b=$RANDOM; [ \"$a\" != \"$b\" ] && echo varying");
+        // The value function is still doing the computing. The seed is PINNED,
+        // and that is not tidiness: `RANDOM` is seeded from the clock, so an
+        // unseeded pair of draws is EQUAL once in 32770 runs -- measured
+        // exactly, 131064 of the 2^32 seeds give two equal draws -- and when it
+        // fires it reds an entire workspace run. Worse, it then looks exactly
+        // like test-order interference: it "passes alone and fails in company"
+        // purely because a 1-in-32770 event does not reproduce.
+        //
+        // Checked by making it fail on purpose: seed 7329 collides here every
+        // time. Note it is NOT 24912, the colliding seed used by the sibling
+        // test below -- `declare RANDOM` fills the slot, and filling it CALLS
+        // the value function, so the pair compared here is draws 2 and 3
+        // rather than 1 and 2. That the two tests need different seeds is
+        // itself evidence the declaration really does compute a value.
+        let (out, _) = run(
+            "RANDOM=1; declare RANDOM; a=$RANDOM; b=$RANDOM; [ \"$a\" != \"$b\" ] && echo varying",
+        );
         assert_eq!(out, "varying\n");
         // What the declaration changes is that the name's slot is filled in:
         // bash's listings walk the variable table and pass over the ones that
@@ -102663,8 +102683,16 @@ st=1
             }
             std::thread::yield_now();
         }
+        // `born_at` an HOUR AHEAD, not `now()`. `Instant::elapsed` saturates
+        // at zero for a future instant, so `elapsed() >= GRACE` stays false
+        // however long this thread is off the CPU. Pinning it to `now()` left
+        // a 20 ms budget between two ADJACENT STATEMENTS, and under a full
+        // workspace run a deschedule that long is ordinary. Lane C found it;
+        // it is the same mistake as the `sleep(5ms)` this replaced, one step
+        // smaller.
+        let unreachable = std::time::Instant::now() + std::time::Duration::from_secs(3600);
         for j in &mut sh.jobs {
-            j.born_at = std::time::Instant::now();
+            j.born_at = unreachable;
         }
         sh.poll_jobs();
         assert!(
@@ -102675,6 +102703,17 @@ st=1
             !sh.jobs.iter().any(|j| j.exit_seen),
             "the grace must NOT have passed yet"
         );
+        // ...and now an hour BEHIND, so the grace has provably elapsed for
+        // everything after this point. THE BUDGET HAS TWO DIRECTIONS, which is
+        // what the future-instant fix alone misses: with `born_at` left in the
+        // future the grace can never pass, `settle_jobs` never sets
+        // `exit_seen`, and the test fails on the very property it exists to
+        // prove. Verified by trying lane C's suggestion exactly as given --
+        // `left: 0, right: 1`.
+        let long_past = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        for j in &mut sh.jobs {
+            j.born_at = long_past;
+        }
         settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert_eq!(

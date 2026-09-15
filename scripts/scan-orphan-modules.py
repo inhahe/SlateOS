@@ -424,6 +424,80 @@ BASELINE_HEADER = """\
 # write, or `--check` refusing a baseline that differs from what `--pin` would
 # produce.
 #
+# DONE, 2026-09-14: it happened a third time and `--pin` now refuses outright
+# rather than merging, for the reason recorded at the refusal itself -- merging
+# means guessing where a stranger's paragraph belongs, and a merge that guesses
+# wrong loses it a second way.  The paragraph above is left as written rather
+# than rewritten in hindsight, because the prediction and its outcome are worth
+# more together than a tidy sentence claiming the problem was always handled.
+#
+# It then happened a FOURTH time, on 2026-09-15, and the refusal caught it --
+# against the lane that had written the refusal the day before.  That is the
+# strongest argument available for preferring a mechanism to an instruction:
+# this comment had been read, extended and then disobeyed by the same person.
+# An instruction competes for attention with everything else in the file it
+# lives in; a refusal does not need to be noticed to work.
+#
+# MOVED HERE 2026-09-15 from the generated file, which is where it was
+# originally written -- the fourth time that has happened, and the first
+# time the refusal added for the third caught it before the prose was lost.
+# It caught the lane that wrote the refusal. That is the argument for the
+# mechanism over the instruction: the comment saying prose lives in the
+# script has been read, written and then disobeyed by the same person.
+#
+# ONE ENTRY ON THIS LIST IS NOT A DEBT, and it costs a reader several minutes
+# to find that out, so it is written down here instead.
+#
+# `gui/compositor/src/server.rs` is the live display server. `Server::bind` is
+# called by `gui/compositor/src/main.rs:273`, the compositor binds a socket
+# with it, and `apps/editor` runs a genuine one on a thread in its tests.
+# Nothing about it is unreached.
+#
+# It is reported anyway, and the mechanism is worth knowing because it is a
+# cost of a deliberate choice made the same day. The scan drops from its
+# evidence any name shared with a `main.rs`'s public items or with any enum
+# variant -- added 2026-09-14, after `apps/fileassoc` declaring its own
+# `FileCategory` falsely cleared the toolkit's file-type registry. `Server` is
+# an enum variant in `apps/ircclient`, `apps/vpnmanager` and `userspace/ntpd`,
+# so the name is poisoned; `ServerStats` and `Disconnect` appear only in
+# `lib.rs`'s re-export, which is discounted as bare. The module is then left
+# resting on `mod server;` alone, and is reported.
+#
+# That conservatism is still right -- a false island costs a reader minutes, a
+# false clearance hides a whole subsystem -- but it is not free, and this is
+# what the bill looks like. Do not try to "pay off" this line: there is
+# nothing to wire, and deleting it would make `--check` report a new island
+# and red the boot.
+#
+#
+# FIFTH BATCH, 2026-09-15, lane C: gui/desktop/src/notification_settings.rs,
+# 2,526 lines, DELETED rather than wired -- the a11y.rs and signal.rs disposal
+# rather than the explorer-columns one.
+#
+# It was a second settings model for notifications.  The first,
+# `gui/notifsettings`, has five consumers -- apps/settings, gui/daywindow, and
+# the shell's own focus_assist.rs and notif_pane.rs -- and the Settings app's
+# Notifications page is built from it.  design-decisions 815 settles which copy
+# goes: a screen you *open* lives in the app and the shell's copy is deleted.
+#
+# The part worth recording is how the decision was actually made, because "it
+# is a duplicate" was not sufficient.  The dead copy modelled FOUR things the
+# live one does not: BannerPosition, AutoDismissDelay, GroupingMode and
+# HistoryRetention.  Deleting it therefore did lose concepts, and the question
+# was whether they were work.  They were not: notif_pane.rs, 3,809 lines and
+# live, has manual dismissal and grouping by *time* only -- no banner
+# placement, no timer, no per-program collapsing, no retention policy.  So all
+# four were settings for behaviour that does not exist, which is exactly what
+# the Settings app's Mouse page and Startup Apps page each refuse to ship, in
+# so many words, a few hundred lines apart.
+#
+# They are written up in known-issues.md as
+# TD-C-FOUR-NOTIFICATION-BEHAVIOURS-HAVE-A-SETTINGS-MODEL-AND-NO-IMPLEMENTATION,
+# with the order a future implementation has to follow -- behaviour first,
+# shared model second, control third -- so that at no point does a setting
+# exist that nothing reads.  That entry is the reason the deletion is safe to
+# make quickly: the ledger loses a line and the knowledge does not.
+#
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
 # wired up or it does not land.  When you connect one, delete its line
@@ -488,27 +562,72 @@ def read_baseline():
 def main():
     argv = sys.argv[1:]
     mode = "report"
+    override_roots = None
     for a in argv:
         if a in ("--check", "--pin"):
             mode = a[2:]
+        elif a.startswith("--roots="):
+            override_roots = [r for r in a.split("=", 1)[1].split(",") if r]
         else:
             print(f"unknown argument: {a}", file=sys.stderr)
             print(__doc__, file=sys.stderr)
             return 2
 
+    # `--roots` is report-only, and the refusal below is the point of the flag
+    # rather than a limitation of it.
+    #
+    # The baseline is a list of module paths. Nothing in it records WHICH roots
+    # produced it, so `--check --roots=userspace` would compare lane B's
+    # modules against lane C's baseline and report "no new orphans" — a true
+    # sentence about a population the run never looked at. That is the failure
+    # this project keeps finding in its own gates: a verdict delivered over a
+    # set the checker cannot enumerate. A flag that lets someone scan another
+    # lane is useful; one that lets them get a green tick for it is worse than
+    # not having the flag.
+    if override_roots is not None and mode != "report":
+        msg = [
+            f"--roots cannot be combined with --{mode}: the baseline in",
+            f"  {BASELINE}",
+            "describes lane C's roots and nothing else, so a pass or a pin",
+            "against different roots would be a verdict over a population",
+            "it does not cover. Run --roots on its own to see the report,",
+            "and keep your own baseline if you want a gate.",
+        ]
+        for line in msg:
+            print(line, file=sys.stderr)
+        return 2
+
     base = pathlib.Path(".")
-    roots = list(ROOTS)
-    roots += [p.name for p in base.iterdir() if p.is_dir() and p.name.startswith("net")]
+    if override_roots is None:
+        roots = list(ROOTS)
+        roots += [p.name for p in base.iterdir() if p.is_dir() and p.name.startswith("net")]
+    else:
+        roots = list(override_roots)
+        missing = [r for r in roots if not (base / r).is_dir()]
+        if missing:
+            print(f"no such directory: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        print(f"scanning {', '.join(sorted(roots))} (report only)", file=sys.stderr)
 
     # Candidate modules: library modules under lane C's roots that define at
     # least one top-level public item.
     candidates = {}
+    skipped_binaries = []
     for root in sorted(set(roots)):
         rp = base / root
         if not rp.is_dir():
             continue
         for f in rust_files(rp):
             if f.name == "main.rs" or f.name in AGGREGATORS:
+                # Counted, not merely skipped. A binary crate is a root, so
+                # "nothing calls this" is a different question inside
+                # main.rs and this scan does not answer it -- but a run
+                # that says "0 islands" over a directory of binaries is
+                # reporting that it did not look, in the same words it
+                # would use for a clean tree. The count below is what
+                # tells those two apart.
+                if f.name == "main.rs":
+                    skipped_binaries.append(f)
                 continue
             try:
                 lines = f.read_text(encoding="utf-8", errors="replace").split("\n")
@@ -877,6 +996,26 @@ def main():
         f" out of {len(candidates)} library module(s) scanned"
         f" ({len(islands) - len(hard)} further test-only helper(s) listed above)."
     )
+    if skipped_binaries:
+        crates = sorted({f.parts[1] for f in skipped_binaries if len(f.parts) > 1})
+        shown = ', '.join(crates[:6])
+        more = f' and {len(crates) - 6} more' if len(crates) > 6 else ''
+        print(
+            f"Not looked at: {len(skipped_binaries)} main.rs file(s)"
+            f" ({shown}{more})."
+        )
+        print(
+            "  A binary crate is a root, so this scan does not ask whether"
+            " a module inside its main.rs has a caller."
+        )
+        print(
+            "  Most of that ground is covered elsewhere, and saying so is"
+            " the point: check-tested-but-uncalled.py reads main.rs and"
+            " reports 381 functions in apps/*/src/main.rs alone that only"
+            " their own tests call. What no gate covers is an inline `mod`"
+            " with no references, or a type or const that is neither a"
+            " module nor a function."
+        )
     print(
         "An island defines top-level public items and no other file in the"
         " repository names\nany of them or its module path, outside tests and"

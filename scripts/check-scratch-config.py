@@ -240,6 +240,25 @@ SELF_TESTS = [
 ]
 
 
+def describe_failure(pkg, output):
+    """Why `pkg`'s own suite failed, naming the tests.
+
+    This used to say only "its own tests did not pass", and on 2026-09-14
+    that refused a push over one failure in a suite of 2,978 with no way to
+    tell which -- the four-line log the hook keeps held nothing else, and
+    the suite passed on re-run. A gate that blocks on somebody else's
+    failure and will not say whose teaches its reader to re-run rather than
+    to look, which is exactly how a flake becomes permanent.
+    """
+    named = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith("test ") and "FAILED" in line
+    ]
+    detail = "; ".join(named[:5]) if named else "no test named itself in the output"
+    return f"{pkg}: its own tests did not pass, so this says nothing -- {detail}"
+
+
 def selftest():
     """Grade the parts that can rot without the verdict changing.
 
@@ -252,6 +271,26 @@ def selftest():
     Both are checked here.
     """
     failed = 0
+
+    # The failure *message*, which is the only thing a blocked pusher sees.
+    one = "test session::tests::a_pane_thing ... FAILED"
+    two = "test a::b ... FAILED" + chr(10) + "test c::d ... FAILED"
+    for name, out, want in [
+        ("a failing test is named, not just counted", one, "a_pane_thing"),
+        ("several are named", two, "c::d"),
+        (
+            "output naming nothing says so rather than looking clean",
+            "error: could not compile `desktop`",
+            "no test named itself",
+        ),
+    ]:
+        got = describe_failure("desktop", out)
+        if want in got:
+            print("ok   " + name)
+        else:
+            print("FAIL " + name + ": " + got)
+            failed += 1
+
     for name, source, expected in SELF_TESTS:
         lines = source.splitlines()
         m = FN.match(lines[0]) or FN.match(lines[1] if len(lines) > 1 else "")
@@ -429,7 +468,7 @@ def main(argv):
         status = "ok" if not left and run.returncode == 0 else "FAIL"
         print("  " + status.ljust(5) + pkg)
         if run.returncode != 0:
-            failures.append(pkg + ": its own tests did not pass, so this says nothing")
+            failures.append(describe_failure(pkg, run.stdout + run.stderr))
         for f in left:
             failures.append(pkg + " wrote " + f.relative_to(probe).as_posix())
         shutil.rmtree(probe, ignore_errors=True)

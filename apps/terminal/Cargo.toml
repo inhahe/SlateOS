@@ -5,6 +5,13 @@ edition = "2024"
 description = "SlateOS Terminal Emulator — graphical VT100/xterm terminal"
 
 [dependencies]
+# The width table every layout decision in this system is made from.
+# A `userspace/` crate as a dependency is normally how a second libc
+# gets into a process (design-decisions 768), and `charwidth` is exempt:
+# two static arrays and a binary search, no syscalls, no allocation, no
+# `posix` dependency. Lane B checked that before proposing it, in
+# requests/b-c-the-terminal-gives-every-character-one-cell.md.
+charwidth = { path = "../../userspace/charwidth" }
 # The user's colours, per design-decisions 822. The terminal's *chrome*
 # follows the theme; its sixteen ANSI colours do not -- see `ColorScheme`.
 appearance = { path = "../../gui/appearance" }

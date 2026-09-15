@@ -940,7 +940,7 @@ work is real but it is not research.
 and because a reader looking at a 176-line baseline needs to know it is one
 wall and not 176 separate jobs.
 
-## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) — OPEN
+## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) -- FIXED; ELF symbol names are a separate layer and stay text
 
 `ar` no longer dies on an operand that is not valid UTF-8, but it does not
 handle one either: it **refuses**, naming the bytes, at `decode_operand`.
@@ -958,6 +958,26 @@ boundary is the honest place to say so.
 is a literal `unwrap` and the process died first. The refusal is strictly
 better and is not the end state.
 
+**It is worse than "cannot represent" — it cannot READ, either.** Found
+2026-09-14 while scoping the conversion, at `main.rs:227`:
+
+```rust
+let raw_name = std::str::from_utf8(&hdr_bytes[0..16])
+    .map_err(|e| format!("invalid name field: {e}"))?
+```
+
+That `?` aborts the whole archive parse. So `ar t` on a **valid archive** —
+one GNU `ar` produced, containing one member whose name holds a byte that is
+not UTF-8 — fails outright with `invalid name field`, and every member in it
+becomes unreachable. Not the member: the archive. This is not a limit of our
+own output, it is a refusal to read other people's, and it is the strongest
+argument for doing the conversion rather than leaving the boundary refusal in
+place.
+
+The structural markers do **not** need decoding to keep working: `//`, `/`,
+`#1/N` and `/N` are ASCII by the format's definition, so they can be matched on
+bytes and the 16-byte field never has to be text at all.
+
 **The fix** is to carry member names as bytes through the format layer —
 `name: Vec<u8>`, comparisons on bytes, and `escape_unprintable` at the
 display sites (`t` listing, `v` output, diagnostics). It is a real piece of
@@ -968,6 +988,29 @@ members.
 
 **Reachability:** `ar` is one of only three argv-baseline binaries on the
 image, so this one is worth doing, unlike most of that backlog.
+
+**Done 2026-09-14 for `ar` itself.** `ArHeader.name` is `Vec<u8>`, and all
+three fatal decodes are gone — the 16-byte field, the GNU `//` table entry, and
+the BSD `#1/N` tail. The structural markers match on bytes, as the format
+defines them, so nothing in the parser needs the name to be text. A test builds
+an archive whose member name holds `0xE9`, parses it, and finds the member by
+those bytes; reintroducing the first decode makes it fail with the original
+`invalid name field`, which is how the test is known to measure something.
+
+Display sites go through `escape_unprintable`, so an unprintable byte in a
+member name cannot forge a line of `ar t` output. `ar x` writes the member out
+under its own name as an `OsString` rather than any text form.
+
+**And done for `ranlib` and `strip` too, 2026-09-14.** Both held their file-path
+operands as `String`. They carry `OsString` now, and `decode_operand` — which
+by then served only them — is **deleted** rather than left as a refusal nothing
+calls. Its two tests went with it: they asserted a refusal that no longer
+happens, and a test that cannot fail is worse than no test.
+
+`strip -K` still takes its symbol names as text, deliberately. Those are ELF
+symbol names matched against a symbol table this file carries as `String`, and
+that layer — `ElfSection.name`, `ElfSymbol.name`, both from ELF string tables —
+is a different question from the `ar` member name and is not converted here.
 
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
@@ -76219,6 +76262,40 @@ named on the command line, and GNU reserves 2 for the latter.
 
 ### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
 
+> **Measured 2026-09-12, and it dwarfs the 626 this is blocked on.** Our own
+> terminal (`apps/terminal`) has **no notion of character width at all**: it
+> advances the cursor one column for every character, unconditionally, and does
+> not depend on `charwidth`. So table and screen disagree about **185,074**
+> characters — 182,712 the table calls two cells wide and the terminal draws in
+> one, and 2,362 zero-width marks given a cell of their own.
+>
+> That is every one of the 20,992 Chinese characters, all 11,172 Korean
+> syllables, the Japanese kana, the fullwidth forms and the 80 emoticon emoji.
+> In the other direction, 1,281 combining marks — the accent in a decomposed
+> `é` — take a cell where every layout calculation reserved none.
+>
+> **Consequence for B-Q8:** on SlateOS, *both* candidate tables are wrong
+> against our own screen for 296 times more characters than they disagree with
+> each other about. Choosing between them is still right for matching upstream
+> byte-for-byte, which is what the harnesses measure, but it is not what makes
+> our screens correct. The renderer is filed to lane C as
+> `requests/b-c-the-terminal-gives-every-character-one-cell.md`; the two do not
+> block each other.
+>
+> **FIXED by lane C — on `main` since 2026-09-15**, checked here rather than
+> taken from the report. They took the better direction: instead of rewriting the table to
+> describe the renderer, they pointed the renderer at the table. `put_char`
+> advances by `charwidth::char_width`, a wide character occupies two cells with
+> the second flagged as a continuation, a combining mark occupies none, and a
+> wide character that will not fit at the margin wraps rather than straddling
+> it. Writing onto either half of a pair breaks it first, in both directions,
+> so no orphaned half survives to overdraw its neighbour.
+>
+> The two can no longer drift, because there is now one source rather than two
+> descriptions of the same thing. The 2,362 zero-width figure above was
+> re-derived from the table's own 368 ranges when lane C flagged that they had
+> not verified it; it holds.
+
 **What it is.** `userspace/charwidth` holds the system's only table of terminal
 column widths, and it was generated and verified against **bash 5.2.37**, which
 gets its widths from glibc's `wcwidth`. Coreutils **9.5** does not use glibc's
@@ -144595,6 +144672,19 @@ There is a picker, so it is not guesswork -- it is a `FileDialog::save()`, a
 field on the app, routing in `handle_event`, and somewhere to report the result,
 which that program currently has no status line for. Small, and open.
 
+**FIXED 2026-09-14.** Ctrl+E puts up `guitk::dialog::FileDialog::save()`, the
+history is written through `safeio::write_str_atomically`, and the status bar
+reports the path -- because a generated password is on screen and a file on
+disk is not, so the write is the one thing this window cannot otherwise show.
+Exporting an empty history is refused with a reason rather than producing an
+empty file of passwords. Four tests drive the whole path and read the file back
+off the disk; three of them go red if the write is removed.
+
+Note what was *not* done: persistence. The entry below is still right that this
+program keeps nothing across runs, and for a password **generator** that is
+correct rather than a gap -- passwords you generated and did not use should not
+linger on disk. The export is the deliberate escape hatch, and it now exists.
+
 **Sharper, and worse, checked 2026-09-14:** `apps/passwordgen` persists
 *nothing*. No `settingsfile`, no load, no save, no config file of any kind --
 the history exists for as long as the window is open and is gone when it
@@ -144696,6 +144786,183 @@ That is strictly better than before -- it used to be true of *every* copy --
 and it is worth knowing that the remaining case exists rather than wondering
 why one copy behaves differently from another.
 
+## TD-C-A-LANE-B-TEST-REDS-LANE-C-S-WORKSPACE-RUNS -- FIXED 2026-09-14 by lane B
+
+**Date:** 2026-09-14. **Lane:** C (the report; the test is lane B's). **OPEN.**
+
+**In short:** one test in `userspace/oils` fails under a loaded full-workspace
+run, and one failure out of 1,499 reds the whole thing, so lane C cannot merge
+behind it. It is not the product failing -- the test cannot arrange its own
+starting conditions when the machine is busy.
+
+`interp::tests::a_poll_before_the_grace_does_not_lose_the_exit_forever`,
+`userspace/oils/src/interp.rs:102674`, on the assertion *"the grace must NOT
+have passed yet"* -- a **premise** check, before it tests anything.
+
+**FIXED by lane B** (`ea0dc3873`, merged as `a76cf245c`): `born_at` is pinned
+an hour ahead for the in-window poll and an hour behind before `settle_jobs`.
+0 failures in 30 runs under 16 concurrent copies of the test binary, and it
+still catches the defect it exists for.
+
+**My suggested fix was half of one, and the half I could not see is the
+instructive part.** I proposed only the forward pin. Lane B applied it exactly
+as given and the test then failed at `left: 0, right: 1` -- because with
+`born_at` an hour in the future the grace can *never* pass, so `settle_jobs`
+never sets `exit_seen`, the job is counted as waited-for, swept, and the
+listing comes back empty. The test would have failed on the very property it
+exists to prove.
+
+The budget has two directions and I only looked at one. I had read the window
+as "do not let the grace elapse yet" when it is really "do not let it elapse
+here, and do let it elapse there" -- a shape I would not have found without
+running it, which lane B did and I did not.
+
+**Measured 2026-09-14, and it is not occasional:**
+
+| run | result |
+|---|---|
+| `cargo test --workspace` | FAILED (1 of 1,499 in `oils`; 344 other crates green) |
+| `cargo test --workspace`, again | FAILED, same test, same assertion |
+| `cargo test -p oils` alone | **ok, 1,500 passed** |
+
+So it is reliable under workspace load and absent in isolation -- which is what
+the test's own comment predicts ("0 in 250 runs in isolation"). Lane C's
+changes cannot reach it: `oils` is `userspace/`, depends on nothing lane C
+touched, and the only coupling is total machine load.
+
+**Why.** The setup sets every job's `born_at` to `Instant::now()` and then
+calls `poll_jobs`, which compares `born_at.elapsed() >= JOB_EXIT_NOTICE_GRACE`
+(20 ms). The premise holds only if fewer than 20 ms pass between two adjacent
+statements. Under a workspace run with dozens of test binaries resident, that
+deschedule is ordinary.
+
+The test's own comment records an earlier round of the same thing -- a 5 ms
+sleep against the 20 ms grace, with the note that *"`sleep` is a FLOOR, not a
+duration"*. The budget is the problem, not its size.
+
+**Not lane C's to fix** (`userspace/**` is lane B's), so it is filed as
+`requests/c-b-the-deterministic-oils-job-test-is-still-timing-dependent-and-it-blocks-merges.md`
+with a one-line suggestion: set `born_at` an hour in the future instead of now,
+since `Instant::elapsed` saturates at zero and no deschedule can then reach the
+grace.
+
+**Why this is recorded here and not merely re-run.** Because re-running is the
+honest response *today* and the corrosive one by next week. The next person to
+see this red will assume it is this test and merge anyway -- and on the day it
+is a genuine regression they will be right to have stopped and wrong to have
+carried on. A flake nobody writes down becomes a red nobody reads.
+
+**Do not "fix" it by raising `JOB_EXIT_NOTICE_GRACE` or adding `#[ignore]`.**
+The first changes shipped behaviour to suit a test. The second turns a red into
+a silence, and the race this test guards is real -- somebody did the work to
+find it, and the test is the only thing standing over it.
+
+## TD-C-THE-PANE-CLOSE-ANIMATION-TEST-IS-FLAKY-UNDER-LOAD
+
+**Date:** 2026-09-14. **Lane:** C. **OPEN.**
+
+**In short:** one test in the desktop suite fails occasionally and passes on a
+re-run, which is the worst kind of failure: it teaches whoever sees it to run
+the suite again instead of reading it. Nothing is wrong with the program -- the
+test asks a question about timing that the test harness cannot answer reliably
+when the machine is busy.
+
+**What it is.** `session::tests::closing_the_pane_slides_it_out_and_it_stays_out`
+(`gui/desktop/src/session/tests.rs:3119`), asserting
+`"the close snapped instead of sliding"`.
+
+The test opens the notification pane, steps 200 frames so the open animation
+finishes, sends the close key, pumps, and then asserts the pane is **still
+visible** -- that is, that closing *starts an animation* rather than vanishing.
+It is a good thing to test and the assertion is the right one.
+
+**What was measured, 2026-09-14:**
+
+| run | result |
+|---|---|
+| full `-p desktop` suite, 35.9 s wall (compiling, machine loaded) | **FAILED** |
+| same test alone, three consecutive runs | passed, passed, passed |
+| full `-p desktop` suite again, 12.9 s wall | passed (2976) |
+
+**Where the nondeterminism is not.** The pane animation is driven by an
+explicit `pane.tick(dt)` with the delta handed in, and there is no
+`Instant::now` or `SystemTime::now` anywhere in `notif_pane.rs`. So the
+animation itself is deterministic given a frame count; this is not an
+animation-on-wall-clock bug.
+
+**Where it is not, corrected 2026-09-14.** The first version of this entry said
+the cause was "how many frames the shell has processed by the time `pump()`
+returns". **That is wrong and was written without reading `pump`.** `pump`
+dispatches queued events and reconciles the window and tray revisions; it does
+not call `step_frame` and does not advance a single animation. `step_frame` is
+the only animator and takes its delta as an argument. So both halves are
+deterministic and the frame count is fixed by the test.
+
+**What the failure actually requires.** `is_visible()` is `!matches!(self,
+Hidden)` and is true throughout the slide-out, so the assertion fails *only* if
+the pane is `Hidden` at that moment -- not merely further along. A close that
+had raced ahead would still be `SlideOut(p)` and still visible. So this is not
+an animation that got too far; it is a pane that was never open, or was closed
+twice. That points at input delivery or event coalescing in the harness, not at
+animation timing, and it means the "obvious" fix below would not have helped.
+
+**Still unknown, after twelve attempts.** It has not reproduced once:
+
+| attempt | result |
+|---|---|
+| the named test alone, 3 runs | passed |
+| full suite, default threads, 6 runs | passed |
+| full suite, `--test-threads=1` (the gate's mode) | passed |
+| full suite, serial, with `XDG_CONFIG_HOME` and `HOME` pointed at an empty probe dir (the gate's exact environment) | passed |
+
+**Ruled out, by reading rather than by guessing:**
+
+* *Frames advancing inside `pump`* -- it dispatches events and reconciles
+  revisions; it never calls `step_frame`.
+* *An animation that raced ahead* -- `is_visible()` is true throughout
+  `SlideOut`, so only `Hidden` fails the assertion.
+* *`reduced_motion`* -- this was the most promising lead, because
+  `begin_notifications_slide` returns early when it is set and the pane then
+  lands immediately, which is *exactly* what "snapped instead of sliding"
+  describes. But `AnimationManager::new()` defaults it to false, nothing loads
+  it from configuration, and the only two tests that set it do so on their own
+  session. Disproved.
+* *Serial ordering and a leaked `XDG_CONFIG_HOME`* -- both reproduced above
+  without failing.
+
+Two confident causes have been written into this entry and removed again. The
+useful residue is the list above: whoever sees this next should not re-derive
+it, and should distrust the next tidy explanation, including their own.
+
+**What the proper fix looks like** -- *once the cause is known.* The shape that
+survives either diagnosis is to assert over a bounded number of frames the test
+steps itself: send the close, step one frame, assert visible; step until not
+visible and assert that took more than one frame. But note this does **not**
+fix the failure described above, because the observed state was `Hidden`
+immediately, and stepping fewer frames cannot make an unopened pane open. Do
+not fix it by loosening the assertion either -- "eventually invisible" is true
+of a snap, which is the thing it exists to catch.
+
+**Seen once for certain. A second, unnamed failure may or may not be this.**
+The pre-push scratch-config gate refused a push with
+`desktop: its own tests did not pass, so this says nothing` -- and **that log
+named no test**, which is what prompted the gate fix below. Attributing it to
+this entry was an assumption, made because this test had failed an hour
+earlier; it is recorded here as unverified rather than as a second sighting.
+What *is* established either way: a failing test anywhere in `gui/desktop`
+stops lane C publishing, and the crate has 2,978 tests for one to hide in.
+
+That refusal also exposed a second, separate problem, now fixed: **the gate did
+not say which test failed.** The four-line log it keeps held nothing but "FAIL
+desktop", so a push blocked by somebody else's flake gave its reader no way to
+look, only to re-run -- which is exactly how a flake becomes permanent.
+`check-scratch-config.py` now names the failing tests, with three self-test
+cases covering the message itself.
+
+**Priority, revised:** worth fixing properly the next time it is seen, rather
+than deferring indefinitely. The fix is described above; the tempting wrong one
+is still wrong.
+
 ## TD-C-CREATING-A-FILE-THAT-ALREADY-EXISTS-DESTROYS-IT-SILENTLY
 
 **Date:** 2026-09-14. **Lane:** C. **Repaired the same hour; kept as a trap.**
@@ -144751,6 +145018,143 @@ entry on a clean tree, so a later `pop` restores *another lane's* stash: 18
 unmerged paths from lane B's August work. Both are commands that succeed while
 doing something other than what they look like, and both destroy work that was
 never yours to lose.
+
+## TD-C-THE-SOUND-PAGE-INVENTS-ITS-DEVICES-AND-ITS-APPLICATIONS -- FIXED 2026-09-14
+
+**Date:** 2026-09-14. **Lane:** C. **OPEN.**
+
+**In short:** the Settings app's Sound page shows two speakers, a microphone and
+four running programs with individual volume sliders. None of them exists. The
+names are written into the source as constants, the machine is never asked what
+audio hardware it has, nothing is ever asked what programs are playing sound,
+and moving any slider changes a number in memory that nothing reads. A user
+would set their volume, close the window, and find nothing had happened.
+
+**The invented lists**, `apps/settings/src/main.rs`:
+
+| list | contents | reality |
+|---|---|---|
+| `output_devices` | "Speakers (Built-in)", "HDMI Audio Output" | no device enumeration exists anywhere in the tree |
+| `app_volumes` | "System", "Browser", "Music Player", "Video Player" | hardcoded. There is no browser in this tree at all; `musicplayer` and `videoplayer` exist but are not being asked |
+
+**And nothing downstream.** `apps/mixer` exists and reads no configuration
+file. There is no audio service under `services/`. So even a slider that
+persisted correctly would have nothing to persist *to*.
+
+**This is the Mouse page's defect, in a page that did not restrain itself.**
+`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` is the same finding, and the
+Mouse page's response was to offer exactly one control -- the one with a
+consumer -- and say so in a comment: *"Each gets its control here when it gets
+a consumer, and not before."* The Sound page offers seven controls and a
+per-application section, and has no consumer for any of them.
+
+**It is also the third fictional catalogue found in this tree**, after
+`apps/fileassoc`'s eight programs that did not exist (fixed 2026-09-14 by
+pointing it at eight real binaries) and the four disagreeing lists of installed
+programs in C-Q20. Fiction in a UI is not a cosmetic problem: it is
+indistinguishable from a working feature until someone tries it, which is the
+worst possible time to find out.
+
+### What to do about it, and why this is not simply "delete the controls"
+
+Three options, and the choice is user-visible:
+
+**A. Make the page honest now.** Empty the two invented lists and say what is
+true: no audio devices detected, no applications playing. The sliders that
+remain are the ones with nothing behind them, so they go too, leaving a page
+that says the feature is not built.
+*What changes:* a user sees an empty Sound page instead of a convincing one
+that does nothing.
+
+**B. Leave it until there is an audio service, then wire it.**
+*What changes:* nothing today; the page goes on inviting a change it cannot
+make, for as long as that takes.
+
+**C. Keep the controls, mark them visibly unavailable** -- greyed rows with one
+line saying audio support is not built yet.
+*What changes:* the user can see the intended shape and cannot be misled by it.
+`guitk::disabled` already exists for exactly this.
+
+**DONE: C, on 2026-09-14.** The rows are drawn and inert -- "No devices
+detected", "Unavailable" -- through a new `unavailable_row` that passes no hit
+band, so they cannot be clicked *by construction* rather than by a handler
+remembering to refuse them. A note above them says audio is not wired up.
+
+The invented data is gone with them: `AudioDevice`, `AppVolume`, nine state
+fields, seven control ids and `round_u8` (whose every caller was a sound
+slider). Two tests went with it. A third -- a good test of slider *drag
+mechanics* that merely used the volume slider as its vehicle -- was re-pointed
+at `TextSize` rather than deleted, since 50..250 gives the same round numbers
+to assert on.
+
+One consequence worth recording, because it is the pattern this whole sweep is
+about: removing the indexed per-application sliders made `slider_raw` unable to
+fail, and clippy said so. It had returned `Option<f32>` for a case that could
+no longer arise, which teaches every caller to handle something impossible.
+Both it and `slider_fraction` are plain `f32` now.
+
+**Original recommendation, kept for the reasoning: C**, and it is the one that fits the tree's own precedent
+best -- the Mouse page hid what it could not deliver, but a whole subsystem is
+a different case from one slider, and a page that shows its shape without
+pretending to work is more useful than an empty one. A is more honest than
+today and less useful than C. B is what happens by default and is the only one
+that can mislead somebody.
+
+**If never answered:** nothing degrades, but the page stays a working-looking
+lie, and it is the kind that surfaces as "I set my volume and it did not
+stick", which sends the finder to the audio code rather than to the page.
+
+## TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING
+
+**Date:** 2026-09-14. **Lane:** C. **OPEN.**
+
+**In short:** you can tell this system which programs should open when you log
+in, in three different places, and none of them has any effect. Nothing
+launches user startup applications at all. The settings are recorded, the
+switches move, and at the next login nothing happens.
+
+**The three:**
+
+| where | what it is |
+|---|---|
+| `gui/desktop/src/startup_settings.rs` | 2,129 lines: per-app enable switches, startup delay, boot-time measurement, impact assessment, auto-disable for failing apps |
+| `apps/startupmanager` | a whole separate application for the same job, with its own `StartupEntry` type |
+| `apps/settings` -> `StartupApps` | a placeholder page, and it stays one -- see below |
+
+**What is missing.** A launcher. Checked 2026-09-14: the desktop session's
+start-up path never mentions startup entries; `apps/startupmanager` spawns
+nothing but its own window (`app::launch` is its own event loop);
+`services/init` does read `/etc/startup.conf` and start things from it, but
+those are **system services**, a different concept, and that tree is lane B's.
+
+**Why the Settings port stopped here rather than adding a fourth.**
+design-decisions 815 moves screens you open into `apps/settings`, so this panel
+is due to move. It is not moving yet, because a ported page would draw
+switches that save a value and change nothing -- which is what
+`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` was filed about, and what the
+Mouse page's own comment already refuses in those words: *"Each gets its
+control here when it gets a consumer, and not before."* The comment at the
+dispatch's `_` arm says this so the next person to look does not port it by
+default.
+
+**What the proper fix looks like, in order.** A launcher first: something in
+the login path that reads one list and spawns it, with the delay and the
+enable flags the existing UIs already model. Then one of the three becomes the
+authority and the other two are deleted or become its client. Then the Settings
+page is worth building, because its switches will do something.
+
+**The launcher is probably not lane C's.** `/etc/startup.conf` and
+`services/init` are lane B's, and if user autostart belongs beside service
+startup then the whole mechanism does. If it belongs to the desktop session
+instead, it is lane C's. That is a genuine fork, and it is the reason this is
+filed rather than started.
+
+**Third family of this shape found today**, after C-Q20's four lists of
+installed programs and this file's fifteen private clipboards. Several complete
+implementations of one idea, each correct in isolation, none connected, nothing
+red, and the system cannot do the thing. It is worth noticing that all three
+were found by looking for *unused values* rather than by looking for missing
+features.
 
 ## TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO
 
@@ -147721,3 +148125,426 @@ Only then the ioctl, which is small once enforcement holds.
 re-does a metadata lookup; the write paths already hold the metadata they need.
 Routing writes through it would add a second lookup per write and a TOCTOU
 window between the check and the write.
+## TD-C-FOUR-NOTIFICATION-BEHAVIOURS-HAVE-A-SETTINGS-MODEL-AND-NO-IMPLEMENTATION
+
+**In short:** the desktop can show you a notification and let you dismiss it,
+and that is all it can do. It cannot put the banner somewhere else, make it
+disappear on its own after a while, group several from one program together,
+or forget old ones. A 2,526-line module in the shell described settings for all
+four as though they existed. That module was deleted on 2026-09-15 because
+nothing anywhere read it; this entry is what it knew, kept so the next person
+builds the behaviour rather than a second copy of the settings for it.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**What was deleted.** `gui/desktop/src/notification_settings.rs` -- an island
+under `scripts/orphan-modules-baseline.txt`, referenced by nothing but its own
+`pub mod` line. It defined `BannerStyle`, `BannerPosition`, `GroupingMode`,
+`NotificationPriority`, `AppNotificationPrefs`, `HistoryRetention`,
+`AutoDismissDelay`, `NotificationConfig`, `NotificationHistoryEntry`,
+`NotificationSettings` and a tabbed UI over them.
+
+**Why deleting was right rather than porting.** Notifications already have a
+live settings model with five consumers -- `gui/notifsettings`, read by
+`apps/settings`, `gui/daywindow`, and the shell's own `focus_assist.rs` and
+`notif_pane.rs`. It carries quiet hours, per-app rules and importance, and the
+Settings app's Notifications page is built from it. So this was a second model
+of a thing already modelled, which `design-decisions.md` 815 settles: a screen
+you *open* lives in the Settings app and the shell's copy goes.
+
+**The four concepts that had no counterpart, and why they are not lost work.**
+`BannerPosition`, `AutoDismissDelay`, `GroupingMode` and `HistoryRetention`
+exist in neither model now. Checked against `notif_pane.rs`, the live pane, at
+3,809 lines: it has manual dismissal and grouping *by time* (today, yesterday,
+this week, older) and no notion of where a banner sits, of a timer that removes
+one, of collapsing several from one program, or of a retention policy. So these
+were settings for behaviour that does not exist -- which is the thing the Mouse
+page and the Startup Apps page each already refuse to ship in so many words:
+a control that saves a value to a file, looks as though it worked, and changes
+nothing. Building the behaviour is the work; the settings are the easy half and
+should follow it.
+
+**What the fix needs**, when someone does it: pick one of the four, implement it
+in `notif_pane.rs` first, add the field to `gui/notifsettings` second, and give
+it a control in `apps/settings`'s Notifications page third. In that order, so
+that at no point does a setting exist that nothing reads. Of the four,
+`AutoDismissDelay` is the one a user would miss first -- a notification that
+never goes away on its own is the complaint the others are downstream of.
+
+## TD-C-THE-UPDATE-PAGE-INVENTED-ITS-HISTORY-AND-A-FAILURE -- FIXED 2026-09-15
+
+**In short:** the Settings app's System Updates page told the user their
+machine was up to date, listed four updates it claimed to have installed, and
+said one of them had failed. None of it was real. There is no updater on this
+system, nothing had been checked, and the four entries were written into the
+source as constants. Fixed by making the page say what is true: this system
+cannot update itself yet.
+
+**Date:** 2026-09-15. **Lane:** C. **Found by:** working through
+`design-decisions.md` 815's list of settings screens that exist twice -- this
+was the live copy, not the dead one.
+
+**What it did.** Four separate claims, in `apps/settings/src/main.rs`:
+
+1. **"Check for Updates"** ran `self.checking_for_updates =
+   !self.checking_for_updates` and nothing else. It flipped the label to
+   "Checking..." and checked nothing; pressing it again flipped it back.
+2. **"Your device is up to date"**, in green, drawn unconditionally whenever a
+   check was not "running" -- an assurance about the user's machine from code
+   that had never looked at it.
+3. **Four update-history entries** hard-coded at construction, with
+   Windows-style KB numbers (`KB5032100`), May 2026 dates, and one described as
+   "Cumulative update for .NET runtime" on a system that has no .NET.
+4. **Automatic updates, active hours, and two deferral sliders** -- settings
+   stored in fields nothing else read.
+
+**The entry that decided it.** One of the four was `UpdateStatus::Failed`: a
+"Driver update for GPU" that had failed. A fabricated success is a lie about
+nothing. A fabricated *failure* sends someone looking for a problem on their
+own machine that never happened, with no way to discover it was never real.
+That is a worse defect than the button, and it is the one that made this
+urgent rather than untidy.
+
+**Why it was not wired up instead.** An update needs a source. There are two in
+the tree -- `userspace/pkg` and `kernel/src/fs/updatemgr.rs` -- and both are in
+other lanes with no service between them and a GUI application. The version
+string had the same problem: `os_version` was the constant
+`"Slate OS 1.0.0 Build 2600"`, and 2600 is Windows XP's build number. Nothing
+in this tree reports an OS version to a userspace program.
+
+**The fix.** The page now states that the system cannot update itself, shows
+"Last checked: Never" and "Available updates: Unknown", and says plainly that
+no component reports a version yet. The dead state went with it: `UpdateStatus`,
+`UpdateEntry`, `update_history`, `os_version`, `checking_for_updates`,
+`auto_update_enabled`, `active_hours_start`/`_end`,
+`defer_feature_days`/`_quality_days`, `ButtonId::CheckForUpdates`,
+`ToggleId::AutoUpdate` and two `SliderId` variants -- 179 lines deleted against
+54 added. Same treatment as the Sound page received on 2026-09-14, for the
+reason the Mouse page states: a control that writes a value nothing reads is
+worse than an absent control, because the absent one does not claim the setting
+took effect.
+
+**One thing worth knowing for the next page.** `cargo build` was clean with the
+page rewritten and every field still present -- the fields are `pub` on a `pub`
+struct and some are read by tests, so nothing warned. `cargo test` was what
+caught the leftover (`SliderId::FIXED` is `[Self; 6]` behind `#[cfg(test)]` and
+had to become `[Self; 4]`). A build passing is not evidence that removed code
+left nothing behind, and `scripts/check-fields-written-never-read.py` exists
+for exactly the residue a build cannot see.
+
+## TD-C-THE-ACCOUNTS-PAGE-INVENTED-THREE-PEOPLE -- FIXED 2026-09-15
+
+**In short:** the Settings app's Accounts page listed three users who do not
+exist on the machine -- Alice, Bob and Charlie -- with email addresses, login
+counts and last-login times, and told you one of them was a child account with
+screen-time limits in force. All of it was written into the source as
+constants. The page now reads the machine's real account database.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**What it claimed.** `SettingsState::new` carried three `UserAccount` values:
+Alice (Administrator, `alice@example.com`, 142 logins, last seen
+2026-05-17 09:34), Bob (Standard, 56 logins) and Charlie (Child, 23 logins).
+Selecting Charlie drew a "Family Safety" section reading *"Screen time limits
+and content filters are active"* over a "Manage Family Settings" button. There
+are no child accounts in this system, no screen-time limits, and no content
+filters.
+
+**The fix, which is a wiring rather than a deletion.** `gui/loginusers` already
+reads the real account database and is what the login screen and
+`apps/lockscreen` use. `SettingsState::new` now starts with an empty list and
+`main` calls `load_user_accounts`, following the same split as
+`load_appearance`, `load_input` and `load_notifications`: a constructor that
+reads a file makes every test depend on the machine it runs on, and this app's
+tests are pure `(w, h) -> RenderTree` functions by design. The mapping half is
+`set_user_accounts`, which takes a slice, so a test can supply accounts without
+a filesystem.
+
+**Three things had no source and are gone rather than mapped:** the email
+address and the login count -- the database records neither -- and the child
+account, which is not a concept it has. Last-login is real and now comes from
+the database as a timestamp, rendered "Never" when it is zero rather than as
+1 January 1970, and labelled UTC because a settings window has no way to ask
+for the machine's local zone.
+
+**Nothing says which account is signed in**, so none is marked. That was
+already the documented fallback in `current_account_picture` -- *"a machine
+with nobody signed in does not claim a choice was made"* -- rather than a new
+compromise invented for this change.
+
+**The tests are the part worth reading.** Six went red at once, because every
+one of them silently used the three invented accounts as its fixture. A fixture
+that lives in production code is a fixture nobody can see they are using: the
+tests looked self-contained and were not, and the only reason this surfaced is
+that the list became empty rather than merely different. They now build their
+own three accounts in `account_fixture`. Two of them also asserted hardcoded
+emoji that happened to be the invented accounts' pictures, and now read the
+expected icons back out of `ACCOUNT_PICTURES`.
+
+## TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED
+
+**In short:** you can pick a picture for your account in Settings, the list
+updates, and nothing writes it down. Close the window and the choice is gone.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+`handle_click` sets `account.picture = index` on the in-memory `Vec` and there
+is no writer anywhere -- the value reaches no file and no other program. The
+account database does carry a real per-account avatar
+(`loginusers::Account::avatar`, an identifier string), so the place for the
+choice exists; what is missing is a write path to the user database and a
+mapping between that identifier and this page's fixed grid of pictures.
+
+**Deliberately not fixed in the same change that wired the accounts up.** The
+picker's own logic is correct and carefully tested -- clicking a tile selects
+that tile, and the edit lands on the signed-in account rather than the
+highlighted one, each pinned by its own test. Deleting a working control and
+wiring a data source are separate decisions, and doing both at once would have
+meant deciding the second one in the middle of the first. It is recorded here
+so the choice is made deliberately rather than by momentum.
+
+## TD-C-THE-PRIVACY-PAGE-TOLD-YOU-A-BROWSER-HAD-YOUR-CAMERA -- FIXED 2026-09-15
+
+**In short:** the Settings app's Privacy page listed nine applications and
+showed, with green ticks and red crosses, which of them could use your
+location, camera and microphone. None of those applications exist on this
+system, nothing on this system asks anything whether an application may use a
+device, and every tick and cross was written into the source as a constant.
+A privacy page is the one screen a user is entitled to believe.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**What it claimed.** Three per-device sections, each with a master toggle and a
+list of applications with allow switches: Location (Maps, Weather, Camera,
+Browser), Camera (Video Chat, Browser, Social Media), Microphone (Video Chat,
+Voice Recorder, Browser). Then a Capabilities sub-page drawing a summary table
+over nine named programs and four permissions -- a tick in green, a cross in
+red, a dash where a program had not asked. `Browser` was ticked for Camera.
+Also a diagnostic-data-collection level to choose, and a "Clear Activity
+History" button.
+
+**Why this could not be finished rather than removed.** `design.txt` specifies
+capability-based security with no ambient authority: a program may use a device
+because it holds an unforgeable handle to it, not because a central table has
+its name ticked. A per-application permission list is therefore not this
+system's model half-built -- it is a different system's model, borrowed from
+Windows and Android. Completing the page would have meant building a permission
+store that the kernel does not consult and could not be made to consult without
+abandoning the capability design.
+
+**The detail that shows the cost of leaving it.** One of the tests deleted with
+this change was
+`test_every_per_app_permission_switch_is_clickable`, and its comment reads:
+*"Only the Location list had a handler; Camera, Microphone and Background were
+drawn and inert."* Somebody had already found a bug in this page and fixed it
+-- real effort spent making fabricated switches respond, on a page where
+responding was never the problem. That is what a convincing fabrication costs:
+not just the user's trust when they find out, but the next person's afternoon.
+
+**The fix.** The page now says that this system does not record per-application
+permissions, and why -- in the plain terms the design deserves: *"a program
+here reaches a device by holding a handle to it, which it can only have been
+given -- there is no central table of names to tick, and nothing has authority
+simply because of what it is called."* The dead state went with it: the four
+app lists, the three master toggles, `PermissionKind`, `AppPermission`,
+`DiagnosticLevel`, `build_permission_list`, `render_capabilities_summary`,
+`PageSink::app_toggle_row`, four `ToggleId` variants and one `DropdownId`.
+
+**Still outstanding:** `gui/desktop/src/privacy_settings.rs` holds a second
+copy of the same borrowed model -- `PermissionKind`, `AppPermission`,
+`PrivacySettings`, with `is_allowed` and `revoke_all` and nothing calling
+either. It is left alone deliberately, because it is a different question:
+this change was about a page that lied to the user, and that file is a model
+nobody uses. It belongs to the `design-decisions.md` 815 sweep of shell copies,
+where the test is whether the behaviour exists rather than whether the screen
+does. The answer there will be the same, for the same reason.
+
+## TD-C-THE-NETWORK-PAGE-LISTED-THREE-ADAPTERS-THIS-SYSTEM-CANNOT-SEE -- FIXED 2026-09-15
+
+**In short:** the Settings app's Network page listed `eth0` as connected at
+192.168.1.100, `wlan0` as disconnected, and `lo` at 127.0.0.1, each with a
+green or grey dot for its link state. This system cannot list its network
+interfaces at all -- nothing in the tree asks the kernel what hardware is
+present -- so all three were constants in the source. The page now says it
+cannot look.
+
+**Date:** 2026-09-15. **Lane:** C. The fourth and last of the fabricated
+Settings pages found by sweeping after the update page: Sound (fixed
+2026-09-14), Updates, Accounts, Privacy and now Network.
+
+**Why a status page is the worst place for this.** A green dot beside an
+interface name and an address is the strongest claim a page can make: it says
+*I looked, and this is what is there*. Every other invented control at least
+described a setting. This described the machine.
+
+**Two separate reasons the controls went, and the second outlives the first.**
+The adapter list cannot be built: `net/` carries a DNS resolver and an HTTP
+client and nothing that enumerates interfaces, and there is no service between
+a GUI application and the kernel's own. But the address, DNS and proxy fields
+would have been dead even with a list, because **nothing reads them**. The
+nearest thing to a consumer is `net/dns`, which defines a `ResolverConfig` and
+parses `resolv.conf` -- so the *format* exists -- and no program in this tree
+loads one. A nameserver typed into that page lived in the window's memory until
+it closed. `net/httpclient` takes no proxy at all.
+
+**Removed with the pages:** `NetworkAdapter`, `AdapterType`, `IpConfigMode`,
+`adapters`, `selected_adapter`, `ip_config_mode`, `static_ip`,
+`static_gateway`, `dns_primary`, `dns_secondary`, `proxy_enabled`,
+`proxy_address`, `proxy_port`, `SelectId::Adapter`, `ToggleId::ProxyEnabled`,
+`DropdownId::IpConfig`, `render_text_field` and `PageSink::field_row`. 260
+lines deleted against 96 added.
+
+**A note on the tests, which is where the real risk was.** Three tests died with
+the feature. Six more did not: they clicked an adapter row as a *vehicle* for
+testing the event loop -- when a frame is drawn, which events are ours, when
+the loop stops -- and the adapter was incidental to all of them. Those were
+re-pointed at an account row, which is the same shape of control and is backed
+by something. Deleting them along with the feature would have been the easy
+mistake and would have quietly removed the coverage of the shipped `run` loop,
+which has nothing to do with networking.
+
+**The remaining pages of this app are honest as far as this sweep goes**, but
+the sweep was "read every page", not a check anything runs. The shape to look
+for is a `Vec` of plausible-looking records built in a constructor: every one of
+the five was found that way, in `SettingsState::new`.
+
+## TD-C-THE-POWER-MANAGER-IS-A-DEAD-HALF-OF-A-LIVE-MODULE
+
+**In short:** the desktop's power file contains a whole battery and sleep
+manager -- idle timeouts, low-battery and critical thresholds, suspend and
+hibernate transitions, a list of things blocking sleep, a log of what happened
+and why -- and nothing anywhere creates one. The same file also draws the power
+menu you click on, and *that* part is live, which is why no tool has reported
+the dead half.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**The evidence.** `PowerManager` occurs 28 times, every one of them inside
+`gui/desktop/src/power.rs`. `gui/desktop/src/lib.rs` uses the same file's
+`render_power_menu`, `PowerMenuRow` and `PowerMenuStyle`, so the module has
+real callers and is correctly absent from
+`scripts/orphan-modules-baseline.txt`.
+
+**Why no gate can see this, and it is not an oversight in any of them.**
+`scan-orphan-modules.py` asks whether a *module* has a caller, and this one
+does. A module can be half-dead and that scan will always answer for the whole
+file. The finding needs a different question -- "which public items of this
+module are reached?" -- which nothing here asks and which is a genuinely bigger
+scan, since it needs per-item reachability rather than per-file.
+
+**Inside the dead half, a second finding.** The low-battery *warning* was never
+written. The file's own module doc advertises "Battery monitoring with
+low-battery warnings", `PowerConfig::low_battery_pct` defaults to 20 and is
+parsed and re-serialised by the config code, and `low_battery_warned` is
+initialised, documented as "whether a low-battery warning has been shown this
+discharge cycle", and reset when charging begins. Nothing ever sets it true.
+
+Its sibling shows exactly what is missing. `critical_action_taken` has the same
+initialisation and the same reset-on-charging, and at `power.rs:837` it has the
+guard-once block that actually does the work:
+
+    if !self.critical_action_taken && self.battery.is_critical(&self.config) {
+        self.critical_action_taken = true;
+        ...
+    }
+
+There is no such block for `low_battery_warned`, and no `is_low` to go with
+`is_critical`. So one of two symmetric features was finished and the other left
+as bookkeeping only.
+
+**What the fix needs, in order.** The warning is not a `PowerAction` -- the
+existing `check_battery_thresholds` returns one of those and a notification is
+not one -- so it wants a `take_low_battery_warning()` in the style of
+`SettingsState::take_notifications_change`, which the shell polls and turns
+into a notification through `gui/notifications`. But that is the *second* step.
+The first is giving `PowerManager` a constructor call at all: writing the
+warning now would add a feature to a state machine nothing drives, which is the
+defect this entry is about rather than a fix for it.
+
+**One note on how this was found**, because the first attempt got it wrong.
+`check-fields-written-never-read.py` reported `low_battery_warned` and I wrote
+in its baseline that it was "probably a live bug -- either warns every tick or
+never warns". Neither happens: nothing constructs the manager, so the
+thresholds are never evaluated. I had inferred a severity from the shape of the
+code without asking whether anything ran it. The corrected note is in
+`scripts/fields-written-never-read-baseline.txt`; the question that was skipped
+is the same one that makes every other finding in this file worth acting on.
+
+## TD-C-SIXTY-THREE-FIXTURE-FUNCTIONS-ARE-CALLED-FROM-PRODUCTION
+
+**In short:** about thirty applications fill their windows from functions named
+`sample_*`, `seed_sample_*`, `mock_*` or `simulate_*` — and those functions are
+called by the real program, not by tests. The weather app invents weather, the
+network scanner invents hosts, the partition manager invents disks, the
+undelete tool invents recoverable files, and the benchmark reports scores that
+are constants in the source. The six fabrications fixed on 2026-09-15 were not
+six; they were the ones that happened to be found first.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**How they were found.** Grep for a production `fn` whose name is fixture
+vocabulary (`sample`, `seed`, `demo`, `mock`, `fake`, `stub`, `simulate`,
+`example`), excluding anything inside `#[cfg(test)]`, then keep only those that
+are **called from a non-test line**. That last filter is what makes the list
+worth reading: a `pub fn sample()` that only tests call is a fixture in the
+wrong module, which is untidy. One the program calls is a fabrication.
+
+77 definitions matched the name; 63 are called from production. The count
+excludes signal-processing vocabulary — `sample_rate`, `bits_per_sample`,
+`sample_count`, `record_sample`, and `sample` in `gui/compositor/src/blur.rs`
+and `gui/imagecodec/src/png.rs`, which are all the other meaning of the word.
+
+**The one verified in detail, because it is the worst and it is instructive.**
+`apps/benchmark` has sixteen `simulate_*` functions and `run_cpu_benchmark`
+calls them. `simulate_integer_benchmark` performs 500,000 real iterations of
+integer arithmetic — and then discards the result and returns `5200.0`, plus or
+minus twelve depending on the parity of the accumulator. Its own comment
+explains the perturbation: *"to prevent const-folding"*. So the machinery that
+makes the number look computed is deliberate, the CPU time is really spent, and
+the score has nothing to do with the machine it ran on.
+
+The file says so at the top — *"for initial development we compute
+deterministic scores"* — and **nothing the user sees says so**. That is exactly
+the shape lane B found in `patch -l` the same day: the field's doc comment says
+"accepted and currently inert" and `--help` says "Match ignoring whitespace."
+A rationale written where only the maintainer reads it does not reach the
+person being told a number.
+
+A benchmark is the worst possible host for this defect, because its entire
+output is a claim about *this* machine, and the number is designed to be
+compared with other people's.
+
+**The list, by what the fabrication is about.** Unverified beyond the name-and-
+call-site test — treat each as a claim to check, not a finding:
+
+| what it invents | where |
+|---|---|
+| measurements | `benchmark` (16), `speedtest` (`simulate_probe`) |
+| hardware | `devicemanager`, `partmanager` (`sample_disks`), `soundrecorder` (`mock_devices`), `netmanager` (5) |
+| the network | `netscan` (`simulate_host_scan`, `simulated_hostname`, `simulated_banner`, `simulate_traceroute`, `simulate_whois`), `vpnmanager` (3), `ircclient` |
+| the user's data | `email` (`seed_sample_mail`), `notes`, `calendar`, `reminders`, `spreadsheet`, `slides`, `ebook`, `videoplayer` (4), `torrent`, `podcast`, `renamer`, `mediaconvert`, `rssreader`, `screenrecorder` |
+| recoverability | `undelete` (`simulated_partitions`, `simulated_recycle_bin`) |
+| system state | `systemrestore` (`simulate_create`, `simulate_restore`), `archivemanager` |
+
+`gui/desktop/src/language_settings.rs`'s three `example` functions are almost
+certainly a false positive — a language's *example text* is example text.
+
+**Which to do first, and why not alphabetically.** By what believing the
+fabrication costs:
+
+1. **`benchmark` and `speedtest`** — a number you would act on, and compare.
+   The CPU and memory ones are *genuinely measurable today*: the work is
+   already performed, and only the clock is missing. `std::time::Instant` is
+   available. This is a fix, not a deletion.
+2. **`undelete` and `partmanager`** — these describe what is recoverable and
+   what is on a disk, immediately before a user does something irreversible.
+3. **`netscan`** — an invented open port is a security conclusion.
+4. The rest, where the cost is a user's time and trust rather than an action.
+
+**What "fixed" means.** Three outcomes, in order of preference, and the choice
+is per case rather than per app: **measure it** where the data is obtainable
+(`benchmark`'s CPU scores, and the photo manager's EXIF once it could open a
+file); **wire it** where a real source exists in the tree (the Accounts page
+onto `gui/loginusers`); **say so** where neither is possible (Sound, Updates,
+Privacy, Network). What is never right is leaving it, and what is never enough
+is a comment — three of the six fixed today had one.

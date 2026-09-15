@@ -40,9 +40,16 @@ cat "E:/visual studio projects/os/open-questions-answers.txt"
 ```
 
 A question sitting at `Status: OPEN` here is **not** evidence that the operator has
-not answered it. Two entries below (B-Q8, C-Q9) are open precisely because the
-operator *did* reply and asked for a clearer explanation — which is a reply, and
-which is invisible from this file alone.
+not answered it. An entry can be open precisely because the operator *did* reply
+and asked for a clearer explanation — which is a reply, and which is invisible
+from this file alone.
+
+*Both examples this note originally cited have since closed, which is worth
+saying rather than quietly editing: C-Q9 was written up as §841 on 2026-09-13,
+and lane B withdrew B-Q8's option (c) as overtaken on 2026-09-14. The point
+stands and the examples did not — so if you are checking the claim against them,
+check the dates first. Examples naming live entries go stale by being right;
+this note now names its examples as history instead. — lane C, 2026-09-14.*
 
 *Recorded by lane A. This describes what has been observed, not a policy the
 operator has set; if a different channel is preferred, say so and this goes away.*
@@ -267,213 +274,83 @@ and on two entries sharing an identifier while one is still open. It only
 duplicate numbers in the archive, both of which are another lane's text to fix
 or history's to keep. Reasoning: `design-decisions.md` §903.
 
-## B-Q8 — [B] Two of the programs we copy disagree about how wide 626 characters are. Which one do we copy? — Status: OPEN
+## B-Q8 — [B] Two programs we copy disagree about the width of 626 mostly-invisible characters. Which do we copy? — Status: OPEN (re-asked 2026-09-14)
 
-**In short:** Text on a terminal is laid out in fixed cells, and every program
-that lines things up in columns has to agree on how many cells each character
-takes — a Chinese character takes two, an accent mark that sits on the previous
-letter takes none, most things take one. We keep one table of those numbers and
-every one of our programs reads it. The trouble is that the two programs we
-copy from — the shell **bash** and the **GNU command-line tools** — disagree
-with each other about 626 characters, and we can only match one of them. Today
-we match bash. Matching bash means our `ls` puts a filename in the wrong column
-for those characters; matching the GNU tools means our shell's menus do.
+**In short:** Terminal text sits in fixed cells. A Chinese character takes two,
+an accent mark that sits on the previous letter takes none, most things take
+one. We keep one table of those numbers. The two things we are cloning — the
+**bash** shell and the **GNU command-line tools** — ship *different* tables, and
+they disagree about 626 characters. We currently match bash. **The question is
+only which of the two we copy.**
 
-**Why we cannot just measure what we draw (the operator's question, 2026-09-07,
-and it turned out to be the good one).** The natural answer is "have the table
-report how wide *we* actually print each character, and have every program ask
-it" — and that is half-true already: our programs do all ask one table. Two
-things stop it from settling the question, and the second is a genuine gap
-nobody had written down:
+### Your two questions from 2026-09-14, answered first
 
-1. **A program cannot ask the terminal.** There is no query for "how wide will
-   you draw this?" The only way to find out is to print it and ask where the
-   cursor ended up — a round-trip per character, over a link that may be a
-   network, and impossible when the output is a file or a pipe, which is where
-   `ls` and `wc -L` also decide their columns. So every implementation
-   everywhere embeds a static table and hopes it matches the terminal.
-2. **Our own terminal does not consult our table.** `userspace/charwidth` is
-   depended on by exactly two crates — `userspace/coreutils` and
-   `userspace/oils`. The GUI terminal that actually draws the glyphs (lane C)
-   is not one of them. So "how wide we actually print" is currently decided by
-   the renderer's font advance, independently of the table that every layout
-   decision is made from. They have never been checked against each other.
+**"Why wouldn't the table simply report how wide we actually print each
+character?"** — It should, and **as of 2026-09-14 it effectively does, which
+removes this from the decision.**
 
-**MEASURED 2026-09-12 (lane B) — and it changes the question.**
+When you asked, the answer was bad enough to be its own defect: our terminal
+had no notion of width at all. It advanced one column for every character, so
+it drew Chinese, Korean, Japanese and emoji one cell wide when they need two —
+**185,074** characters where screen and table disagreed, against the 626 this
+question is about. That was filed to lane C, who own the terminal.
 
-Option (d) below ended with *"Unknown until measured: whether the renderer and
-the table agree today. Nobody has compared them."* They have now been compared.
-**They disagree about 185,074 characters.** The dispute this question is about
-covers 626. So the thing nobody had checked is 296 times larger than the thing
-being asked.
+They have fixed it, and they fixed it the better way round: rather than
+rewriting the table to describe the renderer, **they made the renderer read the
+table.** A wide character now takes two cells, a combining mark takes none, and
+the two can no longer drift apart because there is only one source. **On `main`
+since 2026-09-15**, verified here rather than taken from the report.
 
-The cause is simple and is visible in eleven lines of code. Our terminal
-(`apps/terminal`) has **no notion of character width at all**: when it places a
-character it moves the cursor one column, unconditionally, for every character
-there is. It never consults `charwidth`, or any other table — it does not
-depend on the crate. So "how wide we actually print" is, today, **one cell for
-everything**:
+**So screen-correctness is no longer part of this choice.** Whichever table you
+pick, the terminal will draw what the table says. What is left is the narrow
+question below: which upstream do we match on 626 characters.
 
-| what the table says | how many characters | what the terminal does |
-|---|---|---|
-| two cells wide | 182,712 | one cell |
-| zero cells (invisible marks) | 2,362 | one cell |
+**"Why wouldn't the GNU and bash programs ask how wide a character is, and
+adjust?"** — Two separate reasons, and the first is the one that surprises
+people:
 
-Concretely, and these are the recognisable ones rather than the obscure
-corners: **every one** of the 20,992 Chinese characters, **every one** of the
-11,172 Korean syllables, the Japanese kana, the fullwidth forms, and the 80
-emoticon emoji are marked two cells wide in our table and drawn one cell wide
-by our terminal. In the other direction, 1,281 combining marks — the accent in
-a decomposed `é`, which is the letter `e` followed by a separate mark — are
-marked zero cells and are given a cell of their own, so a decomposed accented
-letter takes two cells on screen where every layout calculation reserved one.
+1. **There is no way to ask a terminal how wide it will draw something.** No
+   such query exists in the protocol. The only way to find out is to print it
+   and see where the cursor lands — a round trip per character, and impossible
+   when the output is a file or a pipe, which is exactly where `ls` decides its
+   columns. So *every* implementation everywhere embeds a static table and
+   hopes it matches.
+2. **bash and the GNU tools are not programs running on SlateOS that could
+   consult our table** — they are the two upstreams we are *reimplementing*.
+   Our own programs do all ask one shared table, which is the part that works
+   as you would expect. The 626 exists because on Linux bash asks the C library
+   and GNU coreutils 9.5 deliberately overrides the C library with its own
+   newer Unicode tables. We can match one or the other, not both.
 
-**What this does to the question being asked.** Options (a) and (b) are a
-choice between bash's answer and the GNU tools' answer on 626 characters. On
-SlateOS *both* of those answers are wrong against our own screen for 185,074
-characters, including every character in Chinese, Japanese and Korean. That
-does not make the choice pointless — it is still the right choice for matching
-upstream byte-for-byte, which is what the differential harnesses measure — but
-it does mean **the choice is not what makes our screens correct**, and the
-entry previously read as though it were.
+### The options
 
-**The operator's instinct was right, and following it is what found this.**
-"Why wouldn't the table simply report how wide we actually do print each
-character" is option (d), and it could not be evaluated before because nobody
-had looked at what we print. Now that someone has: (d) is not a matter of
-adjusting 626 entries to match the renderer. Taken literally today it would
-mean *setting the whole table to one*, which would make our `ls` disagree with
-every real terminal on Earth while agreeing with ours. The renderer is the
-thing that is wrong, not the table.
+| Option | *What changes:* |
+|---|---|
+| **(a) Copy the GNU tools' table** *(recommended)* | Our `ls` and `wc -L` match GNU byte-for-byte on those 626; our shell's menu stops matching bash on them. It is a pinned, re-derivable upstream (Unicode 15.1.0); ours came from whatever Python the build machine had. |
+| **(b) Keep bash's table — today's behaviour** | Nothing changes. Those 626 stay permanently marked "differs on purpose" in the `ls` harness, which dulls it. |
+| **(c) Describe our own renderer instead** | **Withdrawn — overtaken.** It existed to make screen and table agree; lane C achieved that by pointing the renderer at the table, so there is nothing left for it to fix. |
 
-**This is a defect in its own right and is not yours to decide.** A terminal
-that draws Chinese, Japanese, Korean and emoji one cell wide cannot display
-those languages correctly no matter which table the utilities read — text
-overwrites itself and every column is off. It is filed to lane C, who own the
-terminal, as `requests/b-c-the-terminal-gives-every-character-one-cell.md`. It
-is a separate problem from this question and neither blocks the other.
+A fourth option — two tables, one for the shell and one for the utilities — is
+what `charwidth` exists to prevent: the symptom is a menu and a listing that do
+not line up on the same screen. I do not recommend it.
 
-**And the second half of the operator's question — "why wouldn't the programs
-just ask?" — they do.** Every one of our programs asks one table; that part
-already works as you would expect. Two things stop it from settling anything,
-and they are the two listed above: no program can ask the *terminal* how wide
-it will draw something, because terminals expose no such query; and on Linux,
-bash and the GNU tools ask two different tables, which is the entire origin of
-the 626.
+**Why (a):** six utilities consult a width (`ls`, `wc -L`, and `sort`, `pr`,
+`df`, `numfmt` when written) against one shell, and gnulib's table is a named
+upstream we can re-dump mechanically. **Why I have not just done it:** it
+silently changes on-screen layout in six programs to win a byte-diff in one,
+and user-visible behaviour is yours.
 
-### The question
+**If never answered:** safe, and it does not worsen. Today's behaviour is (b).
+The cost is two permanently-deferred cases in the `ls` harness, and the 626 are
+mostly invisible marks and unassigned code points — nobody has a filename made
+of them by accident.
 
-Our table lives in `userspace/charwidth` and is the only such table in the
-system — deliberately, because `ls`, `wc -L` (longest-line), `expand`, `fold`,
-`nl`, `column` and the shell's `select` menu all draw onto the *same* screen,
-so two of them disagreeing is not a difference of opinion, it is a crooked
-screen. The table was built to match bash 5.2.37 and was checked against it at
-1701 places, so today it is bash's answer.
-
-On Linux, though, bash and the GNU tools do not get their numbers from the same
-place. bash asks the C library (glibc). GNU coreutils 9.5 ships its own table
-(from the "gnulib" support library) and **deliberately overrides the C
-library's** in any UTF-8 setting — its own source comment says the system's
-answer is not Unicode-aware enough. Coreutils 9.4 did not do this; 9.5 does.
-Measured here, exhaustively over all 1.1 million characters, the two tables
-disagree on **626 characters in 71 stretches**. Examples:
-
-| Character | bash / glibc | GNU 9.5 / gnulib | Why they differ |
-|---|---|---|---|
-| U+00AD soft hyphen (an invisible "you may break the word here" mark) | 1 cell | 0 cells | A rule disagreement: gnulib gives *every* invisible formatting mark 0; glibc makes this one an exception |
-| U+D7B0–U+D7FB (extra Korean vowel/consonant pieces that fuse onto the letter before them) | 1 cell | 0 cells | Same rule disagreement, applied to a newer Korean block |
-| U+0600–U+0605 (Arabic marks printed *before* the number they belong to) | 0 cells | 1 cell | gnulib carves these out because they really do occupy a cell |
-| U+1F203, U+1FA75, U+4DC0–U+4DFF, … | varies | varies | Different Unicode releases; and gnulib rounds *unassigned* characters inside East-Asian blocks up to 2 cells, we do not |
-
-This is visible today: our `ls`-versus-GNU byte-diff harness has two cases that
-differ for exactly this reason and no other.
-
-### Options
-
-**(a) Follow the GNU tools (gnulib's table).** Regenerate `charwidth` from the
-reference implementation itself — we already have an exact dump of all 1.1
-million answers, taken by calling GNU 9.5's own width routine.
-*What changes:* our `ls` and `wc -L` line up with GNU's byte for byte on those
-626 characters; our shell's `select` menu stops lining up with bash's on them.
-- **Pro:** matches the six utilities that consult a width at all (`ls`, `wc -L`,
-  and `sort`, `pr`, `df`, `numfmt` when we write them) against one shell.
-- **Pro:** it is a *named, pinned* source — Unicode 15.1.0, one file, and we can
-  re-dump it at will. Our present table came from whatever Unicode version the
-  Python on the build machine happened to ship.
-- **Con:** it breaks a passing test. `userspace/oils/tests/gen_display_width.py
-  --diff-osh` compares our shell's menu against real bash at every table edge
-  and currently agrees everywhere; it would start reporting 626 disagreements.
-- **Con:** gnulib's table is *newer*, not *agreed*. Terminals have their own
-  tables too, and nothing says gnulib's matches the terminal we will ship.
-
-**(b) Keep bash's table (what we do today).**
-*What changes:* nothing observable; our `ls` keeps putting those 626 characters
-one cell off from GNU's.
-- **Pro:** no change, and the one end-to-end byte-diff we have that involves a
-  human-visible layout (shell menu vs bash) keeps passing.
-- **Con:** every `ls` case containing one of those characters stays permanently
-  marked "differs on purpose" in the harness, which dulls the harness.
-- **Con:** we are copying the *older* of the two answers on the characters where
-  they differ for a Unicode-version reason.
-
-**(c) Two tables — the shell reads one, the utilities the other.**
-*What changes:* both byte-diffs pass; the shell and `ls` can disagree by one
-cell about the same filename on the same screen.
-- **Pro:** maximum fidelity to both upstreams.
-- **Con:** this is precisely the thing `charwidth` exists to prevent, and the
-  symptom (a menu and a listing that do not line up) is the one a user actually
-  sees. I do not recommend it.
-
-**(d) Make the table describe our own renderer, and pin both to one source.**
-Derive `charwidth` from the width the GUI terminal actually advances by, so the
-table is a *description* of what we draw rather than a *prediction* of what
-someone else draws; both upstream harnesses then show the 626 as deliberate
-differences from *both* references.
-*What changes:* our screens are internally correct by construction — the shell
-menu and `ls` line up with each other and with the glyphs, which is the only
-thing a user of SlateOS can actually see. Both byte-diff harnesses gain
-permanent expected-difference lists.
-- **Pro:** it is the only option whose correctness does not depend on a third
-  party. bash and gnulib are both *guessing* at the terminal; we do not have to.
-- **Pro:** it answers the question the other three cannot — which of the two is
-  right *here* — because on SlateOS neither is authoritative.
-- **Con:** it is cross-lane. The renderer is lane C's; the table is lane B's.
-  It needs an agreed interface (a shared width source, or a generated table
-  checked by a gate on both sides) rather than one lane editing the other.
-- **Con:** it gives up byte-fidelity to *both* upstreams on those 626, so
-  neither harness can be read as pass/fail on them again.
-- **Unknown until measured:** whether the renderer and the table agree today.
-  Nobody has compared them; the answer decides whether (d) is a change or
-  merely a written-down invariant.
-
-### If never answered
-
-Safe, and it does not get worse on its own. Today's behaviour is (b). The cost
-is confined to two permanently-deferred cases in the `ls` harness and to the
-626 characters themselves, which are mostly invisible marks and unassigned
-code points — nobody has a filename made of them by accident.
-
-### Claude's recommendation
-
-**(a)**, but not strongly enough to do it without you: the deciding fact for me
-is that the count is six utilities to one shell and that gnulib's table is a
-pinned upstream we can re-derive mechanically, whereas ours is not. What stops
-me from just doing it is that it silently changes the on-screen layout of the
-shell and five other programs to win a byte-diff in one — a user-visible
-behaviour change, which is yours. Meanwhile I have kept (b) and isolated the
-divergence in the harness (fixture `y/`) so it costs two cases and not twenty.
-
-### Where it bites
-
-`userspace/charwidth/src/lib.rs` (`ZERO_WIDTH`, `WIDE`, and the doc comment
-that says the tables were measured against bash);
-`userspace/oils/tests/gen_display_width.py` (the generator and its `--check` /
-`--diff-osh` measurement against bash); `userspace/oils/src/width.rs`;
-`userspace/coreutils/src/bin/ls.rs` and `wc.rs`; `userspace/column/src/main.rs`;
-`scripts/ls-diff.sh` (fixture `y/`, two `!` cases);
+**Where it bites:** `userspace/charwidth/src/lib.rs`;
+`userspace/oils/tests/gen_display_width.py`; `userspace/oils/src/width.rs`;
+`userspace/coreutils/src/bin/{ls,wc}.rs`; `userspace/column/src/main.rs`;
+`scripts/ls-diff.sh` (fixture `y/`). Full technical detail, including the
+185,074 measurement and the gnulib source that causes the split, is in
 `known-issues.md` → `TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT`.
-
----
 
 ## C-Q11: Should something build every crate before a merge? (raised by lane C, 2026-09-06)
 
@@ -1196,6 +1073,27 @@ interface. This is the pattern `known-issues.md` records as lesson 47, and the
 sharp version of it: the process explorer's *own source* quotes that lesson
 while this module sat beside it.
 
+**A worked example of option A's cost, measured 2026-09-14.** A sixth feature
+of this shape was wired that day, and it is offered here as evidence rather
+than as a decision: the desktop's wallpaper. `WallpaperManager` could already
+load a picture, crop or letterbox or tile or centre it, span it across
+monitors, tint it by time of day and rotate a folder of them — and `set_image`
+was called four times in the whole tree, all four in the shell's own tests.
+
+Wiring it end to end came to a setting in `appearance.yaml`, twelve lines in
+the shell to adopt it, a Settings page with a file picker, and eight tests.
+Under an hour, and it turned up a real bug on the way: the picker's file filter
+was given bare extensions where the toolkit documents glob patterns, so every
+directory would have listed as empty on first use.
+
+**Two caveats, because an example that flatters the option is not evidence.**
+The wallpaper is the *easy* shape — its interface is a settings row, and this
+tree already has settings rows. The five above need a menu item, a panel or a
+keystroke in applications that have none, which is the part this entry says is
+unclear and the part the wallpaper did not have to solve. And one of the five,
+the image viewer's video player, is not a row anywhere: it is a second mode for
+a whole window.
+
 **The options**
 
 **A. Wire them up.** *What changes:* the installer can set up a bootloader, the
@@ -1333,6 +1231,33 @@ another's. The visible consequence today: the Settings app cannot offer you a
 choice of web browser, because it has no way to find out what browsers are
 installed — so that screen shows a placeholder. The question is which list
 should become the one everybody reads.
+
+**Added 2026-09-14, and it changes what is being asked.** This is not one
+duplicated list, it is the fourth example of one shape found in a single day,
+and the others are larger:
+
+| the idea | how many implementations | connected? |
+|---|---|---|
+| which programs are installed | 4 | none to any other |
+| the clipboard | **15** private ones, plus a service | the service has no clients at all |
+| which programs start at login | 3 | nothing launches any of them |
+| the ICMP echo header | 2 | the unused one is in a crate the user already depends on |
+
+Each was found by asking *what reads this?* and getting "nothing" — never by
+looking for a missing feature, because nothing is missing: every copy works.
+Details in `known-issues.md` under
+`TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO`,
+`TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`, and
+`requests/c-a-the-icmp-wire-format-is-written-twice...`.
+
+**Why that is worth your time rather than noise in this entry:** a decision
+about *one* list is a small call about app registries. If the same answer would
+settle the other three, it is worth making it as a rule — "a thing the whole
+system shares lives in one place, and that place is X" — rather than four
+times, differently, by whoever touches each one next. If you would rather
+answer only the narrow question, that is fine and the options below are
+unchanged; this note exists so the choice is yours rather than made by the
+entry's framing.
 
 **The four lists**, with what each knows:
 
@@ -2310,6 +2235,60 @@ risk but direction: the project keeps getting more correct without getting
 more capable, and at some point that becomes the wrong trade. There is no
 deadline on answering.
 
+
+## B-Q19 — [B] Two lanes hit the same editing mistake six times in one day. Add a standing rule, and if so which? — Status: OPEN
+
+**In short:** When we change code we usually tell a script "find this text and
+replace it". Six times today, across two of the three Claude sessions, that
+found *different* text than intended — or found it in three or four places when
+we meant one — and the wrong edit landed silently. Both lanes independently
+arrived at the same two habits that catch it. The question is whether those
+habits should become a written rule all three lanes follow, which only you can
+decide: rules like that live in `CLAUDE.md`, and that file is yours.
+
+**The shortest evidence is that filing this question tripped its own rule.**
+The first anchor I used to insert it matched **eight** places in this file; the
+count check stopped the edit, and a more specific anchor matched one. The habit
+caught its own proposal before the proposal was written down.
+
+**The two habits.** Neither needs new tooling.
+
+1. **Assert the match count before replacing.** A script that means to change
+   one place checks that exactly one place matched, and stops otherwise. This
+   caught an edit of mine today whose anchor appeared **four** times in the
+   file; it would have modified an unrelated test. It also caught the filing of
+   *this question* — my first anchor for it matched 8 places.
+2. **Do not let the explanation and the implementation be the same action.**
+   All four cases where one of us wrote a comment explaining a trap *and
+   simultaneously fell into it* happened in a single pass. Both cases we caught
+   had something run in between — a test, a gate, a merge — so we returned to
+   the code as a reader rather than as its author. Operationally: write the
+   comment, run *something*, then read it back. The run need not be related; it
+   only has to cost enough attention that you come back cold.
+
+**Why this is yours.** Lane C offered to write it down and asked whether I had
+a natural home for it. The natural home is `CLAUDE.md`, and I am told not to
+edit that file except when you tell me to make a specific change — a peer
+suggesting it is explicitly not that. So the proposal comes here rather than
+being applied. I have not filed it elsewhere either: a working-practice rule
+scattered through three lanes' commit messages is how it gets re-derived next
+month.
+
+| Option | *What changes:* |
+|---|---|
+| **A. Add both to `CLAUDE.md`** *(recommended)* | All three lanes follow the same two habits; a wrong edit is caught by the script rather than by whoever happens to read the diff. |
+| **B. Add only the count assertion** | The mechanical half becomes standard and the attention half stays folklore. Cheaper to state, and it is the half with hard evidence — six incidents, each caught or missed by exactly this. |
+| **C. Leave it unwritten** | Each lane keeps its own habit. That has worked twice today and failed four times, and a new session starts with neither. |
+
+**If this is never answered:** nothing breaks. Both lanes already use the
+habits, and the incidents are recorded in commit messages. The cost is that a
+future session — including a future me, with no memory of today — starts
+without them and re-derives them from its own wrong edit.
+
+**Where it bit today:** `userspace/ar/src/main.rs` (anchor matched four places,
+caught), `userspace/oils/src/interp.rs` (a comment about a timing trap written
+in the same pass as a smaller version of that trap, not caught until lane C
+reported it), and four more in lane C's tree.
 
 # Resolved
 

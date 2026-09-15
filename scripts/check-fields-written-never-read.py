@@ -28,6 +28,25 @@ WHAT IT DOES NOT REPORT, deliberately:
   * a field read anywhere in production, however far from where it is written;
   * anything listed in the baseline beside this file.
 
+THE INVERSE QUESTION DOES NOT WORK, and it is worth saying so here because it
+is the obvious next idea. "Fields *read* in production that only a test ever
+writes" would find settings stuck at their default -- a control that exists,
+is applied, and cannot be changed. Tried on 2026-09-14: **249 hits, almost all
+artifact.**
+
+The reason is an asymmetry in Rust rather than in this script. Reads are
+overwhelmingly `.field` accesses, which is why the forward direction works.
+Writes are overwhelmingly *struct literals* -- `yellow: LIGHT_YELLOW`,
+`prevent_close: true` -- which a `.field =` matcher cannot see at all. So every
+value built by construction looks unwritten. `Palette::yellow` came back as
+"read 313 times, written only by tests".
+
+The one promising hit, `gui/remote`'s `prevent_close`/`prevent_move`/
+`prevent_resize`, turned out to be documented already:
+`TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`, which also
+explains why it is deliberate. So the inverse sweep's best signal was a finding
+someone had already written down, and its other 248 were noise.
+
 HOW IT SEES A READ, AND THE MISTAKE THAT MATTERS. The first version matched
 `self.field` only. Every finding vanished, including the two above -- because a
 test reaches a field through the variable it built (`ui.last_export`), never
@@ -119,13 +138,29 @@ def detect(roots=lanec_scan.LANE_C_ROOTS, root=None):
                 written = after.startswith("=") and not after.startswith(("==", "=>"))
                 (writes if written else reads)[(m.group(1), inside[n])] += 1
 
-    return {
-        name: where
-        for name, where in decls.items()
-        if writes[(name, False)] >= 1
-        and reads[(name, False)] == 0
-        and reads[(name, True)] >= 1
-    }
+    # Two categories, reported together because the action is the same for
+    # both: wire the field to the behaviour it names, or delete it.
+    #
+    # `nobody` is the stricter finding and was invisible here until 2026-09-15.
+    # The condition used to require `reads[(name, True)] >= 1` -- at least one
+    # test read -- so a field read by NO ONE fell outside a detector named for
+    # exactly that defect. It was found from the other direction: `auto_connect`
+    # in `apps/ircclient`, set on a pre-shipped IRC network and read nowhere.
+    #
+    # Worth knowing why the compiler does not cover it either. `SavedNetwork`
+    # derives `Debug`, and a derive READS every field, so `dead_code` cannot
+    # see the case by construction -- the same shape as "a `#[cfg(test)]`
+    # module is a use", one layer down. `cargo clippy --all-targets` on that
+    # crate reports zero warnings.
+    out = {}
+    for name, where in decls.items():
+        if writes[(name, False)] < 1 or reads[(name, False)] != 0:
+            continue
+        if reads[(name, True)] >= 1:
+            out[name] = (*where, "tests")
+        else:
+            out[name] = (*where, "nobody")
+    return out
 
 
 def baseline():
@@ -143,35 +178,69 @@ def baseline():
 def main(argv):
     if selftestflag.wants_selftest(argv):
         return self_test()
-    unknown = selftestflag.unknown_options(argv, known=("--list",))
+    roots = None
+    rest = []
+    for arg in argv:
+        if arg.startswith("--roots="):
+            roots = [r for r in arg.split("=", 1)[1].split(",") if r]
+        else:
+            rest.append(arg)
+    unknown = selftestflag.unknown_options(rest, known=("--list",))
     if unknown:
         print(f"unrecognised option(s): {' '.join(unknown)}", file=sys.stderr)
         return 2
 
-    listing = "--list" in argv
+    listing = "--list" in rest
+
+    # `--roots` is report-only, and the refusal is the point of the flag rather
+    # than a limitation of it.
+    #
+    # The baseline is a list of `path:field`. Nothing in it records WHICH roots
+    # produced it, so a pass against different roots would be a true sentence
+    # about a population the run never looked at -- the failure this project
+    # keeps finding in its own gates. A flag that lets another lane scan their
+    # tree is useful; one that lets them collect a green tick for it is worse
+    # than not having the flag.
+    if roots is not None:
+        missing = [r for r in roots if not (lanec_scan.ROOT / r).is_dir()]
+        if missing:
+            print(f"no such directory: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        if listing is False:
+            print(
+                f"scanning {', '.join(sorted(roots))} (report only; the "
+                f"baseline in {BASELINE.as_posix()} describes lane C and is "
+                "not consulted)",
+                file=sys.stderr,
+            )
+        found = detect(roots=tuple(roots))
+        for name, (path, line, who) in sorted(found.items(), key=lambda kv: kv[1]):
+            read_by = "read only by tests" if who == "tests" else "read by nothing at all"
+            print(f"{path}:{line}: `{name}` is written in production and {read_by}")
+        print(f"-- {len(found)} field(s) in {', '.join(sorted(roots))}.")
+        return 0
+
     found = detect()
     known = baseline()
 
     shown = []
-    for name, (path, line) in sorted(found.items(), key=lambda kv: kv[1]):
+    for name, (path, line, who) in sorted(found.items(), key=lambda kv: kv[1]):
         key = f"{path}:{name}"
         if key in known and not listing:
             continue
-        shown.append((path, line, name, key in known))
+        shown.append((path, line, name, key in known, who))
 
-    for path, line, name, was_known in shown:
+    for path, line, name, was_known, who in shown:
         mark = "  (baseline)" if was_known else ""
-        print(
-            f"{path}:{line}: `{name}` is written in production and read only "
-            f"by tests{mark}"
-        )
+        read_by = "read only by tests" if who == "tests" else "read by nothing at all"
+        print(f"{path}:{line}: `{name}` is written in production and {read_by}{mark}")
 
     # A baseline line that no longer matches anything is not harmless. It
     # silently suppresses that exact field if it ever comes back, and it
     # describes a tree that no longer exists -- the same stale-blocker shape
     # that had three documents in this repo telling readers a decided question
     # was still open. Reported, and fatal, so the file cannot rot quietly.
-    live = {f"{path}:{name}" for name, (path, _l) in found.items()}
+    live = {f"{path}:{name}" for name, (path, _l, _w) in found.items()}
     stale = sorted(known - live)
     for key in stale:
         print(
@@ -191,9 +260,16 @@ def main(argv):
             f"{len(found)} found)"
         )
         return 0
+    by_tests = sum(1 for row in unreported if row[4] == "tests")
+    by_nobody = len(unreported) - by_tests
     print(
-        f"{len(unreported)} field(s) written in production and read only by "
-        "tests. `dead_code` cannot see these: a test counts as a read."
+        f"{len(unreported)} field(s) written in production and never read by "
+        f"it: {by_tests} read only by tests, {by_nobody} read by nothing at all."
+    )
+    print(
+        "  `dead_code` cannot see either. A test counts as a read -- and so "
+        "does a derive, which is why a field on a struct deriving `Debug` is "
+        "invisible to it however dead the field is."
     )
     return 1
 
@@ -359,7 +435,12 @@ def self_test():
             f = base / rel
             f.parent.mkdir(parents=True, exist_ok=True)
             text = "\n".join(line[12:] for line in body.strip("\n").split("\n"))
-            f.write_text(text + "\n", encoding="utf-8", newline="")
+            # `newline` is load-bearing here, not tidiness: without it Python
+            # translates to CRLF on Windows, and these fixtures are parsed back
+            # by column, so a stray carriage return rides along in every value
+            # the self-test then compares. The gate that catches this reds the
+            # boot in 15 seconds; lane A found both of mine.
+            f.write_text(text + "\n", encoding="utf-8", newline="\n")
         found = set(detect(roots=("apps",), root=base))
 
     problems = []

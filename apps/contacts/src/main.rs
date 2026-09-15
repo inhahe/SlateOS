@@ -396,7 +396,6 @@ pub struct ContactGroup {
     pub name: String,
     pub description: String,
     pub color: Color,
-    pub member_count: usize,
 }
 
 impl ContactGroup {
@@ -409,7 +408,6 @@ impl ContactGroup {
             // choice, stored per group and shown as its swatch, so it does
             // not follow the desktop theme.
             color: Color::from_hex(0x89B4FA),
-            member_count: 0,
         }
     }
 
@@ -1437,17 +1435,6 @@ impl ContactStore {
     /// Get all groups.
     pub fn all_groups(&self) -> &[ContactGroup] {
         &self.groups
-    }
-
-    /// Update group member counts based on current contact data.
-    pub fn refresh_group_counts(&mut self) {
-        for group in &mut self.groups {
-            group.member_count = self
-                .contacts
-                .iter()
-                .filter(|c| c.groups.contains(&group.id))
-                .count();
-        }
     }
 
     /// Add a contact to a group.
@@ -3483,7 +3470,6 @@ impl ContactsApp {
 
         // Select first contact
         self.view = DetailView::ViewContact(id1);
-        self.store.refresh_group_counts();
     }
 }
 
@@ -4459,7 +4445,6 @@ mod tests {
     fn test_contact_group_new() {
         let g = ContactGroup::new(1, "Friends");
         assert_eq!(g.name, "Friends");
-        assert_eq!(g.member_count, 0);
     }
 
     #[test]
@@ -4939,16 +4924,47 @@ mod tests {
         assert!(!store.remove_contact_from_group(cid, gid));
     }
 
+    /// The count a group shows is the count of its members.
+    ///
+    /// Was `test_store_refresh_group_counts`, against a cached
+    /// `ContactGroup::member_count` that `refresh_group_counts` filled and
+    /// **nothing ever read** -- the number on screen has always come from
+    /// `group_stats`, which recomputes it with the identical filter. Two
+    /// copies of one number, and the test guarded the copy nobody saw. It now
+    /// asks the function the screen asks.
     #[test]
-    fn test_store_refresh_group_counts() {
+    fn a_group_reports_the_number_of_contacts_in_it() {
         let mut store = ContactStore::new();
         let gid = store.add_group(ContactGroup::new(0, "Team"));
         let cid1 = store.add_contact(make_contact("A", "A"));
         let cid2 = store.add_contact(make_contact("B", "B"));
         store.add_contact_to_group(cid1, gid);
         store.add_contact_to_group(cid2, gid);
-        store.refresh_group_counts();
-        assert_eq!(store.get_group(gid).unwrap().member_count, 2);
+
+        let stats = store.group_stats();
+        let (_, name, count) = stats
+            .iter()
+            .find(|(id, _, _)| *id == gid)
+            .expect("the group is not in the stats at all");
+        assert_eq!(name, "Team");
+        assert_eq!(*count, 2);
+    }
+
+    /// Removing a contact changes it, with no refresh step to forget.
+    #[test]
+    fn a_group_count_follows_its_membership() {
+        let mut store = ContactStore::new();
+        let gid = store.add_group(ContactGroup::new(0, "Team"));
+        let cid = store.add_contact(make_contact("A", "A"));
+        store.add_contact_to_group(cid, gid);
+        assert_eq!(store.group_stats()[0].2, 1);
+
+        store.remove_contact_from_group(cid, gid);
+        assert_eq!(
+            store.group_stats()[0].2,
+            0,
+            "a cached count would still read 1 here until something refreshed it"
+        );
     }
 
     #[test]

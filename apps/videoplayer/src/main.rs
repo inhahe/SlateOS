@@ -3283,6 +3283,40 @@ impl VideoPlayerApp {
             corner_radii: CornerRadii::all(3.0),
         });
 
+        // The timestamp under the pointer.
+        //
+        // `seek_preview_position` is maintained through a *drag* -- set on
+        // press, followed on move, cleared on release -- and nothing drew it.
+        // That is not a missing nicety, it is the missing half of a deliberate
+        // design: the comment on the press arm says "the preview follows the
+        // pointer and the picture only moves when it is let go, so dragging
+        // across a film does not seek to every pixel of the way there". The
+        // whole point of not seeking continuously is that the preview tells
+        // you where you are. Without it the user drags blind and finds out
+        // where they landed by arriving there, which is strictly worse than
+        // the continuous seeking this was built to avoid.
+        //
+        // Positioned from the previewed *time* rather than from the pointer's
+        // x, so the label sits over the frame that will actually be sought to
+        // even if the two ever diverge. Clamped to the bar so it stays legible
+        // at either end instead of sliding off the window.
+        if let (Some(preview), Some(file)) = (self.seek_preview_position, &self.current_file) {
+            let frac = preview.progress_of(file.duration) as f32;
+            let label_w = 48.0;
+            let x = (seek_x + seek_w * frac - label_w / 2.0)
+                .clamp(seek_x, (seek_x + seek_w - label_w).max(seek_x));
+            cmds.push(RenderCommand::Text {
+                x,
+                y: seek_y - 16.0,
+                text: preview.format(),
+                font_size: 11.0,
+                color: self.palette.text,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(label_w),
+                overflow: TextOverflow::Clip,
+            });
+        }
+
         // Chapter markers
         if let Some(file) = &self.current_file {
             for chapter in &self.chapters {
@@ -6462,6 +6496,119 @@ mod tests {
     fn a_click_below_the_tab_strip_is_not_a_tab() {
         let app = loaded();
         assert_eq!(app.tab_at(20.0, TAB_BAR_HEIGHT + 4.0), None);
+    }
+
+    /// Every string the player draws, with the y it is drawn at.
+    fn drawn(app: &VideoPlayerApp) -> Vec<(String, f32)> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, y, .. } => Some((text.clone(), *y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Just the seek preview label: the row 16px above the bar.
+    ///
+    /// Keyed by position rather than by content, because after a release the
+    /// clock legitimately reads the very time the label was showing -- the
+    /// player has seeked there. A test that searched for the string alone
+    /// could not tell "the label is gone" from "the label is gone and the
+    /// clock caught up", which is the whole assertion.
+    fn preview_labels(app: &VideoPlayerApp) -> Vec<String> {
+        // `controls_top() + SEEK_BAR_OFFSET` is where the bar is *drawn*, which
+        // `seek_bar()` deliberately is not -- that rect is thicker to grab than
+        // the bar is to look at. The first version of this helper used
+        // `seek_bar().y` and found no labels at all.
+        let row = app.controls_top() + SEEK_BAR_OFFSET - 16.0;
+        drawn(app)
+            .into_iter()
+            .filter(|(_, y)| (*y - row).abs() < 0.5)
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    /// **Dragging the scrubber shows the time you are dragging to.**
+    ///
+    /// The press arm deliberately does not seek until release, "so dragging
+    /// across a film does not seek to every pixel of the way there" -- which
+    /// is only tolerable because a preview says where you are. The preview was
+    /// computed on every move and drawn nowhere, so the design's other half
+    /// was missing and dragging was blind.
+    #[test]
+    fn dragging_the_seek_bar_shows_the_time_it_will_seek_to() {
+        let mut app = loaded();
+        app.play();
+        let bar = app.seek_bar();
+        let y = bar.y + bar.height / 2.0;
+
+        app.handle_event(&mouse(
+            bar.x + bar.width / 2.0,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        let preview = app.seek_preview_position.expect("no preview was computed");
+
+        let labels = preview_labels(&app);
+        assert!(
+            labels.contains(&preview.format()),
+            "the previewed time {:?} is computed and not drawn; labels: {labels:?}",
+            preview.format()
+        );
+    }
+
+    /// The label follows the pointer rather than sitting at the start.
+    #[test]
+    fn the_preview_label_moves_with_the_drag() {
+        let mut app = loaded();
+        app.play();
+        let bar = app.seek_bar();
+        let y = bar.y + bar.height / 2.0;
+
+        app.handle_event(&mouse(
+            bar.x + bar.width * 0.25,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        let early = app.seek_preview_position.expect("no preview").format();
+        app.handle_event(&mouse(bar.x + bar.width * 0.75, y, MouseEventKind::Move));
+        let late = app.seek_preview_position.expect("no preview").format();
+        assert_ne!(early, late, "the preview did not follow the pointer");
+
+        let labels = preview_labels(&app);
+        assert!(labels.contains(&late), "{labels:?}");
+        assert!(
+            !labels.contains(&early),
+            "the label still shows where the drag started: {labels:?}"
+        );
+    }
+
+    /// Letting go seeks and takes the label away.
+    #[test]
+    fn releasing_removes_the_preview_label() {
+        let mut app = loaded();
+        app.play();
+        let bar = app.seek_bar();
+        let y = bar.y + bar.height / 2.0;
+
+        app.handle_event(&mouse(
+            bar.x + bar.width / 2.0,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        let preview = app.seek_preview_position.expect("no preview").format();
+        app.handle_event(&mouse(
+            bar.x + bar.width / 2.0,
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+
+        assert!(app.seek_preview_position.is_none());
+        assert!(
+            preview_labels(&app).is_empty(),
+            "a label outlived the drag it belonged to; it read {preview:?}"
+        );
     }
 
     #[test]

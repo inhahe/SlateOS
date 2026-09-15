@@ -104,7 +104,6 @@ pub mod multimon;
 pub mod network_indicator;
 pub mod network_settings;
 pub mod notif_pane;
-pub mod notification_settings;
 pub mod osd;
 pub mod overview;
 /// The sweep that proves a module was converted off its own colour constants.
@@ -355,6 +354,20 @@ struct TrayDrag {
     /// since it was defined, for exactly this.
     button: MouseButton,
 }
+/// Opacity of an icon while it is being dragged.
+///
+/// Faint enough to read as "this one is in flight" and solid enough to still
+/// be identifiable -- the user is dragging it because they know which one it
+/// is, and a ghost they cannot recognise is worse than none.
+const GHOST_ALPHA: u8 = 110;
+
+/// How far the shortcut card's outcome line sits from its left and bottom
+/// edges.
+///
+/// One constant for both, so the message is inset by the same amount it is
+/// lifted and cannot drift into a corner as the card resizes.
+const SHORTCUT_MESSAGE_INSET: f32 = 20.0;
+
 /// The bell the tray draws when nothing is being silenced.
 ///
 /// Not read by the renderer, which asks the focus manager for the glyph of
@@ -3049,6 +3062,19 @@ impl DesktopShell {
         }
     }
 
+    /// Whether `icon` is the one currently under a drag.
+    ///
+    /// Asks the drag source rather than comparing positions: the icon keeps
+    /// its slot while the *insertion point* moves, which is the whole design
+    /// -- `DragSource` is keyed by `TrayIconKey` and not by index precisely
+    /// because the run can rearrange under the pointer.
+    fn tray_icon_is_being_dragged(&self, icon: &guiremote::tray::TrayIcon) -> bool {
+        self.tray_drag.as_ref().is_some_and(|drag| {
+            drag.source.show_ghost
+                && drag.source.dragging_key.as_ref() == Some(&tray_dnd::TrayIconKey::of(icon))
+        })
+    }
+
     /// The tray tooltip's draw commands, empty unless one is showing.
     ///
     /// Drawn on the overlay surface beside the on-screen display, which is
@@ -5040,11 +5066,24 @@ impl DesktopShell {
             );
         }
         for (rect, icon) in self.tray_icon_rects().iter().zip(self.ordered_tray_icons()) {
+            // The icon being dragged is drawn faint.
+            //
+            // `DragSource` has maintained `show_ghost` and `dragging_key`
+            // since it was written -- set once the drag threshold is crossed,
+            // cleared on drop or on Escape -- and nothing read either, so the
+            // whole state machine was invisible. The icon sat at full opacity
+            // exactly where it started while the insertion point moved under
+            // the pointer, which reads as "the drag did not take".
+            let color = if self.tray_icon_is_being_dragged(icon) {
+                with_alpha(self.theme.taskbar_fg, GHOST_ALPHA)
+            } else {
+                self.theme.taskbar_fg
+            };
             tree.text(
                 rect.x,
                 tray_text_y,
                 &icon.glyph,
-                self.theme.taskbar_fg,
+                color,
                 self.font_size(TextRole::Glyph),
             );
         }
@@ -7435,6 +7474,38 @@ impl DesktopShell {
             ),
             budget,
         ));
+        // What the last rebind did.
+        //
+        // `shortcut_message` has been composed on every outcome since the
+        // editor was written -- "Press the new keys, or Escape to cancel",
+        // "Unchanged", "That row is gone", "Ctrl+Alt+T is now Terminal", and
+        // the one that matters most, "...but could not be saved" -- and
+        // NOTHING DREW ANY OF IT. Rebinding a key was silent whether it
+        // worked, was refused, or worked and failed to persist.
+        //
+        // That last case is why this is not cosmetic. The handler's own
+        // comment calls it "the difference between a shortcut that will be
+        // gone tomorrow and one the user believes is set", and until now the
+        // user was always in the second state.
+        //
+        // Drawn by this function rather than passed into
+        // `hotkeys::render_settings_panel`: the message is the *shell's*
+        // record of what its editor just did, not a fact about the registry,
+        // and threading it through would make a general panel renderer carry
+        // one caller's state.
+        if let Some(message) = &self.shortcut_message {
+            let p = Palette::from_settings(&self.appearance);
+            tree.text(
+                x + SHORTCUT_MESSAGE_INSET,
+                y + height - SHORTCUT_MESSAGE_INSET,
+                message,
+                // `subtext0` and not the accent: this is an outcome, not an
+                // invitation, and the accent is what the card already uses for
+                // the row the keyboard is on.
+                p.subtext0,
+                self.font_size(TextRole::Body),
+            );
+        }
         Some(tree)
     }
 
@@ -8215,6 +8286,66 @@ mod window_manager_tests {
     /// Pressed through `handle_hotkey` rather than by setting the flag, because
     /// the flag was never the part that was missing — `render_settings_panel`
     /// existed and worked for months with nothing able to reach it.
+    /// Every string the shortcut card draws.
+    fn card_text(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .render_shortcut_card()
+            .expect("the card is not open")
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The card says what the last rebind did.**
+    ///
+    /// `shortcut_message` was composed on every outcome from the day the
+    /// editor was written and drawn by nothing, so rebinding a key was silent
+    /// whether it worked, was refused, or worked and failed to persist.
+    #[test]
+    fn the_shortcut_card_reports_the_last_rebind() {
+        let mut shell = shell();
+        shell.shortcut_card_open = true;
+        let quiet = card_text(&shell);
+
+        shell.shortcut_message = Some("Ctrl+Alt+T is now Terminal".to_string());
+        let loud = card_text(&shell);
+
+        assert!(
+            loud.iter().any(|t| t == "Ctrl+Alt+T is now Terminal"),
+            "the outcome never reached the card: {loud:?}"
+        );
+        assert!(
+            !quiet.iter().any(|t| t == "Ctrl+Alt+T is now Terminal"),
+            "the card drew the message before there was one"
+        );
+    }
+
+    /// **The half-failure is the one that must be visible.**
+    ///
+    /// A rebind that worked and could not be saved leaves the user with a
+    /// shortcut that works today and is gone tomorrow. The handler's own
+    /// comment calls that "the difference between a shortcut that will be gone
+    /// tomorrow and one the user believes is set" -- and until the message was
+    /// drawn, the user was always in the second state.
+    #[test]
+    fn a_rebind_that_could_not_be_saved_says_so_on_the_card() {
+        let mut shell = shell();
+        shell.shortcut_card_open = true;
+        shell.shortcut_message =
+            Some("Super+K is now Search, but could not be saved: disk full".to_string());
+
+        let drawn = card_text(&shell);
+
+        assert!(
+            drawn.iter().any(|t| t.contains("could not be saved")),
+            "a rebind that did not persist looks identical to one that did: {drawn:?}"
+        );
+    }
+
     #[test]
     fn the_shortcut_card_opens_and_closes_on_its_own_chord() {
         let mut shell = shell();
@@ -11406,6 +11537,98 @@ mod overview_wiring_tests {
     /// order was the shell's in name only -- correct, folded, tested, and
     /// impossible for a user to change, which is the state `apps/systray` has
     /// been in for months.
+    /// The colour the tray drew `glyph` in.
+    fn tray_glyph_colour(s: &DesktopShell, glyph: &str) -> super::Color {
+        s.render_taskbar()
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text { text, color, .. } if text == glyph => Some(*color),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the tray drew no {glyph:?}"))
+    }
+
+    /// **The icon you are dragging looks like it is being dragged.**
+    ///
+    /// `DragSource::show_ghost` and `dragging_key` have been maintained since
+    /// the module was written -- set past the threshold, cleared on drop or
+    /// Escape -- and nothing read either. The icon sat at full opacity in its
+    /// old slot while the insertion point moved under the pointer, which reads
+    /// as "the drag did not take".
+    #[test]
+    fn the_dragged_tray_icon_is_drawn_faint() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two")]);
+
+        let solid = tray_glyph_colour(&s, "A");
+        let rects = s.tray_icon_rects();
+        let (from, onto) = (rects[0], rects[1]);
+        s.handle_mouse(&guitk::event::MouseEvent {
+            x: from.x + from.w / 2.0,
+            y: from.y + from.h / 2.0,
+            kind: guitk::event::MouseEventKind::Press(MouseButton::Left),
+        });
+        // A press alone is not a drag: until the threshold is crossed this is
+        // still a click, and a click must not dim anything.
+        assert_eq!(
+            tray_glyph_colour(&s, "A"),
+            solid,
+            "a press that has not moved is a click, and dimmed the icon"
+        );
+
+        s.handle_mouse(&guitk::event::MouseEvent {
+            x: onto.x + onto.w * 0.9,
+            y: onto.y + onto.h / 2.0,
+            kind: guitk::event::MouseEventKind::Move,
+        });
+
+        let dragged = tray_glyph_colour(&s, "A");
+        assert_ne!(
+            dragged, solid,
+            "the dragged icon is drawn exactly as before"
+        );
+        assert!(
+            dragged.a < solid.a,
+            "the ghost is not fainter: {dragged:?} vs {solid:?}"
+        );
+        assert_eq!(
+            tray_glyph_colour(&s, "B"),
+            solid,
+            "the icon that is not being dragged was dimmed too"
+        );
+    }
+
+    /// Letting go puts it back to full strength.
+    #[test]
+    fn dropping_a_tray_icon_takes_the_ghost_away() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two")]);
+        let solid = tray_glyph_colour(&s, "A");
+
+        let rects = s.tray_icon_rects();
+        let (from, onto) = (rects[0], rects[1]);
+        for kind in [
+            guitk::event::MouseEventKind::Press(MouseButton::Left),
+            guitk::event::MouseEventKind::Move,
+            guitk::event::MouseEventKind::Release(MouseButton::Left),
+        ] {
+            let (x, y) = match kind {
+                guitk::event::MouseEventKind::Press(_) => {
+                    (from.x + from.w / 2.0, from.y + from.h / 2.0)
+                }
+                _ => (onto.x + onto.w * 0.9, onto.y + onto.h / 2.0),
+            };
+            s.handle_mouse(&guitk::event::MouseEvent { x, y, kind });
+        }
+
+        assert_eq!(
+            tray_glyph_colour(&s, "A"),
+            solid,
+            "a ghost outlived the drag it belonged to"
+        );
+    }
+
     #[test]
     fn dragging_a_tray_icon_past_its_neighbour_reorders_the_row() {
         let mut s = DesktopShell::new(1920, 1080);

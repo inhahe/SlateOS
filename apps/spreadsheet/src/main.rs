@@ -8,12 +8,15 @@
 //! - Multiple sheets, sort, auto-fill, freeze panes
 //! - Find and replace
 //!
-//! CSV import and export are implemented ([`Sheet::export_csv`],
-//! [`Sheet::import_csv`]) and are not on that list, because nothing can reach
-//! them: they take and return a `String`, and this program has no file dialog,
-//! no command line and no clipboard beyond its own internal one, so there is
-//! nowhere for the text to come from or go. That is tracked under
-//! `known-issues.md` -> `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`.
+//! CSV import and export are reachable since 2026-09-15: Ctrl+S writes the
+//! active sheet through [`Sheet::export_csv`] and Ctrl+O reads one back
+//! through [`Sheet::import_csv`].
+//!
+//! Both were written long before either could be called, and the doc that
+//! stood here said so plainly -- "nothing can reach them: they take and return
+//! a `String`, and this program has no file dialog". That is an accurate
+//! description of a consumer with no producer, and it was also a fix nobody
+//! had done. The serialiser was the hard part and it was already finished.
 //! The rest of the list was in the same state until this file was wired to a
 //! window -- five of the features named above were reachable by no key and no
 //! click, behind a toolbar that drew twelve buttons and hit-tested none.
@@ -25,6 +28,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -2746,7 +2750,23 @@ impl SheetBook {
 // ============================================================================
 
 /// The main spreadsheet application state.
+/// The most of a CSV file one open will read.
+///
+/// Reported when it bites: a sheet truncated mid-row is not the file the user
+/// chose, and a silent cut shows a smaller spreadsheet with nothing to say
+/// anything is missing.
+pub const MAX_CSV_BYTES: usize = 8 * 1024 * 1024;
+
+/// Leads a message about a file operation that did not happen.
+const FILE_FAILED_PREFIX: &str = "Could not";
+
 pub struct SpreadsheetApp {
+    /// The open or save picker, while one is up.
+    pub file_dialog: Option<FileDialog>,
+    /// Whether the picker that is up is saving rather than opening.
+    pub dialog_saves: bool,
+    /// What the last open or save did, for the status line.
+    pub last_file_action: Option<String>,
     /// All worksheets, and which one is active.
     pub sheets: SheetBook,
     /// Current interaction mode.
@@ -2791,6 +2811,9 @@ impl SpreadsheetApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            file_dialog: None,
+            dialog_saves: false,
+            last_file_action: None,
             sheets: SheetBook::new(Sheet::new("Sheet1")),
             mode: InteractionMode::Normal,
             clipboard: None,
@@ -3697,6 +3720,106 @@ impl SpreadsheetApp {
     }
 
     /// Handle keyboard events.
+    /// Put the open or save picker up.
+    ///
+    /// `Sheet::export_csv` and `Sheet::import_csv` were written long before
+    /// either could be called, and this module's own doc used to say so: "they
+    /// take and return a `String`, and this program has no file dialog". The
+    /// serialiser was the hard part and it was already finished. What was
+    /// missing was the picker.
+    pub fn open_file_dialog(&mut self, saving: bool) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = if saving {
+            FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(format!("{}.csv", self.sheets.active().name))
+        } else {
+            FileDialog::open().with_initial_path(start)
+        };
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.dialog_saves = saving;
+        self.file_dialog = Some(dialog);
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
+        match action {
+            DialogAction::None => EventResult::Consumed,
+            DialogAction::Cancelled => {
+                self.file_dialog = None;
+                EventResult::Consumed
+            }
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+                EventResult::Consumed
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                let saving = self.dialog_saves;
+                self.last_file_action = Some(if saving {
+                    self.write_csv(&path)
+                } else {
+                    self.read_csv(&path)
+                });
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Write the active sheet to `path` as CSV.
+    ///
+    /// Through `safeio::write_str_atomically`, not `fs::write`: `fs::write`
+    /// truncates the target before writing it, so an interrupted save would
+    /// leave the sheet on disk as a fragment. A spreadsheet that has been
+    /// exported may be the only copy of the numbers in it.
+    pub fn write_csv(&mut self, path: &std::path::Path) -> String {
+        let csv = self.sheets.active().export_csv();
+        match safeio::write_str_atomically(path, &csv) {
+            Ok(()) => format!("Wrote {}", path.display()),
+            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` into the active sheet as CSV.
+    ///
+    /// Reports the read, not the parse. `import_csv` takes any text and fills
+    /// cells from it; a file that is not really CSV produces cells rather than
+    /// an error, and saying "could not read" about a file that was read would
+    /// point the user at the wrong thing.
+    ///
+    /// Bounded, and it says so when it cuts. A sheet truncated mid-row is not
+    /// the file the user chose, and a silent cut would show them a smaller
+    /// spreadsheet with no sign that anything was missing.
+    pub fn read_csv(&mut self, path: &std::path::Path) -> String {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
+        };
+        let whole = text.len();
+        let truncated = whole > MAX_CSV_BYTES;
+        let body = if truncated {
+            let mut cut = MAX_CSV_BYTES;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut = cut.saturating_sub(1);
+            }
+            text.get(..cut).unwrap_or("").to_string()
+        } else {
+            text
+        };
+        self.sheets.active_mut().import_csv(&body);
+        if truncated {
+            format!(
+                "INCOMPLETE: only the first {MAX_CSV_BYTES} bytes were read, of {whole} in {}",
+                path.display()
+            )
+        } else {
+            format!("Opened {}", path.display())
+        }
+    }
+
     pub fn handle_key_event(&mut self, event: &KeyEvent) -> EventResult {
         if !event.pressed {
             return EventResult::Ignored;
@@ -3736,6 +3859,14 @@ impl SpreadsheetApp {
                 }
                 Key::Y => {
                     self.redo();
+                    return EventResult::Consumed;
+                }
+                Key::S => {
+                    self.open_file_dialog(true);
+                    return EventResult::Consumed;
+                }
+                Key::O => {
+                    self.open_file_dialog(false);
                     return EventResult::Consumed;
                 }
                 Key::B => {
@@ -4419,6 +4550,19 @@ impl SpreadsheetApp {
 
     /// Process a top-level event.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes the event first while it is up, or a keystroke
+        // meant for a filename lands in a cell behind it.
+        if self.file_dialog.is_some() {
+            let (w, h) = (self.window_width, self.window_height);
+            let action = match (event, self.file_dialog.as_mut()) {
+                (Event::Key(key_ev), Some(dialog)) if key_ev.pressed => {
+                    dialog.handle_event(key_ev, h)
+                }
+                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
+                _ => return EventResult::Ignored,
+            };
+            return self.apply_dialog_action(action);
+        }
         match event {
             Event::Key(key_event) => {
                 let result = self.handle_key_event(key_event);
@@ -4524,6 +4668,36 @@ impl SpreadsheetApp {
         // Find/replace overlay
         if self.find_replace.active {
             self.render_find_replace(&mut cmds);
+        }
+
+        // What the last open or save did. This is the one place the user's
+        // work leaves the process, so an operation that reports nothing is one
+        // they cannot rely on.
+        if let Some(note) = &self.last_file_action {
+            let avail = (self.window_width - 16.0).max(0.0);
+            if avail > 0.0 {
+                cmds.push(RenderCommand::Text {
+                    x: 8.0,
+                    y: 26.0,
+                    text: note.clone(),
+                    color: if note.starts_with(FILE_FAILED_PREFIX) || note.starts_with("INCOMPLETE")
+                    {
+                        self.palette.ink(self.palette.red)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: 9.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(avail),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+
+        // Last, so it is above everything -- the same order in which
+        // `handle_event` gives it the keystroke.
+        if let Some(dialog) = &self.file_dialog {
+            cmds.extend(dialog.render(&self.palette, self.window_width, self.window_height));
         }
 
         cmds
@@ -6209,6 +6383,57 @@ mod tests {
     use guitk::event::Modifiers;
 
     use super::*;
+
+    /// Ctrl+S writes the sheet and Ctrl+O reads one back.
+    ///
+    /// `export_csv` and `import_csv` were both written long before either
+    /// could be called, and this module's doc used to say so: "nothing can
+    /// reach them: they take and return a `String`, and this program has no
+    /// file dialog". That is an accurate description of a consumer with no
+    /// producer, and it was also a fix nobody had done -- the serialiser was
+    /// the hard part and it was already finished.
+    ///
+    /// Round-tripped rather than checked against a literal, because the CSV
+    /// shape is `export_csv`'s business and this test is about the door.
+    #[test]
+    fn a_sheet_survives_a_write_and_a_read() {
+        let dir = std::env::temp_dir().join("slateos-sheet-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("book.csv");
+
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        for (row, col, text) in [(0, 0, "Item"), (0, 1, "Qty"), (1, 0, "Widget"), (1, 1, "5")] {
+            app.sheets
+                .active_mut()
+                .set_cell_input(CellAddr { col, row }, text);
+        }
+        let before = app.sheets.active().export_csv();
+
+        let said = app.write_csv(&path);
+        assert!(said.starts_with("Wrote"), "{said}");
+
+        let mut reopened = SpreadsheetApp::new(1280.0, 800.0);
+        let said = reopened.read_csv(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert_eq!(reopened.sheets.active().export_csv(), before);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A read that cannot happen is named, not swallowed.
+    ///
+    /// "The file was not read" and "the file was read and was empty" are
+    /// opposite conclusions, and only one of them is about the user's data.
+    #[test]
+    fn a_read_that_fails_says_so() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let missing = std::env::temp_dir().join("slateos-sheet-door-no-such-file.csv");
+        std::fs::remove_file(&missing).ok();
+
+        let said = app.read_csv(&missing);
+        assert!(said.starts_with(FILE_FAILED_PREFIX), "{said}");
+        assert!(said.contains("read"), "{said}");
+    }
 
     // ------------------------------------------------------------------
     // The window

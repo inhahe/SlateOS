@@ -735,10 +735,62 @@ impl Default for ProgressTracker {
 // Simulated Benchmark Runners
 // ============================================================================
 
-// In a real Slate OS environment, these functions would use precise timing
-// (rdtsc, kernel timers) to measure actual hardware performance.  For
-// initial development we compute deterministic scores that exercise the
-// scoring/aggregation/rendering pipeline.
+// HOW THESE MEASURE, AND WHAT THEY USED TO DO INSTEAD.
+//
+// Until 2026-09-15 every function here performed real work, threw the result
+// away, and returned a constant. `measure_integer_ops` ran 500,000 iterations
+// of integer arithmetic and returned `5200.0`, plus or minus twelve depending
+// on the parity of the accumulator -- with a comment explaining that the
+// perturbation existed "to prevent const-folding". So the CPU time was really
+// spent, the machinery that made the constant look computed was deliberate,
+// and the number had nothing to do with the machine it ran on.
+//
+// The file said so at the top and nothing the user saw did. A benchmark is the
+// worst possible host for that: its entire output is a claim about *this*
+// machine, and the numbers are meant to be compared with other people's.
+//
+// The CPU and memory tests below are real now. Nothing exotic was needed --
+// the work was already being done and only the clock was missing. Three notes:
+//
+//  * `std::hint::black_box` is what stops the optimiser removing work whose
+//    result is unused. That is what the parity trick was imitating, badly: it
+//    defeated const-folding by making the answer *look* data-dependent, which
+//    is precisely the illusion that made the constant hard to notice.
+//  * Sizes are chosen so each test runs for tens of milliseconds, well above
+//    the clock's resolution. A measurement shorter than the timer's granularity
+//    is a constant with extra steps. They are also chosen to be affordable
+//    UNOPTIMISED, because the suite runs them for real and a debug build is
+//    roughly an order of magnitude slower than the shipped one -- the first
+//    sizes tried cost this crate's tests 27 seconds.
+//  * A zero or negative elapsed time yields 0.0 rather than an infinity. A
+//    clock that did not move is a failed measurement, and reporting infinite
+//    throughput would be a new fabrication of the same kind.
+//
+// The disk and graphics tests are NOT measured and still return constants --
+// see `known-issues.md`. They are the ones that cannot be fixed by timing the
+// work, because they do not do the work: `simulate_disk_iops` sums the integers
+// 0..2000 and reports 520,000 IOPS.
+
+use std::hint::black_box;
+use std::time::Instant;
+
+/// Seconds spent running `work`, with the result kept alive.
+///
+/// `black_box` on the way out is load-bearing: without it the optimiser is
+/// entitled to delete a computation nobody reads, and the measurement becomes
+/// a measurement of nothing.
+fn seconds<T>(work: impl FnOnce() -> T) -> f64 {
+    let start = Instant::now();
+    let out = work();
+    let elapsed = start.elapsed().as_secs_f64();
+    black_box(out);
+    elapsed
+}
+
+/// `amount / seconds`, or 0.0 if the clock did not move.
+fn rate(amount: f64, secs: f64) -> f64 {
+    if secs > 0.0 { amount / secs } else { 0.0 }
+}
 
 /// Run CPU benchmarks. Returns a `CategoryResult` with all sub-tests.
 pub fn run_cpu_benchmark() -> CategoryResult {
@@ -774,7 +826,7 @@ pub fn run_cpu_benchmark() -> CategoryResult {
     // Matrix multiply score.
     let matrix_score = simulate_matrix_multiply();
     cat.sub_tests.push(SubTestResult::new(
-        "Matrix Multiply (256x256)",
+        "Matrix Multiply (128x128)",
         matrix_score,
         "Mflops/s",
         false,
@@ -793,120 +845,123 @@ pub fn run_cpu_benchmark() -> CategoryResult {
     cat
 }
 
-/// Simulated integer arithmetic benchmark.
+/// Integer arithmetic, in millions of operations per second.
+///
+/// Four integer operations per iteration: a multiply, an add, a shift and an
+/// exclusive-or. Counted rather than estimated, because the unit on the panel
+/// says "Mops/s" and a made-up operation count is the same defect as a made-up
+/// time.
 fn simulate_integer_benchmark() -> f64 {
-    // Perform actual integer work so this isn't trivially optimized away.
-    let mut accumulator: u64 = 0;
-    let iterations: u64 = 500_000;
-    let mut i: u64 = 0;
-    while i < iterations {
-        accumulator = accumulator.wrapping_add(i.wrapping_mul(17));
-        accumulator ^= accumulator >> 3;
-        i = i.wrapping_add(1);
-    }
-    // Use the accumulator to prevent dead-code elimination.
-    // Score is ops/s, scaled for display. Simulated reference ~5000 Mops/s.
-    let base_score = 5200.0;
-    // Tiny perturbation based on accumulator parity to prevent const-folding.
-    if accumulator & 1 == 0 {
-        base_score + 12.0
-    } else {
-        base_score - 8.0
-    }
+    const ITERATIONS: u64 = 8_000_000;
+    const OPS_PER_ITERATION: f64 = 4.0;
+    let secs = seconds(|| {
+        let mut accumulator: u64 = 0;
+        let mut i: u64 = 0;
+        while i < ITERATIONS {
+            accumulator = accumulator.wrapping_add(i.wrapping_mul(17));
+            accumulator ^= accumulator >> 3;
+            i = i.wrapping_add(1);
+        }
+        accumulator
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let ops = ITERATIONS as f64 * OPS_PER_ITERATION;
+    rate(ops / 1_000_000.0, secs)
 }
 
-/// Simulated floating-point benchmark.
+/// Floating point, in millions of operations per second.
+///
+/// Four floating-point operations per iteration: two multiplies, a square root
+/// and an add.
 fn simulate_float_benchmark() -> f64 {
-    let mut sum: f64 = 0.0;
-    let iterations = 200_000;
-    let mut i = 0u64;
-    while i < iterations {
-        let x = (i as f64) * 0.001;
-        sum += (x * 1.5).sqrt();
-        i = i.wrapping_add(1);
-    }
-    let base_score = 3100.0;
-    if sum > 0.0 {
-        base_score + 5.0
-    } else {
-        base_score
-    }
+    const ITERATIONS: u64 = 4_000_000;
+    const FLOPS_PER_ITERATION: f64 = 4.0;
+    let secs = seconds(|| {
+        let mut sum = 0.0_f64;
+        let mut i: u64 = 0;
+        while i < ITERATIONS {
+            #[allow(clippy::cast_precision_loss)]
+            let x = i as f64 * 0.001;
+            sum += (x * 1.5).sqrt();
+            i = i.wrapping_add(1);
+        }
+        sum
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let flops = ITERATIONS as f64 * FLOPS_PER_ITERATION;
+    rate(flops / 1_000_000.0, secs)
 }
 
-/// Simulated prime sieve benchmark.
+/// Sieve of Eratosthenes over a million, in primes found per second.
+///
+/// The count is the real one the sieve produced -- 78,498 below a million --
+/// rather than a reference figure. It used to return `78500.0 + count * 0.01`,
+/// which is a constant wearing the count as a disguise.
 fn simulate_prime_sieve() -> f64 {
-    let limit: usize = 10_000;
-    let mut sieve = vec![true; limit];
-    if limit > 0
-        && let Some(slot) = sieve.get_mut(0)
-    {
-        *slot = false;
-    }
-    if limit > 1
-        && let Some(slot) = sieve.get_mut(1)
-    {
-        *slot = false;
-    }
-    let mut p = 2usize;
-    // `checked_mul` rather than `p * p`: the loop bound is the square, so the
-    // square is computed before it is known to be small. Reaching a `p` whose
-    // square overflows would mean `limit` is near `usize::MAX`, in which case
-    // there is nothing left to sieve and stopping is the right answer anyway.
-    while let Some(square) = p.checked_mul(p) {
-        if square >= limit {
-            break;
+    const LIMIT: usize = 1_000_000;
+    let mut found = 0_usize;
+    let secs = seconds(|| {
+        let mut sieve = vec![true; LIMIT];
+        if let Some(slot) = sieve.get_mut(0) {
+            *slot = false;
         }
-        if sieve.get(p).copied().unwrap_or(false) {
-            let mut multiple = square;
-            while multiple < limit {
-                if let Some(slot) = sieve.get_mut(multiple) {
-                    *slot = false;
-                }
-                multiple = multiple.saturating_add(p);
+        if let Some(slot) = sieve.get_mut(1) {
+            *slot = false;
+        }
+        let mut p = 2_usize;
+        // `checked_mul` rather than `p * p`: the loop bound is the square, so
+        // the square is computed before it is known to be small.
+        while let Some(square) = p.checked_mul(p) {
+            if square >= LIMIT {
+                break;
             }
+            if sieve.get(p).copied().unwrap_or(false) {
+                let mut multiple = square;
+                while multiple < LIMIT {
+                    if let Some(slot) = sieve.get_mut(multiple) {
+                        *slot = false;
+                    }
+                    multiple = multiple.saturating_add(p);
+                }
+            }
+            p = p.saturating_add(1);
         }
-        p = p.saturating_add(1);
-    }
-    let prime_count = sieve.iter().filter(|&&is_prime| is_prime).count();
-    // Score based on prime count found (real bench would be timed).
-    // Reference: ~78500 primes/s at limit=1M.
-    let base = 78500.0;
-    // Use prime_count to avoid dead-code elimination.
-    base + (prime_count as f64 * 0.01)
+        found = sieve.iter().filter(|&&is_prime| is_prime).count();
+        found
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let primes = found as f64;
+    rate(primes, secs)
 }
 
-/// Simulated matrix multiply benchmark.
+/// A 256x256 matrix multiply, in millions of floating-point operations.
+///
+/// `2 * n^3` flops is the standard count for a naive matrix multiply: one
+/// multiply and one add per innermost step, `n^3` steps.
 fn simulate_matrix_multiply() -> f64 {
-    // Small matrix multiply to exercise FP pipeline.
-    let n = 32;
-    let mut a = vec![0.0f64; n * n];
-    let mut b = vec![0.0f64; n * n];
-    let mut c = vec![0.0f64; n * n];
-    // Walked as rows rather than as `i * n + j`: the row-major index arithmetic
-    // is the only integer arithmetic in this function, and `chunks_exact` both
-    // removes it and makes the row/column roles of `i` and `j` visible.
-    for (i, (a_row, b_row)) in a.chunks_exact_mut(n).zip(b.chunks_exact_mut(n)).enumerate() {
-        for (j, (a_cell, b_cell)) in a_row.iter_mut().zip(b_row.iter_mut()).enumerate() {
-            *a_cell = (i as f64) * 0.1 + (j as f64) * 0.01;
-            *b_cell = (j as f64) * 0.1 + (i as f64) * 0.01;
-        }
-    }
-    for (a_row, c_row) in a.chunks_exact(n).zip(c.chunks_exact_mut(n)) {
-        for (j, c_cell) in c_row.iter_mut().enumerate() {
-            let mut sum = 0.0f64;
-            for (a_val, b_row) in a_row.iter().zip(b.chunks_exact(n)) {
-                sum += a_val * b_row.get(j).copied().unwrap_or(0.0);
+    const N: usize = 128;
+    let secs = seconds(|| {
+        #[allow(clippy::cast_precision_loss)]
+        let a: Vec<f64> = (0..N * N).map(|i| (i % 97) as f64 * 0.5).collect();
+        #[allow(clippy::cast_precision_loss)]
+        let b: Vec<f64> = (0..N * N).map(|i| (i % 89) as f64 * 0.25).collect();
+        let mut c = vec![0.0_f64; N * N];
+        for i in 0..N {
+            for k in 0..N {
+                let aik = a.get(i * N + k).copied().unwrap_or(0.0);
+                for j in 0..N {
+                    let bkj = b.get(k * N + j).copied().unwrap_or(0.0);
+                    if let Some(slot) = c.get_mut(i * N + j) {
+                        *slot += aik * bkj;
+                    }
+                }
             }
-            *c_cell = sum;
         }
-    }
-    let trace: f64 = c
-        .chunks_exact(n)
-        .enumerate()
-        .filter_map(|(i, row)| row.get(i).copied())
-        .sum();
-    let base = 2050.0;
-    if trace > 0.0 { base + 15.0 } else { base }
+        c.first().copied().unwrap_or(0.0)
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let flops = 2.0 * (N as f64).powi(3);
+    rate(flops / 1_000_000.0, secs)
 }
 
 /// Run memory benchmarks.
@@ -3042,6 +3097,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+
     // Panicking on bad data is what a test is for: an `expect` that fires here
     // *is* the failure report, and rewriting it as a `match` would only bury
     // the message. CLAUDE.md scopes the defensive panic lints to non-test code
@@ -3059,6 +3115,76 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The CPU scores are measured, not constants.
+    ///
+    /// Each of these returned a fixed number until 2026-09-15 -- 5200 Mops/s,
+    /// 3100 Mflops/s, 78500 primes/s -- with real work performed and discarded
+    /// and a parity perturbation so the constant would not const-fold. The
+    /// old values are named here on purpose: a regression to any of them is
+    /// the exact defect this replaced, and "greater than zero" alone would not
+    /// catch it.
+    ///
+    /// Deliberately not asserting a *range*. The right range depends on the
+    /// machine and on whether the binary was optimised -- these read about
+    /// four times lower under `cargo test` than the fabricated constants
+    /// claimed -- and a benchmark that fails on a slow machine is a benchmark
+    /// that gets deleted.
+    #[test]
+    fn the_cpu_scores_are_measured_rather_than_returned() {
+        let cat = run_cpu_benchmark();
+        assert_eq!(cat.sub_tests.len(), 4);
+        for test in &cat.sub_tests {
+            assert!(
+                test.score > 0.0,
+                "{} scored {}, which is what a clock that did not move returns",
+                test.name,
+                test.score
+            );
+            for fabricated in [
+                5200.0, 5212.0, 5192.0, 3100.0, 3105.0, 78500.0, 4200.0, 4215.0,
+            ] {
+                assert!(
+                    (test.score - fabricated).abs() > 0.001,
+                    "{} scored {}, one of the constants this replaced",
+                    test.name,
+                    test.score
+                );
+            }
+        }
+    }
+
+    /// The clock is attached to the work.
+    ///
+    /// `seconds` is the whole difference between a measurement and a constant,
+    /// so it gets its own test rather than only being exercised through the
+    /// benchmarks. Lane B's framing of the general probe: vary the input,
+    /// assert the output varies. Here the input is how long the closure takes,
+    /// and the bounds are loose because a sleep is a floor and a loaded
+    /// machine can overshoot it by a lot -- what would falsify this is a
+    /// `seconds` that reports the same number either way, which is exactly
+    /// what the old code did.
+    #[test]
+    fn a_longer_piece_of_work_is_measured_as_longer() {
+        let short = seconds(|| std::thread::sleep(std::time::Duration::from_millis(5)));
+        let long = seconds(|| std::thread::sleep(std::time::Duration::from_millis(50)));
+        assert!(short >= 0.004, "5ms of work measured as {short}s");
+        assert!(
+            long > short,
+            "50ms ({long}s) did not measure longer than 5ms ({short}s)"
+        );
+    }
+
+    /// A clock that did not move reports nothing, not everything.
+    ///
+    /// Dividing by a zero elapsed time yields infinity, and an infinite score
+    /// on a panel is a new fabrication of the same kind as the old constants.
+    #[test]
+    fn a_stopped_clock_reports_zero_rather_than_infinity() {
+        assert!((rate(1000.0, 0.0) - 0.0).abs() < f64::EPSILON);
+        assert!((rate(1000.0, -1.0) - 0.0).abs() < f64::EPSILON);
+        assert!((rate(1000.0, 2.0) - 500.0).abs() < f64::EPSILON);
+    }
 
     // --- SubTestResult tests ---
 
@@ -3524,7 +3650,7 @@ mod tests {
         assert!(names.contains(&"Integer Arithmetic"));
         assert!(names.contains(&"Floating Point"));
         assert!(names.contains(&"Prime Sieve (1M)"));
-        assert!(names.contains(&"Matrix Multiply (256x256)"));
+        assert!(names.contains(&"Matrix Multiply (128x128)"));
     }
 
     #[test]

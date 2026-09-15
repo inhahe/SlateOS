@@ -2503,6 +2503,36 @@ mod tests {
         }
     }
     use super::*;
+    /// The picker is not merely open: it is DRAWN.
+    ///
+    /// `is_open()` returning true is not the same claim, and assuming it was
+    /// is how `apps/flashcards` shipped a dialog that took every keystroke and
+    /// painted nothing. Deleting the `picker.render` line in the renderer
+    /// leaves `is_open()` true and every other test green; this is the one
+    /// that notices.
+    #[test]
+    fn the_picker_is_drawn_when_it_is_open() {
+        // `render`, not `render_commands`: this app draws the picker in the
+        // App-trait method, over the top of what `render_commands` produced.
+        // The first version of this test called `render_commands` -- written
+        // by analogy with the seven other apps, where the picker IS in that
+        // function -- and failed against correct code. The render path is
+        // per-app and has to be read off the app.
+        let mut app = FileSearchApp::new();
+        let before = app.render(1024.0, 768.0).commands.len();
+        app.open_folder_dialog();
+        assert!(app.picker.is_open(), "no picker came up");
+        let after = app.render(1024.0, 768.0).commands.len();
+        let own = app.picker.render(&app.palette, 1024.0, 768.0).len();
+        assert!(
+            own > 0,
+            "the picker itself draws nothing, so this proves nothing"
+        );
+        assert!(
+            after >= before + own,
+            "the frame does not contain the picker's own {own} command(s) ({before} before, {after} after) -- something else grew instead"
+        );
+    }
 
     // -- The directory walk --
     //

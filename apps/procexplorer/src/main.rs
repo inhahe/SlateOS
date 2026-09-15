@@ -194,12 +194,6 @@ impl ProcessStatus {
 // Process info
 // ============================================================================
 
-/// The clock ticks a second holds, as `/proc` counts them.
-///
-/// 100 on every platform this runs on; named rather than spelled `100` at the
-/// one site that divides by it.
-const TICKS_PER_SECOND: u64 = 100;
-
 /// A `/proc` state letter as this window's own status.
 ///
 /// `D` -- uninterruptible sleep -- maps to `Sleeping` rather than gaining a
@@ -621,6 +615,15 @@ pub struct ProcessExplorerState {
     // -- Status bar ----------------------------------------------------------
     /// Status bar message.
     pub status_message: String,
+    /// Whether the last refresh could not read `/proc` at all.
+    ///
+    /// Shown rather than papered over. Until 2026-09-15 `main` called
+    /// `load_demo_data` first, so a host without `/proc` -- every developer
+    /// machine, and this one -- opened on six invented processes and an
+    /// invented 8 GiB of memory, and `refresh`'s failure left them in place.
+    /// **A process explorer that cannot see any process must say so**, because
+    /// the alternative is a window that looks exactly like a working one.
+    pub proc_unreadable: bool,
 }
 
 impl ProcessExplorerState {
@@ -667,6 +670,7 @@ impl ProcessExplorerState {
             refresh_interval: RefreshInterval::TwoSeconds,
             ms_since_refresh: 0,
             status_message: String::new(),
+            proc_unreadable: false,
         }
     }
 
@@ -674,12 +678,18 @@ impl ProcessExplorerState {
     // Data refresh
     // ========================================================================
 
-    /// Refresh all data from the OS.
+    /// Re-read the machine: its processes, and its memory, load and uptime.
     ///
-    /// In a real implementation this calls Slate OS syscalls to enumerate
-    /// processes, read system stats, and list network connections. Here
-    /// we define the API shape; the actual syscalls are provided by the
-    /// kernel's process and network subsystems.
+    /// The comment here said "in a real implementation this calls Slate OS
+    /// syscalls ... here we define the API shape". It had been out of date
+    /// since 2026-09-13, when `read_processes` started reading the real
+    /// `/proc` through `procinfo`. **A denial of a capability the program has
+    /// is the same defect as a claim to one it lacks**, and this one helped
+    /// keep `load_demo_data` in `main` for two days after it was redundant.
+    ///
+    /// Network connections are still not read; `/proc/net/tcp` is parsed by
+    /// nothing in this tree yet, so the Network tab shows what it has, which
+    /// is nothing.
     /// Every process `/proc` will admit to, or `None` if it cannot be read.
     ///
     /// Split out from [`refresh`](Self::refresh) so a test can point it at a
@@ -732,7 +742,7 @@ impl ProcessExplorerState {
                 user: String::new(),
                 command_line: cmdline,
                 start_time_secs: 0,
-                cpu_time_ms: ticks.saturating_mul(1000) / TICKS_PER_SECOND,
+                cpu_time_ms: ticks.saturating_mul(1000) / procinfo::TICKS_PER_SEC,
                 threads: Vec::new(),
                 handles: Vec::new(),
                 environment: Vec::new(),
@@ -740,6 +750,35 @@ impl ProcessExplorerState {
             });
         }
         Some(out)
+    }
+
+    /// Read the machine's own totals: memory, load, uptime.
+    ///
+    /// The same `ProcFs` the process list comes from. These used to be set by
+    /// `load_demo_data` -- 8 GiB total, 33% CPU, load 1.23, 86472 seconds of
+    /// uptime -- numbers chosen to look like a working machine, on every host
+    /// including this one.
+    ///
+    /// Each field is left at its previous value when the kernel does not
+    /// publish it, rather than zeroed: `MemInfo`'s fields are individually
+    /// optional, and a zero drawn in a bar chart is a measurement of nothing
+    /// that reads as a measurement of zero.
+    fn read_system(&mut self, fs: &procinfo::ProcFs) {
+        if let Ok(Some(mem)) = fs.memory() {
+            let kib = |v: Option<u64>| v.unwrap_or(0).saturating_mul(1024);
+            self.system_info.total_memory = kib(mem.total_kib);
+            self.system_info.free_memory = kib(mem.free_kib);
+            self.system_info.cached_memory = kib(mem.cached_kib);
+            self.system_info.used_memory = mem.used_kib().unwrap_or(0).saturating_mul(1024);
+            self.system_info.swap_total = kib(mem.swap_total_kib);
+            self.system_info.swap_used = mem.swap_used_kib().unwrap_or(0).saturating_mul(1024);
+        }
+        if let Ok(Some(load)) = fs.load_average() {
+            self.system_info.load_avg = [load.one as f32, load.five as f32, load.fifteen as f32];
+        }
+        if let Ok(Some(up)) = fs.uptime() {
+            self.system_info.uptime_secs = up.up.as_secs();
+        }
     }
 
     pub fn refresh(&mut self) {
@@ -758,9 +797,14 @@ impl ProcessExplorerState {
         // developer host and on any machine where it has not been mounted
         // yet, and an explorer that empties itself on a boot-order accident
         // is worse than one that keeps the last list it had.
-        if let Some(processes) = Self::read_processes(&procinfo::ProcFs::new()) {
+        let fs = procinfo::ProcFs::new();
+        if let Some(processes) = Self::read_processes(&fs) {
             self.processes = processes;
+            self.proc_unreadable = false;
+        } else {
+            self.proc_unreadable = true;
         }
+        self.read_system(&fs);
 
         self.rebuild_visible_list();
         self.update_histories();
@@ -908,6 +952,15 @@ impl ProcessExplorerState {
     /// Update the status bar message.
     fn update_status(&mut self) {
         let total = self.processes.len();
+        if self.proc_unreadable && self.processes.is_empty() {
+            self.status_message = format!(
+                "Cannot read {} -- nothing here is a measurement of this machine",
+                procinfo::ProcFs::new().root().display()
+            );
+            self.system_info.process_count = 0;
+            self.system_info.running_count = 0;
+            return;
+        }
         let running = self
             .processes
             .iter()
@@ -934,13 +987,29 @@ impl ProcessExplorerState {
             && let Some(&proc_idx) = self.visible_indices.get(sel)
             && let Some(proc) = self.processes.get(proc_idx)
         {
-            let pid = proc.pid;
-            let name = proc.name.clone();
-            // In production: sys_process_kill(pid)
-            self.status_message = format!("Killed process {name} (PID {pid})");
-            self.processes.remove(proc_idx);
-            self.rebuild_visible_list();
+            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "killed");
         }
+    }
+
+    /// Why a signal cannot be sent, named for the process it was aimed at.
+    ///
+    /// These three controls used to report the act and then **make the report
+    /// come true in the display**: `kill_selected` said "Killed process X" and
+    /// removed the row, `pause_selected` said "Paused X" and set the row to
+    /// Stopped. That is the worst form this defect takes, because the window
+    /// then agrees with itself -- the process disappears from the list exactly
+    /// as it would have if it had died, so **nothing inside the program can
+    /// tell the user otherwise.** A person who believes a runaway process is
+    /// dead stops trying to kill it.
+    ///
+    /// Sending a signal needs `kill(2)`, which is stateful and therefore
+    /// reachable only through the C ABI per `design-decisions.md` §768 --
+    /// `posix::signal::kill` as a Rust dependency is the route that looks
+    /// right and resolves to a stub answering `-ENOSYS`. That makes it
+    /// `libcall`'s to expose, and `libcall` is not in this lane's tree; see
+    /// `requests/c-b-a-process-manager-needs-a-way-to-send-a-signal.md`.
+    fn cannot_signal(name: &str, pid: u32, verb: &str) -> String {
+        format!("{name} (PID {pid}) was not {verb}: nothing here can signal a process yet")
     }
 
     /// Pause (stop) the selected process.
@@ -949,9 +1018,7 @@ impl ProcessExplorerState {
             && let Some(&proc_idx) = self.visible_indices.get(sel)
             && let Some(proc) = self.processes.get_mut(proc_idx)
         {
-            // In production: sys_process_stop(proc.pid)
-            proc.status = ProcessStatus::Stopped;
-            self.status_message = format!("Paused {} (PID {})", proc.name, proc.pid);
+            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "paused");
         }
     }
 
@@ -961,9 +1028,7 @@ impl ProcessExplorerState {
             && let Some(&proc_idx) = self.visible_indices.get(sel)
             && let Some(proc) = self.processes.get_mut(proc_idx)
         {
-            // In production: sys_process_continue(proc.pid)
-            proc.status = ProcessStatus::Running;
-            self.status_message = format!("Resumed {} (PID {})", proc.name, proc.pid);
+            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "resumed");
         }
     }
 
@@ -1341,32 +1406,24 @@ impl ProcessExplorerState {
         let proc_idx = self.processes.iter().position(|p| p.pid == target_pid);
 
         match action {
+            // The same three controls again, reached from the right-click
+            // menu rather than the toolbar. Repairing `kill_selected` alone
+            // would have left this pair saying "Killed X" two lines away --
+            // `scripts/find-claimed-acts.py` is what caught them, having been
+            // written for this exact defect an hour earlier.
             ContextAction::Kill => {
-                if let Some(idx) = proc_idx {
-                    let name = self
-                        .processes
-                        .get(idx)
-                        .map(|p| p.name.clone())
-                        .unwrap_or_default();
-                    self.processes.remove(idx);
-                    self.rebuild_visible_list();
-                    self.status_message = format!("Killed {name} (PID {target_pid})");
+                if let Some(proc) = proc_idx.and_then(|i| self.processes.get(i)) {
+                    self.status_message = Self::cannot_signal(&proc.name, target_pid, "killed");
                 }
             }
             ContextAction::Pause => {
-                if let Some(idx) = proc_idx
-                    && let Some(proc) = self.processes.get_mut(idx)
-                {
-                    proc.status = ProcessStatus::Stopped;
-                    self.status_message = format!("Paused {} (PID {target_pid})", proc.name);
+                if let Some(proc) = proc_idx.and_then(|i| self.processes.get(i)) {
+                    self.status_message = Self::cannot_signal(&proc.name, target_pid, "paused");
                 }
             }
             ContextAction::Resume => {
-                if let Some(idx) = proc_idx
-                    && let Some(proc) = self.processes.get_mut(idx)
-                {
-                    proc.status = ProcessStatus::Running;
-                    self.status_message = format!("Resumed {} (PID {target_pid})", proc.name);
+                if let Some(proc) = proc_idx.and_then(|i| self.processes.get(i)) {
+                    self.status_message = Self::cannot_signal(&proc.name, target_pid, "resumed");
                 }
             }
             ContextAction::ChangePriority => {
@@ -2734,6 +2791,13 @@ impl ProcessExplorerState {
     // ========================================================================
 
     /// Populate the explorer with sample data for UI testing.
+    /// Fill the window with an invented machine. **Tests only.**
+    ///
+    /// This ran at startup until 2026-09-15. Besides six processes it set
+    /// `total_memory` to 8 GiB, `cpu_overall` to 33%, `load_avg` to
+    /// `[1.23, 0.98, 0.87]`, `uptime_secs` to 86472 and a list of network
+    /// connections -- an entire plausible machine, none of it this one.
+    #[cfg(test)]
     pub fn load_demo_data(&mut self) {
         self.processes = vec![
             make_demo_process(
@@ -3017,6 +3081,8 @@ impl Default for ProcessExplorerState {
 /// Create a demo `ProcessInfo` with reasonable defaults.
 // 9 args mirror the ProcessInfo fields one-to-one for demo construction.
 #[allow(clippy::too_many_arguments)]
+/// Build one invented process. **Tests only**; see `load_demo_data`.
+#[cfg(test)]
 fn make_demo_process(
     pid: u32,
     ppid: u32,
@@ -3135,10 +3201,13 @@ impl App for ProcessExplorerState {
 
 fn main() -> ExitCode {
     let mut explorer = ProcessExplorerState::new();
-    // Until a real process source exists this is what there is to show, and
-    // the window is worth opening on it: an empty list would read as a broken
-    // explorer rather than an unimplemented one.
-    explorer.load_demo_data();
+    // The comment that stood here said "until a real process source exists".
+    // One had existed since 2026-09-13 -- `refresh` reads the real `/proc`
+    // through `procinfo` -- and this call was left, so the window opened on
+    // `load_demo_data`'s invented processes and `refresh` then declined to
+    // replace them, because it keeps the previous list when it cannot read.
+    // **The careful reader was shadowed at startup by the thing it replaced.**
+    explorer.refresh();
     app::launch("procexplorer", &mut explorer)
 }
 
@@ -4111,6 +4180,168 @@ mod tests {
             state.ms_since_refresh, 0,
             "reaching the interval must refresh and reset"
         );
+    }
+
+    /// A kill that cannot happen is not reported as one.
+    ///
+    /// This is the shape worth keeping in mind: the old `kill_selected` said
+    /// "Killed process X (PID n)" **and removed the row**, so the window then
+    /// agreed with its own claim -- the process vanished from the list exactly
+    /// as it would have if it had died. Nothing inside the program could tell
+    /// the user otherwise.
+    #[test]
+    fn killing_a_process_neither_happens_nor_is_claimed() {
+        let mut state = ProcessExplorerState::new();
+        state.load_demo_data();
+        state.rebuild_visible_list();
+        let before = state.processes.len();
+        assert!(before > 0, "control: the fixture must hold processes");
+
+        state.selected_index = Some(0);
+        state.kill_selected();
+
+        assert_eq!(
+            state.processes.len(),
+            before,
+            "the row was removed, which makes the false claim consistent"
+        );
+        assert!(
+            !state.status_message.starts_with("Killed"),
+            "claimed a kill it cannot perform: {}",
+            state.status_message
+        );
+        assert!(
+            state.status_message.contains("not killed"),
+            "should name what did not happen: {}",
+            state.status_message
+        );
+    }
+
+    /// The right-click menu is the same three controls and had the same defect.
+    #[test]
+    fn the_context_menu_neither_signals_nor_claims_to() {
+        let mut state = ProcessExplorerState::new();
+        state.load_demo_data();
+        state.rebuild_visible_list();
+        let before = state.processes.len();
+        let pid = state.processes.first().map(|p| p.pid).unwrap_or(0);
+        assert!(before > 0, "control: the fixture must hold processes");
+
+        state.execute_context_action(ContextAction::Kill, pid);
+        assert_eq!(state.processes.len(), before, "the menu removed the row");
+        assert!(
+            state.status_message.contains("not killed"),
+            "{}",
+            state.status_message
+        );
+
+        let was = state.processes[0].status;
+        state.execute_context_action(ContextAction::Pause, pid);
+        assert_eq!(state.processes[0].status, was, "the menu changed the row");
+        assert!(
+            state.status_message.contains("not paused"),
+            "{}",
+            state.status_message
+        );
+    }
+
+    /// Pause and resume likewise leave the process alone and say so.
+    #[test]
+    fn pausing_and_resuming_neither_happen_nor_are_claimed() {
+        let mut state = ProcessExplorerState::new();
+        state.load_demo_data();
+        state.rebuild_visible_list();
+        state.selected_index = Some(0);
+        let was = state.processes[0].status;
+
+        state.pause_selected();
+        assert_eq!(
+            state.processes[0].status, was,
+            "the row was changed to match the claim"
+        );
+        assert!(
+            state.status_message.contains("not paused"),
+            "{}",
+            state.status_message
+        );
+
+        state.resume_selected();
+        assert_eq!(state.processes[0].status, was);
+        assert!(
+            state.status_message.contains("not resumed"),
+            "{}",
+            state.status_message
+        );
+    }
+
+    /// With no `/proc` to read, the window says so rather than inventing one.
+    ///
+    /// `main` called `load_demo_data` before `refresh`, and `refresh` keeps
+    /// the previous list when it cannot read -- so on every host without
+    /// `/proc` the invented processes stayed, and the invented 8 GiB of memory
+    /// with them. The two halves were each defensible and together they were a
+    /// process explorer showing a machine that does not exist.
+    #[test]
+    fn an_unreadable_proc_is_reported_and_not_filled_in() {
+        let dir = std::env::temp_dir().join(format!(
+            "procexplorer-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut state = ProcessExplorerState::new();
+        let fs = procinfo::ProcFs::at(&dir);
+        assert!(
+            ProcessExplorerState::read_processes(&fs).is_none(),
+            "control: the fixture directory must not be readable as a /proc"
+        );
+
+        state.proc_unreadable = true;
+        state.update_status();
+
+        assert!(state.processes.is_empty(), "invented a process list");
+        assert_eq!(state.system_info.total_memory, 0, "invented a memory size");
+        assert!(
+            state.status_message.contains("Cannot read"),
+            "should say it cannot read: {}",
+            state.status_message
+        );
+    }
+
+    /// Memory, load and uptime come from the same `/proc` the processes do.
+    #[test]
+    fn the_system_figures_are_read_and_not_invented() {
+        let dir = std::env::temp_dir().join(format!(
+            "procexplorer-sys-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meminfo"),
+            b"MemTotal:       2048 kB\nMemFree:         512 kB\nCached:          256 kB\n\
+              SwapTotal:      1024 kB\nSwapFree:        768 kB\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("loadavg"), b"0.50 0.25 0.10 1/99 1234\n").unwrap();
+        std::fs::write(dir.join("uptime"), b"1234.50 5678.00\n").unwrap();
+
+        let mut state = ProcessExplorerState::new();
+        state.read_system(&procinfo::ProcFs::at(&dir));
+
+        assert_eq!(state.system_info.total_memory, 2048 * 1024);
+        assert_eq!(state.system_info.free_memory, 512 * 1024);
+        assert_eq!(state.system_info.cached_memory, 256 * 1024);
+        assert_eq!(state.system_info.swap_total, 1024 * 1024);
+        assert_eq!(
+            state.system_info.swap_used,
+            (1024 - 768) * 1024,
+            "swap used is total minus free, not a field of its own"
+        );
+        assert_eq!(state.system_info.load_avg, [0.5, 0.25, 0.10]);
+        assert_eq!(state.system_info.uptime_secs, 1234);
     }
 
     /// A single long tick refreshes once rather than being ignored.

@@ -9,6 +9,11 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# The export replaces a file of the user's VPN profiles. `fs::write`
+# truncates the target first, so an interrupted write leaves neither the
+# old profiles nor the new ones.
+safeio = { path = "../safeio" }
+
 [dev-dependencies]
 # Import and Export drive a real file chooser over a real directory listing, so
 # the round-trip tests need a directory that is theirs alone and goes away when

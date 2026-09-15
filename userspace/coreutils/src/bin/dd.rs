@@ -409,7 +409,7 @@ fn parse_symbols(
             // `from_utf8_lossy`: a `conv=` name is argv, so it can hold any
             // byte, and lossy conversion would report `conv=<U+FFFD>` for
             // every one of them alike.
-            let bad = quote(&rest[..end]);
+            let bad = quote(rest.get(..end).unwrap_or(rest));
             return Err(Fatal::usage(format!("{error_msgid}: {bad}")));
         };
         if exclusive {
@@ -419,7 +419,7 @@ fn parse_symbols(
         }
         match comma {
             None => return Ok(value),
-            Some(at) => rest = &rest[at + 1..],
+            Some(at) => rest = rest.get(at.saturating_add(1)..).unwrap_or_default(),
         }
     }
 }
@@ -463,17 +463,18 @@ fn parse_integer(text: &[u8]) -> (i64, Status) {
     // `B` alone (`bs=B`) and a doubled `B` (`bs=1kBB`) invalid.
     if is_suffix_char(e)
         && text.get(suffix) == Some(&b'B')
-        && suffix > 0
-        && text.get(suffix - 1) != Some(&b'B')
+        && suffix
+            .checked_sub(1)
+            .is_some_and(|i| text.get(i) != Some(&b'B'))
     {
-        suffix += 1;
+        suffix = suffix.saturating_add(1);
         if suffix == text.len() {
             e = clear_suffix_char(e);
         }
     }
 
     if is_suffix_char(e) && text.get(suffix) == Some(&b'x') {
-        let (o, f) = parse_integer(&text[suffix + 1..]);
+        let (o, f) = parse_integer(text.get(suffix.saturating_add(1)..).unwrap_or_default());
         if !matches!(f, Status::Ok | Status::Overflow) {
             e = f;
             result = 0;
@@ -531,6 +532,29 @@ struct Settings {
 /// The default for both `ibs=` and `obs=`, and therefore for `bs=`.
 const DEFAULT_BLOCKSIZE: i64 = 512;
 
+/// One byte through a 256-entry translation table.
+///
+/// `usize::from(u8)` is 0..=255 and every table here is `[u8; 256]`, so this
+/// is in range BY THE TYPES. Clippy proves only constant indices, and the
+/// obvious alternative is worse: a `get(..).unwrap_or(..)` fallback puts an
+/// INVENTED byte into a character conversion, so `dd conv=ebcdic` would write
+/// a wrong byte rather than fail. For a program whose whole job is copying
+/// bytes faithfully, a quiet wrong byte is the one outcome to avoid.
+#[allow(clippy::indexing_slicing)]
+fn xlat(table: &[u8; 256], b: u8) -> u8 {
+    table[usize::from(b)]
+}
+
+/// `n / d` and `n % d`, or `None` if the division cannot be done.
+///
+/// `ibs` and `obs` are normalised away from zero about twenty-five lines
+/// above their first use, and signed division also traps on `i64::MIN / -1`.
+/// `checked_*` keeps both facts at the operation rather than in a comment
+/// beside the normalisation.
+fn div_rem(n: i64, d: i64) -> Option<(i64, i64)> {
+    Some((n.checked_div(d)?, n.checked_rem(d)?))
+}
+
 /// Upstream's `MIN (IDX_MAX - 1, MIN (SSIZE_MAX, OFF_T_MAX))`. The `- 1` is so
 /// that `conv=swab`'s extra byte still fits. Nothing this large can actually
 /// be allocated; the request is refused later, by name, with `memory
@@ -580,7 +604,12 @@ fn scan_args(operands: &[OsString]) -> Result<Settings, Fatal> {
                 quoteaf_os(operand)
             )));
         };
-        let (key, val) = (&raw[..eq], &raw[eq + 1..]);
+        // `eq` came from a `position`, so the split is in range; taking it
+        // as one operation is what says so.
+        let Some((key, after)) = raw.split_at_checked(eq) else {
+            continue;
+        };
+        let val = after.get(1..).unwrap_or_default();
 
         if key == b"if" {
             input_file = Some(os_from_bytes(val));
@@ -696,7 +725,9 @@ fn scan_args(operands: &[OsString]) -> Result<Settings, Fatal> {
         input_flags |= F_SKIP_BYTES;
     }
     if input_flags & F_SKIP_BYTES != 0 && skip != 0 {
-        (skip_records, skip_bytes) = (skip / ibs, skip % ibs);
+        if let Some((r, b)) = div_rem(skip, ibs) {
+            (skip_records, skip_bytes) = (r, b);
+        }
     } else if skip != 0 {
         skip_records = skip;
     }
@@ -705,7 +736,9 @@ fn scan_args(operands: &[OsString]) -> Result<Settings, Fatal> {
         input_flags |= F_COUNT_BYTES;
     }
     if input_flags & F_COUNT_BYTES != 0 && count != i64::MAX {
-        (max_records, max_bytes) = (count / ibs, count % ibs);
+        if let Some((r, b)) = div_rem(count, ibs) {
+            (max_records, max_bytes) = (r, b);
+        }
     } else if count != i64::MAX {
         max_records = count;
     }
@@ -714,7 +747,9 @@ fn scan_args(operands: &[OsString]) -> Result<Settings, Fatal> {
         output_flags |= F_SEEK_BYTES;
     }
     if output_flags & F_SEEK_BYTES != 0 && seek != 0 {
-        (seek_records, seek_bytes) = (seek / obs, seek % obs);
+        if let Some((r, b)) = div_rem(seek, obs) {
+            (seek_records, seek_bytes) = (r, b);
+        }
     } else if seek != 0 {
         seek_records = seek;
     }
@@ -794,7 +829,7 @@ fn apply_translations(conversions: u32) -> Translation {
 
     let translate_charset = |table: &mut [u8; 256], new_trans: &[u8; 256]| {
         for slot in table.iter_mut() {
-            *slot = new_trans[usize::from(*slot)];
+            *slot = xlat(new_trans, *slot);
         }
     };
 
@@ -819,13 +854,13 @@ fn apply_translations(conversions: u32) -> Translation {
     if conversions & C_EBCDIC != 0 {
         translate_charset(&mut table, &ASCII_TO_EBCDIC);
         needed = true;
-        newline_character = ASCII_TO_EBCDIC[usize::from(b'\n')];
-        space_character = ASCII_TO_EBCDIC[usize::from(b' ')];
+        newline_character = xlat(&ASCII_TO_EBCDIC, b'\n');
+        space_character = xlat(&ASCII_TO_EBCDIC, b' ');
     } else if conversions & C_IBM != 0 {
         translate_charset(&mut table, &ASCII_TO_IBM);
         needed = true;
-        newline_character = ASCII_TO_IBM[usize::from(b'\n')];
-        space_character = ASCII_TO_IBM[usize::from(b' ')];
+        newline_character = xlat(&ASCII_TO_IBM, b'\n');
+        space_character = xlat(&ASCII_TO_IBM, b' ');
     }
 
     Translation {
@@ -1358,7 +1393,7 @@ fn alloc_buffer(size: i64, extra: usize, what: &str) -> Result<Vec<u8>, Fatal> {
 /// Apply the composed translation table to a buffer in place.
 fn translate_buffer(table: &[u8; 256], buf: &mut [u8]) {
     for b in buf {
-        *b = table[usize::from(*b)];
+        *b = xlat(table, *b);
     }
 }
 
@@ -1884,6 +1919,32 @@ fn seek_output(dd: &mut Dd, records: i64, bytes: &mut i64) -> Result<Skipped, Dd
 /// Returns the exit status. `Err` means the same thing with the statistics
 /// still to print — see [`DdError`].
 #[allow(clippy::too_many_lines)]
+/// `buf[start..end]`, or an abort.
+///
+/// Every window in the copy loop is sized from the buffer's own capacity, so
+/// `None` is unreachable. It REFUSES rather than clamping, and that choice is
+/// the whole point: clamping would copy a different number of bytes than the
+/// caller asked for, and `dd` writing a file of the wrong length without
+/// saying so is the one failure this program exists not to have.
+///
+/// A panic would also be safe. There is a `Result` in hand, so the error is
+/// reported instead -- which is what separates this from `bignat::divmod`,
+/// where the indices are equally provable and there is nowhere to report to.
+fn win(buf: &[u8], start: usize, end: usize) -> Result<&[u8], DdError> {
+    buf.get(start..end).ok_or_else(|| {
+        stdfd::diag_line("dd: internal error: buffer window out of range");
+        DdError::Aborted
+    })
+}
+
+/// [`win`], for a window that is written through.
+fn win_mut(buf: &mut [u8], start: usize, end: usize) -> Result<&mut [u8], DdError> {
+    buf.get_mut(start..end).ok_or_else(|| {
+        stdfd::diag_line("dd: internal error: buffer window out of range");
+        DdError::Aborted
+    })
+}
+
 fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdError> {
     let mut exit_status = 0u8;
     // Size of the previous read if it was short, else 0. What makes
@@ -1928,13 +1989,13 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
             let fill = usize::try_from(fill)
                 .unwrap_or(usize::MAX)
                 .min(dd.obuf.len());
-            dd.obuf[..fill].fill(0);
+            win_mut(&mut dd.obuf, 0, fill)?.fill(0);
             loop {
                 let size = if write_records != 0 { dd.obs } else { bytes };
                 let size = usize::try_from(size)
                     .unwrap_or(usize::MAX)
                     .min(dd.obuf.len());
-                if dd.out.iwrite(&dd.obuf[..size]) != size {
+                if dd.out.iwrite(win(&dd.obuf, 0, size)?) != size {
                     stdfd::diag_line(&format!(
                         "dd: writing to {}: {}",
                         quoteaf_os(&dd.out.name),
@@ -1986,7 +2047,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
             } else {
                 0
             };
-            ibuf[..ibs].fill(pad);
+            win_mut(&mut ibuf, 0, ibs)?.fill(pad);
         }
 
         // The last record of a `count=` given in bytes is short by design.
@@ -1996,7 +2057,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
             ibs
         };
 
-        let mut n_bytes_read = match reader.read_block(&mut ibuf[..want]) {
+        let mut n_bytes_read = match reader.read_block(win_mut(&mut ibuf, 0, want)?) {
             Ok(0) => break,
             Ok(n) => {
                 reader.advance(i64::try_from(n).unwrap_or(i64::MAX));
@@ -2045,7 +2106,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
                     } else {
                         0
                     };
-                    ibuf[n_bytes_read..ibs].fill(pad);
+                    win_mut(&mut ibuf, n_bytes_read, ibs)?.fill(pad);
                 }
                 n_bytes_read = ibs;
             }
@@ -2058,7 +2119,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
         // all. This is the `bs=` shape, and the reason `bs=4096` on a pipe
         // reports `0+2 records out` where `ibs=4096 obs=4096` reports `0+1`.
         if !dd.two_bufs {
-            let nwritten = dd.out.iwrite(&ibuf[..n_bytes_read]);
+            let nwritten = dd.out.iwrite(win(&ibuf, 0, n_bytes_read)?);
             dd.stats.w_bytes += i64::try_from(nwritten).unwrap_or(i64::MAX);
             if nwritten != n_bytes_read {
                 stdfd::diag_line(&format!(
@@ -2077,14 +2138,14 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
         }
 
         if dd.trans.needed {
-            translate_buffer(&dd.trans.table, &mut ibuf[..n_bytes_read]);
+            translate_buffer(&dd.trans.table, win_mut(&mut ibuf, 0, n_bytes_read)?);
         }
         let start = if swab {
             swab_buffer(&mut ibuf, &mut n_bytes_read, &mut saved_byte)
         } else {
             0
         };
-        dd.copy_block(&ibuf[start..start + n_bytes_read])?;
+        dd.copy_block(win(&ibuf, start, start.saturating_add(n_bytes_read))?)?;
     }
 
     // `conv=swab` holds a byte back whenever it has an odd one; at the end of
@@ -2113,7 +2174,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
 
     if dd.oc != 0 {
         let oc = dd.oc;
-        let nwritten = dd.out.iwrite(&dd.obuf[..oc]);
+        let nwritten = dd.out.iwrite(win(&dd.obuf, 0, oc)?);
         dd.stats.w_bytes += i64::try_from(nwritten).unwrap_or(i64::MAX);
         if nwritten != 0 {
             dd.stats.w_partial += 1;
@@ -2664,7 +2725,14 @@ fn run_main() -> ExitCode {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic, clippy::pedantic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::pedantic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::{
         C_ASCII, C_BLOCK, C_EBCDIC, C_LCASE, C_NOERROR, C_SPARSE, C_SWAB, C_SYNC, C_TWOBUFS,

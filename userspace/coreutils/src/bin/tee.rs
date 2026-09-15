@@ -66,11 +66,21 @@
 //!
 //! # What is deliberately not here
 //!
-//! * **`-i` is accepted and does nothing.** It ignores `SIGINT`, and there is
-//!   no `SIGINT`. Accepting it matters more than refusing it would: `cmd |
-//!   tee -i log` is written by scripts that have no idea which OS they land
-//!   on, and rejecting the option would fail the whole pipeline over a request
-//!   that is already satisfied.
+//! * ~~**`-i` is accepted and does nothing.**~~ **Implemented 2026-09-15.**
+//!   The reasoning above was sound and its premise expired. It read: "It
+//!   ignores `SIGINT`, and there is no `SIGINT` ... rejecting the option would
+//!   fail the whole pipeline over a request that is already satisfied." The
+//!   last clause was the load-bearing one, and it is what stopped being true:
+//!   `posix/src/signal.rs` corrected its own "our OS doesn't deliver Unix
+//!   signals" on 2026-09-07, and `^C` now arrives as `SIGINT`. A request that
+//!   was satisfied by the absence of signals is not satisfied any more, so
+//!   `cmd | tee -i log` would have died on an interrupt exactly as the flag
+//!   asks it not to.
+//!
+//!   Worth keeping as written rather than deleted: an option that does nothing
+//!   because the thing it asks for is already true is NOT the same defect as
+//!   one that does nothing while the user is told otherwise. It only became
+//!   the second kind when the premise moved underneath it.
 //! * **No `iopoll`.** Upstream watches the first live output *while blocked
 //!   reading*, so a `nopipe` run whose outputs have all become broken pipes
 //!   ends immediately rather than at the next read. Reproducing that needs
@@ -295,7 +305,40 @@ enum Sink {
     File(File),
 }
 
+/// Discard `SIGINT` for this process, which is all `-i` asks for.
+///
+/// `SIG_IGN` rather than a handler: there is nothing to do on an interrupt
+/// beyond not dying, and a disposition survives `exec` where a handler
+/// function does not. `nohup` installs `SIG_IGN` for `SIGHUP` for the same
+/// reason, and declares `signal` the same way -- an `extern "C"` rather than a
+/// dependency on `posix`, which section 768 refuses for any part of it that
+/// keeps state.
+#[cfg(target_os = "linux")]
+fn ignore_sigint() {
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGINT: i32 = 2;
+    const SIG_IGN: usize = 1;
+    // SAFETY: installing `SIG_IGN` runs no user code and cannot fail in a way
+    // that matters here. The return value is the previous disposition, which
+    // nothing needs.
+    unsafe { signal(SIGINT, SIG_IGN) };
+}
+
+/// The dev host, where the tests run. Nothing to ignore and nothing to break:
+/// installing `SIG_IGN` here would change the *test process's* own response to
+/// Ctrl-C, which is not tee's business.
+#[cfg(not(target_os = "linux"))]
+fn ignore_sigint() {}
+
 fn run(settings: &Settings) -> ExitCode {
+    // Before a byte is copied, so an interrupt during the first read is
+    // already covered.
+    if settings.ignore_interrupts {
+        ignore_sigint();
+    }
+
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     let mut ok = true;
@@ -458,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn ignore_interrupts_is_accepted() {
+    fn ignore_interrupts_is_accepted_and_reaches_the_field_that_is_read() {
         // It cannot do anything here, but refusing it would fail a pipeline
         // over a request that is already satisfied.
         assert!(settings(&["-i"]).ignore_interrupts);

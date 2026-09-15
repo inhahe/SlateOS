@@ -4673,7 +4673,7 @@ mod tests {
         assert_ne!(
             control.player_state,
             PlayerState::Stopped,
-            "the control is broken: Space does not start playback, so the              assertion below would hold whether or not the picker intercepts"
+            "the control is broken: Space does not start playback, so the assertion below would hold whether or not the picker intercepts"
         );
 
         // The case: with the picker up, the same keystroke reaches the dialog.

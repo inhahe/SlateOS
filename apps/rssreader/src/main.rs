@@ -29,7 +29,7 @@ use appearance::Surface;
 use std::collections::HashMap;
 
 use guitk::color::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;
 use oswindow::app::{self, App, Response};
@@ -2080,10 +2080,9 @@ fn now_unix() -> u64 {
 }
 
 pub struct RssReaderApp {
-    /// The open or save picker, while one is up.
-    pub file_dialog: Option<FileDialog>,
-    /// Whether the picker that is up is saving rather than opening.
-    pub dialog_saves: bool,
+    /// The open or save picker. Holds the dialog, the saving flag and
+    /// the routing eleven applications used to write out by hand.
+    pub picker: FilePicker,
     pub width: f32,
     pub height: f32,
 
@@ -2141,8 +2140,7 @@ impl RssReaderApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
-            file_dialog: None,
-            dialog_saves: false,
+            picker: FilePicker::new(),
             feeds: Vec::new(),
             articles: Vec::new(),
             folders: Vec::new(),
@@ -2523,14 +2521,18 @@ impl RssReaderApp {
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in the search box behind it.
-        if self.file_dialog.is_some() {
-            let (w, h) = (self.width, self.height);
-            let action = match (event, self.file_dialog.as_mut()) {
-                (Event::Key(key), Some(dialog)) if key.pressed => dialog.handle_event(key, h),
-                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
-                _ => return EventResult::Ignored,
-            };
-            return self.apply_dialog_action(action);
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.status_message = if saving {
+                    self.write_opml_file(&path)
+                } else {
+                    self.read_any_file(&path)
+                };
+                return EventResult::Consumed;
+            }
+            Picked::Handled => return EventResult::Consumed,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
@@ -2556,44 +2558,10 @@ impl RssReaderApp {
     /// app had no way to obtain a byte. **The parsers were the hard part and
     /// they were already finished.**
     pub fn open_file_dialog(&mut self, saving: bool) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = if saving {
-            FileDialog::save()
-                .with_initial_path(start)
-                .with_filename(String::from("subscriptions.opml"))
+        if saving {
+            self.picker.open_to_write("subscriptions.opml");
         } else {
-            FileDialog::open().with_initial_path(start)
-        };
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.dialog_saves = saving;
-        self.file_dialog = Some(dialog);
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
-        match action {
-            DialogAction::None => EventResult::Consumed,
-            DialogAction::Cancelled => {
-                self.file_dialog = None;
-                EventResult::Consumed
-            }
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-                EventResult::Consumed
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                let saving = self.dialog_saves;
-                self.status_message = if saving {
-                    self.write_opml_file(&path)
-                } else {
-                    self.read_any_file(&path)
-                };
-                EventResult::Consumed
-            }
+            self.picker.open_to_read();
         }
     }
 
@@ -3372,11 +3340,7 @@ impl RssReaderApp {
         }
 
         // Last, so it is above everything.
-        if let Some(dialog) = &self.file_dialog {
-            for cmd in dialog.render(&self.palette, self.width, self.height) {
-                cmds.push(cmd);
-            }
-        }
+        cmds.extend(self.picker.render(&self.palette, self.width, self.height));
 
         cmds
     }

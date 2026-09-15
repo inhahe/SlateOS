@@ -34,7 +34,7 @@
 
 use appearance::Palette;
 use guitk::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
 use guitk::probe::Probe;
@@ -3429,8 +3429,9 @@ impl DbTab {
 
 /// Main application state.
 pub struct DbViewerApp {
-    /// The open or save picker, while one is up.
-    pub file_dialog: Option<FileDialog>,
+    /// The open or save picker. Holds the dialog, the saving flag and
+    /// the routing eleven applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the picker that is up will do with the path it returns.
     pub file_intent: FileIntent,
     pub tabs: Vec<DbTab>,
@@ -3483,7 +3484,7 @@ impl DbViewerApp {
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            file_dialog: None,
+            picker: FilePicker::new(),
             file_intent: FileIntent::ImportCsv,
             tabs: vec![tab],
             active_tab: 0,
@@ -3771,10 +3772,8 @@ impl DbViewerApp {
         }
 
         // Last, so it is above everything.
-        if let Some(dialog) = &self.file_dialog {
-            for cmd in dialog.render(&self.palette, l.window.w, l.window.h) {
-                f.push(cmd);
-            }
+        for cmd in self.picker.render(&self.palette, l.window.w, l.window.h) {
+            f.push(cmd);
         }
         f
     }
@@ -5197,14 +5196,16 @@ impl DbViewerApp {
     fn handle_event(&mut self, event: &Event, size: (f32, f32)) {
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in the SQL editor behind it.
-        if self.file_dialog.is_some() {
-            let action = match (event, self.file_dialog.as_mut()) {
-                (Event::Key(ke), Some(dialog)) if ke.pressed => dialog.handle_event(ke, size.1),
-                (Event::Mouse(me), Some(dialog)) => dialog.handle_mouse(me, size.0, size.1),
-                _ => return,
-            };
-            self.apply_dialog_action(action);
-            return;
+        match self.picker.handle(event, size.0, size.1) {
+            Picked::Chose(path) => {
+                self.status = match self.file_intent {
+                    FileIntent::Export(format) => self.write_table(&path, format),
+                    FileIntent::ImportCsv => self.read_csv_file(&path),
+                };
+                return;
+            }
+            Picked::Handled => return,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(ke) => self.handle_key(ke),
@@ -5249,42 +5250,17 @@ impl DbViewerApp {
     /// text surface the window had. That was an honest stopgap and it is now
     /// replaced, for a reason beyond tidiness: see `Target::Export`.
     pub fn open_file_dialog(&mut self, intent: FileIntent) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = match intent {
+        self.file_intent = intent;
+        match intent {
             FileIntent::Export(format) => {
                 let stem = self
                     .active_db_tab()
                     .and_then(|t| t.selected_table.clone())
                     .unwrap_or_else(|| String::from("table"));
-                FileDialog::save()
-                    .with_initial_path(start)
-                    .with_filename(format!("{stem}.{}", format.extension()))
+                self.picker
+                    .open_to_write(format!("{stem}.{}", format.extension()));
             }
-            FileIntent::ImportCsv => FileDialog::open().with_initial_path(start),
-        };
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.file_intent = intent;
-        self.file_dialog = Some(dialog);
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) {
-        match action {
-            DialogAction::None => {}
-            DialogAction::Cancelled => self.file_dialog = None,
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                self.status = match self.file_intent {
-                    FileIntent::Export(format) => self.write_table(&path, format),
-                    FileIntent::ImportCsv => self.read_csv_file(&path),
-                };
-            }
+            FileIntent::ImportCsv => self.picker.open_to_read(),
         }
     }
 
@@ -8664,7 +8640,7 @@ mod tests {
         let before = app.sql_input.clone();
 
         click_text(&mut app, FULL, "Export CSV");
-        assert!(app.file_dialog.is_some(), "no picker came up");
+        assert!(app.picker.is_open(), "no picker came up");
         assert_eq!(
             app.file_intent,
             FileIntent::Export(ExportFormat::Csv),
@@ -8678,7 +8654,7 @@ mod tests {
     fn importing_opens_a_picker() {
         let mut app = wired();
         click_text(&mut app, FULL, "Import");
-        assert!(app.file_dialog.is_some(), "no picker came up");
+        assert!(app.picker.is_open(), "no picker came up");
         assert_eq!(app.file_intent, FileIntent::ImportCsv);
     }
 
@@ -8796,7 +8772,7 @@ mod tests {
         let mut app = DbViewerApp::new();
         click_text(&mut app, FULL, "Export CSV");
         assert!(
-            app.file_dialog.is_none(),
+            !app.picker.is_open(),
             "asked for a path it had nothing to write to"
         );
         assert_eq!(app.status, "Nothing to export: no table selected");

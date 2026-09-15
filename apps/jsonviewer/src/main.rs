@@ -48,7 +48,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -1954,12 +1954,9 @@ struct App {
     input_focused: bool,
     /// Cursor position in input.
     cursor_pos: usize,
-    /// The file picker, while one is up.
-    ///
-    /// The only route a real document has into this viewer. Until 2026-09-15
-    /// there was none: `App::new` loaded `SAMPLE_JSON`, a document describing
-    /// the viewer itself, and that was the only thing it could ever show.
-    file_dialog: Option<FileDialog>,
+    /// The open or save picker. Holds the dialog, the saving flag and
+    /// the routing eleven applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the last open attempt did, for the status line.
     last_open: Option<String>,
     /// Width of the window.
@@ -2073,7 +2070,7 @@ impl App {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             documents: vec![doc],
-            file_dialog: None,
+            picker: FilePicker::new(),
             last_open: Some(String::from("Press Ctrl+O to open a JSON file")),
             active_tab: 0,
             next_tab_id: 2,
@@ -2713,33 +2710,7 @@ impl App {
     /// `handle_key` takes.
     /// Put the file picker up, listing the directory it starts in.
     pub fn open_file_dialog(&mut self) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = FileDialog::open().with_initial_path(start);
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.file_dialog = Some(dialog);
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
-        match action {
-            DialogAction::None => EventResult::Consumed,
-            DialogAction::Cancelled => {
-                self.file_dialog = None;
-                EventResult::Consumed
-            }
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-                EventResult::Consumed
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                self.last_open = Some(self.open_path(&path));
-                EventResult::Consumed
-            }
-        }
+        self.picker.open_to_read();
     }
 
     /// Read `path` into a new tab. Returns what to say about it.
@@ -2801,16 +2772,13 @@ impl App {
     fn handle_event(&mut self, event: &Event) -> EventResult {
         // The picker takes the event first while it is up, or a click meant
         // for a filename lands on the tree behind it.
-        if self.file_dialog.is_some() {
-            let (w, h) = (self.width, self.height);
-            let action = match (event, self.file_dialog.as_mut()) {
-                (Event::Key(key_ev), Some(dialog)) if key_ev.pressed => {
-                    dialog.handle_event(key_ev, h)
-                }
-                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
-                _ => return EventResult::Ignored,
-            };
-            return self.apply_dialog_action(action);
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                self.last_open = Some(self.open_path(&path));
+                return EventResult::Consumed;
+            }
+            Picked::Handled => return EventResult::Consumed,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(key_ev) => {
@@ -2904,7 +2872,7 @@ impl App {
             // shipped the same invisible-picker bug today by a different
             // route, which is why this line has a comment instead of being
             // one more field in a tuple.
-            self.file_dialog.is_some(),
+            self.picker.is_open(),
         )
     }
 
@@ -4552,9 +4520,7 @@ impl oswindow::app::App for App {
         let mut commands = self.render_commands();
         // Last, so it is above everything -- the same order in which
         // `handle_event` gives it the click.
-        if let Some(dialog) = &self.file_dialog {
-            commands.extend(dialog.render(&self.palette, width, height));
-        }
+        commands.extend(self.picker.render(&self.palette, width, height));
         RenderTree { commands }
     }
 }

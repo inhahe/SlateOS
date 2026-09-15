@@ -491,7 +491,7 @@ fn print_help() {
     println!("Rotate, retain and compress log files.");
     println!();
     println!("Options:");
-    println!("  -d, --dry-run       Say what would happen; change nothing");
+    println!("  -d, --debug         Don't do anything, just test and print debug");
     println!("  -f, --force         Rotate every log, whether due or not");
     println!("  -s, --state FILE    Use FILE instead of the default state file");
     println!("  -v, --verbose       Name every log considered");
@@ -538,7 +538,7 @@ fn parse_args(argv: &[std::ffi::OsString]) -> Args {
                 println!("logrotate {VERSION}");
                 process::exit(0);
             }
-            "-d" | "--dry-run" => a.dry_run = true,
+            "-d" | "--debug" | "--dry-run" => a.dry_run = true,
             "-f" | "--force" => a.force = true,
             "-v" | "--verbose" => a.verbose = true,
             "-s" | "--state" => {

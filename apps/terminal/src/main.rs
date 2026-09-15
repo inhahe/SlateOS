@@ -2087,8 +2087,27 @@ impl TerminalState {
         }
 
         // Resize screen lines
+        //
+        // Narrowing can cut a double-width character in half: the continuation
+        // is truncated away and the lead is left at the last column, still
+        // drawing as a wide glyph in a cell that is now the edge of the screen.
+        // A lead is only recognisable by asking the width table what its
+        // character is, because `continuation` marks the *second* half and the
+        // second half is the one that just vanished.
+        //
+        // This is not reflow. `resize` truncates and pads rather than
+        // rewrapping, so no line's text moves between rows and there is no
+        // pair to split anywhere else. An earlier commit here said "rewrap on
+        // resize remains", which named a thing this terminal does not do.
         for line in &mut self.screen {
             line.resize(new_cols);
+            if let Some(last) = new_cols.checked_sub(1)
+                && let Some(cell) = line.cells.get_mut(last)
+                && charwidth::char_width(cell.ch) == Some(2)
+            {
+                cell.ch = ' ';
+                cell.continuation = false;
+            }
         }
 
         // Add or remove rows
@@ -3317,6 +3336,39 @@ mod tests {
         assert_eq!(t.cursor_row, row + 1, "the wide character did not wrap");
         assert_eq!(t.screen[row + 1].cells[0].ch, '\u{4E2D}');
         assert!(t.screen[row + 1].cells[1].continuation);
+    }
+    #[test]
+    fn narrowing_the_window_cannot_leave_half_a_wide_character() {
+        // Resize truncates rather than reflowing, so the only way a pair can be
+        // split by something that is not a write is a narrowing that lands
+        // exactly on the seam: the continuation falls off the end and the lead
+        // stays, drawing two columns wide in a one-column space.
+        let mut t = TerminalState::new(TerminalConfig {
+            cols: 10,
+            rows: 3,
+            ..TerminalConfig::default()
+        });
+        t.put_char('a');
+        t.put_char('\u{4E2D}');
+        let row = t.cursor_row;
+        assert_eq!(t.screen[row].cells[1].ch, '\u{4E2D}', "fixture");
+        assert!(t.screen[row].cells[2].continuation, "fixture");
+
+        // 2 columns keeps the lead at index 1 and drops its continuation.
+        t.resize(2, 3);
+
+        assert_ne!(
+            t.screen[row].cells[1].ch,
+            '\u{4E2D}',
+            "the lead outlived the continuation it needed"
+        );
+        assert!(
+            t.screen[row]
+                .cells
+                .iter()
+                .all(|c| charwidth::char_width(c.ch) != Some(2)),
+            "a double-width character is still in a line narrowed onto its seam"
+        );
     }
 
     #[test]

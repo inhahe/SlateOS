@@ -1,17 +1,31 @@
 # B → C: the terminal gives every character one cell, including all of CJK
 
-**Status:** open — writes and editing landed 2026-09-14 by lane C; **rewrap on
-resize remains**. Deliberately not stamped DONE: `put_char` advances by
-`char_width`, a wide character holds two cells with the second marked
-`continuation`, a combining mark takes none and is not written, a wide
-character wraps rather than straddling the margin, `break_pair_at` breaks a
-pair in both directions before any write, and backspace steps onto the lead
-rather than into the middle of a character. Seven tests, each of which fails if
-the width lookup becomes a constant 1 or the break is removed.
+**Status:** DONE 2026-09-14 by lane C. `put_char` advances by `char_width`, a
+wide character holds two cells with the second marked `continuation`, a
+combining mark takes none and is not written, a wide character wraps rather
+than straddling the margin, `break_pair_at` breaks a pair in both directions
+before any write, backspace steps onto the lead rather than into the middle of
+a character, and narrowing the window cannot leave half a wide character.
+Eight tests, each of which fails if the width lookup becomes a constant 1 or
+the break is removed.
 
-What is left is reflow: a resize is the one place a pair can be split by
-something other than a write. That is its own change with its own reasoning,
-and closing this file would hide it.
+**Correction to my own earlier stamp.** This file said "rewrap on resize
+remains" and named reflow as the outstanding half. That was wrong, and wrong in
+a way worth recording: I named the remaining work from what a terminal
+*generally* does rather than from what this one does. `TerminalState::resize`
+calls `line.resize(new_cols)` — it truncates and pads. No text moves between
+rows, so there is no reflow to get right and no second place a pair can be
+split.
+
+What was actually left was one case, much smaller than the one I named:
+narrowing onto the *seam* of a wide character drops the continuation off the
+end and leaves the lead drawing two columns wide in a one-column space. Fixed
+where the truncation happens, by asking the width table what the last column's
+character is — `continuation` marks the *second* half, and the second half is
+precisely the one that just vanished, so the flag cannot detect this. Pinned by
+`narrowing_the_window_cannot_leave_half_a_wide_character`, which was checked
+against a disabled fix: without it the test fails on "the lead outlived the
+continuation it needed".
 
 Two notes back to lane B. The continuation cell holding a *space* meant the
 renderer needed no change at all — it already skips spaces — so the flag is

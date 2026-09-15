@@ -16,7 +16,8 @@
 //!   --version       Display version and exit
 //!   -q, --quiet     Suppress startup banner
 //!   -x FILE         Execute commands from FILE
-//!   --args          Pass remaining args to inferior
+//!   --args          Collect remaining args for the program. This build
+//!                   cannot run one, so they are reported, not passed.
 //!
 //! gdbserver [HOST:]PORT EXECUTABLE [ARGS...]
 //!   --help          Display help and exit
@@ -3517,7 +3518,18 @@ struct Args {
     show_version: bool,
     command_file: Option<Vec<u8>>,
     server_port: u16,
+    /// `--args` was given. On its own this changes nothing a user can see,
+    /// which is why the arguments below are kept: the flag's whole visible
+    /// effect is that they are collected and then reported as unpassable.
     pass_args: bool,
+    /// What `--args` gathered for the program, in order.
+    ///
+    /// Collected rather than dropped. This build cannot run a program at all
+    /// -- SlateOS has no ptrace -- so they cannot be delivered, and the choice
+    /// is between saying so and behaving exactly as if the user had not typed
+    /// them. `gdb --args ./prog --verbose` used to be indistinguishable from
+    /// `gdb ./prog`.
+    inferior_args: Vec<Vec<u8>>,
     /// The first `-`-prefixed argument neither personality recognised.
     ///
     /// Kept as bytes rather than reported at the parse site: an argument may
@@ -3543,6 +3555,7 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
         command_file: None,
         server_port: 0,
         pass_args: false,
+        inferior_args: Vec::new(),
         unknown_option: None,
     };
 
@@ -3587,7 +3600,21 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
                 if arg[0] != b'-' {
                     if args.binary_path.is_none() {
                         args.binary_path = Some(arg.to_vec());
+                    } else if args.pass_args {
+                        // Everything after the program is the program's, which
+                        // is what `--args` means. Without this branch they hit
+                        // the `if` above, find `binary_path` already set, and
+                        // fall off the end of the match.
+                        args.inferior_args.push(arg.to_vec());
                     }
+                } else if args.pass_args && args.binary_path.is_some() {
+                    // A DASHED argument after the program is the program's
+                    // too, and is the reason `--args` exists at all: `gdb
+                    // --args ./prog -q` must not read `-q` as gdb's own quiet
+                    // flag. It does not reach here -- `-q` matches an arm
+                    // above -- which is a separate defect recorded in
+                    // known-issues rather than fixed under cover of this one.
+                    args.inferior_args.push(arg.to_vec());
                 } else if arg != b"-" && args.unknown_option.is_none() {
                     // Was silently dropped, so `gdb --zzq` printed its banner
                     // and opened a debugger prompt. A non-dash argument is
@@ -3618,6 +3645,7 @@ fn parse_args_server(argc: i32, argv: *const *const u8) -> Args {
         command_file: None,
         server_port: 1234,
         pass_args: false,
+        inferior_args: Vec::new(),
         unknown_option: None,
     };
 
@@ -3683,7 +3711,10 @@ fn print_help_gdb(out: &mut dyn Write) {
     let _ = out.write_all(b"  --version, -v    Display version and exit\n");
     let _ = out.write_all(b"  -q, --quiet      Suppress startup banner\n");
     let _ = out.write_all(b"  -x FILE          Execute commands from FILE\n");
-    let _ = out.write_all(b"  --args           Pass remaining arguments to inferior\n");
+    let _ = out.write_all(
+        b"  --args           Collect remaining arguments for the program\n\
+                   (this build cannot run one; they are reported)\n",
+    );
 }
 
 // Reachable only from `main`, which the test harness replaces: this crate is
@@ -3780,6 +3811,27 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         let _ = out.flush();
     }
 
+    // `--args` collected arguments for a program this build cannot start.
+    // Reported rather than dropped, and NOT fatal: static inspection is what
+    // this debugger is for, and refusing to open the file over an argument
+    // that was always going to be undeliverable would help nobody.
+    if !args.inferior_args.is_empty() {
+        let stderr = io::stderr();
+        let mut err = stderr.lock();
+        let _ = err.write_all(
+            b"gdb: --args collected arguments for the program, and this build \
+cannot pass them.\n\
+SlateOS has no ptrace, so there is no inferior to receive them. They are \
+listed here rather than silently ignored:\n",
+        );
+        for a in &args.inferior_args {
+            let _ = err.write_all(b"  ");
+            let _ = err.write_all(a);
+            let _ = err.write_all(b"\n");
+        }
+        let _ = err.flush();
+    }
+
     // Execute command file if specified
     if let Some(ref cmd_file) = args.command_file {
         let path_str = match core::str::from_utf8(cmd_file) {
@@ -3827,6 +3879,83 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 )]
 mod tests {
     use super::*;
+
+    // ---------------- --args ----------------
+
+    /// Build a C-style argv and run the real parser over it.
+    ///
+    /// `parse_args_gdb` takes `*const *const u8` because it is called from
+    /// `main`, which is why nothing tested it before: the awkwardness was in
+    /// the calling convention rather than in the logic.
+    fn parse_gdb(argv: &[&str]) -> Args {
+        let owned: Vec<Vec<u8>> = argv
+            .iter()
+            .map(|s| {
+                let mut v = s.as_bytes().to_vec();
+                v.push(0);
+                v
+            })
+            .collect();
+        let ptrs: Vec<*const u8> = owned.iter().map(|v| v.as_ptr()).collect();
+        // SAFETY: `owned` outlives this call and keeps every buffer alive,
+        // each is NUL-terminated, and `argc` is the pointer count exactly.
+        let parsed = parse_args_gdb(i32::try_from(ptrs.len()).unwrap_or(0), ptrs.as_ptr());
+        drop(owned);
+        parsed
+    }
+
+    /// The arguments after the program are collected rather than dropped.
+    /// Before this, `gdb --args ./prog foo bar` was indistinguishable from
+    /// `gdb ./prog`.
+    #[test]
+    fn args_collects_what_follows_the_program() {
+        let a = parse_gdb(&["gdb", "--args", "./prog", "foo", "bar"]);
+        assert!(a.pass_args);
+        assert_eq!(a.binary_path.as_deref(), Some(&b"./prog"[..]));
+        assert_eq!(a.inferior_args, vec![b"foo".to_vec(), b"bar".to_vec()]);
+    }
+
+    /// A DASHED argument after the program belongs to the program. This is
+    /// most of the point of `--args`, and the arm that handles it is new.
+    #[test]
+    fn args_collects_a_dashed_argument_for_the_program() {
+        let a = parse_gdb(&["gdb", "--args", "./prog", "--verbose", "-x9"]);
+        assert_eq!(
+            a.inferior_args,
+            vec![b"--verbose".to_vec(), b"-x9".to_vec()]
+        );
+        assert!(a.unknown_option.is_none(), "not gdb's options to reject");
+    }
+
+    /// Without `--args`, nothing is collected. Extra operands are still
+    /// dropped exactly as before -- this change does not widen what the
+    /// parser accepts, only what `--args` does with it.
+    #[test]
+    fn without_args_nothing_is_collected() {
+        let a = parse_gdb(&["gdb", "./prog", "foo"]);
+        assert!(!a.pass_args);
+        assert!(a.inferior_args.is_empty());
+        assert_eq!(a.binary_path.as_deref(), Some(&b"./prog"[..]));
+    }
+
+    /// KNOWN WRONG, PINNED ON PURPOSE. An argument after the program that
+    /// happens to spell one of gdb's own short options is still eaten by
+    /// gdb: the match arm for `-q` is tried before the `--args` branch, so
+    /// `gdb --args ./prog -q` quiets gdb instead of passing `-q` along.
+    ///
+    /// Asserted rather than left undiscovered so that anyone who fixes the
+    /// arm ordering sees this test fail and updates it deliberately. See
+    /// known-issues.md
+    /// `TD-B-GDB-ARGS-LOSES-AN-ARGUMENT-THAT-SPELLS-ONE-OF-GDBS-OWN`.
+    #[test]
+    fn args_still_loses_an_argument_spelling_one_of_gdbs_own() {
+        let a = parse_gdb(&["gdb", "--args", "./prog", "-q"]);
+        assert!(a.quiet, "gdb took it (the defect)");
+        assert!(
+            a.inferior_args.is_empty(),
+            "and the program never sees it (the defect)"
+        );
+    }
 
     // ---- Helper ----
 

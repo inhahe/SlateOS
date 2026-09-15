@@ -38,7 +38,7 @@ use std::env;
 use std::fs::File;
 use std::io::{self, Write};
 use std::process;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // ============================================================================
 // Syscall interface
@@ -52,6 +52,10 @@ const SYS_TCP_SEND: u64 = 801;
 const SYS_TCP_RECV: u64 = 802;
 const SYS_TCP_CLOSE: u64 = 803;
 const SYS_DNS_RESOLVE: u64 = 820;
+/// `SYS_TCP_INFO` fills a 48-byte struct whose FIRST byte is the connection
+/// state. That byte is how `--connect-timeout` watches a non-blocking
+/// connect finish without blocking on it.
+const SYS_TCP_INFO: u64 = 849;
 
 /// Perform a 3-argument syscall via the `syscall` instruction.
 #[cfg(target_vendor = "slateos")]
@@ -171,6 +175,147 @@ fn tcp_connect(ip: u32, port: u16) -> Result<u64, CurlError> {
     Ok(ret as u64)
 }
 
+/// A wall-clock limit on one phase of the transfer, or no limit at all.
+///
+/// `0` means NO limit for both `--connect-timeout` and `--max-time`, which is
+/// curl's meaning and the reason this wraps an `Option` rather than a `u64`
+/// where zero would expire immediately. curl's own default for `--max-time`
+/// is 0, so getting that backwards would have made every transfer fail.
+#[derive(Clone, Copy)]
+struct Deadline(Option<Instant>);
+
+impl Deadline {
+    /// A limit `secs` from now; `secs == 0` means none.
+    fn after(secs: u64) -> Self {
+        Self(if secs == 0 {
+            None
+        } else {
+            // `checked_add` rather than `+`: a deadline far enough out to
+            // overflow the clock is one that never fires, which is the same
+            // answer as "no limit" and better than a panic.
+            Instant::now().checked_add(Duration::from_secs(secs))
+        })
+    }
+
+    fn is_set(self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Whichever of two limits fires first; unset only when both are.
+    ///
+    /// `--max-time` caps `--connect-timeout`: a thirty-second handshake budget
+    /// under `--max-time 5` must not be allowed to spend thirty seconds.
+    fn earliest(a: Self, b: Self) -> Self {
+        match (a.0, b.0) {
+            (Some(x), Some(y)) => Self(Some(x.min(y))),
+            (Some(x), None) => Self(Some(x)),
+            (None, other) => Self(other),
+        }
+    }
+
+    fn expired(self) -> bool {
+        self.0.is_some_and(|limit| Instant::now() >= limit)
+    }
+
+    fn check(self) -> Result<(), CurlError> {
+        if self.expired() {
+            Err(CurlError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// How long to wait between polls of a non-blocking connect's state.
+///
+/// Small enough that the reported timeout is close to the one asked for,
+/// large enough not to spin a core on a handshake that takes a round trip.
+const CONNECT_POLL: Duration = Duration::from_millis(5);
+
+/// The connection state byte `SYS_TCP_INFO` reports at offset 0.
+const TCP_STATE_CLOSED: u8 = 0;
+const TCP_STATE_ESTABLISHED: u8 = 4;
+
+/// Read the connection state byte for `handle`.
+fn tcp_state(handle: u64) -> Result<u8, CurlError> {
+    let mut info = [0u8; 48];
+    // SAFETY: `info` is a live 48-byte buffer and its length is passed
+    // alongside it; the kernel validates the write and refuses a short one.
+    let ret = unsafe {
+        syscall3(
+            SYS_TCP_INFO,
+            handle,
+            info.as_mut_ptr() as u64,
+            info.len() as u64,
+        )
+    };
+    if ret < 0 {
+        return Err(CurlError::ConnectionFailed(format!("error code {ret}")));
+    }
+    info.first()
+        .copied()
+        .ok_or_else(|| CurlError::ConnectionFailed("empty tcp info".to_string()))
+}
+
+/// Connect, giving up if `deadline` passes.
+///
+/// **The capability for this already existed and nothing used it.**
+/// `SYS_TCP_CONNECT` has taken a flags word in `arg2` -- bit 0 asks for a
+/// non-blocking connect that returns a handle in `SYN_SENT` -- and curl passed
+/// a hard-coded `0`, so every connect blocked in the kernel with no way to
+/// bound it. That is why `--connect-timeout` parsed its argument, range-checked
+/// it, stored it and did nothing: the flag was not missing a kernel feature, it
+/// was missing its own call site.
+///
+/// With no deadline this stays on the blocking path, which is both simpler and
+/// what `--connect-timeout 0` asks for.
+fn tcp_connect_timeout(ip: u32, port: u16, deadline: Deadline) -> Result<u64, CurlError> {
+    if !deadline.is_set() {
+        return tcp_connect(ip, port);
+    }
+
+    /// `arg2` bit 0 on `SYS_TCP_CONNECT`.
+    const CONNECT_NONBLOCK: u64 = 1;
+
+    // SAFETY: a valid IP, port and flag word; no pointers are involved.
+    let ret = unsafe {
+        syscall3(
+            SYS_TCP_CONNECT,
+            u64::from(ip),
+            u64::from(port),
+            CONNECT_NONBLOCK,
+        )
+    };
+    if ret < 0 {
+        return Err(CurlError::ConnectionFailed(format!("error code {ret}")));
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let handle = ret as u64;
+
+    loop {
+        match tcp_state(handle)? {
+            TCP_STATE_ESTABLISHED => return Ok(handle),
+            // The peer refused, or the handshake died. Reported as a refusal
+            // rather than a timeout: the connection got an answer, just not
+            // the one wanted, and calling that a timeout would send the reader
+            // looking at the clock instead of at the server.
+            TCP_STATE_CLOSED => {
+                tcp_close(handle);
+                return Err(CurlError::ConnectionFailed(
+                    "connection refused".to_string(),
+                ));
+            }
+            _ => {}
+        }
+        if deadline.expired() {
+            // The handle is in SYN_SENT and nobody will ever read it.
+            tcp_close(handle);
+            return Err(CurlError::Timeout);
+        }
+        std::thread::sleep(CONNECT_POLL);
+    }
+}
+
 /// Send data on a TCP connection. Returns the number of bytes actually sent.
 fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, CurlError> {
     // SAFETY: We pass a valid handle and a pointer to a byte buffer with its
@@ -240,7 +385,9 @@ enum CurlError {
     ConnectionFailed(String),
     SendFailed,
     RecvFailed,
-    #[allow(dead_code)]
+    /// `--connect-timeout` or `--max-time` ran out. Carried the
+    /// `#[allow(dead_code)]` that marks an error nobody raises until
+    /// 2026-09-15, because both flags parsed into fields nothing read.
     Timeout,
     InvalidUrl(String),
     HttpError(u16, String),
@@ -1185,7 +1332,12 @@ impl Default for Options {
             cookie_string: None,
             cookie_jar_read: None,
             cookie_jar_write: None,
-            connect_timeout_secs: 30,
+            // 0 = no limit, and that is the default ON PURPOSE even though
+            // curl's own is 300s. Honouring a default here would put every
+            // request on the non-blocking connect path, which nothing in this
+            // tree exercises yet and which cannot be tested from the dev host
+            // (the syscall stub returns ENOSYS). Opt-in until it has traffic.
+            connect_timeout_secs: 0,
             max_time_secs: 0,
             write_out: None,
             show_progress: false,
@@ -1591,11 +1743,18 @@ fn filename_from_url(url: &ParsedUrl) -> String {
 // ============================================================================
 
 /// Receive the full HTTP response headers.
-fn recv_headers(handle: u64) -> Result<Vec<u8>, CurlError> {
+fn recv_headers(handle: u64, deadline: Deadline) -> Result<Vec<u8>, CurlError> {
     let mut buf = Vec::with_capacity(4096);
     let mut recv_buf = [0u8; 8192];
 
     loop {
+        // BETWEEN reads, not during one. `tcp_recv` blocks in the kernel with
+        // no timeout of its own, so a peer that accepts the connection and
+        // then goes silent mid-read is still not interrupted. This bounds the
+        // case that actually happens -- a server dribbling data, or one that
+        // stops between records -- and the limit is stated rather than
+        // implied. Closing the rest needs a recv timeout in the kernel.
+        deadline.check()?;
         let received = tcp_recv(handle, &mut recv_buf)?;
         if received.is_empty() {
             if buf.is_empty() {
@@ -1658,7 +1817,15 @@ fn do_request(
         eprintln!("*   Trying {}:{}...", ip_to_string(ip), url.port);
     }
 
-    let handle = tcp_connect(ip, url.port)?;
+    // `--max-time` covers the WHOLE operation, so it starts before the
+    // connect and keeps running through it: a connect that eats the entire
+    // budget leaves nothing for the transfer, which is what curl does too.
+    let overall = Deadline::after(opts.max_time_secs);
+    // `--connect-timeout` bounds only the handshake, and only until the
+    // overall budget would end first.
+    let connect_deadline = Deadline::earliest(Deadline::after(opts.connect_timeout_secs), overall);
+    let handle = tcp_connect_timeout(ip, url.port, connect_deadline)?;
+    overall.check()?;
 
     if opts.verbose {
         eprintln!(
@@ -1712,7 +1879,7 @@ fn do_request(
     }
 
     // Receive response headers.
-    let raw_response = match recv_headers(handle) {
+    let raw_response = match recv_headers(handle, overall) {
         Ok(buf) => buf,
         Err(e) => {
             tcp_close(handle);
@@ -1841,6 +2008,10 @@ fn do_request(
                 break;
             }
 
+            // Same limit as the header loop, and the same caveat: checked
+            // between reads. A body that arrives in chunks is bounded; one
+            // that stalls inside a single blocking `tcp_recv` is not.
+            overall.check()?;
             let received = tcp_recv(handle, &mut recv_buf)?;
             if received.is_empty() {
                 break;
@@ -2047,6 +2218,77 @@ mod tests {
 
     // --- URL parsing ---
 
+    // ---------------- --connect-timeout / --max-time ----------------
+
+    /// Zero means NO limit for both flags, which is curl's meaning and the
+    /// one a `u64` with 0 treated as "already expired" would invert. curl's
+    /// own `--max-time` default IS 0, so getting this backwards would have
+    /// made every transfer fail rather than no transfer fail.
+    #[test]
+    fn a_zero_timeout_is_no_limit_at_all() {
+        let d = Deadline::after(0);
+        assert!(!d.is_set());
+        assert!(!d.expired());
+        assert!(d.check().is_ok());
+    }
+
+    #[test]
+    fn a_nonzero_timeout_is_set_and_has_not_expired_yet() {
+        let d = Deadline::after(600);
+        assert!(d.is_set());
+        assert!(!d.expired());
+        assert!(d.check().is_ok());
+    }
+
+    /// A limit already in the past reports itself expired and turns into the
+    /// `Timeout` error -- the variant that carried `#[allow(dead_code)]`
+    /// because nothing raised it.
+    #[test]
+    fn a_past_deadline_expires_and_becomes_a_timeout_error() {
+        let Some(past) = Instant::now().checked_sub(Duration::from_secs(1)) else {
+            // A machine whose clock cannot go back an hour from boot; nothing
+            // to assert rather than a false pass.
+            return;
+        };
+        let d = Deadline(Some(past));
+        assert!(d.is_set());
+        assert!(d.expired());
+        assert!(matches!(d.check(), Err(CurlError::Timeout)));
+    }
+
+    /// `--max-time` caps `--connect-timeout`. A thirty-second handshake budget
+    /// under `--max-time 5` must not be allowed to spend thirty seconds, and
+    /// the cap has to work whichever way round the two are given.
+    #[test]
+    fn the_earlier_of_two_deadlines_wins() {
+        let soon = Deadline::after(1);
+        let late = Deadline::after(3600);
+        let a = Deadline::earliest(soon, late);
+        let b = Deadline::earliest(late, soon);
+        assert_eq!(a.0, soon.0, "the sooner limit must win");
+        assert_eq!(b.0, soon.0, "...whichever argument it is");
+    }
+
+    /// An unset limit never caps a set one, in either position -- otherwise
+    /// `--connect-timeout 5` with no `--max-time` would come back unlimited.
+    #[test]
+    fn an_unset_deadline_does_not_cap_a_set_one() {
+        let set = Deadline::after(5);
+        let unset = Deadline::after(0);
+        assert_eq!(Deadline::earliest(set, unset).0, set.0);
+        assert_eq!(Deadline::earliest(unset, set).0, set.0);
+        assert!(!Deadline::earliest(unset, unset).is_set());
+    }
+
+    /// Both flags parse into the fields the transfer now reads, and
+    /// `--connect-timeout` defaults to no limit rather than to the 30 that
+    /// sat in this struct unread.
+    #[test]
+    fn the_timeout_flags_reach_the_fields_that_are_read() {
+        let d = Options::default();
+        assert_eq!(d.connect_timeout_secs, 0, "opt-in, not a default 30");
+        assert_eq!(d.max_time_secs, 0, "curl's own default is 0 = no limit");
+    }
     #[test]
     fn parse_simple_http_url() {
         let url = parse_url("http://example.com/index.html").unwrap();

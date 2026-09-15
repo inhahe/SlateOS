@@ -84,6 +84,36 @@ printf 'start\n\tindented a b\nend\n'                     > "$proto/a/ws.txt"
 # trips the reversed/already-applied detection. This is the only shape `-N`
 # changes the answer for.
 printf 'alpha\nbravo\nCHANGED\ndelta\n'                   > "$proto/a/applied.txt"
+# Indented with TABS in the lines the hunk only uses as CONTEXT, against a
+# patch that spells them with spaces. ws.txt above cannot catch a context-line
+# rewrite, because the only line it differs on is the one the hunk changes
+# anyway -- a fixture that cannot distinguish the two answers.
+printf '\tctx one\nchangeme\n\tctx two\n'                 > "$proto/a/wsctx.txt"
+# FUZZ FIXTURES. A hunk with three context lines either side of the change,
+# against targets that differ ONLY in the context lines fuzz is supposed to
+# ignore. A fixture for a loose comparison has to perturb the parts it claims
+# are irrelevant, or it is testing the strict path -- ws.txt above did not, and
+# that is how a context-line rewrite got past it.
+#
+# Named for what is wrong with each, since the fuzz level GNU needs follows
+# from that: outermost leading only (fuzz 1), outermost at BOTH ends (still
+# fuzz 1, because the budget is per end), two leading and one trailing
+# (fuzz 2), and the removed line itself (never, at any -F).
+printf 'start\nXXXX\nctx2\nctx3\ntarget\nctx4\nctx5\nctx6\nend\n'  > "$proto/a/fz.txt"
+printf 'start\nXXXX\nctx2\nctx3\ntarget\nctx4\nctx5\nYYYY\nend\n'  > "$proto/a/fzboth.txt"
+printf 'start\nXXXX\nZZZZ\nctx3\ntarget\nctx4\nctx5\nYYYY\nend\n'  > "$proto/a/fz2.txt"
+printf 'start\nctx1\nctx2\nctx3\nWRONG\nctx4\nctx5\nctx6\nend\n'   > "$proto/a/fzrem.txt"
+# OFFSET fixtures: the same hunk, matching EXACTLY, but not where its header
+# says. Padding pushes it later; dropping `start` pulls it earlier, which is
+# the case that reads `(offset -1 lines)` -- PLURAL, because GNU's test is
+# `n == 1` rather than `abs(n) == 1`.
+printf 'P\nstart\nctx1\nctx2\nctx3\ntarget\nctx4\nctx5\nctx6\nend\n'    > "$proto/a/off1.txt"
+printf 'P\nQ\nstart\nctx1\nctx2\nctx3\ntarget\nctx4\nctx5\nctx6\nend\n' > "$proto/a/off2.txt"
+printf 'ctx1\nctx2\nctx3\ntarget\nctx4\nctx5\nctx6\nend\n'             > "$proto/a/offneg.txt"
+# A ZERO-CONTEXT insertion: `diff -U0` of an added line gives `@@ -1,0 +2 @@`,
+# old_count 0, so there is no context and the position cannot come from a
+# match. That is the shape whose reported position was one too low.
+printf 'a\nb\nc\n'                                                     > "$proto/a/ins.txt"
 # A file the patches will not touch, so a side that rewrote the whole tree is
 # caught rather than merely a side that got one file wrong.
 printf 'untouched\n'                                    > "$proto/a/keep.txt"
@@ -121,8 +151,16 @@ cp "$proto/a/sub/deep.txt" "$mk/deep.txt"
 printf 'nested\nCHANGED\nhere\n'                        > "$mk/deep.new"
 # Four SPACES: what ws.patch's context line will say, against a target that
 # uses a tab.
+printf '    ctx one\nchangeme\n    ctx two\n'             > "$mk/wsctx.txt"
+# One original and one revision serve all four fuzz patches; only the labels
+# differ, so each names the target it is meant for.
+printf 'start\nctx1\nctx2\nctx3\ntarget\nctx4\nctx5\nctx6\nend\n'  > "$mk/fz.old"
+printf 'start\nctx1\nctx2\nctx3\nCHANGED\nctx4\nctx5\nctx6\nend\n' > "$mk/fz.new"
+printf '    ctx one\nCHANGED\n    ctx two\n'              > "$mk/wsctx.new"
 printf 'alpha\nbravo\ncharlie\ndelta\n'                   > "$mk/applied.old"
 printf 'alpha\nbravo\nCHANGED\ndelta\n'                   > "$mk/applied.new"
+printf 'a\nb\nc\n'                                        > "$mk/ins.old"
+printf 'a\nX\nb\nc\n'                                     > "$mk/ins.new"
 printf 'start\n    indented a b\nend\n'                 > "$mk/ws.txt"
 printf 'start\nCHANGED\nend\n'                          > "$mk/ws.new"
 
@@ -151,6 +189,14 @@ printf 'alpha\ncaf\351 comment\nCHANGED\ndelta\n'        > "$mk/latin1.new"
     ws.txt ws.new ) > "$patches/ws.patch" || true
 ( cd "$mk" && /usr/bin/diff -u --label x/a/applied.txt --label y/a/applied.txt \
     applied.old applied.new ) > "$patches/applied.patch" || true
+( cd "$mk" && /usr/bin/diff -u --label x/a/wsctx.txt --label y/a/wsctx.txt \
+    wsctx.txt wsctx.new ) > "$patches/wsctx.patch" || true
+( cd "$mk" && /usr/bin/diff -U0 --label x/a/ins.txt --label y/a/ins.txt \
+    ins.old ins.new ) > "$patches/ins.patch" || true
+for fzname in fz fzboth fz2 fzrem off1 off2 offneg; do
+    ( cd "$mk" && /usr/bin/diff -u --label "x/a/$fzname.txt" --label "y/a/$fzname.txt" \
+        fz.old fz.new ) > "$patches/$fzname.patch" || true
+done
 ( cd "$mk" && /usr/bin/diff -u --label x/a/nonl.txt --label y/a/nonl.txt \
     nonl.txt nonl.new ) > "$patches/nonl.patch" || true
 # Two deep path components, so -p0, -p1 and -p2 all land somewhere different.
@@ -383,6 +429,47 @@ run_case u.patch -p1 --ignore-whitespace
 # parsed and then read by nothing. These three do not have that property: the
 # target is indented with a tab and the patch with four spaces.
 run_case ws.patch -p1 -l
+# `-l` must not REWRITE what it loosely matched. The context lines here are
+# tab-indented in the target and space-indented in the patch, and GNU leaves
+# the target's tabs alone -- only the line the hunk actually changes is
+# rewritten. Emitting the patch's spelling instead reindents the file silently.
+run_case wsctx.patch -p1 -l
+# `-F`/fuzz. Ours had a constant named `max_fuzz` that meant SLIDE DISTANCE,
+# and no fuzz at all, so before this we refused hunks GNU applies -- a
+# divergence rather than a missing flag, and one no case here could see
+# because none of them perturbed a context line.
+run_case fz.patch -p1
+run_case fz.patch -p1 -F0
+run_case fz.patch -p1 -F1
+run_case fz.patch -p1 --fuzz=1
+# Both ends wrong is still fuzz 1: the budget is per end, not per hunk.
+run_case fzboth.patch -p1
+# Two leading and one trailing needs fuzz 2, which is the default...
+run_case fz2.patch -p1
+# ...so -F1 must refuse it. This is the case that pins the default at 2.
+run_case fz2.patch -p1 -F1
+# The CONTROL, and the one that matters most: fuzz never excuses a REMOVED
+# line. If this ever starts applying, fuzz has been let loose on lines the
+# hunk is about to delete, and the patch would silently destroy content it
+# never matched.
+run_case fzrem.patch -p1 -F3
+# OFFSET. A hunk that matches exactly but not where its header says still
+# reports itself, and GNU backs the file up for it -- the same
+# `--backup-if-mismatch` default that covers fuzz. Before this, ours reported
+# the position the HEADER named rather than the one it landed on, and said
+# nothing at all unless `--verbose` was given.
+run_case off1.patch -p1
+run_case off2.patch -p1
+# The plural quirk: this one reads `(offset -1 lines)`.
+run_case offneg.patch -p1
+# ...and suppressed, which is the control for the backup half.
+run_case off1.patch -p1 --no-backup-if-mismatch
+# A ZERO-CONTEXT INSERTION under --verbose. The existing --verbose case above
+# is a CHANGE hunk, which reports the same number under either formula, so it
+# could not see that `old_start + offset` is one too low for an insertion:
+# GNU says `Hunk #1 succeeded at 2.` for `@@ -1,0 +2 @@` and we said 1.
+run_case ins.patch -p1 --verbose
+run_case ins.patch -p1
 run_case ws.patch -p1 --ignore-whitespace
 # ...and without the flag the same patch must be refused, by both sides alike.
 # This is the half that fails if `-l` is ever wired on by default.
@@ -394,6 +481,12 @@ run_case ws.patch -p1
 run_case applied.patch -p1
 run_case applied.patch -p1 -N
 run_case applied.patch -p1 --forward
+# `-f/--force` goes the other way from `-N`: rather than skipping the reversed
+# patch more quietly, it refuses to recognise it at all, so the hunk simply
+# FAILS. Different message, different count word, and exit 1 where the default
+# gives 0 -- which is what makes an inert `-f` a divergence rather than a gap.
+run_case applied.patch -p1 -f
+run_case applied.patch -p1 --force
 # ...and the `-R` form, where the detection reads "Unreversed" instead. This
 # pair uses u.patch against the UNPATCHED base.txt on purpose: `-R` against a
 # file that already carries the change applies cleanly and never reaches the

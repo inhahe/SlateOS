@@ -88,6 +88,186 @@ DESTRUCTURE_OPEN = re.compile(r"^\s*let\s+(?:Self|[A-Z]\w*)\s*\{")
 BOUND_NAME = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*,?\s*$")
 
 
+# A backstop on how far above an assignment to look for the option literals
+# that guard it. The real bound is structural -- see `_arm_above` -- and this
+# only stops a runaway on a file that has no arm boundary at all.
+ADVERTISED_WINDOW = 12
+
+# The line that OPENS a branch. Scanning upward from an assignment stops after
+# the first of these, because that is the arm the assignment belongs to.
+_ARM = re.compile(r"(^|\})\s*(else\s+if|if|match)\b")
+
+_OPTION = re.compile(r"--[a-z][a-z0-9-]+")
+
+
+def _advertising_spans(line):
+    """The parts of a source line a USER could read as advertising an option.
+
+    Two things count: a double-quoted string literal, because help text is
+    built out of them (`text.push_str("  -l  --ignore-whitespace  ...")`), and
+    a `//!` module doc, because these programs put their usage block there.
+
+    A `//` or `///` comment does NOT count. It documents the code to the next
+    reader rather than the option to the user, and treating the two alike is
+    exactly how a field whose only nearby mention is `// --foo is inert` gets
+    reported as advertised -- which would invert the finding, since an option
+    documented as inert is the honest case.
+    """
+    stripped = line.lstrip()
+    if stripped.startswith("//!"):
+        return [stripped[3:]]
+    if stripped.startswith("//"):
+        return []
+    out = []
+    i = 0
+    while True:
+        a = line.find('"', i)
+        if a < 0:
+            return out
+        b = line.find('"', a + 1)
+        while b > 0 and line[b - 1] == "\\":
+            b = line.find('"', b + 1)
+        if b < 0:
+            return out
+        out.append(line[a + 1 : b])
+        i = b + 1
+
+
+_OPTIONISH = re.compile(r"-{1,2}[A-Za-z0-9][A-Za-z0-9-]*")
+
+
+def _describes(span, opt):
+    """Does this span EXPLAIN the option, rather than merely name it?
+
+    The PARSER names it too: `if a == "-z" || a == "--zeta" {` holds the
+    spelling in a string literal every bit as much as the help text does, so
+    without this every parsed option would count as advertised and the flag
+    would report nothing useful. What separates them is that help text says
+    something ABOUT the option, so a span counts only if removing every option
+    token from it leaves real words behind.
+
+    Found by the self-test below before this shipped, which is the whole
+    argument for lane C having asked for one.
+    """
+    rest = _OPTIONISH.sub(" ", span.replace(opt, " "))
+    return sum(ch.isalpha() for ch in rest) >= 3
+
+
+def _arm_above(lines, assign_idx, window=ADVERTISED_WINDOW):
+    """The lines from the enclosing branch down to an assignment, inclusive.
+
+    Scanning upward a FIXED number of lines does not work, and the failure is
+    visible rather than theoretical: `patch.rs` parses `-Z` directly beneath
+    `-f`, so four lines above `opts.set_utc = true;` reaches into the previous
+    arm and reports `set_utc` as advertised by `--force`.
+
+    The bound that does work is structural: stop after the first line that
+    OPENS a branch, because that is the arm this assignment belongs to. It
+    handles both the one-line shape and the several-line one --
+
+        } else if a == "-Z" || a == "--set-utc" {
+            opts.set_utc = true;
+
+        } else if a == "-F" || a == "--fuzz" {
+            i = i.saturating_add(1);
+            match args.get(i).and_then(...) {
+                Some(v) => opts.fuzz = Some(v),
+
+    -- which no single line count does, the first needing 1 and the second 5.
+    """
+    lo = max(0, assign_idx - window)
+    for i in range(assign_idx, lo - 1, -1):
+        if _ARM.search(lines[i]) and i != assign_idx:
+            return lines[i : assign_idx + 1]
+    return lines[lo : assign_idx + 1]
+
+
+def advertised_for(lines, field, window=ADVERTISED_WINDOW):
+    """Option spellings assigned into `field` that the program also advertises.
+
+    Returns `(option, assigned_line, advertised_line)` triples, 1-based.
+
+    **This is a heuristic and the report says so.** The association is
+    positional: it reads the enclosing parser arm above each ASSIGNMENT to the
+    field, looking for the option literals that guard it -- the
+    `} else if a == "-l" || a == "--ignore-whitespace" {` shape this tree
+    parses arguments with. A looser rule collects whatever option happens to be
+    parsed nearby; `finger`'s `match_real_name` came back associated with
+    `--help` and `--version` under a six-line window around every MENTION
+    rather than every assignment.
+
+    A false association can only ever promote a row, never demote one, which is
+    why this belongs behind a flag rather than in the default output: the
+    findings it cannot classify keep their standing.
+    """
+    advertised = {}
+    for n, line in enumerate(lines, 1):
+        for span in _advertising_spans(line):
+            for opt in _OPTION.findall(span):
+                if _describes(span, opt):
+                    advertised.setdefault(opt, n)
+
+    assign = re.compile(r"\b" + re.escape(field) + r"\s*=[^=]")
+    hits = []
+    seen = set()
+    for n, line in enumerate(lines, 1):
+        if not assign.search(line):
+            continue
+        for src in _arm_above(lines, n - 1, window):
+            for opt in _OPTION.findall(src):
+                if opt in advertised and opt not in seen:
+                    seen.add(opt)
+                    hits.append((opt, n, advertised[opt]))
+    return sorted(hits)
+
+
+def report_advertised(found, root):
+    """Rank findings by whether the program's own `--help` promises them.
+
+    A field that is parsed, stored, never read AND advertised is worse than one
+    that is merely unread: the user has been told it works. `patch`'s
+    `-l/--ignore-whitespace` was written down in four places -- three said
+    inert and the only one a user reads said it worked.
+    """
+    promised, silent = [], []
+    for name, (path, line, who) in sorted(found.items(), key=lambda kv: kv[1]):
+        try:
+            text = (root / path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"{path}: cannot read: {exc}", file=sys.stderr)
+            silent.append((path, line, name, who, []))
+            continue
+        hits = advertised_for(text.splitlines(), name)
+        (promised if hits else silent).append((path, line, name, who, hits))
+
+    print(
+        "-- `advertised` means the spelling also appears in a string literal "
+        "or a `//!` usage line in the SAME file, AND inside the parser arm that "
+        "assigns the field. Both halves are positional; the line numbers below "
+        "are there so you can check rather than believe."
+    )
+    print()
+    print(f"=== ADVERTISED, and unread ({len(promised)}) ===")
+    for path, line, name, who, hits in sorted(
+        promised, key=lambda r: (r[3] != "nothing", r[0])
+    ):
+        opts = ", ".join(o for o, _a, _h in hits)
+        where = "; ".join(f"{o} assigned :{a}, advertised :{h}" for o, a, h in hits)
+        read_by = "read only by tests" if who == "tests" else "read by NOTHING"
+        print(f"{path}:{line}: `{name}` -> {opts} [{read_by}]")
+        print(f"    {where}")
+    print()
+    print(f"=== not advertised ({len(silent)}) ===")
+    for path, line, name, who, _hits in silent:
+        read_by = "read only by tests" if who == "tests" else "read by NOTHING"
+        print(f"{path}:{line}: `{name}` [{read_by}]")
+    print()
+    print(
+        f"-- {len(promised) + len(silent)} field(s); {len(promised)} advertised "
+        f"in the program's own help text."
+    )
+
+
 def detect(roots=lanec_scan.LANE_C_ROOTS, root=None):
     """`{field name: (relative path, line)}` for every asymmetric field."""
     decls = {}
@@ -185,12 +365,13 @@ def main(argv):
             roots = [r for r in arg.split("=", 1)[1].split(",") if r]
         else:
             rest.append(arg)
-    unknown = selftestflag.unknown_options(rest, known=("--list",))
+    unknown = selftestflag.unknown_options(rest, known=("--list", "--advertised"))
     if unknown:
         print(f"unrecognised option(s): {' '.join(unknown)}", file=sys.stderr)
         return 2
 
     listing = "--list" in rest
+    advertised = "--advertised" in rest
 
     # `--roots` is report-only, and the refusal is the point of the flag rather
     # than a limitation of it.
@@ -214,6 +395,9 @@ def main(argv):
                 file=sys.stderr,
             )
         found = detect(roots=tuple(roots))
+        if advertised:
+            report_advertised(found, lanec_scan.ROOT)
+            return 0
         for name, (path, line, who) in sorted(found.items(), key=lambda kv: kv[1]):
             read_by = "read only by tests" if who == "tests" else "read by nothing at all"
             print(f"{path}:{line}: `{name}` is written in production and {read_by}")
@@ -221,6 +405,15 @@ def main(argv):
         return 0
 
     found = detect()
+
+    # `--advertised` is a REPORT mode in both paths. Wiring it only into the
+    # `--roots` branch would have left `--advertised` alone silently ignored --
+    # a flag parsed, stored and read by nothing, which is the exact defect this
+    # flag exists to rank.
+    if advertised:
+        report_advertised(found, lanec_scan.ROOT)
+        return 0
+
     known = baseline()
 
     shown = []
@@ -272,6 +465,120 @@ def main(argv):
         "invisible to it however dead the field is."
     )
     return 1
+
+
+def advertised_self_test():
+    """The distinction lane B was asked for: advertised, versus merely mentioned.
+
+    Both fixtures below name `--zeta` within the window. Only the first
+    ADVERTISES it, and calling the second advertised would invert the finding:
+    an option a comment records as inert is the honest case, not the bad one.
+    """
+    cases = [
+        # (label, source, expect_advertised)
+        ("help text in a string literal", [
+            'fn help() {',
+            '    text.push_str("  -z  --zeta   Do the zeta thing.");',
+            '}',
+            'fn parse(a: &str, opts: &mut Opts) {',
+            '    if a == "-z" || a == "--zeta" {',
+            '        opts.zeta = true;',
+            '    }',
+            '}',
+        ], True),
+        ("a `//!` usage block", [
+            '//!   -z, --zeta    Do the zeta thing.',
+            'fn parse(a: &str, opts: &mut Opts) {',
+            '    if a == "-z" || a == "--zeta" {',
+            '        opts.zeta = true;',
+            '    }',
+            '}',
+        ], True),
+        ("named ONLY in a comment", [
+            '// --zeta is accepted and inert; see known-issues.',
+            'fn parse(a: &str, opts: &mut Opts) {',
+            '    if a == "-z" || a == "--zeta" {',
+            '        opts.zeta = true;',
+            '    }',
+            '}',
+        ], False),
+        ("named only in a `///` doc comment", [
+            '/// `--zeta` is the flag this field carries.',
+            'fn parse(a: &str, opts: &mut Opts) {',
+            '    if a == "-z" || a == "--zeta" {',
+            '        opts.zeta = true;',
+            '    }',
+            '}',
+        ], False),
+        # The PARSER's own literal must not count as advertising. Without
+        # this every parsed option is "advertised" and the flag says nothing.
+        ("parsed but never described", [
+            'fn parse(a: &str, opts: &mut Opts) {',
+            '    if a == "-z" || a == "--zeta" {',
+            '        opts.zeta = true;',
+            '    }',
+            '}',
+        ], False),
+        # THE PREVIOUS ARM'S option must not leak in. `patch.rs` parses
+        # `-Z` directly below `-f`, and a fixed four-line window reported
+        # `set_utc` as advertised by `--force`. Here `zeta` is parsed by its
+        # SHORT form only, so the sole long option in reach belongs to the arm
+        # above and must not be credited to it.
+        ("the arm above carries a different option", [
+            'fn help() {',
+            '    text.push_str("  -y  --yankee  Do the yankee thing.");',
+            '}',
+            'fn parse(a: &str, opts: &mut Opts) {',
+            '    if a == "-y" || a == "--yankee" {',
+            '        opts.yankee = true;',
+            '    } else if a == "-z" {',
+            '        opts.zeta = true;',
+            '    }',
+            '}',
+        ], False),
+        # ...while a long arm still reaches its OWN option, which no single
+        # line count manages together with the case above.
+        ("several lines below the option, same arm", [
+            'fn help() {',
+            '    text.push_str("  -z  --zeta   Do the zeta thing.");',
+            '}',
+            'fn parse(a: &str, opts: &mut Opts) {',
+            '    if a == "-z" || a == "--zeta" {',
+            '        let _ = 1;',
+            '        let _ = 2;',
+            '        let _ = 3;',
+            '        let _ = 4;',
+            '        let _ = 5;',
+            '        opts.zeta = true;',
+            '    }',
+            '}',
+        ], True),
+        # The backstop still has to be able to MISS, or it is not a bound: no
+        # enclosing arm at all, and the help text further off than it reaches.
+        ("no arm, help text out of range", [
+            'fn help() {',
+            '    text.push_str("  -z  --zeta   Do the zeta thing.");',
+            '}',
+        ] + ['    let _ = 0;'] * 14 + [
+            'fn go(opts: &mut Opts) {',
+            '    opts.zeta = true;',
+            '}',
+        ], False),
+    ]
+
+    problems = []
+    for label, lines, want in cases:
+        got = bool(advertised_for(lines, "zeta"))
+        if got != want:
+            problems.append(
+                f"  {label}: expected advertised={want}, got {got}"
+            )
+    if problems:
+        print("advertised self-test FAILED:")
+        print("\n".join(problems))
+        return 1
+    print(f"ok: --advertised self-test passed ({len(cases)} case(s))")
+    return 0
 
 
 def self_test():
@@ -463,7 +770,7 @@ def self_test():
         f"ok: self-test passed ({len(expected)} write-only field found, "
         f"{len(forbidden)} sound fields rejected)"
     )
-    return 0
+    return advertised_self_test()
 
 
 if __name__ == "__main__":

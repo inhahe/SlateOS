@@ -84,6 +84,80 @@ terminator before comparing — and the formatter has to emit the
 and context output alike. Upstream diffutils carries a flag per side for exactly
 this.
 
+## TD-B-GDB-ARGS-LOSES-AN-ARGUMENT-THAT-SPELLS-ONE-OF-GDBS-OWN — 2026-09-15 — OPEN
+
+**In short:** `gdb --args ./prog -q` quiets **gdb** instead of passing `-q` to
+the program. Anything after the program that happens to spell one of gdb's own
+short options is taken by gdb, which is the one case `--args` exists to
+prevent.
+
+**Why.** `parse_args_gdb` is a `match` over each argument, and the arms for
+gdb's own options (`-q`, `-v`, `-h`, `-x`) are tried before the branch that
+collects arguments for the program. Arm order decides ownership, and it is
+decided before anything knows whether `--args` has already been seen.
+
+**The fix** is to test `args.pass_args && args.binary_path.is_some()` FIRST, so
+that once a program has been named every remaining argument belongs to it
+whatever it spells. That is a change to the shape of the loop rather than to
+one arm, which is why it is not folded into the commit that made `--args`
+collect at all: that commit's claim is "the arguments are no longer silently
+dropped", and widening it to "and ownership is decided correctly" would make
+one commit answer two questions.
+
+**It is pinned, not merely noted.** `args_still_loses_an_argument_spelling_one_of_gdbs_own`
+asserts the current wrong behaviour on purpose, so whoever reorders the arms
+sees a red test and updates it deliberately instead of discovering later that
+something else depended on the old order.
+
+**Scope.** Undeliverable either way today: this build cannot run a program at
+all (`posix::ptrace` returns ENOSYS), so the arguments are reported rather than
+passed. The defect is in which of them get reported, and it becomes
+user-visible the moment ptrace lands.
+
+**Where it lives:** `userspace/gdb/src/main.rs`, `parse_args_gdb`.
+
+---
+
+## TD-B-CURL-MAX-TIME-IS-CHECKED-BETWEEN-READS-NOT-DURING-ONE — 2026-09-15 — OPEN
+
+**In short:** `curl --max-time 30` now works, but only at read boundaries. A
+server that accepts the connection and then stalls *inside* a single read still
+hangs forever, because `SYS_TCP_RECV` blocks in the kernel with no timeout of
+its own and nothing can interrupt it from userspace.
+
+**What was fixed and what was not.** Both `--connect-timeout` and `--max-time`
+were parsed, range-checked, stored in `Options` and read by nothing — found by
+`check-fields-written-never-read.py --advertised`, which ranks a field by
+whether the program's own `--help` promises it. Both are honoured now:
+
+* `--connect-timeout` is exact. `SYS_TCP_CONNECT` has always taken a flags word
+  in `arg2` whose bit 0 asks for a non-blocking connect; curl passed a
+  hard-coded `0`. It now takes that path when a limit is set and polls
+  `SYS_TCP_INFO`'s state byte for the handshake, so the timeout is enforced to
+  within the 5 ms poll interval.
+* `--max-time` is **coarse**. It is checked before each `tcp_recv` in both the
+  header and body loops, which bounds a server that dribbles data or stalls
+  between records — the case that actually happens — and does not bound one
+  that goes silent mid-read.
+
+**What the proper fix looks like.** A recv timeout in the kernel, i.e. an
+`arg3` on `SYS_TCP_RECV` carrying a deadline in milliseconds, mirroring what
+`arg2` already does for `SYS_TCP_CONNECT`. That is lane A's tree. It has not
+been filed as a request yet because the coarse bound covers the observed
+failure mode and a syscall ABI change is worth more than that buys — the next
+lane to want a recv timeout for its own reasons should carry it.
+
+**Why this is not the shape it replaces.** The option no longer lies: it does
+something, and where it stops is written down here and in `recv_headers`'
+comment rather than left for a user to discover. An inert option is defensible
+only while nothing promises otherwise; a *partial* one is defensible when the
+partiality is stated.
+
+**Where it lives:** `userspace/curl/src/main.rs` — `Deadline`,
+`tcp_connect_timeout`, `tcp_state`, and the two `deadline.check()?` calls.
+
+---
+
 ## TD-B-A-FAMILY-HARNESS-CANNOT-BE-AIMED-AT-ONE-HALF-OF-A-PAIR (lane B, 2026-09-11)
 
 **Six harnesses here cover several binaries at once via `DIFF_BINS`, and for
@@ -140979,16 +141053,59 @@ first time passes have outnumbered differences.
 | `--no-backup-if-mismatch` | suppresses `<target>.orig` on a failed hunk, and **only** that — the reject is still written, because a reject is the failure report rather than a backup |
 | `-d DIR` / `--directory=DIR` | chdir before the patch file is opened |
 
-**Accepted and currently inert — `-N/--forward`, `-f/--force`, `-F/--fuzz`,
-`-Z/--set-utc`.** This is the entry's most misreadable line, so: each was
-measured against GNU on the cases this tree exercises, and on those the
-behaviour coincides *exactly* with the default. `-F 3` differs only when a hunk
-would match at a fuzz distance, `-N` only when a patch is already applied, `-f`
-only where GNU would otherwise prompt, `-Z` only in the timestamps it sets.
+**`-l/--ignore-whitespace`, `-N/--forward`, `-F/--fuzz` and `-f/--force` are
+all IMPLEMENTED** as of 2026-09-15. Only `-Z/--set-utc` is still accepted and
+inert.
 
-So accepting them is correct today and **incomplete rather than wrong** — but
-nine harness cases now pass without those behaviours existing, and a reader
-who sees `42 passed` must not conclude that fuzz matching works. It does not.
+**The claim this paragraph used to make about `-f` was false**, and it is the
+clearest example in this file of how an inert option gets justified. It said
+`-f` "differs from the default only where GNU would otherwise prompt". What it
+actually does, measured on an already-applied patch:
+
+| | without `-f` | with `-f` |
+|---|---|---|
+| message | `Reversed (or previously applied) patch detected!` | `Hunk #1 FAILED at 1.` |
+| count | `1 out of 1 hunk ignored` | `1 out of 1 hunk FAILED` |
+| exit status | **0** | **1** |
+
+A script reading the status gets the opposite answer. The prompt was the least
+of it. The original claim was not careless — it was measured, on cases that
+could not tell the two behaviours apart, which is the failure this whole entry
+keeps circling.
+
+`-Z` is the last one, and the honest statement about it is narrower than the
+others were: it sets mtimes from the patch header, no observable difference
+turned up on the cases here, **and `patch-diff.sh` snapshots mode, content and
+size but not mtime — so it could not have seen one.** That is a reason to be
+careful about calling it harmless rather than a reason to call it done.
+
+The wording this replaces said that accepting an inert option was "correct
+today and incomplete rather than wrong". **That argument should not be made
+again without one qualification, and `-l` is why: `--help` ADVERTISED it.** Of
+the four places that option was written down, three said inert and the only one
+a user reads said it worked. An inert option is defensible exactly as long as
+nothing promises otherwise.
+
+**`-F` was not a gap at all — it was a DIVERGENCE**, and the sharpest thing in
+this entry. The constant governing hunk placement was called `max_fuzz` and
+meant *slide distance*: how far a hunk may move from the line its header names,
+while matching every line exactly. GNU's fuzz is a different mechanism
+entirely — ignore up to N **context** lines at each end of the hunk, default 2,
+never excusing a removed line. Two mechanisms, one name, and the name belonged
+to the one that did not exist. So this build refused hunks GNU applies at fuzz
+1, and `patch-diff.sh` was green throughout, because not one of its cases
+perturbed a context line: a harness agreeing with the reference on every case
+that cannot distinguish them.
+
+A hunk that applies with fuzz also leaves a `<target>.orig`, because
+`--backup-if-mismatch` is GNU's default and a fuzzy apply counts as a mismatch.
+An offset does too. A `-l` loose match does **not** — measured, and worth
+stating because it is the one inexact-looking case that writes no backup.
+
+Eight differential cases cover fuzz now, including the control that matters:
+a perturbed REMOVED line must still be refused at `-F 3`. Still open in the
+same family: an **offset** is neither reported (`Hunk #1 succeeded at 3 (offset
+1 line).`) nor does it write the `.orig` GNU writes for it.
 
 **Not implemented at all**, and each still costs its cases: `-o/--output`,
 `-l/--ignore-whitespace`, `-E/--remove-empty-files`, `-v` (which prints the
@@ -148714,7 +148831,7 @@ precisely when someone wants to know what hardware they have.
 None of the ten are fixed. They are listed here so that the next sweep starts
 from the self-declarations rather than from the names.
 
-## TD-C-SYSINFO-INVENTS-A-WHOLE-MACHINE-WHILE-THE-REAL-QUERY-LAYER-SITS-UNUSED
+## TD-C-SYSINFO-INVENTS-A-WHOLE-MACHINE-WHILE-THE-REAL-QUERY-LAYER-SITS-UNUSED -- FIXED 2026-09-15
 
 **In short:** the System Information app tells you your machine has a
 GenuineIntel processor, an Intel I225-V network adapter, Intel Wi-Fi 6E AX211
@@ -148837,6 +148954,374 @@ category, with the field names `SyscallProvider::field` looks up. A producer
 written against those tests cannot disagree with the consumer, which is the one
 piece of luck in this arrangement.
 
+**FIXED, and the correction above needs one of its own.**
+
+The application no longer invents anything: `main` queries
+`hwquery::SyscallProvider` directly, 642 lines of constants are gone, and the
+window says it cannot read the hardware. `hwquery` left the island ledger.
+`FallbackProvider` was deleted rather than wired — it dropped to `StubProvider`
+whenever the syscall path failed, which is every host without the tree, so its
+purpose in practice was to display hardware nobody had.
+
+**The `/sys/hardware` premise in the correction above was itself stale, and the
+decision it contradicted is lane C's own.** `design-decisions.md` §850, dated
+2026-09-14: hardware facts are served under `/sys/devices`, not a second
+`/sys/hardware` tree, because the kernel already publishes `core_id`,
+`physical_package_id` and cache geometry there. Lane A proposed that and
+withdrew their own first choice; **lane C made the final call**, and lane C then
+spent an hour writing a request asking lane A to build the tree §850 had
+retired.
+
+Two things in that request were wrong and the second was dangerous. It scoped
+the change as "thirteen constants and one macro", when the trees differ in
+*data model* — `/sys/devices` is scalar-per-file, `hwquery` read one
+`key=value` file — so the reader changes, not the constants. And it said *"take
+the tests as the specification, not my field list"*, which would have pointed a
+producer author at 33 green tests pinning the very format the decision moved
+away from. Written against them, a producer would have satisfied its consumer
+perfectly, contradicted `main`, and passed everything.
+
+**The general form, which lane A recorded as §937 in these words:** tests pin
+the format the consumer currently parses, which is only the specification if the
+format is not the thing under decision. Where a format has been decided
+against, its tests are the strongest available argument for keeping it — green,
+executable, and evidence of intent — and they are wrong. Pointing at them feels
+like rigour rather than inertia, and thirty-three of them are harder to argue
+with than one sentence in `design-decisions.md`.
+
+**The reader is rewritten** for `/sys/devices`, scalar-per-file: `cpuid/` for
+the CPUID leaf 1 identity, `present` for the logical count, `cpuN/topology/`
+for distinct `(socket, core)` pairs, `cpu0/cache/indexN/` for geometry. Four
+`CpuInfo` fields are `Option` and always `None` on this kernel — there is no
+brand or vendor (CPUID leaves 0 and 0x8000_0002..4 are not served) and no
+`cpufreq/` — and the panel says "Not reported by this system" rather than
+drawing an empty name or a stopped clock.
+
+**Still outstanding:** lane A serves `cpu` and `memory` today and has offered
+`block` and `net` next. Everything else the window lists — PCI, USB, sound,
+IRQs, I/O ports, the memory map, DMA — has no producer, and the window says so
+per category rather than as one banner, which is right: those are separate
+facts and will arrive separately.
+
+## TD-C-ONE-HUNDRED-AND-FIFTEEN-OF-THE-HUNDRED-AND-THIRTY-NINE-APPS-CANNOT-OPEN-A-FILE
+
+**In short:** the invented data in these programs is not the disease. It is the
+symptom. **115 of the 139 applications with a `main.rs` have no filesystem
+access of any kind** — no file picker, no `std::fs`, no `safeio`. They cannot
+open a document, save one, or read anything the user has. The seeded libraries
+and sample records exist because there is no other way for a window to have
+anything in it, and one of them says so in its own comment: *"so the first
+window is not an empty grid"*.
+
+**Date:** 2026-09-15. **Lane:** C. Found by asking, after fixing the photo
+manager, how many other applications were in the state it had been in.
+
+**The measurement.** For each `apps/*/src/`, count references to `FileDialog`,
+`std::fs` and `safeio::`. 115 of 139 score zero. Games are a legitimate part of
+that number — `chess` needs no files — so the count alone overstates it, and
+the named cases below are the argument rather than the total.
+
+**Three that are worth reading twice:**
+
+* **`apps/filesearch` cannot search files.** Its dependencies are `globmatch`,
+  `guitk`, `oswindow` and `appearance` — nothing that reads a directory. The
+  search machinery is *complete*: search by name, by glob, by regular
+  expression, by category, with sorting. It runs against `Index::entries`, and
+  `index.add(...)` is called from **tests only**. So a finished search engine
+  runs against an index production never fills.
+* **`apps/filediff` cannot read files.** It depends on `diffcore`, which is a
+  real diff implementation, and on nothing that opens a file.
+* **`apps/email` has neither network nor storage.** It depends on `guitk`,
+  `oswindow` and `appearance`, and seeds itself with `seed_sample_mail`.
+
+`apps/photomanager` was in exactly this class until 2026-09-15: a real EXIF
+parser, a real album model, an invented library, and no picker. It took one
+`FileDialog` and `guitk::dialog::list_directory` to fix, both of which already
+existed.
+
+**Why this changes the order of the remaining work.** The 63 fixture functions
+and the 32 self-declared stubs are two views of one cause. Fixing them
+app-by-app — replacing invented records with an honest "nothing here" — makes
+each program truthful and leaves it useless, which is the right trade when
+nothing better is available and a poor one when something is. For this class
+something is: the toolkit has had a working file picker all along.
+
+**So the cheap fix is a shared one.** Every app in this class needs the same
+three things the photo manager needed: a control that opens
+`guitk::dialog::FileDialog`, a handler that reads the chosen path, and an
+empty-state that says what to do. That is a per-app change, but it is the same
+change, and it converts "honest and empty" into "works".
+
+**What this does not cover.** The other class — `sysinfo`, `devicemanager`,
+`partmanager`, `netmanager`, `netscan`, `sysmonitor`, `undelete`, `speedtest` —
+needs data the *system* must produce, not data the user can hand over, and
+those stay blocked on kernel work whatever this does. `sysinfo` is the worked
+example: its client is finished and waiting on `/sys/devices` producers.
+
+**The honest caveat on the number.** 115 counts every `main.rs` app including
+games and toys. I have not classified all 139, and the per-app judgement of
+"should this open files" is exactly the kind of thing that should be made when
+someone picks the app up rather than pre-decided in a list here.
+
+**A SHARPER NUMBER, AND THE SAME SENTENCE THREE TIMES.**
+
+115 of 139 counts games, which need no files. A better discriminator is an app
+that **has no filesystem access and whose own code talks about files anyway** —
+ten or more mentions of save, load, export, import, document, filename or
+file_path. That is **28 applications**, and the list reads like a list of
+document editors: `hexeditor`, `jsonviewer`, `pdfviewer`, `diagram`, `slides`,
+`notes`, `kanban`, `renamer`, `contacts`, `dbviewer`, `email`, `clipmanager`,
+`credmanager`, `flashcards`, `reminders`, `rssreader`, `screenrecorder`,
+`soundrecorder`, `startupmanager`, `systemrestore`, `undelete`, `netscan`,
+`speedtest`, `remotedesktop`, `defrag`, `camera`, `alarmclock`, `terminal`.
+
+(`terminal` is probably a false positive — it names paths without needing to
+open them. The rest are not.)
+
+**The evidence that this is one cause rather than 28 coincidences is that three
+authors wrote the same sentence.**
+
+* `apps/photomanager`: *"A library with something in it, so the first window is
+  not an empty grid."*
+* `apps/filesearch`: *"Until a real index exists this is what there is to
+  search. It is one call so that the moment `indexer` can be asked, this is the
+  line that changes."*
+* `apps/hexeditor`: *"Until a file can be opened this is what there is to edit:
+  every byte value once, which is also the most useful thing to look at while
+  the rendering is being worked on."*
+
+Three programs, three authors, one structure: *this is placeholder, the real
+thing is blocked, here is why the placeholder is reasonable.* None of them was
+wrong about the reasoning. All three were wrong about the blocker — the file
+picker and `std::fs` were there the whole time. `filesearch`'s comment even
+names the wrong dependency: it waits for the `indexer` service, and the
+filesystem was nearer.
+
+**`apps/hexeditor` is the sharpest of the three** and should probably be next.
+It opens on `(0..=255).collect()` — every byte value once — with
+`file_path = Some("/demo/sample.bin")`, a path that does not exist, so the
+window names a file it is not showing you. A hex editor is for looking at a
+specific file's actual bytes; there is no version of that which a synthetic
+buffer satisfies.
+
+**Two are done.** `apps/photomanager` and `apps/filesearch` both took the same
+three pieces — a control that opens `guitk::dialog::FileDialog`, a handler for
+the chosen path, and an empty state that says what to do — and all three
+already existed in the toolkit.
+
+**THE RECIPE, AFTER DOING IT THREE TIMES.**
+
+`photomanager`, `filesearch` and `hexeditor` were the same change. Written out
+so the remaining twenty-five are cheaper, and because the parts that took the
+longest were not the obvious ones.
+
+1. **A field** — `file_dialog: Option<FileDialog>` on the app state.
+2. **A way in** — `Ctrl+O`, or a toolbar control. Check which chords the app
+   already uses; `filesearch` had six taken.
+3. **`FileDialog::open()`** for a file, **`select_folder()`** for a directory,
+   filled by `guitk::dialog::list_directory(dialog.current_path())`. The widget
+   does no I/O by design: the host reads the listing and hands it over.
+4. **Intercept events while it is up** — `Event::Key(..) if self.file_dialog
+   .is_some()` ahead of the app's own handlers, or a click meant for a filename
+   lands on whatever is drawn beneath.
+5. **`DialogAction`** has four arms and all four matter: `NavigatedTo` must
+   re-list, or the dialog shows the old directory under the new name.
+6. **Render it last**, so it is above everything — the same order in which the
+   events reach it.
+7. **Delete the seeded data** and make `main` start empty with a line saying
+   how to begin.
+8. **Move the seeder into `#[cfg(test)]`.** All three had tests resting on it.
+   A fixture production can reach is a fixture that ships.
+
+**The three things that cost the most time, none of which are in that list:**
+
+*The picker must actually be drawn.* In `hexeditor` I wrote a comment saying it
+was, above a `render` that was not. It compiled, 189 tests passed, and the
+result would have been a dialog swallowing every keystroke while invisible. Now
+pinned by `the_picker_is_drawn_when_it_is_open`, which counts render commands
+before and after opening — a test that is hard to write vacuously.
+
+*Bounds must announce themselves.* `filesearch` caps the walk at 20,000 entries
+and `hexeditor` caps a read at 16 MiB. Both say so when they bite. A silent cap
+turns a partial answer into a confident wrong one: "no results" reads as "no
+such file", and a truncated hex view lies about a specific address.
+
+*The app must agree that something changed.* `apps/jsonviewer` decides whether
+to redraw by comparing a `state_fingerprint()` before and after the key
+handler, because `handle_key` reports nothing. Opening the picker changes no
+*other* watched state, so until `file_dialog.is_some()` joined that tuple the
+dialog would have been invisible until something else moved — the same
+invisible-picker bug as `hexeditor`'s, reached by a completely different
+mechanism. **Step 6 of the list above is not sufficient on its own.** Before
+writing the picker, find out how the app decides to draw a frame: an
+`EventResult`, a dirty flag, a fingerprint, or nothing at all. Two of the four
+apps done so far needed something beyond "render it last", and they needed
+different things.
+
+*Names are bytes.* `guitk`'s `DirEntry` is deliberately `OsString`, and its own
+doc explains why — decoding lossily "could make it match one it should not". In
+`filesearch` that is the whole game, so non-UTF-8 names are **skipped and
+counted** rather than decoded, and the count is shown. `IndexEntry` holding
+`String` and `globmatch::glob_match` taking `&str` is the real limit; fixing it
+properly means byte-capable matching, which is its own task.
+
+**FOUR FOR FOUR ON THE FIXTURE POINT.**
+
+Every one of `photomanager`, `sysinfo`, `filesearch` and `jsonviewer` had tests
+resting on the invented production data, and in every case they went red
+together the moment it was removed — six, sixteen, sixteen and six of them.
+None of those tests said they depended on it; they read as self-contained and
+were not.
+
+The consistency is the finding. **Production fixture data is always
+load-bearing for tests that nobody recorded as depending on it**, because a
+test needs *something* to act on and the seeded data is there. So the red is
+not a complication of this work, it is the reliable second half of it, and
+budgeting for it is the difference between "delete the fixture" being a
+ten-minute job and a surprise.
+
+Worth adding: the failures are loud only when the data becomes **absent**
+rather than merely **different**. `apps/settings` surfaced because an account
+list became empty; had I replaced three invented accounts with three real ones,
+all six tests would have kept passing against whatever the machine happened to
+have, and I would have called it a clean migration. `apps/sysinfo` was the
+opposite and the better case: its fixture asserts its own precondition, so the
+sixteen failures named the problem — *"fixture's property table fits on screen:
+4 rows in 144 px"* — instead of passing vacuously.
+
+## TD-C-THE-RECOVERY-TOOL-REPORTED-FILES-IT-NEVER-RECOVERED -- FIXED 2026-09-15
+
+**In short:** `apps/undelete` told people who had lost data that their files
+had been recovered, with a byte count and a destination path, having written
+nothing anywhere. It is the worst defect found in this tree today and the only
+one that is acted upon at the moment someone is least able to check it.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+**The flow, all of it read rather than inferred.**
+
+1. Someone opens a file-recovery tool, which means they have lost something.
+2. `UndeleteApp::new` called `simulated_partitions()` — three disks,
+   `/dev/sda1` at 500 GB, `/dev/sda2` at 1 TB, `/dev/sdb1` at 2 TB — on every
+   machine, whatever was attached.
+3. They scan. `RecycleBinReader::scan` was, in its entirety,
+   `self.entries = simulated_recycle_bin()`. The results list showed
+   `/home/user/Documents/report_q4.pdf` at 245,760 bytes and
+   `/home/user/Photos/vacation_001.jpg` at 3 MB.
+4. They select files and press Recover. `recover_selected` built a
+   `RecoveryResult` with `success: true` and
+   `bytes_recovered: file.file_size` — **both taken from the invented file's
+   own metadata** — for a destination nothing ever wrote to.
+5. The crate contains **no reference to `std::fs` or `safeio`**. There is no
+   code path in it that writes a byte to disk.
+
+The module doc advertised "Scans ext4 filesystem inode tables and directory
+entries for deleted files".
+
+**Why this one ranks above the rest.** Every other fabrication here costs time
+or trust and leaves the situation recoverable. This one closes the door: a
+person told recovery *failed* keeps looking, and a person told it *succeeded*
+stops — and then reformats the disk, because the data is safe elsewhere. The
+false success is worse than the false failure by the exact margin that matters.
+
+**The fix, and the half that was nearly missed.** The invented sources are gone
+and recovery reports an honest failure naming the reason. That much is
+straightforward. What was nearly missed is lane B's point: **"no recoverable
+files" and "cannot scan" are different sentences, and an empty list is read as
+the first.** An empty partition list claims you have no disks; an empty result
+list claims nothing of yours survives. Both are verdicts on the user's data
+that this program has not earned and cannot earn, so both screens now say
+outright that nothing has looked. `an_empty_recovery_screen_says_it_could_not_look`
+pins it.
+
+**Two smaller inventions found on the way out.** The failure message read
+"Data blocks partially overwritten" — a specific physical cause that was never
+established, which would send someone hunting a hardware fault they do not
+have. And `scan()` now does **nothing** rather than clearing: with no source to
+read, it learns nothing and therefore changes nothing, where clearing would
+assert the bin is empty, which is a claim it equally cannot make.
+
+**What is implementable, and is the obvious next step.** A recycle bin is an
+ordinary directory. Listing it needs `std::fs::read_dir` and restoring from it
+needs a rename — neither needs the raw block-device access the inode scanner
+and the signature carver do. So of the three sources this tool claims, one is
+reachable today and two are not, and the honest page should eventually say that
+per-source rather than as one banner.
+
+**Twenty-four tests were resting on the invented data** — the fifth application
+in a row where that was true. `test_engine_recovery` asserted that "at least
+some should succeed", and it was *correct about the behaviour*: the behaviour
+was the defect. A test holds a fabrication in place as firmly as it holds
+anything else.
+
+## TD-C-THE-THREE-TOOLS-THAT-REPORT-ACTS-THEY-DID-NOT-PERFORM -- FIXED 2026-09-15
+
+**In short:** three programs told the user that something had happened to their
+data when nothing had. A recovery tool reported files recovered, a partition
+manager reported formats and deletions applied, and a network scanner reported
+open ports on machines it never contacted. None of the three has any access to
+the thing it describes.
+
+**Date:** 2026-09-15. **Lane:** C. Ordered by what believing each one costs,
+which is the axis lane B proposed and which put all three above the twenty-odd
+settings pages fixed earlier the same day.
+
+| program | what it reported | what it had |
+|---|---|---|
+| `apps/undelete` | files recovered, with byte counts and destination paths | no `std::fs`, no `safeio` |
+| `apps/partmanager` | "Applied N operation(s) successfully" for queued formats and deletions | no `std::fs`, no `safeio` |
+| `apps/netscan` | hosts up, ports open, service banners | no `std::net`, no socket syscall |
+
+**What separates these from the rest.** Every other fabrication in this sweep
+cost time or trust and left the situation recoverable. These three are acted
+upon, and the action is often irreversible:
+
+* A person told recovery **failed** keeps looking. One told it **succeeded**
+  stops — and may reformat the disk, because the data is safe elsewhere.
+* A person told a format was **applied** believes a drive was wiped. That is
+  the belief someone acts on before selling or discarding it.
+* A person told a port is **closed** concludes their network is secure. The
+  tuned probabilities reported far more closed ports than open ones.
+
+In each case the false *success* is worse than the false failure, and by a
+margin that the usual "it is only a stub" reasoning does not cover.
+
+**`netscan` was the hardest to have caught and is worth studying.** It was not
+a constant list: each address had a 60% chance of being up, each port a
+probability tuned by service — 50% for SSH and HTTP, 25% for RDP and SMB — and
+a fabricated banner 40% of the time. **Two runs disagreed, which is exactly
+what a real scan does.** Repeating it could never expose it; a constant list
+would have been suspicious the second time. The randomness was what made the
+fiction survive, and a plausible distribution is a stronger disguise than a
+plausible value.
+
+**The fix in all three is the same, and half of it is easy to miss.** Remove
+the invented source, and report an honest failure — that part is
+straightforward. The other half is lane B's: **"no results" and "cannot look"
+are different sentences, and an empty list is read as the first.** An empty
+partition list claims the machine has no disks; an empty recovery list claims
+nothing survives; an empty scan claims the network is quiet. All three are
+verdicts these programs have not earned, so all three screens now say outright
+that nothing was examined.
+
+**Two smaller inventions surfaced inside the fixes.** `undelete`'s failure
+message read "Data blocks partially overwritten" — a physical cause never
+established, which would send someone hunting a hardware fault. And I first
+wrote `RecycleBinReader::scan` as a *clear*, which asserts the bin is empty;
+it is a no-op now, because with nothing to read it learns nothing and therefore
+changes nothing. The second was my own, made while fixing the first.
+
+**`partmanager` keeps its queue after a failed apply**, deliberately. Clearing
+it would leave a window indistinguishable from one where the work was done —
+nothing pending, nothing to see — and the queue is what the user needs if this
+ever gains the ability to apply it.
+
+**Twenty-four, forty and nine tests were resting on the invented data.** That
+is the fifth, sixth and seventh application in a row where removing the
+fabrication turned tests red. Several of those tests asserted the fabricated
+behaviour directly — `test_engine_recovery` required that "at least some should
+succeed" — and were correct about the behaviour. The behaviour was the defect.
+
 ## A-THE-BOOT-TEST-NEVER-MOUNTS-FAT-SO-A-WHOLE-FILESYSTEMS-WRITE-PATHS-ARE-UNGATED (lane A, 2026-09-15) — **Status: FIXED** (the openat2 half; the coverage gap remains open)
 
 **What happened.** Validating an unrelated change through `scripts/run-qemu.ps1`
@@ -148903,3 +149388,4 @@ and the canonical gate is still green. A defect that only a non-canonical
 fixture can see is indistinguishable from "no defect" to everyone reading the
 gate — the eighth mode of §937 (correct on every instance that exists) with the
 population being *fixtures* rather than hardware.
+

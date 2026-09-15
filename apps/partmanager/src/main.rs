@@ -11,8 +11,22 @@
 //! - Safety: confirmation dialogs, warning banners for system partitions
 //! - Human-readable size formatting with binary units
 //!
-//! Uses the guitk library for UI rendering. Disk data is gathered through
-//! Slate OS syscalls; stubbed with representative data for initial development.
+//! **This program cannot presently read or alter a disk, and says so.** It has
+//! no access to a block device and no filesystem access at all -- the crate
+//! contains no reference to `std::fs` or `safeio`.
+//!
+//! Until 2026-09-15 it did not say so. It listed invented disks, down to a
+//! model name and a serial number (`Samsung 970 EVO Plus`, `S4EVNX0R712345`),
+//! and `apply_operations` reported **"Applied N operation(s) successfully"**
+//! having cleared the queue and done nothing else.
+//!
+//! The queue holds deletions, formats and resizes. A false success there is
+//! not merely misinformation: someone who queues a format before disposing of
+//! a drive, and is told it was applied, has been told their data is gone when
+//! it is still there. That is the reason this ranks with `apps/undelete`
+//! rather than with the settings pages -- both report a destructive or
+//! restorative act they did not perform, and in both cases the user's next
+//! action is taken on the strength of it.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -894,6 +908,13 @@ pub enum SelectedItem {
 // ============================================================================
 
 /// Generate sample disks with realistic partition layouts for development.
+/// Representative disks, for tests only.
+///
+/// `#[cfg(test)]` since 2026-09-15. The application called this from its
+/// constructor, so every machine showed the same two drives with the same
+/// model names and serial numbers -- and every partition operation a user
+/// queued was aimed at a disk that was not theirs.
+#[cfg(test)]
 fn sample_disks() -> Vec<Disk> {
     vec![
         Disk {
@@ -1073,7 +1094,9 @@ impl PartitionManagerApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
-            disks: sample_disks(),
+            // Empty: nothing here can enumerate a disk. The window says so
+            // rather than offering a choice between two inventions.
+            disks: Vec::new(),
             selected_disk: 0,
             selected_item: SelectedItem::None,
             operation_queue: Vec::new(),
@@ -1154,13 +1177,37 @@ impl PartitionManagerApp {
     }
 
     /// Apply all pending operations (stub -- in a real system this calls syscalls).
+    /// Attempt the queued operations. None of them are carried out.
+    ///
+    /// This reported `"Applied {count} operation(s) successfully"` and cleared
+    /// the queue, having written nothing -- there is no block device access in
+    /// this crate. The queue holds deletions, formats and resizes, so the
+    /// sentence claimed a destructive act had happened.
+    ///
+    /// **The queue is deliberately NOT cleared now.** Clearing it after a
+    /// failure would leave a window that looks exactly like one where the work
+    /// was done: nothing pending, nothing to see. Keeping the operations in
+    /// place is what makes the failure legible, and it is also what the user
+    /// needs if this ever gains the ability to apply them.
+    ///
+    /// Returns zero, because zero operations were applied.
     pub fn apply_operations(&mut self) -> usize {
-        let count = self.operation_queue.len();
-        self.operation_queue.clear();
-        self.status_message = format!("Applied {count} operation(s) successfully");
+        self.status_message = String::from(Self::CANNOT_APPLY);
         self.clamp_queue_scroll();
-        count
+        0
     }
+
+    /// Why nothing can be applied, in the place the user is looking.
+    ///
+    /// A status line saying "Applied 0 operation(s)" would be true and would
+    /// still be read as "there was nothing to do". The distinction between an
+    /// empty result and an impossible one is the whole of this fix; see
+    /// `known-issues.md` and the same point in `apps/undelete`.
+    pub const CANNOT_APPLY: &'static str =
+        "Nothing was applied: this tool cannot write to a disk. Your partitions are unchanged.";
+
+    /// Why the disk list is empty.
+    pub const CANNOT_LIST: &'static str = "No disks can be listed: this tool has no access to a block device. This is not a finding that you have none.";
 
     /// Select a disk by index.
     pub fn select_disk(&mut self, index: usize) {
@@ -1330,6 +1377,39 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         max_width: Some(geom.text_max_width()),
         overflow: TextOverflow::Ellipsis,
     });
+
+    // Say why the list is empty, rather than showing an empty list.
+    //
+    // A partition manager with no disks under "Disks" reads as "this machine
+    // has none", which is a claim about the user's hardware that nothing here
+    // has checked. The same distinction as `apps/undelete`'s empty results
+    // list, and it is the half of that fix that was nearly missed.
+    if app.disks.is_empty() {
+        for (i, line) in [
+            "No disks can be listed.",
+            "This tool has no access to a block device.",
+            "That is not a finding that you have none.",
+        ]
+        .iter()
+        .enumerate()
+        {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "three lines is far below f32's integer-exact range"
+            )]
+            let line_y = top + 30.0 + (i as f32) * 16.0;
+            tree.push(RenderCommand::Text {
+                x: geom.text_x(),
+                y: line_y,
+                text: String::from(*line),
+                color: app.palette.ink(app.palette.peach),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(geom.text_max_width()),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
 
     // Clip sidebar content
     tree.push(RenderCommand::PushClip {
@@ -3962,6 +4042,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+
     // Exact float comparison is the point in the wheel tests below: they assert
     // that a computed offset equals the row height it was built from, and an
     // epsilon there would weaken the assertion rather than strengthen it.
@@ -4025,7 +4106,7 @@ mod tests {
         // The two Tab handlers held two copies of the same expression, which
         // is what would let them drift. They call one function now; this is
         // the assertion that they still agree.
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog = ActiveDialog::CreatePartition(CreatePartitionDialog::new(2048, 4096, 512));
         handle_event(&mut app, &tab_event());
         let after_create = match &app.dialog {
@@ -4045,6 +4126,19 @@ mod tests {
     }
 
     use super::*;
+
+    /// An app with disks to look at.
+    ///
+    /// `PartitionManagerApp::new` starts with none since 2026-09-15: nothing
+    /// in this crate can enumerate a block device, and it used to show two
+    /// invented drives complete with model names and serial numbers. Forty
+    /// tests here were resting on them -- the sixth application in a row where
+    /// that was true, which is the finding rather than the inconvenience.
+    fn app_with_disks() -> PartitionManagerApp {
+        let mut app = PartitionManagerApp::new();
+        app.disks = sample_disks();
+        app
+    }
     use guitk::text;
 
     // -- Wheel scrolling --
@@ -4052,7 +4146,7 @@ mod tests {
     /// An app whose partition list and operation queue are both longer than
     /// the panes that show them, so either can actually scroll.
     fn app_with_long_lists() -> PartitionManagerApp {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         // Forty more partitions packed in after the sample ones. `regions()`
         // derives the rows from these, so this is what lengthens the list.
         let template = app.disks[0].partitions[0].clone();
@@ -4695,7 +4789,7 @@ mod tests {
 
     /// More disks than the column has room for, so rows fall past its clip.
     fn app_with_many_disks() -> PartitionManagerApp {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         let template = app.disks[0].clone();
         for i in 0..20u32 {
             let mut disk = template.clone();
@@ -5568,7 +5662,7 @@ mod tests {
     /// drew, and before its first frame it has none, so a test that clicks
     /// without rendering is clicking at a dialog that is not on screen.
     fn app_with_confirm(intent: ConfirmIntent, verb: &str) -> PartitionManagerApp {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog = ActiveDialog::destructive(intent, "Delete Partition", "Sure?", verb);
         let _ = render(&mut app);
         app
@@ -5687,7 +5781,7 @@ mod tests {
         // The regression this replaces: the action used to be chosen by
         // searching the title for "Delete"/"Apply"/"Partition Table", so a
         // title that said something else silently did nothing at all.
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.selected_item = SelectedItem::Partition(1);
         app.dialog = ActiveDialog::destructive(
             ConfirmIntent::DeletePartition,
@@ -5773,7 +5867,7 @@ mod tests {
 
     #[test]
     fn test_app_new() {
-        let app = PartitionManagerApp::new();
+        let app = app_with_disks();
         assert!(!app.disks.is_empty());
         assert_eq!(app.selected_disk, 0);
         assert_eq!(app.selected_item, SelectedItem::None);
@@ -5783,14 +5877,14 @@ mod tests {
 
     #[test]
     fn test_app_current_disk() {
-        let app = PartitionManagerApp::new();
+        let app = app_with_disks();
         assert!(app.current_disk().is_some());
         assert_eq!(app.current_disk().unwrap().id, 0);
     }
 
     #[test]
     fn test_app_select_disk() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.select_disk(1);
         assert_eq!(app.selected_disk, 1);
         assert_eq!(app.selected_item, SelectedItem::None);
@@ -5798,7 +5892,7 @@ mod tests {
 
     #[test]
     fn test_app_select_disk_out_of_bounds() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         let count = app.disks.len();
         app.select_disk(count + 10);
         assert_eq!(app.selected_disk, 0); // unchanged
@@ -5806,7 +5900,7 @@ mod tests {
 
     #[test]
     fn test_app_enqueue_operation() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         assert!(!app.has_pending_operations());
         app.enqueue_operation(PendingOperation::SetLabel {
             disk_id: 0,
@@ -5819,7 +5913,7 @@ mod tests {
 
     #[test]
     fn test_app_undo_operation() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.enqueue_operation(PendingOperation::SetLabel {
             disk_id: 0,
             partition_index: 1,
@@ -5832,13 +5926,13 @@ mod tests {
 
     #[test]
     fn test_app_undo_empty_queue() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         assert!(app.undo_last_operation().is_none());
     }
 
     #[test]
     fn test_app_clear_operations() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.enqueue_operation(PendingOperation::SetLabel {
             disk_id: 0,
             partition_index: 1,
@@ -5853,22 +5947,46 @@ mod tests {
         assert_eq!(app.pending_count(), 0);
     }
 
+    /// Applying reports that nothing was applied, and keeps the queue.
+    ///
+    /// This asserted the opposite until 2026-09-15 -- one operation applied,
+    /// queue emptied -- and it was correct about the behaviour.
+    /// `apply_operations` cleared the queue and set the status to "Applied 1
+    /// operation(s) successfully" without writing anything, for a queue that
+    /// holds deletions and formats.
+    ///
+    /// The queue is deliberately kept. Clearing it after a failure leaves a
+    /// window indistinguishable from one where the work was done: nothing
+    /// pending, nothing to see.
     #[test]
-    fn test_app_apply_operations() {
-        let mut app = PartitionManagerApp::new();
+    fn applying_reports_that_nothing_was_applied_and_keeps_the_queue() {
+        let mut app = app_with_disks();
         app.enqueue_operation(PendingOperation::SetLabel {
             disk_id: 0,
             partition_index: 1,
             new_label: String::from("X"),
         });
         let count = app.apply_operations();
-        assert_eq!(count, 1);
-        assert!(!app.has_pending_operations());
+        assert_eq!(count, 0, "an operation was reported as applied");
+        assert!(
+            app.has_pending_operations(),
+            "the queue was cleared, which looks exactly like success"
+        );
+        assert!(
+            app.status_message.contains("cannot write to a disk"),
+            "the status does not say why: {:?}",
+            app.status_message
+        );
+        assert!(
+            app.status_message.contains("unchanged"),
+            "the status does not say the disk is untouched: {:?}",
+            app.status_message
+        );
     }
 
     #[test]
     fn test_app_has_destructive_operations() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.enqueue_operation(PendingOperation::SetLabel {
             disk_id: 0,
             partition_index: 1,
@@ -5886,7 +6004,7 @@ mod tests {
 
     #[test]
     fn test_app_selected_partition() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         assert!(app.selected_partition().is_none());
 
         app.selected_item = SelectedItem::Partition(1);
@@ -5897,14 +6015,14 @@ mod tests {
 
     #[test]
     fn test_app_selected_partition_wrong_index() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.selected_item = SelectedItem::Partition(999);
         assert!(app.selected_partition().is_none());
     }
 
     #[test]
     fn test_app_toolbar_buttons_nothing_selected() {
-        let app = PartitionManagerApp::new();
+        let app = app_with_disks();
         let buttons = app.toolbar_buttons();
         assert_eq!(buttons.len(), 10);
         // "New Table" always enabled
@@ -5917,7 +6035,7 @@ mod tests {
 
     #[test]
     fn test_app_toolbar_buttons_partition_selected() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.selected_item = SelectedItem::Partition(1);
         let buttons = app.toolbar_buttons();
         // Delete, Resize, Format, Label, Flags, Mount should be enabled
@@ -5929,7 +6047,7 @@ mod tests {
 
     #[test]
     fn test_app_toolbar_buttons_unallocated_selected() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.selected_item = SelectedItem::Unallocated(0);
         let buttons = app.toolbar_buttons();
         assert!(buttons[1].1); // Create enabled
@@ -5938,7 +6056,7 @@ mod tests {
 
     #[test]
     fn test_app_toolbar_buttons_undo_apply_with_ops() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.enqueue_operation(PendingOperation::SetLabel {
             disk_id: 0,
             partition_index: 1,
@@ -5953,14 +6071,14 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
     #[test]
     fn test_render_with_selected_partition() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.selected_item = SelectedItem::Partition(1);
         let tree = render(&mut app);
         assert!(!tree.is_empty());
@@ -5968,7 +6086,7 @@ mod tests {
 
     #[test]
     fn test_render_with_dialog() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog =
             ActiveDialog::destructive(ConfirmIntent::ApplyOperations, "Test", "Body", "Apply All");
         let tree = render(&mut app);
@@ -5977,7 +6095,7 @@ mod tests {
 
     #[test]
     fn test_render_with_create_dialog() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog = ActiveDialog::CreatePartition(CreatePartitionDialog::new(0, 1000, 512));
         let tree = render(&mut app);
         assert!(!tree.is_empty());
@@ -5985,7 +6103,7 @@ mod tests {
 
     #[test]
     fn test_render_with_format_dialog() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog = ActiveDialog::Format(FormatDialog::new(1, "Test"));
         let tree = render(&mut app);
         assert!(!tree.is_empty());
@@ -5993,7 +6111,7 @@ mod tests {
 
     #[test]
     fn test_render_queue_expanded() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.queue_expanded = true;
         app.enqueue_operation(PendingOperation::SetLabel {
             disk_id: 0,
@@ -6006,7 +6124,7 @@ mod tests {
 
     #[test]
     fn test_render_queue_collapsed() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.queue_expanded = false;
         let tree = render(&mut app);
         assert!(!tree.is_empty());
@@ -6014,7 +6132,7 @@ mod tests {
 
     #[test]
     fn test_render_second_disk() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.select_disk(1);
         let tree = render(&mut app);
         assert!(!tree.is_empty());
@@ -6022,7 +6140,7 @@ mod tests {
 
     #[test]
     fn test_render_destructive_confirm() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog =
             ActiveDialog::destructive(ConfirmIntent::DeletePartition, "Del", "Sure?", "Delete");
         let tree = render(&mut app);
@@ -6061,7 +6179,7 @@ mod tests {
     fn a_long_confirmation_message_is_wrapped_not_truncated() {
         const MESSAGE: &str =
             "This will destroy ALL data on the disk. Choose GPT (default) or MBR.";
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog = ActiveDialog::destructive(
             ConfirmIntent::CreatePartitionTable,
             "Create New Partition Table",
@@ -6092,7 +6210,7 @@ mod tests {
         // over them. The toolkit grows the box to the text and stops drawing
         // lines that would reach the button row; either way, the thing that
         // must survive is the user's ability to answer.
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         let long = "Deleting this partition removes every file on it. ".repeat(8);
         app.dialog =
             ActiveDialog::destructive(ConfirmIntent::DeletePartition, "Delete", &long, "Delete");
@@ -6126,7 +6244,7 @@ mod tests {
     /// no marker, every one of these rows reads as a complete value, and as the
     /// same complete value as its neighbours.
     fn app_with_overlong_partition_strings() -> PartitionManagerApp {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         if let Some(disk) = app.disks.get_mut(0) {
             for p in &mut disk.partitions {
                 p.label = format!("Timemachine nightly backup volume {}", p.index);
@@ -6230,7 +6348,7 @@ mod tests {
     fn a_partition_label_that_fits_is_drawn_verbatim() {
         // The counterpart to the two tests above: eliding must not touch a
         // value that had room, or every short label would grow a false marker.
-        let app = PartitionManagerApp::new();
+        let app = app_with_disks();
         let label_x = partition_table().left(PART_LABEL);
         let labels: Vec<String> = partition_list_texts(&app)
             .into_iter()
@@ -6249,7 +6367,7 @@ mod tests {
         // The defect this replaced: the widths lived in the header array, in
         // each cell's `max_width`, and again in the row cursor's increment, so
         // "where does the Label column start" had three answers.
-        let app = PartitionManagerApp::new();
+        let app = app_with_disks();
         let texts = partition_list_texts(&app);
         let header_x: Vec<f32> = texts
             .iter()
@@ -6279,7 +6397,7 @@ mod tests {
 
     #[test]
     fn test_handle_resize() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         let result = handle_event(
             &mut app,
             &Event::Resize {
@@ -6294,7 +6412,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_escape_closes_dialog() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog =
             ActiveDialog::destructive(ConfirmIntent::ApplyOperations, "T", "M", "Apply All");
         let ev = Event::Key(KeyEvent {
@@ -6309,7 +6427,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_ctrl_z_undo() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.enqueue_operation(PendingOperation::SetLabel {
             disk_id: 0,
             partition_index: 1,
@@ -6327,7 +6445,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_arrow_navigation() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         // Down arrow selects first region
         let ev = Event::Key(KeyEvent {
             key: Key::Down,
@@ -6341,14 +6459,14 @@ mod tests {
 
     #[test]
     fn test_handle_focus_event_ignored() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         let result = handle_event(&mut app, &Event::FocusIn);
         assert_eq!(result, EventResult::Ignored);
     }
 
     #[test]
     fn test_handle_key_release_ignored() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         let ev = Event::Key(KeyEvent {
             key: Key::A,
             pressed: false,
@@ -6361,7 +6479,7 @@ mod tests {
 
     #[test]
     fn test_handle_create_dialog_text_input() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog = ActiveDialog::CreatePartition(CreatePartitionDialog::new(0, 1000, 512));
         let ev = Event::Key(KeyEvent {
             key: Key::A,
@@ -6379,7 +6497,7 @@ mod tests {
 
     #[test]
     fn test_handle_create_dialog_backspace() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         let mut dlg = CreatePartitionDialog::new(0, 1000, 512);
         dlg.label = String::from("abc");
         app.dialog = ActiveDialog::CreatePartition(dlg);
@@ -6397,7 +6515,7 @@ mod tests {
 
     #[test]
     fn test_handle_create_dialog_size_arrows() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog = ActiveDialog::CreatePartition(CreatePartitionDialog::new(0, 1000, 512));
         // Left arrow decreases
         let ev = Event::Key(KeyEvent {
@@ -6414,7 +6532,7 @@ mod tests {
 
     #[test]
     fn test_handle_create_dialog_tab_cycles_fs() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         app.dialog = ActiveDialog::CreatePartition(CreatePartitionDialog::new(0, 1000, 512));
         let ev = Event::Key(KeyEvent {
             key: Key::Tab,
@@ -6489,14 +6607,14 @@ mod tests {
 
     #[test]
     fn test_select_adjacent_region_down() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         select_adjacent_region(&mut app, false);
         assert_ne!(app.selected_item, SelectedItem::None);
     }
 
     #[test]
     fn test_select_adjacent_region_up_at_start() {
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         // Select first region
         select_adjacent_region(&mut app, false);
         // Up should stay at 0
@@ -6523,7 +6641,7 @@ mod tests {
         // Nothing in this app moves on its own, so an idle window must not
         // hold a timer: a tick that changes nothing is a frame the compositor
         // spends on nothing, multiplied by every window that does the same.
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         assert_eq!(
             app.tick_interval(),
             None,
@@ -6568,7 +6686,7 @@ mod tests {
         // the size that was *asked for* rather than the one that was granted --
         // visible as a stretched or clipped frame for one refresh, and as
         // clicks landing off-target until the first resize.
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         let tree = App::render(&mut app, 1440.0, 900.0);
         assert_eq!(app.width, 1440.0);
         assert_eq!(app.height, 900.0);
@@ -6591,7 +6709,7 @@ mod tests {
         // `Response::Idle` is what lets the compositor skip a repaint. An app
         // that answered `Redraw` to everything would repaint on every mouse
         // move over dead space.
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
         assert_eq!(
             app.on_event(&Event::Tick { elapsed_ms: 16 }),
             Response::Idle,
@@ -6639,7 +6757,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = PartitionManagerApp::new();
+        let mut app = app_with_disks();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

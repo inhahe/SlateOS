@@ -1,6 +1,23 @@
 //! `Slate OS` File Recovery / Undelete Utility
 //!
-//! A comprehensive file recovery application that:
+//! **This program cannot presently recover anything, and says so.** It has no
+//! route to a raw block device and no filesystem access at all -- the crate
+//! contains no reference to `std::fs` or `safeio` -- so it cannot read an
+//! inode table, carve a signature out of free space, or write a recovered file
+//! anywhere.
+//!
+//! Until 2026-09-15 it did not say so. It listed three invented partitions,
+//! reported invented recoverable files with names, paths, sizes and dates, and
+//! then reported a **successful recovery with a byte count** for each one,
+//! having written nothing. That is the most harmful shape a fabrication can
+//! take in this tree: it is acted on at the moment someone is least able to
+//! check, a false success stops the search where a false failure would not,
+//! and believing the data is safe elsewhere is how a disk gets reformatted.
+//!
+//! What follows describes the program's *intended* design, which is unchanged
+//! and is what the model below implements -- confidence scoring, filtering,
+//! the preview panel. What is missing is every source of real data.
+//!
 //! - Scans ext4 filesystem inode tables and directory entries for deleted files
 //! - Detects file signatures (magic bytes) for recovery without directory entries
 //! - Integrates with the OS recycle bin for easy restoration
@@ -844,7 +861,14 @@ impl Partition {
     }
 }
 
-/// Create a set of simulated partitions for the UI.
+/// Representative partitions, for tests only.
+///
+/// `#[cfg(test)]` since 2026-09-15. The application called this from its
+/// constructor, so it showed three disks -- `/dev/sda1` at 500 GB, `/dev/sdb1`
+/// at 2 TB -- on any machine, whatever was actually attached. Selecting one
+/// and scanning it is the first step of a flow that ended in a false recovery
+/// report, so this is where that flow started.
+#[cfg(test)]
 pub fn simulated_partitions() -> Vec<Partition> {
     vec![
         Partition::new(
@@ -1335,10 +1359,32 @@ impl RecycleBinReader {
         }
     }
 
-    /// Simulate reading the recycle bin contents.
+    /// Seed the reader, for tests.
+    ///
+    /// The entries used to come from `simulated_recycle_bin` inside `scan`,
+    /// which is why twenty-four tests were resting on invented data without
+    /// saying so. They pass their own now.
+    #[cfg(test)]
+    pub fn seed(&mut self, entries: Vec<RecycleBinEntry>) {
+        self.entries = entries;
+    }
+
+    /// Read the recycle bin. Finds nothing, because it cannot look.
+    ///
+    /// This used to be `self.entries = simulated_recycle_bin()`, which is why
+    /// a scan on a machine with nothing deleted still reported a PDF and a
+    /// photograph, with paths and byte counts.
+    ///
+    /// **This one is implementable and is the obvious next step.** A recycle
+    /// bin is an ordinary directory, so listing it needs `std::fs::read_dir`
+    /// and restoring from it needs a rename -- neither needs the raw device
+    /// access the inode scanner does. See `known-issues.md`.
     pub fn scan(&mut self) {
-        self.entries.clear();
-        self.entries = simulated_recycle_bin();
+        // A no-op rather than a clear, and the difference matters in exactly
+        // one place: a reader that has been handed entries keeps them. There
+        // is nothing to read from, so a scan learns nothing and therefore
+        // changes nothing -- clearing would be asserting that the bin is
+        // empty, which is a claim this cannot make either.
     }
 
     pub fn entries(&self) -> &[RecycleBinEntry] {
@@ -1359,6 +1405,7 @@ impl RecycleBinReader {
     }
 }
 
+#[cfg(test)]
 fn simulated_recycle_bin() -> Vec<RecycleBinEntry> {
     vec![
         RecycleBinEntry::new(
@@ -1790,8 +1837,18 @@ impl RecoveryEngine {
         }
     }
 
-    /// Simulate recovering selected files to the given target directory.
-    /// Returns a list of (filename, success) tuples.
+    /// Attempt recovery. Every attempt fails, because nothing is written.
+    ///
+    /// This function used to report `success: true` with
+    /// `bytes_recovered: file.file_size` -- both taken from the file's own
+    /// metadata, for a file that was itself a constant, to a destination
+    /// nothing ever wrote. Someone who had lost data was told a byte count and
+    /// a path.
+    ///
+    /// It now reports a failure naming the reason. The failure is honest and
+    /// the success was not, and of the two a recovery tool must prefer the one
+    /// that keeps the user looking: a person told the recovery failed still
+    /// has their disk, and a person told it succeeded may reformat it.
     pub fn recover_selected(&self, target_dir: &str) -> Vec<RecoveryResult> {
         let mut results = Vec::new();
         for file in &self.files {
@@ -1799,24 +1856,20 @@ impl RecoveryEngine {
                 continue;
             }
             let dest = format!("{}/{}", target_dir, file.filename);
-            let success = file.confidence != RecoveryConfidence::Unlikely;
-            let bytes_recovered = if success {
-                file.file_size
-            } else {
-                // Partial recovery for unlikely files.
-                file.file_size / 4
-            };
             results.push(RecoveryResult {
                 filename: file.filename.clone(),
                 destination: dest,
                 original_size: file.file_size,
-                bytes_recovered,
-                success,
-                error_message: if success {
-                    None
-                } else {
-                    Some(String::from("Data blocks partially overwritten"))
-                },
+                bytes_recovered: 0,
+                success: false,
+                // The reason, not a diagnosis. This used to read "Data blocks
+                // partially overwritten", which names a specific physical
+                // cause that was never established -- an invented explanation
+                // for an invented failure, which would send someone looking
+                // for a hardware problem they do not have.
+                error_message: Some(String::from(
+                    "This system cannot write recovered data: the recovery tool has no filesystem access",
+                )),
             });
         }
         results
@@ -2124,7 +2177,9 @@ impl UndeleteApp {
             height,
             screen: UiScreen::ScanSetup,
             engine: RecoveryEngine::new(),
-            partitions: simulated_partitions(),
+            // Empty: nothing here can enumerate a disk. The screen says
+            // so rather than offering a choice between three inventions.
+            partitions: Vec::new(),
             selected_partition: 0,
             scan_mode: ScanMode::Quick,
             filter: ScanFilter::new(),
@@ -2740,6 +2795,49 @@ impl UndeleteApp {
 
     // -- Scan setup screen --------------------------------------------------
 
+    /// Why there is nothing on screen, in the one phrasing that is true.
+    ///
+    /// Lane B's point, and it is the difference between this fix working and
+    /// merely not lying: **"no recoverable files" and "cannot scan" are
+    /// different sentences, and an empty list is read as the first.** A
+    /// recovery tool showing an empty partition list says "you have no disks",
+    /// and one showing an empty result list says "nothing of yours can be
+    /// recovered". Both are false, and both are answers to the question the
+    /// user actually asked -- just quieter ones than the invented files that
+    /// used to be here.
+    pub const CANNOT_LOOK: [&'static str; 3] = [
+        "This tool cannot examine your disks.",
+        "It has no access to a block device or a filesystem, so nothing here has looked at your data.",
+        "An empty list below is not a finding: it is the absence of one.",
+    ];
+
+    /// Draw [`Self::CANNOT_LOOK`] as lines at `y`.
+    ///
+    /// Three short lines rather than one paragraph because `TextOverflow` has
+    /// only `Clip` and `Ellipsis` -- there is no wrapping, so a long sentence
+    /// would be cut at the window edge with an ellipsis. A truncated
+    /// explanation of why a recovery tool is empty is close to no explanation,
+    /// and this is the one message in this program that must arrive whole.
+    fn render_cannot_look(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+        for (i, line) in Self::CANNOT_LOOK.iter().enumerate() {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "three lines is far below f32's integer-exact range"
+            )]
+            let line_y = y + (i as f32) * 18.0;
+            cmds.push(RenderCommand::Text {
+                x: PADDING,
+                y: line_y,
+                text: String::from(*line),
+                color: self.palette.ink(self.palette.peach),
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(self.width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+
     fn render_scan_setup(&self, cmds: &mut Vec<RenderCommand>) {
         // Header
         self.render_header(cmds, "File Recovery");
@@ -2759,6 +2857,9 @@ impl UndeleteApp {
         });
 
         let list_y = content_y + 28.0;
+        if self.partitions.is_empty() {
+            self.render_cannot_look(cmds, list_y);
+        }
         for (i, part) in self.partitions.iter().enumerate() {
             let y = list_y + (i as f32) * 64.0;
             let selected = i == self.selected_partition;
@@ -3067,6 +3168,12 @@ impl UndeleteApp {
         // Main list area
         let list_x = SIDEBAR_WIDTH;
         let list_w = self.width - SIDEBAR_WIDTH - PREVIEW_PANEL_WIDTH;
+        if self.visible_files().is_empty() {
+            // Not an empty list. An empty result list in a recovery tool reads
+            // as "nothing of yours survives", which is a verdict this has not
+            // earned and cannot earn.
+            self.render_cannot_look(cmds, content_y + PADDING);
+        }
         self.render_file_list(cmds, list_x, content_y, list_w, content_h);
 
         // Right preview panel
@@ -4375,6 +4482,51 @@ fn main() -> ExitCode {
     clippy::indexing_slicing
 )]
 mod tests {
+
+    /// An app with disks and a recycle bin to look at.
+    ///
+    /// `UndeleteApp::new` starts with no partitions since 2026-09-15: nothing
+    /// in this crate can enumerate a disk, and it used to show three invented
+    /// ones -- `/dev/sda1` at 500 GB and two more -- on every machine.
+    /// Twenty-four tests here were resting on them, and on the recycle bin
+    /// entries `scan` used to invent. They build their own now.
+    /// An empty screen says it could not look, rather than showing nothing.
+    ///
+    /// Lane B's caution and the reason this fix is not just a deletion: "no
+    /// recoverable files" and "cannot scan" are different sentences, and an
+    /// empty list in a recovery tool is read as the first. That reading is
+    /// still a false answer to the question the user asked -- a verdict on
+    /// their data that nothing here has earned -- just a quieter one than the
+    /// invented files it replaced.
+    #[test]
+    fn an_empty_recovery_screen_says_it_could_not_look() {
+        let app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let drawn: Vec<String> = app
+            .render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn
+                .iter()
+                .any(|t| t.contains("cannot examine your disks")),
+            "the partition screen is empty and unexplained: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|t| t.contains("not a finding")),
+            "nothing distinguishes an empty list from a negative result: {drawn:?}"
+        );
+    }
+
+    fn app_with_disks() -> UndeleteApp {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.partitions = simulated_partitions();
+        app.engine.recycle_reader.seed(simulated_recycle_bin());
+        app
+    }
     use super::*;
 
     // ------------------------------------------------------------------
@@ -4430,7 +4582,7 @@ mod tests {
     }
 
     fn scanned() -> UndeleteApp {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         app
@@ -4443,7 +4595,7 @@ mod tests {
     /// unreachable. The scan ran its four phases inside one call.
     #[test]
     fn a_scan_passes_through_its_phases_where_they_can_be_seen() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.scan_mode = ScanMode::Deep;
         app.start_scan();
 
@@ -4485,7 +4637,7 @@ mod tests {
     /// A quick scan skips the deep phase, and says so on the way past.
     #[test]
     fn a_quick_scan_does_not_go_through_the_deep_phase() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         let mut phases = Vec::new();
         for _ in 0..16 {
@@ -4629,7 +4781,7 @@ mod tests {
 
     #[test]
     fn the_partition_cards_and_mode_radios_can_be_clicked() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         assert!(
             app.partitions.len() > 1,
             "the sample has several partitions"
@@ -4646,14 +4798,14 @@ mod tests {
 
     #[test]
     fn the_start_button_starts_the_scan() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         click_control(&mut app, Control::StartScan);
         assert_eq!(app.screen, UiScreen::Scanning);
     }
 
     #[test]
     fn the_keyboard_chooses_a_partition_and_a_mode() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.handle_event(&press(Key::Down));
         assert_eq!(app.selected_partition, 1);
         app.handle_event(&press(Key::Up));
@@ -4862,7 +5014,7 @@ mod tests {
     /// click.
     #[test]
     fn no_two_controls_on_a_screen_overlap() {
-        for mut app in [UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT), scanned()] {
+        for mut app in [app_with_disks(), scanned()] {
             app.handle_event(&press_ctrl(Key::A));
             let controls = app.controls();
             assert!(!controls.is_empty(), "{:?} draws nothing", app.screen);
@@ -4907,7 +5059,7 @@ mod tests {
 
     #[test]
     fn the_title_says_what_the_window_is_doing() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         assert_eq!(app.title(), "Undelete");
         app.start_scan();
         assert!(app.title().starts_with("Scanning"), "got {:?}", app.title());
@@ -5242,23 +5394,36 @@ mod tests {
 
     // === Recycle bin tests ===
 
+    /// A scan finds nothing, because it cannot look.
+    ///
+    /// `scan` used to assign `simulated_recycle_bin()`, so this test passed on
+    /// a machine with an empty trash and on one with a full trash alike --
+    /// which is the tell that it was measuring neither.
     #[test]
-    fn test_recycle_bin_scan() {
+    fn a_recycle_bin_scan_finds_nothing_because_it_cannot_look() {
         let mut reader = RecycleBinReader::new();
         reader.scan();
-        assert!(reader.count() > 0);
+        assert_eq!(reader.count(), 0);
+        assert_eq!(reader.total_size(), 0);
     }
 
+    /// Seeded entries are found and measured.
+    ///
+    /// The reading half is still worth testing: when `scan` learns to read a
+    /// real trash directory, this is the test that says the rest of the model
+    /// handles what it finds.
     #[test]
-    fn test_recycle_bin_total_size() {
+    fn seeded_entries_are_counted_and_measured() {
         let mut reader = RecycleBinReader::new();
-        reader.scan();
+        reader.seed(simulated_recycle_bin());
+        assert!(reader.count() > 0);
         assert!(reader.total_size() > 0);
     }
 
     #[test]
     fn test_recycle_bin_find() {
         let mut reader = RecycleBinReader::new();
+        reader.seed(simulated_recycle_bin());
         reader.scan();
         assert!(reader.find(10001).is_some());
         assert!(reader.find(99999).is_none());
@@ -5354,9 +5519,18 @@ mod tests {
         assert!(!engine.files[0].selected);
     }
 
+    /// Recovery reports a failure, because nothing is written.
+    ///
+    /// This test asserted the opposite until 2026-09-15 -- "at least some
+    /// should succeed" -- and it was correct about the behaviour. The
+    /// behaviour was that `recover_selected` reported `success: true` and a
+    /// byte count taken from the file's own metadata, having written nothing
+    /// anywhere. A test can hold a fabrication in place as firmly as it holds
+    /// anything else, and this one did.
     #[test]
-    fn test_engine_recovery() {
+    fn recovery_reports_failure_because_nothing_is_written() {
         let mut engine = RecoveryEngine::new();
+        engine.recycle_reader.seed(simulated_recycle_bin());
         let part = Partition::new(
             "/dev/sda1",
             "/dev/sda1",
@@ -5368,9 +5542,25 @@ mod tests {
         let filter = ScanFilter::new();
         engine.select_all(&filter);
         let results = engine.recover_selected("/tmp/recovered");
-        assert!(!results.is_empty());
-        // At least some should succeed.
-        assert!(results.iter().any(|r| r.success));
+
+        assert!(!results.is_empty(), "nothing was attempted");
+        for result in &results {
+            assert!(
+                !result.success,
+                "{} reported success, and no bytes were written",
+                result.filename
+            );
+            assert_eq!(result.bytes_recovered, 0);
+            let reason = result.error_message.as_deref().unwrap_or("");
+            assert!(
+                reason.contains("cannot write"),
+                "the failure does not say why: {reason:?}"
+            );
+            assert!(
+                !reason.contains("overwritten"),
+                "the failure still claims a physical cause it never established: {reason:?}"
+            );
+        }
     }
 
     #[test]
@@ -5582,14 +5772,14 @@ mod tests {
 
     #[test]
     fn test_ui_render_scan_setup() {
-        let app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let app = app_with_disks();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_ui_render_results() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         let cmds = app.render_commands();
@@ -5598,7 +5788,7 @@ mod tests {
 
     #[test]
     fn test_ui_render_results_with_selection() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         app.select_file(0);
@@ -5610,7 +5800,7 @@ mod tests {
 
     /// A scanned app with one file selected, ready for the preview panel.
     fn app_with_selection() -> UndeleteApp {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         app.select_file(0);
@@ -5714,7 +5904,7 @@ mod tests {
 
     #[test]
     fn test_ui_render_recovery_results() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         app.engine.select_all(&app.filter);
@@ -5725,7 +5915,7 @@ mod tests {
 
     #[test]
     fn test_ui_render_deep_scan_results() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.scan_mode = ScanMode::Deep;
         app.start_scan();
         run_scan(&mut app);
@@ -5735,7 +5925,7 @@ mod tests {
 
     #[test]
     fn test_ui_category_filter() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         app.set_category_filter(Some(0));
@@ -5746,7 +5936,7 @@ mod tests {
 
     #[test]
     fn test_ui_category_filter_clear() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         app.set_category_filter(Some(0));
@@ -5756,7 +5946,7 @@ mod tests {
 
     #[test]
     fn test_ui_sorting() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         app.toggle_sort(SortField::Size);
@@ -5769,7 +5959,7 @@ mod tests {
 
     #[test]
     fn test_ui_navigation() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         assert!(app.selected_file_idx.is_none());
@@ -5785,7 +5975,7 @@ mod tests {
 
     #[test]
     fn test_ui_toggle_selection() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         app.select_file(0);
@@ -6009,7 +6199,7 @@ mod tests {
 
     #[test]
     fn test_visible_files_sorted() {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.start_scan();
         run_scan(&mut app);
         app.sort_field = SortField::Size;
@@ -6022,7 +6212,7 @@ mod tests {
 
     #[test]
     fn test_selected_file_returns_none_when_no_selection() {
-        let app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let app = app_with_disks();
         assert!(app.selected_file().is_none());
     }
 
@@ -6048,7 +6238,7 @@ mod tests {
     /// An app whose result list holds files with the long, prefix-sharing
     /// names a real deep scan produces.
     fn app_with_long_recovered_names() -> UndeleteApp {
-        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = app_with_disks();
         app.screen = UiScreen::Results;
         app.engine.files = vec![
             RecoverableFile::from_signature(1, FileSignatureKind::Jpeg, 0x0009_a1c4, 4_194_304),

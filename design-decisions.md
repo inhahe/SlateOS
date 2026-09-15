@@ -537,6 +537,39 @@ path is never modified to produce one.**
 - Do **not**, at any point, add auxv construction to
   `spawn.rs::setup_user_stack` or any other native launch code.
 
+> **§4 UPDATE 2026-09-15 (lane B, from the standing expiry audit in
+> `todo.txt`): THE PREREQUISITE THIS ENTRY IS BLOCKED ON HAS LANDED.** The
+> rejection above reads "there is no Linux compat ELF loader yet (a Phase 5.1
+> feature), so there is no real auxv to serve". Both halves of that are now
+> false, measured rather than assumed:
+>
+> * `kernel/src/proc/linux_stack.rs` builds a System V initial stack with a
+>   **17-entry auxv** — `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_BASE`,
+>   `AT_ENTRY`, `AT_RANDOM`, `AT_SECURE`, `AT_EXECFN`, `AT_HWCAP`,
+>   `AT_CLKTCK`, `AT_PAGESZ`, `AT_FLAGS`, `AT_UID`/`AT_EUID`/`AT_GID`/
+>   `AT_EGID`, `AT_NULL`.
+> * It is **live, not scaffolding**: `spawn.rs` calls `install_linux_stack`,
+>   and the ABI is chosen in the real exec path from
+>   `ElfFile::detect_linux_abi()`. Checked precisely because the neighbouring
+>   `build_linux_*_test_elf` helpers make a test-only reading plausible.
+> * `PR_GET_AUXV` in `kernel/src/syscall/linux.rs` still returns the bare
+>   `AT_NULL`, and its comment still gives this entry's reason: "We don't yet
+>   store a kernel-side auxv copy".
+>
+> So the decision itself is **still correct** — native processes genuinely
+> have no auxv and the bare `AT_NULL` remains the honest answer for them. What
+> has expired is the *blocker*: the one step left is precisely the one this
+> clause already names, "stash the built auxv in Linux-ABI PCB state" and have
+> procfs/prctl serve that copy for Linux-ABI processes only.
+>
+> Filed for lane A, whose tree both files are in:
+> `requests/b-a-the-auxv-blocker-in-section-4-has-expired.md`.
+>
+> Recorded here rather than only in the request because this is the exact
+> shape §305 exists to catch — a decision resting on a missing prerequisite,
+> the prerequisite arriving, and nobody re-reading the clause. S72 went 25 days
+> that way and ~1,100 commits were built on a dead premise.
+
 ---
 
 ## 5. fork() copy-on-write — swap swapped-out parent pages back IN rather than refcount swap slots
@@ -12488,6 +12521,33 @@ the real case where interrupts are running but somehow not crediting.
 instantly under QEMU and make the interrupt-timing path a fallback rather than
 the only source), or once the `syscall3` ABI change lands and `GRND_INSECURE`
 can give callers a real escape hatch from the wait.
+
+> **UPDATE 2026-09-15 (lane B, standing expiry audit in `todo.txt`): THE
+> SECOND CONDITION HAS FIRED — and the decision survives it.**
+>
+> * **`GRND_INSECURE` works.** The `syscall3` ABI change landed 2026-08-18
+>   (`requests/a-b-getrandom-kernel-now-reads-arg2-step-2-landed.md`), and the
+>   flag is honoured and self-tested: `kernel/src/syscall/dispatch.rs` asserts
+>   `getrandom(32, GRND_INSECURE)` returns 32 bytes *in the uncredited pool
+>   state*, which is the escape hatch this clause was waiting for.
+> * **The first condition has NOT fired.** There is still no hardware RNG
+>   driver. `kernel/src/fs/hwrng.rs` looks like one and is not — it is an
+>   entropy *accounting* surface (`record_generation`, `pool_status`), and
+>   `VIRTIO_ID_RNG` appears only in device-ID tables. Stated because the module
+>   name alone would have been enough to call this fired, wrongly.
+>
+> **What the revisit concludes: nothing here changes.** Waiting for a credited
+> pool is still right, and `TimedOut → EIO` is still the honest failure. What
+> the escape hatch changes is the *advice*, so the Consequences bullet above
+> now has a companion: a caller that genuinely cannot wait should pass
+> `GRND_INSECURE` and accept what that means, **not** substitute its own
+> generator. The flag makes the weak draw explicit at the call site instead of
+> hidden in a fallback branch.
+>
+> **Checked rather than assumed:** no caller in `posix/` or `userspace/` falls
+> back to a weaker generator on a failed `getrandom`. That is the defect this
+> entry warns about, and it is absent — a clean negative, recorded so the next
+> audit does not have to re-derive it.
 
 **Reference:** Linux `drivers/char/random.c` — `crng_init`, `crng_ready()`,
 `credit_init_bits()`, `add_timer_randomness()`, and the 5.18 rewrite that
@@ -74433,3 +74493,57 @@ valuable. Writing down *why* the fit was missing turned a vague "the wallpaper
 should support more" into a named blocker -- one model, not two -- which was
 then a thing that could be removed in one move. The entry cost ten minutes and
 the follow-through was shorter than the discussion would have been.
+
+
+## 853. The shell's per-application permission table is deleted, not finished
+
+**Date:** 2026-09-15
+**Lane:** C
+**Decided by:** Claude (autonomous) — on `design.txt`'s authority rather than on
+my own preference; see below.
+
+**In short:** the desktop carried a 2,014-line model of which programs may use
+your camera, microphone and location, with nothing using it. It is deleted
+rather than wired up, because this system does not decide those questions with
+a table of program names. It decides them by whether a program was handed a
+handle to the device, and a table that could override that would be a second
+answer to a question the kernel already answers.
+
+**What was there.** `gui/desktop/src/privacy_settings.rs`: `PermissionKind`,
+`PermissionState`, `AppPermission`, `ActivityEntry`, `TelemetryLevel`,
+`PrivacySettings`, with `is_allowed`, `revoke_all` and 37 tests. Nothing
+outside the file named any of it.
+
+**Why deleting rather than wiring.** `design.txt` specifies capability-based
+security from day one, with no ambient authority: a program reaches a device
+because it holds an unforgeable handle, not because a central list has its name
+ticked. A per-application permission table is therefore not this system's model
+half-built — it is Windows' and Android's model, borrowed. Wiring it up would
+mean building the store the kernel does not consult, and then either ignoring
+it (a control that changes nothing) or letting it override the capability
+system (two answers to one question, with the weaker one on top).
+
+That is the whole argument, and it is `design.txt`'s rather than mine. The
+decision I actually made is only *when* — the file has been dead for as long as
+it has existed, and `apps/settings`' copy of the same model shipped a tick-and-
+cross table telling users a browser had their camera. That page went on
+2026-09-15; this is the other half.
+
+**The case for keeping it, which I do not think survives.** It is 2,014 lines
+and 37 tests of real work, and a future permission *UI* would want something.
+But what it would want is a view of capabilities a process actually holds —
+readable from the kernel, not stored here — and that is a different data model
+with a different source of truth. Keeping this one would give whoever writes
+that a head start in the wrong direction, which is worse than a blank file.
+
+**What is preserved.** `gui/toolkit/src/surface.rs` cited this module as its
+worked example of a test that passes vacuously — a `FillRect` matcher that sees
+nothing once the box becomes an outline, and keeps passing because every
+assertion is over an empty set. The example is why anyone believes the lesson,
+so the doc now records that the module was deleted and what it demonstrated,
+rather than pointing at a file that is not there. Deleting an example silently
+is how a rule becomes folklore.
+
+**Recorded in** `known-issues.md` under
+`TD-C-THE-PRIVACY-PAGE-TOLD-YOU-A-BROWSER-HAD-YOUR-CAMERA`, which carries the
+`apps/settings` half.

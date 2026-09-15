@@ -67436,6 +67436,49 @@ importers and a green call-site gate would all have held for a plausible
 replacement that happened to carry a self-test. Line count and git date would
 not. Three checks of the first kind are worth less than one of the second.
 
+**A seventh: the test's fixture is the defect under test.** Worse than an
+incomplete scope, because repairing the defect keeps the test green.
+
+Lane C, 2026-09-14. `apps/settings` invented its data -- five pages of plausible
+records built in `SettingsState::new`: three accounts with `example.com`
+addresses and login counts, an adapter connected at `192.168.1.100` with a green
+link dot on a system that cannot enumerate interfaces, an update history with
+Windows-style KB numbers including a *failed* GPU driver. Deleting the invented
+accounts turned **six tests red at once** -- every one had been using those three
+production records as its fixture without saying so. They read as
+self-contained and were not.
+
+**The part that would not have been predicted:** it surfaced only because the
+list became **empty**. Had the three invented accounts been replaced with three
+real ones, all six tests would have gone on passing against whatever the machine
+happened to have, and the migration would have been called clean. So the defect
+is invisible to the test file, invisible to a passing run, and invisible to a
+*correct fix* -- it shows up only when the production data goes away entirely.
+
+Lane A's smaller version the same day: the immutability test asserted that a
+write was refused, and `truncate` and `remove` were unenforced. One of three
+enforcement points, and it read exactly like coverage. The shared tell is that
+**neither is visible in the test file** -- in both cases you have to change the
+production side to find out what the test was really standing on.
+
+**And the mirror image, which lane C caught twenty minutes later:** removing the
+network adapters killed three tests genuinely about adapters and **six more**
+that clicked an adapter row only as a *vehicle* for testing the shipped `run`
+loop -- when a frame is drawn, which events are ours, when the loop stops.
+Deleting those along with the feature would have silently dropped event-loop
+coverage unrelated to networking. They were re-pointed at another row. So a test
+that breaks when you delete a feature is not necessarily a test *of* that
+feature, and the question to ask before deleting it is what it would still be
+asserting if the vehicle changed.
+
+**Corollary on verification commands, from the same day.** `cargo build` passed
+clean on a settings page lane C had gutted, because the dead fields were `pub` on
+a `pub` struct and some were read by tests; `cargo test` caught the leftover.
+Lane A shipped a deny-level clippy lint after `cargo check` and `cargo fmt` both
+came back clean, and paid a 37-minute boot to find out. Three commands answered
+three different questions and both lanes needed all three. A clean result is
+evidence only about the question the command asks.
+
 **Where the four sit relative to each other.** A test that performs the missing step itself grants itself a premise;
 a dead instrument cannot fire at
 all; substitution fires correctly about the wrong subject; population blindness

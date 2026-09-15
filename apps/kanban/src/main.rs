@@ -8,6 +8,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
 use guitk::scroll_window;
@@ -34,6 +35,16 @@ mod palette {}
 struct Id(u64);
 
 impl Id {
+    /// The identifier a file says a thing has.
+    ///
+    /// Restoring a board has to use the ids that were written, not fresh ones
+    /// from the counter: a column stores `card_ids`, so renumbering the cards
+    /// would leave every column pointing at nothing while the board still
+    /// looked whole.
+    const fn from_stored(raw: u64) -> Self {
+        Self(raw)
+    }
+
     fn new() -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -51,6 +62,20 @@ enum Priority {
 }
 
 impl Priority {
+    /// The inverse of [`label`](Self::label).
+    ///
+    /// Unknown text becomes `Medium` rather than failing the whole import: a
+    /// board is worth more than a priority, and an unreadable priority is
+    /// visible on the card, where a refused file is not visible at all.
+    fn from_label(text: &str) -> Self {
+        match text {
+            "Low" => Self::Low,
+            "High" => Self::High,
+            "Critical" => Self::Critical,
+            _ => Self::Medium,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Low => "Low",
@@ -172,6 +197,22 @@ struct SimpleDate {
 impl SimpleDate {
     fn new(year: u16, month: u8, day: u8) -> Self {
         Self { year, month, day }
+    }
+
+    /// Read back what [`display`](Self::display) wrote: `YYYY-MM-DD`.
+    ///
+    /// `None` on anything else. A due date that will not parse is dropped and
+    /// the card keeps everything else, which is the same trade as an unknown
+    /// priority: the card is worth more than the field.
+    fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split('-');
+        let year: u16 = parts.next()?.parse().ok()?;
+        let month: u8 = parts.next()?.parse().ok()?;
+        let day: u8 = parts.next()?.parse().ok()?;
+        if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return None;
+        }
+        Some(Self { year, month, day })
     }
 
     fn display(&self) -> String {
@@ -858,6 +899,159 @@ impl JsonExporter {
     }
 }
 
+/// `#rrggbb` as written by `export_label`.
+fn parse_hex_color(text: &str) -> Option<Color> {
+    let body = text.strip_prefix('#')?;
+    if body.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(body.get(0..2)?, 16).ok()?;
+    let g = u8::from_str_radix(body.get(2..4)?, 16).ok()?;
+    let b = u8::from_str_radix(body.get(4..6)?, 16).ok()?;
+    Some(Color::rgb(r, g, b))
+}
+
+/// One card, or `None` when it has no id and therefore nothing to be.
+fn card_from_json(item: &JsonValue) -> Option<Card> {
+    let id = u64::try_from(item.get("id").and_then(JsonValue::as_i64)?).ok()?;
+    let mut card = Card::new(item.get("title").and_then(JsonValue::as_str).unwrap_or(""));
+    card.id = Id::from_stored(id);
+    card.description = item
+        .get("description")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .to_owned();
+    card.labels = item
+        .get("labels")
+        .and_then(JsonValue::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(JsonValue::as_i64)
+        .filter_map(|n| u64::try_from(n).ok())
+        .map(Id::from_stored)
+        .collect();
+    card.priority = item
+        .get("priority")
+        .and_then(JsonValue::as_str)
+        .map_or(Priority::Medium, Priority::from_label);
+    card.due_date = item
+        .get("due_date")
+        .and_then(JsonValue::as_str)
+        .and_then(SimpleDate::parse);
+    card.assignee = item
+        .get("assignee")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .to_owned();
+    card.checklist = item
+        .get("checklist")
+        .and_then(JsonValue::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|c| {
+            Some(ChecklistItem {
+                id: Id::new(),
+                text: c.get("text").and_then(JsonValue::as_str)?.to_owned(),
+                done: c.get("done").and_then(JsonValue::as_bool).unwrap_or(false),
+            })
+        })
+        .collect();
+    card.comments = item
+        .get("comments")
+        .and_then(JsonValue::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|c| {
+            Some(Comment {
+                // A fresh id: nothing addresses a comment by one, and the
+                // format does not carry it.
+                id: Id::new(),
+                author: c.get("author").and_then(JsonValue::as_str)?.to_owned(),
+                text: c
+                    .get("text")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                timestamp: c
+                    .get("timestamp")
+                    .and_then(JsonValue::as_i64)
+                    .and_then(|n| u64::try_from(n).ok())
+                    .unwrap_or(0),
+            })
+        })
+        .collect();
+    card.created_at = item
+        .get("created_at")
+        .and_then(JsonValue::as_i64)
+        .and_then(|n| u64::try_from(n).ok())
+        .unwrap_or(0);
+    card.archived = item
+        .get("archived")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    card.swimlane = item
+        .get("swimlane")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .to_owned();
+    Some(card)
+}
+
+/// One JSON value.
+///
+/// Small on purpose: this reads back what `JsonExporter` writes, which uses
+/// objects, arrays, strings, integers, booleans and null and nothing else. A
+/// float would be rejected rather than silently truncated.
+#[derive(Clone, Debug, PartialEq)]
+enum JsonValue {
+    Null,
+    Bool(bool),
+    Num(i64),
+    Str(String),
+    Arr(Vec<JsonValue>),
+    Obj(Vec<(String, JsonValue)>),
+}
+
+impl JsonValue {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Num(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    fn as_array(&self) -> Option<&[Self]> {
+        match self {
+            Self::Arr(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The value of `key`, or `None` if this is not an object or has no such
+    /// key. A missing key and a `null` are deliberately different: the caller
+    /// decides which of them is acceptable for each field.
+    fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            Self::Obj(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+}
+
 /// Minimal JSON parser for board import (handles the structure exported above).
 // The reader for what the exporter writes. Same position, plus a file
 // chooser it would also need. Kept with its ten tests so that wiring both
@@ -992,6 +1186,190 @@ impl JsonImporter {
     // Part of the importer, which has no file chooser to read from.
     // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
     #[allow(dead_code, reason = "import needs a file chooser")]
+    /// Rebuild a board from what `JsonExporter::export_board` wrote.
+    ///
+    /// # What a failure means here
+    ///
+    /// `Err` is reserved for "this is not one of our boards": the text did not
+    /// parse as JSON, or the top level is not an object with a `name`. A field
+    /// that is present and unreadable does NOT fail the import -- an unknown
+    /// priority becomes Medium, a due date that will not parse is dropped --
+    /// because **a board is worth more than a field, and a dropped field is
+    /// visible on the card where a refused file is not visible at all.**
+    ///
+    /// # Errors
+    ///
+    /// A string describing which of the two happened, for the status line.
+    fn import_board(text: &str) -> Result<Board, String> {
+        let (value, _) = Self::parse_value(text, 0)
+            .ok_or_else(|| String::from("that file is not JSON this program can read"))?;
+        let name = value
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| String::from("that JSON has no board name, so it is not a board"))?;
+
+        let mut board = Board::new(name);
+        board.columns.clear();
+        board.cards.clear();
+        board.labels.clear();
+
+        for item in value
+            .get("labels")
+            .and_then(JsonValue::as_array)
+            .unwrap_or(&[])
+        {
+            let Some(id) = item
+                .get("id")
+                .and_then(JsonValue::as_i64)
+                .and_then(|n| u64::try_from(n).ok())
+            else {
+                continue;
+            };
+            let label_name = item.get("name").and_then(JsonValue::as_str).unwrap_or("");
+            let color = item
+                .get("color")
+                .and_then(JsonValue::as_str)
+                .and_then(parse_hex_color)
+                .unwrap_or(Color::rgb(0x80, 0x80, 0x80));
+            let mut label = Label::new(label_name, color);
+            label.id = Id::from_stored(id);
+            board.labels.push(label);
+        }
+
+        for item in value
+            .get("cards")
+            .and_then(JsonValue::as_array)
+            .unwrap_or(&[])
+        {
+            let Some(card) = card_from_json(item) else {
+                continue;
+            };
+            board.cards.insert(card.id, card);
+        }
+
+        for item in value
+            .get("columns")
+            .and_then(JsonValue::as_array)
+            .unwrap_or(&[])
+        {
+            let Some(id) = item
+                .get("id")
+                .and_then(JsonValue::as_i64)
+                .and_then(|n| u64::try_from(n).ok())
+            else {
+                continue;
+            };
+            let mut column =
+                Column::new(item.get("name").and_then(JsonValue::as_str).unwrap_or(""));
+            column.id = Id::from_stored(id);
+            column.card_ids = item
+                .get("card_ids")
+                .and_then(JsonValue::as_array)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(JsonValue::as_i64)
+                .filter_map(|n| u64::try_from(n).ok())
+                .map(Id::from_stored)
+                .collect();
+            column.wip_limit = item
+                .get("wip_limit")
+                .and_then(JsonValue::as_i64)
+                .and_then(|n| usize::try_from(n).ok());
+            board.columns.push(column);
+        }
+
+        board.swimlanes_enabled = value
+            .get("swimlanes_enabled")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        board.swimlane_names = value
+            .get("swimlane_names")
+            .and_then(JsonValue::as_array)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .map(str::to_owned)
+            .collect();
+
+        Ok(board)
+    }
+
+    /// Parse one JSON value at `start`, returning it and the next offset.
+    ///
+    /// The piece that was missing. `parse_string`, `parse_number`,
+    /// `parse_unicode_escape` and `skip_ws` were all written and all tested,
+    /// and nothing assembled them -- so the type called `JsonImporter` was a
+    /// tokeniser, and the tracking entry that called it "a complete JSON
+    /// importer needing only a file chooser" was wrong by half a parser.
+    fn parse_value(data: &str, start: usize) -> Option<(JsonValue, usize)> {
+        let i = Self::skip_ws(data, start);
+        let rest = data.get(i..)?;
+        let first = rest.chars().next()?;
+        match first {
+            '"' => {
+                let (s, next) = Self::parse_string(data, i)?;
+                Some((JsonValue::Str(s), next))
+            }
+            '[' => Self::parse_seq(data, i, ']', |items, data, at| {
+                let (v, next) = Self::parse_value(data, at)?;
+                items.push(v);
+                Some(next)
+            })
+            .map(|(items, next)| (JsonValue::Arr(items), next)),
+            '{' => Self::parse_seq(data, i, '}', |pairs, data, at| {
+                let (key, after_key) = Self::parse_string(data, at)?;
+                let colon = Self::skip_ws(data, after_key);
+                if data.get(colon..)?.chars().next()? != ':' {
+                    return None;
+                }
+                let (v, next) = Self::parse_value(data, colon.checked_add(1)?)?;
+                pairs.push((key, v));
+                Some(next)
+            })
+            .map(|(pairs, next)| (JsonValue::Obj(pairs), next)),
+            _ => {
+                if rest.starts_with("true") {
+                    return Some((JsonValue::Bool(true), i.checked_add(4)?));
+                }
+                if rest.starts_with("false") {
+                    return Some((JsonValue::Bool(false), i.checked_add(5)?));
+                }
+                if rest.starts_with("null") {
+                    return Some((JsonValue::Null, i.checked_add(4)?));
+                }
+                let (n, next) = Self::parse_number(data, i)?;
+                Some((JsonValue::Num(n), next))
+            }
+        }
+    }
+
+    /// The comma-separated body shared by arrays and objects.
+    ///
+    /// One function rather than two near-identical loops: the bracket and what
+    /// one element is are the only differences, and two copies of a
+    /// comma-and-close loop is exactly the shape that drifts.
+    fn parse_seq<T>(
+        data: &str,
+        open: usize,
+        close: char,
+        mut element: impl FnMut(&mut Vec<T>, &str, usize) -> Option<usize>,
+    ) -> Option<(Vec<T>, usize)> {
+        let mut items = Vec::new();
+        let mut at = Self::skip_ws(data, open.checked_add(1)?);
+        if data.get(at..)?.chars().next()? == close {
+            return Some((items, at.checked_add(1)?));
+        }
+        loop {
+            at = element(&mut items, data, Self::skip_ws(data, at))?;
+            at = Self::skip_ws(data, at);
+            match data.get(at..)?.chars().next()? {
+                ',' => at = at.checked_add(1)?,
+                c if c == close => return Some((items, at.checked_add(1)?)),
+                _ => return None,
+            }
+        }
+    }
+
     fn skip_ws(data: &str, start: usize) -> usize {
         let bytes = data.as_bytes();
         let mut i = start;
@@ -1004,14 +1382,15 @@ impl JsonImporter {
         i
     }
 
-    /// Validate that we can round-trip a board through export.
-    // Part of the importer, which has no file chooser to read from.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "import needs a file chooser")]
-    fn validate_export(board: &Board) -> bool {
-        let json = JsonExporter::export_board(board);
-        !json.is_empty()
-    }
+    // `validate_export` was here. Its name, its doc comment ("validate that we
+    // can round-trip a board through export") and its `bool` all promised a
+    // check, and it exported the board and asked whether the string was
+    // non-empty. `export_board` always writes at least a header, so **it could
+    // not return false.** A validator that cannot fail is not a weaker check
+    // than a real one; it is a false statement about the code, and the next
+    // person to wire up the importer would reasonably have called it and read
+    // a pass as evidence. Deleted rather than fixed: the round trip it claimed
+    // to test is now tested for real, by `a_board_survives_a_round_trip`.
 }
 
 // =============================================================================
@@ -1030,6 +1409,16 @@ enum View {
 
 /// The top-level Kanban application state.
 struct KanbanApp {
+    /// The open or save picker. Holds the dialog, the saving flag and the
+    /// routing thirteen applications used to write out by hand.
+    picker: FilePicker,
+    /// What the last open or save did, for the status line.
+    last_file_action: Option<String>,
+    /// The size the last frame was drawn at, so a click on the picker is
+    /// answered against the window the user is looking at.
+    win_width: f32,
+    /// See `win_width`.
+    win_height: f32,
     boards: Vec<Board>,
     active_board_idx: usize,
     view: View,
@@ -1096,6 +1485,10 @@ impl KanbanApp {
         let default_board = Board::default_board();
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: FilePicker::new(),
+            last_file_action: None,
+            win_width: INITIAL_WIDTH as f32,
+            win_height: INITIAL_HEIGHT as f32,
             boards: vec![default_board],
             active_board_idx: 0,
             view: View::Board,
@@ -1120,6 +1513,47 @@ impl KanbanApp {
     // that unreachable `None` into all 40-odd call sites, where each would
     // invent its own way of ignoring it — which is strictly worse than one
     // documented assertion here.
+    /// Write the active board to `path` as JSON.
+    ///
+    /// Refuses a board with no cards rather than writing one. A board file
+    /// holding empty columns is valid and imports as an empty board, which the
+    /// user cannot tell apart from a save that failed -- and by then it has
+    /// replaced whatever was at that path. See design-decisions 854.
+    fn write_board(&mut self, path: &std::path::Path) -> String {
+        let board = self.active_board();
+        if board.cards.is_empty() {
+            return String::from("That board has no cards -- nothing to write");
+        }
+        let text = JsonExporter::export_board(board);
+        let (name, cards) = (board.name.clone(), board.cards.len());
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!("Wrote {cards} card(s) from {name} to {}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` as a board and open it.
+    ///
+    /// The three outcomes are kept apart, because "0 cards" would cover all
+    /// of them: a file this program cannot read, a board that genuinely has
+    /// no cards, and a read that failed before any parse was attempted.
+    fn read_board(&mut self, path: &std::path::Path) -> String {
+        let read = match safeio::read_to_string_capped(path, MAX_BOARD_BYTES) {
+            Ok(read) => read,
+            Err(err) => return format!("Could not read {}: {err}", path.display()),
+        };
+        let note = read.note(MAX_BOARD_BYTES);
+        match JsonImporter::import_board(&read.text) {
+            Ok(board) => {
+                let (name, cards) = (board.name.clone(), board.cards.len());
+                self.boards.push(board);
+                self.active_board_idx = self.boards.len().saturating_sub(1);
+                format!("{note}Opened {name} with {cards} card(s)")
+            }
+            Err(why) => format!("{note}Could not open {}: {why}", path.display()),
+        }
+    }
+
     #[allow(clippy::expect_used)]
     fn active_board(&self) -> &Board {
         self.boards
@@ -1541,7 +1975,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
 /// What the board says before anything is on it.
 const NOTHING_YET_LINES: [&str; 2] = [
     "No cards yet.",
-    "Nothing is saved between runs -- this app has no filesystem access, so anything you write here is gone when the window closes.",
+    "Nothing is saved automatically -- press Ctrl+E to write the board to a file, Ctrl+O to read one back, or it is gone when the window closes.",
 ];
 
 const CARD_TOP_PAD: f32 = 12.0;
@@ -3045,6 +3479,20 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             true
         }
 
+        // E = write the board out, O = read one back. NOT Ctrl+S, which
+        // this app bound to the search bar long before it had a door: the
+        // app's own vocabulary outranks consistency with its neighbours, and
+        // a second `Key::S if ctrl` arm would simply never be reached.
+        Key::E if key.modifiers.ctrl => {
+            let name = sanitise_board_name(&app.active_board().name);
+            app.picker.open_to_write(format!("{name}.json"));
+            true
+        }
+        Key::O if key.modifiers.ctrl => {
+            app.picker.open_to_read();
+            true
+        }
+
         // S = toggle search
         Key::S if key.modifiers.ctrl => {
             if app.show_filter_bar {
@@ -3338,6 +3786,31 @@ impl App for KanbanApp {
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        // The picker takes input first while it is up, or a keystroke meant
+        // for a filename reaches the board -- where a bare letter starts a
+        // new card and Delete removes the selected one.
+        //
+        // This also gives the picker its mouse events: the match below has no
+        // `Event::Mouse` arm at all, so without this the dialog could be seen
+        // and not clicked.
+        match self.picker.handle(event, self.win_width, self.win_height) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_board(&path)
+                } else {
+                    self.read_board(&path)
+                });
+                return Response::Redraw;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return Response::Redraw,
+            Picked::Ignored => {}
+        }
         match event {
             Event::CloseRequested => Response::Exit,
             Event::Key(key_ev) => {
@@ -3361,9 +3834,52 @@ impl App for KanbanApp {
         // The renderer is a free function taking the size, so there is no
         // stored dimension to reconcile: whatever the compositor grants is what
         // gets drawn, including on the first frame before any `Resize`.
-        render_app(self, width, height)
+        //
+        // Remembered anyway, because a click on the picker has to be answered
+        // against the window the user is looking at, and `on_event` is handed
+        // no size.
+        self.win_width = width;
+        self.win_height = height;
+        let mut tree = render_app(self, width, height);
+        // Last, so it is above everything. Forgetting this is how a picker
+        // ends up open and invisible, taking every keystroke with nothing on
+        // screen to say why.
+        tree.commands
+            .extend(self.picker.render(&self.palette, width, height));
+        tree
     }
 }
+
+/// A board name reduced to something that can be a filename.
+///
+/// Only the three characters a path cannot contain are replaced: the name is
+/// the user's, and rewriting more of it than necessary means they cannot find
+/// the file by the name they gave the board.
+fn sanitise_board_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | '\u{0}') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        String::from("board")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// The most of a board file one open will read.
+///
+/// Reported when it bites. A cut JSON document does not parse, so the import
+/// fails outright rather than losing part of a board -- but the reason must
+/// say which of the two happened, or a long file reads as a corrupt one.
+pub const MAX_BOARD_BYTES: usize = 8 * 1024 * 1024;
 
 /// The size the window asks to open at.
 ///
@@ -3509,6 +4025,307 @@ mod tests {
     // are off here — as `CLAUDE.md` prescribes.
 
     use super::*;
+
+    /// The empty board says what happens to the work, and how to keep it.
+    ///
+    /// **There was no test for this banner at all.** `NOTHING_YET_LINES` was
+    /// referenced once, by the renderer, and nothing checked that it reached
+    /// the screen or that it said anything useful. That was found by running
+    /// the checklist from TD-C-A-TEST-THAT-PINS-WORDING-PASSES-UNTIL-THE-
+    /// WORDING-IS-WRONG before editing it -- grep the app's tests for
+    /// `contains(` first -- which was written for stale assertions and turned
+    /// up a missing one instead.
+    ///
+    /// It asserts the property rather than the sentence: the banner must name
+    /// the cost and the remedy. Rewording either is free; dropping either is
+    /// not.
+    #[test]
+    fn the_empty_board_names_the_cost_and_the_remedy() {
+        let mut app = KanbanApp::new();
+        app.active_board_mut().cards.clear();
+        for column in &mut app.active_board_mut().columns {
+            column.card_ids.clear();
+        }
+
+        let texts: Vec<String> = render_app(&app, TEST_W, TEST_H)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for line in NOTHING_YET_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NOTHING_YET_LINES.iter().any(|l| l.contains("Ctrl+E")),
+            "the banner does not say how to keep the board",
+        );
+        assert!(
+            NOTHING_YET_LINES
+                .iter()
+                .any(|l| l.contains("gone when the window closes")),
+            "the banner does not say what happens if you do not",
+        );
+    }
+
+    /// A board survives a write and a read through the door.
+    #[test]
+    fn a_board_survives_the_door() {
+        let dir = std::env::temp_dir().join("slateos-kanban-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("board.json");
+        let _ = std::fs::remove_file(&path);
+
+        // The default board has columns and labels and no cards, so the
+        // fixture adds one. The assertion below is what caught that: without
+        // it the test would have written an empty board, been refused, and
+        // failed somewhere less informative.
+        let mut app = KanbanApp::new();
+        let card = Card::new("Something to save");
+        let card_id = card.id;
+        app.active_board_mut().cards.insert(card_id, card);
+        if let Some(column) = app.active_board_mut().columns.first_mut() {
+            column.card_ids.push(card_id);
+        }
+        let cards = app.active_board().cards.len();
+        assert!(cards > 0, "the fixture board has no cards to write");
+        let said = app.write_board(&path);
+        assert!(said.starts_with("Wrote "), "said: {said}");
+
+        let before = app.boards.len();
+        let said = app.read_board(&path);
+        assert!(said.starts_with("Opened "), "said: {said}");
+        assert_eq!(app.boards.len(), before + 1, "no board was opened");
+        assert_eq!(
+            app.active_board().cards.len(),
+            cards,
+            "the opened board lost cards"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that is not a board says so rather than opening an empty one.
+    #[test]
+    fn a_file_that_is_not_a_board_is_refused_with_a_reason() {
+        let dir = std::env::temp_dir().join("slateos-kanban-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("notaboard.json");
+        std::fs::write(&path, "{\"unrelated\":true}").expect("write");
+
+        let mut app = KanbanApp::new();
+        let before = app.boards.len();
+        let said = app.read_board(&path);
+        assert!(said.contains("no board name"), "said: {said}");
+        assert_eq!(app.boards.len(), before, "an empty board was opened anyway");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An empty board is refused rather than written. See design-decisions 854.
+    #[test]
+    fn a_board_with_no_cards_is_not_written() {
+        let path = std::env::temp_dir().join("slateos-kanban-should-not-exist.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = KanbanApp::new();
+        app.active_board_mut().cards.clear();
+        let said = app.write_board(&path);
+        assert_eq!(said, "That board has no cards -- nothing to write");
+        assert!(!path.exists(), "nothing should have been created");
+    }
+
+    /// Ctrl+E opens the picker; Ctrl+S still reaches the search bar.
+    ///
+    /// The reason the door is not on Ctrl+S: this app bound that to the search
+    /// bar long before it had a file. A second `Key::S if ctrl` arm would
+    /// never be reached, and the failure would be silent.
+    #[test]
+    fn ctrl_e_opens_the_picker_and_ctrl_s_still_searches() {
+        let mut app = KanbanApp::new();
+        app.show_filter_bar = true;
+
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        let key = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::new(),
+        };
+
+        assert!(handle_key_event(&mut app, &key(Key::S)));
+        assert_eq!(
+            app.input_mode,
+            InputMode::SearchFilter,
+            "Ctrl+S stopped reaching the search bar"
+        );
+
+        let mut app = KanbanApp::new();
+        let before = app.render(TEST_W, TEST_H).commands.len();
+        assert!(handle_key_event(&mut app, &key(Key::E)));
+        assert!(app.picker.is_open(), "Ctrl+E did not open the picker");
+
+        // `is_open` is not enough, and assuming it was is how apps/flashcards
+        // shipped a picker that took every keystroke and painted nothing.
+        // Deleting the render line above leaves `is_open` true and this
+        // assertion is the only one that notices.
+        assert!(
+            app.render(TEST_W, TEST_H).commands.len() > before,
+            "the picker is open and nothing was drawn for it"
+        );
+    }
+
+    /// **The round trip `validate_export` claimed to test and did not.**
+    ///
+    /// That function exported a board and asked whether the string was
+    /// non-empty. `export_board` always writes at least a header, so it could
+    /// not return false. This is the check it was named for.
+    #[test]
+    fn a_board_survives_a_round_trip() {
+        let mut board = Board::new("Sprint");
+        board
+            .labels
+            .push(Label::new("urgent", Color::rgb(0xff, 0x00, 0x00)));
+        let label_id = board.labels.first().expect("a label").id;
+
+        let mut card = Card::new("Write the importer");
+        card.description = String::from("with \"quotes\" and a \\ backslash");
+        card.priority = Priority::Critical;
+        card.due_date = Some(SimpleDate::new(2026, 9, 15));
+        card.assignee = String::from("lane C");
+        card.labels = vec![label_id];
+        card.checklist.push(ChecklistItem {
+            id: Id::new(),
+            text: String::from("parse values"),
+            done: true,
+        });
+        card.comments.push(Comment {
+            id: Id::new(),
+            author: String::from("reviewer"),
+            text: String::from("ship it"),
+            timestamp: 1_700_000_000,
+        });
+        card.archived = false;
+        let card_id = card.id;
+        board.cards.insert(card_id, card);
+
+        let mut column = Column::new("Doing");
+        column.card_ids = vec![card_id];
+        column.wip_limit = Some(3);
+        let column_id = column.id;
+        board.columns.push(column);
+
+        board.swimlanes_enabled = true;
+        board.swimlane_names = vec![String::from("Frontend"), String::from("Backend")];
+
+        let json = JsonExporter::export_board(&board);
+        let back = JsonImporter::import_board(&json).expect("our own export must import");
+
+        assert_eq!(back.name, "Sprint");
+        assert_eq!(back.columns.len(), 1, "the column did not survive");
+        let col = back.columns.first().expect("a column");
+        assert_eq!(col.id, column_id, "the column was renumbered");
+        assert_eq!(col.name, "Doing");
+        assert_eq!(col.wip_limit, Some(3));
+
+        // The part that would break silently if ids were reassigned: a column
+        // stores card ids, so fresh numbering leaves the board looking whole
+        // and every column pointing at nothing.
+        assert_eq!(col.card_ids, vec![card_id], "the column lost its card");
+
+        let got = back.cards.get(&card_id).expect("the card came back by id");
+        assert_eq!(got.title, "Write the importer");
+        assert_eq!(got.description, "with \"quotes\" and a \\ backslash");
+        assert_eq!(got.priority, Priority::Critical);
+        assert_eq!(
+            got.due_date.map(|d| d.display()),
+            Some(String::from("2026-09-15"))
+        );
+        assert_eq!(got.assignee, "lane C");
+        assert_eq!(got.labels, vec![label_id], "the card lost its label");
+        assert_eq!(got.checklist.len(), 1);
+        assert!(got.checklist.first().expect("an item").done);
+        assert_eq!(got.comments.len(), 1);
+        assert_eq!(
+            got.comments.first().expect("a comment").timestamp,
+            1_700_000_000
+        );
+
+        assert!(back.swimlanes_enabled, "the swimlane flag was lost");
+        assert_eq!(back.swimlane_names.len(), 2);
+        assert_eq!(back.labels.len(), 1);
+        assert_eq!(back.labels.first().expect("a label").id, label_id);
+    }
+
+    /// A file that is not JSON is refused, and says which of the two failures
+    /// it was.
+    #[test]
+    fn a_file_that_is_not_ours_is_refused_with_a_reason() {
+        let err = JsonImporter::import_board("this is not json at all")
+            .expect_err("junk must not import");
+        assert!(err.contains("not JSON"), "said: {err}");
+
+        let err = JsonImporter::import_board(r#"{"columns":[]}"#)
+            .expect_err("JSON without a board name is not a board");
+        assert!(err.contains("no board name"), "said: {err}");
+    }
+
+    /// A field that is present and unreadable does NOT fail the import.
+    ///
+    /// A board is worth more than a field, and a dropped field is visible on
+    /// the card where a refused file is not visible at all.
+    #[test]
+    fn an_unreadable_field_costs_the_field_and_not_the_board() {
+        let json = r#"{"name":"B","columns":[],"cards":[{"id":7,"title":"T",
+            "priority":"Nonsense","due_date":"not-a-date","archived":false}],
+            "labels":[],"swimlanes_enabled":false,"swimlane_names":[]}"#;
+        let board = JsonImporter::import_board(json).expect("the board should still import");
+        let card = board
+            .cards
+            .get(&Id::from_stored(7))
+            .expect("the card survived");
+        assert_eq!(
+            card.priority,
+            Priority::Medium,
+            "an unknown priority defaults"
+        );
+        assert_eq!(card.due_date, None, "an unreadable date is dropped");
+        assert_eq!(card.title, "T", "the rest of the card is intact");
+    }
+
+    /// Nested structure the tokeniser alone could never have handled.
+    #[test]
+    fn the_value_parser_handles_nesting_and_escapes() {
+        let (v, _) = JsonImporter::parse_value(r#"{"a":[1,{"b":"x\"y"},null,true]}"#, 0)
+            .expect("valid JSON");
+        let arr = v.get("a").and_then(JsonValue::as_array).expect("an array");
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr.first().and_then(JsonValue::as_i64), Some(1));
+        assert_eq!(
+            arr.get(1)
+                .and_then(|o| o.get("b"))
+                .and_then(JsonValue::as_str),
+            Some("x\"y")
+        );
+        assert_eq!(arr.get(2), Some(&JsonValue::Null));
+        assert_eq!(arr.get(3).and_then(JsonValue::as_bool), Some(true));
+    }
+
+    /// A truncated document is rejected rather than half-read.
+    #[test]
+    fn a_truncated_document_is_rejected() {
+        assert!(JsonImporter::parse_value(r#"{"a":[1,2"#, 0).is_none());
+        assert!(JsonImporter::parse_value(r#"{"a":"#, 0).is_none());
+        assert!(JsonImporter::import_board(r#"{"name":"B","columns":[{"id":1"#).is_err());
+    }
+
     use guitk::event::Modifiers;
 
     // ---- Id tests ----
@@ -4245,10 +5062,35 @@ mod tests {
         assert_eq!(pos, 3);
     }
 
+    /// The default board survives a round trip.
+    ///
+    /// This replaces `test_json_validate_export`, which asserted that
+    /// `validate_export` returned true. That function exported the board and
+    /// asked whether the string was non-empty, and `export_board` always
+    /// writes at least a header -- **so the function could not return false
+    /// and the test could not fail.** A vacuous test guarding a vacuous
+    /// validator, each making the other look covered.
     #[test]
-    fn test_json_validate_export() {
+    fn the_default_board_survives_a_round_trip() {
         let board = Board::default_board();
-        assert!(JsonImporter::validate_export(&board));
+        let json = JsonExporter::export_board(&board);
+        let back = JsonImporter::import_board(&json).expect("our own export must import");
+
+        assert_eq!(back.name, board.name);
+        assert_eq!(
+            back.columns.len(),
+            board.columns.len(),
+            "a column was lost in the round trip"
+        );
+        assert_eq!(back.cards.len(), board.cards.len(), "a card was lost");
+        for column in &board.columns {
+            let got = back
+                .columns
+                .iter()
+                .find(|c| c.id == column.id)
+                .unwrap_or_else(|| panic!("column {:?} did not come back", column.name));
+            assert_eq!(got.card_ids, column.card_ids, "column {:?}", column.name);
+        }
     }
 
     // ---- KanbanApp tests ----

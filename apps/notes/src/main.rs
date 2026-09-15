@@ -34,7 +34,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -1317,8 +1317,9 @@ pub struct NotesApp {
     /// Without it, typing "s" to search would re-sort the list under the box.
     /// The app had no input at all, so nothing had needed the distinction.
     pub searching: bool,
-    /// The save picker, while one is up.
-    pub file_dialog: Option<FileDialog>,
+    /// The open or save picker. Holds the dialog, the saving flag and
+    /// the routing eleven applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the last save attempt did, for the status line.
     pub last_save: Option<String>,
     pub window_width: f32,
@@ -1355,7 +1356,7 @@ impl NotesApp {
             active_panel: ActivePanel::NoteList,
             show_favorites_only: false,
             searching: false,
-            file_dialog: None,
+            picker: FilePicker::new(),
             last_save: None,
             window_width: 1280.0,
             window_height: 800.0,
@@ -1871,16 +1872,16 @@ impl NotesApp {
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in the note behind it.
-        if self.file_dialog.is_some() {
-            let (w, h) = (self.window_width, self.window_height);
-            let action = match (event, self.file_dialog.as_mut()) {
-                (Event::Key(key_ev), Some(dialog)) if key_ev.pressed => {
-                    dialog.handle_event(key_ev, h)
-                }
-                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
-                _ => return EventResult::Ignored,
-            };
-            return self.apply_dialog_action(action);
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.last_save = Some(self.save_selected_note(&path));
+                return EventResult::Consumed;
+            }
+            Picked::Handled => return EventResult::Consumed,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
@@ -1916,14 +1917,7 @@ impl NotesApp {
             return;
         };
         let name = format!("{}.md", sanitise_filename(&note.title));
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = FileDialog::save()
-            .with_initial_path(start)
-            .with_filename(name);
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.file_dialog = Some(dialog);
+        self.picker.open_to_write(name);
     }
 
     /// Write the selected note to `path` as Markdown.
@@ -1953,27 +1947,6 @@ impl NotesApp {
             // happened: a note that was not written and a note that was are
             // opposite states and only one of them is safe to close on.
             Err(err) => format!("{SAVE_FAILED_PREFIX} {}: {err}", path.display()),
-        }
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
-        match action {
-            DialogAction::None => EventResult::Consumed,
-            DialogAction::Cancelled => {
-                self.file_dialog = None;
-                EventResult::Consumed
-            }
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-                EventResult::Consumed
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                self.last_save = Some(self.save_selected_note(&path));
-                EventResult::Consumed
-            }
         }
     }
 
@@ -2224,9 +2197,7 @@ impl NotesApp {
 
         // Last, so it is above everything -- the same order in which
         // `handle_event` gives it the keystroke.
-        if let Some(dialog) = &self.file_dialog {
-            cmds.extend(dialog.render(&self.palette, width, height));
-        }
+        cmds.extend(self.picker.render(&self.palette, width, height));
 
         cmds
     }
@@ -3852,7 +3823,7 @@ mod tests {
         app.selected_note = None;
         app.open_save_dialog();
         assert!(
-            app.file_dialog.is_none(),
+            !app.picker.is_open(),
             "a picker opened with nothing to write"
         );
         let said = app.last_save.clone().expect("refused silently");

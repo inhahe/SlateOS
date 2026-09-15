@@ -20,8 +20,6 @@
 
 #[cfg(not(test))]
 use std::env;
-#[cfg(not(test))]
-use std::io::Read;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -281,31 +279,6 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 const SPOOL_DIR: &str = "/var/spool/lpd";
 const PRINTERS_FILE: &str = "/etc/printcap";
 
-#[cfg(not(test))]
-fn get_next_job_id() -> u32 {
-    let counter_file = format!("{SPOOL_DIR}/.next_id");
-    let current = std::fs::read_to_string(&counter_file)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(1);
-    let next = current.saturating_add(1);
-    let _ = std::fs::create_dir_all(SPOOL_DIR);
-    let _ = std::fs::write(&counter_file, format!("{next}\n"));
-    current
-}
-
-#[cfg(not(test))]
-fn get_default_printer() -> String {
-    // Check PRINTER env var, then LPDEST, then first in printcap
-    if let Ok(p) = env::var("PRINTER") {
-        return p;
-    }
-    if let Ok(p) = env::var("LPDEST") {
-        return p;
-    }
-    "default".to_string()
-}
-
 fn read_printers() -> Vec<PrinterInfo> {
     let mut printers = Vec::new();
 
@@ -440,7 +413,6 @@ fn parse_job_file(content: &str) -> Option<PrintJob> {
 /// submitted work as the superuser and cancelled the superuser's.
 // `#[cfg(not(test))]` to match both consumers: `run_lp` and `run_lprm` are
 // gated that way, so this is genuinely unused in a test build.
-#[cfg(not(test))]
 fn current_username() -> Option<String> {
     let uid = authlib::identity::caller_uid()?;
     userdb::UserDb::load(userdb::DEFAULT_PATH)
@@ -448,46 +420,62 @@ fn current_username() -> Option<String> {
         .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
 }
 
-#[cfg(not(test))]
-fn run_lp(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
-    let Some(username) = current_username() else {
-        return Err(io::Error::other(
-            "cannot determine who you are, and a print job records its owner",
-        ));
-    };
-    let printer = cfg.printer.clone().unwrap_or_else(get_default_printer);
+fn run_lp(_cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
+    // The owner check that used to stand here is gone, and the reasoning I
+    // first wrote for keeping it was wrong. It said the two failures should
+    // stay distinguishable -- "I do not know who you are" versus "there is
+    // nowhere to send this". But the first only matters if a job would
+    // otherwise be created, and none can be: it is a precondition of an
+    // operation that does not happen. Reporting it first put a fixable-
+    // looking error in front of an unfixable one, and made the outcome depend
+    // on whether USER happened to be set.
+    //
+    // `current_username` stays -- `lprm` needs it to decide whose jobs may be
+    // cancelled, which is a real check on a real operation.
 
-    for file_path in &cfg.files {
-        let (title, size) = if file_path.as_os_str() == "-" {
-            // Read stdin
-            let mut data = Vec::new();
-            io::stdin().read_to_end(&mut data)?;
-            let size = data.len() as u64;
-            ("(stdin)".to_string(), size)
-        } else {
-            let meta = std::fs::metadata(file_path)?;
-            let title = cfg
-                .title
-                .clone()
-                .unwrap_or_else(|| file_path.display().to_string());
-            (title, meta.len())
-        };
-
-        let job_id = get_next_job_id();
-
-        // Write job file
-        let job_content = format!(
-            "id={job_id}\nuser={username}\ntitle={title}\nprinter={printer}\nsize={size}\ncopies={}\nstatus=pending\n",
-            cfg.copies
-        );
-
-        let _ = std::fs::create_dir_all(SPOOL_DIR);
-        let _ = std::fs::write(format!("{SPOOL_DIR}/{job_id}.job"), job_content);
-
-        writeln!(writer, "request id is {printer}-{job_id} ({size} bytes)")?;
-    }
-
-    Ok(0)
+    // REFUSING, and the document is deliberately not read.
+    //
+    // What this used to do, per file: stat it (or drain stdin), take the
+    // SIZE, write a `.job` file holding id/user/title/printer/size/copies,
+    // and print
+    //
+    //     request id is default-42 (1234 bytes)
+    //
+    // then exit 0. Three things are wrong with that and they compound.
+    //
+    // THE DOCUMENT WAS NEVER CAPTURED. Only metadata reached the spool, so
+    // even a print service arriving tomorrow would find jobs with nothing to
+    // print. For `-` it is worse than useless: stdin was read to the end,
+    // measured, and dropped, so `cat report.ps | lp` consumed the only copy
+    // of a pipe's contents and reported a queued job. That is why the stdin
+    // read is gone rather than redirected to the spool -- reading it at all,
+    // only to refuse, would still destroy it.
+    //
+    // NOTHING CONSUMES THE SPOOL. `/var/spool/lpd` is written by this crate
+    // and read by this crate; there is no lpd, no cupsd, nothing in
+    // `services/` or `init/`. The job would sit there forever.
+    //
+    // BOTH SPOOL WRITES DISCARDED THEIR ERRORS. `let _ = create_dir_all(..)`
+    // and `let _ = write(..)`, then the request id printed unconditionally --
+    // so the line appeared whether or not even the metadata stub survived.
+    //
+    // `lpstat` and `lprm` still work on the spool, which is honest: they
+    // report and remove what is actually there, and after this change that is
+    // nothing unless something else put it there.
+    writeln!(
+        writer,
+        "lp: cannot queue a print job: nothing on this system prints."
+    )?;
+    writeln!(
+        writer,
+        "lp: {SPOOL_DIR} is written and read only by lp itself -- there is no print \
+service to pick a job up."
+    )?;
+    writeln!(
+        writer,
+        "lp: your file has not been read, and stdin has not been consumed."
+    )?;
+    Ok(1)
 }
 
 fn run_lpstat(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
@@ -496,7 +484,11 @@ fn run_lpstat(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
 
     if cfg.show_all {
         // Show everything
-        writeln!(writer, "scheduler is running")?;
+        // NOT "scheduler is running". There is no scheduler: nothing in
+        // the tree reads the spool but this crate. The line below reports
+        // what is true, and `lpstat` still lists the printcap entries and
+        // the spool contents underneath it, because those are real files.
+        writeln!(writer, "no scheduler is running")?;
         writeln!(writer)?;
 
         // Default destination
@@ -617,7 +609,6 @@ fn run_lpstat(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     Ok(0)
 }
 
-#[cfg(not(test))]
 fn run_lprm(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     if cfg.cancel_all {
         // Cancel all jobs
@@ -803,6 +794,82 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    /// `lprm` reports nothing cancelled when there is nothing to cancel.
+    ///
+    /// `run_lprm` had no test at all -- it was `#[cfg(not(test))]`, so the
+    /// suite could not call it. Cancelling is the one operation in this crate
+    /// that genuinely acts on the filesystem, which makes it the one that
+    /// most deserved a test.
+    ///
+    /// `--all` on an empty spool is the safe case to assert: it exercises the
+    /// read-and-remove loop without depending on a job existing, and a
+    /// version that reported cancellations it did not perform would fail it.
+    #[test]
+    fn lprm_reports_nothing_when_the_spool_is_empty() {
+        let cfg = Config {
+            cancel_all: true,
+            ..Config::default()
+        };
+        let mut out = Vec::new();
+        let code = run_lprm(&cfg, &mut out).expect("no I/O failure on a Vec");
+        assert_eq!(code, 0, "cancelling nothing is not an error");
+
+        let text = String::from_utf8(out).expect("utf8");
+        for line in text.lines() {
+            assert!(
+                !line.starts_with("cancelled job"),
+                "reported a cancellation with no job to cancel: {line}"
+            );
+        }
+    }
+
+    /// `lp` refuses instead of reporting a queued job.
+    ///
+    /// It used to stat the file (or drain stdin), write a metadata-only
+    /// `.job` file, print "request id is default-42 (1234 bytes)", and exit
+    /// 0. The DOCUMENT was never captured, so even a print service arriving
+    /// later would find a job with nothing to print -- and for `-` the pipe
+    /// was read to the end and dropped, destroying the only copy.
+    #[test]
+    fn lp_refuses_rather_than_reporting_a_queued_job() {
+        let cfg = Config::default();
+        let mut out = Vec::new();
+        let code = run_lp(&cfg, &mut out).expect("no I/O failure on a Vec");
+        assert_eq!(code, 1, "a job that was not queued must not report success");
+
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            !text.contains("request id"),
+            "must not print a request id for a job that does not exist: {text}"
+        );
+        assert!(
+            text.contains("nothing on this system prints"),
+            "the refusal must say why: {text}"
+        );
+    }
+
+    /// `lpstat` does not claim a scheduler that is not there.
+    #[test]
+    fn lpstat_does_not_claim_a_running_scheduler() {
+        let cfg = Config {
+            show_all: true,
+            ..Config::default()
+        };
+        let mut out = Vec::new();
+        run_lpstat(&cfg, &mut out).expect("no I/O failure on a Vec");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.contains("no scheduler is running"), "got: {text}");
+        // The negative on its own would pass against a version that printed
+        // nothing at all, so the positive above carries the assertion.
+        assert!(
+            !text.contains(
+                "
+scheduler is running"
+            ),
+            "got: {text}"
+        );
+    }
+
     use super::*;
 
     #[test]

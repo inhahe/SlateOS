@@ -816,7 +816,7 @@ impl Default for ProgressTracker {
 }
 
 // ============================================================================
-// Simulated Benchmark Runners
+// Benchmark Runners
 // ============================================================================
 
 // HOW THESE MEASURE, AND WHAT THEY USED TO DO INSTEAD.
@@ -850,10 +850,26 @@ impl Default for ProgressTracker {
 //    clock that did not move is a failed measurement, and reporting infinite
 //    throughput would be a new fabrication of the same kind.
 //
-// The disk and graphics tests are NOT measured and still return constants --
-// see `known-issues.md`. They are the ones that cannot be fixed by timing the
-// work, because they do not do the work: `simulate_disk_iops` sums the integers
-// 0..2000 and reports 520,000 IOPS.
+// The graphics tests are measured too, on the processor, and the panel says
+// so: nothing here can reach a GPU, and "Fill Rate" under a heading called
+// "Graphics" would otherwise be read as one.
+//
+// The disk category is the one that is mostly *absent* rather than measured.
+// Sequential write is real -- it writes a temporary file and times it, and
+// reports unavailable if it cannot. The other four say why they are missing
+// instead of carrying a number: two would measure the page cache rather than
+// the disk, random write needs a sync per operation that this cannot yet
+// bound, and IOPS was derived from the four above. `simulate_disk_iops`, which
+// summed the integers 0..2000 and reported 520,000 IOPS, is gone.
+//
+// This paragraph is the third description in this file to outlive the
+// behaviour it described -- the module doc still said "simulated" two hours
+// after the fix, eleven of these functions kept a `simulate_` prefix for a
+// day after they started timing real work, and this said the disk and
+// graphics tests still returned constants after they had stopped. A stale
+// comment about a fabrication is the same defect as the fabrication, pointed
+// at the next reader instead of the user: it invites someone to delete a real
+// measurement, or to distrust a genuine regression.
 
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -881,8 +897,8 @@ fn rate(amount: f64, secs: f64) -> f64 {
 pub fn run_cpu_benchmark() -> CategoryResult {
     let mut cat = CategoryResult::new("CPU");
 
-    // Integer arithmetic score — simulated as ops/s.
-    let integer_score = simulate_integer_benchmark();
+    // Integer arithmetic score, in millions of ops/s.
+    let integer_score = measure_integer_benchmark();
     cat.sub_tests.push(SubTestResult::new(
         "Integer Arithmetic",
         integer_score,
@@ -891,7 +907,7 @@ pub fn run_cpu_benchmark() -> CategoryResult {
     ));
 
     // Floating point score.
-    let fp_score = simulate_float_benchmark();
+    let fp_score = measure_float_benchmark();
     cat.sub_tests.push(SubTestResult::new(
         "Floating Point",
         fp_score,
@@ -900,7 +916,7 @@ pub fn run_cpu_benchmark() -> CategoryResult {
     ));
 
     // Prime sieve score.
-    let prime_score = simulate_prime_sieve();
+    let prime_score = measure_prime_sieve();
     cat.sub_tests.push(SubTestResult::new(
         "Prime Sieve (1M)",
         prime_score,
@@ -909,7 +925,7 @@ pub fn run_cpu_benchmark() -> CategoryResult {
     ));
 
     // Matrix multiply score.
-    let matrix_score = simulate_matrix_multiply();
+    let matrix_score = measure_matrix_multiply();
     cat.sub_tests.push(SubTestResult::new(
         "Matrix Multiply (128x128)",
         matrix_score,
@@ -938,7 +954,7 @@ pub fn run_cpu_benchmark() -> CategoryResult {
 /// which is the only check it can get. See this file's module documentation,
 /// "What the tests do and do not establish": a rate is invariant to its own
 /// operation count, so nothing runnable can verify this four.
-fn simulate_integer_benchmark() -> f64 {
+fn measure_integer_benchmark() -> f64 {
     const ITERATIONS: u64 = 8_000_000;
     const OPS_PER_ITERATION: f64 = 4.0;
     let secs = seconds(|| {
@@ -960,7 +976,7 @@ fn simulate_integer_benchmark() -> f64 {
 ///
 /// Four floating-point operations per iteration: two multiplies, a square root
 /// and an add.
-fn simulate_float_benchmark() -> f64 {
+fn measure_float_benchmark() -> f64 {
     const ITERATIONS: u64 = 4_000_000;
     const FLOPS_PER_ITERATION: f64 = 4.0;
     let secs = seconds(|| {
@@ -984,7 +1000,7 @@ fn simulate_float_benchmark() -> f64 {
 /// The count is the real one the sieve produced -- 78,498 below a million --
 /// rather than a reference figure. It used to return `78500.0 + count * 0.01`,
 /// which is a constant wearing the count as a disguise.
-fn simulate_prime_sieve() -> f64 {
+fn measure_prime_sieve() -> f64 {
     const LIMIT: usize = 1_000_000;
     let mut found = 0_usize;
     let secs = seconds(|| {
@@ -1025,7 +1041,7 @@ fn simulate_prime_sieve() -> f64 {
 ///
 /// `2 * n^3` flops is the standard count for a naive matrix multiply: one
 /// multiply and one add per innermost step, `n^3` steps.
-fn simulate_matrix_multiply() -> f64 {
+fn measure_matrix_multiply() -> f64 {
     const N: usize = 128;
     const ELEMS: usize = N * N;
     let secs = seconds(|| {
@@ -1059,7 +1075,7 @@ fn simulate_matrix_multiply() -> f64 {
 pub fn run_memory_benchmark() -> CategoryResult {
     let mut cat = CategoryResult::new("Memory");
 
-    let seq_write = simulate_seq_write_throughput();
+    let seq_write = measure_seq_write_throughput();
     cat.sub_tests.push(SubTestResult::new(
         "Sequential Write",
         seq_write,
@@ -1067,7 +1083,7 @@ pub fn run_memory_benchmark() -> CategoryResult {
         false,
     ));
 
-    let seq_read = simulate_seq_read_throughput();
+    let seq_read = measure_seq_read_throughput();
     cat.sub_tests.push(SubTestResult::new(
         "Sequential Read",
         seq_read,
@@ -1075,7 +1091,7 @@ pub fn run_memory_benchmark() -> CategoryResult {
         false,
     ));
 
-    let random_latency = simulate_random_access_latency();
+    let random_latency = measure_random_access_latency();
     cat.sub_tests.push(SubTestResult::new(
         "Random Access Latency",
         random_latency,
@@ -1083,7 +1099,7 @@ pub fn run_memory_benchmark() -> CategoryResult {
         true,
     ));
 
-    let bandwidth = simulate_memory_bandwidth();
+    let bandwidth = measure_memory_bandwidth();
     cat.sub_tests.push(SubTestResult::new(
         "Memory Bandwidth",
         bandwidth,
@@ -1112,7 +1128,7 @@ pub fn run_memory_benchmark() -> CategoryResult {
 /// Sixteen megabytes, which is past any level of cache on an ordinary desktop,
 /// so this measures memory rather than L2. The old version filled 64 KiB --
 /// comfortably inside L2 — and then returned 11,800 regardless.
-fn simulate_seq_write_throughput() -> f64 {
+fn measure_seq_write_throughput() -> f64 {
     const WORDS: usize = 2 * 1024 * 1024;
     const BYTES: usize = WORDS * 8;
     let mut buf = vec![0_u64; WORDS];
@@ -1137,7 +1153,7 @@ fn simulate_seq_write_throughput() -> f64 {
 /// The buffer is filled before the clock starts, so the measurement is of the
 /// read and not of the allocation — a first touch of fresh pages costs page
 /// faults, which would be charged to the read and reported as slow memory.
-fn simulate_seq_read_throughput() -> f64 {
+fn measure_seq_read_throughput() -> f64 {
     const WORDS: usize = 2 * 1024 * 1024;
     const BYTES: usize = WORDS * 8;
     #[allow(clippy::cast_possible_truncation)]
@@ -1159,7 +1175,7 @@ fn simulate_seq_read_throughput() -> f64 {
 /// The table is 16 MiB so the chase misses cache on essentially every step.
 /// The old version chased 4,096 entries, which fits in L1, and then returned
 /// 78.0 regardless.
-fn simulate_random_access_latency() -> f64 {
+fn measure_random_access_latency() -> f64 {
     const CELLS: usize = 4 * 1024 * 1024;
     const STEPS: usize = 400_000;
     // A large odd multiplier walks the whole table before repeating, so the
@@ -1187,7 +1203,7 @@ fn simulate_random_access_latency() -> f64 {
 /// touched are twice the buffer, which is the convention every other memory
 /// bandwidth figure uses. Reporting the buffer size alone would halve the
 /// number against everyone else's.
-fn simulate_memory_bandwidth() -> f64 {
+fn measure_memory_bandwidth() -> f64 {
     const ELEMS: usize = 4 * 1024 * 1024;
     const BYTES_TOUCHED: f64 = (ELEMS * 8 * 2) as f64;
     #[allow(clippy::cast_possible_truncation)]
@@ -1310,7 +1326,7 @@ fn measure_disk_seq_write() -> Option<f64> {
 pub fn run_graphics_benchmark() -> CategoryResult {
     let mut cat = CategoryResult::new("Graphics");
 
-    let fill_rate = simulate_fill_rate();
+    let fill_rate = measure_fill_rate();
     cat.sub_tests.push(SubTestResult::new(
         "Software Fill",
         fill_rate,
@@ -1318,7 +1334,7 @@ pub fn run_graphics_benchmark() -> CategoryResult {
         false,
     ));
 
-    let text_render = simulate_text_rendering();
+    let text_render = measure_text_rendering();
     cat.sub_tests.push(SubTestResult::new(
         "Text Shaping",
         text_render,
@@ -1326,7 +1342,7 @@ pub fn run_graphics_benchmark() -> CategoryResult {
         false,
     ));
 
-    let composite = simulate_composite_ops();
+    let composite = measure_composite_ops();
     cat.sub_tests.push(SubTestResult::new(
         "Software Compositing",
         composite,
@@ -1351,7 +1367,7 @@ pub fn run_graphics_benchmark() -> CategoryResult {
 /// and a number labelled "Fill Rate" under a heading called "Graphics" would
 /// be read as one. The old version filled the same buffer and returned 2,100
 /// whatever happened.
-fn simulate_fill_rate() -> f64 {
+fn measure_fill_rate() -> f64 {
     const WIDTH: usize = 1920;
     const HEIGHT: usize = 1080;
     const PIXELS: usize = WIDTH * HEIGHT;
@@ -1376,7 +1392,7 @@ fn simulate_fill_rate() -> f64 {
 /// good; the defect would be invisible because the number would still respond
 /// to the machine. That is lane B's probe applied to the input rather than the
 /// output: vary it, or you are measuring the wrong thing.
-fn simulate_text_rendering() -> f64 {
+fn measure_text_rendering() -> f64 {
     const LINES: usize = 150;
     let corpus: Vec<String> = (0..LINES)
         .map(|i| format!("The quick brown fox jumps over the lazy dog {i} times"))
@@ -1399,7 +1415,7 @@ fn simulate_text_rendering() -> f64 {
 /// One operation is one source-over blend of a pixel: the arithmetic a
 /// compositor does for every overlapping window. Done on the processor, and
 /// named for that.
-fn simulate_composite_ops() -> f64 {
+fn measure_composite_ops() -> f64 {
     // A 960x540 region rather than a whole screen: still a realistic
     // frame's worth of blending, and a quarter of the cost in a debug
     // build, where this crate's tests run it for real.
@@ -1669,7 +1685,11 @@ impl BenchmarkApp {
         }
     }
 
-    /// Run the full benchmark suite (synchronous/simulated).
+    /// Run the full benchmark suite, synchronously.
+    ///
+    /// Said "synchronous/simulated" until 2026-09-15. It is synchronous, and
+    /// that is worth keeping in the name: every sub-test below runs real work
+    /// on the calling thread, so this blocks for as long as the suite takes.
     pub fn run_benchmark(&mut self) {
         // Start progress tracking.
         self.progress.reset();

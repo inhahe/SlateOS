@@ -10,12 +10,27 @@
 //! - Export results as text
 //! - Dark theme (Catppuccin Mocha)
 //!
-//! Uses the guitk library for UI rendering. Network I/O is
-//! performed through Slate OS syscalls; simulated with representative
-//! data for initial development.
+//! Uses the guitk library for UI rendering.
+//!
+//! **This app cannot measure anything yet, and says so on screen.** It has no
+//! network access -- no `std::net`, no socket syscall, nothing -- so there is
+//! no traffic it could time. Until 2026-09-15 it ran anyway, synthesising a
+//! download figure that converged on 450 Mbps, an upload figure on 120 Mbps
+//! and a round-trip time on 12.5 ms, and presented them as a result. Nothing
+//! in the window said they were invented.
+//!
+//! What is real here, and is kept: every statistic (min/max/average RTT,
+//! jitter, packet loss, average/peak/current throughput), the rolling history
+//! with its aggregates, and the text export. Those compute over samples handed
+//! to [`LatencyTester::record_sample`] and [`ThroughputTester::record_bytes`],
+//! which are the two doors a real network stack will come through. They have
+//! no caller in production today, which is the honest state of this app: the
+//! arithmetic is written and tested, and the thing that would feed it is not
+//! built.
 
 use std::collections::VecDeque;
 use std::f32::consts::PI;
+#[cfg(test)]
 use std::num::NonZeroU64;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -29,18 +44,20 @@ use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
+#[cfg(test)]
+use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
-/// Seed used when the system has no entropy to offer.
+/// Seed the fixture starts from.
 ///
-/// A simulated speed test is novelty randomness, not a secret, so losing
-/// entropy must not stop the app from running. The constant is per-crate
-/// ("SPEEDTST") so that two programs falling back on the same boot do not
-/// then agree with each other.
+/// `#[cfg(test)]` since 2026-09-15, along with the randomness itself. It was
+/// the fallback for `seeded_from_system`, which the app called at startup so
+/// that two runs of a *simulated* speed test would not be byte-identical.
+/// Production draws no random numbers now, because it produces no numbers.
+#[cfg(test)]
 const FALLBACK_SEED: u64 = 0x5350_4545_4454_5354;
 
 // ============================================================================
@@ -327,31 +344,40 @@ fn dial_height(radius: f32) -> f32 {
 }
 
 // ============================================================================
-// Simulated Measurement Parameters
+// Simulated-run fixture parameters
 // ============================================================================
 //
-// Until there is a network stack to talk to, the numbers a run produces are
-// synthesised. These constants were literals buried in the middle of the run
-// itself; they are up here because the run is now driven a frame at a time
-// from `Event::Tick`, so the same parameters are read from two places (the
-// live path and the batch fixture the regression tests use) and a second copy
-// would be a second answer.
+// `#[cfg(test)]` since 2026-09-15. These drove the *shipping* run until then:
+// pressing Start synthesised a result from them and displayed it as a
+// measurement of the user's connection. They are kept because the phase
+// sequencing they exercise -- latency, then download, then upload, each
+// advancing a frame at a time -- is correct and worth keeping under test. They
+// are unreachable from production because a fixture production can reach is a
+// fixture that ships.
 
 /// Target rate the simulated download phase converges on, in Mbps.
+#[cfg(test)]
 const SIM_DOWNLOAD_MBPS: f64 = 450.0;
 /// Target rate the simulated upload phase converges on, in Mbps.
+#[cfg(test)]
 const SIM_UPLOAD_MBPS: f64 = 120.0;
 /// Round-trip time the simulated latency probes centre on, in milliseconds.
+#[cfg(test)]
 const SIM_LATENCY_BASE_MS: f64 = 12.5;
 /// Half-width of the simulated latency jitter, in milliseconds.
+#[cfg(test)]
 const SIM_LATENCY_VARIANCE_MS: f64 = 3.0;
 /// Wall-clock gap between latency probes, in seconds.
+///
+/// `#[cfg(test)]` with the probe pacing it governs.
 ///
 /// With the default 20 probes this makes the latency phase two seconds long --
 /// long enough to see the phase strip light up, short enough that it is not
 /// the part of the test you wait through.
+#[cfg(test)]
 const LATENCY_PROBE_INTERVAL_SECS: f32 = 0.1;
 /// Fraction of a throughput phase spent ramping up to the target rate.
+#[cfg(test)]
 const THROUGHPUT_RAMP_FRACTION: f64 = 0.2;
 
 // ============================================================================
@@ -376,6 +402,23 @@ impl TestKind {
     }
 }
 
+/// Why no figure is shown, in one line, for [`SpeedTestPhase::Unavailable`].
+const CANNOT_MEASURE: &str = "no network stack to send traffic through";
+
+/// What the window says when Start is pressed, one line per element.
+///
+/// Three lines rather than one because the third is the one that matters and
+/// it does not fit beside the others. A blank result strip is read as a
+/// *reading* -- and for a speed test the reading it is read as is zero, which
+/// says the connection is dead. That is a worse untruth than the one being
+/// fixed, so the window states outright that the figures are unknown rather
+/// than low.
+const CANNOT_MEASURE_LINES: [&str; 3] = [
+    "Cannot measure this connection.",
+    "There is no network stack to send traffic through, so nothing was contacted.",
+    "No download, upload or latency figure was produced -- they are unknown, not zero.",
+];
+
 /// Overall phase of the speed test application.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SpeedTestPhase {
@@ -387,6 +430,14 @@ pub enum SpeedTestPhase {
     Complete,
     /// An error occurred during testing.
     Error(String),
+    /// No test was attempted, and why.
+    ///
+    /// Distinct from [`Self::Error`] on purpose: an error is something a run
+    /// hit, and this is the absence of a run. Reported as "Not run" rather
+    /// than "Error" because "Error" would tell a user their *connection*
+    /// failed, which is a claim about their network that this app is in no
+    /// position to make -- it has never sent a packet.
+    Unavailable(String),
 }
 
 impl SpeedTestPhase {
@@ -408,6 +459,7 @@ impl SpeedTestPhase {
             Self::Testing(kind) => kind.label(),
             Self::Complete => "Complete",
             Self::Error(_) => "Error",
+            Self::Unavailable(_) => "Not run",
         }
     }
 }
@@ -685,6 +737,10 @@ impl LatencyTester {
 
     /// Send one simulated probe.
     ///
+    /// `#[cfg(test)]` since 2026-09-15: this was the app's live source of
+    /// latency data, and every millisecond it produced was drawn from `rng`.
+    #[cfg(test)]
+    ///
     /// One probe rather than a whole run, because the run is paced by the
     /// clock: [`SpeedTestUI::tick`] calls this once per
     /// [`LATENCY_PROBE_INTERVAL_SECS`] so the probe counter fills in visible
@@ -744,8 +800,6 @@ pub struct ThroughputSample {
 /// multiple simulated connections.
 #[derive(Clone, Debug)]
 pub struct ThroughputTester {
-    /// Number of parallel connections.
-    num_connections: u32,
     /// Total bytes transferred so far.
     total_bytes: u64,
     /// Elapsed time of the test in seconds.
@@ -763,7 +817,6 @@ impl ThroughputTester {
     pub fn new(num_connections: u32, duration_secs: f32) -> Self {
         let conns = num_connections.max(1) as usize;
         Self {
-            num_connections: num_connections.max(1),
             total_bytes: 0,
             elapsed_secs: 0.0,
             duration_secs,
@@ -854,6 +907,7 @@ impl ThroughputTester {
     /// drew a fraction at or above 0.5, so the simulated line never rose above
     /// the target rate, only sagged below it. See that method for the
     /// arithmetic.
+    #[cfg(test)]
     pub fn advance_simulated(
         &mut self,
         rng: &mut impl RandomSource,
@@ -875,8 +929,11 @@ impl ThroughputTester {
         // convinces a reader but not the compiler, so the division is still
         // a division by a value that could be zero. This way the type
         // carries the fact.
-        let conn_count = self.num_connections as usize;
-        if let Some(conns) = NonZeroU64::new(self.num_connections.into()) {
+        // `connection_bytes` is the one copy of "how many connections":
+        // `record_bytes` indexes it, so a separate count could disagree with
+        // the thing it is supposed to describe.
+        let conn_count = self.connection_bytes.len();
+        if let Some(conns) = NonZeroU64::new(conn_count as u64) {
             let per_conn = bytes_this_tick / conns;
             for c in 0..conn_count {
                 self.record_bytes(c, per_conn);
@@ -1172,29 +1229,36 @@ pub struct SpeedTestUI {
     export_button_hover: bool,
     /// The stream the simulated runs are drawn from.
     ///
-    /// One per app rather than one per tester, and seeded once at startup
-    /// rather than per run, so that pressing Start twice gives two different
-    /// results. Both were hardcoded literals before -- 42 and 137 -- which
-    /// made every simulated speed test on every machine byte-identical.
+    /// One per app rather than one per tester, and seeded once rather than
+    /// per run, so that two runs of the fixture do not replay each other.
+    /// Both were hardcoded literals before -- 42 and 137 -- which made every
+    /// simulated speed test on every machine byte-identical.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. Nothing in production has any use for
+    /// a random number, because nothing in production produces a figure.
+    #[cfg(test)]
     rng: SeededRng,
 }
 
 impl SpeedTestUI {
     /// Create a new speed test UI with default configuration.
     pub fn new() -> Self {
-        Self::with_rng(seeded_from_system(FALLBACK_SEED))
+        Self::build()
     }
 
     /// Create a UI whose simulated runs come from a known seed.
     #[cfg(test)]
     fn with_seed(seed: u64) -> Self {
-        Self::with_rng(SeededRng::new(seed))
+        let mut ui = Self::build();
+        ui.rng = SeededRng::new(seed);
+        ui
     }
 
-    fn with_rng(rng: SeededRng) -> Self {
+    fn build() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            rng,
+            #[cfg(test)]
+            rng: SeededRng::new(FALLBACK_SEED),
             phase: SpeedTestPhase::Idle,
             config: SpeedTestConfig::default(),
             current_speed_mbps: 0.0,
@@ -1239,7 +1303,39 @@ impl SpeedTestUI {
         self.current_latency_ms = 0.0;
         self.probe_timer_secs = 0.0;
 
-        // Begin with latency phase.
+        // And stop. There is no network stack to send traffic through, so
+        // there is nothing to time. Until 2026-09-15 this line read
+        // `self.phase = SpeedTestPhase::Testing(TestKind::Latency)` and the
+        // run that followed invented every number it displayed.
+        //
+        // The testers above are still reset, deliberately: whatever a previous
+        // press left on screen is cleared, so the explanation is not sitting
+        // next to a stale figure that looks like it belongs to it.
+        self.phase = SpeedTestPhase::Unavailable(String::from(CANNOT_MEASURE));
+    }
+
+    /// Begin a simulated run, the way Start used to.
+    ///
+    /// This is the tail `start_test` lost on 2026-09-15 -- the line that put
+    /// the app into `Testing(Latency)` and let the fabricating producer fill
+    /// in the rest. It is a fixture now, and it is the only way into the phase
+    /// machine, which is the point: the sequencing is worth testing and is not
+    /// worth shipping, because what it sequences is invented.
+    #[cfg(test)]
+    fn begin_simulated_run(&mut self) {
+        self.latency_tester = LatencyTester::new(20);
+        self.download_tester = ThroughputTester::new(
+            self.config.num_connections,
+            self.config.test_duration_secs as f32,
+        );
+        self.upload_tester = ThroughputTester::new(
+            self.config.num_connections,
+            self.config.test_duration_secs as f32,
+        );
+        self.graph_points.clear();
+        self.current_speed_mbps = 0.0;
+        self.current_latency_ms = 0.0;
+        self.probe_timer_secs = 0.0;
         self.phase = SpeedTestPhase::Testing(TestKind::Latency);
     }
 
@@ -1261,6 +1357,13 @@ impl SpeedTestUI {
     /// Seconds rather than milliseconds because both testers measure in
     /// seconds; the conversion from [`Event::Tick`]'s `elapsed_ms` happens
     /// once, at the event.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. Its two producers -- `simulate_probe`
+    /// and `advance_simulated` -- were the fabrication, and without them this
+    /// cannot advance a phase at all: entering `Testing` would hang there for
+    /// ever rather than finish. It is kept under test because the sequencing
+    /// it encodes is right and is what a real producer will drive.
+    #[cfg(test)]
     pub fn tick(&mut self, delta_secs: f32) {
         let SpeedTestPhase::Testing(kind) = self.phase else {
             return;
@@ -1303,6 +1406,7 @@ impl SpeedTestUI {
     /// the window was unmapped, the machine stalled -- and a phase that only
     /// ever advances one probe per frame would stretch to fit the stall. The
     /// loop is bounded by the probe count, which `is_complete` caps.
+    #[cfg(test)]
     fn tick_latency(&mut self, delta_secs: f32) {
         self.probe_timer_secs += delta_secs;
         while self.probe_timer_secs >= LATENCY_PROBE_INTERVAL_SECS
@@ -1326,6 +1430,9 @@ impl SpeedTestUI {
     }
 
     /// Finalize the test and record results.
+    ///
+    /// `#[cfg(test)]` with the run loop that is its only caller.
+    #[cfg(test)]
     fn finalize_test(&mut self) {
         let server_name = self
             .servers
@@ -1485,14 +1592,13 @@ impl SpeedTestUI {
             // `Consumed` only while a test is running: an idle window has no
             // reason to claim the clock, and saying so lets a caller tell a
             // frame that changed something from one that did not.
-            Event::Tick { elapsed_ms } => {
-                if self.phase.is_testing() {
-                    self.tick(*elapsed_ms as f32 / 1000.0);
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
+            // Ignored, because no run can be in progress: `start_test` has
+            // had nothing to start since 2026-09-15. It consumed the tick and
+            // advanced a fabricated run before that. Answering `Ignored` is
+            // what lets the compositor tell a frame that changed something
+            // from one that did not, so claiming the tick for a run that
+            // cannot exist would cost a redraw every frame, for ever.
+            Event::Tick { .. } => EventResult::Ignored,
             // The layout is derived from these two numbers, so this arm is the
             // difference between an app that resizes and one that paints a
             // wider background around a picture of a 900x720 window.
@@ -2122,6 +2228,25 @@ impl SpeedTestUI {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
+            if matches!(self.phase, SpeedTestPhase::Unavailable(_)) {
+                for (i, line) in CANNOT_MEASURE_LINES.iter().enumerate() {
+                    let w = text::measure(line, 12.0, FontWeightHint::Regular).min(r.w);
+                    frame.push(RenderCommand::Text {
+                        x: r.x + (r.w - w).max(0.0) / 2.0,
+                        #[expect(
+                            clippy::cast_precision_loss,
+                            reason = "three lines; the index is 0..3"
+                        )]
+                        y: r.y + 4.0 + i as f32 * 15.0,
+                        text: (*line).to_string(),
+                        color: self.palette.ink(self.palette.yellow),
+                        font_size: 12.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(r.w),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+            }
             return;
         }
 
@@ -2668,22 +2793,38 @@ mod tests {
     /// guard rather than a second definition of how long a test takes.
     const FRAME_BUDGET: usize = 4000;
 
+    /// `FRAME_MS` as seconds, which is what `tick` takes.
+    ///
+    /// A literal with a guard rather than a cast, because `FRAME_MS` is a
+    /// `u64` and `as f32` on one is a pedantic-lint suppression repeated in
+    /// every test that drives a run. The assertion is what stops this becoming
+    /// a second, quietly disagreeing copy of the frame length.
+    const FRAME_SECS: f32 = 0.016;
+    const _: () = assert!(FRAME_MS == 16, "FRAME_SECS must follow FRAME_MS");
+
     /// Press Enter, then feed frames until the run finishes.
     ///
     /// Every test that wants a completed run goes through the keyboard and
     /// the clock rather than calling an internal, because a test that calls
     /// the internal cannot tell a wired app from an unwired one -- which is
     /// exactly how this app shipped with `Event::Tick` in its `_` arm.
+    /// Drive a whole simulated run.
+    ///
+    /// Goes in at `begin_simulated_run` and `tick` rather than at Enter and
+    /// `Event::Tick`. Both of those were real routes until 2026-09-15 and
+    /// neither is now: Start refuses, and a tick is ignored because no run can
+    /// be in progress. What this still covers is the phase sequencing and the
+    /// statistics over it, which are correct. What it no longer covers -- and
+    /// cannot, because it no longer exists -- is the wiring from the event loop
+    /// to the run. See `pressing_start_explains_why_nothing_can_be_measured`.
     fn run_a_full_test(ui: &mut SpeedTestUI) {
-        press(ui, Key::Enter);
-        assert!(ui.phase().is_testing(), "Enter did not start a test");
+        ui.begin_simulated_run();
+        assert!(ui.phase().is_testing(), "the fixture did not begin a run");
         for _ in 0..FRAME_BUDGET {
             if ui.phase().is_complete() {
                 return;
             }
-            ui.handle_event(&Event::Tick {
-                elapsed_ms: FRAME_MS,
-            });
+            ui.tick(FRAME_SECS);
         }
         panic!("the run did not finish within {FRAME_BUDGET} frames");
     }
@@ -2929,29 +3070,19 @@ mod tests {
         assert_ne!(first, second, "the second run replayed the first");
     }
 
-    /// A fresh app takes its seed from the system, not from a literal.
-    ///
-    /// Host `cargo test` has no SlateOS entropy source, so `seeded_from_system`
-    /// returns the fallback and two fresh apps agree -- which is exactly what a
-    /// hardcoded seed would also do. The test therefore asserts *which* seed:
-    /// equal to a run from `FALLBACK_SEED`, and unequal to one from any other
-    /// literal. Gated off Unix, where the host does have entropy and a fresh
-    /// app is genuinely unpredictable.
-    #[cfg(not(unix))]
-    #[test]
-    fn a_fresh_app_is_seeded_by_the_system_and_not_by_a_literal() {
-        fn first_run(mut app: SpeedTestUI) -> Vec<f64> {
-            run_a_full_test(&mut app);
-            app.download_tester
-                .samples()
-                .iter()
-                .map(|s| s.mbps)
-                .collect()
-        }
-        let fresh = first_run(SpeedTestUI::new());
-        assert_eq!(fresh, first_run(SpeedTestUI::with_seed(FALLBACK_SEED)));
-        assert_ne!(fresh, first_run(SpeedTestUI::with_seed(42)));
-    }
+    // `a_fresh_app_is_seeded_by_the_system_and_not_by_a_literal` was here.
+    //
+    // It asserted that a fresh app drew its seed from `seeded_from_system`
+    // rather than a constant, so that a simulated run would differ between
+    // machines and between launches. That mattered because the run shipped.
+    // It does not ship since 2026-09-15, the app asks the system for no
+    // entropy at all, and the seed is a fixture constant -- so the test now
+    // has no property to assert.
+    //
+    // Restore it, unchanged, the day Start does something again *and* any
+    // part of what it does is randomised. Two runs agreeing byte for byte was
+    // a real bug twice in this file (the literals 42 and 137, then the
+    // per-run reseed), and it is invisible in a single run.
 
     #[test]
     fn latency_tester_negative_rtt_ignored() {
@@ -3242,20 +3373,34 @@ mod tests {
     // `handle_event` matched `Event::Key` and `Event::Mouse` and dropped
     // everything else, so a speed test -- a measurement over time -- had no
     // source of time. Start ran the whole thing inside one call instead.
-    // These tests all go in through `handle_event`, because that is the only
+    // These tests went in through `handle_event`, because that was the only
     // way to tell a wired app from an unwired one: the phase machine below
     // was correct the whole time, and nothing but a test ever reached it.
+    //
+    // They go in at `begin_simulated_run` and `tick` since 2026-09-15, when
+    // the wiring was removed along with the fabricated run it carried. That
+    // is a real loss of coverage and is worth stating rather than papering
+    // over: these can no longer tell a wired app from an unwired one. They
+    // cover the phase machine, which is the half that survives. When a
+    // network stack arrives and Start does something again, the wiring needs
+    // its own test back -- it is exactly the kind of gap that stayed open for
+    // months last time.
     // ====================================================================
 
-    /// The event that makes the app work.
+    /// Ticking a begun run sends probes.
+    ///
+    /// Was `a_tick_event_advances_a_running_test`, and went in at
+    /// `Event::Tick` -- "the event that makes the app work". It does not make
+    /// the app work any more: there is no run for it to advance, and the arm
+    /// that used to route it was removed on 2026-09-15.
     #[test]
-    fn a_tick_event_advances_a_running_test() {
+    fn ticking_a_begun_run_sends_probes() {
         let mut ui = SpeedTestUI::new();
-        press(&mut ui, Key::Enter);
+        ui.begin_simulated_run();
         assert_eq!(ui.latency_tester.probes_sent, 0);
 
         for _ in 0..20 {
-            ui.handle_event(&Event::Tick { elapsed_ms: 50 });
+            ui.tick(0.05);
         }
 
         assert!(
@@ -3282,7 +3427,7 @@ mod tests {
     #[test]
     fn the_run_is_drawn_in_every_phase_it_passes_through() {
         let mut ui = SpeedTestUI::new();
-        press(&mut ui, Key::Enter);
+        ui.begin_simulated_run();
 
         let mut seen = Vec::new();
         for _ in 0..FRAME_BUDGET {
@@ -3293,9 +3438,7 @@ mod tests {
             if ui.phase().is_complete() {
                 break;
             }
-            ui.handle_event(&Event::Tick {
-                elapsed_ms: FRAME_MS,
-            });
+            ui.tick(FRAME_SECS);
         }
 
         assert_eq!(
@@ -3313,14 +3456,12 @@ mod tests {
     #[test]
     fn the_graph_grows_while_the_download_runs() {
         let mut ui = SpeedTestUI::new();
-        press(&mut ui, Key::Enter);
+        ui.begin_simulated_run();
 
         // Past the latency phase and a little way into the download.
         let mut early = 0;
         for _ in 0..FRAME_BUDGET {
-            ui.handle_event(&Event::Tick {
-                elapsed_ms: FRAME_MS,
-            });
+            ui.tick(FRAME_SECS);
             if *ui.phase() == SpeedTestPhase::Testing(TestKind::Download) {
                 early = ui.graph_points.len();
                 if early > 0 {
@@ -3331,9 +3472,7 @@ mod tests {
         assert!(early > 0, "the download phase drew no graph points");
 
         for _ in 0..100 {
-            ui.handle_event(&Event::Tick {
-                elapsed_ms: FRAME_MS,
-            });
+            ui.tick(FRAME_SECS);
         }
         assert!(
             ui.graph_points.len() > early,
@@ -3350,32 +3489,34 @@ mod tests {
     /// one that probed at most once per frame would disagree between them.
     #[test]
     fn the_probe_rate_does_not_follow_the_frame_rate() {
-        fn probes_after(frame_ms: u64, frames: usize) -> u32 {
+        fn probes_after(frame_secs: f32, frames: usize) -> u32 {
             let mut ui = SpeedTestUI::new();
-            press(&mut ui, Key::Enter);
+            ui.begin_simulated_run();
             for _ in 0..frames {
-                ui.handle_event(&Event::Tick {
-                    elapsed_ms: frame_ms,
-                });
+                ui.tick(frame_secs);
             }
             ui.latency_tester.probes_sent
         }
 
-        let slow = probes_after(50, 15);
-        let fast = probes_after(25, 30);
+        let slow = probes_after(0.05, 15);
+        let fast = probes_after(0.025, 30);
         assert_eq!(slow, fast, "{slow} probes at 20 Hz but {fast} at 40 Hz");
         assert_eq!(slow, 7, "750 ms should pay for seven 100 ms probes");
     }
 
-    /// Escape gets to cancel, now that there is a running test to cancel.
+    /// Escape cancels a run that the fixture began.
     ///
-    /// The branch is guarded on `phase.is_testing()`, which was false at
-    /// every moment a key could be pressed.
+    /// The cancel branch is guarded on `phase.is_testing()`. That was false at
+    /// every moment a key could be pressed before 2026-08-25, which is the bug
+    /// this test was written for; it is false again now, for the different and
+    /// honest reason that no run can begin. The branch is kept because it is
+    /// correct and is needed the day Start does something again, and this is
+    /// the only thing that reaches it.
     #[test]
-    fn escape_cancels_a_running_test() {
+    fn escape_cancels_a_run_the_fixture_began() {
         let mut ui = SpeedTestUI::new();
-        press(&mut ui, Key::Enter);
-        ui.handle_event(&Event::Tick { elapsed_ms: 500 });
+        ui.begin_simulated_run();
+        ui.tick(0.5);
         assert!(ui.phase().is_testing());
 
         assert_eq!(press(&mut ui, Key::Escape), EventResult::Consumed);
@@ -3383,9 +3524,7 @@ mod tests {
 
         // And a cancelled run records nothing.
         for _ in 0..FRAME_BUDGET {
-            ui.handle_event(&Event::Tick {
-                elapsed_ms: FRAME_MS,
-            });
+            ui.tick(FRAME_SECS);
         }
         assert!(ui.phase().is_idle());
         assert_eq!(ui.history().len(), 0);
@@ -3400,15 +3539,13 @@ mod tests {
     #[test]
     fn a_run_lasts_the_configured_duration() {
         let mut ui = SpeedTestUI::new();
-        press(&mut ui, Key::Enter);
+        ui.begin_simulated_run();
         let mut frames = 0u64;
         for _ in 0..FRAME_BUDGET {
             if ui.phase().is_complete() {
                 break;
             }
-            ui.handle_event(&Event::Tick {
-                elapsed_ms: FRAME_MS,
-            });
+            ui.tick(FRAME_SECS);
             frames += 1;
         }
         let secs = (frames * FRAME_MS) as f64 / 1000.0;
@@ -4160,54 +4297,85 @@ mod tests {
         }
     }
 
-    /// The clock is asked for only while there is something to measure. A
-    /// window showing a finished result costs the compositor nothing.
+    /// The clock is never armed, because nothing here can measure.
+    ///
+    /// Replaces `the_clock_is_only_armed_while_a_test_runs`, which pressed
+    /// Enter, asserted the app had asked for a 16 ms tick, and drove the run
+    /// to completion through `on_event`. Every step of that was real until
+    /// 2026-09-15 and none of it is now. The property worth guarding has
+    /// inverted: an app that cannot run a test must not ask to be woken sixty
+    /// times a second for one. Getting this wrong costs a wakeup per frame for
+    /// as long as the window is open, on a machine that may be on battery, in
+    /// service of a dial that cannot move.
     #[test]
-    fn the_clock_is_only_armed_while_a_test_runs() {
+    fn the_clock_is_never_armed_because_no_run_can_begin() {
         let mut ui = SpeedTestUI::with_seed(5);
         assert_eq!(ui.tick_interval(), None, "an idle window wants the clock");
-
         press(&mut ui, Key::Enter);
-        assert!(ui.phase().is_testing());
-        let interval = ui.tick_interval().expect("a running test needs the clock");
         assert!(
-            interval <= Duration::from_millis(20),
-            "a sweeping dial cannot be animated at {interval:?}",
+            matches!(ui.phase(), SpeedTestPhase::Unavailable(_)),
+            "Enter started something",
         );
-
-        for _ in 0..FRAME_BUDGET {
-            if ui.phase().is_complete() {
-                break;
-            }
-            ui.on_event(&Event::Tick {
-                elapsed_ms: FRAME_MS,
-            });
-        }
-        assert!(ui.phase().is_complete(), "the run never finished");
         assert_eq!(
             ui.tick_interval(),
             None,
-            "a finished window keeps the clock"
+            "an app that cannot measure asked for the clock anyway",
         );
     }
 
-    /// A tick is only worth a frame while it changes something.
+    /// No tick is ever worth a frame now.
+    ///
+    /// The second half of this used to press Enter and assert the next tick
+    /// answered `Redraw` -- correct then, because a run was advancing. A tick
+    /// that still answered `Redraw` would now be asking for a repaint of a
+    /// picture that cannot change.
     #[test]
-    fn an_idle_tick_does_not_ask_for_a_redraw() {
+    fn no_tick_asks_for_a_redraw() {
         let mut ui = SpeedTestUI::new();
-        assert!(matches!(
-            ui.on_event(&Event::Tick {
-                elapsed_ms: FRAME_MS
-            }),
-            Response::Idle,
-        ));
+        for _ in 0..3 {
+            assert!(matches!(
+                ui.on_event(&Event::Tick {
+                    elapsed_ms: FRAME_MS
+                }),
+                Response::Idle,
+            ));
+            press(&mut ui, Key::Enter);
+        }
+    }
+
+    /// Start says what is missing, in the window, in words.
+    ///
+    /// The whole point of the 2026-09-15 change. Before it, this same press
+    /// produced 450 Mbps down, 120 Mbps up and 12.5 ms, all drawn from an RNG,
+    /// with nothing on screen marking them as invented.
+    ///
+    /// Asserts the third line specifically. A blank result strip is read as a
+    /// *reading*, and for a speed test the reading it is read as is zero --
+    /// which says the line is dead. Saying "unknown, not zero" is the part that
+    /// stops one untruth being swapped for a worse one.
+    #[test]
+    fn pressing_start_explains_why_nothing_can_be_measured() {
+        let mut ui = SpeedTestUI::new();
         press(&mut ui, Key::Enter);
-        assert!(matches!(
-            ui.on_event(&Event::Tick {
-                elapsed_ms: FRAME_MS
-            }),
-            Response::Redraw,
-        ));
+
+        let SpeedTestPhase::Unavailable(ref why) = *ui.phase() else {
+            panic!("Start produced {:?}, not an explanation", ui.phase());
+        };
+        assert_eq!(why, CANNOT_MEASURE);
+        assert_eq!(ui.history().len(), 0, "a refusal recorded a result");
+
+        for line in CANNOT_MEASURE_LINES {
+            assert!(
+                text_at(&ui, line).is_some(),
+                "the window never said {line:?}",
+            );
+        }
+        assert!(
+            CANNOT_MEASURE_LINES
+                .iter()
+                .any(|l| l.contains("unknown, not zero")),
+            "nothing forecloses reading the blank result as 0 Mbps",
+        );
     }
 
     /// Pointer motion over dead space costs no frame; motion that lights a
@@ -4251,7 +4419,7 @@ mod tests {
             Response::Exit,
         ));
 
-        press(&mut ui, Key::Enter);
+        ui.begin_simulated_run();
         assert!(ui.phase().is_testing());
         assert!(
             !matches!(

@@ -30,6 +30,7 @@ use guitk::event::{
 };
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+#[cfg(test)]
 use guitk::rng::{RandomSource, SeededRng};
 use guitk::scroll_window;
 #[allow(unused_imports)]
@@ -1561,6 +1562,7 @@ impl ScanResult {
 /// values, so a probability finer than 0.0001 was silently rounded; and its
 /// range reduction was a plain remainder over the weak low half of the state,
 /// which favours the low end of every range.
+#[cfg(test)]
 type SimRng = SeededRng;
 
 // There was a `sim_range(&mut SimRng, u32, u32) -> u32` here, identical to
@@ -1578,12 +1580,14 @@ type SimRng = SeededRng;
 /// with its low bound, and the `try_from` fallback lands on the same value,
 /// so a caller that swapped its arguments gets a number inside whichever
 /// range it meant rather than a panic.
+#[cfg(test)]
 fn sim_octet(rng: &mut SimRng, min: u8, max: u8) -> u8 {
     let drawn = rng.between(i64::from(min), i64::from(max));
     u8::try_from(drawn).unwrap_or(min)
 }
 
 /// Simulate a traceroute to a destination IP.
+#[cfg(test)]
 fn simulate_traceroute(dest: Ipv4Addr) -> Vec<TracerouteHop> {
     // The address seeds the route, so the same destination always traces the
     // same way. `0.0.0.0` is a legal thing to type and seeds this with zero —
@@ -1644,6 +1648,7 @@ fn simulate_traceroute(dest: Ipv4Addr) -> Vec<TracerouteHop> {
 }
 
 /// Simulate WHOIS lookup for a public IP.
+#[cfg(test)]
 fn simulate_whois(ip: Ipv4Addr) -> WhoisInfo {
     let octet0 = ip.octets[0];
     let (org, country, net) = if octet0 < 100 {
@@ -1968,11 +1973,26 @@ pub struct NetScanApp {
     /// top of its own panel with no way back down.
     pub results_scroll: usize,
     pub traceroute_target: String,
+    /// Why there is no traceroute, when the user has asked for one.
+    ///
+    /// Separate from `traceroute_result` because `None` on its own means "not
+    /// asked yet", and the two must not look the same: a panel that stays
+    /// blank after a button press is read as the button not working, which
+    /// sends the user to look for a bug in the wrong place.
+    pub traceroute_note: Option<String>,
     pub traceroute_result: Option<Vec<TracerouteHop>>,
     pub whois_target: String,
+    /// Why there is no WHOIS answer, when the user has asked for one.
+    pub whois_note: Option<String>,
     pub whois_result: Option<WhoisInfo>,
     pub wol_target_mac: String,
-    pub wol_sent: bool,
+    /// What the last Wake-on-LAN press did.
+    ///
+    /// Replaces `wol_sent: bool`, which was set to `true` without anything
+    /// being sent; the button then read "Packet Sent!". A `bool` cannot hold
+    /// the reason a thing did not happen, and that reason is the entire
+    /// content of this control now.
+    pub wol_note: Option<String>,
     pub show_export_menu: bool,
     pub history_selected_idx: Option<usize>,
     pub history_compare_idx: Option<usize>,
@@ -2020,11 +2040,13 @@ impl Default for NetScanApp {
             window_height: WINDOW_HEIGHT,
             results_scroll: 0,
             traceroute_target: String::from("8.8.8.8"),
+            traceroute_note: None,
             traceroute_result: None,
             whois_target: String::from("8.8.8.8"),
+            whois_note: None,
             whois_result: None,
             wol_target_mac: String::new(),
-            wol_sent: false,
+            wol_note: None,
             show_export_menu: false,
             history_selected_idx: None,
             history_compare_idx: None,
@@ -2143,27 +2165,67 @@ impl NetScanApp {
         self.is_scanning = false;
     }
 
-    /// Run traceroute to the configured target.
+    /// Report that a traceroute cannot be run.
+    ///
+    /// It used to return a route: four to twelve hops, each with an address
+    /// and a latency, seeded from the destination so the same target always
+    /// traced the same way. A route is a claim about the shape of the network
+    /// between here and there, and this program has never sent a packet.
+    ///
+    /// The address is still parsed first, so a typo is still reported as a
+    /// typo rather than being swallowed by the refusal.
     pub fn run_traceroute(&mut self) {
-        if let Some(ip) = Ipv4Addr::parse(&self.traceroute_target) {
-            self.traceroute_result = Some(simulate_traceroute(ip));
-        }
+        self.traceroute_result = None;
+        self.traceroute_note = Some(if Ipv4Addr::parse(&self.traceroute_target).is_some() {
+            String::from(
+                "Cannot trace a route: this program has no network access, so no packet was sent",
+            )
+        } else {
+            format!("Not an IPv4 address: {}", self.traceroute_target)
+        });
     }
 
-    /// Run WHOIS lookup for the configured target.
+    /// Report that a WHOIS lookup cannot be run.
+    ///
+    /// It used to answer from the first octet alone: below 100 was "ARIN
+    /// Regional Registry, US", below 150 "RIPE Network Coordination Centre,
+    /// EU", and so on. That is a claim about **who owns an address**, and it
+    /// is acted on -- an abuse report goes to the registry the tool named. A
+    /// wrong one is sent to a party with no power over the host and no reason
+    /// to answer, and the real operator never hears about it.
     pub fn run_whois(&mut self) {
-        if let Some(ip) = Ipv4Addr::parse(&self.whois_target) {
-            self.whois_result = Some(simulate_whois(ip));
-        }
+        self.whois_result = None;
+        self.whois_note = Some(if Ipv4Addr::parse(&self.whois_target).is_some() {
+            String::from("Cannot look up ownership: this program cannot reach a WHOIS server")
+        } else {
+            format!("Not an IPv4 address: {}", self.whois_target)
+        });
     }
 
-    /// Send Wake-on-LAN to the entered MAC address.
+    /// Report that a Wake-on-LAN packet cannot be sent.
+    ///
+    /// The packet is still *built*, and that part is real: `build_wol_packet`
+    /// produces a correct magic frame and is tested against the specification.
+    /// What never happened was sending it -- there is no UDP socket here -- and
+    /// the button said "Packet Sent!" anyway.
+    ///
+    /// This is the one on this panel with a waiting cost: somebody who believes
+    /// the packet went out sits watching a machine that was never asked to
+    /// wake, and concludes the *machine* is broken.
     pub fn send_wol(&mut self) {
-        if let Some(mac) = parse_mac(&self.wol_target_mac) {
-            let _packet = build_wol_packet(&mac);
-            // In real OS: send via UDP broadcast on port 9
-            self.wol_sent = true;
-        }
+        self.wol_note = Some(match parse_mac(&self.wol_target_mac) {
+            Some(mac) => {
+                // Built, checked, and discarded -- keeping the call means the
+                // packet builder stays exercised on the production path rather
+                // than only from tests.
+                let packet = build_wol_packet(&mac);
+                debug_assert_eq!(packet.len(), 102, "a magic packet is 6 + 16 * 6 bytes");
+                // Short and front-loaded: this lands in a sidebar column and
+                // is ellipsised, so the refusal has to be the part that fits.
+                String::from("Cannot send: no socket to broadcast on")
+            }
+            None => format!("Not a MAC address: {}", self.wol_target_mac),
+        });
     }
 
     /// Get the currently selected host, if any.
@@ -3221,7 +3283,7 @@ impl NetScanApp {
         } else {
             // Overview panel
             tree.push(RenderCommand::Text {
-                x: x + PADDING,
+                x: PADDING,
                 y: top_y + PADDING,
                 text: "Host Details".to_string(),
                 color: self.palette.ink(self.palette.lavender),
@@ -3231,7 +3293,7 @@ impl NetScanApp {
                 overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
-                x: x + PADDING,
+                x: PADDING,
                 y: top_y + PADDING + 24.0,
                 text: "Select a host to view details".to_string(),
                 color: self.palette.subtext0,
@@ -3244,7 +3306,7 @@ impl NetScanApp {
             // WOL section
             let wol_y = self.window_height - 100.0;
             tree.push(RenderCommand::Text {
-                x: x + PADDING,
+                x: PADDING,
                 y: wol_y,
                 text: "Wake-on-LAN".to_string(),
                 color: self.palette.ink(self.palette.lavender),
@@ -3265,7 +3327,7 @@ impl NetScanApp {
             // WOL Send button
             let wol_btn_y = wol_y + 50.0;
             tree.push(RenderCommand::FillRect {
-                x: x + PADDING,
+                x: PADDING,
                 y: wol_btn_y,
                 width: 120.0,
                 height: BUTTON_HEIGHT,
@@ -3275,18 +3337,40 @@ impl NetScanApp {
             tree.push(RenderCommand::Text {
                 x: x + PADDING + 20.0,
                 y: wol_btn_y + 9.0,
-                text: if self.wol_sent {
-                    "Packet Sent!"
-                } else {
-                    "Send WOL"
-                }
-                .to_string(),
+                // Always "Send WOL". It used to read "Packet Sent!" once
+                // pressed, which was the claim; the outcome goes in a line
+                // below the button instead, where it can say why.
+                text: "Send WOL".to_string(),
                 color: self.palette.crust,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
+
+            // What the press did. The comment above said this line existed
+            // three commits before it did: the button stopped claiming
+            // "Packet Sent!" and nothing replaced it, so pressing Send became
+            // a silent no-op -- which is a worse answer than the false one,
+            // because a user reads silence as a broken button and goes looking
+            // for the fault in the wrong place.
+            //
+            // Caught by `check-fields-written-never-read`, not by a test:
+            // `wol_note` was assigned and read by nothing. Second time in one
+            // day that a comment here described a render that had not been
+            // written; the first was `apps/hexeditor`'s file picker.
+            if let Some(note) = &self.wol_note {
+                tree.push(RenderCommand::Text {
+                    x: PADDING,
+                    y: wol_btn_y + BUTTON_HEIGHT + 8.0,
+                    text: note.clone(),
+                    color: self.palette.ink(self.palette.yellow),
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
 
             // Export button
             let export_y = self.window_height - 50.0;
@@ -4015,6 +4099,19 @@ impl NetScanApp {
             overflow: TextOverflow::Clip,
         });
 
+        if let Some(ref note) = self.traceroute_note {
+            tree.push(RenderCommand::Text {
+                x: PADDING,
+                y: btn_y + BUTTON_HEIGHT + 16.0,
+                text: note.clone(),
+                color: self.palette.ink(self.palette.yellow),
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(560.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         // Results
         if let Some(ref hops) = self.traceroute_result {
             let table_y = btn_y + BUTTON_HEIGHT + 16.0;
@@ -4200,6 +4297,19 @@ impl NetScanApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+
+        if let Some(ref note) = self.whois_note {
+            tree.push(RenderCommand::Text {
+                x: PADDING,
+                y: btn_y + BUTTON_HEIGHT + 16.0,
+                text: note.clone(),
+                color: self.palette.ink(self.palette.yellow),
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(560.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // WHOIS result display
         if let Some(ref info) = self.whois_result {
@@ -5479,7 +5589,69 @@ mod tests {
         let mut app = NetScanApp::new();
         app.traceroute_target = "8.8.8.8".to_string();
         app.run_traceroute();
-        assert!(app.traceroute_result.is_some());
+        // Was `is_some()`: four to twelve invented hops with invented
+        // latencies, seeded from the destination so the same target always
+        // traced the same way -- which made it look like a real measurement of
+        // a stable route.
+        assert!(
+            app.traceroute_result.is_none(),
+            "a route appeared from nowhere"
+        );
+        let note = app.traceroute_note.expect("no route and no reason given");
+        assert!(note.contains("no packet was sent"), "{note}");
+    }
+
+    /// A bad address is still reported as a bad address.
+    ///
+    /// The refusal must not swallow the typo: parsing happens first, so the
+    /// user finds out they mistyped rather than being told the network is
+    /// unreachable.
+    #[test]
+    fn a_malformed_traceroute_target_is_named_as_such() {
+        let mut app = NetScanApp::new();
+        app.traceroute_target = "8.8.8".to_string();
+        app.run_traceroute();
+        let note = app.traceroute_note.expect("nothing said anything");
+        assert!(note.contains("Not an IPv4 address"), "{note}");
+    }
+
+    /// Wake-on-LAN builds the packet and cannot send it.
+    ///
+    /// The button read "Packet Sent!" and nothing was sent. This is the one on
+    /// that panel with a waiting cost: somebody who believes the packet went
+    /// out watches a machine that was never asked to wake, and concludes the
+    /// machine is broken.
+    #[test]
+    fn wake_on_lan_does_not_claim_to_have_sent_anything() {
+        let mut app = NetScanApp::new();
+        app.wol_target_mac = "AA:BB:CC:DD:EE:FF".to_string();
+        app.send_wol();
+        let note = app
+            .wol_note
+            .clone()
+            .expect("Send did nothing and said nothing");
+        assert!(note.contains("Cannot send"), "{note}");
+
+        // And it reaches the window. `wol_note` was written and rendered by
+        // nothing for three commits; the comment beside the button claimed
+        // otherwise, and only `check-fields-written-never-read` noticed.
+        assert!(
+            app.render_tree()
+                .commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == &note)),
+            "the refusal never reached the screen",
+        );
+
+        // And the button never advertises a send.
+        let tree = app.render_tree();
+        assert!(
+            !tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text.contains("Packet Sent")
+            )),
+            "the button still claims the packet went out",
+        );
     }
 
     #[test]
@@ -5487,7 +5659,12 @@ mod tests {
         let mut app = NetScanApp::new();
         app.whois_target = "8.8.8.8".to_string();
         app.run_whois();
-        assert!(app.whois_result.is_some());
+        // Was `is_some()`: an owner derived from the first octet alone. That
+        // is a claim about who is responsible for an address, and it is acted
+        // on -- an abuse report goes to the registry the tool named.
+        assert!(app.whois_result.is_none(), "an owner appeared from nowhere");
+        let note = app.whois_note.expect("no answer and no reason given");
+        assert!(note.contains("Cannot look up ownership"), "{note}");
     }
 
     #[test]

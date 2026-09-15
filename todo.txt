@@ -54202,6 +54202,32 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   NOT established: that genuine Oils cross-compiles, or that any C++ binary
 ##   runs on SlateOS. The prerequisite fired; the port is effort.
 ##
+##   AUDIT PASS 2026-09-15 (lane B) -- one finding, filed.
+##   * S4 (PR_GET_AUXV / no native auxv): PREMISE HAS FIRED. It rejects
+##     implementing the auxv because "there is no Linux compat ELF loader yet
+##     ... so there is no real auxv to serve". Both halves are false now:
+##     kernel/src/proc/linux_stack.rs builds a 17-entry auxv (AT_PHDR, AT_ENTRY,
+##     AT_RANDOM, AT_SECURE, AT_EXECFN, ...) and spawn.rs calls
+##     install_linux_stack in the REAL exec path, keyed off
+##     ElfFile::detect_linux_abi(). Checked that it was live rather than
+##     scaffolding on purpose -- the build_linux_*_test_elf helpers beside it
+##     make a test-only reading plausible, and that reading would have made the
+##     whole finding wrong. Meanwhile PR_GET_AUXV still returns a bare AT_NULL
+##     and its comment still quotes S4's reason.
+##     THE DECISION IS STILL RIGHT (native processes have no auxv); what expired
+##     is the BLOCKER, and the remaining step is the one S4's own "How to
+##     reverse" already names: retain the built vector in Linux-ABI PCB state.
+##     Annotated in design-decisions S4, filed as
+##     requests/b-a-the-auxv-blocker-in-section-4-has-expired.md (lane A's tree).
+##   HOW THE SEARCH WAS SCOPED, for whoever resumes: "How to reverse" matches
+##   ~130 entries and most describe how to UNDO a decision rather than a
+##   condition that can expire. The ones that rot are those whose rationale
+##   names a MISSING PREREQUISITE -- "there is no X yet", "once X exists",
+##   "when X lands". S4 was found by reading the clause headings for that shape
+##   rather than by reading all 130. Not yet swept on this pass: the ~42
+##   "revisit if/when" clauses, and the "### How to reverse" heading form
+##   (about 30 entries) which the bolded-label grep does not match.
+##
 ##   AUDIT PASS 2026-08-18 (lane A) -- IN PROGRESS, resumable. Findings so far:
 ##   * S59 (GPU accel scope, Q18): PREMISE HAS FIRED. It defers the Mesa port
 ##     "until a virgl test environment exists"; one exists and always did. The

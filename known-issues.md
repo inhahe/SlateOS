@@ -23093,7 +23093,8 @@ Per setting, and they are not equal:
    Worse, desktop icon layout already exists a second time —
    `kernel/src/fs/deskicons.rs`, marked done at `roadmap.md` line 2385, with a
    grid, an icon size, layout modes, sorting, hit testing, persistence, a
-   kshell command and `/proc/deskicons`. Two models of one user-visible state
+   kshell command and `/proc/deskicons` (all deleted 2026-09-14, A-Q8). Two
+   models of one user-visible state
    in two lanes, which is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` again.
    Asked in `requests/c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick.md`;
    until it is answered, wiring either one entrenches a duplicate.
@@ -144233,10 +144234,19 @@ missing.
 already queues launches from it, so the activation path is one mapping once the
 events arrive.
 
-**Do not delete `/proc/deskicons` yet.** A-Q8 orders this deliberately: lane C
-wires first, lane A deletes after. Positions reaching disk is not the same as a
-desktop the user can use, and until this entry closes the kernel tree is still
-the only path that does anything.
+**~~Do not delete `/proc/deskicons` yet.~~ DONE 2026-09-14 -- the ordering was
+met and the kernel side is deleted.** A-Q8 ordered this deliberately: lane C
+wires first, lane A deletes after, because positions reaching disk is not the
+same as a desktop the user can use. Lane C's shell now reads positions at
+session start, writes on drag release, and routes press/drag/double-click
+through `handle_mouse`, with the clamp and the routing each proved by
+reintroduction. Lane A then removed `fs::deskicons`, `/proc/deskicons`, the
+kshell command and its self-tests -- 893 lines across ten files.
+
+The instruction is struck through rather than deleted because it was correct
+when written and the record of *why* the ordering existed is worth keeping. An
+unstruck 'do not delete yet' beside a thing already deleted is how a reader
+concludes somebody jumped the gun.
 
 ## TD-C-SYSTEM-INFORMATION-REPORTS-CORRUPT-HARDWARE-DATA-AS-ZEROS
 

@@ -73804,3 +73804,35 @@ follows. If the trade were "crop everything for ever" it would be theirs; it is
 **What would reverse it:** a second consumer for the fit mode, or a user who
 wants a tiled pattern. Both point the same way, and this entry says what the
 clean version looks like.
+
+### Followed through the same day, 2026-09-14
+
+The deferral lasted about two hours, which is worth recording rather than
+quietly editing away: the entry above was written to explain shipping a gap,
+and the gap is closed.
+
+Done exactly as this entry said it should be, and in that order:
+
+1. `ImageFit` moved into `appearance` beside `ThemeMode`, `SurfaceStyle`,
+   `StripStyle` and `ColorFilter`. `gui/desktop` re-exports it, so all 55
+   references compiled unchanged; `as_str`/`from_str_config` became
+   `yaml_name`/`from_yaml_name` on the same six strings, so a wallpaper config
+   written by the older code still reads.
+2. `AppearanceSettings::wallpaper_fit`, defaulting to `Fill` -- what the shell
+   did unconditionally before, so no existing desktop changes shape.
+3. The Wallpaper page offers it, and only when there is a picture to place.
+
+**One thing the plan did not anticipate, and it is the useful part.**
+`WallpaperManager::set_fit` had to be added, narrower than `set_image`. The fit
+is applied when the wallpaper is *drawn* -- `get_render_commands` hands it to
+`compute_image_rect` -- so changing it needs no new pixels, while `set_image`
+issues a fresh image id and the background surface re-inflates any id it has
+not seen. Routing a fit change through `set_image` would have decoded a
+full-screen photograph again to learn nothing new about it, six times over for
+a user trying each option. A test fails if it is swapped back.
+
+**Was the deferral worth having made?** Yes, and not because the gap was
+valuable. Writing down *why* the fit was missing turned a vague "the wallpaper
+should support more" into a named blocker -- one model, not two -- which was
+then a thing that could be removed in one move. The entry cost ten minutes and
+the follow-through was shorter than the discussion would have been.

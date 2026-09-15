@@ -8,6 +8,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
 use guitk::scroll_window;
@@ -1408,6 +1409,16 @@ enum View {
 
 /// The top-level Kanban application state.
 struct KanbanApp {
+    /// The open or save picker. Holds the dialog, the saving flag and the
+    /// routing thirteen applications used to write out by hand.
+    picker: FilePicker,
+    /// What the last open or save did, for the status line.
+    last_file_action: Option<String>,
+    /// The size the last frame was drawn at, so a click on the picker is
+    /// answered against the window the user is looking at.
+    win_width: f32,
+    /// See `win_width`.
+    win_height: f32,
     boards: Vec<Board>,
     active_board_idx: usize,
     view: View,
@@ -1474,6 +1485,10 @@ impl KanbanApp {
         let default_board = Board::default_board();
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: FilePicker::new(),
+            last_file_action: None,
+            win_width: INITIAL_WIDTH as f32,
+            win_height: INITIAL_HEIGHT as f32,
             boards: vec![default_board],
             active_board_idx: 0,
             view: View::Board,
@@ -1498,6 +1513,47 @@ impl KanbanApp {
     // that unreachable `None` into all 40-odd call sites, where each would
     // invent its own way of ignoring it — which is strictly worse than one
     // documented assertion here.
+    /// Write the active board to `path` as JSON.
+    ///
+    /// Refuses a board with no cards rather than writing one. A board file
+    /// holding empty columns is valid and imports as an empty board, which the
+    /// user cannot tell apart from a save that failed -- and by then it has
+    /// replaced whatever was at that path. See design-decisions 854.
+    fn write_board(&mut self, path: &std::path::Path) -> String {
+        let board = self.active_board();
+        if board.cards.is_empty() {
+            return String::from("That board has no cards -- nothing to write");
+        }
+        let text = JsonExporter::export_board(board);
+        let (name, cards) = (board.name.clone(), board.cards.len());
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!("Wrote {cards} card(s) from {name} to {}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` as a board and open it.
+    ///
+    /// The three outcomes are kept apart, because "0 cards" would cover all
+    /// of them: a file this program cannot read, a board that genuinely has
+    /// no cards, and a read that failed before any parse was attempted.
+    fn read_board(&mut self, path: &std::path::Path) -> String {
+        let read = match safeio::read_to_string_capped(path, MAX_BOARD_BYTES) {
+            Ok(read) => read,
+            Err(err) => return format!("Could not read {}: {err}", path.display()),
+        };
+        let note = read.note(MAX_BOARD_BYTES);
+        match JsonImporter::import_board(&read.text) {
+            Ok(board) => {
+                let (name, cards) = (board.name.clone(), board.cards.len());
+                self.boards.push(board);
+                self.active_board_idx = self.boards.len().saturating_sub(1);
+                format!("{note}Opened {name} with {cards} card(s)")
+            }
+            Err(why) => format!("{note}Could not open {}: {why}", path.display()),
+        }
+    }
+
     #[allow(clippy::expect_used)]
     fn active_board(&self) -> &Board {
         self.boards
@@ -1919,7 +1975,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
 /// What the board says before anything is on it.
 const NOTHING_YET_LINES: [&str; 2] = [
     "No cards yet.",
-    "Nothing is saved between runs -- this app has no filesystem access, so anything you write here is gone when the window closes.",
+    "Nothing is saved automatically -- press Ctrl+E to write the board to a file, Ctrl+O to read one back, or it is gone when the window closes.",
 ];
 
 const CARD_TOP_PAD: f32 = 12.0;
@@ -3423,6 +3479,20 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             true
         }
 
+        // E = write the board out, O = read one back. NOT Ctrl+S, which
+        // this app bound to the search bar long before it had a door: the
+        // app's own vocabulary outranks consistency with its neighbours, and
+        // a second `Key::S if ctrl` arm would simply never be reached.
+        Key::E if key.modifiers.ctrl => {
+            let name = sanitise_board_name(&app.active_board().name);
+            app.picker.open_to_write(format!("{name}.json"));
+            true
+        }
+        Key::O if key.modifiers.ctrl => {
+            app.picker.open_to_read();
+            true
+        }
+
         // S = toggle search
         Key::S if key.modifiers.ctrl => {
             if app.show_filter_bar {
@@ -3716,6 +3786,31 @@ impl App for KanbanApp {
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        // The picker takes input first while it is up, or a keystroke meant
+        // for a filename reaches the board -- where a bare letter starts a
+        // new card and Delete removes the selected one.
+        //
+        // This also gives the picker its mouse events: the match below has no
+        // `Event::Mouse` arm at all, so without this the dialog could be seen
+        // and not clicked.
+        match self.picker.handle(event, self.win_width, self.win_height) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_board(&path)
+                } else {
+                    self.read_board(&path)
+                });
+                return Response::Redraw;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return Response::Redraw,
+            Picked::Ignored => {}
+        }
         match event {
             Event::CloseRequested => Response::Exit,
             Event::Key(key_ev) => {
@@ -3739,9 +3834,52 @@ impl App for KanbanApp {
         // The renderer is a free function taking the size, so there is no
         // stored dimension to reconcile: whatever the compositor grants is what
         // gets drawn, including on the first frame before any `Resize`.
-        render_app(self, width, height)
+        //
+        // Remembered anyway, because a click on the picker has to be answered
+        // against the window the user is looking at, and `on_event` is handed
+        // no size.
+        self.win_width = width;
+        self.win_height = height;
+        let mut tree = render_app(self, width, height);
+        // Last, so it is above everything. Forgetting this is how a picker
+        // ends up open and invisible, taking every keystroke with nothing on
+        // screen to say why.
+        tree.commands
+            .extend(self.picker.render(&self.palette, width, height));
+        tree
     }
 }
+
+/// A board name reduced to something that can be a filename.
+///
+/// Only the three characters a path cannot contain are replaced: the name is
+/// the user's, and rewriting more of it than necessary means they cannot find
+/// the file by the name they gave the board.
+fn sanitise_board_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | '\u{0}') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        String::from("board")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// The most of a board file one open will read.
+///
+/// Reported when it bites. A cut JSON document does not parse, so the import
+/// fails outright rather than losing part of a board -- but the reason must
+/// say which of the two happened, or a long file reads as a corrupt one.
+pub const MAX_BOARD_BYTES: usize = 8 * 1024 * 1024;
 
 /// The size the window asks to open at.
 ///
@@ -3887,6 +4025,162 @@ mod tests {
     // are off here — as `CLAUDE.md` prescribes.
 
     use super::*;
+
+    /// The empty board says what happens to the work, and how to keep it.
+    ///
+    /// **There was no test for this banner at all.** `NOTHING_YET_LINES` was
+    /// referenced once, by the renderer, and nothing checked that it reached
+    /// the screen or that it said anything useful. That was found by running
+    /// the checklist from TD-C-A-TEST-THAT-PINS-WORDING-PASSES-UNTIL-THE-
+    /// WORDING-IS-WRONG before editing it -- grep the app's tests for
+    /// `contains(` first -- which was written for stale assertions and turned
+    /// up a missing one instead.
+    ///
+    /// It asserts the property rather than the sentence: the banner must name
+    /// the cost and the remedy. Rewording either is free; dropping either is
+    /// not.
+    #[test]
+    fn the_empty_board_names_the_cost_and_the_remedy() {
+        let mut app = KanbanApp::new();
+        app.active_board_mut().cards.clear();
+        for column in &mut app.active_board_mut().columns {
+            column.card_ids.clear();
+        }
+
+        let texts: Vec<String> = render_app(&app, TEST_W, TEST_H)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for line in NOTHING_YET_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NOTHING_YET_LINES.iter().any(|l| l.contains("Ctrl+E")),
+            "the banner does not say how to keep the board",
+        );
+        assert!(
+            NOTHING_YET_LINES
+                .iter()
+                .any(|l| l.contains("gone when the window closes")),
+            "the banner does not say what happens if you do not",
+        );
+    }
+
+    /// A board survives a write and a read through the door.
+    #[test]
+    fn a_board_survives_the_door() {
+        let dir = std::env::temp_dir().join("slateos-kanban-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("board.json");
+        let _ = std::fs::remove_file(&path);
+
+        // The default board has columns and labels and no cards, so the
+        // fixture adds one. The assertion below is what caught that: without
+        // it the test would have written an empty board, been refused, and
+        // failed somewhere less informative.
+        let mut app = KanbanApp::new();
+        let card = Card::new("Something to save");
+        let card_id = card.id;
+        app.active_board_mut().cards.insert(card_id, card);
+        if let Some(column) = app.active_board_mut().columns.first_mut() {
+            column.card_ids.push(card_id);
+        }
+        let cards = app.active_board().cards.len();
+        assert!(cards > 0, "the fixture board has no cards to write");
+        let said = app.write_board(&path);
+        assert!(said.starts_with("Wrote "), "said: {said}");
+
+        let before = app.boards.len();
+        let said = app.read_board(&path);
+        assert!(said.starts_with("Opened "), "said: {said}");
+        assert_eq!(app.boards.len(), before + 1, "no board was opened");
+        assert_eq!(
+            app.active_board().cards.len(),
+            cards,
+            "the opened board lost cards"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that is not a board says so rather than opening an empty one.
+    #[test]
+    fn a_file_that_is_not_a_board_is_refused_with_a_reason() {
+        let dir = std::env::temp_dir().join("slateos-kanban-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("notaboard.json");
+        std::fs::write(&path, "{\"unrelated\":true}").expect("write");
+
+        let mut app = KanbanApp::new();
+        let before = app.boards.len();
+        let said = app.read_board(&path);
+        assert!(said.contains("no board name"), "said: {said}");
+        assert_eq!(app.boards.len(), before, "an empty board was opened anyway");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An empty board is refused rather than written. See design-decisions 854.
+    #[test]
+    fn a_board_with_no_cards_is_not_written() {
+        let path = std::env::temp_dir().join("slateos-kanban-should-not-exist.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = KanbanApp::new();
+        app.active_board_mut().cards.clear();
+        let said = app.write_board(&path);
+        assert_eq!(said, "That board has no cards -- nothing to write");
+        assert!(!path.exists(), "nothing should have been created");
+    }
+
+    /// Ctrl+E opens the picker; Ctrl+S still reaches the search bar.
+    ///
+    /// The reason the door is not on Ctrl+S: this app bound that to the search
+    /// bar long before it had a file. A second `Key::S if ctrl` arm would
+    /// never be reached, and the failure would be silent.
+    #[test]
+    fn ctrl_e_opens_the_picker_and_ctrl_s_still_searches() {
+        let mut app = KanbanApp::new();
+        app.show_filter_bar = true;
+
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        let key = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::new(),
+        };
+
+        assert!(handle_key_event(&mut app, &key(Key::S)));
+        assert_eq!(
+            app.input_mode,
+            InputMode::SearchFilter,
+            "Ctrl+S stopped reaching the search bar"
+        );
+
+        let mut app = KanbanApp::new();
+        let before = app.render(TEST_W, TEST_H).commands.len();
+        assert!(handle_key_event(&mut app, &key(Key::E)));
+        assert!(app.picker.is_open(), "Ctrl+E did not open the picker");
+
+        // `is_open` is not enough, and assuming it was is how apps/flashcards
+        // shipped a picker that took every keystroke and painted nothing.
+        // Deleting the render line above leaves `is_open` true and this
+        // assertion is the only one that notices.
+        assert!(
+            app.render(TEST_W, TEST_H).commands.len() > before,
+            "the picker is open and nothing was drawn for it"
+        );
+    }
 
     /// **The round trip `validate_export` claimed to test and did not.**
     ///

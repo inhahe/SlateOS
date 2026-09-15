@@ -148330,3 +148330,47 @@ buffer satisfies.
 three pieces — a control that opens `guitk::dialog::FileDialog`, a handler for
 the chosen path, and an empty state that says what to do — and all three
 already existed in the toolkit.
+
+**THE RECIPE, AFTER DOING IT THREE TIMES.**
+
+`photomanager`, `filesearch` and `hexeditor` were the same change. Written out
+so the remaining twenty-five are cheaper, and because the parts that took the
+longest were not the obvious ones.
+
+1. **A field** — `file_dialog: Option<FileDialog>` on the app state.
+2. **A way in** — `Ctrl+O`, or a toolbar control. Check which chords the app
+   already uses; `filesearch` had six taken.
+3. **`FileDialog::open()`** for a file, **`select_folder()`** for a directory,
+   filled by `guitk::dialog::list_directory(dialog.current_path())`. The widget
+   does no I/O by design: the host reads the listing and hands it over.
+4. **Intercept events while it is up** — `Event::Key(..) if self.file_dialog
+   .is_some()` ahead of the app's own handlers, or a click meant for a filename
+   lands on whatever is drawn beneath.
+5. **`DialogAction`** has four arms and all four matter: `NavigatedTo` must
+   re-list, or the dialog shows the old directory under the new name.
+6. **Render it last**, so it is above everything — the same order in which the
+   events reach it.
+7. **Delete the seeded data** and make `main` start empty with a line saying
+   how to begin.
+8. **Move the seeder into `#[cfg(test)]`.** All three had tests resting on it.
+   A fixture production can reach is a fixture that ships.
+
+**The three things that cost the most time, none of which are in that list:**
+
+*The picker must actually be drawn.* In `hexeditor` I wrote a comment saying it
+was, above a `render` that was not. It compiled, 189 tests passed, and the
+result would have been a dialog swallowing every keystroke while invisible. Now
+pinned by `the_picker_is_drawn_when_it_is_open`, which counts render commands
+before and after opening — a test that is hard to write vacuously.
+
+*Bounds must announce themselves.* `filesearch` caps the walk at 20,000 entries
+and `hexeditor` caps a read at 16 MiB. Both say so when they bite. A silent cap
+turns a partial answer into a confident wrong one: "no results" reads as "no
+such file", and a truncated hex view lies about a specific address.
+
+*Names are bytes.* `guitk`'s `DirEntry` is deliberately `OsString`, and its own
+doc explains why — decoding lossily "could make it match one it should not". In
+`filesearch` that is the whole game, so non-UTF-8 names are **skipped and
+counted** rather than decoded, and the count is shown. `IndexEntry` holding
+`String` and `globmatch::glob_match` taking `&str` is the real limit; fixing it
+properly means byte-capable matching, which is its own task.

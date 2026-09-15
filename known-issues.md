@@ -76262,6 +76262,20 @@ named on the command line, and GNU reserves 2 for the latter.
 > our screens correct. The renderer is filed to lane C as
 > `requests/b-c-the-terminal-gives-every-character-one-cell.md`; the two do not
 > block each other.
+>
+> **FIXED by lane C, 2026-09-14** (on `origin/lane-c`; reaches `main` on their
+> merge). They took the better direction: instead of rewriting the table to
+> describe the renderer, they pointed the renderer at the table. `put_char`
+> advances by `charwidth::char_width`, a wide character occupies two cells with
+> the second flagged as a continuation, a combining mark occupies none, and a
+> wide character that will not fit at the margin wraps rather than straddling
+> it. Writing onto either half of a pair breaks it first, in both directions,
+> so no orphaned half survives to overdraw its neighbour.
+>
+> The two can no longer drift, because there is now one source rather than two
+> descriptions of the same thing. The 2,362 zero-width figure above was
+> re-derived from the table's own 368 ranges when lane C flagged that they had
+> not verified it; it holds.
 
 **What it is.** `userspace/charwidth` holds the system's only table of terminal
 column widths, and it was generated and verified against **bash 5.2.37**, which

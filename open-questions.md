@@ -116,18 +116,24 @@ only which of the two we copy.**
 ### Your two questions from 2026-09-14, answered first
 
 **"Why wouldn't the table simply report how wide we actually print each
-character?"** — It should, and that is option (c). It could not be evaluated
-until somebody measured what we actually print. Somebody now has, and the
-answer is bad enough to be its own defect: **our terminal has no notion of
-width at all.** It advances one column for every character, so it draws Chinese,
-Korean, Japanese and emoji one cell wide when they need two — 185,074
-characters where the screen and the table disagree, against the 626 this
-question is about. Taken literally today, option (c) would mean setting the
-whole table to one, which would make our `ls` agree with our terminal and
-disagree with every other terminal on Earth. **The renderer is the thing that
-is wrong, and it is lane C's**; filed separately as
-`requests/b-c-the-terminal-gives-every-character-one-cell.md`. It neither
-blocks nor is blocked by this question.
+character?"** — It should, and **as of 2026-09-14 it effectively does, which
+removes this from the decision.**
+
+When you asked, the answer was bad enough to be its own defect: our terminal
+had no notion of width at all. It advanced one column for every character, so
+it drew Chinese, Korean, Japanese and emoji one cell wide when they need two —
+**185,074** characters where screen and table disagreed, against the 626 this
+question is about. That was filed to lane C, who own the terminal.
+
+They have fixed it, and they fixed it the better way round: rather than
+rewriting the table to describe the renderer, **they made the renderer read the
+table.** A wide character now takes two cells, a combining mark takes none, and
+the two can no longer drift apart because there is only one source. (On
+`origin/lane-c` now; it reaches `main` when they merge.)
+
+**So screen-correctness is no longer part of this choice.** Whichever table you
+pick, the terminal will draw what the table says. What is left is the narrow
+question below: which upstream do we match on 626 characters.
 
 **"Why wouldn't the GNU and bash programs ask how wide a character is, and
 adjust?"** — Two separate reasons, and the first is the one that surprises
@@ -152,7 +158,7 @@ people:
 |---|---|
 | **(a) Copy the GNU tools' table** *(recommended)* | Our `ls` and `wc -L` match GNU byte-for-byte on those 626; our shell's menu stops matching bash on them. It is a pinned, re-derivable upstream (Unicode 15.1.0); ours came from whatever Python the build machine had. |
 | **(b) Keep bash's table — today's behaviour** | Nothing changes. Those 626 stay permanently marked "differs on purpose" in the `ls` harness, which dulls it. |
-| **(c) Describe our own renderer instead** | Not available until the terminal knows about width at all. Revisit after lane C's fix; today it would mean a table of all-ones. |
+| **(c) Describe our own renderer instead** | **Withdrawn — overtaken.** It existed to make screen and table agree; lane C achieved that by pointing the renderer at the table, so there is nothing left for it to fix. |
 
 A fourth option — two tables, one for the shell and one for the utilities — is
 what `charwidth` exists to prevent: the symptom is a menu and a listing that do

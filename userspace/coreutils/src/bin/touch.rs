@@ -759,6 +759,7 @@ fn stdout_as_file() -> ManuallyDrop<File> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 #[allow(
     clippy::unwrap_used,
     clippy::panic,

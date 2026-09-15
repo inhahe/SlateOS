@@ -2473,6 +2473,7 @@ fn main() {
 /// The fix is for `parse_args` to return a `Result` and let `main` exit;
 /// recorded in `todo.txt` rather than done in the same change as the port.
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;

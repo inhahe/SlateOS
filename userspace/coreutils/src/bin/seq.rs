@@ -1063,6 +1063,11 @@ fn arg_bytes(arg: &OsString) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;

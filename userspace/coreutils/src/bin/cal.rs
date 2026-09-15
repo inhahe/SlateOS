@@ -2580,6 +2580,13 @@ fn run_main() -> ExitCode {
 /// from the source, because the two disagreed four times while this file was
 /// being written and the binary was right every time.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

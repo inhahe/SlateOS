@@ -5368,6 +5368,12 @@ fn run_main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[expect(
     clippy::unwrap_used,
     reason = "a test that cannot build its own fixture should fail loudly"

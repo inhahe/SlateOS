@@ -2899,6 +2899,7 @@ fn symlink(_points_at: &Path, _at: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 #[allow(
     clippy::unwrap_used,
     clippy::panic,

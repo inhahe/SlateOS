@@ -3805,6 +3805,7 @@ fn search_stream(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;

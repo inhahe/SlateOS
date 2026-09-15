@@ -2878,6 +2878,7 @@ fn arg_bytes(arg: &OsString) -> Vec<u8> {
 // -------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

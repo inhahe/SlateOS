@@ -224,6 +224,13 @@ pub fn borrowed(fd: i32) -> Option<ManuallyDrop<File>> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::{is_regular, is_seekable, regular};
     use std::fs::File;

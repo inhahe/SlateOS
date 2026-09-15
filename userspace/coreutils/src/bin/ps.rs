@@ -1376,6 +1376,11 @@ fn format_cpu_time(utime: u64, stime: u64) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     /// A newline, built rather than escaped.

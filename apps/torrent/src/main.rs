@@ -2084,6 +2084,7 @@ impl Default for ClientSettings {
 
 // ─── Application ─────────────────────────────────────────────────────
 
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -2174,6 +2175,13 @@ const TABLE_FONT: f32 = 11.0;
 /// torrent, a dead tracker, someone else's problem. It is not: nothing here
 /// has contacted a tracker or a peer, and nothing here can write a file even
 /// if it had.
+/// The most of a `.torrent` one open will read.
+///
+/// A torrent file describes content; it does not contain it, so this is
+/// generous. Reported when it bites, because a cut bencode document does not
+/// parse and the parse error alone would blame the file.
+pub const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
+
 const CANNOT_TRANSFER_LINES: [&str; 3] = [
     "This client cannot download or upload anything.",
     "It has no network access and no way to write a file, so no tracker or peer has been contacted.",
@@ -2284,6 +2292,16 @@ impl Tab {
 
 /// Main torrent client application
 pub struct TorrentApp {
+    /// The open picker. Holds the dialog and the routing thirteen
+    /// applications used to write out by hand.
+    pub picker: FilePicker,
+    /// What the last open did, for the status line.
+    pub last_open: Option<String>,
+    /// The size the last frame was drawn at, so a click on the picker is
+    /// answered against the window the user is looking at.
+    pub win_width: f32,
+    /// See `win_width`.
+    pub win_height: f32,
     pub torrents: Vec<ManagedTorrent>,
     pub settings: ClientSettings,
     pub active_tab: Tab,
@@ -2385,6 +2403,10 @@ impl TorrentApp {
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: FilePicker::new(),
+            last_open: None,
+            win_width: WINDOW_WIDTH,
+            win_height: WINDOW_HEIGHT,
             torrents: Vec::new(),
             settings: ClientSettings::default(),
             active_tab: Tab::Transfers,
@@ -2528,7 +2550,68 @@ impl TorrentApp {
     }
 
     /// Handle one event from the window.
+    /// Read `path` as a `.torrent` and list what is in it.
+    ///
+    /// `TorrentMetainfo::from_bencode` was written, tested and unreachable:
+    /// this program had no way to obtain a byte. **A torrent file is the one
+    /// thing here that does not need the network** -- it is a description of
+    /// content, so reading it tells the user the name, the size, the piece
+    /// count, the file list and which trackers it names, none of which
+    /// requires contacting anything.
+    ///
+    /// Goes through `add_torrent` rather than building a `ManagedTorrent`
+    /// here: that function owns the id counter, the default save path and the
+    /// status line, and a second copy of it would drift.
+    /// `ManagedTorrent::from_metainfo` marks every tracker `NotContacted`,
+    /// which is the truth and stays the truth -- opening a file adds a
+    /// description, not a download.
+    ///
+    /// Read as BYTES. `.torrent` is bencode, and the text reader refuses at
+    /// the first byte that is not UTF-8, reporting "stream did not contain
+    /// valid UTF-8" about a file that is perfectly valid and simply not text.
+    pub fn open_torrent_file(&mut self, path: &std::path::Path) -> String {
+        let read = match safeio::read_capped(path, MAX_TORRENT_BYTES) {
+            Ok(read) => read,
+            Err(err) => return format!("Could not read {}: {err}", path.display()),
+        };
+        // Front-loaded: a cut bencode document fails to parse, so without this
+        // the user is told their file is malformed when it is merely long.
+        let note = read.note(MAX_TORRENT_BYTES);
+        match TorrentMetainfo::from_bencode(&read.bytes) {
+            Ok(meta) => {
+                let name = meta.name.clone();
+                let files = meta.files.len().max(1);
+                self.add_torrent(meta, None);
+                format!("{note}Opened {name}: {files} file(s), nothing contacted")
+            }
+            // The parser's own reason, not one invented here: "missing 'info'
+            // dict" and "missing torrent name" say which part is absent, and
+            // replacing them with "not a torrent" would throw that away.
+            Err(why) => format!("{note}Could not read {}: {why}", path.display()),
+        }
+    }
+
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up, or a keystroke meant
+        // for a filename reaches the list behind it -- where Delete removes
+        // the selected torrent.
+        //
+        // A tick comes back as `Ignored` and falls through, and here that is
+        // load-bearing rather than incidental: `tick_interval` asks for ticks
+        // while anything is downloading, and the arm below advances the
+        // pieces. Swallowing it would stall a transfer because somebody
+        // opened a file dialog -- which is what apps/podcast and
+        // apps/photomanager each did before this type existed.
+        match self.picker.handle(event, self.win_width, self.win_height) {
+            Picked::Chose(path) => {
+                self.last_open = Some(self.open_torrent_file(&path));
+                return EventResult::Consumed;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Tick { .. } => self.handle_tick(),
@@ -2645,6 +2728,10 @@ impl TorrentApp {
                         self.resume_torrent(id);
                     }
                 }
+                EventResult::Consumed
+            }
+            Key::O if key.modifiers.ctrl => {
+                self.picker.open_to_read();
                 EventResult::Consumed
             }
             Key::Delete => {
@@ -3128,6 +3215,11 @@ impl TorrentApp {
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        // Last, so it is above everything. Without this the picker
+        // takes every keystroke with nothing on screen to say why --
+        // the defect apps/flashcards shipped.
+        cmds.extend(self.picker.render(&self.palette, width, height));
 
         cmds
     }
@@ -4000,6 +4092,149 @@ fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) 
 )]
 mod tests {
     use super::*;
+
+    /// A `.torrent` built by this crate's own encoder, so the test exercises
+    /// the parser rather than my transcription of bencode.
+    fn a_real_torrent_file(name: &str) -> Vec<u8> {
+        let mut info = std::collections::BTreeMap::new();
+        info.insert(
+            "name".to_string(),
+            BencodeValue::Bytes(name.as_bytes().to_vec()),
+        );
+        info.insert("piece length".to_string(), BencodeValue::Integer(16_384));
+        // One piece: twenty bytes of SHA-1. 0xFF specifically, because it is
+        // never valid UTF-8 -- the first fixture used 0x07, which IS valid
+        // (it is a control character), and the bytes-not-text test below
+        // refused to run against it. A real SHA-1 is arbitrary bytes and will
+        // usually contain some, but "usually" is not what a test asserts on.
+        info.insert("pieces".to_string(), BencodeValue::Bytes(vec![0xFFu8; 20]));
+        info.insert("length".to_string(), BencodeValue::Integer(1_000));
+
+        let mut root = std::collections::BTreeMap::new();
+        root.insert(
+            "announce".to_string(),
+            BencodeValue::Bytes(b"http://tracker.invalid/announce".to_vec()),
+        );
+        root.insert("info".to_string(), BencodeValue::Dict(info));
+        bencode_encode(&BencodeValue::Dict(root))
+    }
+
+    fn torrent_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("slateos-torrent-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// **A torrent file is the one thing here that needs no network.**
+    ///
+    /// `TorrentMetainfo::from_bencode` was written, tested and unreachable:
+    /// the program had no way to obtain a byte. Opening one tells the user the
+    /// name, the size and which trackers it names, and contacts nothing.
+    #[test]
+    fn opening_a_torrent_file_lists_what_is_in_it() {
+        let path = torrent_dir().join("thing.torrent");
+        std::fs::write(&path, a_real_torrent_file("A Thing")).expect("write torrent");
+
+        let mut app = TorrentApp::new();
+        let before = app.torrents.len();
+        let said = app.open_torrent_file(&path);
+
+        assert!(said.starts_with("Opened A Thing"), "said: {said}");
+        assert!(said.contains("nothing contacted"), "said: {said}");
+        assert_eq!(app.torrents.len(), before + 1, "no torrent was added");
+
+        let added = app.torrents.last().expect("the torrent");
+        assert_eq!(added.name, "A Thing");
+        assert!(
+            added
+                .trackers
+                .iter()
+                .all(|t| t.status == TrackerStatus::NotContacted),
+            "a tracker was marked as something other than NotContacted"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that is not a torrent keeps the parser's own reason.
+    ///
+    /// "missing 'info' dict" says which part is absent; replacing it with
+    /// "not a torrent" would throw that away, and the user would have no idea
+    /// whether they picked the wrong file or have a damaged one.
+    #[test]
+    fn a_file_that_is_not_a_torrent_keeps_the_parsers_reason() {
+        let path = torrent_dir().join("notatorrent.bin");
+        // Valid bencode, wrong shape: a dict with no `info`.
+        let mut root = std::collections::BTreeMap::new();
+        root.insert("announce".to_string(), BencodeValue::Bytes(b"x".to_vec()));
+        std::fs::write(&path, bencode_encode(&BencodeValue::Dict(root))).expect("write");
+
+        let mut app = TorrentApp::new();
+        let before = app.torrents.len();
+        let said = app.open_torrent_file(&path);
+
+        assert!(said.contains("missing 'info' dict"), "said: {said}");
+        assert_eq!(app.torrents.len(), before, "a failed read added a torrent");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Bytes, not text. A `.torrent` is bencode and its `pieces` field is raw
+    /// SHA-1, which is not UTF-8 -- reading it as text would refuse a
+    /// perfectly valid file and blame its contents.
+    #[test]
+    fn a_torrent_is_read_as_bytes_not_text() {
+        let path = torrent_dir().join("binary.torrent");
+        let bytes = a_real_torrent_file("Binary");
+        assert!(
+            String::from_utf8(bytes.clone()).is_err(),
+            "the fixture is valid UTF-8, so it cannot show that bytes are needed"
+        );
+        std::fs::write(&path, bytes).expect("write torrent");
+
+        let mut app = TorrentApp::new();
+        let said = app.open_torrent_file(&path);
+        assert!(said.starts_with("Opened Binary"), "said: {said}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that is not there is a read failure, not a verdict on contents.
+    #[test]
+    fn a_missing_torrent_is_reported_as_a_read_failure() {
+        let path = std::env::temp_dir().join("slateos-torrent-absent.torrent");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = TorrentApp::new();
+        let said = app.open_torrent_file(&path);
+        assert!(said.starts_with("Could not read"), "said: {said}");
+        assert!(
+            !said.contains("missing"),
+            "the file was never parsed, so do not blame its contents: {said}"
+        );
+    }
+
+    /// The picker is not merely open: it is DRAWN.
+    #[test]
+    fn the_picker_is_drawn_when_it_is_open() {
+        let mut app = TorrentApp::new();
+        let before = app.render_commands(WINDOW_WIDTH, WINDOW_HEIGHT).len();
+        app.picker.open_to_read();
+        assert!(app.picker.is_open(), "no picker came up");
+        let own = app
+            .picker
+            .render(&app.palette, WINDOW_WIDTH, WINDOW_HEIGHT)
+            .len();
+        assert!(
+            own > 0,
+            "the picker itself draws nothing, so this proves nothing"
+        );
+        let after = app.render_commands(WINDOW_WIDTH, WINDOW_HEIGHT).len();
+        assert!(
+            after >= before + own,
+            "the frame does not contain the picker's own {own} command(s)"
+        );
+    }
 
     /// A fresh client holds nothing and finishes nothing.
     ///

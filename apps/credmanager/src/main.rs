@@ -2849,6 +2849,17 @@ impl ClipboardState {
         self.copied_at = now;
     }
 
+    /// Seconds until the copy is wiped, or `None` when nothing is held.
+    ///
+    /// Saturating rather than wrapping: `now` comes from outside, and a clock
+    /// that goes backwards would otherwise turn "2 seconds left" into four
+    /// billion.
+    fn remaining(&self, now: u64) -> Option<u64> {
+        self.content.as_ref()?;
+        let elapsed = now.saturating_sub(self.copied_at);
+        Some(u64::from(self.auto_clear_seconds).saturating_sub(elapsed))
+    }
+
     fn should_clear(&self, now: u64) -> bool {
         if self.content.is_none() {
             return false;
@@ -3517,6 +3528,41 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         false,
     );
     frame.hit(Target::Settings, settings);
+
+    // WHAT WAS COPIED, AND HOW LONG IT LASTS.
+    //
+    // `copy_field` has recorded the label in `last_copied` since this program
+    // was written and nothing rendered it -- there is no status line, toast or
+    // banner anywhere in this program. Pressing Copy on a password therefore
+    // showed the user *nothing*, and the only way to learn whether it had
+    // worked, or which row it had taken, was to paste somewhere and look. In a
+    // password manager the difference between "copied" and "copied the wrong
+    // row" is the entire point of the press.
+    //
+    // The countdown is the same omission from the other side. The clipboard
+    // wipes itself after `auto_clear_seconds`, which is a good thing to do and
+    // a bad thing to do invisibly: a user who does not know it is coming reads
+    // the empty paste as the program having failed.
+    //
+    // Left-aligned after the last button rather than right-aligned, because
+    // right-aligning needs the rendered width and guessing it from the
+    // character count is wrong for every proportional face in the tree.
+    if let (Some(label), Some(secs)) = (
+        state.last_copied.as_deref(),
+        state.clipboard.remaining(state.now),
+    ) {
+        let notice_x = x + TOOLBAR_GAP;
+        draw_text(
+            frame,
+            notice_x,
+            (TOOLBAR_HEIGHT - DEFAULT_FONT_SIZE) / 2.0,
+            &format!("Copied {label} — clears in {secs}s"),
+            state.palette.green,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some((width - notice_x).max(0.0)),
+        );
+    }
 
     frame.unclip();
 
@@ -7243,6 +7289,83 @@ mod tests {
         regenerate_password(&mut state);
         assert!(!state.generated_password.is_empty());
         assert_eq!(state.generator_error, None);
+    }
+
+    /// Every string the toolbar draws.
+    fn toolbar_texts(state: &AppState) -> Vec<String> {
+        let layout = Layout::new(1200.0, 800.0);
+        let mut frame = Frame::new(1200.0, 800.0);
+        render_toolbar(&mut frame, state, &layout);
+        frame
+            .commands()
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Copying a credential says so, and says when it will be wiped.**
+    ///
+    /// `copy_field` recorded the label and this program drew no message of any
+    /// kind, so pressing Copy on a password was indistinguishable from
+    /// pressing nothing. The clipboard's own auto-clear was equally silent: a
+    /// user who does not know the wipe is coming reads the empty paste as a
+    /// failure.
+    #[test]
+    fn copying_says_what_was_copied_and_when_it_clears() {
+        let mut state = AppState::for_test();
+        state.now = 100;
+        state.clipboard.copy("hunter2", state.now);
+        state.last_copied = Some("Password".to_string());
+
+        let texts = toolbar_texts(&state);
+        assert!(
+            texts.iter().any(|t| t.starts_with("Copied Password")),
+            "nothing on the toolbar says a copy happened: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("clears in")),
+            "the wipe is still invisible: {texts:?}"
+        );
+    }
+
+    /// The countdown counts down rather than sitting still.
+    #[test]
+    fn the_countdown_shrinks_as_time_passes() {
+        let mut state = AppState::for_test();
+        state.now = 100;
+        state.clipboard.copy("hunter2", state.now);
+        state.last_copied = Some("Password".to_string());
+
+        let first = state
+            .clipboard
+            .remaining(state.now)
+            .expect("holding nothing");
+        let later = state
+            .clipboard
+            .remaining(state.now + 3)
+            .expect("holding nothing");
+        assert_eq!(later, first.saturating_sub(3), "{first} -> {later}");
+    }
+
+    /// Once the clipboard has wiped itself there is nothing to announce.
+    #[test]
+    fn the_notice_goes_when_the_clipboard_does() {
+        let mut state = AppState::for_test();
+        state.now = 100;
+        state.clipboard.copy("hunter2", state.now);
+        state.last_copied = Some("Password".to_string());
+
+        state.now += u64::from(state.clipboard.auto_clear_seconds) + 1;
+        state.clipboard.tick(state.now);
+
+        let texts = toolbar_texts(&state);
+        assert!(
+            !texts.iter().any(|t| t.starts_with("Copied")),
+            "a stale copy notice outlived the clipboard: {texts:?}"
+        );
     }
 
     #[test]

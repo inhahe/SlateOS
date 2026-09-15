@@ -1,0 +1,211 @@
+# Fields written in production and read only by tests -- the known ones.
+#
+# WHAT THIS FILE IS FOR. `check-fields-written-never-read.py` found 26 of these
+# on the day it was written. A gate that reports 26 things is a gate nobody
+# reads, and two of the 26 were genuine user-facing defects that would have
+# been lost in the noise -- `apps/fileassoc`'s `last_export` (an Export button
+# that wrote nothing anywhere) and `apps/explorer`'s `eta_secs` (a time
+# remaining computed on every tick and shown to nobody). Both are fixed.
+#
+# The remaining 25 are listed here so the gate is green today and RED the
+# moment a twenty-sixth appears. This is a triage queue, not an amnesty: every
+# line is a program doing work it then throws away, and each needs looking at
+# on its own terms. Some will be sound -- a field kept for a future consumer,
+# or read somewhere this script's textual matching cannot see. Those should get
+# a `#` note here saying so, rather than being deleted.
+#
+# Delete a line when the field is fixed. Do not regenerate the file wholesale:
+# the notes are the point, and a regenerating flag in a sibling script silently
+# destroyed hand-written prose three times before it was made to refuse.
+#
+# Format: <path>:<field name>, one per line. `#` starts a comment.
+#
+# `apps/reminders/src/main.rs:completed_at` was here and was a FALSE
+# POSITIVE. It is written into the program's JSON by
+# `let Self { .., completed_at, .. } = self;` -- a destructuring pattern
+# reads every field it binds, and binds them by bare name, so there is no
+# `.field` anywhere for a textual detector to see. Fixed, with a fixture.
+#
+# A line here that no longer matches anything is FATAL, not harmless: it
+# would silently suppress that field if it came back. Delete it when the
+# field is fixed.
+#
+# `apps/hearts/src/main.rs:hearts_broken` was here and was a FALSE POSITIVE.
+# The detector read the `=>` of a match arm as an assignment, so
+# `None if !self.hearts_broken =>` -- the rule the game is named after,
+# gating whether a heart may be led -- counted as a write rather than a
+# read. The field then had no production reads and was reported as
+# thrown-away work when it was load-bearing logic. Fixed, with a fixture.
+#
+# Noticed on triage and worth a closer look first:
+#   gui/desktop/src/sound_settings.rs:output_device_id -- picking an output
+#     device for an app records the choice and nothing acts on it. Deferred
+#     only because design-decisions 815 moves this whole panel into
+#     `apps/settings`, and fixing the copy that is about to be deleted is
+#     work done twice. The port must not carry it over.
+#   apps/netmanager/src/main.rs:diagnostics_running -- TRIAGED 2026-09-14, and
+#     it is not a drawing bug. `run_diagnostics` sets it true, builds six
+#     canned results, and sets it false again before returning, so no renderer
+#     can ever observe it as true. Drawing a spinner for it would be theatre.
+#     The flag becomes meaningful only when the diagnostics stop being
+#     simulated and acquire a real wait; until then it is dead state that a
+#     future async version will want, so it is kept and annotated rather than
+#     deleted.
+#   gui/desktop/src/lib.rs:shortcut_message -- a message composed for the user
+#     and never rendered.
+
+# TRIAGED 2026-09-14, BOTH REAL, neither fixed yet.
+#
+#   `test_results` (archivemanager): `backend::verify` returns per-file
+#   results; `results.summary()` goes to the status bar and is seen, the
+#   detail is stored here and is not. So Test Archive answers "3 files
+#   failed" and cannot say which. Partial, not invisible: the fix is a
+#   detail panel, not a wire.
+#
+#   `last_copied` (credmanager): FIXED 2026-09-14 -- the toolbar now says
+#   what was copied and counts down to the clipboard wipe.
+apps/archivemanager/src/main.rs:test_results
+# TRIAGED 2026-09-14, REAL, and the fix is a DELETION rather than a wire.
+#   `Store::refresh_group_counts` walks every contact to fill
+#   `group.member_count`, and it is called in production (once). Nothing
+#   reads it. The number the user sees comes from `Store::group_stats`,
+#   which recomputes the SAME count with the identical filter on every
+#   draw -- `contacts.iter().filter(|c| c.groups.contains(&g.id)).count()`
+#   appears twice, ten lines apart in behaviour.
+#
+#   So this is two predicates for one state, which this tree has already
+#   been bitten by (see the `can_clean` comment in diskcleanup: a button
+#   that looked disabled and acted enabled). Today they agree. They will
+#   stop agreeing the first time someone changes what group membership
+#   means and finds only one of the copies.
+#
+#   Fix: delete `member_count` and `refresh_group_counts`, keeping
+#   `group_stats`, which is always fresh and is the one already drawn. A
+#   cached count that has to be refreshed by hand is the stale half of a
+#   pair waiting to happen.
+apps/contacts/src/main.rs:member_count
+# TRIAGED 2026-09-14, SOUND. `affected_rows` duplicates a count that the
+# `message` field beside it already states in words -- every producer sets
+# both, as `QueryResult::success(&format!("{n} row(s) updated"))` with
+# `affected_rows = n` on the next line. The user is told. This is the
+# structured form for a consumer that does not exist yet (a script runner,
+# an API), so drawing it would print the same number twice.
+apps/dbviewer/src/main.rs:affected_rows
+# TRIAGED 2026-09-14 (diskcleanup). `last_accessed_days` is FIXED -- the
+# file preview now shows "45 days ago" beside each size, which is the only
+# thing on the row that speaks to whether you want the file, and what this
+# program does with the answer is `remove_dir_all`. The other two stay:
+#
+#   `min_age_days` is on `ScheduledCleanup` ("only clean items older than
+#   this many days"), and the whole scheduled-cleanup feature is
+#   unimplemented: `AppState.schedule` is `Option<ScheduledCleanup>`, set
+#   to `None` at construction, and `.schedule` has ZERO references
+#   anywhere else in the program. So this is an island, not a rule being
+#   ignored -- worth being sure of, because an automatic cleanup that
+#   silently dropped its age limit would delete files a user just made.
+#
+#   `path_pattern` records the glob that matched an item. The category is
+#   already shown and the pattern is derived from it (`default_pattern`),
+#   so drawing it would add a column that repeats the heading. Low value,
+#   not wrong.
+apps/diskcleanup/src/main.rs:path_pattern
+apps/diskcleanup/src/main.rs:min_age_days
+# TRIAGED 2026-09-14, REAL and BLOCKED. See known-issues.md ->
+# TD-C-FOUR-CLIPBOARDS-AND-NONE-OF-THEM-IS-CONNECTED. `last_selected` holds
+# the tinted emoji the user picked and is documented "for clipboard / IPC
+# output"; there is no clipboard or IPC code in that program, no client
+# library for the clipboard service anywhere, and A-Q15 means a second
+# socket would kill the program's own window. So the emoji picker cannot
+# give you an emoji, and the field is the last correct step before a gap.
+apps/emojipicker/src/main.rs:last_selected
+apps/netmanager/src/main.rs:diagnostics_running
+# TRIAGED 2026-09-14, ISLAND. `sync_clipboard` sets this and is called only
+# from its own tests, so remotedesktop's whole clipboard-sync feature has no
+# production caller and its settings panel shows "Never / Text / 0" for
+# ever. Adding the missing Size row would print a permanent zero, which is
+# worse than the omission. This is the fifth disconnected clipboard --
+# see TD-C-FIVE-CLIPBOARDS-AND-NONE-OF-THEM-IS-CONNECTED.
+apps/remotedesktop/src/main.rs:content_size_bytes
+# TRIAGED 2026-09-14, REAL and in lane C's own tree, not blocked.
+#   Set on every mouse Move over the seek bar (`preview_at(event.x)`) and
+#   cleared on leave, so the player computes which timestamp the pointer
+#   is over, continuously, and draws nothing. Hovering a video scrubber
+#   shows no time. The hover tracking is complete -- press, move, leave --
+#   and entirely invisible.
+apps/videoplayer/src/main.rs:seek_preview_position
+# TRIAGED 2026-09-14 -- THE SETTINGS-PANEL GROUP, and this is a checklist
+# for the design-decisions 815 port rather than a list of things to wire
+# where they stand. Fixing a panel that is about to be deleted is work done
+# twice; carrying its bug across is work done wrong. Each of these is a
+# value the panel computes and never shows or acts on:
+#
+#   backup_settings:last_backup_timestamp -- when the last backup ran is
+#     recorded from the history entry and never displayed, so the one
+#     question a backup screen exists to answer ("am I backed up?") is the
+#     one it does not answer.
+#   bluetooth:discoverable -- `set_discoverable` returns true and sets the
+#     field, and NOTHING reads it. The toggle does not make the adapter
+#     discoverable and the UI does not show that it is. A switch that does
+#     nothing, in both directions.
+#   startup_settings:last_run_at -- when a startup program last ran,
+#     recorded and never shown, so a program that fails at every boot looks
+#     the same as one that ran a second ago.
+#   sound_settings:output_device_id, volume_override -- per-app audio
+#     routing and volume, recorded and never applied.
+#   lib.rs:shortcut_message -- "Press the new keys, or Escape to cancel",
+#     "Unchanged", "That row is gone": the whole of the shortcut editor's
+#     feedback, composed and drawn nowhere, so rebinding a key is silent
+#     whether it worked or not.
+#
+gui/desktop/src/backup_settings.rs:last_backup_timestamp
+gui/desktop/src/bluetooth.rs:discoverable
+# TRIAGED 2026-09-14, REAL, and the SECOND instance today of one pattern.
+#   `record_invocation` sets `loading_timeout = self.response_time_avg_ms >
+#   200.0`, and `is_slow()` twelve lines below returns
+#   `self.response_time_avg_ms > 200.0`. The same predicate, cached in one
+#   place and computed live in the other; only the live one is used.
+#
+#   `apps/contacts` has the identical shape (`member_count` cached,
+#   `group_stats` recomputed, only the recomputed one drawn). Two in one
+#   sweep makes it a pattern worth naming: a cached copy of a predicate
+#   that has to be refreshed by hand is the stale half of a pair waiting
+#   to happen, and this gate finds them because the cache is what nobody
+#   reads. Fix in both cases is a deletion, keeping the live computation.
+gui/desktop/src/context_ext.rs:loading_timeout
+gui/desktop/src/lib.rs:shortcut_message
+gui/desktop/src/sound_settings.rs:volume_override
+gui/desktop/src/sound_settings.rs:output_device_id
+gui/desktop/src/startup_settings.rs:last_run_at
+# TRIAGED 2026-09-14, REAL and NOT blocked by the settings port -- this is
+# shell chrome, not a settings screen, so 815 does not touch it.
+#   `DragSource::show_ghost` is documented "whether the icon should appear
+#   semi-transparent (drag in progress)" and `dragging_key` says which one.
+#   Both are set when the drag threshold is crossed and cleared on drop or
+#   cancel, and nothing reads either. `with_alpha` appears in the shell
+#   only for taskbar and overlay transparency settings, never for a
+#   dragged icon.
+#
+#   So dragging a tray icon or a taskbar pin gives no sign that anything
+#   is being dragged: the icon sits where it was, at full opacity, while
+#   the drop target changes under the pointer. The state machine is
+#   complete and correct -- threshold, cancel-on-Escape, key rather than
+#   index so a row can rearrange mid-drag -- and none of it is visible.
+#   Fix: draw the icon named by `dragging_key` with `with_alpha` while
+#   `show_ghost`. Small, and in lane C's own tree.
+gui/desktop/src/tray_dnd.rs:show_ghost
+gui/desktop/src/tray_dnd.rs:dragging_key
+# TRIAGED 2026-09-14, SOUND. Both of these are library API with no
+# consumer yet, which is the island problem rather than this one.
+#
+#   `attempts` is parsed from `options attempts:N` in resolv.conf. This
+#   crate has no retry loop and no transport -- it encodes and decodes
+#   DNS messages and parses the config -- so applying the count belongs
+#   to whoever sends the query. The same is true of `timeout_ms` beside
+#   it. It becomes a real defect the moment a resolver here sends
+#   anything and hardcodes a number instead.
+#
+#   `http_only` is a cookie attribute parsed from Set-Cookie and exposed
+#   as a `pub` field. Parsing it and offering it IS the library's whole
+#   job; enforcing it is the caller's, and there is no caller yet.
+net/dns/src/lib.rs:attempts
+net/httpclient/src/lib.rs:http_only

@@ -144595,6 +144595,26 @@ There is a picker, so it is not guesswork -- it is a `FileDialog::save()`, a
 field on the app, routing in `handle_event`, and somewhere to report the result,
 which that program currently has no status line for. Small, and open.
 
+**Sharper, and worse, checked 2026-09-14:** `apps/passwordgen` persists
+*nothing*. No `settingsfile`, no load, no save, no config file of any kind --
+the history exists for as long as the window is open and is gone when it
+closes. So `export_history` is not one of two ways out of that program, it is
+the only one, and it leads nowhere.
+
+**A correction about how this was found.** The gate's own line was wrong in its
+reasoning while right in its observation. It read "`export_history` is called
+1x, all from tests, while its counterpart `load_history` is called in
+production" -- and that counterpart is `gui/desktop`'s Run box remembering
+typed commands, a different program keeping different data. The gate paired
+them on a shared suffix across the whole workspace. It was the only thing it
+reported on a clean tree, so its false-positive rate that day was 100%.
+
+The observation survived the correction because it was checked separately, but
+it very nearly did not need to be: the obvious fix for the false finding was to
+wire passwordgen's export, watch the gate go green, and conclude the instrument
+worked. Scoping, comment-stripping and test-module fixes are in c9a190c77, with
+a self-test in 5a6249354 that encodes this case as a fixture.
+
 **Not urgent, and worth saying why:** the editor opens files perfectly well
 when something else chooses them -- the file explorer's double-click, a command
 line, a future "Open with". The missing piece is only the case where the editor
@@ -144675,6 +144695,151 @@ freezes the window for its duration and then everything catches up at once.
 That is strictly better than before -- it used to be true of *every* copy --
 and it is worth knowing that the remaining case exists rather than wondering
 why one copy behaves differently from another.
+
+## TD-C-CREATING-A-FILE-THAT-ALREADY-EXISTS-DESTROYS-IT-SILENTLY
+
+**Date:** 2026-09-14. **Lane:** C. **Repaired the same hour; kept as a trap.**
+
+**In short:** writing a "new" file whose name is already taken deletes the old
+one without a word. No tool involved says anything: `cat > f` truncates, the
+Write tool overwrites, and git records it as an ordinary edit. On 2026-09-14
+this destroyed `scripts/rustscan.py` -- 418 lines, eleven days old, imported by
+seven scripts and wired into the boot test -- and left an unrelated module of
+the same name in its place, on `origin/lane-c`, for about an hour.
+
+**Three tells were present and all three were missed:**
+
+1. **`git status` said `M`, not `??`.** A file you have just created is
+   untracked. If it shows as *modified*, it existed before you wrote it. This
+   is the cheapest check there is and it is one character wide.
+2. **The commit's own diffstat.** Two genuinely new files showed pure
+   additions; the third read
+   `scripts/rustscan.py | 582 ++++++++-----------------`. **A file you just
+   created cannot have deletions in it.** Any `-` in the bar is proof the name
+   was taken. Mechanically: `git show --numstat` gives deleted-line counts, and
+   a clobber deletes roughly the whole previous file.
+3. **A gate refused the push and named the file.**
+   `check-gate-call-sites.py` said `rustscan.py` is invoked with `--self-test`,
+   "which appears nowhere in the script ... this gate reports OK having done
+   something other than what the call site asked". That is an exact description
+   of a module somebody has replaced. It was read as "my new library needs a
+   self-test", because the reader assumed the file it named was his own.
+
+The third is the one worth dwelling on: **the instrumentation worked.** The
+tree caught this within minutes, in precise language, and the catch was
+filtered through the very assumption that caused the damage. A correct alarm is
+only as good as the reading, and the reading is done by whoever is least able
+to doubt themselves at that moment.
+
+**The rule, stated so it can be followed without judgement:** before creating a
+file, test that the path does not exist. After creating it, confirm
+`git status --short` shows `??` for it. Both are one command; neither requires
+suspecting anything.
+
+**Why the obvious defence does not work.** "Look before you write" only helps
+someone who already suspects the name is taken, and the whole failure is not
+suspecting. There are 222 scripts in this directory and no index of what they
+do; the module destroyed here solves the exact problem its destroyer spent that
+day rediscovering, and its docstring opens by naming the two traps -- "a comment
+that mentions X", "a test that exercises X" -- that cost two lanes a day of
+false positives and blind self-tests. **This is a discovery failure before it
+is a discipline failure**, and the durable fix is an index of what the scripts
+directory already contains, not more care.
+
+**Sibling trap, same family** -- see lane A's entry on `git stash` creating no
+entry on a clean tree, so a later `pop` restores *another lane's* stash: 18
+unmerged paths from lane B's August work. Both are commands that succeed while
+doing something other than what they look like, and both destroy work that was
+never yours to lose.
+
+## TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO
+
+**Date:** 2026-09-14. **Lane:** C. **OPEN.**
+
+**In short:** copying something in one program and pasting it into another does
+not work anywhere in this system, and the reason is not a bug in the copying.
+**Fifteen** programs each keep a private clipboard of their own, and the one
+clipboard *service* that exists is connected to none of them. Copy and paste
+works perfectly inside any single program and cannot cross between two. The clearest symptom:
+the emoji picker cannot give you an emoji. You can browse them, tint them and
+pick one, and nothing leaves the program.
+
+**The four:**
+
+| where | what it is | who it talks to |
+|---|---|---|
+| `gui/clipboard/src/main.rs` | a **service**: ring buffer of 50 clips, format negotiation, 30-second expiry for sensitive entries. Its own doc says "all applications communicate with this service via IPC" | nobody. It is a `main.rs` with no library beside it, so nothing can link it, and no program opens a connection to it |
+| `gui/desktop/src/clipboard_viewer.rs` | history viewer with preview, search, pinning. Its doc says "Integrates with the gui/clipboard service" | nobody. It contains no IPC, no socket, no connect and no send. It views an in-process model of its own |
+| `apps/credmanager` | `ClipboardState` with auto-clear, marked "(simulated)" | itself |
+| `apps/emojipicker` | `last_selected`, documented "for clipboard / IPC output" | nothing. There is no clipboard or IPC code in that program at all |
+| `apps/remotedesktop` | clipboard **sync** state -- mode, direction, content type, size, count -- with a settings panel that displays four of them | nothing. `sync_clipboard` is called only from its own tests, so the panel shows "Never / Text / 0" for ever |
+
+Those are the five that were examined closely. **The real count is fifteen**,
+and getting there took three tries, which is the part worth keeping:
+
+* "four" -- the ones I had opened while tracing one field;
+* "five" -- after triaging one more baselined field, and I wrote beside it that
+  the number now came "from a sweep", which was **false when I typed it**. No
+  sweep had been run. It was the same sentence-shaped confidence that made
+  "only `sysinfo` collides" wrong earlier in the day;
+* "fifteen" -- from actually running it.
+  `grep -rlnE "^\s*(pub )?clipboard: |struct [A-Za-z]*Clipboard"` over `apps/`
+  and `gui/` returns fifteen crates, and a looser grep for the word returns
+  twenty-three. Among them `apps/clipmanager`, an entire second clipboard
+  *manager* program, and `apps/editor`, whose `self.clipboard` means you can
+  copy inside the editor and nowhere else.
+
+A count is a measurement. Three times in one entry I reported one without
+taking it.
+
+**How this was found.** `scripts/check-fields-written-never-read.py` reported
+`last_selected` as written in production and read only by tests. The field's own
+doc comment names the missing mechanism, which is what turned a one-field
+finding into this one: the picker records which emoji you chose, re-tints it
+correctly, stores it in exactly the right place, and there is nowhere for it to
+go. Every part works and the program does nothing.
+
+**Why it is not simply "wire the picker to the service".** Two things sit in
+front of that, and the second is not lane C's:
+
+1. **There is no client.** The service is a binary. An application cannot call
+   it without an IPC client API, and none exists. Whoever writes the first one
+   is choosing the clipboard protocol for the whole system, which is why this
+   is written down rather than done in passing.
+
+2. **A-Q15 says a program can only have one socket open at a time.**
+   `create_kind` calls `NetstackConn::open()` per socket, each of which calls
+   `shm::create` for a fresh ring, while the daemon holds one `RingSession`
+   and tears down `conns` *and* `listeners` on a different handle
+   (`services/netstack/src/main.rs:2270`, 2594). Every windowed program's
+   socket number one is its compositor connection --
+   `gui/remote/src/socket.rs` is TCP -- so a program that opens a second
+   socket to reach the clipboard does not see that call fail. It sees its
+   window die, in a subsystem nobody would think to suspect. The bug report
+   would read "the emoji picker closes itself when I click an emoji".
+
+   `services/**` is lane B's, so the daemon fix is not lane C's to make.
+
+**`gui/toolkit` is not a sixteenth, and that was worth checking.** It mentions
+the clipboard in comments and in one `textview` method that "optionally returns
+a clipboard string (on Ctrl+C)" -- the widget hands the host a string and the
+host decides what to do with it, which is the toolkit's usual pure-widget
+contract. So there is genuinely no client anywhere, rather than one I had not
+found.
+
+**The shape is familiar and worth naming.** This is the same defect as C-Q20's
+four separate lists of installed programs: several complete implementations of
+one idea, each correct in isolation, none able to read another. In both cases
+nothing is broken *inside* any of the four, so nothing is red, and the system
+still cannot do the thing.
+
+**What the proper fix looks like,** in order: A-Q15 first, because without it
+the second socket is a window-killer; then a client library beside the service
+(`gui/clipboard` gains a `lib.rs`, the binary keeps `main.rs`); then the four
+consumers move onto it and `clipboard_viewer`'s claim about integrating becomes
+true. The emoji picker is the smallest possible first consumer and a good
+acceptance test: one string, one direction, and you can see whether it worked
+by pasting.
 
 ## TD-C-SYSINFO-PARSES-HARDWARE-FIELDS-BY-DEFAULTING-TO-ZERO
 

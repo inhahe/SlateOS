@@ -437,7 +437,14 @@ pub fn list_ntp_servers() -> Vec<NtpServer> {
     STATE.lock().ntp_servers.clone()
 }
 
-/// Simulate NTP sync (record an offset).
+/// Record an NTP offset **without performing a sync**.
+///
+/// No packet is sent: this kernel has no NTP client. The offset is whatever
+/// the caller passes, and it is published per server by
+/// `procfs::gen_timezone` under an `OFFSET_US` column, where a reader takes
+/// it for a measurement. Callers outside a self-test should not exist until
+/// something really queries a server; a self-test calling it must use a
+/// server it owns and removes, or the invented number outlives the test.
 pub fn simulate_sync(hostname: &str, offset_us: i64) -> KernelResult<()> {
     let mut state = STATE.lock();
     let server = state
@@ -883,11 +890,25 @@ fn self_test_inner() -> KernelResult<()> {
 
     // Test 5: NTP sync.
     serial_println!("timezone::self_test 5: NTP sync");
+    // On a server this test OWNS and then removes, never a shipped one.
+    //
+    // `simulate_sync` sends no packet -- there is no NTP client in this
+    // kernel -- but it writes `offset_us` and `last_sync_ns`, and
+    // `procfs::gen_timezone` prints a per-server OFFSET_US column. Naming
+    // `pool.ntp.org` here left every boot reporting the clock as 1500us off
+    // a real server from an exchange that never happened. Note that
+    // `set_ntp_enabled(false)` below resets the STATUS but not the offset,
+    // so the claim outlived the test that made it.
+    //
+    // `.invalid` is RFC 2606's reserved TLD: it cannot resolve, so the entry
+    // cannot be mistaken for a server anyone could reach.
+    add_ntp_server("selftest.ntp.invalid", 123)?;
     set_ntp_enabled(true)?;
-    simulate_sync("pool.ntp.org", -1500)?;
+    simulate_sync("selftest.ntp.invalid", -1500)?;
     assert_eq!(ntp_status(), NtpStatus::Synced);
     set_ntp_enabled(false)?;
     assert_eq!(ntp_status(), NtpStatus::Disabled);
+    remove_ntp_server("selftest.ntp.invalid")?;
 
     // Test 6: display format settings.
     serial_println!("timezone::self_test 6: format settings");

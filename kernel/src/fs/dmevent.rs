@@ -469,7 +469,13 @@ fn self_test_inner() {
 
     // 8: Stats.
     let (devs, evs, rules, total, matched, ops) = stats();
-    assert!(devs >= 3);
+    // Exactly one: test 2 added `/sys/block/sdb`, and test 4's remove marked
+    // that same devpath offline rather than adding another. This was
+    // `>= 3`, a floor that existed only to tolerate the three seeded
+    // devices -- and it is the assertion I missed when removing them,
+    // because I searched a 30-line window of the function and took it for
+    // the whole. An exact count is also stronger than a floor.
+    assert_eq!(devs, 1);
     assert_eq!(evs, 0); // Cleared.
     assert_eq!(rules, 2);
     assert!(total >= 2);

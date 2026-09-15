@@ -4527,6 +4527,89 @@
 
 ## Judgment Calls
 
+Lane C's fabrication scanners, run over --roots=kernel (lane A, 2026-09-15).
+Verdicts recorded because the ranking promotes and only checking demotes, so
+the next person to run these will see the same rows.
+
+  find-reachable-fixtures.py -- 7 promoted, 1 real:
+
+    CONFIRMED  fs/timezone.rs simulate_sync. Writes offset_us/last_sync_ns
+               without sending a packet, the self-test named the SHIPPED
+               pool.ntp.org, and procfs publishes a per-server OFFSET_US
+               column -- so every boot reported the clock 1500us off a real
+               server from an exchange that never happened. Fixed.
+    cleared    kshell cmd_rip_sample, kstat sample, mm/frag_history sample,
+               mm/frame populate_free_lists, mm/page_cache is_populated,
+               rng reseed_count -- all promoted on the NAME. Each reads or
+               counts real state; none invents a record.
+
+  find-silent-incapacity.py -- 1 promoted, 0 real:
+
+    cleared    kernel/ada, scored 0 claim-verbs. It is the Ada/SPARK component
+               (.adb/.ads), so a Rust-oriented scanner reads no production
+               code there and scores zero by construction. Not a program that
+               stays quiet about being unable to do anything -- a directory
+               the tool cannot parse. Point it at apps/ and gui/, not here.
+
+  Also checked while there: the 18 .bak files under kernel/ada are gnatprove
+  session files under a gitignored /build/, untracked. Not stale sources.
+
+  Worth keeping from lane C's framing, because it is what nearly made me
+  dismiss the timezone hit: care taken NEARBY is not evidence about the line
+  in front of you. That module cleans up ntp_status, names the function
+  simulate_, and says 'Simulate' in its doc -- all true, none of it covering
+  the line that publishes the number. And a careful fixture is harder to
+  notice than a careless one: -1500us is exactly the magnitude a real sync
+  would produce.
+
+/sys/devices: what is left, and the prerequisite that blocks the best of it
+(lane A, 2026-09-15).
+
+  apps/sysinfo's hwquery names thirteen categories. Served: block, cpu (with
+  cpuid), memory, pci. Unserved: display, dma, ioports, irqs, memmap, net,
+  sound, usb, drivers.
+
+  memmap is the most valuable and CANNOT be served yet. The physical memory
+  map is real and already parsed, but limine's response lives in
+  bootloader-reclaimable memory and is only ever passed around as a borrowed
+  &[&MemmapEntry] during boot (acpi::init, boot.rs). Nothing copies it into
+  kernel-owned storage. A sysfs file reading it after boot would be reading
+  memory the kernel may have reused -- worse than no file, because it would
+  answer plausibly.
+
+  Prerequisite: snapshot the memmap at boot into kernel storage, which needs
+  care about heap availability at that point. That is the work; serving the
+  file afterwards is trivial.
+
+  net stays blocked on a naming decision, unchanged: InterfaceInfo has no name
+  field, so eth0 would be invented. dma and sound have no evident real source
+  and should be checked for one before being built, not built and then
+  sourced.
+
+Partition enumeration: deferred at lane C's explicit request (lane A,
+2026-09-15).
+
+  I declined to serve /sys/devices/block/<name>/partitions from
+  fs::partmgr::list_partitions, because that returns STATE.lock().partitions --
+  what create_partition/delete_partition have written, i.e. the Settings UI's
+  intended layout, not a reading of the disk. Its own module doc calls it a
+  data model. Publishing it would report no partitions on an untouched drive
+  and the queued plan on a drive with changes pending, and nothing downstream
+  could tell a plan from a reading once both are in the same field.
+
+  Lane C asked me NOT to prioritise the GPT/MBR reader -- diskimager is useful
+  enumerating whole drives, and they now render 'Partitions unknown' rather
+  than '0 partition(s)', which had been telling users an unread drive was
+  blank. When it is built, the field to fill is DriveInfo::partitions and the
+  signal is partition_table: Gpt | Mbr | None; leaving it Unknown is always
+  safe, so there is no half-measure to avoid.
+
+  Shape is settled and only one form may exist: lane C deleted
+  parse_block_records and its flat key=value parser outright, so the directory
+  tree under /sys/devices/block is the only interface. Do not add a flat file
+  'as well' -- a parser with no producer invites someone to write the producer
+  to satisfy the parser, which is the second-tree problem 850 exists to stop.
+
 Backslashes lose a level even inside a QUOTED heredoc through this tooling
 (lane A, 2026-09-15). The standing rule was already 'generated code never
 travels through a shell string'; this records the mechanism, because the rule

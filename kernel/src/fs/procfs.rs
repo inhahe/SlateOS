@@ -7192,9 +7192,19 @@ fn gen_timezone() -> Vec<u8> {
             "SERVER", "PORT", "ENABLED", "OFFSET_US"
         ));
         for s in &servers {
+            // A server that has never synced has `last_sync_ns == 0` and an
+            // `offset_us` of 0. Printed raw under a column headed OFFSET_US
+            // that reads as "measured, and exactly on time" -- the strongest
+            // claim available, made by a field nobody wrote. Print the
+            // absence: an unmeasured offset is not a measurement of zero.
+            let offset = if s.last_sync_ns == 0 {
+                String::from("never synced")
+            } else {
+                format!("{}", s.offset_us)
+            };
             out.push_str(&format!(
                 "{:<30} {:<6} {:<10} {}\n",
-                s.hostname, s.port, s.enabled, s.offset_us
+                s.hostname, s.port, s.enabled, offset
             ));
         }
     }

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process;
 
 // ============================================================================
@@ -248,6 +249,117 @@ fn parse_fstab() -> Vec<FstabEntry> {
 // ============================================================================
 // Filtering
 // ============================================================================
+
+/// English plural for a count, which util-linux's summary line needs in
+/// three places at once.
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("{n} {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
+/// `--verify`: check each fstab entry instead of listing it. Returns the exit
+/// status.
+///
+/// Measured against util-linux 2.40, and three details of it are not what you
+/// would write from the description:
+///
+/// * the FINDINGS go to stdout and the SUMMARY goes to stderr, with a blank
+///   line before the summary;
+/// * the exit status is 1 only when there is at least one **error** -- an
+///   entry with two warnings and no errors exits 0;
+/// * a clean run says "Success, no errors or warnings detected" and prints no
+///   per-entry block at all.
+///
+/// **What this checks is a subset, and the subset is the point.** util-linux
+/// also probes each source for its on-disk filesystem type and warns when it
+/// cannot read one. That needs superblock probing this build has no route to,
+/// so it is not attempted and not claimed -- an entry that GNU would give
+/// three notes gets two here. Stated in `--help` and in known-issues rather
+/// than left for a user to infer from a shorter list.
+///
+/// What it replaces is worse than a subset: `--verify` was parsed, stored and
+/// read by nothing, so it printed the ordinary mount table and exited 0. A
+/// verifier that always passes is the one kind of check that is worse than no
+/// check, because the user stops looking.
+fn verify_fstab() -> i32 {
+    let (blocks, errors, warnings) = verify_entries(&parse_fstab());
+
+    let mut out = io::stdout().lock();
+    for b in &blocks {
+        let _ = writeln!(out, "{b}");
+    }
+    let _ = out.flush();
+
+    let mut err = io::stderr().lock();
+    if errors == 0 && warnings == 0 {
+        let _ = writeln!(err, "Success, no errors or warnings detected");
+    } else {
+        // The blank line is util-linux's, not decoration: it separates the
+        // summary on stderr from the findings on stdout when both land on a
+        // terminal together.
+        let _ = writeln!(err);
+        let _ = writeln!(
+            err,
+            "{}, {}, {}",
+            // Parse errors are always 0 here: `parse_fstab` drops a line it
+            // cannot read rather than counting it, so claiming a number would
+            // be claiming a count nothing kept.
+            plural(0, "parse error"),
+            plural(errors, "error"),
+            plural(warnings, "warning")
+        );
+    }
+    let _ = err.flush();
+
+    i32::from(errors > 0)
+}
+
+/// The checking half, separated from the printing half so it can be tested
+/// without a real `/etc/fstab` or a captured stdout.
+///
+/// Returns the per-target blocks and the error and warning counts.
+fn verify_entries(entries: &[FstabEntry]) -> (Vec<String>, usize, usize) {
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    let mut blocks: Vec<String> = Vec::new();
+
+    for e in entries {
+        let mut notes: Vec<String> = Vec::new();
+
+        if !Path::new(&e.target).is_dir() {
+            notes.push(
+                "   [E] unreachable on boot required target: No such file or directory".to_string(),
+            );
+            errors = errors.saturating_add(1);
+        }
+
+        // Only a PATH source can be checked for existence. `UUID=`, `LABEL=`,
+        // `tmpfs`, `proc` and friends name something that is not a file, and
+        // reporting them missing would be a false positive on every correct
+        // fstab this OS ships.
+        if e.source.starts_with('/') && !Path::new(&e.source).exists() {
+            notes.push(format!(
+                "   [W] unreachable source: {}: No such file or directory",
+                e.source
+            ));
+            warnings = warnings.saturating_add(1);
+        }
+
+        if !notes.is_empty() {
+            let mut block = e.target.clone();
+            for n in notes {
+                block.push('\n');
+                block.push_str(&n);
+            }
+            blocks.push(block);
+        }
+    }
+
+    (blocks, errors, warnings)
+}
 
 fn apply_filters(entries: &[MountEntry], opts: &Options) -> Vec<MountEntry> {
     entries
@@ -703,6 +815,12 @@ fn cmd_findmnt(args: &[String]) {
         i += 1;
     }
 
+    // `--verify` checks rather than lists, so it returns before any of the
+    // table machinery below.
+    if opts.verify_mode {
+        process::exit(verify_fstab());
+    }
+
     // Get mount entries.
     let mut entries = if opts.fstab_mode {
         let fstab = parse_fstab();
@@ -764,7 +882,8 @@ fn print_findmnt_usage() {
     println!("  -n, --noheadings    No column headers");
     println!("  -f, --first-only    First matching entry only");
     println!("  -s, --fstab         Show from /etc/fstab");
-    println!("  --verify            Verify fstab vs mounted");
+    println!("  --verify            Check fstab targets and sources exist");
+    println!("                      (no on-disk filesystem-type probe)");
     println!("  -R, --submounts     Include submounts");
     println!("  -S, --source DEV    Filter by source device");
     println!("  -T, --target DIR    Filter by target mount point");
@@ -810,6 +929,96 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------- --verify ----------------
+
+    fn fstab_entry(source: &str, target: &str) -> FstabEntry {
+        FstabEntry {
+            source: source.to_string(),
+            target: target.to_string(),
+            fstype: "ext4".to_string(),
+            options: "defaults".to_string(),
+            dump: 0,
+            pass: 0,
+        }
+    }
+
+    /// A target that is not a directory is an ERROR, and errors are what
+    /// decide the exit status. Measured against util-linux: the wording is
+    /// theirs, including "on boot required".
+    #[test]
+    fn a_missing_target_is_an_error() {
+        let e = [fstab_entry("tmpfs", "/no/such/target/at/all")];
+        let (blocks, errors, warnings) = verify_entries(&e);
+        assert_eq!(errors, 1);
+        assert_eq!(warnings, 0);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].contains("[E] unreachable on boot required target"));
+    }
+
+    /// A missing PATH source is a warning, not an error -- measured: an entry
+    /// whose target exists and whose source does not exits 0.
+    #[test]
+    fn a_missing_path_source_is_only_a_warning() {
+        let dir = std::env::temp_dir();
+        let target = dir.to_string_lossy().to_string();
+        let e = [fstab_entry("/dev/nosuchdev", &target)];
+        let (blocks, errors, warnings) = verify_entries(&e);
+        assert_eq!(errors, 0, "a missing source must not fail the run");
+        assert_eq!(warnings, 1);
+        assert!(blocks[0].contains("[W] unreachable source: /dev/nosuchdev"));
+    }
+
+    /// A source that is NOT a path names something that is not a file --
+    /// `tmpfs`, `proc`, `UUID=...` -- and must not be reported missing.
+    /// Without this the check would fire on every correct fstab this OS
+    /// ships, which is the failure mode that gets a checker switched off.
+    #[test]
+    fn a_non_path_source_is_never_reported_missing() {
+        let dir = std::env::temp_dir();
+        let target = dir.to_string_lossy().to_string();
+        for src in ["tmpfs", "proc", "sysfs", "UUID=1234-5678", "LABEL=root"] {
+            let e = [fstab_entry(src, &target)];
+            let (blocks, errors, warnings) = verify_entries(&e);
+            assert_eq!(errors, 0, "{src}");
+            assert_eq!(warnings, 0, "{src}");
+            assert!(blocks.is_empty(), "{src} produced {blocks:?}");
+        }
+    }
+
+    /// A clean entry produces no block at all, which is what lets the caller
+    /// print "Success, no errors or warnings detected" rather than an empty
+    /// findings list.
+    #[test]
+    fn a_sound_entry_produces_nothing() {
+        let dir = std::env::temp_dir();
+        let target = dir.to_string_lossy().to_string();
+        let e = [fstab_entry("tmpfs", &target)];
+        let (blocks, errors, warnings) = verify_entries(&e);
+        assert!(blocks.is_empty());
+        assert_eq!((errors, warnings), (0, 0));
+    }
+
+    /// Both problems on one entry share a single block headed by the target,
+    /// which is util-linux's layout.
+    #[test]
+    fn two_problems_on_one_entry_share_one_block() {
+        let e = [fstab_entry("/dev/nosuchdev", "/no/such/target")];
+        let (blocks, errors, warnings) = verify_entries(&e);
+        assert_eq!((errors, warnings), (1, 1));
+        assert_eq!(blocks.len(), 1, "one block, not two");
+        assert!(blocks[0].starts_with("/no/such/target"));
+        assert!(blocks[0].contains("[E]") && blocks[0].contains("[W]"));
+    }
+
+    /// The summary line pluralises each count independently: measured
+    /// "0 parse errors, 1 error, 2 warnings".
+    #[test]
+    fn the_summary_pluralises_each_count_on_its_own() {
+        assert_eq!(plural(0, "parse error"), "0 parse errors");
+        assert_eq!(plural(1, "error"), "1 error");
+        assert_eq!(plural(2, "warning"), "2 warnings");
+    }
 
     fn make_mount(id: u32, parent: u32, src: &str, tgt: &str, fstype: &str) -> MountEntry {
         MountEntry {

@@ -279,6 +279,15 @@ def selftest():
 
 # Where a binary's source could live. A `-cli` wrapper and a plain tool both
 # sit at `<root>/<name>/src/`; coreutils keeps its commands as single files.
+#
+# THIS GUARD ALREADY EXISTED TWICE IN THIS DIRECTORY when it was added here:
+# `unknown-option-sweep.py` has `stale_binaries()` (and records that 85 of 191
+# binaries were once older than their source), and `osh-bash-diff.py` refuses
+# outright. `dup-differential.py` needs none -- it builds what it tests. So
+# the knowledge was in two of the four artifact-probing scripts and reached
+# neither the third nor whoever writes the fifth. If that is you: probing a
+# prebuilt binary means asking whether it is newer than the source it claims
+# to represent, and the answer is not usually yes.
 _SOURCE_ROOTS = ("userspace", "gui", "apps", "services", "init", "net", "net80211")
 
 

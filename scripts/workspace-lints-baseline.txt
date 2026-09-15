@@ -52,7 +52,6 @@ userspace/gzip
 userspace/hexdump
 userspace/htop
 userspace/hwclock
-userspace/iconv
 userspace/indexer
 userspace/install
 userspace/ip

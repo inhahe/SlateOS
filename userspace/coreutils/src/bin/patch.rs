@@ -212,10 +212,18 @@ struct Options {
     backup: bool,
     /// `-o FILE`: write the result to FILE, leaving the target untouched.
     output_file: Option<OsString>,
-    /// `-l`: match ignoring whitespace. Accepted and currently inert -- see the
-    /// note on `forward` for what that does and does not mean. It changes an
-    /// answer only where a hunk differs from the target in whitespace alone,
-    /// and no case in this tree does.
+    /// `-l`: match context ignoring whitespace differences. IMPLEMENTED.
+    ///
+    /// It was accepted and inert for a long time, on the argument that it
+    /// changes an answer only where a hunk differs from the target in
+    /// whitespace alone, and no case in this tree does. That argument does not
+    /// survive the way it was found: `--help` advertises "Match ignoring
+    /// whitespace." with no hint that nothing reads the flag, so a user is
+    /// TOLD the option works. An inert option is defensible only while nothing
+    /// promises otherwise -- and of the four places this one was written down,
+    /// the only one a user reads was the one that lied.
+    ///
+    /// See `loose_eq` for the matching rule, which is measured, not guessed.
     ignore_whitespace: bool,
     /// `-E`: delete a file the patch has emptied.
     remove_empty: bool,
@@ -1011,7 +1019,12 @@ fn parse_file_path(line: &[u8], prefix: &[u8]) -> Vec<u8> {
 /// Apply a single hunk to the file lines. Returns the new lines if successful,
 /// or None if the hunk doesn't match the expected context.
 /// `offset` is the cumulative line offset from previous hunks.
-fn apply_hunk(lines: &[Vec<u8>], hunk: &Hunk, offset: i64) -> Option<(Vec<Vec<u8>>, i64)> {
+fn apply_hunk(
+    lines: &[Vec<u8>],
+    hunk: &Hunk,
+    offset: i64,
+    loose: bool,
+) -> Option<(Vec<Vec<u8>>, i64)> {
     // A HUNK THAT REMOVES NOTHING NAMES THE LINE TO INSERT *AFTER*, so its
     // 0-based insertion point is `old_start` itself and the usual `- 1` is
     // wrong. For delete and change, `old_start` is the first affected line and
@@ -1043,7 +1056,7 @@ fn apply_hunk(lines: &[Vec<u8>], hunk: &Hunk, offset: i64) -> Option<(Vec<Vec<u8
 
     'outer: for fuzz in 0..=max_fuzz {
         if fuzz == 0 {
-            if try_hunk_at(lines, hunk, target_start) {
+            if try_hunk_at(lines, hunk, target_start, loose) {
                 best_pos = Some(target_start);
                 break;
             }
@@ -1051,13 +1064,13 @@ fn apply_hunk(lines: &[Vec<u8>], hunk: &Hunk, offset: i64) -> Option<(Vec<Vec<u8
         }
         // Try -fuzz, then +fuzz.
         if let Some(pos) = target_start.checked_sub(fuzz)
-            && try_hunk_at(lines, hunk, pos)
+            && try_hunk_at(lines, hunk, pos, loose)
         {
             best_pos = Some(pos);
             break 'outer;
         }
         let pos = target_start.saturating_add(fuzz);
-        if try_hunk_at(lines, hunk, pos) {
+        if try_hunk_at(lines, hunk, pos, loose) {
             best_pos = Some(pos);
             break;
         }
@@ -1099,7 +1112,86 @@ fn apply_hunk(lines: &[Vec<u8>], hunk: &Hunk, offset: i64) -> Option<(Vec<Vec<u8
 }
 
 /// Check if a hunk's context/remove lines match at the given position.
-fn try_hunk_at(lines: &[Vec<u8>], hunk: &Hunk, pos: usize) -> bool {
+/// Compare one hunk line against one file line, honouring `-l`.
+fn lines_match(actual: &[u8], expected: &[u8], loose: bool) -> bool {
+    if loose {
+        loose_eq(actual, expected)
+    } else {
+        actual == expected
+    }
+}
+
+/// `-l/--ignore-whitespace`: a run of whitespace is interchangeable with any
+/// other run, but is never interchangeable with nothing.
+///
+/// Measured against GNU patch, seven cases against one patch whose context
+/// line is `    indented a b`:
+///
+/// | target line | GNU |
+/// |---|---|
+/// | `\tindented a b` (tab for four spaces) | match |
+/// | `        indented a b` (eight for four) | match |
+/// | `    indented  a  b` (internal run longer) | match |
+/// | `    indented a b    ` (trailing added) | match |
+/// | `indented a b` (leading run REMOVED) | fail |
+/// | `    indenteda b` (internal run REMOVED) | fail |
+/// | `    indented a c` (a real byte differs) | fail |
+///
+/// One rule explains all seven: strip TRAILING whitespace, then treat every
+/// remaining run as equal to any other run. The asymmetry is the part worth
+/// keeping -- lengthening a run matches, removing it does not.
+///
+/// A line that is ENTIRELY whitespace matches an empty line, which looks like
+/// a contradiction of that and is not: the trailing strip consumes the whole
+/// line, so there is no run left to match against nothing. Measured both ways
+/// round -- four spaces against a tab, against two spaces, and against an
+/// empty line all match, while four spaces against `x` fails. Thirteen cases
+/// in total, one rule, no special case.
+///
+/// Whitespace here is SPACE and TAB only, and that is measured rather than
+/// assumed: `\v`, `\f` and `\r` each FAIL against a space. So
+/// `is_ascii_whitespace()` would have been wrong in three ways, and wrong
+/// invisibly -- no fixture in this tree holds those bytes, so every harness
+/// case would still have passed. An instrument that cannot fail is not
+/// evidence.
+fn loose_eq(a: &[u8], b: &[u8]) -> bool {
+    // GNU's set here is `" \t"` -- space and tab -- not `isspace`.
+    const WS: &[u8] = b" \t";
+
+    fn is_ws(byte: u8) -> bool {
+        byte == b' ' || byte == b'\t'
+    }
+
+    // Trailing whitespace is not part of the comparison at all, on either side.
+    let a = bytes::trim_end_matches(a, WS);
+    let b = bytes::trim_end_matches(b, WS);
+
+    let (mut i, mut j) = (0usize, 0usize);
+    loop {
+        match (a.get(i).copied(), b.get(j).copied()) {
+            (None, None) => return true,
+            // Both sit on a run: consume each run WHOLE. The two runs may be
+            // different lengths and made of different bytes; that is the point.
+            (Some(x), Some(y)) if is_ws(x) && is_ws(y) => {
+                while a.get(i).copied().is_some_and(is_ws) {
+                    i = i.saturating_add(1);
+                }
+                while b.get(j).copied().is_some_and(is_ws) {
+                    j = j.saturating_add(1);
+                }
+            }
+            (Some(x), Some(y)) if x == y && !is_ws(x) => {
+                i = i.saturating_add(1);
+                j = j.saturating_add(1);
+            }
+            // Anything else -- one side ended, or a run faces a non-run, or two
+            // ordinary bytes differ -- is a mismatch.
+            _ => return false,
+        }
+    }
+}
+
+fn try_hunk_at(lines: &[Vec<u8>], hunk: &Hunk, pos: usize, loose: bool) -> bool {
     let mut line_idx = pos;
     for hl in &hunk.lines {
         match hl {
@@ -1107,7 +1199,7 @@ fn try_hunk_at(lines: &[Vec<u8>], hunk: &Hunk, pos: usize) -> bool {
                 let Some(actual) = lines.get(line_idx) else {
                     return false;
                 };
-                if actual != expected {
+                if !lines_match(actual, expected, loose) {
                     return false;
                 }
                 line_idx = line_idx.saturating_add(1);
@@ -1657,9 +1749,13 @@ fn main() {
         } else {
             fp.hunks.iter().map(reverse_hunk).collect()
         };
-        let forward_fails = hunks.iter().any(|h| apply_hunk(&lines, h, 0).is_none());
-        let opposite_applies =
-            !opposite.is_empty() && opposite.iter().all(|h| apply_hunk(&lines, h, 0).is_some());
+        let forward_fails = hunks
+            .iter()
+            .any(|h| apply_hunk(&lines, h, 0, opts.ignore_whitespace).is_none());
+        let opposite_applies = !opposite.is_empty()
+            && opposite
+                .iter()
+                .all(|h| apply_hunk(&lines, h, 0, opts.ignore_whitespace).is_some());
         if forward_fails && opposite_applies {
             any_failed = true;
             // `-r FILE` names the reject file outright; without it the reject
@@ -1719,7 +1815,7 @@ fn main() {
         }
 
         for (hunk_idx, hunk) in hunks.iter().enumerate() {
-            match apply_hunk(&lines, hunk, offset) {
+            match apply_hunk(&lines, hunk, offset, opts.ignore_whitespace) {
                 Some((new_lines, new_offset)) => {
                     if opts.verbose && !opts.silent {
                         // The line the hunk landed on, which is its start
@@ -2396,25 +2492,128 @@ mod tests {
     #[test]
     fn try_hunk_at_matches_correct_position() {
         let l = lines(&["line1", "line2", "line3"]);
-        assert!(try_hunk_at(&l, &modify_hunk(), 0));
+        assert!(try_hunk_at(&l, &modify_hunk(), 0, false));
     }
 
     #[test]
     fn try_hunk_at_fails_on_mismatch() {
         let l = lines(&["lineA", "lineB", "lineC"]);
-        assert!(!try_hunk_at(&l, &modify_hunk(), 0));
+        assert!(!try_hunk_at(&l, &modify_hunk(), 0, false));
     }
 
     #[test]
     fn try_hunk_at_fails_past_end() {
         let l = lines(&["line1"]);
-        assert!(!try_hunk_at(&l, &modify_hunk(), 0));
+        assert!(!try_hunk_at(&l, &modify_hunk(), 0, false));
+    }
+
+    // ---------------- -l / --ignore-whitespace ----------------
+
+    /// The seven cases measured against GNU with a context line of
+    /// `    indented a b`. The table in `loose_eq`'s doc comment is this list,
+    /// and this test is what keeps the two honest.
+    #[test]
+    fn loose_eq_matches_gnu_on_whitespace_runs() {
+        let base = &b"    indented a b"[..];
+        for (target, want, label) in [
+            (&b"\tindented a b"[..], true, "tab for four spaces"),
+            (&b"        indented a b"[..], true, "eight spaces for four"),
+            (&b"    indented  a  b"[..], true, "internal run lengthened"),
+            (
+                &b"    indented a b    "[..],
+                true,
+                "trailing whitespace added",
+            ),
+            (&b"indented a b"[..], false, "leading run REMOVED"),
+            (&b"    indenteda b"[..], false, "internal run REMOVED"),
+            (&b"    indented a c"[..], false, "a real byte differs"),
+        ] {
+            assert_eq!(loose_eq(target, base), want, "{label}");
+            // Matching must not depend on which side came from the patch.
+            assert_eq!(loose_eq(base, target), want, "{label}, reversed");
+        }
+    }
+
+    /// Whitespace for `-l` is SPACE and TAB only. Vertical tab, form feed and
+    /// carriage return are NOT whitespace here -- measured against GNU, not
+    /// assumed. `is_ascii_whitespace()` would have been wrong in three ways,
+    /// and wrong invisibly: no fixture in this tree contains those bytes.
+    #[test]
+    fn loose_eq_counts_only_space_and_tab_as_whitespace() {
+        assert!(loose_eq(b"A\tB", b"A B"), "tab IS whitespace");
+        for (target, label) in [
+            (&b"A\x0bB"[..], "vertical tab"),
+            (&b"A\x0cB"[..], "form feed"),
+            (&b"A\rB"[..], "carriage return"),
+            (&b"A\xa0B"[..], "nbsp, which is not an ASCII space"),
+        ] {
+            assert!(!loose_eq(target, b"A B"), "{label} must NOT be whitespace");
+        }
+    }
+
+    /// A line that is ENTIRELY whitespace matches an empty one. That looks
+    /// like a counterexample to "a run never matches nothing" and is not: the
+    /// trailing strip eats the whole line, so no run is left to match.
+    #[test]
+    fn loose_eq_treats_an_all_whitespace_line_as_empty() {
+        for (a, b, want) in [
+            (&b"    "[..], &b"\t"[..], true),
+            (&b"    "[..], &b""[..], true),
+            (&b"    "[..], &b"  "[..], true),
+            (&b"    "[..], &b"x"[..], false),
+            (&b""[..], &b"    "[..], true),
+            (&b""[..], &b""[..], true),
+        ] {
+            assert_eq!(loose_eq(a, b), want, "{a:?} vs {b:?}");
+        }
+    }
+
+    /// End to end: a hunk whose context differs from the file in whitespace
+    /// alone applies under `-l` and is refused without it. This is the
+    /// behaviour `--help` has been advertising all along.
+    #[test]
+    fn a_hunk_differing_only_in_whitespace_applies_under_l_and_not_without() {
+        // The file is indented with a TAB; the patch was made against a copy
+        // indented with four SPACES.
+        let file = lines(&["start", "\tindented a b", "end"]);
+        let hunk = Hunk {
+            old_start: 1,
+            old_count: 3,
+            new_start: 1,
+            new_count: 3,
+            lines: vec![
+                HunkLine::Context("start".into()),
+                HunkLine::Remove("    indented a b".into()),
+                HunkLine::Add("CHANGED".into()),
+                HunkLine::Context("end".into()),
+            ],
+        };
+
+        assert!(
+            apply_hunk(&file, &hunk, 0, false).is_none(),
+            "exact matching must still refuse a whitespace difference"
+        );
+        let (out, _) = apply_hunk(&file, &hunk, 0, true).expect("-l must apply it");
+        // GNU writes the PATCH's replacement text, not the file's -- measured.
+        assert_eq!(out, lines(&["start", "CHANGED", "end"]));
+    }
+
+    /// Both spellings reach the flag, and it is off unless asked for.
+    #[test]
+    fn l_and_ignore_whitespace_both_set_the_flag() {
+        assert!(parse_args(&s(&["-l"])).unwrap().ignore_whitespace);
+        assert!(
+            parse_args(&s(&["--ignore-whitespace"]))
+                .unwrap()
+                .ignore_whitespace
+        );
+        assert!(!parse_args(&s(&[])).unwrap().ignore_whitespace);
     }
 
     #[test]
     fn apply_hunk_modifies_buffer() {
         let l = lines(&["line1", "line2", "line3"]);
-        let (new_lines, new_offset) = apply_hunk(&l, &modify_hunk(), 0).unwrap();
+        let (new_lines, new_offset) = apply_hunk(&l, &modify_hunk(), 0, false).unwrap();
         assert_eq!(new_lines, lines(&["line1", "line2 modified", "line3"]));
         assert_eq!(new_offset, 0); // new_count(3) - old_count(3) = 0
     }
@@ -2422,14 +2621,14 @@ mod tests {
     #[test]
     fn apply_hunk_returns_none_on_mismatch() {
         let l = lines(&["nope", "nope", "nope"]);
-        assert!(apply_hunk(&l, &modify_hunk(), 0).is_none());
+        assert!(apply_hunk(&l, &modify_hunk(), 0, false).is_none());
     }
 
     #[test]
     fn apply_hunk_finds_via_fuzz() {
         // Add a blank prefix line — hunk says start=1 but actual match is at line 2.
         let l = lines(&["blank", "line1", "line2", "line3"]);
-        let (new_lines, _) = apply_hunk(&l, &modify_hunk(), 0).unwrap();
+        let (new_lines, _) = apply_hunk(&l, &modify_hunk(), 0, false).unwrap();
         assert_eq!(
             new_lines,
             lines(&["blank", "line1", "line2 modified", "line3"])
@@ -2451,7 +2650,7 @@ mod tests {
             ],
         };
         let l = lines(&["x"]);
-        let (new_lines, offset) = apply_hunk(&l, &h, 0).unwrap();
+        let (new_lines, offset) = apply_hunk(&l, &h, 0, false).unwrap();
         assert_eq!(new_lines, lines(&["a", "b", "c"]));
         assert_eq!(offset, 2); // 3 - 1
     }
@@ -2761,7 +2960,7 @@ mod tests {
 
         // The observable half: applied to five lines, `new` lands fifth.
         let original = lines(&["1", "2", "3", "4", "5"]);
-        let (out, _) = apply_hunk(&original, h, 0).expect("a pure insertion applies");
+        let (out, _) = apply_hunk(&original, h, 0, false).expect("a pure insertion applies");
         assert_eq!(out, lines(&["1", "2", "3", "4", "new", "5"]));
     }
 
@@ -2773,7 +2972,7 @@ mod tests {
         let h = &ps[0].hunks[0];
         assert_eq!(h.old_count, 0, "a -U0 insertion removes nothing");
         let (out, _) =
-            apply_hunk(&lines(&["a", "b", "c"]), h, 0).expect("a pure insertion applies");
+            apply_hunk(&lines(&["a", "b", "c"]), h, 0, false).expect("a pure insertion applies");
         // Measured against GNU patch 2.7.6: `a X b c`, not `X a b c`.
         assert_eq!(out, lines(&["a", "X", "b", "c"]));
     }

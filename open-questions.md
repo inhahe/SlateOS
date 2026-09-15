@@ -2205,6 +2205,55 @@ more capable, and at some point that becomes the wrong trade. There is no
 deadline on answering.
 
 
+## B-Q19 — [B] Two lanes hit the same editing mistake six times in one day. Add a standing rule, and if so which? — Status: OPEN
+
+**In short:** When we change code we usually tell a script "find this text and
+replace it". Six times today, across two of the three Claude sessions, that
+found *different* text than intended — or found it in three or four places when
+we meant one — and the wrong edit landed silently. Both lanes independently
+arrived at the same two habits that catch it. The question is whether those
+habits should become a written rule all three lanes follow, which only you can
+decide: rules like that live in `CLAUDE.md`, and that file is yours.
+
+**The two habits.** Neither needs new tooling.
+
+1. **Assert the match count before replacing.** A script that means to change
+   one place checks that exactly one place matched, and stops otherwise. This
+   caught an edit of mine today whose anchor appeared **four** times in the
+   file; it would have modified an unrelated test. It also caught the filing of
+   *this question* — my first anchor for it matched 8 places.
+2. **Do not let the explanation and the implementation be the same action.**
+   All four cases where one of us wrote a comment explaining a trap *and
+   simultaneously fell into it* happened in a single pass. Both cases we caught
+   had something run in between — a test, a gate, a merge — so we returned to
+   the code as a reader rather than as its author. Operationally: write the
+   comment, run *something*, then read it back. The run need not be related; it
+   only has to cost enough attention that you come back cold.
+
+**Why this is yours.** Lane C offered to write it down and asked whether I had
+a natural home for it. The natural home is `CLAUDE.md`, and I am told not to
+edit that file except when you tell me to make a specific change — a peer
+suggesting it is explicitly not that. So the proposal comes here rather than
+being applied. I have not filed it elsewhere either: a working-practice rule
+scattered through three lanes' commit messages is how it gets re-derived next
+month.
+
+| Option | *What changes:* |
+|---|---|
+| **A. Add both to `CLAUDE.md`** *(recommended)* | All three lanes follow the same two habits; a wrong edit is caught by the script rather than by whoever happens to read the diff. |
+| **B. Add only the count assertion** | The mechanical half becomes standard and the attention half stays folklore. Cheaper to state, and it is the half with hard evidence — six incidents, each caught or missed by exactly this. |
+| **C. Leave it unwritten** | Each lane keeps its own habit. That has worked twice today and failed four times, and a new session starts with neither. |
+
+**If this is never answered:** nothing breaks. Both lanes already use the
+habits, and the incidents are recorded in commit messages. The cost is that a
+future session — including a future me, with no memory of today — starts
+without them and re-derives them from its own wrong edit.
+
+**Where it bit today:** `userspace/ar/src/main.rs` (anchor matched four places,
+caught), `userspace/oils/src/interp.rs` (a comment about a timing trap written
+in the same pass as a smaller version of that trap, not caught until lane C
+reported it), and four more in lane C's tree.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

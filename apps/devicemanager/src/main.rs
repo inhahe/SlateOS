@@ -46,6 +46,23 @@ const SIDEBAR_WIDTH: f32 = 280.0;
 const TITLE_BAR_HEIGHT: f32 = 36.0;
 /// Height of the toolbar.
 const TOOLBAR_HEIGHT: f32 = 38.0;
+/// Height of the banner saying the hardware cannot be seen.
+const CANNOT_SEE_HARDWARE_HEIGHT: f32 = 54.0;
+
+/// What the window says instead of listing hardware.
+///
+/// Three lines. The third is the one that costs the most to leave out: an
+/// empty device tree is not read as "nothing was examined", it is read as
+/// "this machine has no devices", which is a claim about the user's computer
+/// that this program is in no position to make.
+const CANNOT_SEE_HARDWARE_LINES: [&str; 3] = [
+    "This program cannot see the machine's hardware.",
+    "It has no way to enumerate devices, read a driver version, or change a device's state.",
+    "The tree is empty because nothing was examined -- not because the machine has no devices.",
+];
+
+/// Said when a toolbar action is pressed and cannot be carried out.
+const CANNOT_ACT: &str = "Nothing here can reach the hardware, so nothing was changed";
 /// Height of the status bar at the bottom.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Height of each tree node row.
@@ -787,6 +804,8 @@ pub struct DeviceManagerState {
     /// Hovered tree node index.
     pub hovered_tree_index: Option<usize>,
     /// Hovered toolbar action index.
+    /// What the last toolbar press did, if it did nothing.
+    pub notice: Option<String>,
     pub hovered_toolbar_action: Option<usize>,
     /// Whether we are showing the resource view (instead of per-device).
     pub show_resource_view: bool,
@@ -797,7 +816,20 @@ pub struct DeviceManagerState {
 impl DeviceManagerState {
     /// Create a new device manager with sample data.
     pub fn new() -> Self {
-        let devices = sample_devices();
+        // Empty. Until 2026-09-15 this was `sample_devices()`, which invented
+        // the machine: a Virtio GPU at IRQ 11 with an MMIO range of
+        // 0xFD000000-0xFDFFFFFF, driver "virtio-gpu" version 1.2.0 dated
+        // 2026-04-01, and several more like it. Every field of that is a fact
+        // about the user's computer, and none of it had been read from
+        // anything -- this crate has no `/sys` reader, no `std::fs` and no
+        // syscall that could enumerate a bus.
+        //
+        // A device manager is where somebody goes when hardware is not
+        // working. Showing them a healthy device that does not exist ends the
+        // search at the wrong place: the thing they came to find is precisely
+        // the device that is missing or faulted, and an invented inventory
+        // cannot be missing anything.
+        let devices: Vec<DeviceInfo> = Vec::new();
         let resource_view = ResourceView::from_devices(&devices);
         let tree_nodes = build_tree_nodes(&devices);
         let mut update_checks = HashMap::new();
@@ -815,13 +847,14 @@ impl DeviceManagerState {
             active_tab: PropertiesTab::General,
             search_query: String::new(),
             search_focused: false,
-            event_history: sample_events(),
+            event_history: Vec::new(),
             resource_view,
             update_checks,
             tree_scroll: 0,
             properties_scroll: 0.0,
             tree_wheel: wheel::Accumulator::default(),
             hovered_tree_index: None,
+            notice: None,
             hovered_toolbar_action: None,
             show_resource_view: false,
             hovered_tab_index: None,
@@ -1051,10 +1084,22 @@ impl DeviceManagerState {
     }
 
     /// Simulate scanning for hardware changes (re-builds tree).
+    /// Rebuild the views over whatever devices are known.
+    ///
+    /// Note what this does *not* do, and never did: look for hardware. It
+    /// recomputes the tree and the resource view from `self.devices`, which
+    /// nothing changes. The toolbar button is labelled "Scan" and the module
+    /// documentation promised "Scan for hardware changes", so the button
+    /// reported a search that had not happened -- and reported it by the
+    /// strongest means available, which is leaving the list exactly as it was
+    /// and letting the user conclude nothing had changed.
     pub fn scan_hardware(&mut self) {
         self.resource_view = ResourceView::from_devices(&self.devices);
         self.tree_nodes = build_tree_nodes(&self.devices);
         self.apply_search_filter();
+        self.notice = Some(String::from(
+            "Cannot scan: nothing here can enumerate hardware. No devices were examined",
+        ));
     }
 
     /// Add an event to the history.
@@ -1166,6 +1211,29 @@ impl DeviceManagerState {
     }
 
     /// Process a toolbar action.
+    /// A manager holding the inventory `new` used to invent.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about the tree, the search
+    /// filter, the properties tabs, resource conflicts and the report -- all of
+    /// which need *devices*, not specifically invented ones. Before
+    /// 2026-09-15 they got them from `new`, which is the whole defect: the
+    /// inventory production could reach was the inventory that shipped.
+    #[cfg(test)]
+    fn with_sample_devices() -> Self {
+        let mut state = Self::new();
+        state.devices = sample_devices();
+        state.event_history = sample_events();
+        state.resource_view = ResourceView::from_devices(&state.devices);
+        state.tree_nodes = build_tree_nodes(&state.devices);
+        for dev in &state.devices {
+            state
+                .update_checks
+                .insert(dev.id, DriverUpdateCheck::new(dev.id));
+        }
+        state.notice = None;
+        state
+    }
+
     pub fn handle_toolbar_action(&mut self, action: ToolbarAction) {
         match action {
             ToolbarAction::Scan => self.scan_hardware(),
@@ -1176,27 +1244,34 @@ impl DeviceManagerState {
                     self.show_resource_view = false;
                 }
             }
-            ToolbarAction::Enable => {
-                if let Some(dev) = self.selected_device() {
-                    let id = dev.id;
-                    self.set_device_enabled(id, true);
-                }
-            }
-            ToolbarAction::Disable => {
-                if let Some(dev) = self.selected_device() {
-                    let id = dev.id;
-                    self.set_device_enabled(id, false);
-                }
-            }
-            ToolbarAction::Uninstall => {
-                if let Some(dev) = self.selected_device() {
-                    let id = dev.id;
-                    self.uninstall_driver(id);
-                }
+            // Enable, Disable and Uninstall all reported success for a
+            // change that never left this process. Uninstall is the one that
+            // matters most: somebody troubleshooting removes a driver, sees it
+            // gone from the tree, and reboots expecting the system to install
+            // a fresh one. Nothing was removed, so nothing is reinstalled, and
+            // the fault they were chasing is exactly where it was.
+            //
+            // They are unreachable today in any case, because `selected_device`
+            // has nothing to select, but the refusal is written here rather
+            // than relying on that -- an empty list is a reason, not a
+            // safeguard, and the list stops being empty the day a real
+            // enumerator lands.
+            ToolbarAction::Enable | ToolbarAction::Disable | ToolbarAction::Uninstall => {
+                self.notice = Some(String::from(CANNOT_ACT));
             }
             ToolbarAction::Export => {
-                let _report = self.export_report();
-                // In a real app, we would save to a file or show in a dialog.
+                // The report is still *built*, and that part is real and
+                // tested -- including the field sanitiser that stops a
+                // hardware-supplied string from redrawing the table. What
+                // never happened is writing it anywhere: the old body ended
+                // with `let _report = ...` and a comment saying a real app
+                // would save it. So Export was a button that discarded its own
+                // output, silently, which reads as a broken button.
+                let report = self.export_report();
+                self.notice = Some(format!(
+                    "Cannot export: no way to write a file. The report would have been {} bytes",
+                    report.len()
+                ));
             }
         }
     }
@@ -1273,6 +1348,7 @@ fn build_tree_nodes(devices: &[DeviceInfo]) -> Vec<TreeNode> {
 // ============================================================================
 
 /// Generate sample device data for development/testing.
+#[cfg(test)]
 fn sample_devices() -> Vec<DeviceInfo> {
     vec![
         DeviceInfo {
@@ -1537,6 +1613,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
 }
 
 /// Generate sample event history for development/testing.
+#[cfg(test)]
 fn sample_events() -> Vec<DeviceEvent> {
     vec![
         DeviceEvent::new(
@@ -1632,8 +1709,63 @@ pub fn render(state: &DeviceManagerState) -> Vec<RenderCommand> {
     render_sidebar(state, &mut cmds);
     render_properties_panel(state, &mut cmds);
     render_status_bar(state, &mut cmds);
+    // Last, so nothing paints over it.
+    render_cannot_see_hardware(state, &mut cmds);
 
     cmds
+}
+
+/// Say, in the window, that the hardware cannot be seen.
+///
+/// Drawn whenever the device list is empty, which is every frame today. Keyed
+/// on the list rather than on a constant so that it disappears by itself the
+/// day something fills it, rather than becoming a stale claim of its own.
+fn render_cannot_see_hardware(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
+    if !state.devices.is_empty() {
+        return;
+    }
+    let y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
+    cmds.push(RenderCommand::FillRect {
+        x: 0.0,
+        y,
+        width: state.width,
+        height: CANNOT_SEE_HARDWARE_HEIGHT,
+        color: state.palette.surface0,
+        corner_radii: CornerRadii::ZERO,
+    });
+    for (i, line) in CANNOT_SEE_HARDWARE_LINES.iter().enumerate() {
+        cmds.push(RenderCommand::Text {
+            x: 10.0,
+            #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+            y: y + 5.0 + i as f32 * 15.0,
+            text: (*line).to_string(),
+            color: if i == 0 {
+                state.palette.ink(state.palette.yellow)
+            } else {
+                state.palette.subtext0
+            },
+            font_size: if i == 0 { 13.0 } else { 11.0 },
+            font_weight: if i == 0 {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
+            max_width: Some(state.width - 20.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+    if let Some(notice) = &state.notice {
+        cmds.push(RenderCommand::Text {
+            x: 10.0,
+            y: y + CANNOT_SEE_HARDWARE_HEIGHT + 4.0,
+            text: notice.clone(),
+            color: state.palette.ink(state.palette.peach),
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(state.width - 20.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
 }
 
 /// Render the title bar.
@@ -3458,6 +3590,75 @@ mod tests {
 
     use super::*;
 
+    /// The window says it cannot see the hardware, in words.
+    ///
+    /// Emptying the tree is only half the fix. An empty device tree is not
+    /// read as "nothing was examined" -- it is read as "this machine has no
+    /// devices", which is a claim about the user's computer. And a device
+    /// manager is exactly where somebody goes when hardware is not working,
+    /// so that claim lands on the person least able to discount it.
+    #[test]
+    fn the_window_says_it_cannot_see_the_hardware() {
+        let state = DeviceManagerState::new();
+        let cmds = render(&state);
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_SEE_HARDWARE_LINES {
+            assert!(texts.contains(&line), "the window never said {line:?}");
+        }
+        assert!(
+            CANNOT_SEE_HARDWARE_LINES
+                .iter()
+                .any(|l| l.contains("not because the machine has no devices")),
+            "nothing forecloses reading the empty tree as a finding",
+        );
+    }
+
+    /// Scan reports that it scanned nothing.
+    ///
+    /// `scan_hardware` never looked for hardware -- it recomputed the tree from
+    /// a list nothing changes. It reported that by the strongest means
+    /// available: leaving the list exactly as it was, so the user concluded
+    /// nothing had changed.
+    #[test]
+    fn scan_says_it_examined_nothing() {
+        let mut state = DeviceManagerState::new();
+        state.scan_hardware();
+        let notice = state.notice.clone().expect("Scan said nothing at all");
+        assert!(notice.contains("Cannot scan"), "{notice}");
+        assert!(state.devices.is_empty(), "Scan found devices from nowhere");
+        assert!(
+            render(&state).iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == &notice
+            )),
+            "the refusal never reached the screen",
+        );
+    }
+
+    /// Export says it could not write, and says how big the report was.
+    ///
+    /// The old body ended `let _report = self.export_report();` with a comment
+    /// that a real app would save it -- a button that discarded its own output
+    /// in silence, which reads as a broken button. The report is still built,
+    /// because that part is real and tested.
+    #[test]
+    fn export_admits_it_cannot_write_a_file() {
+        let mut state = DeviceManagerState::with_sample_devices();
+        state.handle_toolbar_action(ToolbarAction::Export);
+        let notice = state.notice.clone().expect("Export said nothing at all");
+        assert!(notice.contains("Cannot export"), "{notice}");
+        assert!(
+            notice.contains("bytes"),
+            "no sign the report was built: {notice}"
+        );
+    }
+
     // -- DeviceCategory tests ------------------------------------------------
 
     /// Every colour the device manager draws comes from the user's palette.
@@ -3474,7 +3675,7 @@ mod tests {
             for tab in PropertiesTab::all() {
                 for selected in [None, Some(0)] {
                     for searching in [false, true] {
-                        let mut state = DeviceManagerState::new();
+                        let mut state = DeviceManagerState::with_sample_devices();
                         state.palette = Palette::for_mode(light);
                         state.active_tab = *tab;
                         state.selected_tree_index = selected;
@@ -3967,38 +4168,48 @@ mod tests {
 
     #[test]
     fn test_state_new_has_devices() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         assert!(!state.devices.is_empty());
     }
 
     #[test]
     fn test_state_new_has_tree_nodes() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         assert!(!state.tree_nodes.is_empty());
     }
 
     #[test]
     fn test_state_new_has_events() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         assert!(!state.event_history.is_empty());
     }
 
     #[test]
     fn test_state_new_has_resource_view() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         assert!(state.resource_view.total_count() > 0);
     }
 
     #[test]
     fn test_state_default_selection() {
+        // Deliberately the real constructor, not the fixture: this test is
+        // about what a freshly opened window contains.
         let state = DeviceManagerState::new();
         assert!(state.selected_tree_index.is_none());
         assert!(state.selected_device().is_none());
+        assert!(
+            state.devices.is_empty(),
+            "a fresh manager invented hardware"
+        );
+        assert!(
+            state.event_history.is_empty(),
+            "a fresh manager invented an event log"
+        );
     }
 
     #[test]
     fn test_state_select_device() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         // Find a device node
         let dev_idx = state
             .tree_nodes
@@ -4012,7 +4223,7 @@ mod tests {
 
     #[test]
     fn test_state_select_category() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.select_tree_node(0); // First node is always a category
         assert!(state.selected_category().is_some());
         assert!(state.show_resource_view);
@@ -4020,7 +4231,7 @@ mod tests {
 
     #[test]
     fn test_state_problem_device_count() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let count = state.problem_device_count();
         // Sample data has at least 1 warning and 1 error device
         assert!(
@@ -4031,7 +4242,7 @@ mod tests {
 
     #[test]
     fn test_state_enabled_device_count() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let count = state.enabled_device_count();
         assert!(count > 0);
         assert!(count <= state.devices.len());
@@ -4039,7 +4250,7 @@ mod tests {
 
     #[test]
     fn test_state_update_available_count() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let count = state.update_available_count();
         // Sample data has some devices with update_available
         assert!(count > 0);
@@ -4047,7 +4258,7 @@ mod tests {
 
     #[test]
     fn test_state_toggle_category() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let first_cat = state
             .tree_nodes
             .iter()
@@ -4062,7 +4273,7 @@ mod tests {
 
     #[test]
     fn test_state_set_device_enabled() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let id = state.devices[0].id;
         assert!(state.devices[0].enabled);
 
@@ -4079,7 +4290,7 @@ mod tests {
 
     #[test]
     fn test_state_uninstall_driver() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let id = state.devices[0].id;
         assert!(state.devices[0].driver.is_some());
 
@@ -4091,7 +4302,7 @@ mod tests {
 
     #[test]
     fn test_state_scan_hardware() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let old_node_count = state.tree_nodes.len();
         state.scan_hardware();
         // After scan, tree should be rebuilt with same data
@@ -4100,7 +4311,7 @@ mod tests {
 
     #[test]
     fn test_state_add_event() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let initial_count = state.event_history.len();
         state.add_event(DeviceEvent::new(
             1,
@@ -4113,7 +4324,7 @@ mod tests {
 
     #[test]
     fn test_state_add_event_max_cap() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.event_history.clear();
         for i in 0..MAX_EVENT_HISTORY + 50 {
             state.add_event(DeviceEvent::new(
@@ -4128,7 +4339,7 @@ mod tests {
 
     #[test]
     fn test_state_events_for_device() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let events = state.events_for_device(1);
         assert!(!events.is_empty());
         for ev in &events {
@@ -4138,7 +4349,7 @@ mod tests {
 
     #[test]
     fn test_state_events_for_nonexistent_device() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let events = state.events_for_device(99999);
         assert!(events.is_empty());
     }
@@ -4147,13 +4358,13 @@ mod tests {
 
     #[test]
     fn test_search_empty_matches_all() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         assert_eq!(state.matching_device_count(), state.devices.len());
     }
 
     #[test]
     fn test_search_filter_applies() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.search_query = "virtio".to_string();
         state.apply_search_filter();
         let count = state.matching_device_count();
@@ -4163,7 +4374,7 @@ mod tests {
 
     #[test]
     fn test_search_filter_no_match() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.search_query = "xyznonexistent123".to_string();
         state.apply_search_filter();
         assert_eq!(state.matching_device_count(), 0);
@@ -4217,21 +4428,21 @@ mod tests {
 
     #[test]
     fn test_export_report_nonempty() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let report = state.export_report();
         assert!(!report.is_empty());
     }
 
     #[test]
     fn test_export_report_contains_header() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let report = state.export_report();
         assert!(report.contains("Hardware Report"));
     }
 
     #[test]
     fn test_export_report_contains_devices() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let report = state.export_report();
         assert!(report.contains("Virtio GPU"));
         assert!(report.contains("Intel HD Audio"));
@@ -4267,13 +4478,13 @@ mod tests {
 
     #[test]
     fn a_device_name_cannot_forge_a_report_section() {
-        let clean = DeviceManagerState::new();
+        let clean = DeviceManagerState::with_sample_devices();
         let baseline = clean.export_report();
         let want_headers = header_lines(&baseline);
         let want_lines = baseline.lines().count();
 
         for name in HOSTILE_NAMES {
-            let mut state = DeviceManagerState::new();
+            let mut state = DeviceManagerState::with_sample_devices();
             let dev = state.devices.first_mut().expect("a device to rename");
             dev.name = (*name).to_string();
             let report = state.export_report();
@@ -4295,7 +4506,7 @@ mod tests {
         // Not just the name: vendor, type, hardware ID, location and the three
         // driver strings are all supplied by the same source, and a report is
         // only as trustworthy as its least-checked field.
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let payload = String::from("x\n--- Forged ---");
         {
             let dev = state.devices.first_mut().expect("a device");
@@ -4309,7 +4520,7 @@ mod tests {
                 drv.provider = payload.clone();
             }
         }
-        let clean = DeviceManagerState::new().export_report();
+        let clean = DeviceManagerState::with_sample_devices().export_report();
         let report = state.export_report();
         // Again per line, not `contains`: the payload's characters survive the
         // fold on purpose, they just cannot be a line of their own any more.
@@ -4338,21 +4549,21 @@ mod tests {
 
     #[test]
     fn test_export_report_contains_irqs() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let report = state.export_report();
         assert!(report.contains("IRQ Assignments"));
     }
 
     #[test]
     fn test_export_report_contains_mmio() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let report = state.export_report();
         assert!(report.contains("MMIO Ranges"));
     }
 
     #[test]
     fn test_export_report_contains_dma() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let report = state.export_report();
         assert!(report.contains("DMA Channels"));
     }
@@ -4361,14 +4572,14 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let cmds = render(&state);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_with_selected_device() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let dev_idx = state
             .tree_nodes
             .iter()
@@ -4381,7 +4592,7 @@ mod tests {
 
     #[test]
     fn test_render_resource_view() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.select_tree_node(0); // Select a category
         assert!(state.show_resource_view);
         let cmds = render(&state);
@@ -4390,7 +4601,7 @@ mod tests {
 
     #[test]
     fn test_render_all_tabs() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let dev_idx = state
             .tree_nodes
             .iter()
@@ -4415,7 +4626,7 @@ mod tests {
     #[allow(clippy::float_cmp)]
     #[test]
     fn test_handle_resize() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let result = handle_event(
             &mut state,
             &Event::Resize {
@@ -4430,7 +4641,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_down() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.select_tree_node(0);
         let result = handle_event(
             &mut state,
@@ -4446,7 +4657,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_up() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.select_tree_node(1);
         let result = handle_event(
             &mut state,
@@ -4462,7 +4673,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_tab_cycles_tabs() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         assert_eq!(state.active_tab, PropertiesTab::General);
         handle_event(
             &mut state,
@@ -4478,7 +4689,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_f5_scans() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let result = handle_event(
             &mut state,
             &Event::Key(KeyEvent {
@@ -4493,7 +4704,7 @@ mod tests {
 
     #[test]
     fn test_handle_ctrl_f_focuses_search() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         assert!(!state.search_focused);
         handle_event(
             &mut state,
@@ -4509,7 +4720,7 @@ mod tests {
 
     #[test]
     fn test_handle_search_typing() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.search_focused = true;
         handle_event(
             &mut state,
@@ -4525,7 +4736,7 @@ mod tests {
 
     #[test]
     fn test_handle_search_backspace() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.search_focused = true;
         state.search_query = "abc".to_string();
         handle_event(
@@ -4542,7 +4753,7 @@ mod tests {
 
     #[test]
     fn test_handle_search_escape() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.search_focused = true;
         handle_event(
             &mut state,
@@ -4558,7 +4769,7 @@ mod tests {
 
     #[test]
     fn test_handle_left_collapses_category() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let cat_idx = state
             .tree_nodes
             .iter()
@@ -4580,7 +4791,7 @@ mod tests {
 
     #[test]
     fn test_handle_right_expands_category() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let cat_idx = state
             .tree_nodes
             .iter()
@@ -4602,7 +4813,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_release_ignored() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let result = handle_event(
             &mut state,
             &Event::Key(KeyEvent {
@@ -4623,14 +4834,14 @@ mod tests {
 
     #[test]
     fn test_tree_hit_test_first_node() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let hit = tree_hit_test(&state, state.panel_top() + 5.0);
         assert_eq!(hit, Some(0));
     }
 
     #[test]
     fn test_tree_hit_test_out_of_bounds() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         assert!(tree_hit_test(&state, 100_000.0).is_none());
         assert!(
             tree_hit_test(&state, state.panel_top() - 1.0).is_none(),
@@ -4640,13 +4851,13 @@ mod tests {
 
     #[test]
     fn test_is_node_visible_category() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         assert!(is_node_visible(&state, 0));
     }
 
     #[test]
     fn test_is_node_visible_device_under_expanded() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         let dev_idx = state
             .tree_nodes
             .iter()
@@ -4657,7 +4868,7 @@ mod tests {
 
     #[test]
     fn test_is_node_visible_device_under_collapsed() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         // Collapse first category
         state.tree_nodes[0].expanded = false;
         // The device right after should not be visible
@@ -4668,7 +4879,7 @@ mod tests {
 
     #[test]
     fn test_is_node_visible_out_of_bounds() {
-        let state = DeviceManagerState::new();
+        let state = DeviceManagerState::with_sample_devices();
         assert!(!is_node_visible(&state, 99999));
     }
 
@@ -4676,7 +4887,7 @@ mod tests {
 
     #[test]
     fn test_toolbar_enable_action() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         // Find a disabled device
         let disabled_idx = state.tree_nodes.iter().position(|n| {
             n.device_id
@@ -4692,13 +4903,18 @@ mod tests {
                 .iter()
                 .find(|d| d.id == dev_id)
                 .expect("exists");
-            assert!(dev.enabled);
+            // Was `assert!(dev.enabled)`. Enabling a device is a change to the
+            // machine, and nothing here reaches the machine; the flag flipped
+            // in this process and nowhere else.
+            assert!(!dev.enabled, "a device was enabled in name only");
+            let notice = state.notice.clone().expect("refused and said nothing");
+            assert!(notice.contains("nothing was changed"), "{notice}");
         }
     }
 
     #[test]
     fn test_toolbar_disable_action() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let dev_idx = state
             .tree_nodes
             .iter()
@@ -4716,12 +4932,17 @@ mod tests {
             .iter()
             .find(|d| d.id == dev_id)
             .expect("exists");
-        assert!(!dev.enabled);
+        // Was `assert!(!dev.enabled)`. Taking a device down is the more
+        // consequential half of the pair -- somebody disables a device to stop
+        // it interfering with something -- and it never left this process.
+        assert!(dev.enabled, "a device was disabled in name only");
+        let notice = state.notice.clone().expect("refused and said nothing");
+        assert!(notice.contains("nothing was changed"), "{notice}");
     }
 
     #[test]
     fn test_toolbar_properties_action() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let dev_idx = state
             .tree_nodes
             .iter()
@@ -4759,7 +4980,18 @@ mod tests {
     #[test]
     fn test_state_default() {
         let state = DeviceManagerState::default();
-        assert!(!state.devices.is_empty());
+        // Was `assert!(!state.devices.is_empty())` -- a test asserting that a
+        // freshly opened device manager already knows about hardware it has
+        // never looked for. The behaviour was the defect, and the test was
+        // correct about the behaviour.
+        assert!(
+            state.devices.is_empty(),
+            "a fresh manager invented hardware"
+        );
+        assert!(
+            state.event_history.is_empty(),
+            "a fresh manager invented an event log"
+        );
     }
 
     // -- Constant sanity checks ----------------------------------------------
@@ -4867,7 +5099,7 @@ mod tests {
     /// zero and each assertion would be checking that nothing happened, which
     /// is exactly what a broken wheel also produces.
     fn app_with_scrollable_tree() -> DeviceManagerState {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.height = 260.0;
         assert!(
             state.max_tree_scroll() > 0,
@@ -4986,7 +5218,7 @@ mod tests {
 
     #[test]
     fn a_tree_that_fits_cannot_be_scrolled() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.height = 4000.0;
         assert_eq!(state.max_tree_scroll(), 0, "the whole tree fits");
         let (x, y) = tree_point(&state);
@@ -5071,7 +5303,7 @@ mod tests {
     #[test]
     fn the_sidebars_clip_matches_what_the_hit_test_uses() {
         for height in [260.0, 500.0, 900.0] {
-            let mut state = DeviceManagerState::new();
+            let mut state = DeviceManagerState::with_sample_devices();
             state.height = height;
             let (clip_y, clip_h) = sidebar_clip(&state);
             assert!((clip_y - state.panel_top()).abs() < 0.01, "top at {height}");
@@ -5166,7 +5398,7 @@ mod tests {
     /// whether it was visible or not.
     #[test]
     fn is_node_visible_agrees_with_the_rows_the_sidebar_draws() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         for query in ["", "audio", "nic", "zzzz"] {
             state.search_query = query.to_string();
             state.apply_search_filter();
@@ -5196,7 +5428,7 @@ mod tests {
     /// is true exactly when the sidebar draws the row, for *any* state.
     #[test]
     fn is_node_visible_agrees_even_where_the_filters_invariant_does_not_hold() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let cat = state
             .tree_nodes
             .iter()
@@ -5219,7 +5451,7 @@ mod tests {
 
     /// A device whose General tab is long enough to overflow a short window.
     fn app_with_scrollable_panel() -> DeviceManagerState {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.height = 260.0;
         let dev_idx = state
             .tree_nodes
@@ -5327,7 +5559,7 @@ mod tests {
 
     #[test]
     fn a_properties_panel_that_fits_cannot_be_scrolled() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.height = 4000.0;
         let dev_idx = state
             .tree_nodes
@@ -5394,7 +5626,7 @@ mod tests {
     /// the same predicate or the clip and the content disagree by 28px.
     #[test]
     fn the_resource_view_scrolls_and_starts_at_the_panel_top() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.height = 260.0;
         let cat_idx = state
             .tree_nodes
@@ -5447,7 +5679,7 @@ mod tests {
     /// scroll the content off the top.
     #[test]
     fn an_impossibly_short_window_still_bounds_the_offsets() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         state.height = 1.0;
         assert_eq!(state.max_tree_scroll(), 0);
         assert!(state.max_properties_scroll() >= 0.0);
@@ -5497,7 +5729,7 @@ mod tests {
     /// edge and put the toolbar buttons where the mouse is not.
     #[test]
     fn render_believes_the_size_it_is_given_not_the_one_it_asked_for() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         let given_w = 640.0_f32;
         let given_h = 480.0_f32;
         // The test proves nothing unless the granted size differs from the
@@ -5532,7 +5764,7 @@ mod tests {
     /// time a user drags the pointer across it on the way to something else.
     #[test]
     fn an_ignored_event_does_not_ask_for_a_frame() {
-        let mut state = DeviceManagerState::new();
+        let mut state = DeviceManagerState::with_sample_devices();
         // A tick is the clearest case: this app asks for no clock, so it has no
         // handler for one, and one arriving anyway must change nothing.
         let ignored = state.on_event(&Event::Tick { elapsed_ms: 16 });
@@ -5554,6 +5786,10 @@ mod tests {
     /// sitting idle keeps the compositor compositing for as long as it is open.
     #[test]
     fn a_window_with_nothing_moving_asks_for_no_clock() {
-        assert!(DeviceManagerState::new().tick_interval().is_none());
+        assert!(
+            DeviceManagerState::with_sample_devices()
+                .tick_interval()
+                .is_none()
+        );
     }
 }

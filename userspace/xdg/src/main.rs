@@ -1353,7 +1353,24 @@ fn run_mimeopen(args: &[String]) -> i32 {
                 ask = true;
                 set_default = true;
             }
-            "-n" | "--no-open" => no_open = true,
+            // `-n` is `--no-ask` in mimeopen: "Don't ask the user which
+            // program to use. Choose the default program or the first program
+            // known to handle the file mimetype." It OPENS the file. Bound
+            // here to `--no-open`, which prints the type and opens nothing --
+            // the opposite outcome from the same letter, so
+            // `mimeopen -n report.pdf` opened the document everywhere else
+            // and printed a line here.
+            //
+            // `ask` already defaults to false, so this is the explicit
+            // spelling of the default rather than a new mode; it exists so
+            // that a script passing `-n` gets what it asked for instead of an
+            // unknown-option failure.
+            "-n" | "--no-ask" => ask = false,
+            // `--no-open` keeps its meaning and gives the letter back.
+            // mimeopen has no equivalent, so this is an extension -- and an
+            // extension may add a long option but may not redefine a letter
+            // the reference already uses.
+            "--no-open" => no_open = true,
             "-h" | "--help" => {
                 print_mimeopen_usage();
                 return 0;
@@ -1477,6 +1494,8 @@ Open files with the appropriate application.
 
 Options:
   -a, --ask          Ask which application to use
+  -n, --no-ask       Use the default program without asking
+      --no-open      Print the detected type; open nothing (extension)
   -d, --ask-default  Ask and set as default handler
   -n, --no-open      Print MIME type without opening
   -h, --help         Show this help

@@ -564,7 +564,12 @@ def self_test():
             f = base / rel
             f.parent.mkdir(parents=True, exist_ok=True)
             text = "\n".join(line[12:] for line in body.strip("\n").split("\n"))
-            f.write_text(text + "\n", encoding="utf-8")
+            # `newline` is load-bearing here, not tidiness: without it Python
+            # translates to CRLF on Windows, and these fixtures are parsed back
+            # by column, so a stray carriage return rides along in every value
+            # the self-test then compares. The gate that catches this reds the
+            # boot in 15 seconds; lane A found both of mine.
+            f.write_text(text + "\n", encoding="utf-8", newline="\n")
 
         saved = (ROOT, ROOTS)
         ROOT, ROOTS = base, ("apps", "gui")

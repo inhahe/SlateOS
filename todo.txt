@@ -4527,6 +4527,63 @@
 
 ## Judgment Calls
 
+"Fixed" means fixed ON MAIN, and say which when telling another lane
+(lane A, 2026-09-15). Lane C's correction, adopted here because the same
+ambiguity is in everything I have said today.
+
+  I told lane C that deflate/src/lib.rs:2940 was fixed. True of MY TREE at
+  that moment, and not of main. Lane C relayed it to lane B as a statement
+  about main, in a report whose purpose was to let lane B decide whether to
+  widen a gate -- and lane B was about to widen it against a file still red on
+  main. They checked origin/main at 800df3ae3 themselves and found the gap
+  still there.
+
+  Nothing I said was false; the ambiguity did the damage. "Fixed" is two
+  different claims -- "in my tree" and "in the tree you will build" -- and only
+  the second is a fact about anything shared. Lane B notes this is the second
+  time in two days that something was reported fixed on a branch and read as
+  fixed on main.
+
+  The rule: when telling another lane something is fixed, check origin/main,
+  not the worktree and not the memory of having done it. If it is only on a
+  branch, say the branch. `git show origin/main:<path>` is the whole cost.
+
+  Why it mattered more than a stale line usually would, which is lane B's
+  point and worth keeping: deflate is in NO lane's glob list. Widening a
+  tree-wide gate while that file was red would have refused EVERY lane's push
+  for a file none of us owns -- so at the moment of widening it had no owner
+  and all three lanes depended on it.
+
+  Verified after the fact: origin/main carries the single-spaced message and
+  zero occurrences of the gap.
+
+  AND THE PROVENANCE HALF OF THAT CHECK WAS WRONG, which is the more useful
+  half of this entry. I ran
+
+      git log --oneline origin/main -- deflate/src/lib.rs
+
+  saw only 5a7cf6796 (mine), and told lane C that lane B's belief -- that they
+  had repaired the file in their widening commit -- was not what main showed.
+  Lane B was right and my check was answering a narrower question than it
+  looked like.
+
+  `git log -- <path>` applies HISTORY SIMPLIFICATION. Both branches made the
+  BYTE-IDENTICAL change to line 2940, so the merge is TREESAME to one parent
+  and git follows only that side, dropping the other commit entirely. It is
+  answering "what is the simplest history that explains this file's current
+  content", not "what commits changed this file". `--full-history` asks the
+  second, and shows 9159b3d30 -- lane B's widening -- with
+  `git show --stat` listing `deflate/src/lib.rs | 2 +-`.
+
+  So use --full-history whenever the question is WHO CHANGED THIS, and plain
+  log only when the question is HOW DID IT GET THIS WAY.
+
+  Lane C's refinement, which is the rule that would have got it right:
+  CHECKING CONTENT BEATS CHECKING PROVENANCE when the assertion is "this is
+  fixed". `git show origin/main:<path>` was correct here and the log was not,
+  because the fact anyone depends on is the file's bytes, not which commit
+  produced them.
+
 A gate for blocking locks reached from interrupt context (lane A, 2026-09-15).
 Deferred, with the justification supplied by lane B rather than by me.
 

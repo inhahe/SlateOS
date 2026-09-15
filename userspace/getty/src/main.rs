@@ -78,6 +78,13 @@ struct Config {
     no_hostname: bool,
     no_newline: bool,
     long_hostname: bool,
+    /// `-h, --flow-control`: enable hardware flow control.
+    ///
+    /// Parsed so the letter means what agetty means by it. Not applied --
+    /// there is no termios layer -- so it joins `unapplied_settings`.
+    flow_control: bool,
+    /// `-o, --login-options <opts>`: extra arguments for login(1).
+    login_options: Option<String>,
     local_line: bool,
     no_reset: bool,
     no_clear: bool,
@@ -111,6 +118,8 @@ impl Default for Config {
             no_hostname: false,
             no_newline: false,
             long_hostname: false,
+            flow_control: false,
+            login_options: None,
             local_line: false,
             no_reset: false,
             no_clear: false,
@@ -178,7 +187,14 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
     while i < args.len() {
         let Some(raw) = args.get(i) else { break };
         match raw.to_str().unwrap_or_default() {
-            "-h" | "--help" => cfg.show_help = true,
+            // `-h` is `--flow-control` in agetty, and `--help` there is
+            // LONG-ONLY. It matters more than it looks: an inittab or unit
+            // line reading `agetty -h ttyS0 115200` asks for hardware flow
+            // control, and here it used to print the help text and exit 0 --
+            // so that console got no login prompt at all, and the service
+            // looked like it had succeeded.
+            "-h" | "--flow-control" => cfg.flow_control = true,
+            "--help" => cfg.show_help = true,
             "-V" | "--version" => cfg.show_version = true,
             "-8" | "--8bits" => {} // accept but no-op in our implementation
             "-a" | "--autologin" => {
@@ -209,7 +225,17 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
             "-m" | "--extract-baud" => cfg.keep_baud = true,
             "-n" | "--skip-login" => cfg.skip_login = true,
             "-N" | "--nonewline" => cfg.no_newline = true,
-            "-o" | "--long-hostname" => cfg.long_hostname = true,
+            // `--long-hostname` is LONG-ONLY in agetty; `-o` there is
+            // `--login-options <opts>`, which CONSUMES AN ARGUMENT. So
+            // `agetty -o '-- \u' tty1` passed options to login upstream and
+            // here set the hostname flag, leaving `-- \u` to be read as the
+            // port name.
+            "--long-hostname" => cfg.long_hostname = true,
+            "-o" | "--login-options" => {
+                i += 1;
+                cfg.login_options =
+                    Some(text_at(args, i, "-o requires login options")?.to_string());
+            }
             "-p" | "--login-pause" => cfg.login_pause = true,
             "-r" | "--chroot" => {
                 i += 1;
@@ -616,14 +642,19 @@ fn run_getty(
 
     // Autologin mode
     if let Some(ref user) = cfg.autologin_user {
-        let mut login_args = vec![
-            cfg.login_program.display().to_string(),
-            String::from("-f"),
-            user.clone(),
-        ];
-        if let Some(ref host) = cfg.host {
-            login_args.push(String::from("-h"));
-            login_args.push(host.clone());
+        let mut login_args = vec![cfg.login_program.display().to_string()];
+        if let Some(ref opts) = cfg.login_options {
+            // `--login-options` REPLACES the argv this would have built,
+            // which is what makes it useful and what makes it the
+            // operator's responsibility. See `login_options_shield_the_name`.
+            login_args.extend(splice_login_options(opts, user));
+        } else {
+            login_args.push(String::from("-f"));
+            login_args.push(user.clone());
+            if let Some(ref host) = cfg.host {
+                login_args.push(String::from("-h"));
+                login_args.push(host.clone());
+            }
         }
         return Ok(Some((cfg.login_program.clone(), login_args)));
     }
@@ -680,14 +711,20 @@ fn run_getty(
         // Read login name
         match read_login_name(reader, writer) {
             Ok(Some(username)) => {
-                let mut login_args = vec![
-                    cfg.login_program.display().to_string(),
-                    String::from("--"),
-                    username,
-                ];
-                if let Some(ref host) = cfg.host {
-                    login_args.push(String::from("-h"));
-                    login_args.push(host.clone());
+                let mut login_args = vec![cfg.login_program.display().to_string()];
+                if let Some(ref opts) = cfg.login_options {
+                    login_args.extend(splice_login_options(opts, &username));
+                } else {
+                    // The `--` this build inserts unconditionally is the
+                    // protection agetty's SECURITY NOTICE recommends: a
+                    // username beginning with `-` must not be read by
+                    // login(1) as an option.
+                    login_args.push(String::from("--"));
+                    login_args.push(username);
+                    if let Some(ref host) = cfg.host {
+                        login_args.push(String::from("-h"));
+                        login_args.push(host.clone());
+                    }
                 }
                 return Ok(Some((cfg.login_program.clone(), login_args)));
             }
@@ -706,6 +743,43 @@ fn run_getty(
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+/// The argv for login(1) implied by `--login-options`, with `NAME` spliced in.
+///
+/// agetty: "Options and arguments that are passed to login(1). Where \u is
+/// replaced by the login name."
+///
+/// Substitution happens INSIDE a token rather than by re-splitting, which is
+/// the manual's stated protection: "agetty does check for a leading - and
+/// makes sure the logname gets passed as one parameter (so embedded spaces
+/// will not create yet another parameter)". A username of `alice bob` becomes
+/// one argument, not two.
+fn splice_login_options(opts: &str, username: &str) -> Vec<String> {
+    opts.split_whitespace()
+        .map(|tok| tok.replace("\\u", username))
+        .collect()
+}
+
+/// Whether `opts` shields the username from being read as an option.
+///
+/// The manual's own advice: "Some programs use -- to indicate that the rest
+/// of the command line should not be interpreted as options. Use this feature
+/// if available by passing -- before the username gets passed by \u."
+///
+/// Without `--login-options`, this build already does that unconditionally --
+/// it builds `[login, --, username]`. Supplying the option REPLACES that
+/// construction, so the guarantee becomes the operator's to keep, and they
+/// get told when they have not. agetty does not warn; this is ours, and it
+/// costs nothing because it is one line on stderr at startup.
+fn login_options_shield_the_name(opts: &str) -> bool {
+    let toks: Vec<&str> = opts.split_whitespace().collect();
+    match toks.iter().position(|t| t.contains("\\u")) {
+        Some(at) => toks.get(..at).is_some_and(|before| before.contains(&"--")),
+        // No `\u` at all: the username is not passed through these options,
+        // so there is nothing for a leading dash to be read as.
+        None => true,
+    }
+}
 
 /// Settings the operator asked for that this build parses and never applies.
 ///
@@ -740,6 +814,9 @@ fn unapplied_settings(cfg: &Config) -> Vec<&'static str> {
     }
     if cfg.keep_baud {
         out.push("--keep-baud");
+    }
+    if cfg.flow_control {
+        out.push("--flow-control");
     }
     if cfg.nice_value.is_some() {
         out.push("--nice");
@@ -828,6 +905,19 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         eprintln!("getty: {why}");
         eprintln!("getty: refusing to start.");
         return 1;
+    }
+
+    if let Some(ref opts) = cfg.login_options
+        && !login_options_shield_the_name(opts)
+    {
+        eprintln!(
+            "getty: --login-options passes the login name without a preceding `--`, \
+so a name beginning with `-` will reach login(1) as an option."
+        );
+        eprintln!(
+            "getty: agetty's manual recommends `-- \\u`; this build cannot add it for you, \
+because where the name goes is what the option decides."
+        );
     }
 
     let unapplied = unapplied_settings(&cfg);
@@ -1523,9 +1613,77 @@ mod tests {
 
     #[test]
     fn test_parse_args_long_hostname() {
-        let args = argv(&["getty", "-o", "tty1"]);
+        // LONG-ONLY, as in agetty. This test used to pass `-o` and assert the
+        // flag was set -- it proved the option was reachable, by the letter
+        // agetty gives to `--login-options`.
+        let args = argv(&["getty", "--long-hostname", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.long_hostname);
+
+        // `-o` now takes a value and does NOT set the hostname flag.
+        let args = argv(&["getty", "-o", "-- \\u", "tty1"]);
+        let cfg = parse_args(&args).unwrap();
+        assert!(!cfg.long_hostname);
+        assert_eq!(cfg.login_options.as_deref(), Some("-- \\u"));
+        assert_eq!(cfg.port, "tty1", "the port must not be eaten by -o");
+    }
+
+    /// `-h` is hardware flow control, not help.
+    ///
+    /// An inittab line reading `agetty -h ttyS0 115200` asks for flow
+    /// control. This build used to print help and exit 0 for it, so that
+    /// console got no login prompt and the service looked like it had
+    /// succeeded. `--help` still works, spelled in full.
+    #[test]
+    fn dash_h_is_flow_control_and_help_is_long_only() {
+        let cfg = parse_args(&argv(&["getty", "-h", "ttyS0"])).unwrap();
+        assert!(cfg.flow_control, "-h enables hardware flow control");
+        assert!(!cfg.show_help, "-h must not be help");
+        assert_eq!(cfg.port, "ttyS0");
+        assert!(
+            unapplied_settings(&cfg).contains(&"--flow-control"),
+            "flow control is parsed but not applied, so it must be reported"
+        );
+
+        let cfg = parse_args(&argv(&["getty", "--help"])).unwrap();
+        assert!(cfg.show_help);
+    }
+
+    /// `--login-options` splices the name in as ONE argument.
+    #[test]
+    fn login_options_substitute_the_name_as_a_single_argument() {
+        assert_eq!(
+            splice_login_options("-h darkstar -- \\u", "alice"),
+            vec!["-h", "darkstar", "--", "alice"]
+        );
+
+        // The manual's stated protection: "makes sure the logname gets passed
+        // as one parameter (so embedded spaces will not create yet another
+        // parameter)". Substituting inside the token rather than re-splitting
+        // is what delivers that.
+        assert_eq!(
+            splice_login_options("-- \\u", "alice bob"),
+            vec!["--", "alice bob"]
+        );
+
+        // No `\u` at all: the options are passed through unchanged.
+        assert_eq!(splice_login_options("-p", "alice"), vec!["-p"]);
+    }
+
+    /// The `--` shield is detected where it matters, and only there.
+    #[test]
+    fn login_options_shield_is_required_only_before_the_name() {
+        assert!(login_options_shield_the_name("-- \\u"));
+        assert!(login_options_shield_the_name("-h darkstar -- \\u"));
+        // No `\u`: the name is not passed through these options at all, so
+        // there is nothing for a leading dash to be read as.
+        assert!(login_options_shield_the_name("-p"));
+
+        // These are the ones that need the warning.
+        assert!(!login_options_shield_the_name("\\u"));
+        assert!(!login_options_shield_the_name("-h darkstar \\u"));
+        // `--` AFTER the name does not shield it.
+        assert!(!login_options_shield_the_name("\\u --"));
     }
 
     #[test]

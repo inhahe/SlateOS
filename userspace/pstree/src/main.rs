@@ -10,7 +10,7 @@
 #![deny(clippy::all)]
 
 use quoting::quoteaf_os;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -255,11 +255,59 @@ fn format_process(info: &ProcessInfo, opts: &Options) -> String {
 /// Recursion-invariant context for `render_tree`: the output sink and the
 /// process/child maps and options that stay constant across the whole walk.
 /// Bundling these keeps `render_tree`'s per-node argument list small.
+/// ANSI bold on and off, which is what psmisc uses for `-H`.
+///
+/// Emitted whether or not stdout is a terminal, which is measured rather than
+/// assumed: piping `pstree -H <pid>` through `cat -A` still shows `^[[1m`, so
+/// psmisc does not gate this on `isatty`. Matching that matters more than
+/// being tidy about it -- a script diffing two `pstree -H` runs sees the same
+/// bytes either way.
+const HIGHLIGHT_ON: &str = "\x1b[1m";
+const HIGHLIGHT_OFF: &str = "\x1b[0m";
+
+/// The PIDs `-H` picks out: the named process **and every ancestor of it**.
+///
+/// Measured against psmisc 23.7 -- `pstree -H <shell>` bolds the shell, its
+/// relay, its session leader, init and the root, so what is highlighted is the
+/// PATH from the root down to the process rather than the single node. A
+/// single-node reading would have looked right on a shallow tree and wrong on
+/// every real one.
+///
+/// A PID that no longer exists highlights nothing, which falls out of the
+/// lookup rather than needing a case: `procs.get` misses and the walk stops.
+fn highlight_set(procs: &HashMap<u32, ProcessInfo>, target: Option<u32>) -> HashSet<u32> {
+    let mut set = HashSet::new();
+    let Some(mut pid) = target else {
+        return set;
+    };
+    if !procs.contains_key(&pid) {
+        return set;
+    }
+    // Bounded by the process count: a chain of parents cannot be longer than
+    // the set of processes, and `insert` returning false catches a cycle
+    // before the bound does. /proc is read a file at a time, so a parent link
+    // that points at a reused PID is a real possibility rather than a
+    // hypothetical one.
+    for _ in 0..=procs.len() {
+        if !set.insert(pid) {
+            break;
+        }
+        match procs.get(&pid) {
+            Some(info) if info.ppid != pid && info.ppid != 0 => pid = info.ppid,
+            _ => break,
+        }
+    }
+    set
+}
+
 struct TreeCtx<'a, 'o> {
     out: &'a mut io::StdoutLock<'o>,
     procs: &'a HashMap<u32, ProcessInfo>,
     children: &'a HashMap<u32, Vec<u32>>,
     opts: &'a Options,
+    /// Empty unless `-H` was given, so the common path costs one hash lookup
+    /// against an empty set.
+    highlight: &'a HashSet<u32>,
 }
 
 fn render_tree(ctx: &mut TreeCtx<'_, '_>, pid: u32, prefix: &str, is_last: bool, is_root: bool) {
@@ -281,6 +329,13 @@ fn render_tree(ctx: &mut TreeCtx<'_, '_>, pid: u32, prefix: &str, is_last: bool,
 
     // Print this node.
     let display = format_process(info, ctx.opts);
+    // The whole rendered process, not just its name: psmisc bolds
+    // `Relay(1125972)` including the pid it appends under `-p`.
+    let display = if ctx.highlight.contains(&pid) {
+        format!("{HIGHLIGHT_ON}{display}{HIGHLIGHT_OFF}")
+    } else {
+        display
+    };
 
     if is_root {
         let _ = writeln!(ctx.out, "{display}");
@@ -508,11 +563,13 @@ fn main() {
     let root = opts.root_pid.unwrap_or(1);
 
     if procs.contains_key(&root) {
+        let highlight = highlight_set(&procs, opts.highlight_pid);
         let mut ctx = TreeCtx {
             out: &mut out,
             procs: &procs,
             children: &children,
             opts: &opts,
+            highlight: &highlight,
         };
         render_tree(&mut ctx, root, "", true, true);
     } else if procs.is_empty() {
@@ -543,6 +600,82 @@ mod tests {
             state: 'S',
             username: "root".to_string(),
         }
+    }
+
+    // ---------------- -H / --highlight-pid ----------------
+
+    /// A tree: 1 -> 10 -> 100, with 11 a sibling of 10.
+    fn highlight_tree() -> HashMap<u32, ProcessInfo> {
+        let mut procs = HashMap::new();
+        procs.insert(1, make_proc(1, 0, b"init"));
+        procs.insert(10, make_proc(10, 1, b"login"));
+        procs.insert(11, make_proc(11, 1, b"cron"));
+        procs.insert(100, make_proc(100, 10, b"bash"));
+        procs
+    }
+
+    /// `-H` picks out the PATH from the root down to the process, not the
+    /// single node. Measured against psmisc 23.7, which bolds the shell, its
+    /// relay, its session leader, init and the root. A single-node reading
+    /// looks right on a shallow tree and wrong on every real one.
+    #[test]
+    fn highlight_covers_the_target_and_all_its_ancestors() {
+        let procs = highlight_tree();
+        let set = highlight_set(&procs, Some(100));
+        assert!(set.contains(&100), "the target itself");
+        assert!(set.contains(&10), "its parent");
+        assert!(set.contains(&1), "the root");
+        assert!(!set.contains(&11), "a sibling branch is untouched");
+        assert_eq!(set.len(), 3);
+    }
+
+    /// The root highlights only itself -- there is nothing above it, and the
+    /// walk must stop rather than follow ppid 0 into a process that is not
+    /// in the map.
+    #[test]
+    fn highlighting_the_root_stops_at_the_root() {
+        let procs = highlight_tree();
+        let set = highlight_set(&procs, Some(1));
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&1));
+    }
+
+    /// Without `-H` nothing is highlighted, and the set is empty rather than
+    /// absent so the render path costs one lookup instead of a branch.
+    #[test]
+    fn no_highlight_pid_highlights_nothing() {
+        let procs = highlight_tree();
+        assert!(highlight_set(&procs, None).is_empty());
+    }
+
+    /// A PID that is not in the tree highlights nothing. It is the ordinary
+    /// case of asking about a process that has exited between the scan and
+    /// the argument being read, not an error.
+    #[test]
+    fn an_unknown_pid_highlights_nothing() {
+        let procs = highlight_tree();
+        assert!(highlight_set(&procs, Some(9999)).is_empty());
+    }
+
+    /// A parent link that loops must not spin. /proc is read a file at a time,
+    /// so a ppid pointing at a reused PID is a real possibility rather than a
+    /// hypothetical: this test is the reason the walk is bounded AND checks
+    /// `insert`'s return rather than relying on either alone.
+    #[test]
+    fn a_parent_cycle_terminates() {
+        let mut procs = HashMap::new();
+        procs.insert(5, make_proc(5, 6, b"a"));
+        procs.insert(6, make_proc(6, 5, b"b"));
+        let set = highlight_set(&procs, Some(5));
+        assert_eq!(set.len(), 2, "both, once each, and no hang");
+    }
+
+    /// A process whose ppid is itself is the same hazard one step shorter.
+    #[test]
+    fn a_self_parent_terminates() {
+        let mut procs = HashMap::new();
+        procs.insert(7, make_proc(7, 7, b"looped"));
+        assert_eq!(highlight_set(&procs, Some(7)).len(), 1);
     }
 
     #[test]

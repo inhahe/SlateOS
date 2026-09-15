@@ -91,7 +91,13 @@ def detect(roots=rustscan.LANE_C_ROOTS, root=None):
                 after = line[m.end() :].lstrip()
                 if after.startswith("("):
                     continue  # a method call, not a field
-                written = after.startswith("=") and not after.startswith("==")
+                # `=>` is a match arm, not an assignment, and `==` is a
+                # comparison. Both READ the field. Without this, a rule
+                # expressed as a match guard -- `None if !self.hearts_broken
+                # =>` in the Hearts game -- counted as a write, so the field
+                # had "no production reads" and was reported as thrown-away
+                # work when it was the opposite: load-bearing game logic.
+                written = after.startswith("=") and not after.startswith(("==", "=>"))
                 (writes if written else reads)[(m.group(1), inside[n])] += 1
 
     return {
@@ -141,10 +147,25 @@ def main(argv):
             f"by tests{mark}"
         )
 
+    # A baseline line that no longer matches anything is not harmless. It
+    # silently suppresses that exact field if it ever comes back, and it
+    # describes a tree that no longer exists -- the same stale-blocker shape
+    # that had three documents in this repo telling readers a decided question
+    # was still open. Reported, and fatal, so the file cannot rot quietly.
+    live = {f"{path}:{name}" for name, (path, _l) in found.items()}
+    stale = sorted(known - live)
+    for key in stale:
+        print(
+            f"{key}: in the baseline but no longer found. Delete the line -- "
+            f"while it is there, this field cannot be reported again."
+        )
+
     unreported = [row for row in shown if not row[3]]
     if listing:
         print(f"-- {len(found)} field(s); {len(known)} in the baseline.")
         return 0
+    if stale:
+        return 1
     if not unreported:
         print(
             f"ok: no new write-only fields ({len(known)} in the baseline, "
@@ -257,13 +278,38 @@ def self_test():
                 fn t() { let e = Eps::new(); assert_eq!(e.title, "x"); }
             }
             """,
+        # 6. A match guard reads the field. `=>` is not `=`, and reading it
+        #    as one turns every rule expressed as a guard into a "write",
+        #    which leaves the field with no reads and reports live logic as
+        #    dead. Found in `apps/hearts`, where `hearts_broken` gates whether
+        #    a heart may be led -- the rule the game is named after.
+        "apps/zeta/src/main.rs": """
+            pub struct Zeta {
+                pub broken: bool,
+            }
+            impl Zeta {
+                fn go(&mut self) { self.broken = true; }
+                fn may_lead(&self) -> bool {
+                    match self.pick() {
+                        None if !self.broken => false,
+                        _ => true,
+                    }
+                }
+                fn pick(&self) -> Option<u8> { None }
+            }
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn t() { let z = Zeta::new(); assert!(!z.broken); }
+            }
+            """,
     }
 
     # Every one of these was verified by reintroducing the bug it stands for
     # and watching the self-test go red. The first version had only case 1,
     # passed, and was blind to both 4 and 5.
     expected = {"last_export", "caption", "title"}
-    forbidden = {"shown", "counted", "scratch"}
+    forbidden = {"shown", "counted", "scratch", "broken"}
 
     with tempfile.TemporaryDirectory(prefix="fieldscan_selftest_") as tmp:
         base = pathlib.Path(tmp)

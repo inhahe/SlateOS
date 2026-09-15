@@ -20,6 +20,17 @@
 #
 # Format: <path>:<field name>, one per line. `#` starts a comment.
 #
+# A line here that no longer matches anything is FATAL, not harmless: it
+# would silently suppress that field if it came back. Delete it when the
+# field is fixed.
+#
+# `apps/hearts/src/main.rs:hearts_broken` was here and was a FALSE POSITIVE.
+# The detector read the `=>` of a match arm as an assignment, so
+# `None if !self.hearts_broken =>` -- the rule the game is named after,
+# gating whether a heart may be led -- counted as a write rather than a
+# read. The field then had no production reads and was reported as
+# thrown-away work when it was load-bearing logic. Fixed, with a fixture.
+#
 # Noticed on triage and worth a closer look first:
 #   gui/desktop/src/sound_settings.rs:output_device_id -- picking an output
 #     device for an app records the choice and nothing acts on it. Deferred
@@ -45,7 +56,6 @@ apps/diskcleanup/src/main.rs:path_pattern
 apps/diskcleanup/src/main.rs:last_accessed_days
 apps/diskcleanup/src/main.rs:min_age_days
 apps/emojipicker/src/main.rs:last_selected
-apps/hearts/src/main.rs:hearts_broken
 apps/netmanager/src/main.rs:diagnostics_running
 apps/reminders/src/main.rs:completed_at
 apps/remotedesktop/src/main.rs:content_size_bytes

@@ -435,22 +435,34 @@ fn print_usage() {
     println!("Options:");
     println!("  -p, --show-pids     Show PIDs");
     println!("  -u, --uid-changes   Show UID/username changes");
-    println!("  -t, --threads       Show thread counts");
+    println!("      --threads       Show thread counts (extension)");
     println!("  -a, --arguments     Show command line arguments");
     println!("  -l, --long          Long format (full command line)");
     println!("  -c, --compact=no    Don't compact identical subtrees");
     println!("  -A, --ascii         Use ASCII line drawing");
     println!("  -n, --numeric-sort  Sort by PID (default)");
-    println!("  -N, --name-sort     Sort by process name");
+    println!("      --name-sort     Sort by process name (extension)");
     println!("  -k, --show-kernel   Show kernel threads");
-    println!("  -g, --numeric-uid   Show numeric UIDs");
+    println!("      --numeric-uid   Show numeric UIDs (extension)");
     println!("  -H PID, --highlight-pid=PID  Highlight a PID");
-    println!("  -h, --help          Show this help");
+    println!("  -h, --highlight-all Highlight this process and its ancestors");
+    println!("      --help          Show this help");
     println!("  -V, --version       Show version");
 }
 
 fn parse_args() -> Options {
-    let args: Vec<String> = env::args().collect();
+    parse_args_from(&env::args().collect::<Vec<String>>())
+}
+
+/// Parse an explicit argv.
+///
+/// Split from `parse_args` so the bindings can be asserted without a process.
+/// They are worth asserting: four of this program's short options meant
+/// something other than psmisc gives them, and nothing in the crate could
+/// have caught that, because nothing could call the parser.
+///
+/// `--help` and `--version` still exit, so a test must not pass them.
+fn parse_args_from(args: &[String]) -> Options {
     let mut opts = Options {
         show_pids: false,
         show_uid: false,
@@ -469,7 +481,12 @@ fn parse_args() -> Options {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-h" | "--help" | "help" => {
+            // `-h` is `--highlight-all` in psmisc, and `--help` there is
+            // long-only. Implemented rather than reported: highlighting a
+            // process and its ancestors is what `-H PID` already does, and
+            // "current process" is this one's own pid.
+            "-h" | "--highlight-all" => opts.highlight_pid = Some(process::id()),
+            "--help" | "help" => {
                 print_usage();
                 process::exit(0);
             }
@@ -479,16 +496,30 @@ fn parse_args() -> Options {
             }
             "-p" | "--show-pids" => opts.show_pids = true,
             "-u" | "--uid-changes" => opts.show_uid = true,
-            "-t" | "--threads" => opts.show_threads = true,
+            // `-t` is `--thread-names` in psmisc (show full thread names)
+            // and `-T` is `--hide-threads`. What this does -- append
+            // `{N threads}` -- is neither, so it keeps its own name and
+            // gives the letter back rather than claiming a meaning it does
+            // not implement.
+            "--threads" => opts.show_threads = true,
             "-a" | "--arguments" => opts.show_args = true,
             "-l" | "--long" => opts.long_format = true,
             "-c" => opts.compact = false,
             "--compact=no" => opts.compact = false,
             "-A" | "--ascii" => opts.ascii = true,
             "-n" | "--numeric-sort" => opts.sort_by_name = false,
-            "-N" | "--name-sort" => opts.sort_by_name = true,
+            // `-N` is `--ns-sort=TYPE` in psmisc and CONSUMES AN ARGUMENT,
+            // so `pstree -N pid` sorted by namespace there and by name here,
+            // leaving `pid` to be read as a process to show. This one hid
+            // from the checker as well: psmisc writes it `-N TYPE,
+            // --ns-sort=TYPE`, and the reference parser wanted the comma
+            // beside the letter.
+            "--name-sort" => opts.sort_by_name = true,
             "-k" | "--show-kernel" => opts.show_kernel = true,
-            "-g" | "--numeric-uid" => {
+            // `-g` is `--show-pgids` in psmisc. `--numeric-uid` is an
+            // extension -- psmisc has no such option -- so it gives the
+            // letter back and keeps the long name.
+            "--numeric-uid" => {
                 opts.numeric_uid = true;
                 opts.show_uid = true;
             }
@@ -586,6 +617,44 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The four letters psmisc gives to something else.
+    ///
+    /// `-h` is `--highlight-all`, `-t` is `--thread-names`, `-g` is
+    /// `--show-pgids`, `-N` is `--ns-sort=TYPE`. Each meant something else
+    /// here, and `-N` consumes an argument upstream -- so `pstree -N pid`
+    /// sorted by namespace there and left `pid` as a process to show here.
+    #[test]
+    fn short_options_do_not_claim_psmisc_meanings() {
+        // -h highlights this process and its ancestors; it is not help.
+        let opts = parse_args_from(&argv(&["pstree", "-h"]));
+        assert_eq!(opts.highlight_pid, Some(std::process::id()));
+
+        // The extensions keep their long names and give the letters back.
+        let opts = parse_args_from(&argv(&["pstree", "--threads"]));
+        assert!(opts.show_threads);
+        let opts = parse_args_from(&argv(&["pstree", "--numeric-uid"]));
+        assert!(opts.numeric_uid && opts.show_uid);
+        let opts = parse_args_from(&argv(&["pstree", "--name-sort"]));
+        assert!(opts.sort_by_name);
+
+        // The freed letters are now REJECTED rather than silently doing
+        // something else -- `pstree -t` prints "unknown option: -t" and exits
+        // 1, which is the visible failure a missing option should have. That
+        // cannot be asserted here, because the unknown-option arm calls
+        // `process::exit` and would take the test process with it; making it
+        // return a `Result` is a separate change.
+
+        // The ones that already matched psmisc still work.
+        let opts = parse_args_from(&argv(&["pstree", "-H", "42"]));
+        assert_eq!(opts.highlight_pid, Some(42));
+        let opts = parse_args_from(&argv(&["pstree", "-p", "-a", "-l"]));
+        assert!(opts.show_pids && opts.show_args && opts.long_format);
+    }
+
     use super::*;
 
     /// `&[u8]`, so a fixture can hold a name this program must not drop --

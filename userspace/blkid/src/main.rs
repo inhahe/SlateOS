@@ -438,7 +438,11 @@ struct Config {
     tag_filter: Option<(String, String)>, // TAG=VALUE
     show_all: bool,
     cache_file: Option<PathBuf>,
-    no_encoding: bool,
+    /// `-n, --match-types`: which superblock types to report.
+    ///
+    /// `None` means no filter. Replaces `no_encoding`, which this short
+    /// option was wrongly bound to -- see `parse_type_filter`.
+    match_types: Option<TypeFilter>,
     show_help: bool,
     show_version: bool,
     // findfs
@@ -463,7 +467,7 @@ impl Default for Config {
             tag_filter: None,
             show_all: false,
             cache_file: None,
-            no_encoding: false,
+            match_types: None,
             show_help: false,
             show_version: false,
             findfs_spec: None,
@@ -523,7 +527,27 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 }
                 "-p" | "--probe" => cfg.show_all = true,
                 "-g" | "--garbage-collect" => {} // no-op
-                "-n" | "--no-encoding" => cfg.no_encoding = true,
+                // `-n` IS `--match-types` in util-linux, and was bound here
+                // to `--no-encoding`. That is not a missing feature but a
+                // WRONG one: `blkid -n vfat,ext3 dev` is an ordinary real
+                // invocation, and this build used to set a no-op flag and
+                // then treat `vfat,ext3` as a device path -- reporting
+                // filesystems the caller had asked to exclude, with no
+                // diagnostic. The short option for `--no-encoding` is `-d`.
+                "-n" | "--match-types" => {
+                    i = i.saturating_add(1);
+                    let list = args
+                        .get(i)
+                        .ok_or_else(|| "-n requires a type list".to_string())?;
+                    cfg.match_types = Some(parse_type_filter(list)?);
+                }
+                // Accepted and deliberately not stored: this build never
+                // encodes. Labels are carried and printed as raw device
+                // bytes, which is what util-linux does for LABEL too -- its
+                // encoding lives in `-o udev`'s separate `ID_FS_LABEL_ENC`
+                // tag, which this build does not implement. So the request
+                // asks for behaviour already in force.
+                "-d" | "--no-encoding" => {}
                 "-h" | "--help" => cfg.show_help = true,
                 "-V" | "--version" => cfg.show_version = true,
                 other if other.starts_with('-') => {
@@ -545,6 +569,74 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     }
 
     Ok(cfg)
+}
+
+/// A `--match-types` list: the names, and whether they include or exclude.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypeFilter {
+    names: Vec<String>,
+    /// `true` for `vfat,ext3` (report only these), `false` for `novfat`
+    /// (report everything else).
+    include: bool,
+}
+
+impl TypeFilter {
+    /// Whether an entry of this filesystem type should be reported.
+    fn admits(&self, fs_type: &str) -> bool {
+        self.names.iter().any(|n| n == fs_type) == self.include
+    }
+}
+
+/// Parse a `--match-types` list.
+///
+/// Measured against util-linux 2.39.3's man page rather than recalled:
+///
+///     -n, --match-types list
+///         Restrict the probing functions to the specified
+///         (comma-separated) list of superblock types (names). The list
+///         items may be prefixed with "no" to specify the types which
+///         should be ignored.
+///
+/// A MIXED list is REFUSED rather than guessed at. The documentation gives a
+/// pure include (`vfat,ext3,ext4`) and a pure exclude (`nominix`) and says
+/// nothing about what `ext4,novfat` means; libblkid has an answer, but I
+/// could not read it here, and a silently-wrong filter is worse than a
+/// visible error -- the whole reason this option is being touched is that it
+/// used to mean something else entirely and said nothing.
+fn parse_type_filter(list: &str) -> Result<TypeFilter, String> {
+    let mut names = Vec::new();
+    let mut negated = 0usize;
+    let mut total = 0usize;
+
+    for item in list.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        total = total.saturating_add(1);
+        match item.strip_prefix("no") {
+            Some(rest) if !rest.is_empty() => {
+                negated = negated.saturating_add(1);
+                names.push(rest.to_string());
+            }
+            _ => names.push(item.to_string()),
+        }
+    }
+
+    if total == 0 {
+        return Err("--match-types: empty type list".to_string());
+    }
+    if negated != 0 && negated != total {
+        return Err(format!(
+            "--match-types {list}: mixing included and excluded types is not supported; \
+use either a list of types or a list of no-prefixed types"
+        ));
+    }
+
+    Ok(TypeFilter {
+        names,
+        include: negated == 0,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +668,14 @@ fn run_blkid(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
 
     for device in &devices {
         if let Some(info) = detect_filesystem(device) {
+            // Type filter, before the tag filter: -n selects which
+            // superblock types are reported at all.
+            if let Some(ref filter) = cfg.match_types
+                && !filter.admits(&info.fs_type)
+            {
+                continue;
+            }
+
             // Tag filter
             if let Some((ref tag, ref val)) = cfg.tag_filter {
                 let tag_val: &[u8] = match tag.to_uppercase().as_str() {
@@ -729,6 +829,8 @@ fn print_help(personality: Personality) {
             println!("  -s <tag>      Show only specified tag (TYPE, LABEL, UUID)");
             println!("  -t <spec>     Find device by tag (e.g., TYPE=ext4)");
             println!("  -c <file>     Cache file (default: /etc/blkid.tab)");
+            println!("  -n, --match-types <list>  Only these superblock types (or no<type>)");
+            println!("  -d, --no-encoding         Don't encode non-printing characters");
             println!("  -p            Low-level probing mode");
             println!("  -h, --help    Show this help");
             println!("  -V, --version Show version");
@@ -990,6 +1092,48 @@ mod tests {
         assert_eq!(trim_pad(b"\0\0\0", 0), b"");
         assert_eq!(trim_pad(b"", 0), b"");
         assert_eq!(trim_pad(b"AB", 0), b"AB");
+    }
+
+    /// `-n` selects superblock types; it is not `--no-encoding`.
+    ///
+    /// The regression this guards is not a missing feature but a wrong one:
+    /// `-n` used to set a no-op `no_encoding` flag, so `blkid -n vfat,ext3 dev`
+    /// consumed the type list as a device path and then reported filesystems
+    /// the caller had asked to exclude.
+    #[test]
+    fn match_types_includes_or_excludes_by_superblock_type() {
+        let only = parse_type_filter("vfat,ext3,ext4").expect("a plain list parses");
+        assert!(only.include);
+        assert!(only.admits("vfat"));
+        assert!(only.admits("ext4"));
+        assert!(!only.admits("ext2"), "ext2 is not in the list");
+
+        let except = parse_type_filter("nominix").expect("a no-prefixed list parses");
+        assert!(!except.include);
+        assert!(!except.admits("minix"));
+        assert!(except.admits("ext4"), "everything but minix is admitted");
+
+        // Whitespace around items, as a shell may leave it.
+        let spaced = parse_type_filter(" vfat , ext3 ").expect("spaced list parses");
+        assert!(spaced.admits("ext3"));
+
+        // `no` alone is a TYPE NAME, not a negation with nothing after it.
+        let literal = parse_type_filter("no").expect("bare 'no' parses");
+        assert!(literal.include, "bare 'no' is a type name, not a prefix");
+        assert!(literal.admits("no"));
+    }
+
+    /// A mixed list is refused rather than guessed at.
+    #[test]
+    fn match_types_refuses_a_mixed_list() {
+        let err = parse_type_filter("ext4,novfat")
+            .expect_err("mixing include and exclude has no documented meaning");
+        assert!(
+            err.contains("mixing"),
+            "the refusal must say what is wrong, got: {err}"
+        );
+        assert!(parse_type_filter("").is_err(), "an empty list is an error");
+        assert!(parse_type_filter(",,").is_err(), "no items is an error");
     }
 
     #[test]

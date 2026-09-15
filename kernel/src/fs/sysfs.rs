@@ -663,6 +663,12 @@ fn gen_memory_file(name: &str) -> KernelResult<Vec<u8>> {
 }
 
 /// Whether a block device of this name is currently registered.
+///
+/// **Lock order: VFS, then `blkdev`'s registry -- never the reverse.** This is
+/// called from path classification, so a `/sys` lookup holds whatever the VFS
+/// holds and then takes `REGISTRY`. Checked rather than assumed: `blkdev` makes
+/// no call into `crate::fs` anywhere, so there is no path by which the registry
+/// could be held while the VFS is entered, and the order cannot invert.
 fn block_device_exists(name: &str) -> bool {
     crate::blkdev::list_devices().iter().any(|d| d.name == name)
 }

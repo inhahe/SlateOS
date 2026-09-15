@@ -4527,6 +4527,32 @@
 
 ## Judgment Calls
 
+check-design-decisions-bands.py advice is tree-local, and the LINE is the
+risky half (lane A, 2026-09-15). Not pursued, reasoning recorded so nobody
+re-derives it.
+
+  I had a one-line fix staged (build/bands-fix.py) relabelling the output
+  'next is N' as 'next in THIS TREE is N'. Dropped, and NOT filed as a
+  request, because the case it guards cannot happen: the bands are per-lane
+  and only lane A writes 900-999, so lane A's own branch always contains
+  every entry lane A has written. Reading another lane's band off a stale
+  tree does give a wrong number, but you are never entitled to write there.
+
+  What IS fragile is the other half of the same line: 'insert after line
+  NNNN'. That number is only valid for the tree it was computed in and
+  moves under any merge or edit in between -- the 938 shape (an artifact
+  true when written does not say when it stopped being true). It cost me a
+  real off-by-one on 2026-09-15: the reported line was the blank separator
+  after the previous section, not its last line of prose, and an inserter
+  that assumed prose would have buried entry 939 inside 938. The assertion
+  caught it; a reader following the advice by hand would not have been.
+
+  Proper fix, for whoever owns that script (not lane A -- it is outside
+  lane A's write scope): have it print what it expects to find AT that
+  line, e.g. 'insert after line 67618, which should read "" (blank)', so a
+  caller can assert the anchor instead of trusting the count. Relabelling
+  the band number is cosmetic next to that.
+
 A-Q10 implementation notes (lane A, 2026-09-13): where the code actually is.
 
   Investigated but NOT started, because it cannot be validated while main is red

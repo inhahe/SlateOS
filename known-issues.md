@@ -148836,3 +148836,70 @@ pinned by `hwquery`'s parser and its 33 tests — flat `key=value` files, one pe
 category, with the field names `SyscallProvider::field` looks up. A producer
 written against those tests cannot disagree with the consumer, which is the one
 piece of luck in this arrangement.
+
+## A-THE-BOOT-TEST-NEVER-MOUNTS-FAT-SO-A-WHOLE-FILESYSTEMS-WRITE-PATHS-ARE-UNGATED (lane A, 2026-09-15) — **Status: FIXED** (the openat2 half; the coverage gap remains open)
+
+**What happened.** Validating an unrelated change through `scripts/run-qemu.ps1`
+instead of `scripts/boot-test.sh`, the boot died at:
+
+```
+[syscall]   FAIL: native openat2 CREATE with mode 0o4755 returned -2
+FATAL: Post-mount dispatch self-test failed: internal kernel error (-1)
+```
+
+`-2` is `NotSupported` in the native ABI, not `ENOENT` — worth stating, because
+reading it as `ENOENT` (the Linux convention) sends you looking for a failed
+lookup, which is where I went first.
+
+**The bug, which is real.** `open_resolved` creates the file and then stamps the
+requested mode:
+
+```rust
+let perm = create_mode & 0o7777;
+if perm != DEFAULT_CREATE_MODE {
+    crate::fs::Vfs::set_permissions(&norm, perm)?;   // FAT: NotSupported
+}
+```
+
+FAT stores no mode bits, so `set_permissions` answers `NotSupported` and the `?`
+reports that as the result of the *open* — for a file that had already been
+created and was left on the disk. Failure reported, side effect kept. Linux's
+vfat ignores the mode argument and lets the mount's umask govern; that is now
+what this does, for `NotSupported` **only**. Any other error still fails the
+open, because on a filesystem that can store a mode, failing to stamp it is a
+real failure and §639's agreement not to silently discard a requested
+permission bit still applies. Fixed in `kernel/src/fs/handle.rs`.
+
+**The part that is NOT fixed, and is the more useful finding.**
+`scripts/boot-test.sh` never attaches `disk.img` — zero occurrences in the
+file. `run-qemu.ps1` attaches it as a virtio disk. So under the canonical
+harness `fat::init` fails, the root stays `memfs`, and `memfs` stores the `u16`
+whole — which makes the faulty arm **unreachable in the gate everyone trusts**.
+The bug has been present since the mode stamp landed (`759607e04`, 2026-07-22)
+and the test case that catches it since `295bde6a4` (2026-08-30). Both sat green
+for six weeks because the fixture cannot reach them.
+
+So every FAT write path — create, unlink, rename, timestamps, the short-name
+guard — is exercised by nothing gated. `fat.rs` says so out loud in a comment
+above `self_test_datetime` ("the boot test mounts an in-memory root ... so
+`init` fails and the whole suite is skipped"), which means this was known,
+written down next to the code, and still did not reach anyone: the note explains
+why one suite was extracted, not that a filesystem is ungated.
+
+**Why I am not fixing the gap in the same change.** Attaching a FAT disk to
+`boot-test.sh` changes what mounts at `/` for every self-test in the run, so a
+number of suites would start exercising paths they have never run — which is the
+point, and is also exactly why it deserves its own change with its own boot
+rather than riding along on a sysfs feature. The proper fix is a *second* boot
+configuration rather than a changed one: keep the memfs-root run as the gate,
+add a FAT-root run, and let the difference between them be visible. Filed rather
+than done, with the mechanism recorded so the next person does not have to
+rediscover which harness mounts what.
+
+**A 937 note on how this was found.** It was found by accident, by a harness I
+had picked for an unrelated reason, and my first instinct was to treat the
+failure as a regression in my own merge. It is neither: the tree is unchanged
+and the canonical gate is still green. A defect that only a non-canonical
+fixture can see is indistinguishable from "no defect" to everyone reading the
+gate — the eighth mode of §937 (correct on every instance that exists) with the
+population being *fixtures* rather than hardware.

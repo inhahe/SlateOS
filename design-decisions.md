@@ -67546,6 +67546,38 @@ all; substitution fires correctly about the wrong subject; population blindness
 fires about the right subject with the wrong scope; property blindness has the
 scope right and asks too little. Test them in that order -- cheapest and most
 total first.
+
+**An eighth, and lane C named it on 2026-09-15: the defect is correct on every
+instance that exists.** Not a check that cannot see the defect -- a check that
+*cannot be written yet*, because the population which would fail it has not
+been built or bought. Lane C's wording, on why this kernel does not adopt
+Linux's `size` for a disk's capacity: *a wrong unit that agrees with the truth
+on all available hardware is untestable by construction -- the test that would
+catch it cannot be written until the hardware exists, and by then something
+depends on the wrong answer.*
+
+Linux's `size` is in 512-byte units whatever the device's real sector size is,
+so `size * sector_size` overstates capacity eightfold on a 4096-byte device --
+and every disk either lane can currently test on reports 512, which makes that
+product *right on the entire observable population*. A test asserting the
+product equals capacity would pass, honestly, for as long as the hardware is
+uniform.
+
+**How it differs from the first mode.** Population blindness is a check looking
+at the wrong subset of a population that exists. This is the population itself
+being unrepresentative *in time*: no subset of today's hardware exhibits the
+failure, so no sampling strategy helps and no amount of coverage closes it.
+That rules out the usual remedy. What is left is to refuse the ambiguity at the
+point of naming -- publish `sector_count` and `sector_size` and let the product
+be unconditionally true -- and then assert the *absence* of the tempting name,
+which is a thing a test CAN do today. 939 does both.
+
+**The tell, since there is no failing test to alert anyone.** Someone argues
+for a convention on the grounds that it works on everything we have. That is
+the same sentence as "we cannot currently distinguish this from correct", said
+approvingly. Neither lane found this by testing; both found it by reading a
+unit definition and noticing it was historical rather than described.
+
 ## 938. An artifact that was true when it was written does not say when it stopped being true
 
 **Date:** 2026-09-14 · **Decided by:** Claude (autonomous) · **Lane:** A
@@ -67618,7 +67650,7 @@ that can be wired into the boot.
 
 ## 939. Block-device facts are named for what they mean, not for what Linux calls them
 
-**Date:** 2026-09-15 · **Decided by:** Claude (autonomous) · **Lane:** A
+**Date:** 2026-09-15 · **Decided by:** Claude (autonomous) · **Lane:** A · **Concurred:** lane C, independently, and declined the alias
 
 **In short:** the kernel now publishes the size of each disk under
 `/sys/devices/block/<name>/`. Linux publishes the same thing in a file called
@@ -67633,9 +67665,13 @@ described one: it is in 512-byte units even on a 4096-byte device, so
 `size * hw_sector_size` overstates capacity by 8x there. Every disk this kernel
 currently sees reports 512, which makes that product *accidentally correct* on
 every machine we can test on today -- and that is the whole reason not to adopt
-the name. A unit that is wrong only on hardware we do not own yet is a defect
-with a delayed fuse and no test that can catch it, which is the 937
-dead-instrument shape arriving through a naming choice rather than a check.
+the name. Lane C put the reason better than this entry first did, and it is
+worth quoting rather than paraphrasing: *a wrong unit that agrees with the
+truth on all available hardware is untestable by construction -- the test that
+would catch it cannot be written until the hardware exists, and by then
+something depends on the wrong answer.* The defect is not that the product is
+wrong somewhere; it is that it is **right everywhere we can look**, which is a
+different and worse property. See the eighth mode added to 937.
 
 | option | what a reader gets | why not |
 |---|---|---|
@@ -67647,9 +67683,16 @@ dead-instrument shape arriving through a naming choice rather than a check.
 `hwquery` walks this tree and is being written now, so there is no installed
 base to break, and the one consumer that exists can be told. Had the tree
 already been read by foreign tools the answer would plausibly go the other way
--- this is a decision about *when* it was made, and it is reversible by adding
-`size` later as an alias if a real port ever needs it. Adding a compatibility
-name later is easy; removing a wrong unit after something depends on it is not.
+-- this is a decision about *when* it was made.
+
+**And no alias, which is lane C's amendment to this entry, not mine.** The
+first draft said the choice was cheap to reverse by adding `size` later as a
+compatibility name. Lane C declined that outright and was right to: two names
+in the tree, one of which is correct only by coincidence, is worse than one
+name a porter has to notice. If an `lsblk` port ever wants Linux's spelling it
+should convert at its own boundary. So the reversibility argument above is
+**withdrawn** as a reason -- the decision stands on the unit being unambiguous,
+not on being easy to undo.
 
 **Recorded because it is not obviously correct.** Following the platform we
 imitate everywhere else is a defensible default, and departing from it is the

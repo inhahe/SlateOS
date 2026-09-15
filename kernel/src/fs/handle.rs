@@ -587,7 +587,30 @@ fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelRes
             // would not be.
             let perm = create_mode & 0o7777;
             if perm != DEFAULT_CREATE_MODE {
-                crate::fs::Vfs::set_permissions(&norm, perm)?;
+                match crate::fs::Vfs::set_permissions(&norm, perm) {
+                    Ok(()) => {}
+                    // A filesystem with no permission model must not make
+                    // the create FAIL. FAT stores no mode bits and answers
+                    // `NotSupported`; propagating that reported failure for
+                    // a file that had already been created and was left
+                    // behind -- the worst of both answers, and indefensible
+                    // whichever way you think the mode should be handled.
+                    // Linux's vfat behaves as this arm does: the mode
+                    // argument is ignored and the mount's umask governs.
+                    //
+                    // `NotSupported` ONLY. On a filesystem that can store a
+                    // mode, failing to stamp one is a real failure, and
+                    // 639's agreement not to silently discard a permission
+                    // bit the caller asked for applies in full.
+                    //
+                    // Invisible to the boot test, which is why it survived:
+                    // `boot-test.sh` never attaches `disk.img`, so `fat::init`
+                    // fails, the root stays `memfs` -- which stores the u16
+                    // whole -- and this arm is unreachable there. It shows up
+                    // the moment anything boots with a real FAT root.
+                    Err(KernelError::NotSupported) => {}
+                    Err(e) => return Err(e),
+                }
             }
 
             let handle = allocate_handle(norm.clone(), 0, 0, flags)?;

@@ -53,6 +53,14 @@
 // protocol packets, and machine memory. Arithmetic is on offsets bounded
 // by section sizes / packet lengths, indexing/slicing is gated by
 // length checks at the call site (errors return Err, not panic).
+//
+// THAT CLAIM WAS CHECKED RATHER THAN TRUSTED, and it was false when
+// written: both argv parsers did `arg[0]` on an argument that may be
+// empty, so `gdb ""` panicked. Fixed to `first()`. Note what the blanket
+// allow cost -- `indexing_slicing` is `warn` at the workspace level and
+// would have named both sites on the day they were written, and this
+// allow is why nobody saw them. A crate-wide allow whose justification
+// is "every site is gated" silently covers the sites that are not.
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use std::io::{self, Write};
@@ -3545,6 +3553,16 @@ struct Args {
 // in the test cfg and live in the real build. Scoped to `test` rather than
 // allowed outright, so a genuinely dead item here is still reported.
 #[cfg_attr(test, allow(dead_code))]
+// The crate-level allow above is NOT in force here, and that is deliberate.
+// Measured: removing it crate-wide reports 542 sites (268 arithmetic, 176
+// indexing, 98 slicing), nearly all of them offsets into a DWARF section or
+// a remote-serial packet whose length was already checked -- auditing those
+// would be churn. But argv is different in kind: its entries are whatever
+// the user typed, INCLUDING the empty string, and nothing here bounds them.
+// Two `arg[0]` sites in this file panicked on `gdb ""` for exactly that
+// reason. Denying the lint on these two functions keeps the lint's value
+// where lengths are unknown without paying for it where they are known.
+#[deny(clippy::indexing_slicing)]
 fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
     let mut args = Args {
         personality: Personality::Gdb,
@@ -3567,17 +3585,13 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
         })
         .collect();
 
-    if arg_ptrs.is_empty() {
+    let Some(&argv0) = arg_ptrs.first() else {
         return args;
-    }
-
-    // Detect personality from argv[0]
-    args.personality = detect_personality(arg_ptrs[0]);
+    };
+    args.personality = detect_personality(argv0);
 
     let mut i = 1;
-    while i < arg_ptrs.len() {
-        let arg = arg_ptrs[i];
-
+    while let Some(&arg) = arg_ptrs.get(i) {
         // OWNERSHIP IS DECIDED HERE, ahead of the match, and that position is
         // the whole fix. The arms below claim `-q`, `-v`, `-h` and `-x` by
         // spelling, and a match arm cannot ask whether the argument is even
@@ -3611,12 +3625,17 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
             }
             b"-x" => {
                 i += 1;
-                if i < arg_ptrs.len() {
-                    args.command_file = Some(arg_ptrs[i].to_vec());
+                if let Some(path) = arg_ptrs.get(i) {
+                    args.command_file = Some((*path).to_vec());
                 }
             }
             _ => {
-                if arg[0] != b'-' {
+                // `first()`, not `[0]`: an argv entry may be EMPTY, and
+                // `gdb ""` indexed a zero-length slice and panicked. An empty
+                // argument is not an option, which is what `None != Some(b'-')`
+                // says, so it becomes the program name -- and failing to open
+                // a file called "" is a diagnosable error, unlike a panic.
+                if arg.first() != Some(&b'-') {
                     if args.binary_path.is_none() {
                         args.binary_path = Some(arg.to_vec());
                     }
@@ -3643,6 +3662,16 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
 // in the test cfg and live in the real build. Scoped to `test` rather than
 // allowed outright, so a genuinely dead item here is still reported.
 #[cfg_attr(test, allow(dead_code))]
+// The crate-level allow above is NOT in force here, and that is deliberate.
+// Measured: removing it crate-wide reports 542 sites (268 arithmetic, 176
+// indexing, 98 slicing), nearly all of them offsets into a DWARF section or
+// a remote-serial packet whose length was already checked -- auditing those
+// would be churn. But argv is different in kind: its entries are whatever
+// the user typed, INCLUDING the empty string, and nothing here bounds them.
+// Two `arg[0]` sites in this file panicked on `gdb ""` for exactly that
+// reason. Denying the lint on these two functions keeps the lint's value
+// where lengths are unknown without paying for it where they are known.
+#[deny(clippy::indexing_slicing)]
 fn parse_args_server(argc: i32, argv: *const *const u8) -> Args {
     let mut args = Args {
         personality: Personality::GdbServer,
@@ -3664,15 +3693,13 @@ fn parse_args_server(argc: i32, argv: *const *const u8) -> Args {
         })
         .collect();
 
-    if arg_ptrs.is_empty() {
+    let Some(&argv0) = arg_ptrs.first() else {
         return args;
-    }
-
-    args.personality = detect_personality(arg_ptrs[0]);
+    };
+    args.personality = detect_personality(argv0);
 
     let mut i = 1;
-    while i < arg_ptrs.len() {
-        let arg = arg_ptrs[i];
+    while let Some(&arg) = arg_ptrs.get(i) {
         match arg {
             b"--help" => {
                 args.show_help = true;
@@ -3682,12 +3709,17 @@ fn parse_args_server(argc: i32, argv: *const *const u8) -> Args {
             }
             _ => {
                 // First non-flag arg is [host:]port
-                if arg[0] != b'-' && args.server_port == 1234 && args.binary_path.is_none() {
+                // Same empty-argv panic as the gdb parser above.
+                if arg.first() != Some(&b'-')
+                    && args.server_port == 1234
+                    && args.binary_path.is_none()
+                {
                     // Try to parse as port number (possibly with host: prefix)
-                    let port_str = if let Some(colon_pos) = arg.iter().rposition(|&b| b == b':') {
-                        &arg[colon_pos + 1..]
-                    } else {
-                        arg
+                    let port_str = match arg.iter().rposition(|&b| b == b':') {
+                        // Saturating, so a `usize::MAX` position cannot wrap
+                        // to 0 and silently reinterpret the whole argument.
+                        Some(colon) => arg.get(colon.saturating_add(1)..).unwrap_or(&[]),
+                        None => arg,
                     };
                     if let Some(port) = parse_u64(port_str) {
                         args.server_port = port as u16;
@@ -3896,6 +3928,17 @@ mod tests {
     /// `main`, which is why nothing tested it before: the awkwardness was in
     /// the calling convention rather than in the logic.
     fn parse_gdb(argv: &[&str]) -> Args {
+        parse_with(parse_args_gdb, argv)
+    }
+
+    /// The gdbserver personality's parser, which has its own argv loop.
+    fn parse_server(argv: &[&str]) -> Args {
+        parse_with(parse_args_server, argv)
+    }
+
+    /// Generalised from `parse_gdb` when a defect turned out to sit in BOTH
+    /// argv loops: testing one of a copied pair proves nothing about the other.
+    fn parse_with(parser: fn(i32, *const *const u8) -> Args, argv: &[&str]) -> Args {
         let owned: Vec<Vec<u8>> = argv
             .iter()
             .map(|s| {
@@ -3907,9 +3950,39 @@ mod tests {
         let ptrs: Vec<*const u8> = owned.iter().map(|v| v.as_ptr()).collect();
         // SAFETY: `owned` outlives this call and keeps every buffer alive,
         // each is NUL-terminated, and `argc` is the pointer count exactly.
-        let parsed = parse_args_gdb(i32::try_from(ptrs.len()).unwrap_or(0), ptrs.as_ptr());
+        let parsed = parser(i32::try_from(ptrs.len()).unwrap_or(0), ptrs.as_ptr());
         drop(owned);
         parsed
+    }
+
+    /// An EMPTY argv entry must not panic either parser.
+    ///
+    /// `gdb ""` is an ordinary command line -- a shell passes the empty
+    /// string straight through -- and both loops tested for a leading dash
+    /// with `arg[0]`, which panics on a zero-length slice. `clippy::
+    /// indexing_slicing` is `warn` at the workspace level and would have
+    /// named both sites when they were written; the crate-level
+    /// `#![allow(...)]` is why it did not.
+    #[test]
+    fn an_empty_argument_does_not_panic_either_parser() {
+        // Not an option, so it is the program name. Opening a file called
+        // "" then fails with a diagnosable error, which a panic is not.
+        let a = parse_gdb(&["gdb", ""]);
+        assert_eq!(a.binary_path.as_deref(), Some(&b""[..]));
+        assert!(a.unknown_option.is_none(), "empty is not an unknown option");
+
+        // The server loop is a separate copy of the same test, and the
+        // reason the helper above was generalised.
+        let s = parse_server(&["gdbserver", ""]);
+        assert_eq!(s.server_port, 1234, "empty is not a port");
+        assert!(s.binary_path.is_none());
+        assert!(s.unknown_option.is_none());
+
+        // And after `--args` it is an ordinary argument for the program,
+        // which is the interaction with the fix in the previous commit.
+        let a = parse_gdb(&["gdb", "--args", "./prog", "", "-q"]);
+        assert_eq!(a.inferior_args, vec![b"".to_vec(), b"-q".to_vec()]);
+        assert!(!a.quiet);
     }
 
     /// The arguments after the program are collected rather than dropped.

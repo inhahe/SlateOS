@@ -84,6 +84,52 @@ terminator before comparing — and the formatter has to emit the
 and context output alike. Upstream diffutils carries a flag per side for exactly
 this.
 
+## TD-B-NINE-CRATES-ALLOW-TWO-CORRECTNESS-LINTS-CRATE-WIDE — 2026-09-15 — OPEN
+
+**In short:** nine `userspace/` programs switch off two warnings that exist to
+catch crashes -- "this array access might be out of range" and "this sum might
+overflow" -- for the whole program at once. In `gdb` that hid two real crashes:
+typing `gdb ""` (an empty filename) made the debugger panic instead of printing
+an error. Fixed in `gdb`; the other eight are unaudited.
+
+**The crates:** `ar`, `ftp`, `gdb`, `ldd`, `objdump`, `readelf`, `stty`,
+`telnet`, `zip` -- each with `#![allow(clippy::arithmetic_side_effects,
+clippy::indexing_slicing)]` at crate level. `indexing_slicing` is `warn` at the
+workspace level (root `Cargo.toml`), so these allows are a deliberate opt-out.
+
+**Why they exist, and it is a fair reason.** These are binary-format parsers.
+Measured on `gdb`: removing the allow reports **542 sites** -- 268 arithmetic,
+176 indexing, 98 slicing -- and nearly all are offsets into a DWARF section or
+a remote-serial packet whose length was checked a few lines earlier. Rewriting
+those as `.get()` would be churn with no correctness gain.
+
+**Why it is still debt.** The justification written in `gdb` was *"indexing/
+slicing is gated by length checks at the call site"*. That was checked rather
+than trusted and it was **false**: both argv loops did `arg[0]`, and an argv
+entry may be empty. A crate-wide allow whose justification is "every site is
+gated" cannot be verified by reading it, and it covers precisely the sites that
+are not -- which are the ones handling input whose length the program does not
+control.
+
+**The fix, and it is cheap.** Not removing the allow: re-arming the lint where
+lengths are unknown. `#[deny(clippy::indexing_slicing)]` on the two argv
+parsers in `gdb` turned up **six further sites** beyond the two panics, all
+safe-but-incidentally so (an `is_empty()` check two lines above an `[0]`, a
+`while i < len` above an `[i]`). They are now `first()`, `get(i)` and
+`get(colon + 1..)`, where the bound is structural and a later edit cannot
+separate the guard from the access. Clippy refuses the build if `arg[0]`
+returns -- verified by putting it back.
+
+**What is left:** the same treatment for the other eight. None has the `arg[0]`
+argv pattern (checked), so there is no known panic in them today; what is
+unknown is whether any of their 500-odd allowed sites touches a length the
+program does not control.
+
+**Where it lives:** the nine `userspace/<crate>/src/main.rs` crate attributes;
+`gdb`'s is the worked example.
+
+---
+
 ## TD-B-AUDITD-LOGGED-A-DAEMON-START-THAT-NEVER-HAPPENED — 2026-09-15 — FIXED by refusing
 
 **In short:** `auditd` wrote `DaemonStart … res=success` into the audit log and

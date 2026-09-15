@@ -53,6 +53,12 @@ use std::time::Duration;
 // Constants
 // ============================================================================
 
+/// What the window says before any contact exists.
+const NO_CONTACTS_LINES: [&str; 2] = [
+    "No contacts.",
+    "Nothing is saved between runs -- this app has no filesystem access, so anyone you add is gone when the window closes.",
+];
+
 const SIDEBAR_WIDTH: f32 = 280.0;
 const ALPHABET_BAR_WIDTH: f32 = 24.0;
 const HEADER_HEIGHT: f32 = 56.0;
@@ -2284,6 +2290,44 @@ impl ContactsApp {
         self.draw_alphabet(&mut f, &l);
         self.draw_panel(&mut f, &l);
         self.draw_status(&mut f, &l);
+
+        // Last, so nothing paints over it. Keyed on the store being empty so
+        // it retires itself at the first real contact.
+        if self.store.contacts.is_empty() {
+            for (i, line) in NO_CONTACTS_LINES.iter().enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+                let y = l.window.y + 2.0 + i as f32 * 12.0;
+                // A window can be two pixels across. `w - 16.0` goes negative
+                // there, and a line that does not fit vertically must not be
+                // drawn at all -- both caught by
+                // `every_run_of_text_is_bounded_and_inside_the_window`, which
+                // is the second render-invariant test in this sweep to reject
+                // one of these banners. They read commands rather than pixels,
+                // so a clip cannot hide an overrun from them.
+                let avail = (l.window.w - 16.0).max(0.0);
+                if avail <= 0.0 || y + 12.0 > l.window.y + l.window.h {
+                    break;
+                }
+                f.push(RenderCommand::Text {
+                    x: l.window.x + 8.0,
+                    y,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 11.0 } else { 9.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(avail),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
         f
     }
 
@@ -3377,6 +3421,28 @@ impl ContactsApp {
     }
 
     /// Populate with sample contacts for demonstration.
+    /// Groups and contacts, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `main` called it, so the window opened
+    /// on Alice Anderson of Acme Corp, her mobile and work numbers, two email
+    /// addresses, a birthday, a home address and the note "Met at the Rust
+    /// conference 2024" -- filed under Family, Work and Friends, in the place
+    /// the user's own address book goes.
+    ///
+    /// **Note how carefully it was built.** The numbers are `+1-555-01xx`,
+    /// which is the reserved fictional range, and the domain is `example.com`,
+    /// which is reserved for documentation. Whoever wrote this made sure
+    /// nobody could accidentally ring or mail these people. That is genuinely
+    /// thoughtful, and it is the third fixture in this sweep where the
+    /// *harmful* part was handled with care and the *claim* was not examined
+    /// at all -- `apps/reminders` made its due dates relative so "overdue"
+    /// would stay true, and `apps/habits` spread its check-ins to a plausible
+    /// 70%.
+    ///
+    /// **A careful fixture is harder to notice than a careless one.** Stale
+    /// dates, a routable phone number or a flat 100% streak would each have
+    /// been questioned sooner than the polished version was.
+    #[cfg(test)]
     pub fn load_sample_data(&mut self) {
         // Groups
         let g1 = self
@@ -4037,8 +4103,8 @@ fn main() -> ExitCode {
     // The previous `main` was three lines: build the store, load the sample
     // data, render one frame into a `Vec` and drop it. It exercised the
     // drawing code and showed nobody the result.
+    // Opens empty. It used to call `load_sample_data`.
     let mut app = ContactsApp::new();
-    app.load_sample_data();
     app::launch("contacts", &mut app)
 }
 
@@ -4060,6 +4126,48 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A fresh window holds nobody, and says nothing is kept.
+    ///
+    /// `main` called `load_sample_data`, so the window opened on Alice
+    /// Anderson of Acme Corp with two phone numbers, two email addresses, a
+    /// birthday, a home address and a note about meeting her at a conference
+    /// -- in the place the user's own address book goes.
+    ///
+    /// The fixture was built with real care: `+1-555-01xx` is the reserved
+    /// fictional range and `example.com` is reserved for documentation, so
+    /// nobody could accidentally ring or mail these people. That care is why
+    /// it lasted. A careful fixture is harder to notice than a careless one.
+    #[test]
+    fn a_fresh_window_holds_nobody_and_says_nothing_is_kept() {
+        let app = ContactsApp::new();
+        assert!(
+            app.store.contacts.is_empty(),
+            "contacts appeared from nowhere"
+        );
+        assert!(app.store.groups.is_empty(), "groups appeared from nowhere");
+
+        let texts: Vec<String> = app
+            .render()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_CONTACTS_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NO_CONTACTS_LINES
+                .iter()
+                .any(|l| l.contains("Nothing is saved between runs")),
+            "nothing warns that a contact added today does not survive the window",
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Helper: create a minimal contact for tests

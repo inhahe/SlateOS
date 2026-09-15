@@ -24,7 +24,6 @@
 //! dhcpcd --no-ntp                 Don't configure NTP servers
 //! ```
 
-#![deny(clippy::all)]
 // DHCP_MIN_LEN, DHCP_DECLINE, build_decline, msg_type_name, and the
 // MsgType::name helper are declared up-front because they encode the
 // RFC 2131 / 2132 protocol surface the real implementation must
@@ -213,19 +212,20 @@ fn ip_to_string(ip: u32) -> String {
 
 /// Convert a subnet mask (big-endian u32) to CIDR prefix length.
 fn mask_to_cidr(mask: u32) -> u32 {
-    mask.to_be_bytes()
-        .iter()
-        .fold(0u32, |acc, &byte| acc + (byte.count_ones()))
+    // The per-byte popcounts of a u32 summed IS the popcount of the u32, so
+    // the fold was doing by hand what one instruction does. Same answer for
+    // a non-contiguous mask as before: both count set bits, not leading ones.
+    mask.count_ones()
 }
 
 /// Format a 6-byte MAC address as a colon-separated hex string.
 fn mac_to_string(mac: &[u8]) -> String {
-    if mac.len() < 6 {
+    let Some(m) = mac.first_chunk::<6>() else {
         return "??:??:??:??:??:??".to_string();
-    }
+    };
     format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        m[0], m[1], m[2], m[3], m[4], m[5]
     )
 }
 
@@ -345,37 +345,41 @@ impl DhcpMessage {
 
     /// Parse a DHCP message from raw bytes.
     fn parse(data: &[u8]) -> Option<Self> {
-        if data.len() < DHCP_HEADER_LEN + 4 {
-            return None;
-        }
+        /// The fixed part: the BOOTP header plus the four-byte magic cookie.
+        const FIXED: usize = DHCP_HEADER_LEN + 4;
 
-        let op = data[0];
-        let htype = data[1];
-        let hlen = data[2];
-        let hops = data[3];
-        let xid = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        let secs = u16::from_be_bytes([data[8], data[9]]);
-        let flags = u16::from_be_bytes([data[10], data[11]]);
-        let ciaddr = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
-        let yiaddr = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
-        let siaddr = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
-        let giaddr = u32::from_be_bytes([data[24], data[25], data[26], data[27]]);
+        // `first_chunk` IS the `data.len() < FIXED` test, and it hands back a
+        // `&[u8; FIXED]`, so every constant index below is checked at compile
+        // time instead of resting on a comparison written above them.
+        let h: &[u8; FIXED] = data.first_chunk()?;
+
+        let op = h[0];
+        let htype = h[1];
+        let hlen = h[2];
+        let hops = h[3];
+        let xid = u32::from_be_bytes([h[4], h[5], h[6], h[7]]);
+        let secs = u16::from_be_bytes([h[8], h[9]]);
+        let flags = u16::from_be_bytes([h[10], h[11]]);
+        let ciaddr = u32::from_be_bytes([h[12], h[13], h[14], h[15]]);
+        let yiaddr = u32::from_be_bytes([h[16], h[17], h[18], h[19]]);
+        let siaddr = u32::from_be_bytes([h[20], h[21], h[22], h[23]]);
+        let giaddr = u32::from_be_bytes([h[24], h[25], h[26], h[27]]);
 
         let mut chaddr = [0u8; 16];
-        chaddr.copy_from_slice(&data[28..44]);
+        chaddr.copy_from_slice(&h[28..44]);
 
         let mut sname = [0u8; 64];
-        sname.copy_from_slice(&data[44..108]);
+        sname.copy_from_slice(&h[44..108]);
 
         let mut file = [0u8; 128];
-        file.copy_from_slice(&data[108..236]);
+        file.copy_from_slice(&h[108..236]);
 
         // Validate magic cookie.
-        if data[236..240] != MAGIC_COOKIE {
+        if h[236..240] != MAGIC_COOKIE {
             return None;
         }
 
-        let options = parse_options(&data[240..])?;
+        let options = parse_options(data.get(FIXED..)?);
 
         Some(Self {
             op,
@@ -402,60 +406,64 @@ impl DhcpMessage {
 // ============================================================================
 
 /// Parse a TLV-encoded DHCP options section.
-fn parse_options(data: &[u8]) -> Option<DhcpOptions> {
-    let mut opts = DhcpOptions::default();
-    let mut i = 0;
+/// The first four bytes of an option value, big-endian.
+///
+/// `None` when the option is shorter than the field it claims to carry,
+/// which replaces eight copies of an `if len >= 4` guard standing next to
+/// four indexes that trusted it.
+fn opt_be32(value: &[u8]) -> Option<u32> {
+    value.first_chunk::<4>().copied().map(u32::from_be_bytes)
+}
 
-    while i < data.len() {
-        let code = data[i];
+/// Every whole four-byte group in an option value. A trailing partial group
+/// is dropped, exactly as the `while j + 4 <= len` loops did.
+fn opt_be32_list(value: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    value
+        .chunks_exact(4)
+        .filter_map(|c| c.first_chunk::<4>().copied())
+        .map(u32::from_be_bytes)
+}
+
+fn parse_options(data: &[u8]) -> DhcpOptions {
+    let mut opts = DhcpOptions::default();
+    // The remaining bytes rather than an index into them. Every `break` below
+    // is a malformed chain -- a length byte with no value after it, or a
+    // length longer than what is left -- and the walk stops there because
+    // nothing past a broken TLV can be located.
+    let mut rest = data;
+
+    while let Some((&code, tail)) = rest.split_first() {
         if code == OPT_END {
             break;
         }
         if code == OPT_PAD {
-            i += 1;
+            rest = tail;
             continue;
         }
-        i += 1;
-        if i >= data.len() {
+        let Some((&len, tail)) = tail.split_first() else {
             break;
-        }
-        let len = data[i] as usize;
-        i += 1;
-        if i + len > data.len() {
+        };
+        let Some((value, tail)) = tail.split_at_checked(len as usize) else {
             break;
-        }
-        let value = &data[i..i + len];
+        };
+        rest = tail;
+
         match code {
-            OPT_MSG_TYPE if len >= 1 => {
-                opts.msg_type = Some(value[0]);
+            OPT_MSG_TYPE => {
+                if let Some(&b) = value.first() {
+                    opts.msg_type = Some(b);
+                }
             }
-            OPT_SUBNET_MASK if len >= 4 => {
-                opts.subnet_mask =
-                    Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+            OPT_SUBNET_MASK => {
+                if let Some(v) = opt_be32(value) {
+                    opts.subnet_mask = Some(v);
+                }
             }
             OPT_ROUTER => {
-                let mut j = 0;
-                while j + 4 <= len {
-                    opts.routers.push(u32::from_be_bytes([
-                        value[j],
-                        value[j + 1],
-                        value[j + 2],
-                        value[j + 3],
-                    ]));
-                    j += 4;
-                }
+                opts.routers.extend(opt_be32_list(value));
             }
             OPT_DNS => {
-                let mut j = 0;
-                while j + 4 <= len {
-                    opts.dns_servers.push(u32::from_be_bytes([
-                        value[j],
-                        value[j + 1],
-                        value[j + 2],
-                        value[j + 3],
-                    ]));
-                    j += 4;
-                }
+                opts.dns_servers.extend(opt_be32_list(value));
             }
             OPT_HOSTNAME => {
                 opts.hostname = String::from_utf8(value.to_vec()).ok();
@@ -463,42 +471,39 @@ fn parse_options(data: &[u8]) -> Option<DhcpOptions> {
             OPT_DOMAIN_NAME => {
                 opts.domain_name = String::from_utf8(value.to_vec()).ok();
             }
-            OPT_BROADCAST if len >= 4 => {
-                opts.broadcast = Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
-            }
-            OPT_NTP => {
-                let mut j = 0;
-                while j + 4 <= len {
-                    opts.ntp_servers.push(u32::from_be_bytes([
-                        value[j],
-                        value[j + 1],
-                        value[j + 2],
-                        value[j + 3],
-                    ]));
-                    j += 4;
+            OPT_BROADCAST => {
+                if let Some(v) = opt_be32(value) {
+                    opts.broadcast = Some(v);
                 }
             }
-            OPT_LEASE_TIME if len >= 4 => {
-                opts.lease_time =
-                    Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+            OPT_NTP => {
+                opts.ntp_servers.extend(opt_be32_list(value));
             }
-            OPT_SERVER_ID if len >= 4 => {
-                opts.server_id = Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+            OPT_LEASE_TIME => {
+                if let Some(v) = opt_be32(value) {
+                    opts.lease_time = Some(v);
+                }
             }
-            OPT_RENEWAL_TIME if len >= 4 => {
-                opts.renewal_time =
-                    Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+            OPT_SERVER_ID => {
+                if let Some(v) = opt_be32(value) {
+                    opts.server_id = Some(v);
+                }
             }
-            OPT_REBINDING_TIME if len >= 4 => {
-                opts.rebinding_time =
-                    Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+            OPT_RENEWAL_TIME => {
+                if let Some(v) = opt_be32(value) {
+                    opts.renewal_time = Some(v);
+                }
+            }
+            OPT_REBINDING_TIME => {
+                if let Some(v) = opt_be32(value) {
+                    opts.rebinding_time = Some(v);
+                }
             }
             _ => { /* Unrecognized option; skip. */ }
         }
-        i += len;
     }
 
-    Some(opts)
+    opts
 }
 
 /// Write a single TLV option into a buffer.
@@ -507,7 +512,7 @@ fn write_option(buf: &mut Vec<u8>, code: u8, data: &[u8]) {
     // Truncate oversized options to 255 bytes (RFC 2132 max length field is u8).
     let len = data.len().min(255);
     buf.push(len as u8);
-    buf.extend_from_slice(&data[..len]);
+    buf.extend_from_slice(data.get(..len).unwrap_or(data));
 }
 
 /// Write the message-type option (53).
@@ -718,7 +723,18 @@ impl LeaseInfo {
     fn from_ack(msg: &DhcpMessage, obtained_at: u64) -> Self {
         let lease_time = msg.options.lease_time.unwrap_or(86400);
         let renewal_time = msg.options.renewal_time.unwrap_or(lease_time / 2);
-        let rebinding_time = msg.options.rebinding_time.unwrap_or(lease_time * 7 / 8);
+        // RFC 2131 puts T2 at 0.875 of the lease. DIVIDING FIRST is not a
+        // style choice: `lease_time * 7` overflows u32 for any lease above
+        // ~19.5 years, and 0xFFFFFFFF is not a hostile value -- RFC 2131
+        // defines it as an INFINITE lease. So a conforming server offering
+        // one panicked this client in debug, and in release wrapped to a
+        // small T2, making it rebind almost immediately and forever.
+        //
+        // Dividing first costs at most 7 seconds of precision on T2.
+        let rebinding_time = msg
+            .options
+            .rebinding_time
+            .unwrap_or((lease_time / 8).saturating_mul(7));
 
         Self {
             ip_address: msg.yiaddr,
@@ -775,13 +791,25 @@ impl LeaseInfo {
             s.push_str(&format!("Broadcast    : {}\n", ip_to_string(bcast)));
         }
         for (i, &r) in self.routers.iter().enumerate() {
-            s.push_str(&format!("Router {:>2}    : {}\n", i + 1, ip_to_string(r)));
+            s.push_str(&format!(
+                "Router {:>2}    : {}\n",
+                i.saturating_add(1),
+                ip_to_string(r)
+            ));
         }
         for (i, &d) in self.dns_servers.iter().enumerate() {
-            s.push_str(&format!("DNS {:>2}       : {}\n", i + 1, ip_to_string(d)));
+            s.push_str(&format!(
+                "DNS {:>2}       : {}\n",
+                i.saturating_add(1),
+                ip_to_string(d)
+            ));
         }
         for (i, &n) in self.ntp_servers.iter().enumerate() {
-            s.push_str(&format!("NTP {:>2}       : {}\n", i + 1, ip_to_string(n)));
+            s.push_str(&format!(
+                "NTP {:>2}       : {}\n",
+                i.saturating_add(1),
+                ip_to_string(n)
+            ));
         }
         if let Some(ref h) = self.hostname {
             s.push_str(&format!("Hostname     : {h}\n"));
@@ -923,22 +951,21 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut cfg = Config::default_config();
     let mut i = 0;
 
-    while i < args.len() {
-        let arg = &args[i];
+    while let Some(arg) = args.get(i) {
         match arg.as_str() {
             "-i" => {
-                i += 1;
+                i = i.saturating_add(1);
                 cfg.interface = args.get(i).ok_or("-i requires an interface name")?.clone();
             }
             "-n" => cfg.no_configure = true,
             "-r" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let ip_str = args.get(i).ok_or("-r requires an IP address")?;
                 cfg.requested_ip =
                     Some(parse_ipv4(ip_str).ok_or_else(|| format!("invalid IP: {ip_str}"))?);
             }
             "-s" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let ip_str = args.get(i).ok_or("-s requires an IP address")?;
                 cfg.client_ip =
                     Some(parse_ipv4(ip_str).ok_or_else(|| format!("invalid IP: {ip_str}"))?);
@@ -946,7 +973,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             "-d" => cfg.debug = true,
             "-f" => cfg.foreground = true,
             "-t" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let t_str = args.get(i).ok_or("-t requires a timeout value")?;
                 cfg.timeout = t_str
                     .parse()
@@ -963,7 +990,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             }
             _ => return Err(format!("unknown option: {arg}")),
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     Ok(cfg)
@@ -1202,8 +1229,10 @@ fn read_mac(iface: &str) -> Option<[u8; 6]> {
         return None;
     }
     let mut mac = [0u8; 6];
-    for (i, part) in parts.iter().enumerate() {
-        mac[i] = u8::from_str_radix(part, 16).ok()?;
+    // Zipping rather than indexing by the loop counter: the `parts.len() != 6`
+    // test above is what made `mac[i]` safe, and zip needs no such pairing.
+    for (slot, part) in mac.iter_mut().zip(parts.iter()) {
+        *slot = u8::from_str_radix(part, 16).ok()?;
     }
     Some(mac)
 }
@@ -1299,7 +1328,7 @@ fn configure_static(iface: &str, cfg: &Config) -> bool {
     if ret < 0 {
         eprintln!(
             "dhcpcd: failed to apply the static address to {iface}: errno {}",
-            -ret
+            ret.saturating_neg()
         );
     }
     true
@@ -1596,7 +1625,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                 let mut buf = [0u8; DHCP_MAX_LEN];
                 match socket.recv_from(&mut buf) {
                     Ok((len, _addr)) => {
-                        if let Some(msg) = DhcpMessage::parse(&buf[..len]) {
+                        if let Some(msg) = buf.get(..len).and_then(DhcpMessage::parse) {
                             if msg.xid != xid || msg.op != BOOTREPLY {
                                 continue;
                             }
@@ -1627,7 +1656,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                         if e.kind() == io::ErrorKind::WouldBlock
                             || e.kind() == io::ErrorKind::TimedOut =>
                     {
-                        retries += 1;
+                        retries = retries.saturating_add(1);
                         if cfg.try_once || retries > MAX_RETRIES {
                             return Err("no DHCP server responded".to_string());
                         }
@@ -1643,7 +1672,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                 let mut buf = [0u8; DHCP_MAX_LEN];
                 match socket.recv_from(&mut buf) {
                     Ok((len, _addr)) => {
-                        if let Some(msg) = DhcpMessage::parse(&buf[..len]) {
+                        if let Some(msg) = buf.get(..len).and_then(DhcpMessage::parse) {
                             if msg.xid != xid || msg.op != BOOTREPLY {
                                 continue;
                             }
@@ -1667,7 +1696,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                                 }
                                 Some(DHCP_NAK) => {
                                     debug_log(cfg, "received NAK; restarting");
-                                    retries += 1;
+                                    retries = retries.saturating_add(1);
                                     if retries > MAX_RETRIES {
                                         return Err("server rejected request (NAK)".to_string());
                                     }
@@ -1681,7 +1710,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                         if e.kind() == io::ErrorKind::WouldBlock
                             || e.kind() == io::ErrorKind::TimedOut =>
                     {
-                        retries += 1;
+                        retries = retries.saturating_add(1);
                         if cfg.try_once || retries > MAX_RETRIES {
                             return Err("no ACK received".to_string());
                         }
@@ -1756,7 +1785,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                 let mut buf = [0u8; DHCP_MAX_LEN];
                 match socket.recv_from(&mut buf) {
                     Ok((len, _)) => {
-                        if let Some(msg) = DhcpMessage::parse(&buf[..len])
+                        if let Some(msg) = buf.get(..len).and_then(DhcpMessage::parse)
                             && msg.op == BOOTREPLY
                             && msg.xid == new_xid
                         {
@@ -1824,7 +1853,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                 socket.set_read_timeout(Some(Duration::from_secs(10))).ok();
                 let mut buf = [0u8; DHCP_MAX_LEN];
                 if let Ok((len, _)) = socket.recv_from(&mut buf)
-                    && let Some(msg) = DhcpMessage::parse(&buf[..len])
+                    && let Some(msg) = buf.get(..len).and_then(DhcpMessage::parse)
                     && msg.op == BOOTREPLY
                     && msg.xid == new_xid
                 {
@@ -1939,7 +1968,7 @@ fn main() {
         process::exit(0);
     }
 
-    let mut cfg = match parse_args(&args[1..]) {
+    let mut cfg = match parse_args(args.get(1..).unwrap_or(&[])) {
         Ok(c) => c,
         Err(e) => {
             error_log(&e);
@@ -2009,6 +2038,13 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -2323,49 +2359,49 @@ mod tests {
     #[test]
     fn test_parse_options_msg_type() {
         let data = [OPT_MSG_TYPE, 1, DHCP_OFFER, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.msg_type, Some(DHCP_OFFER));
     }
 
     #[test]
     fn test_parse_options_subnet_mask() {
         let data = [OPT_SUBNET_MASK, 4, 255, 255, 255, 0, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.subnet_mask, Some(0xFFFF_FF00));
     }
 
     #[test]
     fn test_parse_options_single_router() {
         let data = [OPT_ROUTER, 4, 192, 168, 1, 1, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.routers, vec![0xC0A80101]);
     }
 
     #[test]
     fn test_parse_options_multiple_routers() {
         let data = [OPT_ROUTER, 8, 10, 0, 0, 1, 10, 0, 0, 2, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.routers, vec![0x0A000001, 0x0A000002]);
     }
 
     #[test]
     fn test_parse_options_single_dns() {
         let data = [OPT_DNS, 4, 8, 8, 8, 8, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.dns_servers, vec![0x08080808]);
     }
 
     #[test]
     fn test_parse_options_multiple_dns() {
         let data = [OPT_DNS, 8, 8, 8, 8, 8, 8, 8, 4, 4, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.dns_servers, vec![0x08080808, 0x08080404]);
     }
 
     #[test]
     fn test_parse_options_hostname() {
         let data = [OPT_HOSTNAME, 4, b't', b'e', b's', b't', OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.hostname, Some("test".to_string()));
     }
 
@@ -2383,21 +2419,21 @@ mod tests {
             b'm',
             OPT_END,
         ];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.domain_name, Some("foo.com".to_string()));
     }
 
     #[test]
     fn test_parse_options_broadcast() {
         let data = [OPT_BROADCAST, 4, 192, 168, 1, 255, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.broadcast, Some(0xC0A801FF));
     }
 
     #[test]
     fn test_parse_options_ntp() {
         let data = [OPT_NTP, 4, 10, 0, 0, 1, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.ntp_servers, vec![0x0A000001]);
     }
 
@@ -2405,14 +2441,14 @@ mod tests {
     fn test_parse_options_lease_time() {
         // 86400 = 0x00015180
         let data = [OPT_LEASE_TIME, 4, 0x00, 0x01, 0x51, 0x80, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.lease_time, Some(86400));
     }
 
     #[test]
     fn test_parse_options_server_id() {
         let data = [OPT_SERVER_ID, 4, 172, 16, 0, 1, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.server_id, Some(0xAC100001));
     }
 
@@ -2420,7 +2456,7 @@ mod tests {
     fn test_parse_options_renewal_time() {
         // T1 = 43200 = 0x0000A8C0
         let data = [OPT_RENEWAL_TIME, 4, 0x00, 0x00, 0xA8, 0xC0, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.renewal_time, Some(43200));
     }
 
@@ -2428,7 +2464,7 @@ mod tests {
     fn test_parse_options_rebinding_time() {
         // T2 = 75600 = 0x00012750
         let data = [OPT_REBINDING_TIME, 4, 0x00, 0x01, 0x27, 0x50, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.rebinding_time, Some(75600));
     }
 
@@ -2443,14 +2479,14 @@ mod tests {
             OPT_PAD,
             OPT_END,
         ];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.msg_type, Some(DHCP_ACK));
     }
 
     #[test]
     fn test_parse_options_empty() {
         let data = [OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.msg_type, None);
         assert!(opts.routers.is_empty());
         assert!(opts.dns_servers.is_empty());
@@ -2460,7 +2496,7 @@ mod tests {
     fn test_parse_options_unknown_skipped() {
         // Option 200 is not recognized; it should be silently skipped.
         let data = [200, 2, 0xAB, 0xCD, OPT_MSG_TYPE, 1, DHCP_ACK, OPT_END];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert_eq!(opts.msg_type, Some(DHCP_ACK));
     }
 
@@ -2468,7 +2504,7 @@ mod tests {
     fn test_parse_options_truncated_value() {
         // Claim length 10 but only 2 bytes follow; parser should stop gracefully.
         let data = [OPT_DNS, 10, 8, 8];
-        let opts = parse_options(&data).unwrap();
+        let opts = parse_options(&data);
         assert!(opts.dns_servers.is_empty()); // Not enough data; skipped.
     }
 
@@ -2687,6 +2723,49 @@ mod tests {
     }
 
     // ---- Lease info ----
+
+    /// RFC 2131's INFINITE lease, 0xFFFFFFFF, must not overflow T2.
+    ///
+    /// The default for the rebinding time was `lease_time * 7 / 8`, and
+    /// `lease_time` is whatever the server put in option 51. That product
+    /// leaves u32 for any lease above ~19.5 years -- so this is not a
+    /// hostile-server test: 0xFFFFFFFF is the value RFC 2131 s3.3 defines
+    /// for a lease that never expires, and a conforming server offering one
+    /// panicked the client in debug.
+    ///
+    /// In release it was worse than a crash, because it was silent: the
+    /// product wrapped to 4294967289, and 4294967289 / 8 is 536870911 --
+    /// LESS than T1 of 2147483647. The client would have tried to rebind
+    /// long before it tried to renew, permanently.
+    #[test]
+    fn an_infinite_lease_does_not_overflow_the_rebinding_time() {
+        let mut opts = Vec::new();
+        opts.extend_from_slice(&[OPT_MSG_TYPE, 1, DHCP_ACK]);
+        opts.extend_from_slice(&[OPT_LEASE_TIME, 4, 0xFF, 0xFF, 0xFF, 0xFF]);
+        opts.push(OPT_END);
+
+        let pkt = make_test_reply(1, 0x0A00020F, &opts);
+        let msg = DhcpMessage::parse(&pkt).unwrap();
+        let lease = LeaseInfo::from_ack(&msg, 0);
+
+        assert_eq!(lease.lease_time, u32::MAX);
+        assert_eq!(lease.renewal_time, u32::MAX / 2, "T1 is half the lease");
+        assert_eq!(
+            lease.rebinding_time,
+            (u32::MAX / 8) * 7,
+            "T2 is 0.875 of the lease, divided before it is multiplied"
+        );
+
+        // The invariant the wrap actually broke, stated as itself rather
+        // than as a number: a client that rebinds before it renews has the
+        // two timers the wrong way round for the life of the lease.
+        assert!(
+            lease.rebinding_time > lease.renewal_time,
+            "T2 ({}) must exceed T1 ({})",
+            lease.rebinding_time,
+            lease.renewal_time
+        );
+    }
 
     #[test]
     fn test_lease_from_ack() {

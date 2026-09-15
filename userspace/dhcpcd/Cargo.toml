@@ -8,3 +8,6 @@ description = "SlateOS dhcpcd - DHCP client daemon"
 # DHCP server.
 quoting = { path = "../quoting" }
 libcall = { path = "../../libcall" }
+
+[lints]
+workspace = true

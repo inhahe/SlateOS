@@ -134,6 +134,22 @@ gui/desktop/src/lib.rs:shortcut_message
 gui/desktop/src/sound_settings.rs:volume_override
 gui/desktop/src/sound_settings.rs:output_device_id
 gui/desktop/src/startup_settings.rs:last_run_at
+# TRIAGED 2026-09-14, REAL and NOT blocked by the settings port -- this is
+# shell chrome, not a settings screen, so 815 does not touch it.
+#   `DragSource::show_ghost` is documented "whether the icon should appear
+#   semi-transparent (drag in progress)" and `dragging_key` says which one.
+#   Both are set when the drag threshold is crossed and cleared on drop or
+#   cancel, and nothing reads either. `with_alpha` appears in the shell
+#   only for taskbar and overlay transparency settings, never for a
+#   dragged icon.
+#
+#   So dragging a tray icon or a taskbar pin gives no sign that anything
+#   is being dragged: the icon sits where it was, at full opacity, while
+#   the drop target changes under the pointer. The state machine is
+#   complete and correct -- threshold, cancel-on-Escape, key rather than
+#   index so a row can rearrange mid-drag -- and none of it is visible.
+#   Fix: draw the icon named by `dragging_key` with `with_alpha` while
+#   `show_ghost`. Small, and in lane C's own tree.
 gui/desktop/src/tray_dnd.rs:show_ghost
 gui/desktop/src/tray_dnd.rs:dragging_key
 # TRIAGED 2026-09-14, SOUND. Both of these are library API with no

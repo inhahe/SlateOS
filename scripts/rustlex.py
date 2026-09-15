@@ -276,6 +276,68 @@ def live_code(src: str) -> tuple[str, str]:
     return "".join(out), "".join(mout)
 
 
+def string_literals(src: str) -> list[str]:
+    """Every string literal in `src`, comments excluded, delimiters stripped.
+
+    For the checkers that ask "does this crate SAY something the user can
+    read?" -- `find-silent-incapacity` and `find-stale-admissions`. Both used
+    `re.findall(r'"(...)"')` on raw source, which is the twelfth copy of the
+    mistake this module was written to end: one quotation mark inside a `//`
+    comment pairs with the next one in code, and the source between them comes
+    back as a "literal".
+
+    That failure is ASYMMETRIC and runs toward silence, like every other one
+    recorded above. `find-silent-incapacity` asks whether a crate admits an
+    incapacity *anywhere*; a bogus span that swallowed a comment containing the
+    word "cannot" made a crate that admits nothing look like one that does, and
+    it was skipped. Seven crates were being quietly cleared.
+
+    Rather than lex a third time, this derives the spans from the two passes
+    already here: a character belongs to a literal exactly when `strip_noise`
+    blanks it and `strip_noise(keep_literals=True)` does not. Everything the
+    module has learned about raw strings, char literals and nested comments is
+    inherited rather than re-implemented.
+
+    Two characters cannot be told apart by that rule, because blanking maps to
+    a space and preserves newlines: a SPACE or a NEWLINE already equal to its
+    blanked form looks live wherever it stands. Both continue an open span
+    instead. Without that, `r#"has "quotes" inside"#` came back as three
+    separate literals, split at each space -- which would have been invisible
+    in a caller that only asks whether some literal matches a word.
+
+    Two literals cannot be adjacent across whitespace in Rust without live code
+    between them, so continuing a span cannot join two. Whitespace picked up
+    past a closing delimiter is trimmed.
+
+    Char literals are literals to `strip_noise` and are dropped here: `'"'` is
+    not something the user reads.
+    """
+    blanked = strip_noise(src)
+    kept = strip_noise(src, keep_literals=True)
+    out: list[str] = []
+    cur: list[str] = []
+    for ch, b, k in zip(src, blanked, kept):
+        if b != ch and k == ch:
+            cur.append(ch)
+        elif ch in " \n" and cur:
+            cur.append(ch)
+        elif cur:
+            out.append("".join(cur).strip())
+            cur = []
+    if cur:
+        out.append("".join(cur).strip())
+    return [_undelimit(s) for s in out if not s.startswith("'")]
+
+
+_DELIM = re.compile(r'^b?r?(#*)"(.*)"\1$', re.S)
+
+
+def _undelimit(lit: str) -> str:
+    """`"hi"` -> `hi`, `r#"hi"#` -> `hi`. Anything unrecognised is returned."""
+    m = _DELIM.match(lit)
+    return m.group(2) if m else lit
+
+
 def _self_test() -> int:
     """Fixtures for every way this has been wrong.
 
@@ -397,6 +459,34 @@ fn tail() { read_to_string(p); }
     expect("a brace inside a string does not end a test mod early",
            "tail" in live, True)
     expect("the test mod around it still goes", "let s" in live, False)
+
+    # `string_literals`. The first case is the one that made the naive version
+    # dangerous: a quote in a comment must neither open a literal nor be
+    # returned as one, or a crate that admits nothing reads as one that does.
+    expect("a quote in a comment is not a literal",
+           string_literals('// it\'s a "quoted" word\nlet x = "real";'),
+           ["real"])
+    expect("an unbalanced quote in a comment does not swallow code",
+           string_literals('// unbalanced " here\nlet a = 1;\nlet b = "real";'),
+           ["real"])
+    expect("a char literal holding a quote does not open a string",
+           string_literals("let c = '\"'; let s = \"after\";"),
+           ["after"])
+    expect("a raw string keeps its inner quotes",
+           string_literals('let x = r#"has "quotes" inside"#;'),
+           ['has "quotes" inside'])
+    expect("a raw string ending in a backslash does not swallow its terminator",
+           string_literals('let x = r"a\\"; let y = "after";'),
+           ["a\\", "after"]),
+    expect("a lifetime does not open a char literal",
+           string_literals("fn f<'a>(s: &'a str) -> &'a str { \"out\" }"),
+           ["out"])
+    expect("a multi-line literal stays one literal",
+           string_literals('let s = "one\ntwo";'),
+           ["one\ntwo"])
+    expect("escapes come back as source, not decoded",
+           string_literals(r'let s = "a\nb";'),
+           [r"a\nb"])
 
     print(f"rustlex: self-test {'FAILED' if failures else 'passed'} "
           f"({failures} failure(s))")

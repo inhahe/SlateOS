@@ -23,6 +23,7 @@ use appearance::Surface;
 use std::collections::HashMap;
 
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -47,11 +48,27 @@ use std::time::Duration;
 /// Three lines. The third is about offline availability, which is the whole
 /// reason anyone downloads a podcast: the failure surfaces on a plane or a
 /// train, at the exact moment there is no connection to fall back on.
+///
+/// The first line used to read "This app cannot subscribe to or download
+/// podcasts", and the OPML door makes half of that arguable -- an imported
+/// subscription list *is* a set of subscriptions, held and exportable. What
+/// remains true, and is what the user actually cares about, is that nothing
+/// here can fetch a feed or retrieve an episode. The line now says that
+/// instead, and the second says plainly what an import does and does not
+/// bring, because **a show listed with no episodes reads as a show that has
+/// published none.**
 const CANNOT_FETCH_LINES: [&str; 3] = [
-    "This app cannot subscribe to or download podcasts.",
-    "It has no network access, so no feed has been fetched and no episode file exists.",
+    "This app cannot fetch a feed or download an episode.",
+    "It has no network access. A subscription list can be imported from an OPML file, but no episode comes with it.",
     "Nothing here is available offline -- an episode marked Downloaded would be a file that is not there.",
 ];
+
+/// The most of an OPML file one import will read.
+///
+/// Reported when it bites. `parse_opml` returns the outlines it managed to
+/// read and says nothing about a document that stopped early, so a cut file
+/// yields a shorter subscription list and no complaint.
+pub const MAX_OPML_BYTES: usize = 8 * 1024 * 1024;
 
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 750.0;
@@ -925,6 +942,12 @@ pub enum SidebarSelection {
 
 /// The main podcast manager application.
 pub struct PodcastApp {
+    /// The open or save picker, while one is up.
+    pub file_dialog: Option<FileDialog>,
+    /// Whether the picker that is up is saving rather than opening.
+    pub dialog_saves: bool,
+    /// What the last open or save did, for the status line.
+    pub last_file_action: Option<String>,
     pub width: f32,
     pub height: f32,
 
@@ -979,6 +1002,9 @@ impl PodcastApp {
     pub fn new(width: f32, height: f32) -> Self {
         let app = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            file_dialog: None,
+            dialog_saves: false,
+            last_file_action: None,
             width,
             height,
             podcasts: Vec::new(),
@@ -2004,6 +2030,19 @@ impl PodcastApp {
 
     /// Handle one input event. Returns whether anything changed.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The picker takes the event first while it is up, or a keystroke
+        // meant for a filename reaches the player behind it -- and Space,
+        // which every player binds, would start an episode mid-filename.
+        if self.file_dialog.is_some() {
+            let (w, h) = (self.width, self.height);
+            let action = match (event, self.file_dialog.as_mut()) {
+                (Event::Key(key), Some(dialog)) if key.pressed => dialog.handle_event(key, h),
+                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
+                _ => return false,
+            };
+            self.apply_dialog_action(action);
+            return true;
+        }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -2076,7 +2115,141 @@ impl PodcastApp {
         false
     }
 
+    /// Put the open or save picker up.
+    ///
+    /// `generate_opml` and `parse_opml` were written, tested and unreachable.
+    /// Export is the direction that matters most here: it is how a
+    /// subscription list leaves a program that cannot fetch, and a list you
+    /// cannot get out of an app is a list you have to retype.
+    pub fn open_file_dialog(&mut self, saving: bool) {
+        let start =
+            std::env::var_os("HOME").map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+        let mut dialog = if saving {
+            FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(String::from("subscriptions.opml"))
+        } else {
+            FileDialog::open().with_initial_path(start)
+        };
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.dialog_saves = saving;
+        self.file_dialog = Some(dialog);
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) {
+        match action {
+            DialogAction::None => {}
+            DialogAction::Cancelled => self.file_dialog = None,
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                let saving = self.dialog_saves;
+                self.last_file_action = Some(if saving {
+                    self.write_opml(&path)
+                } else {
+                    self.read_opml(&path)
+                });
+            }
+        }
+    }
+
+    /// Write the subscription list to `path` as OPML.
+    ///
+    /// Refuses an empty list: an OPML file with an empty body is valid and
+    /// imports elsewhere as nothing, which cannot be told apart from an export
+    /// that failed. See design-decisions 854.
+    pub fn write_opml(&mut self, path: &std::path::Path) -> String {
+        if self.podcasts.is_empty() {
+            return String::from("No subscriptions to write");
+        }
+        let text = self.export_opml();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!(
+                "Wrote {} subscription(s) to {}",
+                self.podcasts.len(),
+                path.display()
+            ),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` and add every subscription in it.
+    ///
+    /// **`import_opml` returns a count and cannot fail**, so a file that is not
+    /// OPML imports zero and looks like a success -- and "0 subscriptions
+    /// added" reads as *that file was empty*, a claim about the file rather
+    /// than about this program's ability to read it. The three outcomes are
+    /// separated here, and the shape check is described as what it is: it asks
+    /// whether the text contains an `<opml` element, not whether the XML is
+    /// well formed.
+    ///
+    /// The success message says what did **not** arrive. An OPML file is a
+    /// list of addresses; nothing here can fetch one, so the shows appear with
+    /// no episodes under them, and **a show listed with no episodes reads as a
+    /// show that has published none** -- a claim about the podcast rather than
+    /// about this program.
+    pub fn read_opml(&mut self, path: &std::path::Path) -> String {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => return format!("Could not read {}: {err}", path.display()),
+        };
+        let whole = text.len();
+        let truncated = whole > MAX_OPML_BYTES;
+        let body = if truncated {
+            let mut end = MAX_OPML_BYTES;
+            while end > 0 && !text.is_char_boundary(end) {
+                end = end.saturating_sub(1);
+            }
+            text.get(..end).unwrap_or("")
+        } else {
+            text.as_str()
+        };
+        let cut_note = if truncated {
+            format!("INCOMPLETE ({MAX_OPML_BYTES} of {whole} bytes read): ")
+        } else {
+            String::new()
+        };
+
+        let added = self.import_opml(body);
+        if added > 0 {
+            return format!(
+                "{cut_note}Subscribed to {added} show(s) from {}. No episodes came with them -- an OPML file holds addresses, and nothing here can fetch one.",
+                path.display()
+            );
+        }
+        if body.to_ascii_lowercase().contains("<opml") {
+            format!(
+                "{cut_note}{} lists no shows this app was not already subscribed to",
+                path.display()
+            )
+        } else {
+            format!(
+                "{cut_note}{} is not an OPML subscription list, so nothing was added",
+                path.display()
+            )
+        }
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // Before anything else: Space plays, and a guard arm placed after a
+        // bare `Key::S` would never be reached.
+        if event.modifiers.ctrl {
+            match event.key {
+                Key::S => {
+                    self.open_file_dialog(true);
+                    return true;
+                }
+                Key::O => {
+                    self.open_file_dialog(false);
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         match event.key {
             // Playback. Space is the one key every player in the world binds.
             Key::Space => {
@@ -2344,6 +2517,13 @@ impl PodcastApp {
         // Now playing bar.
         if self.player_state != PlayerState::Stopped {
             self.render_now_playing(&mut cmds);
+        }
+
+        // Last, so it is above everything.
+        if let Some(dialog) = &self.file_dialog {
+            for cmd in dialog.render(&self.palette, self.width, self.height) {
+                cmds.push(cmd);
+            }
         }
 
         cmds
@@ -4359,6 +4539,192 @@ mod tests {
     )]
 
     use super::*;
+
+    fn pod_door_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("slateos-podcast-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// A subscription list survives a write and a read.
+    ///
+    /// Export is the direction that matters most in an app that cannot fetch:
+    /// it is how the list leaves for a program that *can*, and a list you
+    /// cannot get out is a list you have to retype.
+    #[test]
+    fn a_subscription_list_survives_a_write_and_a_read() {
+        let path = pod_door_dir().join("subs.opml");
+        let _ = std::fs::remove_file(&path);
+
+        // Distinct feed URLs, deliberately. `app_with_subscriptions` gives
+        // every show the same `rss://x`, which is right for the sidebar tests
+        // that use it and wrong here: OPML identifies a feed by its xmlUrl and
+        // `import_opml` dedupes on it, so three shows at one URL correctly
+        // round-trip to one. Two subscriptions to the same feed ARE one
+        // subscription.
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+        drop_sample_data(&mut app);
+        for i in 0..3 {
+            app.subscribe(
+                &format!("Show {i}"),
+                "",
+                "",
+                &format!("rss://feed/{i}"),
+                "",
+                vec![],
+            );
+        }
+        let said = app.write_opml(&path);
+        assert!(said.starts_with("Wrote 3 subscription(s)"), "said: {said}");
+
+        let mut target = PodcastApp::with_sample_data(800.0, 600.0);
+        drop_sample_data(&mut target);
+        let said = target.read_opml(&path);
+        assert!(said.starts_with("Subscribed to 3 show(s)"), "said: {said}");
+        assert_eq!(target.podcasts.len(), 3, "the shows did not arrive");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The import says what did **not** come with it.
+    ///
+    /// An OPML file is a list of addresses. Nothing here can fetch one, so the
+    /// shows arrive with no episodes under them -- and **a show listed with no
+    /// episodes reads as a show that has published none**, which is a claim
+    /// about the podcast rather than about this program.
+    #[test]
+    fn the_import_says_no_episodes_came_with_it() {
+        let path = pod_door_dir().join("episodes.opml");
+        let mut source = PodcastApp::with_sample_data(800.0, 600.0);
+        drop_sample_data(&mut source);
+        for i in 0..2 {
+            source.subscribe(
+                &format!("Show {i}"),
+                "",
+                "",
+                &format!("rss://feed/{i}"),
+                "",
+                vec![],
+            );
+        }
+        source.write_opml(&path);
+
+        let mut target = PodcastApp::with_sample_data(800.0, 600.0);
+        drop_sample_data(&mut target);
+        let said = target.read_opml(&path);
+        assert!(
+            said.contains("No episodes came with them") && said.contains("fetch"),
+            "the import must say why the new shows are empty, said: {said}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that is not OPML is named as such, not reported as empty.
+    ///
+    /// `import_opml` returns a count and cannot fail, so without this the
+    /// message would be "0 subscriptions added" -- which reads as *that file
+    /// was empty*, a claim about the file rather than about this program's
+    /// ability to read it.
+    #[test]
+    fn a_file_that_is_not_opml_is_not_reported_as_empty() {
+        let path = pod_door_dir().join("notopml.txt");
+        std::fs::write(&path, "just some notes\nnothing structured\n").expect("write junk");
+
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+        drop_sample_data(&mut app);
+        let said = app.read_opml(&path);
+        assert!(
+            said.contains("is not an OPML subscription list"),
+            "a file it cannot read must say so, said: {said}"
+        );
+        assert!(app.podcasts.is_empty(), "nothing should have been added");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An export of nothing is refused. See design-decisions 854.
+    #[test]
+    fn an_empty_subscription_list_is_not_written() {
+        let path = std::env::temp_dir().join("slateos-podcast-should-not-exist.opml");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+        drop_sample_data(&mut app);
+        let said = app.write_opml(&path);
+        assert_eq!(said, "No subscriptions to write");
+        assert!(!path.exists(), "nothing should have been created");
+    }
+
+    /// A missing file is a read failure, not a verdict on its contents.
+    #[test]
+    fn a_missing_opml_is_reported_as_a_read_failure() {
+        let path = std::env::temp_dir().join("slateos-podcast-absent.opml");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+        let said = app.read_opml(&path);
+        assert!(said.starts_with("Could not read"), "said: {said}");
+        assert!(
+            !said.contains("is not an OPML"),
+            "the file was never examined, so do not judge its contents: {said}"
+        );
+    }
+
+    /// While the picker is up it takes the keyboard.
+    ///
+    /// Space is the key every player in the world binds, and this one is no
+    /// exception -- so without the intercept, typing a filename containing a
+    /// space starts playing an episode behind the dialog.
+    ///
+    /// **This test carries its own control, and needs it.** The first version
+    /// asserted only that playback had not started, and stayed green when the
+    /// intercept was deliberately disabled: no episode was selected in the
+    /// fixture, so Space did nothing either way and the assertion was true for
+    /// the wrong reason. A test that cannot fail is not evidence. The first
+    /// half now proves Space *does* start playback here, so the second half
+    /// means something.
+    #[test]
+    fn the_picker_takes_the_keyboard_and_space_does_not_play_behind_it() {
+        let space = || {
+            Event::Key(KeyEvent {
+                key: Key::Space,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::from(" "),
+            })
+        };
+
+        // The control: with no picker up, Space plays.
+        let mut control = app_with_episodes(3);
+        control.move_episode_selection(1);
+        control.handle_event(&space());
+        assert_ne!(
+            control.player_state,
+            PlayerState::Stopped,
+            "the control is broken: Space does not start playback, so the              assertion below would hold whether or not the picker intercepts"
+        );
+
+        // The case: with the picker up, the same keystroke reaches the dialog.
+        let mut app = app_with_episodes(3);
+        app.move_episode_selection(1);
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::S,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::new(),
+        }));
+        assert!(app.file_dialog.is_some(), "Ctrl+S did not open the picker");
+
+        app.handle_event(&space());
+        assert_eq!(
+            app.player_state,
+            PlayerState::Stopped,
+            "a space typed at the picker started playback behind it"
+        );
+    }
 
     /// A fresh app holds no subscriptions and claims no disk.
     ///

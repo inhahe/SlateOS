@@ -137,8 +137,9 @@ const SYSFS_MEMMAP: &str = sysfs!("/memmap");
 const SYSFS_DMA: &str = sysfs!("/dma");
 /// Running services.
 const SYSFS_SERVICES: &str = "/sys/services";
-/// Process list.
-const SYSFS_PROC: &str = "/sys/proc";
+// No constant for the process list: it comes from `/proc`, which is where
+// processes have always been. This named `/sys/proc`, a path with no producer
+// and no precedent -- Linux has never put a process list under `/sys`.
 /// Loaded drivers.
 const SYSFS_DRIVERS: &str = "/sys/drivers";
 /// Startup programs.
@@ -838,19 +839,41 @@ impl HardwareProvider for SyscallProvider {
         Ok(services)
     }
 
+    /// Read the running processes from `/proc`.
+    ///
+    /// The third window in this tree to read the same files, and the third to
+    /// do it through `procinfo` rather than growing its own parser --
+    /// `apps/procexplorer` and `apps/sysmonitor` were wired to it earlier
+    /// today. Two parsers of `/proc/<pid>/stat` in one repository is the
+    /// arrangement where a kernel change fixes one window and not the others
+    /// and nobody notices, because all of them still produce numbers.
+    ///
+    /// `cpu_percent` stays 0.0. A percentage is a rate, and a rate needs two
+    /// samples of a counter; this query has one. The same decision
+    /// `procexplorer` makes, for the same reason, and the reason it is worth
+    /// repeating here is that **0.0 is also what an invented value would look
+    /// like if nobody had thought about it.**
     fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_PROC)?;
-        let mut procs = Vec::new();
+        let fs = self.procfs();
+        let pids = fs.process_ids().map_err(|_| HwQueryError::NotAvailable {
+            path: self.rooted("/proc"),
+        })?;
 
-        for entry in &entries {
+        let mut procs = Vec::with_capacity(pids.len());
+        for pid in pids {
+            // A process that exits between the listing and the read is the
+            // normal case, not an error: racing with the thing being measured
+            // is what a process list is.
+            let Ok(Some(stat)) = fs.process_stat(pid) else {
+                continue;
+            };
             procs.push(ProcessEntry {
-                pid: Self::field(entry, "pid", 0)?,
-                name: entry.get("name").cloned().unwrap_or_default(),
-                memory_kb: Self::field(entry, "memory_kb", 0)?,
-                cpu_percent: Self::field(entry, "cpu_percent", 0.0)?,
+                pid: u32::try_from(stat.pid).unwrap_or(u32::MAX),
+                name: String::from_utf8_lossy(&stat.comm).into_owned(),
+                memory_kb: stat.rss_kib(),
+                cpu_percent: 0.0,
             });
         }
-
         Ok(procs)
     }
 

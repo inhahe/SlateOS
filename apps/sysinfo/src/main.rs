@@ -687,11 +687,35 @@ impl SysInfoState {
     /// It would also pass any test that only checked the app was using
     /// `hwquery`.
     ///
-    /// Every query is expected to fail at present: nothing in `kernel/`,
-    /// `services/` or `userspace/` produces `/sys/hardware/*`. That is the
-    /// point rather than a defect here -- the window says it cannot read the
-    /// hardware, which is true, and it starts reporting real values on the day
-    /// a producer appears, with no change to this file.
+    /// **The paragraph that stood here was a promise, and it was wrong by
+    /// 2026-09-15.** It said every query was expected to fail because nothing
+    /// produced `/sys/hardware/*`, that this was the point rather than a
+    /// defect, and that the window would start reporting real values "on the
+    /// day a producer appears, with no change to this file".
+    ///
+    /// No producer of `/sys/hardware` ever appeared and none is coming. The
+    /// kernel serves `/sys/devices/...`, `/sys/fs/` and `/sys/params/`, and
+    /// lane A has recorded that `irqs` and `display` in particular will *never*
+    /// be served there, because `/proc/interrupts` and `/proc/monitors` already
+    /// publish them and a second kernel answer to one question is what §850
+    /// exists to prevent. Each category moved by hand instead, so "with no
+    /// change to this file" was the least accurate part.
+    ///
+    /// Where each category reads from now:
+    ///
+    /// | category | source |
+    /// |---|---|
+    /// | CPU, memory | `/sys/devices/system/{cpu,memory}` (§850) |
+    /// | storage | `/sys/devices/block/<name>/` |
+    /// | network, processes | `/proc/net/dev`, `/proc/<pid>/stat` |
+    /// | IRQs, display | `/proc/{interrupts,monitors}` — **published, not yet read here** |
+    /// | PCI, USB, sound, I/O ports, DMA, memory map, drivers, services, startup | nothing publishes these |
+    ///
+    /// The last row is the honest "cannot read", and is expected to stay that
+    /// way. The row above it is the outstanding work, and it needs parsers in
+    /// `procinfo` rather than here -- see
+    /// `known-issues.md` →
+    /// `TD-C-APPS-SYSINFO-WAITS-ON-A-FILESYSTEM-TREE-THAT-DOES-NOT-EXIST`.
     pub fn new() -> Self {
         use hwquery::HardwareProvider;
         let provider = hwquery::SyscallProvider::new();
@@ -2402,11 +2426,17 @@ mod tests {
     // *is* the failure report, and rewriting it as a `match` would only bury
     // the message. CLAUDE.md scopes the defensive panic lints to non-test code
     // for exactly this reason.
+    // `float_cmp` joins them for one assertion: that `cpu_percent` is exactly
+    // 0.0, which is not an approximation of a measurement but the *absence* of
+    // one. An epsilon comparison there would assert something weaker than what
+    // actually holds, and the value it guards against is a rate invented from
+    // a single sample.
     #![allow(
         clippy::expect_used,
         clippy::unwrap_used,
         clippy::indexing_slicing,
-        clippy::panic
+        clippy::panic,
+        clippy::float_cmp
     )]
 
     use super::*;
@@ -2933,6 +2963,72 @@ mod tests {
         assert!(
             provider.query_network().is_err(),
             "an unreadable /proc/net/dev reported as a machine with no interfaces"
+        );
+    }
+
+    /// The running processes are read from `/proc`, not invented.
+    ///
+    /// `query_processes` read `/sys/proc` -- a path with no producer and no
+    /// precedent; Linux has never put a process list under `/sys`. This is the
+    /// third window in the tree to read `/proc/<pid>/stat` and the third to do
+    /// it through `procinfo`, after `apps/procexplorer` and
+    /// `apps/sysmonitor` earlier today.
+    #[test]
+    fn the_running_processes_are_read_from_proc() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-proc-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc/41")).expect("fixture");
+        // A directory with no `stat`: a process that exited while the list was
+        // being walked.
+        std::fs::create_dir_all(root.join("proc/42")).expect("fixture");
+        std::fs::write(
+            root.join("proc/41/stat"),
+            b"41 (shell) R 1 41 41 0 -1 0 0 0 0 0 200 50 0 0 20 0 8 0 900 \
+              4096000 300 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+        )
+        .unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let procs = provider.query_processes().expect("the fixture is readable");
+
+        assert_eq!(
+            procs.len(),
+            1,
+            "the half-gone process is skipped, not fatal"
+        );
+        let p = procs.first().expect("one process");
+        assert_eq!(p.pid, 41);
+        assert_eq!(p.name, "shell");
+        assert_eq!(
+            p.memory_kb,
+            300 * procinfo::PAGE_SIZE_KIB,
+            "resident pages become KiB through the shared page size"
+        );
+        assert_eq!(
+            p.cpu_percent, 0.0,
+            "a rate needs two samples of a counter and this query has one"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no `/proc`, it says so rather than reporting no processes.
+    #[test]
+    fn an_absent_proc_is_an_error_not_an_empty_process_list() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-proc-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        assert!(
+            provider.query_processes().is_err(),
+            "an unreadable /proc reported as a machine running nothing"
         );
     }
 

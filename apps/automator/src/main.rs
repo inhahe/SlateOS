@@ -37,6 +37,7 @@
 
 use appearance::Palette;
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
 use guitk::probe::Probe;
@@ -63,6 +64,37 @@ use std::process::ExitCode;
 /// `SIDEBAR_WIDTH = 240` and `PROPERTIES_WIDTH = 260` were the layout in every
 /// window there has ever been, and 240 + 260 of a 400-wide one is more than
 /// there is.
+/// A macro name reduced to something that can be a filename.
+///
+/// Only the three characters a path cannot contain are replaced: the name is
+/// the user's, and rewriting more of it than necessary means they cannot find
+/// the file by the name they gave the macro.
+fn sanitise_macro_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | '\0') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        String::from("macro")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// The most of a script one open will read.
+///
+/// Reported when it bites, because a cut script PARSES -- every whole line in
+/// it is a command -- so the macro is simply short, and **a macro missing its
+/// last twenty actions looks like a macro that was recorded that way.**
+pub const MAX_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
+
 const WINDOW_WIDTH: f32 = 1000.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 
@@ -143,6 +175,8 @@ pub enum Button {
     MoveActionDown,
     DeleteAction,
     ApplyScript,
+    WriteScript,
+    ReadScript,
     Help,
 }
 
@@ -163,6 +197,13 @@ impl Button {
             Self::MoveActionDown => Key::RightBracket,
             Self::DeleteAction => Key::Backspace,
             Self::ApplyScript => Key::A,
+            // Not Ctrl+S and Ctrl+O, which every other door in this
+            // tree uses: `handle_key` refuses any key carrying a
+            // modifier, deliberately and with a comment saying those
+            // belong to the window manager. `S` is taken by
+            // StopPlayback, so W for write and O for open.
+            Self::WriteScript => Key::W,
+            Self::ReadScript => Key::O,
             Self::Help => Key::F1,
         }
     }
@@ -183,6 +224,8 @@ impl Button {
             Self::MoveActionDown => "]",
             Self::DeleteAction => "Bksp",
             Self::ApplyScript => "A",
+            Self::WriteScript => "W",
+            Self::ReadScript => "O",
             Self::Help => "F1",
         }
     }
@@ -203,6 +246,8 @@ impl Button {
             Self::MoveActionDown => "Move down",
             Self::DeleteAction => "Delete action",
             Self::ApplyScript => "Apply Script",
+            Self::WriteScript => "Save Script",
+            Self::ReadScript => "Open Script",
             Self::Help => "Help",
         }
     }
@@ -223,6 +268,8 @@ impl Button {
             Self::MoveActionDown,
             Self::DeleteAction,
             Self::ApplyScript,
+            Self::WriteScript,
+            Self::ReadScript,
             Self::Help,
         ]
     }
@@ -1303,6 +1350,11 @@ impl ActiveTab {
 
 /// The main application state.
 pub struct AutomatorApp {
+    /// The open or save picker. Holds the dialog, the saving flag and the
+    /// routing fourteen applications used to write out by hand.
+    pub picker: FilePicker,
+    /// What the last open or save did, for the status line.
+    pub last_file_action: Option<String>,
     library: MacroLibrary,
     selected_macro_id: Option<u64>,
     selected_action_idx: Option<usize>,
@@ -1358,6 +1410,8 @@ impl AutomatorApp {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             library: MacroLibrary::new(),
+            picker: FilePicker::new(),
+            last_file_action: None,
             selected_macro_id: None,
             selected_action_idx: None,
             recording_state: RecordingState::Idle,
@@ -3095,6 +3149,30 @@ impl AutomatorApp {
     /// zero. Every test that exercised playback called `tick` directly, which
     /// is the path the compositor does not take (known-issues.md lesson 102).
     fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up, or a filename is typed
+        // at the macro list -- where bare letters are controls.
+        //
+        // A tick comes back as `Ignored` and falls through, and that is
+        // load-bearing here: the arm below drives playback, so swallowing it
+        // would stop a running macro because somebody opened a dialog.
+        // `self.size`, not a second pair of fields: `render` already
+        // records what it was handed, and two sources of truth for the
+        // window size is the drift this sweep keeps finding.
+        match self.picker.handle(event, self.size.0, self.size.1) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_script(&path)
+                } else {
+                    self.read_script(&path)
+                });
+                return EventResult::Consumed;
+            }
+            // Cancelled grouped with Handled: this caller keeps no dialog
+            // state of its own that could go stale.
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -3242,6 +3320,82 @@ impl AutomatorApp {
     ///
     /// A button and its key cannot drift apart because there is only one of
     /// them: `handle_key` looks the button up by its key and calls this.
+    /// Write the selected macro out as a script.
+    ///
+    /// `serialize_script` and `parse_script` were both written, both tested,
+    /// and both reachable -- through a text box inside this window. That is a
+    /// round trip nobody can get anything out of: **a macro you spent ten
+    /// minutes recording lived exactly as long as the window did.**
+    ///
+    /// The format is the readable one this app already writes -- `wait 250`,
+    /// `click 100 200 left` -- so the file is editable in any text editor and
+    /// diffable, which is most of the point of having it on disk.
+    pub fn write_script(&mut self, path: &std::path::Path) -> String {
+        let Some(macro_) = self
+            .selected_macro_id
+            .and_then(|id| self.library.macros.iter().find(|m| m.id == id))
+        else {
+            return String::from("No macro selected -- nothing to write");
+        };
+        if macro_.actions.is_empty() {
+            return String::from("That macro has no actions -- nothing to write");
+        }
+        let (name, count) = (macro_.name.clone(), macro_.actions.len());
+        let text = serialize_script(&macro_.actions);
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!("Wrote {name}: {count} action(s) to {}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read a script from `path` into a new macro.
+    ///
+    /// `parse_script` returns a typed `ScriptError`, and that reason is passed
+    /// through rather than replaced: it names the line it could not read, and
+    /// "not a macro script" would throw that away -- leaving the user to
+    /// bisect their own file.
+    ///
+    /// # The action count changes, and that is not loss
+    ///
+    /// A pause has two representations. In memory a `TimedAction` carries its
+    /// own `delay_ms`; on disk `serialize_script` writes that as a `wait 250`
+    /// line, and this reads it back as a standalone `Delay` action. So a macro
+    /// of two actions is written as three lines and opens as three actions.
+    /// It plays identically, and a second round trip is stable because the
+    /// `Delay` action carries no delay of its own. The count in the message is
+    /// what was actually created, not what was exported.
+    pub fn read_script(&mut self, path: &std::path::Path) -> String {
+        let read = match safeio::read_to_string_capped(path, MAX_SCRIPT_BYTES) {
+            Ok(read) => read,
+            Err(err) => return format!("Could not read {}: {err}", path.display()),
+        };
+        // Front-loaded: a cut script parses fine and is simply short, so
+        // without this the user gets a macro missing its tail and no hint.
+        let note = read.note(MAX_SCRIPT_BYTES);
+        match parse_script(&read.text) {
+            Ok(actions) if actions.is_empty() => {
+                format!("{note}{} holds no actions", path.display())
+            }
+            Ok(actions) => {
+                let count = actions.len();
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                    .map_or_else(|| String::from("Imported macro"), str::to_owned);
+                // Through `new_macro`, not `library.create_macro`: that one
+                // also sets the selection and the status line, and a second
+                // path that half-does it is how the two drift.
+                let id = self.new_macro(&name);
+                if let Some(m) = self.library.macros.iter_mut().find(|m| m.id == id) {
+                    m.actions = actions;
+                }
+                format!("{note}Opened {name}: {count} action(s)")
+            }
+            Err(why) => format!("{note}Could not read {}: {why}", path.display()),
+        }
+    }
+
     fn press(&mut self, button: Button) {
         match button {
             Button::Record => self.start_recording(),
@@ -3273,6 +3427,14 @@ impl AutomatorApp {
             Button::DeleteAction => {
                 self.delete_selected_action();
             }
+            Button::WriteScript => {
+                let name = self
+                    .selected_macro_id
+                    .and_then(|id| self.library.macros.iter().find(|m| m.id == id))
+                    .map_or_else(|| String::from("macro"), |m| sanitise_macro_name(&m.name));
+                self.picker.open_to_write(format!("{name}.macro"));
+            }
+            Button::ReadScript => self.picker.open_to_read(),
             Button::ApplyScript => {
                 self.active_tab = ActiveTab::Script;
                 self.apply_script();
@@ -3872,7 +4034,13 @@ impl App for AutomatorApp {
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         self.size = (width, height);
-        self.frame(width, height).into_tree()
+        let mut tree = self.frame(width, height).into_tree();
+        // Last, so it is above everything. Without this the picker takes
+        // every keystroke with nothing on screen to say why -- the defect
+        // apps/flashcards shipped.
+        tree.commands
+            .extend(self.picker.render(&self.palette, width, height));
+        tree
     }
 }
 
@@ -3922,6 +4090,208 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    fn auto_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("slateos-automator-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// A recorded macro survives a write and a read.
+    ///
+    /// `serialize_script` and `parse_script` were both written, both tested,
+    /// and both reachable -- through a text box inside this window. A round
+    /// trip nobody can get anything out of: **a macro you spent ten minutes
+    /// recording lived exactly as long as the window did.**
+    #[test]
+    fn a_macro_survives_a_write_and_a_read() {
+        let path = auto_dir().join("clicks.macro");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = AutomatorApp::new();
+        let id = app.new_macro("Clicks");
+        if let Some(m) = app.library.macros.iter_mut().find(|m| m.id == id) {
+            m.actions = vec![
+                TimedAction {
+                    delay_ms: 250,
+                    action: MacroAction::MouseClick {
+                        x: 100.0,
+                        y: 200.0,
+                        button: MacroMouseButton::Left,
+                    },
+                },
+                TimedAction {
+                    delay_ms: 0,
+                    action: MacroAction::KeyPress {
+                        key_name: String::from("a"),
+                    },
+                },
+            ];
+        }
+
+        let said = app.write_script(&path);
+        assert!(
+            said.starts_with("Wrote Clicks: 2 action(s)"),
+            "said: {said}"
+        );
+
+        let mut reopened = AutomatorApp::new();
+        let before = reopened.library.macros.len();
+        let said = reopened.read_script(&path);
+        assert!(said.starts_with("Opened clicks:"), "said: {said}");
+        assert_eq!(
+            reopened.library.macros.len(),
+            before + 1,
+            "no macro was added"
+        );
+        let opened = reopened.library.macros.last().expect("the opened macro");
+
+        // THE COUNT IS NOT PRESERVED, AND THAT IS NOT LOSS. The format has two
+        // ways to express a pause: in memory a `TimedAction` carries its own
+        // `delay_ms`, and on disk a `wait 250` is its own line. The parser
+        // reads that line back as a standalone `Delay` action, so two actions
+        // go out as three lines and come back as three actions. The macro
+        // plays identically -- a Delay then a click is the same as a click
+        // that waited -- and a second round trip is stable, because the Delay
+        // action carries no delay of its own.
+        //
+        // So the test asserts what survives rather than a count that does not.
+        let waited: u64 = opened
+            .actions
+            .iter()
+            .map(|a| {
+                a.delay_ms
+                    + match a.action {
+                        MacroAction::Delay { ms } => ms,
+                        _ => 0,
+                    }
+            })
+            .sum();
+        assert_eq!(waited, 250, "the pause did not survive in any form");
+        assert!(
+            opened
+                .actions
+                .iter()
+                .any(|a| matches!(a.action, MacroAction::MouseClick { .. })),
+            "the click was lost"
+        );
+        assert!(
+            opened
+                .actions
+                .iter()
+                .any(|a| matches!(a.action, MacroAction::KeyPress { .. })),
+            "the keypress was lost"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file that is not a script keeps the parser's own reason.
+    ///
+    /// `ScriptError` names the line it could not read. "Not a macro script"
+    /// would throw that away and leave the user to bisect their own file.
+    #[test]
+    fn an_unreadable_script_keeps_the_parsers_reason() {
+        let path = auto_dir().join("bad.macro");
+        std::fs::write(&path, "click 100 200 left\nnonsense-command 4\n").expect("write");
+
+        let mut app = AutomatorApp::new();
+        let before = app.library.macros.len();
+        let said = app.read_script(&path);
+
+        assert!(said.starts_with("Could not read"), "said: {said}");
+        assert!(
+            said.len() > "Could not read ".len() + path.display().to_string().len() + 2,
+            "the parser's reason was dropped: {said}"
+        );
+        assert_eq!(
+            app.library.macros.len(),
+            before,
+            "a failed read added a macro"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An empty macro is refused rather than written. See design-decisions 854.
+    #[test]
+    fn a_macro_with_no_actions_is_not_written() {
+        let path = std::env::temp_dir().join("slateos-automator-should-not-exist.macro");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = AutomatorApp::new();
+        app.new_macro("Empty");
+        let said = app.write_script(&path);
+        assert_eq!(said, "That macro has no actions -- nothing to write");
+        assert!(!path.exists(), "nothing should have been created");
+    }
+
+    /// The door is on W and O, and it reaches them.
+    ///
+    /// NOT Ctrl+S and Ctrl+O, which every other door in this tree uses:
+    /// `handle_key` refuses any key carrying a modifier, deliberately, with a
+    /// comment saying those belong to the window manager. A Ctrl binding here
+    /// would be silently ignored -- and the test that proves the key works is
+    /// the only thing that would have noticed.
+    #[test]
+    fn w_opens_the_save_picker_and_ctrl_w_is_ignored() {
+        let mut app = AutomatorApp::new();
+        let id = app.new_macro("Something");
+        if let Some(m) = app.library.macros.iter_mut().find(|m| m.id == id) {
+            m.actions = vec![TimedAction {
+                delay_ms: 0,
+                action: MacroAction::KeyPress {
+                    key_name: String::from("a"),
+                },
+            }];
+        }
+
+        let plain = KeyEvent {
+            key: Key::W,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        app.handle_event(&Event::Key(plain));
+        assert!(app.picker.is_open(), "W did not open the save picker");
+
+        // And the modifier policy still holds.
+        let mut app = AutomatorApp::new();
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::W,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::new(),
+        }));
+        assert!(
+            !app.picker.is_open(),
+            "a modified key reached a control, against this app's stated policy"
+        );
+    }
+
+    /// The picker is not merely open: it is DRAWN.
+    #[test]
+    fn the_picker_is_drawn_when_it_is_open() {
+        let mut app = AutomatorApp::new();
+        let before = app.render(WINDOW_WIDTH, WINDOW_HEIGHT).commands.len();
+        app.picker.open_to_read();
+        assert!(app.picker.is_open(), "no picker came up");
+        let own = app
+            .picker
+            .render(&app.palette, WINDOW_WIDTH, WINDOW_HEIGHT)
+            .len();
+        assert!(
+            own > 0,
+            "the picker itself draws nothing, so this proves nothing"
+        );
+        let after = app.render(WINDOW_WIDTH, WINDOW_HEIGHT).commands.len();
+        assert!(
+            after >= before + own,
+            "the frame does not contain the picker's own {own} command(s)"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // MacroMouseButton tests

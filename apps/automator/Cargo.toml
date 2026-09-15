@@ -12,5 +12,9 @@ guitk = { path = "../../gui/toolkit" }
 # so nothing was ever shown and no click or key ever reached the program.
 oswindow = { path = "../../gui/window" }
 
+# W writes through `safeio::write_str_atomically`, not `fs::write`, which
+# truncates the target before writing it.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

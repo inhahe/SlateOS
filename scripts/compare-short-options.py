@@ -73,8 +73,43 @@ def personalities(crate_name: str, source: str, cargo: str) -> list[str]:
     return sorted(n for n in names if not n.startswith(".") and len(n) > 1)
 
 
+def strip_comments(source: str) -> str:
+    """Remove `//` comments, so prose about options is not read as code.
+
+    THIS CHECK REPORTED ITS OWN DOCUMENTATION. A comment added to `dmesg`
+    explaining that the comparator reads `"-x" | "--long"` pairs was matched
+    as an `-x` binding, and the next run duly reported `-x` as bound to
+    `--long` here and `--decode` upstream. The finding was a sentence about
+    findings.
+
+    The `//` is only a comment when it is outside a string, which the parity
+    of unescaped quotes before it decides. Getting that wrong can only DROP a
+    binding, never invent one, so the failure direction is a missed
+    comparison rather than a false alarm.
+    """
+    out = []
+    for line in source.splitlines():
+        quotes = 0
+        cut = None
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                quotes += 1
+            elif ch == "/" and line[i : i + 2] == "//" and quotes % 2 == 0:
+                cut = i
+                break
+            i += 1
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
+
+
 def ours(source: str) -> dict[str, str]:
     """Short -> long, as this tree binds them."""
+    source = strip_comments(source)
     found: dict[str, str] = {}
     for short, long in OURS_A.findall(source):
         found.setdefault(short, long)
@@ -131,6 +166,17 @@ def selftest() -> int:
     assert ours('"-n" | "--match-types" =>') == {"-n": "--match-types"}
     assert ours('"--match-types" | "-n" =>') == {"-n": "--match-types"}
     cases += 2
+
+    # A COMMENT IS NOT A BINDING. This check reported its own documentation
+    # once: a comment in `dmesg` explaining that it reads `"-x" | "--long"`
+    # pairs was matched as an `-x` binding.
+    assert ours('// reads `"-x" | "--long"` pairs') == {}
+    assert ours('    /// like `"-q" | "--quiet"` above') == {}
+    # ...but a real binding on a line that also has a trailing comment stays.
+    assert ours('"-q" | "--quiet" => o.q = true, // quiet') == {"-q": "--quiet"}
+    # ...and a `//` inside a string does not truncate the line.
+    assert ours('let u = "https://x/"; "-q" | "--quiet" =>') == {"-q": "--quiet"}
+    cases += 4
 
     # Reference extraction, with and without an argument spec.
     assert theirs(" -d, --no-encoding   don't encode") == {"-d": "--no-encoding"}

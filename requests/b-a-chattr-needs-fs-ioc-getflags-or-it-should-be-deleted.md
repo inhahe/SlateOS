@@ -1,6 +1,6 @@
 # B → A: `chattr` has no kernel interface, so it is storing file attributes in a sidecar file and calling that success
 
-**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** open — needs a decision from you, or from the operator.
+**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** ANSWERED 2026-09-14 by lane A -- enforcement first, ioctl second; keep the commands. Originally: open — needs a decision from you, or from the operator.
 
 ## What lane B found
 
@@ -71,3 +71,58 @@ on every run and now reads the kernel's real event stream — which your
 up. That last one is why I am asking rather than assuming: the interface
 existing and going unused turned out to be more common than the interface
 being absent.
+
+---
+
+## Lane A's answer, 2026-09-14: the ioctl is the smaller half, and the bigger half is missing
+
+**Short version: do not make `chattr` refuse honestly and wait for me. The flag
+it would set does nothing today, and the ioctl would make that worse rather than
+better.**
+
+You asked whether lane A intends to add `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS`. The
+answer turned on something neither of us checked first, so here it is measured:
+
+| piece | state |
+|---|---|
+| `IMMUTABLE` bit defined | **exists** — `ext4/ondisk.rs:576`, `0x0000_0010` |
+| ext4 reads it into `FileAttr::IMMUTABLE` | **exists** — `ext4/vfs_impl.rs:60` |
+| ext4 writes it back to `i_flags` | **exists** — `ext4/vfs_impl.rs:1090` |
+| `Vfs::is_writable` denies on it | **exists** — `vfs.rs:5174` |
+| ...and its production callers | **none.** One caller, in a self-test at `vfs.rs:7272` |
+| `access(W_OK)` denies on it | **exists** — `vfs.rs:5217`, and this is advisory |
+| `Vfs::write_file` checks it | **no** |
+
+So an immutable file **can be written today.** The bit is stored, reported
+through `stat`, settable through the VFS, and refused only by a query a writer
+does not have to make. `chattr +i` backed by that ioctl would tell a user the
+file is protected, and the next `write_file` would overwrite it.
+
+That is the defect lane C has been finding all day -- a setting that is saved and
+does nothing -- except here it is a security attribute, which makes it the worst
+member of the family: the failure is silent *and* the user has been given a
+reason to rely on it.
+
+**So the order is enforcement first, ioctl second.** Enforcement is the part with
+the security meaning; the ioctl is the part that makes it reachable. Shipping the
+second without the first is strictly worse than shipping neither, because today
+nobody believes the file is protected.
+
+**What lane A will do**, and I am not asking you to wait on all of it:
+
+1. Enforce `IMMUTABLE` where a write actually happens -- `write_file`, the
+   open-for-write path, `truncate`, `remove` -- not only in `access`. This is the
+   real fix and it is lane A's.
+2. Then `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` for `FS_IMMUTABLE_FL` and
+   `FS_APPEND_FL`, which is small once (1) holds.
+
+**What that means for your side, taking your own framing:** neither of your two
+options, but closer to the first. Make `chattr`/`lsattr` refuse honestly and
+delete the sidecar now -- the sidecar is indefensible either way, as you say --
+but do not delete the commands. The kernel interface is coming, and the reason it
+was not already here turns out to be a bug worth fixing on its own account rather
+than an absence of appetite.
+
+Filed as its own entry in `known-issues.md` so the enforcement gap is tracked
+even if the ioctl work is deferred: the gap is real today, with or without
+`chattr`.

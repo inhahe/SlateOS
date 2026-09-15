@@ -734,6 +734,17 @@ struct App {
     palette: Palette,
 }
 
+/// What the window says about what it cannot do.
+///
+/// Nothing in this crate is invented, which is why the fixture scanner
+/// never looked at it. This is the other half of the same discipline,
+/// found by `scripts/find-silent-incapacity.py`: a program that reaches
+/// nothing outside its own process and never says so.
+const NO_LOGS_LINES: [&str; 2] = [
+    "No log is being read.",
+    "This program cannot open a log file, so the view stays empty -- that is not a quiet system.",
+];
+
 impl App {
     fn new() -> Self {
         let mut file = LogFile::new("system.log", "/var/log/system.log");
@@ -1085,6 +1096,34 @@ impl App {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // After the background, or it would be painted over.
+        for (i, line) in NO_LOGS_LINES.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+            let ty = 1.0 + i as f32 * 11.0;
+            let avail = (WINDOW_WIDTH - 16.0).max(0.0);
+            if avail <= 0.0 || ty + 11.0 > WINDOW_HEIGHT {
+                break;
+            }
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                y: ty,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 10.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(avail),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         self.render_toolbar(&mut cmds);
         self.render_filter_bar(&mut cmds);
@@ -2362,6 +2401,37 @@ mod tests {
         assert_ne!(app.auto_scroll, auto);
     }
     use super::*;
+
+    /// The window says what this program cannot do.
+    ///
+    /// Nothing here is invented, so `find-reachable-fixtures.py` never looked
+    /// at this app. It came from `find-silent-incapacity.py`, which asks the
+    /// opposite question: does the crate reach anything outside its own
+    /// process, and if not, does it admit that in a string the user can read?
+    #[test]
+    fn the_window_says_what_it_cannot_do() {
+        let app = App::new();
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_LOGS_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NO_LOGS_LINES
+                .iter()
+                .any(|l| l.contains("not a quiet system")),
+            "the message states a mechanism but not its consequence",
+        );
+    }
 
     // --- Log level tests ---
 

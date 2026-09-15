@@ -3646,6 +3646,20 @@ impl DefragUI {
                 drive.fs_type.label(),
                 format_size(drive.free_bytes()),
             )
+        } else if self.drives.is_empty() {
+            // Not "No drive selected", which is an instruction: it tells the
+            // user to pick one, and there are none to pick. An empty drive
+            // list under a defragmenter is read as *this machine has no
+            // drives*, which is the `apps/devicemanager` shape -- a claim
+            // about the user's hardware from a program that has not looked.
+            //
+            // `main` already reasons this through correctly and greys the
+            // Analyze button to match: "SlateOS has no way yet to enumerate
+            // volumes or read a block layout [...] That is the honest
+            // picture." It is honest in the source and in the button. The one
+            // thing missing was the sentence, and the sentence is what the
+            // user reads.
+            "No drives: this program cannot enumerate volumes yet, so none were found".to_string()
         } else {
             "No drive selected".to_string()
         };
@@ -3728,6 +3742,42 @@ mod tests {
     )]
 
     use super::*;
+
+    /// An empty drive list says why it is empty, not "pick one".
+    ///
+    /// This app was already careful: `main` explains that SlateOS cannot
+    /// enumerate volumes, the Analyze button is greyed to match, and the gap
+    /// is tracked as `C-DEFRAG-HAS-NO-WAY-TO-SCAN-A-DRIVE`. The status bar
+    /// still said "No drive selected", which is an *instruction* -- it tells
+    /// the user to pick one, and there are none to pick.
+    ///
+    /// An empty drive list under a defragmenter is read as "this machine has
+    /// no drives", which is the `apps/devicemanager` shape: a claim about the
+    /// user's hardware from a program that has not looked. Honest in the
+    /// source and in the button, and the one thing missing was the sentence.
+    #[test]
+    fn an_empty_drive_list_says_why_rather_than_asking_for_a_pick() {
+        let ui = DefragUI::new();
+        assert!(ui.drives.is_empty(), "drives appeared from nowhere");
+
+        let texts: Vec<String> = ui
+            .frame(1200.0, 800.0)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !texts.iter().any(|t| t == "No drive selected"),
+            "the status bar asks for a pick that cannot be made",
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("cannot enumerate volumes")),
+            "and does not say why the list is empty: {texts:?}",
+        );
+    }
 
     // -- text measurement ------------------------------------------------------
 

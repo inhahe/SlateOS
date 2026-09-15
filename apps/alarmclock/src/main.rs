@@ -53,6 +53,27 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ============================================================================
 
 /// Window dimensions.
+/// What the window says about what an alarm can actually do.
+///
+/// The alarm *does* fire: `check_alarm_triggers` sets `ringing` and the row
+/// changes. What it cannot do is make a sound or raise a system notification --
+/// this crate has no audio path and no notifier, and there is nothing in the
+/// tree for it to call.
+///
+/// **An alarm that changes a pixel in an unfocused window will not wake
+/// anyone.** That is the whole of the risk here, and it is the sharpest case
+/// of the pattern `apps/weather` and `apps/podcast` showed: the failure is
+/// deferred to the exact situation the feature existed for, and the user finds
+/// out by missing the thing they set it for.
+///
+/// Not a fabrication -- nothing here is invented, which is why the fixture
+/// scanner never looked at this app. It is the other half of the same
+/// discipline, and `scripts/find-silent-incapacity.py` was written to find it.
+const NO_SOUND_LINES: [&str; 2] = [
+    "Alarms ring in this window only.",
+    "There is no sound and no system notification -- if this window is not in front of you, nothing will wake you.",
+];
+
 const WINDOW_WIDTH: f32 = 480.0;
 const WINDOW_HEIGHT: f32 = 640.0;
 
@@ -2333,6 +2354,35 @@ impl AlarmClockApp {
             self.palette.base,
             0.0,
         );
+        // After the background, or it would be painted over. Unconditional:
+        // there is no state in which this program can make a sound.
+        for (i, line) in NO_SOUND_LINES.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+            let ty = 1.0 + i as f32 * 11.0;
+            let avail = (width - 16.0).max(0.0);
+            if avail <= 0.0 || ty + 11.0 > height {
+                break;
+            }
+            f.push(RenderCommand::Text {
+                x: 8.0,
+                y: ty,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 10.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(avail),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         self.draw_tab_bar(&mut f, width);
 
         let content = Self::content_rect(width, height);
@@ -3459,6 +3509,47 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The window says an alarm cannot wake anyone.
+    ///
+    /// The alarm genuinely fires: `check_alarm_triggers` sets `ringing` and
+    /// the row changes. What this crate has no path for is sound or a system
+    /// notification -- no audio, no notifier, and nothing in the tree to call.
+    ///
+    /// **An alarm that changes a pixel in an unfocused window will not wake
+    /// anyone**, and somebody who sets one finds out by missing the thing they
+    /// set it for. That is `apps/weather`'s alert channel and `apps/podcast`'s
+    /// Downloaded mark again: the failure is deferred to the exact situation
+    /// the feature existed for.
+    ///
+    /// Nothing here is invented, so the fixture scanner never looked at this
+    /// app. `scripts/find-silent-incapacity.py` was written to find this half.
+    #[test]
+    fn the_window_says_an_alarm_cannot_wake_anyone() {
+        let app = AlarmClockApp::new();
+        let texts: Vec<String> = app
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_SOUND_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NO_SOUND_LINES
+                .iter()
+                .any(|l| l.contains("nothing will wake you")),
+            "nothing states the consequence, only the mechanism",
+        );
+    }
+
     use guitk::probe;
 
     // ---- Weekday tests ----

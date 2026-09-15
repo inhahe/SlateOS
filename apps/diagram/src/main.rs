@@ -801,6 +801,17 @@ pub struct DiagramApp {
     palette: Palette,
 }
 
+/// What the window says about what it cannot do.
+///
+/// Nothing in this crate is invented, which is why the fixture scanner
+/// never looked at it. This is the other half of the same discipline,
+/// found by `scripts/find-silent-incapacity.py`: a program that reaches
+/// nothing outside its own process and never says so.
+const NOTHING_KEPT_LINES: [&str; 2] = [
+    "Diagrams cannot be saved or opened.",
+    "Nothing is saved -- this app has no filesystem access, so your work is gone when the window closes.",
+];
+
 impl DiagramApp {
     // ========================================================================
     // Construction
@@ -2072,6 +2083,34 @@ impl DiagramApp {
             0.0,
             Surface::Card,
         );
+
+        // After the background, or it would be painted over.
+        for (i, line) in NOTHING_KEPT_LINES.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+            let ty = 1.0 + i as f32 * 11.0;
+            let avail = (self.window_w - 16.0).max(0.0);
+            if avail <= 0.0 || ty + 11.0 > self.window_h {
+                break;
+            }
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                y: ty,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 10.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(avail),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         self.render_toolbar(&mut cmds);
         self.render_palette(&mut cmds);
@@ -3472,6 +3511,37 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// The window says what this program cannot do.
+    ///
+    /// Nothing here is invented, so `find-reachable-fixtures.py` never looked
+    /// at this app. It came from `find-silent-incapacity.py`, which asks the
+    /// opposite question: does the crate reach anything outside its own
+    /// process, and if not, does it admit that in a string the user can read?
+    #[test]
+    fn the_window_says_what_it_cannot_do() {
+        let app = DiagramApp::new(1280.0, 800.0);
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NOTHING_KEPT_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NOTHING_KEPT_LINES
+                .iter()
+                .any(|l| l.contains("gone when the window closes")),
+            "the message states a mechanism but not its consequence",
+        );
+    }
 
     // ------------------------------------------------------------------
     // Events

@@ -39,6 +39,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ── Card-list type sizes ────────────────────────────────────────────
 // Named because eliding text and drawing it must agree on the size: a cell
 // measured at one size and drawn at another either overflows or is cut short.
+/// What the window says about the three decks and about progress.
+///
+/// **The decks stay.** "What is the capital of France? -> Paris" is a true
+/// statement about the world, correctly stated, bundled as content -- the
+/// `apps/ebook` case rather than the `apps/kanban` one. A fabrication is a
+/// claim about something the program cannot observe, and this is not one.
+///
+/// The second line is the defect, and it is specific to this kind of program.
+/// **Spaced repetition is defined by history.** A scheduler that forgets is
+/// worse than no scheduler: it will show a card that was mastered last week
+/// and hold back one that is about to be forgotten, and the user cannot tell
+/// because the whole point is that they do not remember either.
+const SAMPLE_AND_PROGRESS_LINES: [&str; 2] = [
+    "Three included decks -- these came with the app, not from you.",
+    "No progress is saved: this app has no filesystem access, so every review schedule resets when the window closes.",
+];
+
 const CARD_HEADING_SIZE: f32 = 11.0;
 const CARD_FRONT_SIZE: f32 = 13.0;
 const CARD_BACK_SIZE: f32 = 11.0;
@@ -1513,6 +1530,34 @@ impl FlashcardsApp {
             corner_radii: CornerRadii::ZERO,
         });
 
+        // After the background, or it would be painted over.
+        for (i, line) in SAMPLE_AND_PROGRESS_LINES.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+            let ty = 1.0 + i as f32 * 11.0;
+            let avail = (self.width - 16.0).max(0.0);
+            if avail <= 0.0 || ty + 11.0 > self.height {
+                break;
+            }
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                y: ty,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.subtext0
+                } else {
+                    self.palette.ink(self.palette.yellow)
+                },
+                font_size: if i == 0 { 9.0 } else { 10.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Regular
+                } else {
+                    FontWeightHint::Bold
+                },
+                max_width: Some(avail),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         self.render_header(&mut cmds);
 
         match self.view {
@@ -2924,6 +2969,49 @@ mod tests {
     }
 
     use super::*;
+
+    /// The window names the decks as included and the progress as unsaved.
+    ///
+    /// Both scanners reached this app, and they disagreed usefully.
+    /// `find-reachable-fixtures.py` flagged `sample_world_capitals` and its
+    /// two siblings; `find-silent-incapacity.py` flagged the crate for
+    /// reaching nothing and saying nothing.
+    ///
+    /// **The decks stay.** "What is the capital of France? -> Paris" is a true
+    /// statement about the world, bundled as content. A fabrication is a claim
+    /// about something the program cannot observe, and this is not one -- the
+    /// `apps/ebook` case, not the `apps/kanban` one. They are labelled so they
+    /// cannot be mistaken for the user's own.
+    ///
+    /// The silence was the real defect, and it is specific to this kind of
+    /// program: **spaced repetition is defined by history.** A scheduler that
+    /// forgets is worse than no scheduler -- it shows a card mastered last
+    /// week and holds back one about to be forgotten, and the user cannot tell,
+    /// because not remembering is the thing they came here about.
+    #[test]
+    fn the_window_names_the_decks_and_the_lost_progress() {
+        let app = FlashcardsApp::new();
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in SAMPLE_AND_PROGRESS_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            SAMPLE_AND_PROGRESS_LINES
+                .iter()
+                .any(|l| l.contains("review schedule resets")),
+            "the message states the mechanism but not what it costs the user",
+        );
+    }
 
     // ── ReviewData / SM-2 tests ─────────────────────────────────────
 

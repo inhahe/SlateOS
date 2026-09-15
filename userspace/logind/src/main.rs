@@ -1546,8 +1546,49 @@ fn detect_personality(args: &[String]) -> &'static str {
 // ============================================================================
 
 /// Parse a logind.conf style configuration from text content.
-fn parse_config(content: &str) -> DaemonConfig {
+/// `logind.conf` keys this build parses and stores but nothing ACTS on.
+///
+/// Every name here is a promise the file appears to make and this build does
+/// not keep. They are inert for one shared reason rather than nine separate
+/// ones: this build has no session lifecycle and no input-event source, so
+/// there is no logout to kill processes at and no power key to handle. The
+/// gap is recorded as
+/// `known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT`.
+///
+/// `IdleActionSec` is in this list even though a field-level scan calls it
+/// READ, and that difference is the point. Its only reader is the startup
+/// banner, which prints `idle_timeout=600s` back at the operator -- so the
+/// one thing the setting does is CONFIRM ITSELF. A scanner asking "is this
+/// field ever read?" cannot see that, because printing is a read; the
+/// question that finds it is "does anything ACT on it?".
+///
+/// When one of these is wired up, delete its entry. The test below checks
+/// every name here is a key `parse_config` actually recognises -- crossing
+/// this list against the parser's own `recognised` answer, NOT against
+/// itself -- so a typo or a renamed key fails. Nothing can check that a name
+/// is STILL inert, so removing one is a deliberate act and has to stay that
+/// way.
+const INERT_CONFIG_KEYS: &[&str] = &[
+    "HandleHibernateKey",
+    "HandleLidSwitch",
+    "HandleLidSwitchDocked",
+    "HandlePowerKey",
+    "HandleSuspendKey",
+    "IdleAction",
+    "IdleActionSec",
+    "InhibitDelayMaxSec",
+    "KillUserProcesses",
+];
+
+/// Parse `logind.conf`, and report which of the keys it set are inert.
+///
+/// The second half of the return is empty unless the operator actually set
+/// one, which is the whole design: silence when nothing was asked for, and a
+/// plain statement when something was. A warning printed unconditionally is
+/// one the reader learns to skip.
+fn parse_config(content: &str) -> (DaemonConfig, Vec<&'static str>) {
     let mut config = DaemonConfig::default();
+    let mut inert: Vec<&'static str> = Vec::new();
     let mut in_login_section = false;
 
     for line in content.lines() {
@@ -1566,32 +1607,67 @@ fn parse_config(content: &str) -> DaemonConfig {
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
             let value = value.trim();
-            match key {
-                "IdleAction" => config.idle_action = value.to_string(),
+            // `recognised` comes from the MATCH, not from the inert list.
+            //
+            // The first version of this asked only "is the key in
+            // INERT_CONFIG_KEYS?", which made the staleness test below a
+            // tautology: it looked the key up in the list, found it, pushed
+            // it, and then asserted it was in the list. A deliberately bogus
+            // entry passed. Crossing the parser's answer with the list's is
+            // what gives that test something to fail on.
+            let recognised = match key {
+                "IdleAction" => {
+                    config.idle_action = value.to_string();
+                    true
+                }
                 "IdleActionSec" => {
                     if let Ok(v) = value.parse() {
                         config.idle_timeout = v;
                     }
+                    true
                 }
-                "HandlePowerKey" => config.handle_power_key = value.to_string(),
-                "HandleSuspendKey" => config.handle_suspend_key = value.to_string(),
-                "HandleHibernateKey" => config.handle_hibernate_key = value.to_string(),
-                "HandleLidSwitch" => config.handle_lid_switch = value.to_string(),
-                "HandleLidSwitchDocked" => config.handle_lid_switch_docked = value.to_string(),
+                "HandlePowerKey" => {
+                    config.handle_power_key = value.to_string();
+                    true
+                }
+                "HandleSuspendKey" => {
+                    config.handle_suspend_key = value.to_string();
+                    true
+                }
+                "HandleHibernateKey" => {
+                    config.handle_hibernate_key = value.to_string();
+                    true
+                }
+                "HandleLidSwitch" => {
+                    config.handle_lid_switch = value.to_string();
+                    true
+                }
+                "HandleLidSwitchDocked" => {
+                    config.handle_lid_switch_docked = value.to_string();
+                    true
+                }
                 "KillUserProcesses" => {
                     config.kill_user_processes = value == "yes" || value == "true" || value == "1";
+                    true
                 }
                 "InhibitDelayMaxSec" => {
                     if let Ok(v) = value.parse() {
                         config.inhibit_delay_max = v;
                     }
+                    true
                 }
-                _ => {}
+                _ => false,
+            };
+            if recognised
+                && let Some(name) = INERT_CONFIG_KEYS.iter().find(|k| **k == key)
+                && !inert.contains(name)
+            {
+                inert.push(name);
             }
         }
     }
 
-    config
+    (config, inert)
 }
 
 // ============================================================================
@@ -1640,9 +1716,9 @@ fn run_daemon(args: &[String]) -> i32 {
     let daemon_args = parse_daemon_args(args);
 
     // Try to load configuration from /etc/systemd/logind.conf.
-    let config = match std::fs::read_to_string("/etc/systemd/logind.conf") {
+    let (config, inert_keys) = match std::fs::read_to_string("/etc/systemd/logind.conf") {
         Ok(content) => parse_config(&content),
-        Err(_) => DaemonConfig::default(),
+        Err(_) => (DaemonConfig::default(), Vec::new()),
     };
 
     let mut daemon = Daemon::new(config, authlib::Authenticator::new());
@@ -1655,6 +1731,27 @@ fn run_daemon(args: &[String]) -> i32 {
         io::stderr(),
         "logind: starting session manager (v{VERSION})"
     );
+
+    // Said once, at startup, and only when the operator set one of them.
+    //
+    // The alternative was to stop accepting these keys, which is the other
+    // honest option and the wrong one here: a config file is not a command
+    // line, and refusing to start because logind.conf mentions
+    // `HandleLidSwitch` would turn a documented gap into an outage. Saying so
+    // keeps the file portable and stops the setting being believed.
+    if !inert_keys.is_empty() {
+        let _ = writeln!(
+            io::stderr(),
+            "logind: these logind.conf settings are parsed but have NO EFFECT: {}",
+            inert_keys.join(", ")
+        );
+        let _ = writeln!(
+            io::stderr(),
+            "logind: this build has no session lifecycle and no input-event source, \
+so there is no logout to act at and no key press to handle. See known-issues.md \
+-> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT."
+        );
+    }
 
     if !daemon_args.foreground {
         let _ = writeln!(
@@ -3391,9 +3488,53 @@ mod tests {
 
     // --- Configuration parsing ---
 
+    /// Setting an inert key is reported; setting nothing is silent.
+    #[test]
+    fn inert_config_keys_are_named_when_set() {
+        // An unrecognised key, deliberately: EVERY key this parser knows is
+        // currently inert, so there is no "recognised and effective" spelling
+        // to use here. That is itself the finding -- see the commit message.
+        let (_, quiet) = parse_config("[Login]\nSomeKeyWeDoNotKnow=1\n");
+        assert!(
+            quiet.is_empty(),
+            "a config that sets nothing inert must not warn, got {quiet:?}"
+        );
+
+        let (_, inert) = parse_config("[Login]\nKillUserProcesses=yes\nHandleLidSwitch=suspend\n");
+        assert_eq!(inert, vec!["KillUserProcesses", "HandleLidSwitch"]);
+
+        // Reported once even if repeated, or the message grows with the file.
+        let (_, dupes) = parse_config("[Login]\nIdleAction=poweroff\nIdleAction=suspend\n");
+        assert_eq!(dupes, vec!["IdleAction"]);
+
+        // Outside [Login] nothing is parsed, so nothing is inert either.
+        let (_, other) = parse_config("[Other]\nKillUserProcesses=yes\n");
+        assert!(other.is_empty(), "got {other:?}");
+    }
+
+    /// Every name in `INERT_CONFIG_KEYS` is a key `parse_config` recognises.
+    ///
+    /// This is what stops the list rotting into a lie in the one direction a
+    /// test CAN check: a typo, or a key renamed without updating the list,
+    /// would otherwise sit there naming a setting that no longer exists and
+    /// never firing. The other direction -- a key that has since been wired
+    /// up and is no longer inert -- cannot be checked mechanically, which is
+    /// why removing an entry has to be a deliberate act.
+    #[test]
+    fn every_inert_key_is_one_the_parser_knows() {
+        for key in INERT_CONFIG_KEYS {
+            let (_, inert) = parse_config(&format!("[Login]\n{key}=x\n"));
+            assert_eq!(
+                inert,
+                vec![*key],
+                "{key} is listed as inert but the parser does not recognise it"
+            );
+        }
+    }
+
     #[test]
     fn test_parse_config_defaults() {
-        let config = parse_config("");
+        let (config, _inert) = parse_config("");
         assert_eq!(config.idle_timeout, DEFAULT_IDLE_TIMEOUT);
         assert_eq!(config.handle_power_key, "poweroff");
         assert!(!config.kill_user_processes);
@@ -3409,7 +3550,7 @@ HandlePowerKey=hibernate
 KillUserProcesses=yes
 InhibitDelayMaxSec=10
 ";
-        let config = parse_config(content);
+        let (config, _inert) = parse_config(content);
         assert_eq!(config.idle_action, "suspend");
         assert_eq!(config.idle_timeout, 600);
         assert_eq!(config.handle_power_key, "hibernate");
@@ -3425,7 +3566,7 @@ IdleAction=poweroff
 [Login]
 IdleAction=suspend
 ";
-        let config = parse_config(content);
+        let (config, _inert) = parse_config(content);
         assert_eq!(config.idle_action, "suspend");
     }
 
@@ -3438,7 +3579,7 @@ IdleAction=suspend
 [Login]
 HandleSuspendKey=ignore
 ";
-        let config = parse_config(content);
+        let (config, _inert) = parse_config(content);
         assert_eq!(config.handle_suspend_key, "ignore");
     }
 

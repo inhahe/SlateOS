@@ -152368,3 +152368,341 @@ found five copies of in `userspace/`, and it earned its place again here.
 compiles: the rename silenced, a failure counted as a success, a non-text name
 treated as text, the picker undrawn, an undo queued for a rename that did not
 happen, and folders listed as files. All eight went red.
+
+## TD-C-TWO-PROCESS-MANAGERS-REPORTED-KILLING-PROCESSES-THEY-NEVER-TOUCHED -- FIXED 2026-09-15
+
+**In short:** the process explorer and the system monitor each had Kill, Pause
+and Resume buttons. Pressing Kill said "Killed process firefox (PID 4821)" and
+removed the row from the list. Nothing was signalled — neither program can send
+a signal at all. The process explorer additionally opened on six invented
+processes and an invented 8 GiB machine, even though it had been reading the
+real `/proc` since 2026-09-13.
+
+**Date:** 2026-09-15. **Lane:** C. Found by
+`scripts/find-claimed-acts.py`, written the same afternoon for this class.
+
+**Why this is the worst form the defect takes.** The claim was not merely
+false; **the program then made it come true in the display.** Kill removed the
+row, Pause set the row to Stopped. So the window agreed with its own status
+line — the process vanished from the list exactly as it would have if it had
+died — and *nothing inside the program could tell the user otherwise.* Every
+other fabrication in this sweep can in principle be caught by looking harder at
+the screen. This one cannot.
+
+What believing it costs: a person who thinks a runaway process is dead stops
+trying to kill it. The machine stays slow, and the reason has been removed
+from the list of suspects.
+
+| control | claimed | did |
+|---|---|---|
+| `procexplorer` Kill (toolbar + menu) | "Killed process X (PID n)" | removed the row |
+| `procexplorer` Pause / Resume (both routes) | "Paused X" / "Resumed X" | set the row's status |
+| `sysmonitor` Kill (toolbar + menu) | "Killed process X (PID n)" | removed the row |
+| `sysmonitor` Stop / Continue | "Stopped X" / "Resumed X" | set the row's status |
+
+**Two routes each, and that is the part worth remembering.** Both apps had the
+toolbar action *and* a right-click menu action, implemented separately, saying
+the same false thing two hundred lines apart. Repairing `kill_selected` alone
+left `ContextAction::Kill` untouched in both — and I did exactly that, and the
+scanner caught it on the re-run. **A defect found by reading one call site is
+a defect half-fixed by default.**
+
+**The tests were the other half, and they differed instructively.**
+`procexplorer` had *no* test for any of the three controls, which is part of
+why the claim survived. `sysmonitor` had four, and they were worse than none:
+
+```rust
+s.kill_selected();
+assert_eq!(s.processes.len(), initial - 1);
+```
+
+That assertion **pins the fabrication.** It does not test that a process was
+killed — nothing could, from in here — it tests that the row was removed, which
+is precisely the mechanism that made the lie self-consistent. A test over a
+claim nothing performs makes the defect look deliberate and protects it from
+the next reader. A fifth test, `test_continue_selected`, then passed
+*vacuously* once the repair landed: it stopped and continued a process that was
+already Running and asserted it was Running, so it would have held against two
+methods that did nothing whatever.
+
+**`procexplorer`'s invented machine, and the shape of how it survived.** Two
+changes, each defensible alone:
+
+* `refresh()` reads the real `/proc` through `procinfo`, and **keeps the
+  previous list when it cannot read** — right, because an explorer that empties
+  itself when `/proc` is briefly unavailable is worse than one that holds.
+* `main()` called `load_demo_data()` first, under a comment reading *"Until a
+  real process source exists this is what there is to show"*.
+
+Together: on every host without `/proc`, the invented list loaded first and the
+real reader then declined to replace it. **The careful reader was shadowed at
+startup by the thing it replaced**, and the comment saying why had been false
+for two days. `load_demo_data` set more than processes — 8 GiB of memory, 33%
+CPU, load `[1.23, 0.98, 0.87]`, 86472 seconds of uptime, and a table of network
+connections. An entire plausible machine, none of it this one.
+
+Startup now calls `refresh()`; the demo builders are `#[cfg(test)]`; memory,
+load and uptime are read from the same `ProcFs`; and when `/proc` cannot be
+read at all the status bar says so rather than leaving a window that looks like
+a working one.
+
+**What is still missing, and whose it is.** Sending a signal needs `kill(2)`,
+which is stateful and therefore reachable only through the C ABI per
+`design-decisions.md` §768 — `posix::signal::kill` as a Rust dependency is the
+route that looks right and resolves to a stub answering `-ENOSYS`. That makes
+it `libcall`'s to expose and `libcall` is lane B's:
+`requests/c-b-a-process-manager-needs-a-way-to-send-a-signal.md`. Until it is
+answered the three controls are honest and inert, which is the correct state
+for a control that cannot act.
+
+`/proc/net/tcp` is likewise parsed by nothing in this tree, so both Network
+tabs now show an empty list rather than invented sockets.
+
+**Still open here:** `sysmonitor` has no `procinfo` dependency and still
+invents its process list and system figures from `load_demo_data` at startup.
+Its *claims* are repaired; its *data* is not. That is the next commit, and it
+is the same edit `procexplorer` just took.
+
+**Verified by sabotage**, five claims, each broken with an edit that still
+compiles: the kill claimed again, the row removed to match it, an unreadable
+`/proc` passed over in silence, and the system figures left unread. All five
+went red.
+
+## TD-C-THE-VPN-MANAGER-REPORTED-CONNECTING-AND-KEPT-A-LOG-OF-SESSIONS-THAT-NEVER-HAPPENED -- FIXED 2026-09-15
+
+**In short:** clicking Connect in the VPN manager turned the profile green,
+said "Connected successfully", showed a local address of 10.8.0.2 and a latency
+of 42 ms, and started a session clock. No tunnel was established, because
+nothing in this operating system can establish one. The window also opened on a
+log of past sessions that never happened.
+
+**Date:** 2026-09-15. **Lane:** C. Found by
+`scripts/find-claimed-acts.py`.
+
+**This one has a consequence the others do not.** Every fabrication fixed in
+this sweep costs the user time or trust. This one costs them privacy: **a
+person who believes their traffic is inside a tunnel behaves as though it is.**
+That is the whole purpose of the program, and it is the one belief it could
+create falsely.
+
+The code said so itself:
+
+```rust
+// Simulate immediate connection success for UI purposes
+if let Some(conn) = self.connection_for_mut(pid) {
+    conn.status = ConnectionStatus::Connected;
+}
+self.add_log(&name, "Connected successfully", LogLevel::Info);
+```
+
+**Someone had already been here, and cleaned the wrong half.** `advance`
+carries a careful paragraph refusing to move the byte counters, because
+"traffic on a tunnel it is not carrying would be a number invented to look
+busy". The fabricated *readings* were removed and the *claim* was left
+standing — the same partial audit that left `apps/sysinfo` on a FIXED list
+with three lying controls, and the same shape as `apps/procexplorer`, where
+`refresh()` was wired to the real `/proc` and `main()` went on seeding invented
+processes. **A fabrication has two halves — the numbers and the sentence — and
+fixing either one leaves a program that still lies.**
+
+**There is no VPN in this tree and there is not going to be one soon.** `net/`
+holds `dns` and `httpclient`. There is no tunnel device, no WireGuard, no
+IPsec, nothing that could carry a packet through anything. So this is not
+"unfinished"; it is a capability the system does not have, which is why the
+new status is `Unavailable` rather than `Error`. **A status that invites the
+user to try again is its own small lie** when trying again cannot help.
+
+**What changed:**
+
+* `connect()` sets `ConnectionStatus::Unavailable`, logs a warning, and returns
+  `Err("No VPN client on this system: the profile was checked, but no tunnel
+  was established")`. `quick_connect` and `reconnect` delegate to it, so both
+  became honest without being touched.
+* The invented `local_ip = "10.8.0.2"` and `latency_ms = 42` are gone — an
+  address nothing assigned and a round trip nothing measured, drawn in the
+  details pane beside the real fields with no way to tell them apart.
+* The log starts empty. It had opened on "Connected to vpn.company.com",
+  "Assigned IP 10.8.0.2", "Handshake completed with peer", "Connection timed
+  out". **A log is where a user looks to find out what actually happened**,
+  which makes an invented one a fabricated account of their own machine rather
+  than decoration.
+* The export writes through `safeio::write_str_atomically` rather than
+  `fs::write`, which truncates the target before writing: an interrupted
+  export would have left neither the old profiles nor the new ones. It also
+  had no test at all — the one door this program has, unpinned.
+
+**Twenty-one tests went red at once, and that is the measurement worth
+keeping.** Every test of `disconnect`, the session statistics, the uptime clock
+and the status sort order reached its starting state by calling `connect` and
+unwrapping. **Twenty-four call sites asserted their own setup through the very
+claim that was false**, so the moment `connect` stopped pretending, most of the
+crate's connection suite collapsed. Nothing was wrong with those tests as tests
+— the machinery they cover is correct — but none of them could have caught this
+defect, because all of them depended on it.
+
+They now reach that state through `connected_for_testing`, a `#[cfg(test)]`
+method that places the state by hand. The name is the point: no production path
+calls it, and a reader of any test can see in one word that the connection was
+put there rather than arrived at.
+
+**A consequence worth stating plainly:** with nothing able to connect, the
+Reconnect button is conditional on a state the system cannot reach, so it
+cannot appear in a shipping build at all. That is honest rather than broken,
+and `reconnect_is_only_offered_once_there_is_a_connection_to_reconnect` now
+pins both halves — that Connect does not make it appear, and that a
+hand-placed connection does.
+
+**Still open, and it is the same app:** `sample_profiles()` is called from
+`VpnManager::new()`, so the window still opens on three invented profiles
+("Work VPN" at vpn.company.com, "Personal WG", "Travel VPN") that the user
+never created. Unlike the log, these are configuration rather than history, and
+unlike `procexplorer`'s seed they cannot be removed in one line — `new()` is
+used by all 210 tests, so the migration is a test-wide change of the same size
+as the one above. The next commit is that migration: `new()` opens empty,
+`with_sample_profiles()` becomes `#[cfg(test)]`, and the window says "no
+profiles yet — import one" the way `apps/renamer` says "Ctrl+O to choose a
+folder".
+
+**Verified by sabotage**, five claims, each broken with an edit that still
+compiles: the tunnel claimed again, the invented address restored, the invented
+latency restored. All five went red. The harness also reported honestly that
+**nothing pins the atomic write** — testing that needs fault injection this
+crate has no way to do, and the export test says so at the test rather than
+leaving the gap silent.
+
+## TD-C-THE-SYSTEM-MONITOR-NEVER-READ-THE-SYSTEM -- FIXED 2026-09-15
+
+**In short:** the system monitor showed fifteen processes, a memory total, a
+CPU percentage and load averages. All of it was written into the program by
+`load_demo_data` at startup. `refresh()` — the method whose name says it
+re-reads the machine — sorted the list it already had and read nothing at all.
+It now reads the real `/proc`, including the machine's hostname and kernel
+release, and says plainly when it cannot.
+
+**Date:** 2026-09-15. **Lane:** C. The other half of
+`TD-C-TWO-PROCESS-MANAGERS-REPORTED-KILLING-PROCESSES-THEY-NEVER-TOUCHED`,
+whose fix repaired this app's *claims* and left its *data*.
+
+**The comment was a promise, and this is it being kept.** `main` read:
+
+```rust
+// Until a real process source exists this is what there is to show. It is
+// loaded here rather than in `new` so that the moment a source arrives,
+// this is the one line that changes.
+monitor.load_demo_data();
+```
+
+That was honest and well-judged when written. `procinfo` — the shared `/proc`
+reader lane B built at lane C's request — had existed for days, so the source
+had arrived and nobody came back. **The value of a comment like that is
+entirely in someone returning to it**, and what makes that likely is not the
+comment; it is a check that notices. `apps/procexplorer` had the identical
+comment, also stale, found the same afternoon.
+
+**What is read now:** every process `/proc` admits to (pid, name, state,
+resident memory, thread count), plus memory totals, load averages, uptime, CPU
+model, hostname and kernel release. Two numbers are deliberately *not*
+produced:
+
+* `cpu_percent` stays 0.0. A percentage needs two samples of a counter and a
+  refresh has one. Inventing it is the mistake this whole change undoes.
+* A process's age is `system uptime − its start time`, because `/proc` does not
+  publish an age. That arithmetic is pinned by a test, and the sabotage run
+  confirmed that returning the start time instead goes red.
+
+**A fixture caught a wrong path, which is the point of asserting values.** The
+first version of the system test wrote `/proc/hostname`; `procinfo` reads
+`sys/kernel/hostname`. The test failed with `left: "" right: "slate-test"`
+rather than passing over a field that was never read.
+
+**One constant, one derivation.** `apps/procexplorer` defined its own
+`TICKS_PER_SECOND: u64 = 100` beside `procinfo::TICKS_PER_SEC`, which is the
+same fact about the same files written twice. It now uses `procinfo`'s. Two
+copies of a kernel constant is how one program keeps working across a change
+and the other quietly stops.
+
+**Verified by sabotage**, five claims, each broken with an edit that still
+compiles: the process list not read, a process's age reported as its start
+time, the system figures not read, the kernel release taken as the whole
+`/proc/version` line, and an unreadable `/proc` passed over in silence. All
+five went red.
+
+## TD-C-APPS-SYSINFO-WAITS-ON-A-FILESYSTEM-TREE-THAT-DOES-NOT-EXIST -- OPEN 2026-09-15
+
+**In short:** the graphical System Information window reads ten of its twelve
+categories from `/sys/hardware/...`. The kernel serves no `/sys/hardware` at
+all, and lane A has now decided that several of those nodes will never exist,
+because `/proc` already answers the same questions. So those categories will
+report "cannot read" forever, while the data sits in `/proc` — and the crate
+built specifically to read it for this app is not among the app's
+dependencies.
+
+**Date:** 2026-09-15. **Lane:** C. Not yet fixed; the work is scoped below.
+
+**How it got here, in three correct steps.**
+
+1. `apps/sysinfo` was given a real provider reading `/sys/hardware/*`, with an
+   honest comment: *"Every query is expected to fail at present: nothing in
+   `kernel/`, `services/` or `userspace/` produces `/sys/hardware/*`. That is
+   the point rather than a defect here — the window says it cannot read the
+   hardware, which is true, and it starts reporting real values on the day a
+   producer appears."* Correct when written.
+2. §850 then settled that the CPU and memory trees belong at `/sys/devices`,
+   not a parallel `/sys/hardware`, and those two were moved. They work.
+3. Lane A recorded on 2026-09-15 that `irqs` and `display` are **deliberately
+   not served**, because `/proc/interrupts` and `/proc/monitors` already
+   publish them and "a second kernel answer to one question" is what §850
+   exists to prevent.
+
+Every step is right. The consequence nobody was positioned to see is that the
+app's comment — *"it starts reporting real values on the day a producer
+appears"* — became a **promise that will not be kept**, for a growing number of
+its categories, and the app is the only place that sentence is written.
+
+**What the kernel actually serves** (`kernel/src/fs/sysfs.rs`):
+`/sys/devices/system/cpu/**`, `/sys/devices/system/memory/{total_kb,
+available_kb}`, `/sys/devices/block/<name>/*` (added 2026-09-15, dd-939),
+`/sys/fs/*`, `/sys/params/*`. No `/sys/hardware` node of any kind, and
+deliberately no `cpufreq/` or `net/` — "no frequency source, and
+`InterfaceInfo` has no name field, so both would be invented", which is the
+same discipline applied one level down.
+
+**What `/proc` publishes that these categories want:** `cpuinfo`, `meminfo`,
+`uptime`, `loadavg`, `version`, `sys/kernel/hostname`, `mounts`, `diskstats`,
+`net/dev`, `interrupts`, `monitors`, and the whole `<pid>/` tree.
+
+**`procinfo` parses nearly all of it already**, and exists for this app: its
+module docs say so by name — *"the two system-information programs in this
+tree — `userspace/sysinfo` (the CLI) and `apps/sysinfo` (the graphical one) —
+differ entirely in the second half and not at all in this one"* — and the
+request that produced it was filed by this lane. **`apps/sysinfo/Cargo.toml`
+does not list it.** `apps/procexplorer` and `apps/sysmonitor` both do, as of
+today.
+
+| category | source available now | in `procinfo`? |
+|---|---|---|
+| System summary, CPU, memory | `/proc/{cpuinfo,meminfo,uptime,loadavg,version}` | yes |
+| Storage | `/proc/mounts`, `/proc/diskstats`, `/sys/devices/block` | yes |
+| Network | `/proc/net/dev` | yes |
+| Processes | `/proc/<pid>/{stat,statm,cmdline}` | yes |
+| IRQs | `/proc/interrupts` | **no parser** |
+| Display | `/proc/monitors` | **no parser** |
+| PCI, USB, sound, I/O ports, DMA, memory map, drivers, services, startup | nothing publishes these | — |
+
+**The fix, in order:**
+
+1. Add `procinfo` to `apps/sysinfo` and serve the first four rows from it. That
+   is most of the window, and it is real data today.
+2. For IRQs and display, ask lane B for `ProcFs::interrupts()` and
+   `ProcFs::monitors()` rather than parsing them here — `procinfo` exists
+   precisely so two programs do not grow two parsers of one file, and
+   `userspace/` will want the same two.
+3. For the last row, keep saying it cannot be read, and **delete the
+   `/sys/hardware/*` constants that back them** so the next reader is not
+   waiting on a path that was decided against. The sentence about "the day a
+   producer appears" has to go with them: it is a promise this project has
+   declined to make.
+
+**Why this is filed rather than done:** it is the largest remaining item in
+this sweep and wants its own commits. Everything needed to start is above, and
+nothing about it is blocked.

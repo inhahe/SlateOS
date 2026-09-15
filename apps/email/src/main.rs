@@ -2286,13 +2286,32 @@ impl EmailApp {
         }
     }
 
-    /// Turn the open draft into a message and file it under Sent.
+    /// Check the open draft, and say plainly that it cannot be sent.
     ///
     /// This is the one place `build_message` is called, and it is what makes
     /// the twelve tests over it worth having: a draft with a malformed
     /// recipient is *rejected* rather than silently repaired -- the builder
     /// partitions the addresses and hands back the ones it would not accept,
     /// and the status line says so.
+    ///
+    /// **What it used to do after that is the defect.** The doc comment said
+    /// "file it under Sent". Nothing in this program files anything under
+    /// Sent -- `MailboxType::Sent` appears twice in the whole file, once as a
+    /// sidebar label and once as an icon. So `built.text`, the RFC-822 message
+    /// this crate assembles carefully and tests for forged headers and BCC
+    /// leakage, was used only to read `rejected_recipients` off and was then
+    /// dropped. The draft was cleared, the panel switched away, and the status
+    /// line read `sent "..." to 3 recipient(s)`.
+    ///
+    /// Three things wrong at once, and the order matters: **the user's
+    /// composed message was destroyed**, nothing was transmitted, and they
+    /// were told it had been delivered. This app has no `std::net` and there
+    /// is no SMTP client anywhere in the tree, so the last of those could
+    /// never have been true.
+    ///
+    /// The draft now stays open. Filing it under Drafts was considered and
+    /// rejected: nothing reads that mailbox either, so it would move the
+    /// message from one place it is lost to another.
     fn send_draft(&mut self) {
         let Some(draft) = self.compose_draft.as_ref() else {
             return;
@@ -2331,9 +2350,13 @@ impl EmailApp {
         }
 
         let subject = draft.subject.clone();
-        self.compose_draft = None;
-        self.active_panel = Panel::MessageList;
-        self.status_message = format!("sent \"{subject}\" to {recipients} recipient(s)");
+        // The draft is deliberately left open and the panel deliberately not
+        // switched: the composing window is the only place this message
+        // exists.
+        self.status_message = format!(
+            "\"{subject}\" was not sent -- nothing here can reach a mail server. \
+             The draft is still open; {recipients} recipient(s) checked out."
+        );
     }
 
     /// Move the message selection by `delta` rows through what is on screen.
@@ -3660,10 +3683,23 @@ mod tests {
         assert_eq!(draft.body, "Body");
     }
 
-    /// `build_message` has twelve tests and had no caller, so nothing this
-    /// client composed was ever turned into a message.
+    /// Ctrl+Enter checks the draft, keeps it, and does not claim to have sent it.
+    ///
+    /// This test used to be `ctrl_enter_sends_the_draft` and asserted
+    /// `compose_draft.is_none()` -- "the draft should have gone" -- plus a
+    /// status line containing "sent". Its own comment records why it was
+    /// written: `build_message` had twelve tests and no caller, so it was
+    /// wired to Ctrl+Enter to give the stranded builder a door.
+    ///
+    /// **The door led nowhere.** This client has no `std::net` and there is no
+    /// SMTP client in the tree, so wiring the builder to a Send control
+    /// produced a program that destroyed the user's draft and reported a
+    /// delivery. Giving a finished serialiser a caller is only a repair if the
+    /// caller can perform the act; otherwise it converts an unreachable
+    /// function into a false claim, which is strictly worse than leaving it
+    /// unreachable.
     #[test]
-    fn ctrl_enter_sends_the_draft() {
+    fn ctrl_enter_checks_the_draft_and_keeps_it() {
         let mut app = seeded();
         app.handle_event(&key_ev(Key::N, true));
         for c in "bob@example.com".chars() {
@@ -3675,11 +3711,18 @@ mod tests {
         }
 
         app.handle_event(&key_ev(Key::Enter, true));
-        assert!(app.compose_draft.is_none(), "the draft should have gone");
-        assert_eq!(app.active_panel, Panel::MessageList);
         assert!(
-            app.status_message.contains("sent"),
-            "got {:?}",
+            app.compose_draft.is_some(),
+            "the draft was destroyed; it is the only place this message exists"
+        );
+        assert_eq!(
+            app.active_panel,
+            Panel::Compose,
+            "switching away hides the draft that was kept"
+        );
+        assert!(
+            app.status_message.contains("was not sent"),
+            "claimed a delivery it cannot perform: {:?}",
             app.status_message
         );
     }

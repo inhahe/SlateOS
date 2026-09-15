@@ -940,20 +940,24 @@ fn simulate_prime_sieve() -> f64 {
 /// multiply and one add per innermost step, `n^3` steps.
 fn simulate_matrix_multiply() -> f64 {
     const N: usize = 128;
+    const ELEMS: usize = N * N;
     let secs = seconds(|| {
         #[allow(clippy::cast_precision_loss)]
-        let a: Vec<f64> = (0..N * N).map(|i| (i % 97) as f64 * 0.5).collect();
+        let a: Vec<f64> = (0..ELEMS).map(|i| (i % 97) as f64 * 0.5).collect();
         #[allow(clippy::cast_precision_loss)]
-        let b: Vec<f64> = (0..N * N).map(|i| (i % 89) as f64 * 0.25).collect();
-        let mut c = vec![0.0_f64; N * N];
-        for i in 0..N {
-            for k in 0..N {
-                let aik = a.get(i * N + k).copied().unwrap_or(0.0);
-                for j in 0..N {
-                    let bkj = b.get(k * N + j).copied().unwrap_or(0.0);
-                    if let Some(slot) = c.get_mut(i * N + j) {
-                        *slot += aik * bkj;
-                    }
+        let b: Vec<f64> = (0..ELEMS).map(|i| (i % 89) as f64 * 0.25).collect();
+        let mut c = vec![0.0_f64; ELEMS];
+        // Walked as rows rather than by computing `i * N + j`, which keeps the
+        // index arithmetic out of the loop entirely -- `chunks_exact` cannot
+        // run off the end, so there is nothing to bounds-check and nothing for
+        // `arithmetic_side_effects` to object to. The i-k-j order is the
+        // original's and is the cache-friendly one: the innermost loop walks
+        // a row of `b` and a row of `c` in step.
+        let b_rows: Vec<&[f64]> = b.chunks_exact(N).collect();
+        for (a_row, c_row) in a.chunks_exact(N).zip(c.chunks_exact_mut(N)) {
+            for (aik, b_row) in a_row.iter().zip(b_rows.iter()) {
+                for (c_val, b_val) in c_row.iter_mut().zip(b_row.iter()) {
+                    *c_val += aik * b_val;
                 }
             }
         }

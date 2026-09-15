@@ -65,6 +65,24 @@
 #   `last_copied` (credmanager): FIXED 2026-09-14 -- the toolbar now says
 #   what was copied and counts down to the clipboard wipe.
 apps/archivemanager/src/main.rs:test_results
+# TRIAGED 2026-09-14, REAL, and the fix is a DELETION rather than a wire.
+#   `Store::refresh_group_counts` walks every contact to fill
+#   `group.member_count`, and it is called in production (once). Nothing
+#   reads it. The number the user sees comes from `Store::group_stats`,
+#   which recomputes the SAME count with the identical filter on every
+#   draw -- `contacts.iter().filter(|c| c.groups.contains(&g.id)).count()`
+#   appears twice, ten lines apart in behaviour.
+#
+#   So this is two predicates for one state, which this tree has already
+#   been bitten by (see the `can_clean` comment in diskcleanup: a button
+#   that looked disabled and acted enabled). Today they agree. They will
+#   stop agreeing the first time someone changes what group membership
+#   means and finds only one of the copies.
+#
+#   Fix: delete `member_count` and `refresh_group_counts`, keeping
+#   `group_stats`, which is always fresh and is the one already drawn. A
+#   cached count that has to be refreshed by hand is the stale half of a
+#   pair waiting to happen.
 apps/contacts/src/main.rs:member_count
 # TRIAGED 2026-09-14, SOUND. `affected_rows` duplicates a count that the
 # `message` field beside it already states in words -- every producer sets

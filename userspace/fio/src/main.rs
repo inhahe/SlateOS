@@ -249,7 +249,6 @@ struct JobDef {
     numjobs: u32,
     runtime: Option<u64>,
     time_based: bool,
-    direct: bool,
     ioengine: IoEngine,
     rwmixread: u32,
     norandommap: bool,
@@ -273,7 +272,6 @@ impl Default for JobDef {
             numjobs: 1,
             runtime: None,
             time_based: false,
-            direct: false,
             ioengine: IoEngine::Sync,
             rwmixread: 50,
             norandommap: false,
@@ -322,8 +320,39 @@ impl JobDef {
                 );
             }
             "time_based" => self.time_based = true,
+            // REFUSED rather than stored. There is no field behind this any
+            // more, and that is the fix.
+            //
+            // `direct` was parsed, asserted on by three tests, and read by no
+            // production code, so every run with `--direct=1` did buffered
+            // I/O while believing it had bypassed the page cache. For a
+            // benchmark that is the worst possible failure: the numbers are
+            // wrong in ONE DIRECTION -- inflated by however much of the
+            // working set the cache held -- and nothing about the output
+            // looks unusual. A benchmark that fails is an inconvenience; a
+            // benchmark that silently measures the wrong thing is worse than
+            // having no benchmark, because it is believed.
+            //
+            // Wiring it was considered and rejected for now, not deferred out
+            // of effort. `O_DIRECT` does not exist in `posix/fcntl.rs` --
+            // only `O_DIRECTORY` -- so there is nothing to pass on SlateOS,
+            // and adding the constant without kernel support would move this
+            // same lie one layer down. Implementing it on the Windows dev
+            // host via `FILE_FLAG_NO_BUFFERING` would be worse still: the
+            // flag would then work where we test and silently not work on
+            // the target we ship, which is how a defect survives its own
+            // regression test.
+            //
+            // `--direct=0` stays accepted, because buffered is honestly what
+            // this does, and scripts pass it explicitly.
             "direct" => {
-                self.direct = value != "0";
+                if value != "0" {
+                    return Err(format!(
+                        "direct={value}: unbuffered I/O is not available in this build, \
+                         and running buffered would report cache hits as device throughput. \
+                         Use direct=0, or a build whose kernel provides O_DIRECT."
+                    ));
+                }
             }
             "ioengine" => {
                 self.ioengine =
@@ -1307,7 +1336,11 @@ fn format_normal(stats: &mut JobStats, show_percentiles: bool) -> String {
     }
 
     out.push_str(&format!(
-        "\nRun status:\n  {rw}: io={io}, bw={bw}KiB/s, iops={iops:.0}, run={elapsed:.0}msec\n",
+        // `{bw:.0}`: it was the only value on this line without a
+        // precision, so an f64 divide printed its full repr --
+        // `bw=9319.935925440514KiB/s` in a real run. `iops` and `elapsed`
+        // beside it were already `:.0`.
+        "\nRun status:\n  {rw}: io={io}, bw={bw:.0}KiB/s, iops={iops:.0}, run={elapsed:.0}msec\n",
         rw = stats.rw,
         io = format_size(stats.read_bytes.saturating_add(stats.write_bytes)),
         bw = stats.read_bw_kib() + stats.write_bw_kib(),
@@ -1777,7 +1810,7 @@ fn print_help() {
     println!("  --numjobs=<n>           Number of parallel jobs (default 1)");
     println!("  --runtime=<s>           Max runtime in seconds");
     println!("  --time_based            Loop workload for runtime duration");
-    println!("  --direct=<0|1>          Bypass OS cache (O_DIRECT)");
+    println!("  --direct=0              Buffered I/O only; --direct=1 is refused");
     println!("  --ioengine=<name>       Engine: sync, psync, libaio, io_uring, mmap");
     println!("  --rwmixread=<pct>       Read percentage for mixed workloads (default 50)");
     println!("  --norandommap           Don't track random blocks");
@@ -2300,7 +2333,6 @@ mod tests {
         assert_eq!(j.numjobs, 1);
         assert_eq!(j.ioengine, IoEngine::Sync);
         assert_eq!(j.rwmixread, 50);
-        assert!(!j.direct);
         assert!(!j.time_based);
     }
 
@@ -2381,18 +2413,40 @@ mod tests {
         assert!(j.time_based);
     }
 
+    /// `direct=1` is refused, and the refusal names the consequence.
+    ///
+    /// The old test asserted `j.direct` after setting it -- which is exactly
+    /// the assertion that let this survive: it proved the flag was STORED,
+    /// and storing it was the whole defect. A test that a value was written
+    /// says nothing about whether anything reads it.
     #[test]
-    fn test_jobdef_set_direct_on() {
+    fn direct_io_is_refused_rather_than_silently_ignored() {
         let mut j = JobDef::default();
-        j.set_param("direct", "1").unwrap();
-        assert!(j.direct);
+        let err = j
+            .set_param("direct", "1")
+            .expect_err("direct=1 must not be accepted while it does nothing");
+        assert!(
+            err.contains("not available"),
+            "the refusal must say why, got: {err}"
+        );
+
+        // Any non-zero spelling, not just "1" -- the old code treated every
+        // value except "0" as on, so the refusal has to cover the same set.
+        for on in ["1", "true", "yes", "2"] {
+            assert!(
+                j.set_param("direct", on).is_err(),
+                "direct={on} must be refused"
+            );
+        }
     }
 
+    /// `direct=0` is still accepted: buffered is what this actually does, and
+    /// refusing an accurate request would be its own kind of dishonesty.
     #[test]
     fn test_jobdef_set_direct_off() {
         let mut j = JobDef::default();
-        j.set_param("direct", "0").unwrap();
-        assert!(!j.direct);
+        j.set_param("direct", "0")
+            .expect("direct=0 describes what this build does");
     }
 
     #[test]
@@ -2766,7 +2820,10 @@ mod tests {
 
     #[test]
     fn test_parse_job_file_global_only() {
-        let content = "[global]\nbs=8k\ndirect=1\n";
+        // `time_based` rather than the `direct=1` this carried: the subject
+        // is that a global-only file defines no jobs, which needs a second
+        // key to show, not that particular one.
+        let content = "[global]\nbs=8k\ntime_based\n";
         let jobs = parse_job_file(content).unwrap();
         assert!(jobs.is_empty());
     }
@@ -2794,11 +2851,14 @@ mod tests {
 
     #[test]
     fn test_parse_job_file_global_inherits() {
+        // `bs` rather than the `direct=1` this used to inherit: that line
+        // is refused now, and inheritance is better demonstrated by a key
+        // whose value production code actually reads.
         let content =
-            "[global]\nioengine=libaio\ndirect=1\n\n[job1]\nrw=read\nsize=1m\nfilename=/tmp/t\n";
+            "[global]\nioengine=libaio\nbs=8k\n\n[job1]\nrw=read\nsize=1m\nfilename=/tmp/t\n";
         let jobs = parse_job_file(content).unwrap();
         assert_eq!(jobs[0].ioengine, IoEngine::Libaio);
-        assert!(jobs[0].direct);
+        assert_eq!(jobs[0].bs, 8192);
     }
 
     #[test]

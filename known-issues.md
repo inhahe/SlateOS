@@ -148284,3 +148284,49 @@ example: its client is finished and waiting on `/sys/devices` producers.
 games and toys. I have not classified all 139, and the per-app judgement of
 "should this open files" is exactly the kind of thing that should be made when
 someone picks the app up rather than pre-decided in a list here.
+
+**A SHARPER NUMBER, AND THE SAME SENTENCE THREE TIMES.**
+
+115 of 139 counts games, which need no files. A better discriminator is an app
+that **has no filesystem access and whose own code talks about files anyway** —
+ten or more mentions of save, load, export, import, document, filename or
+file_path. That is **28 applications**, and the list reads like a list of
+document editors: `hexeditor`, `jsonviewer`, `pdfviewer`, `diagram`, `slides`,
+`notes`, `kanban`, `renamer`, `contacts`, `dbviewer`, `email`, `clipmanager`,
+`credmanager`, `flashcards`, `reminders`, `rssreader`, `screenrecorder`,
+`soundrecorder`, `startupmanager`, `systemrestore`, `undelete`, `netscan`,
+`speedtest`, `remotedesktop`, `defrag`, `camera`, `alarmclock`, `terminal`.
+
+(`terminal` is probably a false positive — it names paths without needing to
+open them. The rest are not.)
+
+**The evidence that this is one cause rather than 28 coincidences is that three
+authors wrote the same sentence.**
+
+* `apps/photomanager`: *"A library with something in it, so the first window is
+  not an empty grid."*
+* `apps/filesearch`: *"Until a real index exists this is what there is to
+  search. It is one call so that the moment `indexer` can be asked, this is the
+  line that changes."*
+* `apps/hexeditor`: *"Until a file can be opened this is what there is to edit:
+  every byte value once, which is also the most useful thing to look at while
+  the rendering is being worked on."*
+
+Three programs, three authors, one structure: *this is placeholder, the real
+thing is blocked, here is why the placeholder is reasonable.* None of them was
+wrong about the reasoning. All three were wrong about the blocker — the file
+picker and `std::fs` were there the whole time. `filesearch`'s comment even
+names the wrong dependency: it waits for the `indexer` service, and the
+filesystem was nearer.
+
+**`apps/hexeditor` is the sharpest of the three** and should probably be next.
+It opens on `(0..=255).collect()` — every byte value once — with
+`file_path = Some("/demo/sample.bin")`, a path that does not exist, so the
+window names a file it is not showing you. A hex editor is for looking at a
+specific file's actual bytes; there is no version of that which a synthetic
+buffer satisfies.
+
+**Two are done.** `apps/photomanager` and `apps/filesearch` both took the same
+three pieces — a control that opens `guitk::dialog::FileDialog`, a handler for
+the chosen path, and an empty state that says what to do — and all three
+already existed in the toolkit.

@@ -727,7 +727,7 @@ mod tests {
         let theirs = std::thread::spawn(|| tmp("shadow")).join().expect("thread");
         assert_ne!(
             mine, theirs,
-            "two threads shared a shadow fixture; cargo gives each `#[test]` its              own thread, so that is two tests asserting over one file"
+            "two threads shared a shadow fixture; cargo gives each `#[test]` its own thread, so that is two tests asserting over one file"
         );
     }
     // ---- check_stored ----

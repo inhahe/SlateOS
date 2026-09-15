@@ -193,6 +193,23 @@ def main(argv):
         return 2
 
     total, files = 0, 0
+    # STILL `gui`/`apps`/`scripts`, and widening it is a real piece of work
+    # rather than a one-line change. Measured on 2026-09-15 by pointing this
+    # at the whole tree: 73 findings, of which 3 were genuine collapsed
+    # assertion messages and 70 were column-aligned text -- `free.rs` and
+    # `ls.rs` expected-output fixtures, `arp`'s table header, the kernel's
+    # `PCPU: hit={}%  refills={}` statistics lines.
+    #
+    # Narrowing the macro set to assertions alone takes it to 30, and the
+    # remaining 27 are the same class one level in: an `assert_eq!` whose
+    # EXPECTED VALUE is formatted output, sitting on its own line. So the
+    # discriminator is not the macro, it is WHICH ARGUMENT -- only the
+    # message is prose, and the message is the third argument of
+    # `assert_eq!`, the second of `assert!`, the first of `panic!`.
+    #
+    # That is the fix, and it is lane C's to make: it changes what this tool
+    # considers a message, which is its whole design. Filed back to them with
+    # these numbers.
     for top in ("gui", "apps", "scripts"):
         for path in sorted((ROOT / top).rglob("*.rs")):
             files += 1

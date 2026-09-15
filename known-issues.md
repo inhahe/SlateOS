@@ -148705,3 +148705,133 @@ because it is the same split every time:
 The lesson repeats: **production fixture data is load-bearing for tests nobody
 recorded as depending on it**, and the tests that break loudest are the ones
 that never mentioned the fixture at all.
+
+## TD-C-A-RECORDER-THAT-RAN-A-CLOCK-OVER-NO-AUDIO -- FIXED 2026-09-15
+
+**In short:** `apps/soundrecorder` showed a recording timer counting up, a
+count of automatic saves, and the word "Recording", while capturing no sound
+at all and writing nothing to disk. Someone recording an interview would have
+watched all three, pressed Stop, and had nothing.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+`process_samples` is the door audio comes in through. **Nothing in production
+calls it** -- this crate has no audio device access, no `std::fs`, and no
+syscall that could find a capture device -- so the sample buffer stayed empty
+for the whole of every take. Everything around it ran anyway:
+
+| what the window showed | what was true |
+|---|---|
+| a clock climbing through 00:03:47 | `tick` advanced a timer that no audio fed |
+| an auto-save count going up | `check_auto_save` fired on schedule and wrote nothing |
+| the state "Recording" | nothing was being recorded |
+| a device menu with three microphones | `mock_devices()`, enumerated from nothing |
+| a time-remaining countdown of `-01:26:48` | 1 GB of free space that nothing measured, divided by the bitrate |
+
+**This is the worst finding of the sweep on the axis that matters, and it is
+not close.** Every other fabrication here misreports something that still
+exists to be checked: a wrong speed can be re-measured, a wrong partition list
+can be re-read, a wrong scan can be re-run. **This one destroys an
+unrepeatable event.** And it destroys it while displaying the specific
+reassurance a careful person would look for -- an auto-save count is what you
+check *because* you are worried about losing the take.
+
+**The one honest signal on screen was the flat VU meter**, and a flat VU meter
+is indistinguishable from a quiet room. That is worth sitting with: the
+program did have a true indicator, and it was the one no user would read as an
+error.
+
+**The fix is a refusal at the start of the take**, not a warning during it. A
+take that begins and then reports trouble has already cost the user the thing
+they were recording. Because `tick` and `check_auto_save` are both guarded on
+the `Recording` state, refusing to enter it stops the clock and the save
+counter too; the test drives a minute of ticks and asserts both stay at zero.
+
+**The second fabrication in the same file is the time-remaining countdown.**
+`RecordingTimer::available_bytes` was a `u64` initialised to `1_000_000_000`.
+A `u64` has no way to say "unmeasured", so the only answer it could give was a
+wrong one. It is `Option<u64>` now and the field reads `--:--:--`. Deliberately
+**not** `00:00:00`, which says the disk is about to fill and the take is about
+to stop, and **not** an omitted field, which is read as however much room you
+like. The countdown also drops its leading minus when unknown, because
+`-​--:--:--` reads as a negative duration rather than an absent one.
+
+**The banner says "This is not a missing microphone -- this program has no way
+to open a capture device at all."** The first line on its own reads as a
+hardware fault and sends the user hunting for an unplugged cable. The
+distinction between *this machine has no microphone* and *this program cannot
+look for one* is the whole content of the fix, so it has to be on screen.
+
+**A third defect surfaced during the fix, and it was mine:** `blocked_reason`
+was set on a refused press and rendered by nothing, caught by
+`check-fields-written-never-read`. Third time in one day that gate found a
+field of mine that production writes and nothing draws. The fix is the one
+`netscan`'s Send button had taught an hour earlier -- **a press that changes
+nothing visible reads as a broken button** -- so the reason is drawn under the
+transport even though the banner above already explains the situation.
+
+13 of 133 tests rested on the invented device list and moved to a
+`with_mock_input()` fixture.
+
+
+## TD-C-A-DEVICE-MANAGER-THAT-INVENTED-THE-MACHINE -- FIXED 2026-09-15
+
+**In short:** `apps/devicemanager` listed the computer's hardware -- graphics
+card, IRQ numbers, memory ranges, driver versions and dates -- and had no way
+to look at any of it. Every device it showed was marked Working.
+
+**Date:** 2026-09-15. **Lane:** C.
+
+The crate has no `/sys` reader, no `std::fs` and no syscall that could
+enumerate a bus. `sample_devices()` supplied the tree: a Virtio GPU at IRQ 11
+with an MMIO range of `0xFD000000`-`0xFDFFFFFF`, driver `virtio-gpu` version
+`1.2.0` dated `2026-04-01`, and several more, each with a hardware ID, a
+vendor, a status and a driver date. `sample_events()` supplied a matching
+event history.
+
+**What makes a device manager a uniquely bad host for this is who opens one.**
+It is where somebody goes *when hardware is not working*. The thing they came
+to find is precisely the device that is missing, faulted, or claimed by the
+wrong driver -- and **an invented inventory cannot be missing anything**. Every
+device in it was Working. So the program answered the one question it exists
+to answer, wrongly, for the reader least able to discount the answer.
+
+**Six acts it could not perform.** Scan (documented as "Scan for hardware
+changes") recomputed the tree from a list nothing changes, and reported the
+non-search by the strongest means available: leaving the list exactly as it
+was, so the user concluded nothing had changed. Enable and Disable flipped a
+flag in this process. **Uninstall is the worst**: somebody troubleshooting
+removes a driver, sees it gone, and reboots expecting the system to install a
+fresh one -- nothing was removed, so nothing is reinstalled, and they have now
+*eliminated* the real fault from their search. Export ended with
+`let _report = self.export_report();` and a comment saying a real app would
+save it: a button that discarded its own output in silence.
+
+**Export now builds the report anyway and says how many bytes it would have
+written.** That is the difference between "cannot write a file" and "nothing
+happened", and the report's own field sanitiser -- which stops a
+hardware-supplied string from redrawing the table -- stays exercised on the
+production path rather than only from tests.
+
+**The refusals in Enable, Disable and Uninstall are written out even though
+nothing can currently reach them**, because `selected_device()` has nothing to
+select. An empty list is a reason, not a safeguard, and it stops being empty
+the day a real enumerator lands.
+
+**The banner is keyed on the device list being empty, not on a constant.** It
+disappears by itself when something fills the list, rather than becoming a
+stale claim of its own -- which is the failure mode three descriptions in
+`apps/benchmark` hit earlier the same day.
+
+**When a real producer arrives it is `/sys/devices`**, the same source
+`sysinfo` reads since design-decisions §850. Lane A has
+`block/<name>/{sector_count,sector_size,read_only}` built and pending a green
+boot.
+
+**51 of 137 tests rested on the invented inventory** -- the tenth application
+in a row. Most were about the tree, the search filter, the properties tabs,
+resource conflicts and the report, all of which need devices rather than
+specifically invented ones, and moved to a `with_sample_devices()` fixture.
+Three asserted the fabricated acts, including `test_state_default`, which
+asserted that a freshly opened manager already knew about hardware it had
+never looked for.

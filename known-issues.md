@@ -150162,3 +150162,111 @@ its spans from the two passes already there rather than lexing a third time.
 The count is now 58, and most of the list is games -- a sudoku needs no
 filesystem and owes nobody an explanation. **The output is a list to read, not
 a list to empty.** The number going up was the point; it is not a backlog.
+
+## TD-C-A-DIALOG-THAT-STOPPED-THE-CLOCK -- FIXED 2026-09-15
+
+**In short:** in three apps, opening a Save dialog quietly froze time. Podcast
+playback stopped advancing, the reminders app stopped noticing that something
+had become overdue, and the calendar never rolled over to the next day. Nothing
+crashed and nothing looked wrong; the window behind the dialog simply stopped
+being told that time had passed. The bug was in code that eleven applications
+had each written out by hand, and it was found by collecting that code into one
+place rather than by anyone noticing the symptom.
+
+### The shape of it
+
+An app with a file dialog has to route events to the dialog while it is up, or
+a keystroke meant for a filename reaches the window behind it. Nine of the
+eleven wrote that as an early return:
+
+```rust
+if self.file_dialog.is_some() {
+    let action = match (event, self.file_dialog.as_mut()) {
+        (Event::Key(key), Some(d)) if key.pressed => d.handle_event(key, h),
+        (Event::Mouse(m), Some(d)) => d.handle_mouse(m, w, h),
+        _ => return EventResult::Ignored,   // <-- here
+    };
+    return self.apply_dialog_action(action);
+}
+```
+
+The `_` arm is meant to say "not an input event, nothing for the dialog to do".
+What it actually does is **return from the whole event handler**, so
+`Event::Tick` never reaches the application at all.
+
+### What each one lost
+
+| App | What the tick does | Consequence |
+|---|---|---|
+| `podcast` | advances playback and the download queue | audio stops because you opened Save |
+| `reminders` | re-reads the clock, fires notifications | stops noticing what has become overdue |
+| `calendar` | midnight rollover | "today" stays on yesterday, in blue, in five places |
+
+The other six with this shape (`contacts`, `dbviewer`, `jsonviewer`, `notes`,
+`rssreader`, `spreadsheet`) never ask for ticks, so their instance is **latent
+rather than live** -- it would have become a bug the day any of them grew a
+clock, an autosave or a progress indicator.
+
+`filesearch` and `hexeditor` wrote the intercept as guard arms on the outer
+match instead:
+
+```rust
+match event {
+    Event::Key(k) if self.file_dialog.is_some() => self.dialog_key(k),
+    Event::Mouse(m) if self.file_dialog.is_some() => self.dialog_mouse(m),
+    Event::Key(k) => self.handle_key(k),
+    ...
+}
+```
+
+which lets every other event fall through to its own arm. **Two of eleven got
+it right, and they got it right by using a structure that made the wrong
+answer inexpressible** rather than by thinking about ticks.
+
+### Why nobody caught it
+
+There was no test anywhere, in any of the nine. The bug lives in the arm nobody
+thinks about: you write the intercept to solve the keystroke problem, you test
+the keystroke problem, and the `_` arm is the part you wrote to make the match
+exhaustive.
+
+It is also invisible from the outside. Nothing errors. The window redraws on
+the next keypress and the clock appears to catch up, so even someone watching
+it happen would see only that the app was briefly slow.
+
+### The fix
+
+`guitk::dialog::FilePicker` owns the routing once. `FilePicker::handle` takes
+**input** -- key presses, key releases and mouse events -- and returns
+`Picked::Ignored` for **time and geometry**, so a tick or a resize falls
+through to the application:
+
+```rust
+match self.picker.handle(event, w, h) {
+    Picked::Chose(path) => { /* the one arm that differs per app */ }
+    Picked::Handled => return EventResult::Consumed,
+    Picked::Ignored => {}
+}
+```
+
+A key *release* is still taken, so the window behind never acts on half a
+keystroke whose press the dialog handled.
+
+Each of the three live cases has a regression test that sets its clock to a
+moment the real one cannot be at (1 Jan 2000), opens the picker, sends a tick
+and asserts time moved. All three were watched to fail by restoring the
+swallow.
+
+### The transferable part
+
+**Collecting duplicated code is how you find out the copies disagree.** In the
+commit that added `FilePicker` I wrote that the eight hand-rolled
+character-boundary truncation loops agreed -- I had read all eight -- and that
+the extraction fixed no bug. That was true of the truncation loops. It was not
+true of the intercepts, which I had not compared as carefully, and the
+disagreement only became visible when a shared type forced a single answer to
+"what should a dialog take?".
+
+Duplication is not only a maintenance cost paid later. It is a place where
+**two copies can already differ today and nothing reports it**, because each
+one is locally plausible and no test compares them.

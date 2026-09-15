@@ -230,8 +230,17 @@ impl HardwareInfo {
 pub struct SubTestResult {
     /// Human-readable test name.
     pub name: String,
-    /// Measured score (higher is better, except latency where lower is better).
-    pub score: f64,
+    /// Measured score, or `None` for a test this system cannot perform.
+    ///
+    /// An `Option` rather than a sentinel number, so "not measured" cannot be
+    /// mistaken for a measurement anywhere downstream. Every consumer has to
+    /// say what it does with the absence -- the bar chart skips it, the
+    /// composite excludes it, and the panel prints "not measured" -- which is
+    /// the point: a zero here would have read as a very slow disk, and a magic
+    /// -1.0 is the same fabrication this file was full of, one level up.
+    ///
+    /// Higher is better except where `lower_is_better`.
+    pub score: Option<f64>,
     /// Unit label (e.g., "ops/s", "MB/s", "ns", "fps").
     pub unit: String,
     /// Whether lower scores are better (e.g., latency).
@@ -242,22 +251,41 @@ impl SubTestResult {
     pub fn new(name: &str, score: f64, unit: &str, lower_is_better: bool) -> Self {
         Self {
             name: name.into(),
-            score,
+            score: Some(score),
             unit: unit.into(),
             lower_is_better,
         }
     }
 
+    /// A test this system cannot perform, with the reason shown to the user.
+    ///
+    /// `why` is a short phrase completing "not measured: …", and it is
+    /// required rather than optional: a blank row invites the reader to
+    /// assume the machine scored badly.
+    pub fn unavailable(name: &str, unit: &str, why: &str) -> Self {
+        Self {
+            name: name.into(),
+            score: None,
+            unit: format!("{unit} — not measured: {why}"),
+            lower_is_better: false,
+        }
+    }
+
     /// Format score with unit.
     pub fn formatted_score(&self) -> String {
-        if self.score >= 1_000_000.0 {
-            format!("{:.2}M {}", self.score / 1_000_000.0, self.unit)
-        } else if self.score >= 1_000.0 {
-            format!("{:.1}K {}", self.score / 1_000.0, self.unit)
-        } else if self.score < 1.0 && self.score > 0.0 {
-            format!("{:.3} {}", self.score, self.unit)
+        let Some(score) = self.score else {
+            // The unit already carries the reason; printing a dash before it
+            // keeps the column aligned with the measured rows.
+            return format!("— {}", self.unit);
+        };
+        if score >= 1_000_000.0 {
+            format!("{:.2}M {}", score / 1_000_000.0, self.unit)
+        } else if score >= 1_000.0 {
+            format!("{:.1}K {}", score / 1_000.0, self.unit)
+        } else if score < 1.0 && score > 0.0 {
+            format!("{score:.3} {}", self.unit)
         } else {
-            format!("{:.1} {}", self.score, self.unit)
+            format!("{score:.1} {}", self.unit)
         }
     }
 }
@@ -293,15 +321,21 @@ impl CategoryResult {
             self.composite_score = 0.0;
             return;
         }
+        // Only measured sub-tests count. Averaging a "not measured" in as a
+        // zero would report a machine as slow for a test it never ran, which
+        // is the same defect as reporting a constant -- a number that is not
+        // about this machine.
         let mut total = 0.0;
-        let count = self.sub_tests.len() as f64;
+        let mut measured = 0_usize;
         for sub in &self.sub_tests {
-            // Normalize each sub-test score to roughly 0-10000.
-            // The normalization factors are tuned per-category in the
-            // benchmark runner.
-            total += sub.score;
+            if let Some(score) = sub.score {
+                total += score;
+                measured = measured.saturating_add(1);
+            }
         }
-        self.composite_score = total / count;
+        #[allow(clippy::cast_precision_loss)]
+        let count = measured as f64;
+        self.composite_score = if measured == 0 { 0.0 } else { total / count };
     }
 
     /// Format as text lines for export.
@@ -772,6 +806,7 @@ impl Default for ProgressTracker {
 // 0..2000 and reports 520,000 IOPS.
 
 use std::hint::black_box;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Seconds spent running `work`, with the result kept alive.
@@ -1113,85 +1148,110 @@ fn simulate_memory_bandwidth() -> f64 {
 }
 
 /// Run disk benchmarks.
+///
+/// One of the five is measured. The other four are reported as not measured,
+/// with the reason on the row, rather than given a number.
+///
+/// **Why only one.** A sequential write can be timed honestly because
+/// `sync_all` makes the operating system commit the bytes to the device before
+/// the clock stops. A *read* cannot: the file was just written, so it is in the
+/// page cache, and timing it measures memory. There is no portable way to
+/// bypass that cache from a userspace program here -- it wants `O_DIRECT` or
+/// Windows' `FILE_FLAG_NO_BUFFERING`, neither of which `std` exposes.
+///
+/// Reporting a cache-warmed read as disk throughput would be a *new*
+/// fabrication of exactly the kind this file was full of: a number that looks
+/// like a measurement of the disk and is a measurement of something else. The
+/// old code reported 3,500 MB/s for it, from summing the integers 0..1000.
 pub fn run_disk_benchmark() -> CategoryResult {
     let mut cat = CategoryResult::new("Disk");
 
-    let seq_write = simulate_disk_seq_write();
-    cat.sub_tests.push(SubTestResult::new(
-        "Sequential Write",
-        seq_write,
-        "MB/s",
-        false,
-    ));
+    match measure_disk_seq_write() {
+        Some(mb_per_s) => cat.sub_tests.push(SubTestResult::new(
+            "Sequential Write",
+            mb_per_s,
+            "MB/s",
+            false,
+        )),
+        None => cat.sub_tests.push(SubTestResult::unavailable(
+            "Sequential Write",
+            "MB/s",
+            "could not write a temporary file",
+        )),
+    }
 
-    let seq_read = simulate_disk_seq_read();
-    cat.sub_tests.push(SubTestResult::new(
+    cat.sub_tests.push(SubTestResult::unavailable(
         "Sequential Read",
-        seq_read,
         "MB/s",
-        false,
+        "would measure the page cache, not the disk",
     ));
-
-    let rand_4k_read = simulate_disk_random_4k_read();
-    cat.sub_tests.push(SubTestResult::new(
+    cat.sub_tests.push(SubTestResult::unavailable(
         "Random 4K Read",
-        rand_4k_read,
         "MB/s",
-        false,
+        "would measure the page cache, not the disk",
     ));
-
-    let rand_4k_write = simulate_disk_random_4k_write();
-    cat.sub_tests.push(SubTestResult::new(
+    cat.sub_tests.push(SubTestResult::unavailable(
         "Random 4K Write",
-        rand_4k_write,
         "MB/s",
-        false,
+        "needs a sync per operation, which this cannot yet bound",
+    ));
+    cat.sub_tests.push(SubTestResult::unavailable(
+        "IOPS",
+        "ops/s",
+        "derived from the four above",
     ));
 
-    let iops = simulate_disk_iops();
-    cat.sub_tests
-        .push(SubTestResult::new("IOPS (4K Random)", iops, "IOPS", false));
-
-    // Normalize: seq_write ref ~3000 MB/s, seq_read ref ~3500 MB/s,
-    // rand_4k_read ref ~50 MB/s, rand_4k_write ref ~45 MB/s, iops ref ~500K.
-    let norm_sw = (seq_write / 3000.0) * 2000.0;
-    let norm_sr = (seq_read / 3500.0) * 2000.0;
-    let norm_4kr = (rand_4k_read / 50.0) * 2000.0;
-    let norm_4kw = (rand_4k_write / 45.0) * 2000.0;
-    let norm_iops = (iops / 500000.0) * 2000.0;
-    cat.composite_score = (norm_sw + norm_sr + norm_4kr + norm_4kw + norm_iops).max(0.0);
-
+    cat.compute_composite();
     cat
 }
 
-fn simulate_disk_seq_write() -> f64 {
-    let base = 3100.0;
-    let work: u64 = (0..1000u64).sum();
-    if work > 0 { base + 20.0 } else { base }
-}
+/// Write sixteen megabytes to a temporary file and time it, including the sync.
+///
+/// `sync_all` is inside the measurement on purpose. Without it the call returns
+/// as soon as the bytes reach the page cache, and the number reported would be
+/// memory bandwidth wearing a disk's name -- which is how `simulate_disk_seq_write`
+/// came to claim 3,100 MB/s while summing the integers 0..1000.
+///
+/// Returns `None` rather than a zero if anything fails: a disk that could not
+/// be written to has no throughput, and 0.0 MB/s would read as a measurement of
+/// a very slow one.
+fn measure_disk_seq_write() -> Option<f64> {
+    use std::io::Write;
 
-fn simulate_disk_seq_read() -> f64 {
-    let base = 3500.0;
-    let work: u64 = (0..1000u64).sum();
-    if work > 0 { base + 30.0 } else { base }
-}
+    const BYTES: usize = 16 * 1024 * 1024;
 
-fn simulate_disk_random_4k_read() -> f64 {
-    let base = 52.0;
-    let work: u64 = (0..500u64).map(|x| x.wrapping_mul(3)).sum();
-    if work > 0 { base + 1.0 } else { base }
-}
+    // A name unique to this call, not a fixed one.
+    //
+    // The first version used `slateos-benchmark-seqwrite.tmp` flat, and the
+    // crate's own tests caught it within a minute: several of them call
+    // `run_disk_benchmark` and the harness runs them in parallel, so one run's
+    // `remove_file` deleted another's file mid-write and the measurement came
+    // back as nothing. It would do the same to two copies of this program open
+    // at once, and there the symptom is a wrong number rather than a missing
+    // one -- a truncated file syncs faster than a whole one.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "slateos-benchmark-seqwrite-{}-{unique}.tmp",
+        std::process::id()
+    ));
+    let buf = vec![0xA5_u8; BYTES];
 
-fn simulate_disk_random_4k_write() -> f64 {
-    let base = 46.0;
-    let work: u64 = (0..500u64).map(|x| x.wrapping_mul(5)).sum();
-    if work > 0 { base + 0.8 } else { base }
-}
+    let measured = (|| -> std::io::Result<f64> {
+        let mut file = std::fs::File::create(&path)?;
+        let start = Instant::now();
+        file.write_all(&buf)?;
+        file.sync_all()?;
+        let secs = start.elapsed().as_secs_f64();
+        #[allow(clippy::cast_precision_loss)]
+        let megabytes = BYTES as f64 / 1_000_000.0;
+        Ok(rate(megabytes, secs))
+    })();
 
-fn simulate_disk_iops() -> f64 {
-    let base = 520000.0;
-    let work: u64 = (0..2000u64).sum();
-    if work > 0 { base + 5000.0 } else { base }
+    // Removed whether or not the write succeeded; a failed run must not leave
+    // sixteen megabytes in the user's temporary directory.
+    drop(std::fs::remove_file(&path));
+    measured.ok().filter(|mb| *mb > 0.0)
 }
 
 /// Run graphics benchmarks.
@@ -2458,7 +2518,7 @@ impl BenchmarkApp {
             let max_score = cat
                 .sub_tests
                 .iter()
-                .map(|s| s.score)
+                .filter_map(|s| s.score)
                 .reduce(f64::max)
                 .unwrap_or(1.0)
                 .max(1.0);
@@ -2505,13 +2565,18 @@ impl BenchmarkApp {
                     overflow: TextOverflow::Ellipsis,
                 });
 
-                // Bar chart.
-                let bar_frac = if sub.lower_is_better {
-                    // Invert for lower-is-better so shorter bar = higher score.
-                    (1.0 - sub.score / max_score).max(0.1)
-                } else {
-                    sub.score / max_score
-                } as f32;
+                // Bar chart. A test that was not measured draws no bar at
+                // all: a zero-length bar and a genuinely terrible score would
+                // look identical, and the row already says why in its unit.
+                #[allow(clippy::cast_possible_truncation)]
+                let bar_frac = match sub.score {
+                    None => 0.0_f32,
+                    Some(score) if sub.lower_is_better => {
+                        // Invert for lower-is-better so shorter bar = higher score.
+                        (1.0 - score / max_score).max(0.1) as f32
+                    }
+                    Some(score) => (score / max_score) as f32,
+                };
                 let bar_x = x + 420.0;
                 let bar_w = BAR_CHART_MAX_WIDTH;
 
@@ -3182,20 +3247,21 @@ mod tests {
         let cat = run_cpu_benchmark();
         assert_eq!(cat.sub_tests.len(), 4);
         for test in &cat.sub_tests {
+            let score = test
+                .score
+                .unwrap_or_else(|| panic!("{} reported no measurement", test.name));
             assert!(
-                test.score > 0.0,
-                "{} scored {}, which is what a clock that did not move returns",
-                test.name,
-                test.score
+                score > 0.0,
+                "{} scored {score}, which is what a clock that did not move returns",
+                test.name
             );
             for fabricated in [
                 5200.0, 5212.0, 5192.0, 3100.0, 3105.0, 78500.0, 4200.0, 4215.0,
             ] {
                 assert!(
-                    (test.score - fabricated).abs() > 0.001,
-                    "{} scored {}, one of the constants this replaced",
-                    test.name,
-                    test.score
+                    (score - fabricated).abs() > 0.001,
+                    "{} scored {score}, one of the constants this replaced",
+                    test.name
                 );
             }
         }
@@ -3233,21 +3299,84 @@ mod tests {
         let cat = run_memory_benchmark();
         assert_eq!(cat.sub_tests.len(), 4);
         for test in &cat.sub_tests {
+            let score = test
+                .score
+                .unwrap_or_else(|| panic!("{} reported no measurement", test.name));
             assert!(
-                test.score > 0.0,
-                "{} scored {}, which is what a clock that did not move returns",
-                test.name,
-                test.score
+                score > 0.0,
+                "{} scored {score}, which is what a clock that did not move returns",
+                test.name
             );
             for fabricated in [11800.0, 11850.0, 14200.0, 14230.0, 78.0, 25.5, 25.8] {
                 assert!(
-                    (test.score - fabricated).abs() > 0.001,
-                    "{} scored {}, one of the constants this replaced",
-                    test.name,
-                    test.score
+                    (score - fabricated).abs() > 0.001,
+                    "{} scored {score}, one of the constants this replaced",
+                    test.name
                 );
             }
         }
+    }
+
+    /// The disk category says which tests it did not run, and why.
+    ///
+    /// Four of the five cannot be measured honestly here: a read would time
+    /// the page cache rather than the disk, and there is no portable way to
+    /// bypass it from a userspace program. Those rows carry no number at all,
+    /// which is the whole reason `score` is an `Option` -- a zero would read
+    /// as a very slow disk and a magic -1.0 would be the same fabrication one
+    /// level up.
+    #[test]
+    fn the_disk_tests_that_cannot_be_measured_report_no_number() {
+        let cat = run_disk_benchmark();
+        let measured: Vec<&str> = cat
+            .sub_tests
+            .iter()
+            .filter(|t| t.score.is_some())
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(
+            measured,
+            ["Sequential Write"],
+            "exactly the sequential write is measurable through sync_all"
+        );
+
+        for test in cat.sub_tests.iter().filter(|t| t.score.is_none()) {
+            assert!(
+                test.unit.contains("not measured:"),
+                "{} carries no number and no reason: {:?}",
+                test.name,
+                test.unit
+            );
+            assert!(
+                test.formatted_score().starts_with('—'),
+                "{} formats as {:?}, which does not read as an absence",
+                test.name,
+                test.formatted_score()
+            );
+        }
+    }
+
+    /// An unmeasured test does not drag the category average down.
+    ///
+    /// Averaging a "not measured" in as a zero would report the machine as
+    /// slow for a test it never ran, which is the same defect as reporting a
+    /// constant: a number that is not about this machine.
+    #[test]
+    fn the_composite_ignores_what_was_not_measured() {
+        let mut cat = CategoryResult::new("Mixed");
+        cat.sub_tests
+            .push(SubTestResult::new("Measured", 100.0, "MB/s", false));
+        cat.sub_tests.push(SubTestResult::unavailable(
+            "Absent",
+            "MB/s",
+            "no way to ask",
+        ));
+        cat.compute_composite();
+        assert!(
+            (cat.composite_score - 100.0).abs() < f64::EPSILON,
+            "the absent test pulled the average to {}",
+            cat.composite_score
+        );
     }
 
     /// A clock that did not move reports nothing, not everything.
@@ -3732,11 +3861,13 @@ mod tests {
     fn cpu_benchmark_all_scores_positive() {
         let cat = run_cpu_benchmark();
         for sub in &cat.sub_tests {
-            assert!(
-                sub.score > 0.0,
-                "Sub-test {} has non-positive score",
-                sub.name
-            );
+            // Every CPU sub-test is measured, so `None` here is a failure
+            // rather than an expected absence -- unlike the Disk category,
+            // where four of five report no measurement by design.
+            let score = sub
+                .score
+                .unwrap_or_else(|| panic!("Sub-test {} reported no measurement", sub.name));
+            assert!(score > 0.0, "Sub-test {} has non-positive score", sub.name);
         }
     }
 

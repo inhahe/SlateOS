@@ -165,6 +165,18 @@ impl XmlElement {
 /// hundred levels of.
 const MAX_XML_DEPTH: usize = 100;
 
+/// What the window says instead of listing articles.
+///
+/// Three lines. The third is about refresh, because this app advertises F5
+/// and Shift+F5 in its own key list as "Refresh current feed" and "Refresh all
+/// feeds", and nothing dispatches either. A key that is documented and does
+/// nothing is read as a broken key, so the window says which it is.
+const CANNOT_FETCH_LINES: [&str; 3] = [
+    "This reader cannot fetch feeds.",
+    "It has no network access, so no feed has been retrieved and no article is real.",
+    "Refresh (F5) cannot help -- there is nothing to refresh from.",
+];
+
 /// XML parser state.
 struct XmlParser<'a> {
     input: &'a [u8],
@@ -915,6 +927,8 @@ pub fn format_timestamp(ts: u64) -> String {
 
 /// The instant the bundled sample articles are dated from, so that the sample
 /// data reads as a week of activity rather than a column of epoch seconds.
+/// `#[cfg(test)]` with the sample feed it anchors.
+#[cfg(test)]
 const SAMPLE_BASE_TS: u64 = 1_700_000_000;
 
 /// A sample article's timestamp: `days` days and `secs` seconds after
@@ -923,6 +937,8 @@ const SAMPLE_BASE_TS: u64 = 1_700_000_000;
 /// The sample data spelled each of these out as `base_ts + 86400 * 7 + 3600`,
 /// which is the same seconds-per-day conversion written by hand sixteen
 /// times -- sixteen chances to type 8640.
+/// `#[cfg(test)]` with the sample feed it timestamps.
+#[cfg(test)]
 const fn sample_ts(days: u64, secs: u64) -> u64 {
     SAMPLE_BASE_TS
         .saturating_add(days.saturating_mul(86_400))
@@ -2092,7 +2108,7 @@ pub struct RssReaderApp {
 impl RssReaderApp {
     /// Create a new RSS reader app with default dimensions and sample data.
     pub fn new(width: f32, height: f32) -> Self {
-        let mut app = Self {
+        let app = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
@@ -2125,6 +2141,21 @@ impl RssReaderApp {
             global_auto_refresh_seconds: 1800,
             last_global_refresh: 0,
         };
+        // No articles. `populate_sample_data` built folders, feeds and
+        // articles from `SAMPLE_RSS`, a constant fed through the real parser
+        // -- so everything downstream of the parse was genuine and everything
+        // upstream of it was invented.
+        app
+    }
+
+    /// An app holding the folders, feeds and articles `new` used to build.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about the article list,
+    /// the filters, the read and starred counters, the search and the offline
+    /// cache -- all of which need *articles*, not specifically invented ones.
+    #[cfg(test)]
+    fn with_sample_data(width: f32, height: f32) -> Self {
+        let mut app = Self::new(width, height);
         app.populate_sample_data();
         app
     }
@@ -2625,6 +2656,14 @@ impl RssReaderApp {
     /// The XML is small and deliberately exercises the awkward parts: an
     /// escaped ampersand in a title, a CDATA description, and a
     /// `<pubDate>` in RFC 822 form.
+    /// Ingest `SAMPLE_RSS` as though it had been fetched.
+    ///
+    /// `#[cfg(test)]`. Note what is *not* being retired: `ingest_feed_xml` and
+    /// `parse_feed` below it are real, and `ingest_feed_xml` is the door a
+    /// fetcher comes through -- the same shape as `speedtest`'s
+    /// `record_sample`. The parser was never the problem; where the bytes came
+    /// from was.
+    #[cfg(test)]
     fn seed_feed_from_xml(&mut self, feed_id: FeedId) {
         self.ingest_feed_xml(feed_id, Self::SAMPLE_RSS);
     }
@@ -2636,7 +2675,18 @@ impl RssReaderApp {
     /// exercise the `Err` arm was to break the sample, and a mutation that
     /// deleted the error report survived because nothing could make it fire.
     /// This is also the shape a real refresh would call.
-    fn ingest_feed_xml(&mut self, feed_id: FeedId, xml: &str) {
+    /// Take a feed document and fold it into the article list.
+    ///
+    /// `pub` rather than private since 2026-09-15, and deliberately kept out
+    /// of `#[cfg(test)]`: **this is the door a real fetcher comes through.**
+    /// It has no caller in production today, which is the honest state of this
+    /// app -- the parser, the de-duplication and the article merge are written
+    /// and tested, and the thing that would hand them bytes is not built.
+    ///
+    /// Retiring it into the test build instead would hide that, and would mean
+    /// whoever writes the fetcher has to reconstruct an entry point that
+    /// already exists and already works.
+    pub fn ingest_feed_xml(&mut self, feed_id: FeedId, xml: &str) {
         match parse_feed(xml) {
             Ok(parsed) => self.ingest_parsed_feed(feed_id, &parsed, 1_700_000_000),
             // Reported rather than ignored: a feed that did not parse is worth
@@ -2653,6 +2703,8 @@ impl RssReaderApp {
     /// Small, and deliberately awkward in the places a feed parser goes wrong: an
     /// escaped ampersand in a title, a CDATA description with markup inside it, and
     /// an RFC 822 `pubDate`.
+    /// A feed document, for tests.
+    #[cfg(test)]
     const SAMPLE_RSS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
@@ -2677,6 +2729,10 @@ impl RssReaderApp {
 </rss>"#;
 
     /// Populate sample data for demonstration.
+    /// Folders, feeds and articles, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `new` called it.
+    #[cfg(test)]
     fn populate_sample_data(&mut self) {
         // Create folders
         let tech_folder = self.add_folder("Technology");
@@ -2923,6 +2979,7 @@ impl RssReaderApp {
     }
 
     /// Helper to create a sample article with all fields populated.
+    #[cfg(test)]
     fn create_sample_article(
         &mut self,
         feed_id: FeedId,
@@ -2975,6 +3032,29 @@ impl RssReaderApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // After the background, or it would be painted over.
+        for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                y: 1.0 + i as f32 * 12.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 11.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(self.width - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Title bar
         let title_bar_height = 40.0;
@@ -4717,6 +4797,55 @@ mod tests {
 
     use super::*;
 
+    /// A fresh reader holds no feeds and no articles.
+    ///
+    /// `new` called `populate_sample_data`, which built folders, feeds and
+    /// articles out of `SAMPLE_RSS` -- a constant fed through the real parser.
+    /// So everything downstream of the parse was genuine and everything
+    /// upstream of it was invented, which is why the parser stays and only the
+    /// source of the bytes was retired. `ingest_feed_xml` is the door a real
+    /// fetcher comes through, the same shape as `speedtest`'s `record_sample`.
+    #[test]
+    fn a_fresh_reader_holds_no_feeds_and_no_articles() {
+        let app = RssReaderApp::new(1200.0, 800.0);
+        assert!(app.feeds.is_empty(), "feeds appeared from nowhere");
+        assert!(app.articles.is_empty(), "articles appeared from nowhere");
+        assert_eq!(
+            app.total_unread(),
+            0,
+            "unread articles appeared from nowhere"
+        );
+    }
+
+    /// And the window says why, including about the refresh keys.
+    ///
+    /// This app advertises F5 and Shift+F5 in its own key list as "Refresh
+    /// current feed" and "Refresh all feeds", and nothing dispatches either. A
+    /// key that is documented and does nothing reads as a broken key, so the
+    /// banner says which it is rather than leaving the user to guess.
+    #[test]
+    fn the_window_says_it_cannot_fetch() {
+        let app = RssReaderApp::new(1200.0, 800.0);
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_FETCH_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_FETCH_LINES.iter().any(|l| l.contains("F5")),
+            "the advertised refresh keys are not accounted for",
+        );
+    }
+
     // ------------------------------------------------------------------
     // Wiring
     //
@@ -4751,7 +4880,7 @@ mod tests {
     }
 
     fn app() -> RssReaderApp {
-        RssReaderApp::new(1200.0, 800.0)
+        RssReaderApp::with_sample_data(1200.0, 800.0)
     }
 
     /// One feed is filled by parsing real RSS rather than by a constructor, so
@@ -6182,7 +6311,7 @@ mod tests {
 
     #[test]
     fn test_app_creation() {
-        let app = RssReaderApp::new(1200.0, 800.0);
+        let app = RssReaderApp::with_sample_data(1200.0, 800.0);
         assert_eq!(app.width, 1200.0);
         assert_eq!(app.height, 800.0);
         assert!(!app.feeds.is_empty());
@@ -6192,7 +6321,7 @@ mod tests {
 
     #[test]
     fn test_app_add_folder() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let initial_count = app.folders.len();
         let id = app.add_folder("Test Folder");
         assert_eq!(app.folders.len(), initial_count + 1);
@@ -6205,7 +6334,7 @@ mod tests {
 
     #[test]
     fn test_app_add_feed() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let initial_count = app.feeds.len();
         let id = app.add_feed("New Feed", "http://new.rss", None);
         assert_eq!(app.feeds.len(), initial_count + 1);
@@ -6214,7 +6343,7 @@ mod tests {
 
     #[test]
     fn test_app_remove_feed() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let feed_id = app.feeds[0].id;
         let articles_before = app.articles.len();
         app.remove_feed(feed_id);
@@ -6224,7 +6353,7 @@ mod tests {
 
     #[test]
     fn test_app_rename_feed() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let feed_id = app.feeds[0].id;
         app.rename_feed(feed_id, "Renamed Feed");
         let feed = app.feeds.iter().find(|f| f.id == feed_id).unwrap();
@@ -6233,7 +6362,7 @@ mod tests {
 
     #[test]
     fn test_app_remove_folder_with_feeds() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let folder_id = app.folders[0].id;
         let feeds_in_folder = app
             .feeds
@@ -6253,7 +6382,7 @@ mod tests {
 
     #[test]
     fn test_app_remove_folder_keep_feeds() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let folder_id = app.folders[0].id;
         let feed_ids: Vec<FeedId> = app
             .feeds
@@ -6271,7 +6400,7 @@ mod tests {
 
     #[test]
     fn test_app_move_feed_to_folder() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let feed_id = app.feeds[0].id;
         let new_folder = app.add_folder("NewDir");
         app.move_feed_to_folder(feed_id, Some(new_folder));
@@ -6281,7 +6410,7 @@ mod tests {
 
     #[test]
     fn test_app_toggle_read() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let filtered = app.filtered_article_indices();
         let idx = filtered[0];
         let was_read = app.articles[idx].is_read;
@@ -6291,7 +6420,7 @@ mod tests {
 
     #[test]
     fn test_app_toggle_star() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let filtered = app.filtered_article_indices();
         let idx = filtered[0];
         let was_starred = app.articles[idx].is_starred;
@@ -6301,7 +6430,7 @@ mod tests {
 
     #[test]
     fn test_app_mark_all_read() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         assert!(app.total_unread() > 0);
         app.mark_all_read();
         let filtered = app.filtered_article_indices();
@@ -6312,7 +6441,7 @@ mod tests {
 
     #[test]
     fn test_app_unread_counts() {
-        let app = RssReaderApp::new(800.0, 600.0);
+        let app = RssReaderApp::with_sample_data(800.0, 600.0);
         let total = app.total_unread();
         assert!(total > 0);
 
@@ -6323,14 +6452,14 @@ mod tests {
 
     #[test]
     fn test_app_starred_count() {
-        let app = RssReaderApp::new(800.0, 600.0);
+        let app = RssReaderApp::with_sample_data(800.0, 600.0);
         let starred = app.total_starred();
         assert!(starred > 0);
     }
 
     #[test]
     fn test_app_folder_unread_count() {
-        let app = RssReaderApp::new(800.0, 600.0);
+        let app = RssReaderApp::with_sample_data(800.0, 600.0);
         let folder_id = app.folders[0].id;
         let count = app.unread_count_for_folder(folder_id);
         // Should be non-negative (some folders may have unread articles)
@@ -6339,7 +6468,7 @@ mod tests {
 
     #[test]
     fn test_app_next_prev_article() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         assert_eq!(app.selected_article_index, 0);
         app.next_article();
         assert_eq!(app.selected_article_index, 1);
@@ -6349,21 +6478,21 @@ mod tests {
 
     #[test]
     fn test_app_prev_article_at_zero_stays() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.prev_article();
         assert_eq!(app.selected_article_index, 0);
     }
 
     #[test]
     fn test_app_selected_article() {
-        let app = RssReaderApp::new(800.0, 600.0);
+        let app = RssReaderApp::with_sample_data(800.0, 600.0);
         let article = app.selected_article();
         assert!(article.is_some());
     }
 
     #[test]
     fn test_app_feed_name() {
-        let app = RssReaderApp::new(800.0, 600.0);
+        let app = RssReaderApp::with_sample_data(800.0, 600.0);
         let feed_id = app.feeds[0].id;
         let name = app.feed_name(feed_id);
         assert!(!name.is_empty());
@@ -6371,7 +6500,7 @@ mod tests {
 
     #[test]
     fn test_app_feed_name_unknown() {
-        let app = RssReaderApp::new(800.0, 600.0);
+        let app = RssReaderApp::with_sample_data(800.0, 600.0);
         let name = app.feed_name(99999);
         assert_eq!(name, "Unknown Feed");
     }
@@ -6382,14 +6511,14 @@ mod tests {
 
     #[test]
     fn test_filter_all_returns_all() {
-        let app = RssReaderApp::new(800.0, 600.0);
+        let app = RssReaderApp::with_sample_data(800.0, 600.0);
         let indices = app.filtered_article_indices();
         assert_eq!(indices.len(), app.articles.len());
     }
 
     #[test]
     fn test_filter_unread() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.filter_mode = FilterMode::Unread;
         let indices = app.filtered_article_indices();
         for &idx in &indices {
@@ -6399,7 +6528,7 @@ mod tests {
 
     #[test]
     fn test_filter_starred() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.filter_mode = FilterMode::Starred;
         let indices = app.filtered_article_indices();
         for &idx in &indices {
@@ -6409,7 +6538,7 @@ mod tests {
 
     #[test]
     fn test_filter_by_feed() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let feed_id = app.feeds[0].id;
         app.sidebar_selection = SidebarSelection::Feed(feed_id);
         let indices = app.filtered_article_indices();
@@ -6420,7 +6549,7 @@ mod tests {
 
     #[test]
     fn test_filter_by_folder() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let folder_id = app.folders[0].id;
         app.sidebar_selection = SidebarSelection::Folder(folder_id);
         let indices = app.filtered_article_indices();
@@ -6437,7 +6566,7 @@ mod tests {
 
     #[test]
     fn test_sort_by_date_desc() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.sort_order = SortOrder::DateDesc;
         let indices = app.filtered_article_indices();
         for win in indices.windows(2) {
@@ -6447,7 +6576,7 @@ mod tests {
 
     #[test]
     fn test_sort_by_date_asc() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.sort_order = SortOrder::DateAsc;
         let indices = app.filtered_article_indices();
         for win in indices.windows(2) {
@@ -6457,7 +6586,7 @@ mod tests {
 
     #[test]
     fn test_sort_by_title_asc() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.sort_order = SortOrder::TitleAsc;
         let indices = app.filtered_article_indices();
         for win in indices.windows(2) {
@@ -6467,7 +6596,7 @@ mod tests {
 
     #[test]
     fn test_search_filtering() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.search_query = "Rust".to_string();
         let indices = app.filtered_article_indices();
         for &idx in &indices {
@@ -6485,7 +6614,7 @@ mod tests {
 
     #[test]
     fn test_app_import_opml() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let opml = r#"<?xml version="1.0"?>
         <opml version="2.0">
           <head><title>Import</title></head>
@@ -6500,7 +6629,7 @@ mod tests {
 
     #[test]
     fn test_app_import_opml_with_folders() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let initial_folders = app.folders.len();
         let opml = r#"<opml version="2.0">
           <head><title>Test</title></head>
@@ -6518,7 +6647,7 @@ mod tests {
 
     #[test]
     fn test_app_export_opml() {
-        let app = RssReaderApp::new(800.0, 600.0);
+        let app = RssReaderApp::with_sample_data(800.0, 600.0);
         let xml = app.export_opml();
         assert!(xml.contains("<opml"));
         assert!(xml.contains("</opml>"));
@@ -6533,7 +6662,7 @@ mod tests {
 
     #[test]
     fn test_ingest_parsed_feed() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let feed_id = app.add_feed("Test", "http://test.rss", None);
         let initial_articles = app.articles.len();
 
@@ -6560,7 +6689,7 @@ mod tests {
 
     #[test]
     fn test_ingest_dedup() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         let feed_id = app.add_feed("Dup", "http://dup.rss", None);
 
         let parsed = ParsedFeed {
@@ -6590,7 +6719,7 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
-        let app = RssReaderApp::new(1200.0, 800.0);
+        let app = RssReaderApp::with_sample_data(1200.0, 800.0);
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
         // Should produce a significant number of commands
@@ -6599,7 +6728,7 @@ mod tests {
 
     #[test]
     fn test_render_with_sidebar_hidden() {
-        let mut app = RssReaderApp::new(1200.0, 800.0);
+        let mut app = RssReaderApp::with_sample_data(1200.0, 800.0);
         app.sidebar_visible = false;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -6607,12 +6736,12 @@ mod tests {
 
     #[test]
     fn test_render_with_help_overlay() {
-        let mut app = RssReaderApp::new(1200.0, 800.0);
+        let mut app = RssReaderApp::with_sample_data(1200.0, 800.0);
         app.show_help = true;
         let cmds = app.render_commands();
         // Should have more commands due to overlay
         let normal = {
-            let mut a2 = RssReaderApp::new(1200.0, 800.0);
+            let mut a2 = RssReaderApp::with_sample_data(1200.0, 800.0);
             a2.show_help = false;
             a2.render_commands().len()
         };
@@ -6621,7 +6750,7 @@ mod tests {
 
     #[test]
     fn test_render_with_add_feed_dialog() {
-        let mut app = RssReaderApp::new(1200.0, 800.0);
+        let mut app = RssReaderApp::with_sample_data(1200.0, 800.0);
         app.show_add_feed_dialog = true;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -6629,7 +6758,7 @@ mod tests {
 
     #[test]
     fn test_render_with_feed_health_overlay() {
-        let mut app = RssReaderApp::new(1200.0, 800.0);
+        let mut app = RssReaderApp::with_sample_data(1200.0, 800.0);
         app.show_feed_health = true;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -6637,7 +6766,7 @@ mod tests {
 
     #[test]
     fn test_render_empty_article_list() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.search_query = "zzzzzz_no_match_ever".to_string();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -6645,7 +6774,7 @@ mod tests {
 
     #[test]
     fn test_render_no_selected_article() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.articles.clear();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -6653,7 +6782,7 @@ mod tests {
 
     #[test]
     fn test_render_small_window() {
-        let app = RssReaderApp::new(400.0, 300.0);
+        let app = RssReaderApp::with_sample_data(400.0, 300.0);
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
@@ -6831,7 +6960,7 @@ mod tests {
 
     #[test]
     fn test_sidebar_selection_starred_filter() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.sidebar_selection = SidebarSelection::Starred;
         let indices = app.filtered_article_indices();
         for &idx in &indices {
@@ -6845,7 +6974,7 @@ mod tests {
 
     #[test]
     fn test_perform_search() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.search_query = "Rust".to_string();
         app.perform_search();
         assert!(!app.search_results.is_empty());
@@ -6853,7 +6982,7 @@ mod tests {
 
     #[test]
     fn test_perform_search_empty() {
-        let mut app = RssReaderApp::new(800.0, 600.0);
+        let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
         app.search_query.clear();
         app.perform_search();
         assert!(app.search_results.is_empty());
@@ -6900,7 +7029,7 @@ mod tests {
     }
 
     fn list_with_summaries(summaries: &[String], panel_width: f32) -> Vec<RenderCommand> {
-        let mut app = RssReaderApp::new(1200.0, 800.0);
+        let mut app = RssReaderApp::with_sample_data(1200.0, 800.0);
         let feed_id = app.feeds[0].id;
         app.sidebar_selection = SidebarSelection::AllFeeds;
         app.filter_mode = FilterMode::All;
@@ -7024,7 +7153,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = RssReaderApp::new(1000.0, 700.0);
+        let mut app = RssReaderApp::with_sample_data(1000.0, 700.0);
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

@@ -1,0 +1,58 @@
+# Fields written in production and read only by tests -- the known ones.
+#
+# WHAT THIS FILE IS FOR. `check-fields-written-never-read.py` found 26 of these
+# on the day it was written. A gate that reports 26 things is a gate nobody
+# reads, and two of the 26 were genuine user-facing defects that would have
+# been lost in the noise -- `apps/fileassoc`'s `last_export` (an Export button
+# that wrote nothing anywhere) and `apps/explorer`'s `eta_secs` (a time
+# remaining computed on every tick and shown to nobody). Both are fixed.
+#
+# The remaining 25 are listed here so the gate is green today and RED the
+# moment a twenty-sixth appears. This is a triage queue, not an amnesty: every
+# line is a program doing work it then throws away, and each needs looking at
+# on its own terms. Some will be sound -- a field kept for a future consumer,
+# or read somewhere this script's textual matching cannot see. Those should get
+# a `#` note here saying so, rather than being deleted.
+#
+# Delete a line when the field is fixed. Do not regenerate the file wholesale:
+# the notes are the point, and a regenerating flag in a sibling script silently
+# destroyed hand-written prose three times before it was made to refuse.
+#
+# Format: <path>:<field name>, one per line. `#` starts a comment.
+#
+# Noticed on triage and worth a closer look first:
+#   gui/desktop/src/sound_settings.rs:output_device_id -- picking an output
+#     device for an app records the choice and nothing acts on it. Deferred
+#     only because design-decisions 815 moves this whole panel into
+#     `apps/settings`, and fixing the copy that is about to be deleted is
+#     work done twice. The port must not carry it over.
+#   apps/netmanager/src/main.rs:diagnostics_running -- a spinner state set and
+#     never drawn, so "running diagnostics" may look like nothing happening.
+#   gui/desktop/src/lib.rs:shortcut_message -- a message composed for the user
+#     and never rendered.
+
+apps/archivemanager/src/main.rs:test_results
+apps/contacts/src/main.rs:member_count
+apps/credmanager/src/main.rs:last_copied
+apps/dbviewer/src/main.rs:affected_rows
+apps/diskcleanup/src/main.rs:path_pattern
+apps/diskcleanup/src/main.rs:last_accessed_days
+apps/diskcleanup/src/main.rs:min_age_days
+apps/emojipicker/src/main.rs:last_selected
+apps/hearts/src/main.rs:hearts_broken
+apps/netmanager/src/main.rs:diagnostics_running
+apps/regextester/src/main.rs:replace_result
+apps/reminders/src/main.rs:completed_at
+apps/remotedesktop/src/main.rs:content_size_bytes
+apps/videoplayer/src/main.rs:seek_preview_position
+gui/desktop/src/backup_settings.rs:last_backup_timestamp
+gui/desktop/src/bluetooth.rs:discoverable
+gui/desktop/src/context_ext.rs:loading_timeout
+gui/desktop/src/lib.rs:shortcut_message
+gui/desktop/src/sound_settings.rs:volume_override
+gui/desktop/src/sound_settings.rs:output_device_id
+gui/desktop/src/startup_settings.rs:last_run_at
+gui/desktop/src/tray_dnd.rs:show_ghost
+gui/desktop/src/tray_dnd.rs:dragging_key
+net/dns/src/lib.rs:attempts
+net/httpclient/src/lib.rs:http_only

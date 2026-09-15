@@ -377,7 +377,7 @@ def analyse():
     for path, line, name, uses in uncalled:
         crate = crate_of(path)
         for other in counterpart(name):
-            # Both tests are needed and neither implies the other.  # noqa: E501 The first
+            # Both tests are needed and neither implies the other. The first
             # says this program *has* the other half; the second says this
             # program *uses* it outside its tests. A half defined here and
             # called only from another crate's production code would pass the

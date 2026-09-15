@@ -34,10 +34,19 @@ event has no coverage of (3).
 It restores every file it touches and verifies the restore by SHA-256 before
 exiting. It is slow: one `cargo test` per app.
 
-Measured 2026-09-15: **14 of 20 apps unpinned.** The four that were pinned --
+Measured 2026-09-15: **16 of 20 apps unpinned.** The four that were pinned --
 `dbviewer`, `diagram`, `podcast`, `clipmanager` -- each carry a test asserting
 that input while the dialog is up does not reach the window behind it, which
 is the cheapest form this coverage takes.
+
+The first run of this said 14, and reported `calendar` and `musicplayer` as
+"could not cut the routing". That was this file's bug, not theirs: the pattern
+began with a literal backspace, because a backslash-b written into an unquoted
+heredoc arrived as the control character rather than as a word-boundary
+escape. **A checker that excludes what it cannot parse, and files that under a
+word meaning "not evidence", will under-report exactly as quietly as one that
+scans the wrong directory.** The two apps route through `state.picker` rather
+than `self.picker`, which is what the widened pattern is for.
 
 Usage:  python scripts/find-unpinned-picker-routing.py [--apps=kanban,torrent]
 """
@@ -53,7 +62,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Where a crate's directory name is not its package name.
 PACKAGE = {"sysinfo": "sysinfo-app"}
 
-ROUTING = re.compile(r"self\.picker\s*\.?\s*handle\([^;]*?\)\s*\{", re.S)
+# `self.picker.handle(..)` and `state.picker.handle(..)` -- the second is
+# what an app whose event handler is a free function writes, and matching
+# only the first quietly skipped `calendar` and `musicplayer`.
+ROUTING = re.compile(r"\w+\s*\.\s*picker\s*\.?\s*handle\([^;]*?\)\s*\{", re.S)
 
 
 def apps_with_a_picker():

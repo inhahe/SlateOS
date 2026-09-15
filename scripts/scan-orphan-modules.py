@@ -470,6 +470,34 @@ BASELINE_HEADER = """\
 # and red the boot.
 #
 #
+# FIFTH BATCH, 2026-09-15, lane C: gui/desktop/src/notification_settings.rs,
+# 2,526 lines, DELETED rather than wired -- the a11y.rs and signal.rs disposal
+# rather than the explorer-columns one.
+#
+# It was a second settings model for notifications.  The first,
+# `gui/notifsettings`, has five consumers -- apps/settings, gui/daywindow, and
+# the shell's own focus_assist.rs and notif_pane.rs -- and the Settings app's
+# Notifications page is built from it.  design-decisions 815 settles which copy
+# goes: a screen you *open* lives in the app and the shell's copy is deleted.
+#
+# The part worth recording is how the decision was actually made, because "it
+# is a duplicate" was not sufficient.  The dead copy modelled FOUR things the
+# live one does not: BannerPosition, AutoDismissDelay, GroupingMode and
+# HistoryRetention.  Deleting it therefore did lose concepts, and the question
+# was whether they were work.  They were not: notif_pane.rs, 3,809 lines and
+# live, has manual dismissal and grouping by *time* only -- no banner
+# placement, no timer, no per-program collapsing, no retention policy.  So all
+# four were settings for behaviour that does not exist, which is exactly what
+# the Settings app's Mouse page and Startup Apps page each refuse to ship, in
+# so many words, a few hundred lines apart.
+#
+# They are written up in known-issues.md as
+# TD-C-FOUR-NOTIFICATION-BEHAVIOURS-HAVE-A-SETTINGS-MODEL-AND-NO-IMPLEMENTATION,
+# with the order a future implementation has to follow -- behaviour first,
+# shared model second, control third -- so that at no point does a setting
+# exist that nothing reads.  That entry is the reason the deletion is safe to
+# make quickly: the ledger loses a line and the knowledge does not.
+#
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
 # wired up or it does not land.  When you connect one, delete its line

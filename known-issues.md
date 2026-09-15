@@ -144644,11 +144644,23 @@ animated" without depending on how much the harness did while nobody was
 looking. Do not fix it by loosening the assertion -- "eventually invisible" is
 true of a snap, which is the thing it exists to catch.
 
-**Why it is filed rather than fixed now:** it was found while deleting an
-unrelated cached field, the failure is in a test rather than in shipped
-behaviour, and rewriting a cross-process timing test deserves its own change
-with its own re-runs rather than being folded into a deletion. It has not been
-seen twice; if it recurs, that is worth recording here rather than re-running.
+**It has now been seen twice, and the second time blocked a push.** The
+pre-push scratch-config gate runs `cargo test -p desktop` itself, under the
+load of every other gate, and refused the push with
+`desktop: its own tests did not pass, so this says nothing`. So this is not a
+local nuisance -- a flaky test in `gui/desktop` stops lane C publishing, and
+the crate has 2,978 tests for it to hide in.
+
+That refusal also exposed a second, separate problem, now fixed: **the gate did
+not say which test failed.** The four-line log it keeps held nothing but "FAIL
+desktop", so a push blocked by somebody else's flake gave its reader no way to
+look, only to re-run -- which is exactly how a flake becomes permanent.
+`check-scratch-config.py` now names the failing tests, with three self-test
+cases covering the message itself.
+
+**Priority, revised:** worth fixing properly the next time it is seen, rather
+than deferring indefinitely. The fix is described above; the tempting wrong one
+is still wrong.
 
 ## TD-C-CREATING-A-FILE-THAT-ALREADY-EXISTS-DESTROYS-IT-SILENTLY
 

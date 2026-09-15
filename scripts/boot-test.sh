@@ -6380,6 +6380,114 @@ check_orphan_modules() {
 check_orphan_modules
 
 # ---------------------------------------------------------------------------
+# check-fields-written-never-read.py and check-tested-but-uncalled.py -- lane
+# C's gates, wired 2026-09-15 by lane C.  Same arrangement as lane B's gate
+# below: the edit is in lane A's file, and the DECISION is lane C's, because
+# running a gate can fail on the owning lane's tree and these two read lane
+# C's roots only.  Neither can red lane A or lane B.
+#
+# They were pushed unwired, which check-gates-are-wired caught -- and one of
+# them had already been DESCRIBED as wired in a request filed to lane B.  A
+# gate nothing runs is the failure this project keeps finding in its own
+# instruments, and claiming it is wired is the version of that failure that
+# also misleads the next reader.
+#
+# What they enforce, recorded because whoever reads this next will not know:
+# a field or function that production code fills in and only the TESTS ever
+# read.  cargo cannot warn about either, because a #[cfg(test)] module is a
+# use -- so the code compiles clean, its own tests pass, and the work it does
+# is thrown away.  That shape is how 39 command-line options in userspace/
+# came to be parsed and ignored.
+#
+# Cost measured before wiring, not estimated: 18s and 56s against a run of
+# hours.
+# ---------------------------------------------------------------------------
+# Written out twice rather than looped over a $name.  The loop was shorter and
+# it hid both gates from check-gates-are-wired, which looks for the script's
+# name beside a runner call -- and, more to the point, from anyone grepping the
+# tree for where their gate runs.  Indirection that saves six lines and costs
+# discoverability is a bad trade in a file whose whole job is to be audited.
+
+check_fields_written_never_read() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== check-fields-written-never-read.py: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking lane C for fields that production fills in and only tests read ==="
+    # Self-test first, beside the gate's own call: this gate reports a clean
+    # tree and a stopped scanner in the same words, and the self-test is what
+    # tells those apart.
+    if ! run_checker check-fields-written-never-read-selftest "$py" \
+                     "$PROJECT_ROOT/scripts/check-fields-written-never-read.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-fields-written-never-read.py FAILED ITS OWN SELF-TEST," >&2
+        echo "so its verdict is not trustworthy -- a clean report from a broken" >&2
+        echo "scanner reads exactly like a clean tree." >&2
+        exit 1
+    fi
+    if run_checker check-fields-written-never-read "$py" "$PROJECT_ROOT/scripts/check-fields-written-never-read.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Something above is written by production" >&2
+    echo "code and read only by tests.  Wire it to the behaviour it names, or" >&2
+    echo "delete it -- both are honest.  If it is deliberate, add it to the" >&2
+    echo "gate baseline in the same commit WITH A TRIAGE NOTE: a baseline entry" >&2
+    echo "without a reason is an amnesty, and the next reader cannot tell one" >&2
+    echo "from a finding somebody judged." >&2
+    exit 1
+}
+
+check_fields_written_never_read
+
+check_tested_but_uncalled() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== check-tested-but-uncalled.py: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking lane C for functions that only their own tests call ==="
+    # Self-test first, beside the gate's own call: this gate reports a clean
+    # tree and a stopped scanner in the same words, and the self-test is what
+    # tells those apart.
+    if ! run_checker check-tested-but-uncalled-selftest "$py" \
+                     "$PROJECT_ROOT/scripts/check-tested-but-uncalled.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-tested-but-uncalled.py FAILED ITS OWN SELF-TEST," >&2
+        echo "so its verdict is not trustworthy -- a clean report from a broken" >&2
+        echo "scanner reads exactly like a clean tree." >&2
+        exit 1
+    fi
+    if run_checker check-tested-but-uncalled "$py" "$PROJECT_ROOT/scripts/check-tested-but-uncalled.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Something above is written by production" >&2
+    echo "code and read only by tests.  Wire it to the behaviour it names, or" >&2
+    echo "delete it -- both are honest.  If it is deliberate, add it to the" >&2
+    echo "gate baseline in the same commit WITH A TRIAGE NOTE: a baseline entry" >&2
+    echo "without a reason is an amnesty, and the next reader cannot tell one" >&2
+    echo "from a finding somebody judged." >&2
+    exit 1
+}
+
+check_tested_but_uncalled
+
+
+# ---------------------------------------------------------------------------
 # check-diff-preamble-order.py -- lane B's gate, wired at their request
 # (2026-09-12).  It was pushed unwired, which check-gates-are-wired caught; the
 # edit is here because boot-test.sh is lane A's file, and the DECISION was theirs

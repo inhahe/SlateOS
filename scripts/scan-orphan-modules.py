@@ -488,27 +488,72 @@ def read_baseline():
 def main():
     argv = sys.argv[1:]
     mode = "report"
+    override_roots = None
     for a in argv:
         if a in ("--check", "--pin"):
             mode = a[2:]
+        elif a.startswith("--roots="):
+            override_roots = [r for r in a.split("=", 1)[1].split(",") if r]
         else:
             print(f"unknown argument: {a}", file=sys.stderr)
             print(__doc__, file=sys.stderr)
             return 2
 
+    # `--roots` is report-only, and the refusal below is the point of the flag
+    # rather than a limitation of it.
+    #
+    # The baseline is a list of module paths. Nothing in it records WHICH roots
+    # produced it, so `--check --roots=userspace` would compare lane B's
+    # modules against lane C's baseline and report "no new orphans" — a true
+    # sentence about a population the run never looked at. That is the failure
+    # this project keeps finding in its own gates: a verdict delivered over a
+    # set the checker cannot enumerate. A flag that lets someone scan another
+    # lane is useful; one that lets them get a green tick for it is worse than
+    # not having the flag.
+    if override_roots is not None and mode != "report":
+        msg = [
+            f"--roots cannot be combined with --{mode}: the baseline in",
+            f"  {BASELINE}",
+            "describes lane C's roots and nothing else, so a pass or a pin",
+            "against different roots would be a verdict over a population",
+            "it does not cover. Run --roots on its own to see the report,",
+            "and keep your own baseline if you want a gate.",
+        ]
+        for line in msg:
+            print(line, file=sys.stderr)
+        return 2
+
     base = pathlib.Path(".")
-    roots = list(ROOTS)
-    roots += [p.name for p in base.iterdir() if p.is_dir() and p.name.startswith("net")]
+    if override_roots is None:
+        roots = list(ROOTS)
+        roots += [p.name for p in base.iterdir() if p.is_dir() and p.name.startswith("net")]
+    else:
+        roots = list(override_roots)
+        missing = [r for r in roots if not (base / r).is_dir()]
+        if missing:
+            print(f"no such directory: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        print(f"scanning {', '.join(sorted(roots))} (report only)", file=sys.stderr)
 
     # Candidate modules: library modules under lane C's roots that define at
     # least one top-level public item.
     candidates = {}
+    skipped_binaries = []
     for root in sorted(set(roots)):
         rp = base / root
         if not rp.is_dir():
             continue
         for f in rust_files(rp):
             if f.name == "main.rs" or f.name in AGGREGATORS:
+                # Counted, not merely skipped. A binary crate is a root, so
+                # "nothing calls this" is a different question inside
+                # main.rs and this scan does not answer it -- but a run
+                # that says "0 islands" over a directory of binaries is
+                # reporting that it did not look, in the same words it
+                # would use for a clean tree. The count below is what
+                # tells those two apart.
+                if f.name == "main.rs":
+                    skipped_binaries.append(f)
                 continue
             try:
                 lines = f.read_text(encoding="utf-8", errors="replace").split("\n")
@@ -877,6 +922,26 @@ def main():
         f" out of {len(candidates)} library module(s) scanned"
         f" ({len(islands) - len(hard)} further test-only helper(s) listed above)."
     )
+    if skipped_binaries:
+        crates = sorted({f.parts[1] for f in skipped_binaries if len(f.parts) > 1})
+        shown = ', '.join(crates[:6])
+        more = f' and {len(crates) - 6} more' if len(crates) > 6 else ''
+        print(
+            f"Not looked at: {len(skipped_binaries)} main.rs file(s)"
+            f" ({shown}{more})."
+        )
+        print(
+            "  A binary crate is a root, so this scan does not ask whether"
+            " a module inside its main.rs has a caller."
+        )
+        print(
+            "  Most of that ground is covered elsewhere, and saying so is"
+            " the point: check-tested-but-uncalled.py reads main.rs and"
+            " reports 381 functions in apps/*/src/main.rs alone that only"
+            " their own tests call. What no gate covers is an inline `mod`"
+            " with no references, or a type or const that is neither a"
+            " module nor a function."
+        )
     print(
         "An island defines top-level public items and no other file in the"
         " repository names\nany of them or its module path, outside tests and"

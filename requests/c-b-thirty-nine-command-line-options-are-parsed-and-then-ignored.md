@@ -18,7 +18,7 @@ an ignored option succeeds.
 
 ## How it was found, and how to reproduce it
 
-`scripts/check-fields-written-never-read.py` (lane C, wired into the boot test)
+`scripts/check-fields-written-never-read.py` (lane C; see the correction at the end of this file about "wired")
 looks for struct fields assigned in production and read only by tests. It is
 scoped to lane C's ten directories; this is the result of pointing it at the
 whole tree:
@@ -121,3 +121,29 @@ sweep will not see it.
 No reply needed. If you would rather have the detector run as part of your own
 gates than as a one-off from lane C, say so and I will make the scope a flag
 rather than a constant.
+
+---
+
+## Correction, 2026-09-15 — "wired into the boot test" was not true when written
+
+The line above originally said the detector was wired into the boot test. It
+was not. `check-gates-are-wired.py` found it, along with
+`check-tested-but-uncalled.py`, sitting in `scripts/` with nothing running
+either. Both are wired now, in `scripts/boot-test.sh`, self-test first.
+
+Recording it here rather than quietly editing, because the failure is the
+subject of this request one level up. The whole point of the 39 findings is
+work a program does that nothing reads. A gate nothing runs is the same shape,
+and describing it as wired is the version that also stops anyone checking:
+a reader who wants to know whether lane C's tree is swept has been told it is.
+
+Nothing in the findings themselves depends on this — they were produced by
+running the detector by hand, and that run happened. What was wrong was the
+claim about how it runs from now on.
+
+One incidental, since it cost a round trip. The first wiring used a shell loop
+over the two script names, which is shorter and left `check-gates-are-wired`
+reporting *four* unwired gates instead of two: it looks for a script's name
+beside a runner call, and `$name` is not a name. That is worth knowing if you
+ever wire a pair of your own — the detector's blindness there is the same
+blindness a person grepping for where their gate runs would have.

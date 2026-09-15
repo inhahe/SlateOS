@@ -141192,11 +141192,30 @@ suppressed everything, so a script running `patch -s` and reading stdout was
 told nothing at all about a failure. Silent means do not narrate the work; it
 does not mean hide that the work did not happen.
 
-**`-l`/`--ignore-whitespace` is accepted and inert**, on the same terms as
-`-N`/`-f`/`-F`/`-Z` above: it changes an answer only where a hunk differs from
-the target in whitespace alone, and no case in this tree does. Correct today,
-incomplete rather than wrong, and recorded so a passing harness is not read as
-evidence that whitespace-insensitive matching exists. It does not.
+**`-l`/`--ignore-whitespace` IS IMPLEMENTED as of 2026-09-15.** It was accepted
+and inert, on the same terms as `-N`/`-f`/`-F`/`-Z` above: it changes an answer
+only where a hunk differs from the target in whitespace alone, and no case in
+this tree did.
+
+That argument was wrong, and the way it was wrong is worth keeping. Lane C's
+dead-field detector found the flag was parsed and read by nothing, and the
+defect is not the inertness -- it is that `--help` advertised "Match ignoring
+whitespace." with no hint of it. Of the four places the option was written
+down, three said inert and the only one a user reads said it worked. **An inert
+option is defensible exactly as long as nothing promises otherwise.**
+
+The matching rule is measured, not guessed: strip trailing whitespace, then
+treat any run of whitespace as equal to any other run -- a run matches a
+different run but never matches nothing. Whitespace is SPACE and TAB only;
+`\v`, `\f` and `\r` all fail against a space, so `is_ascii_whitespace()` would
+have been wrong three ways with every fixture still green. Eighteen measured
+cases, in `loose_eq`'s doc comment and its tests.
+
+`patch-diff.sh` had an `--ignore-whitespace` case throughout, and it passed
+throughout, because its fixture's target and patch agree about whitespace. A
+flag-bearing case whose fixture makes the flag irrelevant is not coverage. The
+three cases added alongside this fix use a tab-indented target against a
+space-indented patch, and two of them fail if the flag goes inert again.
 
 ### A-OPTION-REFUSAL-PASS-LINE-CLAIMS-MORE-THAN-ITS-DETECTORS-ESTABLISH — 2026-09-12 — FIXED by lane B (lane A)
 

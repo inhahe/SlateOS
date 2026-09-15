@@ -8,8 +8,21 @@ the two functions are not. Stated precisely because "the kernel now uses
 | asked for | state |
 |---|---|
 | `TYPE_ECHO_REPLY`, `TYPE_ECHO_REQUEST`, `HEADER_LEN` | **done** — `use netproto::icmp as wire;` at `icmp.rs:35`, ~20 sites repointed, all three local constants deleted |
-| `write_echo` (build a request) | **not done** — `build_echo_request` (:413) and `build_trace_echo_request` (:315) still encode by hand |
-| `reply_to` (request → reply) | **not done** — still inline in `process_icmp` |
+| `write_echo` (build a request) | **done** 2026-09-15 — both `build_echo_request` and `build_trace_echo_request` call it; no hand-rolled layout remains |
+| `reply_to` (request → reply) | **not done, and it is NOT a byte-identical swap** — see below |
+
+**`reply_to` turns out to change behaviour, and to fix a conformance bug doing
+it.** `netproto::icmp::reply_to` is `write_echo(out, false, id, seq, data)`, so
+it emits **code = 0**. The kernel's `send_echo_reply` copies the request's bytes
+and flips only byte 0, which means it **echoes the request's code byte back**.
+RFC 792 specifies Code = 0 for an Echo Reply, so the current kernel propagates a
+field it should zero.
+
+That makes the remaining adoption a small conformance fix rather than a
+refactor, and it deserves its own change with its own reasoning rather than
+riding along on a swap that was provably byte-identical. Filed here so the
+distinction is on record: `write_echo` could not change a packet, `reply_to`
+can.
 
 One premise has also changed since filing, and it strengthens the case rather
 than weakening it: netproto's copy is no longer "an island nobody calls" —

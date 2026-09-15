@@ -312,23 +312,25 @@ pub fn trace_id() -> u16 {
 
 /// Build an ICMP echo request for traceroute (uses TRACEROUTE_ID).
 #[allow(clippy::arithmetic_side_effects)]
-pub fn build_trace_echo_request(seq: u16) -> Vec<u8> {
+pub fn build_trace_echo_request(seq: u16) -> KernelResult<Vec<u8>> {
     let payload = b"traceroute probe";
     let total = wire::HEADER_LEN + payload.len();
-    let mut pkt = Vec::with_capacity(total);
-
-    pkt.push(wire::TYPE_ECHO_REQUEST);
-    pkt.push(0);
-    pkt.extend_from_slice(&[0, 0]); // Checksum placeholder.
-    pkt.extend_from_slice(&TRACEROUTE_ID.to_be_bytes());
-    pkt.extend_from_slice(&seq.to_be_bytes());
-    pkt.extend_from_slice(payload);
-
-    let checksum = ipv4::ip_checksum(&pkt);
-    pkt[2] = (checksum >> 8) as u8;
-    pkt[3] = checksum as u8;
-
-    pkt
+    let mut pkt = alloc::vec![0u8; total];
+    // netproto's encoder rather than a second copy of the layout.
+    //
+    // Byte-identical to the hand-rolled version this replaces, by derivation
+    // and not by inspection: `ipv4::ip_checksum` is
+    // `finish(sum_bytes(0, d))` over `crate::net::checksum`, which is itself a
+    // thin wrapper around netproto's `accumulate`/`fold` -- the same two
+    // primitives `checksum::internet` composes. The swap therefore cannot
+    // change a byte on the wire, which matters because a wrong ICMP checksum
+    // is dropped by the peer and looks exactly like packet loss.
+    let Some(n) = wire::write_echo(&mut pkt, true, TRACEROUTE_ID, seq, payload) else {
+        // Unreachable, for the same reason as `build_echo_request`.
+        return Err(crate::error::KernelError::InvalidArgument);
+    };
+    pkt.truncate(n);
+    Ok(pkt)
 }
 
 /// Match a Time Exceeded ICMP error against our traceroute probes.
@@ -410,30 +412,27 @@ fn match_trace_echo_reply(from_ip: Ipv4Addr, id: u16, seq: u16) {
 
 /// Build an ICMP echo request.
 #[allow(clippy::arithmetic_side_effects)]
-fn build_echo_request(seq: u16) -> Vec<u8> {
+fn build_echo_request(seq: u16) -> KernelResult<Vec<u8>> {
     let payload = b"ping from kernel!";
     let total = wire::HEADER_LEN + payload.len();
-    let mut pkt = Vec::with_capacity(total);
-
-    // Type: Echo Request.
-    pkt.push(wire::TYPE_ECHO_REQUEST);
-    // Code: 0.
-    pkt.push(0);
-    // Checksum placeholder.
-    pkt.extend_from_slice(&[0, 0]);
-    // Identifier.
-    pkt.extend_from_slice(&PING_ID.to_be_bytes());
-    // Sequence number.
-    pkt.extend_from_slice(&seq.to_be_bytes());
-    // Payload.
-    pkt.extend_from_slice(payload);
-
-    // Compute checksum.
-    let checksum = ipv4::ip_checksum(&pkt);
-    pkt[2] = (checksum >> 8) as u8;
-    pkt[3] = checksum as u8;
-
-    pkt
+    let mut pkt = alloc::vec![0u8; total];
+    // netproto's encoder rather than a second copy of the layout.
+    //
+    // Byte-identical to the hand-rolled version this replaces, by derivation
+    // and not by inspection: `ipv4::ip_checksum` is
+    // `finish(sum_bytes(0, d))` over `crate::net::checksum`, which is itself a
+    // thin wrapper around netproto's `accumulate`/`fold` -- the same two
+    // primitives `checksum::internet` composes. The swap therefore cannot
+    // change a byte on the wire, which matters because a wrong ICMP checksum
+    // is dropped by the peer and looks exactly like packet loss.
+    let Some(n) = wire::write_echo(&mut pkt, true, PING_ID, seq, payload) else {
+        // Unreachable: `pkt` is exactly `HEADER_LEN + payload.len()`, which is
+        // what `write_echo` requires. Surfaced as an error rather than a short
+        // packet, because a half-built echo request reads as network loss.
+        return Err(crate::error::KernelError::InvalidArgument);
+    };
+    pkt.truncate(n);
+    Ok(pkt)
 }
 
 // ---------------------------------------------------------------------------
@@ -753,7 +752,7 @@ fn send_echo_reply(request_ip: &Ipv4Packet<'_>, ns_id: crate::netns::NetNsId) ->
 /// Returns the sequence number used.
 pub fn ping(dst: Ipv4Addr) -> KernelResult<u16> {
     let seq = PING_SEQ.fetch_add(1, Ordering::Relaxed);
-    let pkt = build_echo_request(seq);
+    let pkt = build_echo_request(seq)?;
     record_outstanding(seq, dst);
     ipv4::send(dst, PROTO_ICMP, &pkt)?;
     Ok(seq)
@@ -830,7 +829,7 @@ pub fn self_test() -> KernelResult<()> {
 
 /// Test that build_echo_request produces a valid ICMP checksum.
 fn test_build_echo_request_checksum() -> KernelResult<()> {
-    let pkt = build_echo_request(42);
+    let pkt = build_echo_request(42)?;
 
     // Minimum size: 8 bytes header + payload "ping from kernel!" (17 bytes).
     if pkt.len() < wire::HEADER_LEN {
@@ -881,7 +880,7 @@ fn test_build_echo_request_checksum() -> KernelResult<()> {
 /// Test verify_checksum with a known-valid ICMP packet.
 fn test_verify_checksum_valid() -> KernelResult<()> {
     // Build a valid echo request and verify it passes.
-    let pkt = build_echo_request(100);
+    let pkt = build_echo_request(100)?;
     if !verify_checksum(&pkt) {
         crate::serial_println!("[icmp]   FAIL: valid packet rejected by verify_checksum");
         return Err(crate::error::KernelError::InternalError);
@@ -893,7 +892,7 @@ fn test_verify_checksum_valid() -> KernelResult<()> {
 
 /// Test verify_checksum rejects a corrupted ICMP packet.
 fn test_verify_checksum_invalid() -> KernelResult<()> {
-    let mut pkt = build_echo_request(200);
+    let mut pkt = build_echo_request(200)?;
 
     // Corrupt a payload byte.
     if let Some(b) = pkt.get_mut(10) {
@@ -911,7 +910,7 @@ fn test_verify_checksum_invalid() -> KernelResult<()> {
 
 /// Test that build_trace_echo_request produces valid ICMP.
 fn test_build_trace_echo_request() -> KernelResult<()> {
-    let pkt = build_trace_echo_request(7);
+    let pkt = build_trace_echo_request(7)?;
 
     if pkt.len() < wire::HEADER_LEN {
         crate::serial_println!("[icmp]   FAIL: trace request too short");

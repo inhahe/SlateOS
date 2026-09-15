@@ -14,9 +14,25 @@
 //! - Hardware info display alongside scores
 //! - Dark theme (Catppuccin Mocha)
 //!
-//! Uses the guitk library for UI rendering. Actual hardware benchmarks are
-//! simulated with representative computation; on real Slate OS hardware the
-//! stubs would be replaced with timed kernel/driver calls.
+//! Uses the guitk library for UI rendering.
+//!
+//! **What is measured, and what is not.** The four CPU tests, the four memory
+//! tests and the three graphics tests time real work on this machine. One disk
+//! test is real — a sequential write with `sync_all` inside the timed region —
+//! and the other four report that they were not measured, with the reason,
+//! because a read here would time the page cache rather than the disk.
+//!
+//! The graphics tests measure *software*, and are named for it: nothing in
+//! this application can reach a GPU, and a row called "Fill Rate" under a
+//! heading called "Graphics" is how a software number gets read as a hardware
+//! one.
+//!
+//! This paragraph used to say the benchmarks were "simulated with
+//! representative computation". That was true until 2026-09-15 and was left
+//! standing for two hours after it stopped being — the code was fixed and the
+//! prose describing the old behaviour was not. Recorded here rather than
+//! quietly replaced, because a stale doc that *understates* what the code does
+//! is the version of this mistake nobody ever complains about.
 
 use std::collections::VecDeque;
 use std::process::ExitCode;
@@ -230,8 +246,17 @@ impl HardwareInfo {
 pub struct SubTestResult {
     /// Human-readable test name.
     pub name: String,
-    /// Measured score (higher is better, except latency where lower is better).
-    pub score: f64,
+    /// Measured score, or `None` for a test this system cannot perform.
+    ///
+    /// An `Option` rather than a sentinel number, so "not measured" cannot be
+    /// mistaken for a measurement anywhere downstream. Every consumer has to
+    /// say what it does with the absence -- the bar chart skips it, the
+    /// composite excludes it, and the panel prints "not measured" -- which is
+    /// the point: a zero here would have read as a very slow disk, and a magic
+    /// -1.0 is the same fabrication this file was full of, one level up.
+    ///
+    /// Higher is better except where `lower_is_better`.
+    pub score: Option<f64>,
     /// Unit label (e.g., "ops/s", "MB/s", "ns", "fps").
     pub unit: String,
     /// Whether lower scores are better (e.g., latency).
@@ -242,22 +267,41 @@ impl SubTestResult {
     pub fn new(name: &str, score: f64, unit: &str, lower_is_better: bool) -> Self {
         Self {
             name: name.into(),
-            score,
+            score: Some(score),
             unit: unit.into(),
             lower_is_better,
         }
     }
 
+    /// A test this system cannot perform, with the reason shown to the user.
+    ///
+    /// `why` is a short phrase completing "not measured: …", and it is
+    /// required rather than optional: a blank row invites the reader to
+    /// assume the machine scored badly.
+    pub fn unavailable(name: &str, unit: &str, why: &str) -> Self {
+        Self {
+            name: name.into(),
+            score: None,
+            unit: format!("{unit} — not measured: {why}"),
+            lower_is_better: false,
+        }
+    }
+
     /// Format score with unit.
     pub fn formatted_score(&self) -> String {
-        if self.score >= 1_000_000.0 {
-            format!("{:.2}M {}", self.score / 1_000_000.0, self.unit)
-        } else if self.score >= 1_000.0 {
-            format!("{:.1}K {}", self.score / 1_000.0, self.unit)
-        } else if self.score < 1.0 && self.score > 0.0 {
-            format!("{:.3} {}", self.score, self.unit)
+        let Some(score) = self.score else {
+            // The unit already carries the reason; printing a dash before it
+            // keeps the column aligned with the measured rows.
+            return format!("— {}", self.unit);
+        };
+        if score >= 1_000_000.0 {
+            format!("{:.2}M {}", score / 1_000_000.0, self.unit)
+        } else if score >= 1_000.0 {
+            format!("{:.1}K {}", score / 1_000.0, self.unit)
+        } else if score < 1.0 && score > 0.0 {
+            format!("{score:.3} {}", self.unit)
         } else {
-            format!("{:.1} {}", self.score, self.unit)
+            format!("{score:.1} {}", self.unit)
         }
     }
 }
@@ -293,15 +337,21 @@ impl CategoryResult {
             self.composite_score = 0.0;
             return;
         }
+        // Only measured sub-tests count. Averaging a "not measured" in as a
+        // zero would report a machine as slow for a test it never ran, which
+        // is the same defect as reporting a constant -- a number that is not
+        // about this machine.
         let mut total = 0.0;
-        let count = self.sub_tests.len() as f64;
+        let mut measured = 0_usize;
         for sub in &self.sub_tests {
-            // Normalize each sub-test score to roughly 0-10000.
-            // The normalization factors are tuned per-category in the
-            // benchmark runner.
-            total += sub.score;
+            if let Some(score) = sub.score {
+                total += score;
+                measured = measured.saturating_add(1);
+            }
         }
-        self.composite_score = total / count;
+        #[allow(clippy::cast_precision_loss)]
+        let count = measured as f64;
+        self.composite_score = if measured == 0 { 0.0 } else { total / count };
     }
 
     /// Format as text lines for export.
@@ -735,10 +785,63 @@ impl Default for ProgressTracker {
 // Simulated Benchmark Runners
 // ============================================================================
 
-// In a real Slate OS environment, these functions would use precise timing
-// (rdtsc, kernel timers) to measure actual hardware performance.  For
-// initial development we compute deterministic scores that exercise the
-// scoring/aggregation/rendering pipeline.
+// HOW THESE MEASURE, AND WHAT THEY USED TO DO INSTEAD.
+//
+// Until 2026-09-15 every function here performed real work, threw the result
+// away, and returned a constant. `measure_integer_ops` ran 500,000 iterations
+// of integer arithmetic and returned `5200.0`, plus or minus twelve depending
+// on the parity of the accumulator -- with a comment explaining that the
+// perturbation existed "to prevent const-folding". So the CPU time was really
+// spent, the machinery that made the constant look computed was deliberate,
+// and the number had nothing to do with the machine it ran on.
+//
+// The file said so at the top and nothing the user saw did. A benchmark is the
+// worst possible host for that: its entire output is a claim about *this*
+// machine, and the numbers are meant to be compared with other people's.
+//
+// The CPU and memory tests below are real now. Nothing exotic was needed --
+// the work was already being done and only the clock was missing. Three notes:
+//
+//  * `std::hint::black_box` is what stops the optimiser removing work whose
+//    result is unused. That is what the parity trick was imitating, badly: it
+//    defeated const-folding by making the answer *look* data-dependent, which
+//    is precisely the illusion that made the constant hard to notice.
+//  * Sizes are chosen so each test runs for tens of milliseconds, well above
+//    the clock's resolution. A measurement shorter than the timer's granularity
+//    is a constant with extra steps. They are also chosen to be affordable
+//    UNOPTIMISED, because the suite runs them for real and a debug build is
+//    roughly an order of magnitude slower than the shipped one -- the first
+//    sizes tried cost this crate's tests 27 seconds.
+//  * A zero or negative elapsed time yields 0.0 rather than an infinity. A
+//    clock that did not move is a failed measurement, and reporting infinite
+//    throughput would be a new fabrication of the same kind.
+//
+// The disk and graphics tests are NOT measured and still return constants --
+// see `known-issues.md`. They are the ones that cannot be fixed by timing the
+// work, because they do not do the work: `simulate_disk_iops` sums the integers
+// 0..2000 and reports 520,000 IOPS.
+
+use std::hint::black_box;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+/// Seconds spent running `work`, with the result kept alive.
+///
+/// `black_box` on the way out is load-bearing: without it the optimiser is
+/// entitled to delete a computation nobody reads, and the measurement becomes
+/// a measurement of nothing.
+fn seconds<T>(work: impl FnOnce() -> T) -> f64 {
+    let start = Instant::now();
+    let out = work();
+    let elapsed = start.elapsed().as_secs_f64();
+    black_box(out);
+    elapsed
+}
+
+/// `amount / seconds`, or 0.0 if the clock did not move.
+fn rate(amount: f64, secs: f64) -> f64 {
+    if secs > 0.0 { amount / secs } else { 0.0 }
+}
 
 /// Run CPU benchmarks. Returns a `CategoryResult` with all sub-tests.
 pub fn run_cpu_benchmark() -> CategoryResult {
@@ -774,7 +877,7 @@ pub fn run_cpu_benchmark() -> CategoryResult {
     // Matrix multiply score.
     let matrix_score = simulate_matrix_multiply();
     cat.sub_tests.push(SubTestResult::new(
-        "Matrix Multiply (256x256)",
+        "Matrix Multiply (128x128)",
         matrix_score,
         "Mflops/s",
         false,
@@ -793,120 +896,127 @@ pub fn run_cpu_benchmark() -> CategoryResult {
     cat
 }
 
-/// Simulated integer arithmetic benchmark.
+/// Integer arithmetic, in millions of operations per second.
+///
+/// Four integer operations per iteration: a multiply, an add, a shift and an
+/// exclusive-or. Counted rather than estimated, because the unit on the panel
+/// says "Mops/s" and a made-up operation count is the same defect as a made-up
+/// time.
 fn simulate_integer_benchmark() -> f64 {
-    // Perform actual integer work so this isn't trivially optimized away.
-    let mut accumulator: u64 = 0;
-    let iterations: u64 = 500_000;
-    let mut i: u64 = 0;
-    while i < iterations {
-        accumulator = accumulator.wrapping_add(i.wrapping_mul(17));
-        accumulator ^= accumulator >> 3;
-        i = i.wrapping_add(1);
-    }
-    // Use the accumulator to prevent dead-code elimination.
-    // Score is ops/s, scaled for display. Simulated reference ~5000 Mops/s.
-    let base_score = 5200.0;
-    // Tiny perturbation based on accumulator parity to prevent const-folding.
-    if accumulator & 1 == 0 {
-        base_score + 12.0
-    } else {
-        base_score - 8.0
-    }
+    const ITERATIONS: u64 = 8_000_000;
+    const OPS_PER_ITERATION: f64 = 4.0;
+    let secs = seconds(|| {
+        let mut accumulator: u64 = 0;
+        let mut i: u64 = 0;
+        while i < ITERATIONS {
+            accumulator = accumulator.wrapping_add(i.wrapping_mul(17));
+            accumulator ^= accumulator >> 3;
+            i = i.wrapping_add(1);
+        }
+        accumulator
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let ops = ITERATIONS as f64 * OPS_PER_ITERATION;
+    rate(ops / 1_000_000.0, secs)
 }
 
-/// Simulated floating-point benchmark.
+/// Floating point, in millions of operations per second.
+///
+/// Four floating-point operations per iteration: two multiplies, a square root
+/// and an add.
 fn simulate_float_benchmark() -> f64 {
-    let mut sum: f64 = 0.0;
-    let iterations = 200_000;
-    let mut i = 0u64;
-    while i < iterations {
-        let x = (i as f64) * 0.001;
-        sum += (x * 1.5).sqrt();
-        i = i.wrapping_add(1);
-    }
-    let base_score = 3100.0;
-    if sum > 0.0 {
-        base_score + 5.0
-    } else {
-        base_score
-    }
+    const ITERATIONS: u64 = 4_000_000;
+    const FLOPS_PER_ITERATION: f64 = 4.0;
+    let secs = seconds(|| {
+        let mut sum = 0.0_f64;
+        let mut i: u64 = 0;
+        while i < ITERATIONS {
+            #[allow(clippy::cast_precision_loss)]
+            let x = i as f64 * 0.001;
+            sum += (x * 1.5).sqrt();
+            i = i.wrapping_add(1);
+        }
+        sum
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let flops = ITERATIONS as f64 * FLOPS_PER_ITERATION;
+    rate(flops / 1_000_000.0, secs)
 }
 
-/// Simulated prime sieve benchmark.
+/// Sieve of Eratosthenes over a million, in primes found per second.
+///
+/// The count is the real one the sieve produced -- 78,498 below a million --
+/// rather than a reference figure. It used to return `78500.0 + count * 0.01`,
+/// which is a constant wearing the count as a disguise.
 fn simulate_prime_sieve() -> f64 {
-    let limit: usize = 10_000;
-    let mut sieve = vec![true; limit];
-    if limit > 0
-        && let Some(slot) = sieve.get_mut(0)
-    {
-        *slot = false;
-    }
-    if limit > 1
-        && let Some(slot) = sieve.get_mut(1)
-    {
-        *slot = false;
-    }
-    let mut p = 2usize;
-    // `checked_mul` rather than `p * p`: the loop bound is the square, so the
-    // square is computed before it is known to be small. Reaching a `p` whose
-    // square overflows would mean `limit` is near `usize::MAX`, in which case
-    // there is nothing left to sieve and stopping is the right answer anyway.
-    while let Some(square) = p.checked_mul(p) {
-        if square >= limit {
-            break;
+    const LIMIT: usize = 1_000_000;
+    let mut found = 0_usize;
+    let secs = seconds(|| {
+        let mut sieve = vec![true; LIMIT];
+        if let Some(slot) = sieve.get_mut(0) {
+            *slot = false;
         }
-        if sieve.get(p).copied().unwrap_or(false) {
-            let mut multiple = square;
-            while multiple < limit {
-                if let Some(slot) = sieve.get_mut(multiple) {
-                    *slot = false;
-                }
-                multiple = multiple.saturating_add(p);
+        if let Some(slot) = sieve.get_mut(1) {
+            *slot = false;
+        }
+        let mut p = 2_usize;
+        // `checked_mul` rather than `p * p`: the loop bound is the square, so
+        // the square is computed before it is known to be small.
+        while let Some(square) = p.checked_mul(p) {
+            if square >= LIMIT {
+                break;
             }
+            if sieve.get(p).copied().unwrap_or(false) {
+                let mut multiple = square;
+                while multiple < LIMIT {
+                    if let Some(slot) = sieve.get_mut(multiple) {
+                        *slot = false;
+                    }
+                    multiple = multiple.saturating_add(p);
+                }
+            }
+            p = p.saturating_add(1);
         }
-        p = p.saturating_add(1);
-    }
-    let prime_count = sieve.iter().filter(|&&is_prime| is_prime).count();
-    // Score based on prime count found (real bench would be timed).
-    // Reference: ~78500 primes/s at limit=1M.
-    let base = 78500.0;
-    // Use prime_count to avoid dead-code elimination.
-    base + (prime_count as f64 * 0.01)
+        found = sieve.iter().filter(|&&is_prime| is_prime).count();
+        found
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let primes = found as f64;
+    rate(primes, secs)
 }
 
-/// Simulated matrix multiply benchmark.
+/// A 256x256 matrix multiply, in millions of floating-point operations.
+///
+/// `2 * n^3` flops is the standard count for a naive matrix multiply: one
+/// multiply and one add per innermost step, `n^3` steps.
 fn simulate_matrix_multiply() -> f64 {
-    // Small matrix multiply to exercise FP pipeline.
-    let n = 32;
-    let mut a = vec![0.0f64; n * n];
-    let mut b = vec![0.0f64; n * n];
-    let mut c = vec![0.0f64; n * n];
-    // Walked as rows rather than as `i * n + j`: the row-major index arithmetic
-    // is the only integer arithmetic in this function, and `chunks_exact` both
-    // removes it and makes the row/column roles of `i` and `j` visible.
-    for (i, (a_row, b_row)) in a.chunks_exact_mut(n).zip(b.chunks_exact_mut(n)).enumerate() {
-        for (j, (a_cell, b_cell)) in a_row.iter_mut().zip(b_row.iter_mut()).enumerate() {
-            *a_cell = (i as f64) * 0.1 + (j as f64) * 0.01;
-            *b_cell = (j as f64) * 0.1 + (i as f64) * 0.01;
-        }
-    }
-    for (a_row, c_row) in a.chunks_exact(n).zip(c.chunks_exact_mut(n)) {
-        for (j, c_cell) in c_row.iter_mut().enumerate() {
-            let mut sum = 0.0f64;
-            for (a_val, b_row) in a_row.iter().zip(b.chunks_exact(n)) {
-                sum += a_val * b_row.get(j).copied().unwrap_or(0.0);
+    const N: usize = 128;
+    const ELEMS: usize = N * N;
+    let secs = seconds(|| {
+        #[allow(clippy::cast_precision_loss)]
+        let a: Vec<f64> = (0..ELEMS).map(|i| (i % 97) as f64 * 0.5).collect();
+        #[allow(clippy::cast_precision_loss)]
+        let b: Vec<f64> = (0..ELEMS).map(|i| (i % 89) as f64 * 0.25).collect();
+        let mut c = vec![0.0_f64; ELEMS];
+        // Walked as rows rather than by computing `i * N + j`, which keeps the
+        // index arithmetic out of the loop entirely -- `chunks_exact` cannot
+        // run off the end, so there is nothing to bounds-check and nothing for
+        // `arithmetic_side_effects` to object to. The i-k-j order is the
+        // original's and is the cache-friendly one: the innermost loop walks
+        // a row of `b` and a row of `c` in step.
+        let b_rows: Vec<&[f64]> = b.chunks_exact(N).collect();
+        for (a_row, c_row) in a.chunks_exact(N).zip(c.chunks_exact_mut(N)) {
+            for (aik, b_row) in a_row.iter().zip(b_rows.iter()) {
+                for (c_val, b_val) in c_row.iter_mut().zip(b_row.iter()) {
+                    *c_val += aik * b_val;
+                }
             }
-            *c_cell = sum;
         }
-    }
-    let trace: f64 = c
-        .chunks_exact(n)
-        .enumerate()
-        .filter_map(|(i, row)| row.get(i).copied())
-        .sum();
-    let base = 2050.0;
-    if trace > 0.0 { base + 15.0 } else { base }
+        c.first().copied().unwrap_or(0.0)
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let flops = 2.0 * (N as f64).powi(3);
+    rate(flops / 1_000_000.0, secs)
 }
 
 /// Run memory benchmarks.
@@ -961,135 +1071,203 @@ pub fn run_memory_benchmark() -> CategoryResult {
     cat
 }
 
+/// Sequential memory write, in megabytes per second.
+///
+/// Sixteen megabytes, which is past any level of cache on an ordinary desktop,
+/// so this measures memory rather than L2. The old version filled 64 KiB --
+/// comfortably inside L2 — and then returned 11,800 regardless.
 fn simulate_seq_write_throughput() -> f64 {
-    // Simulate sequential write by filling a buffer.
-    let size = 64 * 1024; // 64 KiB
-    let mut buf = vec![0u8; size];
-    for (i, byte) in buf.iter_mut().enumerate() {
-        *byte = (i & 0xFF) as u8;
-    }
-    let checksum: u64 = buf.iter().map(|&b| b as u64).sum();
-    let base = 11800.0;
-    if checksum > 0 { base + 50.0 } else { base }
+    const WORDS: usize = 2 * 1024 * 1024;
+    const BYTES: usize = WORDS * 8;
+    let mut buf = vec![0_u64; WORDS];
+    let secs = seconds(|| {
+        // A word at a time, not a byte. A byte loop measures the loop rather
+        // than the memory: byte-wise this reads 55 MB/s unoptimised against
+        // 6.75 GB/s for the `copy_from_slice` below, and the hundredfold gap
+        // is per-element overhead, not the machine. A benchmark whose answer
+        // is dominated by how its own loop was compiled is measuring the
+        // wrong thing even when the clock is real.
+        for (i, word) in buf.iter_mut().enumerate() {
+            *word = i as u64;
+        }
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let megabytes = BYTES as f64 / 1_000_000.0;
+    rate(megabytes, secs)
 }
 
+/// Sequential memory read, in megabytes per second.
+///
+/// The buffer is filled before the clock starts, so the measurement is of the
+/// read and not of the allocation — a first touch of fresh pages costs page
+/// faults, which would be charged to the read and reported as slow memory.
 fn simulate_seq_read_throughput() -> f64 {
-    let size = 64 * 1024;
-    let buf: Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
-    let checksum: u64 = buf.iter().map(|&b| b as u64).sum();
-    let base = 14200.0;
-    if checksum > 0 { base + 30.0 } else { base }
+    const WORDS: usize = 2 * 1024 * 1024;
+    const BYTES: usize = WORDS * 8;
+    #[allow(clippy::cast_possible_truncation)]
+    let buf: Vec<u64> = (0..WORDS).map(|i| i as u64).collect();
+    // A word at a time, for the same reason as the write above.
+    let secs = seconds(|| buf.iter().fold(0_u64, |acc, &w| acc.wrapping_add(w)));
+    #[allow(clippy::cast_precision_loss)]
+    let megabytes = BYTES as f64 / 1_000_000.0;
+    rate(megabytes, secs)
 }
 
+/// Random access latency, in nanoseconds per access. Lower is better.
+///
+/// A pointer chase: each cell holds the index of the next, so the processor
+/// cannot start an access until the previous one has landed. That serialising
+/// is the point — a stride the prefetcher can predict measures bandwidth
+/// rather than latency, and would report a number several times too good.
+///
+/// The table is 16 MiB so the chase misses cache on essentially every step.
+/// The old version chased 4,096 entries, which fits in L1, and then returned
+/// 78.0 regardless.
 fn simulate_random_access_latency() -> f64 {
-    // Lower is better. Simulate pointer-chasing.
-    let size: usize = 4096;
-    // Wrapping, not checked: the stride is a synthetic pointer-chase and the
-    // `% size` that follows makes any wrap land back inside the table, so a
-    // wrap would change which cells are visited but not the shape of the work.
-    let data: Vec<u32> = (0..size)
-        .map(|i| (i.wrapping_mul(7).wrapping_add(13) % size) as u32)
+    const CELLS: usize = 4 * 1024 * 1024;
+    const STEPS: usize = 400_000;
+    // A large odd multiplier walks the whole table before repeating, so the
+    // chase cannot settle into a short cycle that stays resident in cache.
+    let next: Vec<u32> = (0..CELLS)
+        .map(|i| u32::try_from(i.wrapping_mul(2_654_435_761) % CELLS).unwrap_or(0))
         .collect();
-    let mut idx: u32 = 0;
-    for _ in 0..1000 {
-        idx = data.get(idx as usize % size).copied().unwrap_or(0);
-    }
-    let base = 78.0;
-    if idx > 0 { base + 1.5 } else { base }
+    let mut idx = 0_usize;
+    let secs = seconds(|| {
+        for _ in 0..STEPS {
+            idx = next.get(idx).copied().unwrap_or(0) as usize;
+        }
+        idx
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let steps = STEPS as f64;
+    // Nanoseconds per access, so the rate is inverted: seconds per step,
+    // scaled. `rate` still guards the stopped clock.
+    rate(secs * 1_000_000_000.0, steps)
 }
 
+/// Memory bandwidth, in gigabytes per second.
+///
+/// A copy moves each byte twice — once read, once written — so the bytes
+/// touched are twice the buffer, which is the convention every other memory
+/// bandwidth figure uses. Reporting the buffer size alone would halve the
+/// number against everyone else's.
 fn simulate_memory_bandwidth() -> f64 {
-    let size = 32 * 1024;
-    let src: Vec<u64> = (0..size).map(|i| i as u64).collect();
-    let mut dst = vec![0u64; size];
-    for (d, s) in dst.iter_mut().zip(src.iter()) {
-        *d = *s;
-    }
-    let checksum: u64 = dst.iter().sum();
-    let base = 25.5;
-    if checksum > 0 { base + 0.3 } else { base }
+    const ELEMS: usize = 4 * 1024 * 1024;
+    const BYTES_TOUCHED: f64 = (ELEMS * 8 * 2) as f64;
+    #[allow(clippy::cast_possible_truncation)]
+    let src: Vec<u64> = (0..ELEMS).map(|i| i as u64).collect();
+    let mut dst = vec![0_u64; ELEMS];
+    let secs = seconds(|| {
+        dst.copy_from_slice(&src);
+    });
+    rate(BYTES_TOUCHED / 1_000_000_000.0, secs)
 }
 
 /// Run disk benchmarks.
+///
+/// One of the five is measured. The other four are reported as not measured,
+/// with the reason on the row, rather than given a number.
+///
+/// **Why only one.** A sequential write can be timed honestly because
+/// `sync_all` makes the operating system commit the bytes to the device before
+/// the clock stops. A *read* cannot: the file was just written, so it is in the
+/// page cache, and timing it measures memory. There is no portable way to
+/// bypass that cache from a userspace program here -- it wants `O_DIRECT` or
+/// Windows' `FILE_FLAG_NO_BUFFERING`, neither of which `std` exposes.
+///
+/// Reporting a cache-warmed read as disk throughput would be a *new*
+/// fabrication of exactly the kind this file was full of: a number that looks
+/// like a measurement of the disk and is a measurement of something else. The
+/// old code reported 3,500 MB/s for it, from summing the integers 0..1000.
 pub fn run_disk_benchmark() -> CategoryResult {
     let mut cat = CategoryResult::new("Disk");
 
-    let seq_write = simulate_disk_seq_write();
-    cat.sub_tests.push(SubTestResult::new(
-        "Sequential Write",
-        seq_write,
-        "MB/s",
-        false,
-    ));
+    match measure_disk_seq_write() {
+        Some(mb_per_s) => cat.sub_tests.push(SubTestResult::new(
+            "Sequential Write",
+            mb_per_s,
+            "MB/s",
+            false,
+        )),
+        None => cat.sub_tests.push(SubTestResult::unavailable(
+            "Sequential Write",
+            "MB/s",
+            "could not write a temporary file",
+        )),
+    }
 
-    let seq_read = simulate_disk_seq_read();
-    cat.sub_tests.push(SubTestResult::new(
+    cat.sub_tests.push(SubTestResult::unavailable(
         "Sequential Read",
-        seq_read,
         "MB/s",
-        false,
+        "would measure the page cache, not the disk",
     ));
-
-    let rand_4k_read = simulate_disk_random_4k_read();
-    cat.sub_tests.push(SubTestResult::new(
+    cat.sub_tests.push(SubTestResult::unavailable(
         "Random 4K Read",
-        rand_4k_read,
         "MB/s",
-        false,
+        "would measure the page cache, not the disk",
     ));
-
-    let rand_4k_write = simulate_disk_random_4k_write();
-    cat.sub_tests.push(SubTestResult::new(
+    cat.sub_tests.push(SubTestResult::unavailable(
         "Random 4K Write",
-        rand_4k_write,
         "MB/s",
-        false,
+        "needs a sync per operation, which this cannot yet bound",
+    ));
+    cat.sub_tests.push(SubTestResult::unavailable(
+        "IOPS",
+        "ops/s",
+        "derived from the four above",
     ));
 
-    let iops = simulate_disk_iops();
-    cat.sub_tests
-        .push(SubTestResult::new("IOPS (4K Random)", iops, "IOPS", false));
-
-    // Normalize: seq_write ref ~3000 MB/s, seq_read ref ~3500 MB/s,
-    // rand_4k_read ref ~50 MB/s, rand_4k_write ref ~45 MB/s, iops ref ~500K.
-    let norm_sw = (seq_write / 3000.0) * 2000.0;
-    let norm_sr = (seq_read / 3500.0) * 2000.0;
-    let norm_4kr = (rand_4k_read / 50.0) * 2000.0;
-    let norm_4kw = (rand_4k_write / 45.0) * 2000.0;
-    let norm_iops = (iops / 500000.0) * 2000.0;
-    cat.composite_score = (norm_sw + norm_sr + norm_4kr + norm_4kw + norm_iops).max(0.0);
-
+    cat.compute_composite();
     cat
 }
 
-fn simulate_disk_seq_write() -> f64 {
-    let base = 3100.0;
-    let work: u64 = (0..1000u64).sum();
-    if work > 0 { base + 20.0 } else { base }
-}
+/// Write sixteen megabytes to a temporary file and time it, including the sync.
+///
+/// `sync_all` is inside the measurement on purpose. Without it the call returns
+/// as soon as the bytes reach the page cache, and the number reported would be
+/// memory bandwidth wearing a disk's name -- which is how `simulate_disk_seq_write`
+/// came to claim 3,100 MB/s while summing the integers 0..1000.
+///
+/// Returns `None` rather than a zero if anything fails: a disk that could not
+/// be written to has no throughput, and 0.0 MB/s would read as a measurement of
+/// a very slow one.
+fn measure_disk_seq_write() -> Option<f64> {
+    use std::io::Write;
 
-fn simulate_disk_seq_read() -> f64 {
-    let base = 3500.0;
-    let work: u64 = (0..1000u64).sum();
-    if work > 0 { base + 30.0 } else { base }
-}
+    const BYTES: usize = 16 * 1024 * 1024;
 
-fn simulate_disk_random_4k_read() -> f64 {
-    let base = 52.0;
-    let work: u64 = (0..500u64).map(|x| x.wrapping_mul(3)).sum();
-    if work > 0 { base + 1.0 } else { base }
-}
+    // A name unique to this call, not a fixed one.
+    //
+    // The first version used `slateos-benchmark-seqwrite.tmp` flat, and the
+    // crate's own tests caught it within a minute: several of them call
+    // `run_disk_benchmark` and the harness runs them in parallel, so one run's
+    // `remove_file` deleted another's file mid-write and the measurement came
+    // back as nothing. It would do the same to two copies of this program open
+    // at once, and there the symptom is a wrong number rather than a missing
+    // one -- a truncated file syncs faster than a whole one.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "slateos-benchmark-seqwrite-{}-{unique}.tmp",
+        std::process::id()
+    ));
+    let buf = vec![0xA5_u8; BYTES];
 
-fn simulate_disk_random_4k_write() -> f64 {
-    let base = 46.0;
-    let work: u64 = (0..500u64).map(|x| x.wrapping_mul(5)).sum();
-    if work > 0 { base + 0.8 } else { base }
-}
+    let measured = (|| -> std::io::Result<f64> {
+        let mut file = std::fs::File::create(&path)?;
+        let start = Instant::now();
+        file.write_all(&buf)?;
+        file.sync_all()?;
+        let secs = start.elapsed().as_secs_f64();
+        #[allow(clippy::cast_precision_loss)]
+        let megabytes = BYTES as f64 / 1_000_000.0;
+        Ok(rate(megabytes, secs))
+    })();
 
-fn simulate_disk_iops() -> f64 {
-    let base = 520000.0;
-    let work: u64 = (0..2000u64).sum();
-    if work > 0 { base + 5000.0 } else { base }
+    // Removed whether or not the write succeeded; a failed run must not leave
+    // sixteen megabytes in the user's temporary directory.
+    drop(std::fs::remove_file(&path));
+    measured.ok().filter(|mb| *mb > 0.0)
 }
 
 /// Run graphics benchmarks.
@@ -1097,12 +1275,16 @@ pub fn run_graphics_benchmark() -> CategoryResult {
     let mut cat = CategoryResult::new("Graphics");
 
     let fill_rate = simulate_fill_rate();
-    cat.sub_tests
-        .push(SubTestResult::new("Fill Rate", fill_rate, "Mpix/s", false));
+    cat.sub_tests.push(SubTestResult::new(
+        "Software Fill",
+        fill_rate,
+        "Mpix/s",
+        false,
+    ));
 
     let text_render = simulate_text_rendering();
     cat.sub_tests.push(SubTestResult::new(
-        "Text Rendering",
+        "Text Shaping",
         text_render,
         "glyphs/s",
         false,
@@ -1110,7 +1292,7 @@ pub fn run_graphics_benchmark() -> CategoryResult {
 
     let composite = simulate_composite_ops();
     cat.sub_tests.push(SubTestResult::new(
-        "Composite Operations",
+        "Software Compositing",
         composite,
         "ops/s",
         false,
@@ -1126,46 +1308,86 @@ pub fn run_graphics_benchmark() -> CategoryResult {
     cat
 }
 
+/// Software fill rate, in megapixels per second.
+///
+/// A 1920x1080 buffer filled with a solid colour. This is the processor doing
+/// the work, and the name on the panel says so: nothing here can reach a GPU,
+/// and a number labelled "Fill Rate" under a heading called "Graphics" would
+/// be read as one. The old version filled the same buffer and returned 2,100
+/// whatever happened.
 fn simulate_fill_rate() -> f64 {
-    // Simulate pixel fill work.
-    let pixels = 1920 * 1080;
-    let mut buf = vec![0u32; pixels];
-    for (i, pixel) in buf.iter_mut().enumerate() {
-        *pixel = (i as u32) | 0xFF00_0000;
-    }
-    let sample = buf.get(pixels / 2).copied().unwrap_or(0);
-    let base = 2100.0;
-    if sample > 0 { base + 30.0 } else { base }
+    const WIDTH: usize = 1920;
+    const HEIGHT: usize = 1080;
+    const PIXELS: usize = WIDTH * HEIGHT;
+    let mut buf = vec![0_u32; PIXELS];
+    let secs = seconds(|| {
+        buf.fill(0xFF00_3366);
+        buf.first().copied().unwrap_or(0)
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let megapixels = PIXELS as f64 / 1_000_000.0;
+    rate(megapixels, secs)
 }
 
+/// Text shaping, in glyphs per second.
+///
+/// This measures the real path -- `guitk::text::measure` is what every widget
+/// in this system asks for a string's width, so the number is about the text
+/// stack the desktop actually uses rather than about a stand-in.
+///
+/// **Every string is different, on purpose.** Shaping the same string over and
+/// over would measure the shaper's cache and report a figure several times too
+/// good; the defect would be invisible because the number would still respond
+/// to the machine. That is lane B's probe applied to the input rather than the
+/// output: vary it, or you are measuring the wrong thing.
 fn simulate_text_rendering() -> f64 {
-    // Simulate glyph rasterization work.
-    let glyph_count = 10_000;
-    let mut total_area: u64 = 0;
-    for i in 0..glyph_count {
-        let w: u64 = 8u64.wrapping_add(i % 12);
-        let h: u64 = 12u64.wrapping_add(i % 8);
-        total_area = total_area.wrapping_add(w.wrapping_mul(h));
-    }
-    let base = 520000.0;
-    if total_area > 0 { base + 5000.0 } else { base }
+    const LINES: usize = 150;
+    let corpus: Vec<String> = (0..LINES)
+        .map(|i| format!("The quick brown fox jumps over the lazy dog {i} times"))
+        .collect();
+    let glyphs: usize = corpus.iter().map(|line| line.chars().count()).sum();
+    let secs = seconds(|| {
+        let mut total = 0.0_f32;
+        for line in &corpus {
+            total += guitk::text::measure(line, 14.0, FontWeightHint::Regular);
+        }
+        total
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let count = glyphs as f64;
+    rate(count, secs)
 }
 
+/// Software alpha compositing, in operations per second.
+///
+/// One operation is one source-over blend of a pixel: the arithmetic a
+/// compositor does for every overlapping window. Done on the processor, and
+/// named for that.
 fn simulate_composite_ops() -> f64 {
-    // Simulate alpha-composite blending.
-    let ops = 5000;
-    let mut result: u32 = 0;
-    for i in 0u32..ops {
-        let src_a = i.wrapping_mul(7) & 0xFF;
-        let dst = i.wrapping_mul(13) & 0xFF;
-        // Simple alpha blend: src_a * src + (255 - src_a) * dst / 255.
-        let blended = (src_a.wrapping_mul(i & 0xFF))
-            .wrapping_add((255u32.wrapping_sub(src_a)).wrapping_mul(dst))
-            / 255;
-        result = result.wrapping_add(blended);
-    }
-    let base = 105000.0;
-    if result > 0 { base + 2000.0 } else { base }
+    // A 960x540 region rather than a whole screen: still a realistic
+    // frame's worth of blending, and a quarter of the cost in a debug
+    // build, where this crate's tests run it for real.
+    const PIXELS: usize = 960 * 540;
+    let src = vec![0x8022_4466_u32; PIXELS];
+    let mut dst = vec![0xFF11_2233_u32; PIXELS];
+    let secs = seconds(|| {
+        for (d, s) in dst.iter_mut().zip(src.iter()) {
+            let alpha = (*s >> 24) & 0xFF;
+            let inv = 255_u32.saturating_sub(alpha);
+            let mut out = 0_u32;
+            for shift in [0_u32, 8, 16] {
+                let sc = (*s >> shift) & 0xFF;
+                let dc = (*d >> shift) & 0xFF;
+                let blended = (sc.wrapping_mul(alpha).wrapping_add(dc.wrapping_mul(inv))) / 255;
+                out |= (blended & 0xFF) << shift;
+            }
+            *d = out | 0xFF00_0000;
+        }
+        dst.first().copied().unwrap_or(0)
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let ops = PIXELS as f64;
+    rate(ops, secs)
 }
 
 /// Run all benchmarks and produce a complete result.
@@ -2356,7 +2578,7 @@ impl BenchmarkApp {
             let max_score = cat
                 .sub_tests
                 .iter()
-                .map(|s| s.score)
+                .filter_map(|s| s.score)
                 .reduce(f64::max)
                 .unwrap_or(1.0)
                 .max(1.0);
@@ -2403,13 +2625,18 @@ impl BenchmarkApp {
                     overflow: TextOverflow::Ellipsis,
                 });
 
-                // Bar chart.
-                let bar_frac = if sub.lower_is_better {
-                    // Invert for lower-is-better so shorter bar = higher score.
-                    (1.0 - sub.score / max_score).max(0.1)
-                } else {
-                    sub.score / max_score
-                } as f32;
+                // Bar chart. A test that was not measured draws no bar at
+                // all: a zero-length bar and a genuinely terrible score would
+                // look identical, and the row already says why in its unit.
+                #[allow(clippy::cast_possible_truncation)]
+                let bar_frac = match sub.score {
+                    None => 0.0_f32,
+                    Some(score) if sub.lower_is_better => {
+                        // Invert for lower-is-better so shorter bar = higher score.
+                        (1.0 - score / max_score).max(0.1) as f32
+                    }
+                    Some(score) => (score / max_score) as f32,
+                };
                 let bar_x = x + 420.0;
                 let bar_w = BAR_CHART_MAX_WIDTH;
 
@@ -3042,6 +3269,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+
     // Panicking on bad data is what a test is for: an `expect` that fires here
     // *is* the failure report, and rewriting it as a `match` would only bury
     // the message. CLAUDE.md scopes the defensive panic lints to non-test code
@@ -3059,6 +3287,199 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The CPU scores are measured, not constants.
+    ///
+    /// Each of these returned a fixed number until 2026-09-15 -- 5200 Mops/s,
+    /// 3100 Mflops/s, 78500 primes/s -- with real work performed and discarded
+    /// and a parity perturbation so the constant would not const-fold. The
+    /// old values are named here on purpose: a regression to any of them is
+    /// the exact defect this replaced, and "greater than zero" alone would not
+    /// catch it.
+    ///
+    /// Deliberately not asserting a *range*. The right range depends on the
+    /// machine and on whether the binary was optimised -- these read about
+    /// four times lower under `cargo test` than the fabricated constants
+    /// claimed -- and a benchmark that fails on a slow machine is a benchmark
+    /// that gets deleted.
+    #[test]
+    fn the_cpu_scores_are_measured_rather_than_returned() {
+        let cat = run_cpu_benchmark();
+        assert_eq!(cat.sub_tests.len(), 4);
+        for test in &cat.sub_tests {
+            let score = test
+                .score
+                .unwrap_or_else(|| panic!("{} reported no measurement", test.name));
+            assert!(
+                score > 0.0,
+                "{} scored {score}, which is what a clock that did not move returns",
+                test.name
+            );
+            for fabricated in [
+                5200.0, 5212.0, 5192.0, 3100.0, 3105.0, 78500.0, 4200.0, 4215.0,
+            ] {
+                assert!(
+                    (score - fabricated).abs() > 0.001,
+                    "{} scored {score}, one of the constants this replaced",
+                    test.name
+                );
+            }
+        }
+    }
+
+    /// The clock is attached to the work.
+    ///
+    /// `seconds` is the whole difference between a measurement and a constant,
+    /// so it gets its own test rather than only being exercised through the
+    /// benchmarks. Lane B's framing of the general probe: vary the input,
+    /// assert the output varies. Here the input is how long the closure takes,
+    /// and the bounds are loose because a sleep is a floor and a loaded
+    /// machine can overshoot it by a lot -- what would falsify this is a
+    /// `seconds` that reports the same number either way, which is exactly
+    /// what the old code did.
+    #[test]
+    fn a_longer_piece_of_work_is_measured_as_longer() {
+        let short = seconds(|| std::thread::sleep(std::time::Duration::from_millis(5)));
+        let long = seconds(|| std::thread::sleep(std::time::Duration::from_millis(50)));
+        assert!(short >= 0.004, "5ms of work measured as {short}s");
+        assert!(
+            long > short,
+            "50ms ({long}s) did not measure longer than 5ms ({short}s)"
+        );
+    }
+
+    /// The memory scores are measured, not constants.
+    ///
+    /// Same shape as the CPU test above, including the latency: it is reported
+    /// lower-is-better, so a zero would read as an instantaneous memory access
+    /// rather than as a failed measurement, and is asserted against for that
+    /// reason rather than by copying the line above.
+    #[test]
+    fn the_memory_scores_are_measured_rather_than_returned() {
+        let cat = run_memory_benchmark();
+        assert_eq!(cat.sub_tests.len(), 4);
+        for test in &cat.sub_tests {
+            let score = test
+                .score
+                .unwrap_or_else(|| panic!("{} reported no measurement", test.name));
+            assert!(
+                score > 0.0,
+                "{} scored {score}, which is what a clock that did not move returns",
+                test.name
+            );
+            for fabricated in [11800.0, 11850.0, 14200.0, 14230.0, 78.0, 25.5, 25.8] {
+                assert!(
+                    (score - fabricated).abs() > 0.001,
+                    "{} scored {score}, one of the constants this replaced",
+                    test.name
+                );
+            }
+        }
+    }
+
+    /// The disk category says which tests it did not run, and why.
+    ///
+    /// Four of the five cannot be measured honestly here: a read would time
+    /// the page cache rather than the disk, and there is no portable way to
+    /// bypass it from a userspace program. Those rows carry no number at all,
+    /// which is the whole reason `score` is an `Option` -- a zero would read
+    /// as a very slow disk and a magic -1.0 would be the same fabrication one
+    /// level up.
+    #[test]
+    fn the_disk_tests_that_cannot_be_measured_report_no_number() {
+        let cat = run_disk_benchmark();
+        let measured: Vec<&str> = cat
+            .sub_tests
+            .iter()
+            .filter(|t| t.score.is_some())
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(
+            measured,
+            ["Sequential Write"],
+            "exactly the sequential write is measurable through sync_all"
+        );
+
+        for test in cat.sub_tests.iter().filter(|t| t.score.is_none()) {
+            assert!(
+                test.unit.contains("not measured:"),
+                "{} carries no number and no reason: {:?}",
+                test.name,
+                test.unit
+            );
+            assert!(
+                test.formatted_score().starts_with('—'),
+                "{} formats as {:?}, which does not read as an absence",
+                test.name,
+                test.formatted_score()
+            );
+        }
+    }
+
+    /// An unmeasured test does not drag the category average down.
+    ///
+    /// Averaging a "not measured" in as a zero would report the machine as
+    /// slow for a test it never ran, which is the same defect as reporting a
+    /// constant: a number that is not about this machine.
+    #[test]
+    fn the_composite_ignores_what_was_not_measured() {
+        let mut cat = CategoryResult::new("Mixed");
+        cat.sub_tests
+            .push(SubTestResult::new("Measured", 100.0, "MB/s", false));
+        cat.sub_tests.push(SubTestResult::unavailable(
+            "Absent",
+            "MB/s",
+            "no way to ask",
+        ));
+        cat.compute_composite();
+        assert!(
+            (cat.composite_score - 100.0).abs() < f64::EPSILON,
+            "the absent test pulled the average to {}",
+            cat.composite_score
+        );
+    }
+
+    /// The graphics scores are measured, and named for what they measure.
+    ///
+    /// Nothing in this application can reach a GPU. The rows used to read
+    /// "Fill Rate", "Text Rendering" and "Composite Operations" under a
+    /// heading called "Graphics", which is how a software number gets read as
+    /// a hardware one. They say "Software" or "Shaping" now, and the names are
+    /// asserted here rather than left to a reviewer, because the honesty of
+    /// this category lives entirely in its labels.
+    #[test]
+    fn the_graphics_scores_are_measured_and_say_they_are_software() {
+        let cat = run_graphics_benchmark();
+        let names: Vec<&str> = cat.sub_tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Software Fill", "Text Shaping", "Software Compositing"]
+        );
+        for test in &cat.sub_tests {
+            let score = test
+                .score
+                .unwrap_or_else(|| panic!("{} reported no measurement", test.name));
+            assert!(score > 0.0, "{} scored {score}", test.name);
+            for fabricated in [2100.0, 2130.0, 520_000.0, 525_000.0] {
+                assert!(
+                    (score - fabricated).abs() > 0.001,
+                    "{} scored {score}, one of the constants this replaced",
+                    test.name
+                );
+            }
+        }
+    }
+
+    /// A clock that did not move reports nothing, not everything.
+    ///
+    /// Dividing by a zero elapsed time yields infinity, and an infinite score
+    /// on a panel is a new fabrication of the same kind as the old constants.
+    #[test]
+    fn a_stopped_clock_reports_zero_rather_than_infinity() {
+        assert!((rate(1000.0, 0.0) - 0.0).abs() < f64::EPSILON);
+        assert!((rate(1000.0, -1.0) - 0.0).abs() < f64::EPSILON);
+        assert!((rate(1000.0, 2.0) - 500.0).abs() < f64::EPSILON);
+    }
 
     // --- SubTestResult tests ---
 
@@ -3524,18 +3945,20 @@ mod tests {
         assert!(names.contains(&"Integer Arithmetic"));
         assert!(names.contains(&"Floating Point"));
         assert!(names.contains(&"Prime Sieve (1M)"));
-        assert!(names.contains(&"Matrix Multiply (256x256)"));
+        assert!(names.contains(&"Matrix Multiply (128x128)"));
     }
 
     #[test]
     fn cpu_benchmark_all_scores_positive() {
         let cat = run_cpu_benchmark();
         for sub in &cat.sub_tests {
-            assert!(
-                sub.score > 0.0,
-                "Sub-test {} has non-positive score",
-                sub.name
-            );
+            // Every CPU sub-test is measured, so `None` here is a failure
+            // rather than an expected absence -- unlike the Disk category,
+            // where four of five report no measurement by design.
+            let score = sub
+                .score
+                .unwrap_or_else(|| panic!("Sub-test {} reported no measurement", sub.name));
+            assert!(score > 0.0, "Sub-test {} has non-positive score", sub.name);
         }
     }
 

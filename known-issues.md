@@ -147821,6 +147821,11 @@ deterministic form. — `sample_rate`, `bits_per_sample`,
 `sample_count`, `record_sample`, and `sample` in `gui/compositor/src/blur.rs`
 and `gui/imagecodec/src/png.rs`, which are all the other meaning of the word.
 
+**PAID OFF 2026-09-15: `apps/benchmark`, all sixteen.** Four CPU and four
+memory tests are measured; one disk test is measured and four report why they
+are not; three graphics tests are measured and renamed. Details below, and the
+commits carry the numbers. That is 16 of the 63.
+
 **The one verified in detail, because it is the worst and it is instructive.**
 `apps/benchmark` has sixteen `simulate_*` functions and `run_cpu_benchmark`
 calls them. `simulate_integer_benchmark` performs 500,000 real iterations of
@@ -147875,3 +147880,33 @@ file); **wire it** where a real source exists in the tree (the Accounts page
 onto `gui/loginusers`); **say so** where neither is possible (Sound, Updates,
 Privacy, Network). What is never right is leaving it, and what is never enough
 is a comment — three of the six fixed today had one.
+
+**FIXING AN INSTANCE AND LEAVING THE CLASS — added 2026-09-15.**
+
+Lane B put this better than I had: *"the detector's real value was not finding
+`-l`; it was showing me I had fixed an instance and left the class."* They had
+implemented `patch --ignore-whitespace` after I reported it, and the detector
+then found `-N`, `-F` and `-Z` in the same file, under the same doc comment
+whose argument they had just spent a commit refuting.
+
+It is worth writing down because it is the shape of both our days, and it has a
+cause rather than being carelessness: **the instance is easy to see precisely
+because someone wrote down the reasoning that covers the class.** A rationale
+for leaving one thing inert is a rationale for leaving all of them, so the
+moment it is refuted, every sibling it covered becomes a finding — and nothing
+announces that. The same applies here: six fabricated Settings pages were fixed
+before anyone asked how many more there were, and the answer was 63.
+
+The check that follows from it costs nothing: **when a fix refutes a written
+rationale, grep for the other things that rationale covered** before closing
+the task. For `patch` that was the three other options under the same comment.
+For the Settings pages it would have been `SettingsState::new` — where all five
+sat together, in one constructor, visible in a single screen.
+
+**A better axis than mine, also from lane B.** They ranked their 110 by whether
+the option is advertised in the program's own `--help`: 50 are, and 24 of those
+are read by nothing at all. That is mechanical where my ordering by "what
+believing it costs" needs a judgement per row, and it gets at the same thing —
+a promise in `--help` is the program telling the user what to believe. The GUI
+analogue is not `--help` but the window itself, and by that measure all 63 here
+are advertised, which is why the ordering here has to be by consequence.

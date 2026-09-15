@@ -2785,8 +2785,13 @@ impl App {
         self.active_tab = self.documents.len().saturating_sub(1);
 
         if truncated {
+            // Front-loaded on purpose. This lands in a status bar with a
+            // bounded width and `TextOverflow::Ellipsis`, so whatever is at
+            // the end may not survive. The clause that must survive is the one
+            // saying the document is incomplete, so it goes first and the file
+            // name -- which the user just chose and already knows -- goes last.
             format!(
-                "Opened the first {MAX_OPEN_BYTES} bytes of {shown} -- it is {whole} bytes, so this is not the whole document"
+                "INCOMPLETE: only the first {MAX_OPEN_BYTES} bytes are shown, of {whole} in {shown}"
             )
         } else {
             format!("Opened {shown}")
@@ -4152,6 +4157,39 @@ impl App {
             width: 1.0,
         });
 
+        // What the last open attempt did.
+        //
+        // Drawn before the document lookup below, which returns early when
+        // there is no document -- and "there is no document" is exactly when a
+        // failed open has the most to say.
+        //
+        // This field was computed and never rendered between 2026-09-15 and
+        // the same evening, when lane A's `check-fields-written-never-read`
+        // gate caught it on `main` and blocked their boot test. The gate was
+        // right to refuse: `open_path` returns the truncation warning through
+        // this field, so a document cut at 8 MiB was displayed with nothing
+        // saying it was incomplete -- a JSON file cut in half is invalid JSON,
+        // so the user would have seen a parse error about their file that was
+        // really about our cap.
+        if let Some(note) = &self.last_open {
+            let x = PADDING + 110.0;
+            let right = if self.edit_mode {
+                self.width * 0.4
+            } else {
+                self.width - 130.0
+            };
+            cmds.push(RenderCommand::Text {
+                x,
+                y: y + 16.0,
+                text: note.clone(),
+                color: self.palette.subtext0,
+                font_size: SMALL_TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((right - x - 8.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         let doc = match self.active_doc() {
             Some(d) => d,
             None => return,
@@ -4539,6 +4577,57 @@ fn main() -> ExitCode {
     clippy::single_char_pattern
 )]
 mod tests {
+
+    use super::*;
+
+    /// What an open did reaches the window.
+    ///
+    /// `last_open` was assigned by `open_path` and rendered by nothing between
+    /// 2026-09-15 and the same evening, when lane A's
+    /// `check-fields-written-never-read` gate caught it on `main` and blocked
+    /// their boot test. The gate was right to refuse rather than be
+    /// baselined: the field carries the truncation warning, so a document cut
+    /// at the read cap was shown with nothing saying it was incomplete -- and
+    /// a JSON file cut in half is invalid JSON, so the user would have met a
+    /// parse error about their own file that was really about our cap.
+    #[test]
+    fn the_status_bar_says_what_the_last_open_did() {
+        let mut app = App::new();
+        app.last_open = Some(String::from("INCOMPLETE: only the first 4 bytes are shown"));
+        let tree = app.render(900.0, 700.0);
+        assert!(
+            tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text.starts_with("INCOMPLETE:")
+            )),
+            "the open result never reached the screen",
+        );
+    }
+
+    /// The warning leads with the part that must survive an ellipsis.
+    ///
+    /// It goes into a status bar with a bounded width and
+    /// `TextOverflow::Ellipsis`. The clause that matters is that the document
+    /// is incomplete, so it is first; the file name, which the user just
+    /// picked, is last.
+    #[test]
+    fn the_truncation_warning_leads_with_the_word_that_matters() {
+        let dir = std::env::temp_dir().join("slateos-jsonviewer-truncation");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("big.json");
+        let body = vec![b' '; MAX_OPEN_BYTES + 64];
+        std::fs::write(&path, &body).expect("write fixture");
+
+        let mut app = App::new();
+        let note = app.open_path(&path);
+        std::fs::remove_file(&path).ok();
+
+        assert!(
+            note.starts_with("INCOMPLETE"),
+            "the warning buries its point: {note}"
+        );
+        assert!(note.contains(&MAX_OPEN_BYTES.to_string()), "{note}");
+    }
 
     // ------------------------------------------------------------------
     // Compositor routing, and the two features it made reachable

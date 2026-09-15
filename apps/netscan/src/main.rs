@@ -2220,7 +2220,9 @@ impl NetScanApp {
                 // than only from tests.
                 let packet = build_wol_packet(&mac);
                 debug_assert_eq!(packet.len(), 102, "a magic packet is 6 + 16 * 6 bytes");
-                String::from("Cannot send: this program has no socket to broadcast the packet on")
+                // Short and front-loaded: this lands in a sidebar column and
+                // is ellipsised, so the refusal has to be the part that fits.
+                String::from("Cannot send: no socket to broadcast on")
             }
             None => format!("Not a MAC address: {}", self.wol_target_mac),
         });
@@ -3345,6 +3347,30 @@ impl NetScanApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
+
+            // What the press did. The comment above said this line existed
+            // three commits before it did: the button stopped claiming
+            // "Packet Sent!" and nothing replaced it, so pressing Send became
+            // a silent no-op -- which is a worse answer than the false one,
+            // because a user reads silence as a broken button and goes looking
+            // for the fault in the wrong place.
+            //
+            // Caught by `check-fields-written-never-read`, not by a test:
+            // `wol_note` was assigned and read by nothing. Second time in one
+            // day that a comment here described a render that had not been
+            // written; the first was `apps/hexeditor`'s file picker.
+            if let Some(note) = &self.wol_note {
+                tree.push(RenderCommand::Text {
+                    x: PADDING,
+                    y: wol_btn_y + BUTTON_HEIGHT + 8.0,
+                    text: note.clone(),
+                    color: self.palette.ink(self.palette.yellow),
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
 
             // Export button
             let export_y = self.window_height - 50.0;
@@ -5605,6 +5631,17 @@ mod tests {
             .clone()
             .expect("Send did nothing and said nothing");
         assert!(note.contains("Cannot send"), "{note}");
+
+        // And it reaches the window. `wol_note` was written and rendered by
+        // nothing for three commits; the comment beside the button claimed
+        // otherwise, and only `check-fields-written-never-read` noticed.
+        assert!(
+            app.render_tree()
+                .commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == &note)),
+            "the refusal never reached the screen",
+        );
 
         // And the button never advertises a send.
         let tree = app.render_tree();

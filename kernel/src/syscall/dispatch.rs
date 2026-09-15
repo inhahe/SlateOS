@@ -1150,6 +1150,12 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
     let dirfd = dir.value as u64;
 
     let mut failed = 0u32;
+    // Whether case (e) actually compared a stored mode. False only on a
+    // filesystem with no per-file mode, and it MUST reach the summary:
+    // the OK line below names `12-bit mode` among the things it covers,
+    // so leaving this local would make that line claim a measurement
+    // nobody took.
+    let mut mode_checked = true;
     // A free `fn` rather than a closure over `failed`: a closure would hold a
     // unique borrow of `failed` from its definition to its last call, which
     // makes the cases that count failures themselves (the read-back ones)
@@ -1303,8 +1309,65 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
                 arg5: 0,
             },
         );
+        // A control file with a DIFFERENT mode, so this can tell a
+        // filesystem that stores no per-file mode from one that stored a
+        // MASKED mode. Masking 639-style turns 0o4755 into 0o755 and
+        // 0o4700 into 0o700 -- still different from each other; only a
+        // filesystem storing nothing makes the two read identically. So
+        // the bug this case exists to catch still fails loudly.
+        let ctl = dispatch(
+            SYS_FS_OPENAT2,
+            &mk(
+                b"ctlmode.txt",
+                OpenFlags::WRITE.union(OpenFlags::CREATE).bits(),
+                0o4700,
+                RESOLVE_BENEATH,
+                dirfd,
+            ),
+        );
+        if ctl.value > 0 {
+            #[allow(clippy::cast_sign_loss)]
+            let cfd = ctl.value as u64;
+            let _ = dispatch(
+                crate::syscall::number::SYS_FS_CLOSE,
+                &SyscallArgs {
+                    arg0: cfd,
+                    arg1: 0,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                },
+            );
+        }
+        // Unreadable control -> assume the filesystem DOES store modes, so
+        // the guard below still fires. Failing closed: an inconclusive
+        // discriminator must not be what retires a regression test.
+        let stores_per_file_mode = match (
+            crate::fs::Vfs::metadata("/openat2_native/setuid.txt"),
+            crate::fs::Vfs::metadata("/openat2_native/ctlmode.txt"),
+        ) {
+            (Ok(a), Ok(b)) => a.permissions != b.permissions,
+            _ => true,
+        };
         match crate::fs::Vfs::metadata("/openat2_native/setuid.txt") {
             Ok(md) if md.permissions == 0o4755 => {}
+            // No per-file mode on this filesystem. Not a skip: what is
+            // asserted here is that the create SUCCEEDED, which is the
+            // defect fixed in `handle.rs` on 2026-09-15 -- FAT answered
+            // `NotSupported` to the mode stamp and the open reported
+            // failure for a file it had already created. Reaching this
+            // arm at all proves that path is still right.
+            Ok(md) if !stores_per_file_mode => {
+                mode_checked = false;
+                serial_println!(
+                    "[syscall]   native openat2 create mode: NOT CHECKED -- this \
+                     filesystem stores no per-file mode (0o4755 and 0o4700 both read \
+                     {:#o}), so 639's twelve-bit guard cannot run here. The create \
+                     itself succeeded, which is what this case can still prove.",
+                    md.permissions
+                );
+            }
             Ok(md) => {
                 serial_println!(
                     "[syscall]   FAIL: native openat2 create mode stored {:#o}, expected 0o4755 \
@@ -1419,6 +1482,7 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
     // cosmetic, and reporting a cleanup failure as a test failure would blame
     // this call for someone else's defect.
     let _ = crate::fs::Vfs::remove("/openat2_native/setuid.txt");
+    let _ = crate::fs::Vfs::remove("/openat2_native/ctlmode.txt");
     let _ = crate::fs::Vfs::remove("/openat2_native/inside.txt");
     let _ = crate::fs::Vfs::remove("/openat2_native_outside.txt");
     let _ = crate::fs::Vfs::rmdir("/openat2_native");
@@ -1430,9 +1494,18 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!(
-        "[syscall]   Native openat2 (resolve gate, check order, dirfd base, 12-bit mode): OK"
-    );
+    if mode_checked {
+        serial_println!(
+            "[syscall]   Native openat2 (resolve gate, check order, dirfd base, \
+             12-bit mode): OK"
+        );
+    } else {
+        serial_println!(
+            "[syscall]   Native openat2 (resolve gate, check order, dirfd base): OK \
+             -- 12-bit mode NOT covered on this filesystem, which stores no per-file \
+             mode. The create succeeded and was verified; the stored value was not."
+        );
+    }
     Ok(())
 }
 

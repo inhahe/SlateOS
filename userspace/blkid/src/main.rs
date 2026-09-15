@@ -112,14 +112,58 @@ const FS_MAGICS: &[FsMagic] = &[
     },
 ];
 
+/// Read up to `buf.len()` bytes, stopping only at EOF.
+///
+/// `Read::read` is allowed to return fewer bytes than asked for even when more
+/// are available, and on a block device a short read is ordinary rather than
+/// exceptional -- one call tends to stop at a sector or page boundary. A
+/// single `read` here therefore under-reports the device, and every caller
+/// below decides what it may parse from the length it gets back.
+fn read_up_to(file: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut total = 0usize;
+    while total < buf.len() {
+        let Some(rest) = buf.get_mut(total..) else {
+            break;
+        };
+        match file.read(rest) {
+            Ok(0) => break,
+            Ok(n) => total = total.saturating_add(n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
+}
+
 fn detect_filesystem(device_path: &Path) -> Option<BlkidInfo> {
     let mut file = std::fs::File::open(device_path).ok()?;
     let mut buf = vec![0u8; 0x20000]; // Read first 128KB
-    let bytes_read = file.read(&mut buf).ok()?;
+    let bytes_read = read_up_to(&mut file, &mut buf).ok()?;
 
     if bytes_read < 512 {
         return None;
     }
+
+    // THE LOAD-BEARING LINE. Without it every `buf.len()` test in every
+    // parser below is vacuously true, because `buf` is a 128 KiB zero-filled
+    // `Vec` whose length never depended on the device at all.
+    //
+    // The parsers are already careful: each one guards each field with
+    // `if buf.len() >= <end of that field>` before reading it, and the output
+    // path already suppresses an empty label, an empty UUID and a zero block
+    // size. Both halves of the check were written. Neither could fire, so a
+    // device that stopped short of a field still produced one -- read out of
+    // the zero padding and printed as measured fact.
+    //
+    // What that looked like: a 1082-byte image carrying only the ext4 magic
+    // reported `UUID="00000000-0000-0000-0000-000000000000"`. Not merely
+    // wrong -- EVERY short device reported that same UUID, so `findfs UUID=`
+    // matched whichever it enumerated first. A UUID's one job is to be
+    // unique, and the zero padding manufactured collisions.
+    //
+    // `bytes_read` was measured and then thrown away; this hands it to the
+    // parsers, which is what they were already written to expect.
+    buf.truncate(bytes_read);
 
     let mut info = BlkidInfo {
         device: device_path.to_path_buf(),
@@ -134,8 +178,9 @@ fn detect_filesystem(device_path: &Path) -> Option<BlkidInfo> {
 
     // Check magic signatures
     for magic in FS_MAGICS {
-        if magic.offset + magic.magic.len() <= bytes_read
-            && buf[magic.offset..magic.offset + magic.magic.len()] == *magic.magic
+        if buf
+            .get(magic.offset..)
+            .is_some_and(|tail| tail.starts_with(magic.magic))
         {
             info.fs_type = magic.fs_type.to_string();
 
@@ -812,6 +857,68 @@ mod tests {
         assert_eq!(info.block_size, 4096);
         assert_eq!(info.fs_type, "ext4");
         assert!(info.label.starts_with("TEST"));
+    }
+
+    /// A device that stops short of a field must not report that field.
+    ///
+    /// Both images carry a valid ext4 magic at 0x438, so both are detected.
+    /// They differ only in whether the superblock's UUID (0x468..0x478) and
+    /// label (0x478..0x488) are actually present on the device.
+    ///
+    /// The truncated case is the regression: before `buf.truncate`, the
+    /// parser read those offsets out of the zero padding of a 128 KiB buffer
+    /// and reported an all-zero UUID as fact.
+    #[test]
+    fn short_device_reports_no_uuid_or_label() {
+        let dir = std::env::temp_dir().join("blkid-short-device-test");
+        // Ignored: a leftover directory from a previous run is fine, and any
+        // real failure to create it surfaces on the `write` below.
+        let _ = std::fs::create_dir_all(&dir);
+
+        let write = |name: &str, size: usize, fields: &[(usize, &[u8])]| -> PathBuf {
+            let mut img = vec![0u8; size];
+            for (off, data) in fields {
+                img[*off..*off + data.len()].copy_from_slice(data);
+            }
+            let path = dir.join(name);
+            std::fs::write(&path, &img).expect("write test image");
+            path
+        };
+
+        let uuid: Vec<u8> = (0x11u8..0x21).collect();
+        let full = write(
+            "full.img",
+            0x1000,
+            &[
+                (0x438, &[0x53, 0xEF]),
+                (0x468, &uuid),
+                (0x478, b"REALLABEL"),
+            ],
+        );
+        // One byte past the magic: the UUID at 0x468 is beyond end-of-file.
+        let short = write("short.img", 0x43A, &[(0x438, &[0x53, 0xEF])]);
+
+        // Probe one: the parser RUNS. Without this the test below would pass
+        // against a blkid that simply never parsed anything.
+        let got = detect_filesystem(&full).expect("full image is detected");
+        assert_eq!(got.uuid, "11121314-1516-1718-191a-1b1c1d1e1f20");
+        assert_eq!(got.label, "REALLABEL");
+
+        // Probe two: the parser REFUSES. The fields are not on the device, so
+        // no value may be reported for them -- least of all a zero one.
+        let got = detect_filesystem(&short).expect("short image is still detected");
+        assert!(
+            got.uuid.is_empty(),
+            "reported UUID {:?} for a device that ends before the UUID field",
+            got.uuid
+        );
+        assert!(
+            got.label.is_empty(),
+            "reported label {:?} for a device that ends before the label field",
+            got.label
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

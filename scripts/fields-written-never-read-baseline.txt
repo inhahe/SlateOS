@@ -66,6 +66,12 @@
 #   what was copied and counts down to the clipboard wipe.
 apps/archivemanager/src/main.rs:test_results
 apps/contacts/src/main.rs:member_count
+# TRIAGED 2026-09-14, SOUND. `affected_rows` duplicates a count that the
+# `message` field beside it already states in words -- every producer sets
+# both, as `QueryResult::success(&format!("{n} row(s) updated"))` with
+# `affected_rows = n` on the next line. The user is told. This is the
+# structured form for a consumer that does not exist yet (a script runner,
+# an API), so drawing it would print the same number twice.
 apps/dbviewer/src/main.rs:affected_rows
 # TRIAGED 2026-09-14 (diskcleanup). `last_accessed_days` is FIXED -- the
 # file preview now shows "45 days ago" beside each size, which is the only

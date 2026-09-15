@@ -144609,6 +144609,46 @@ That is strictly better than before -- it used to be true of *every* copy --
 and it is worth knowing that the remaining case exists rather than wondering
 why one copy behaves differently from another.
 
+## TD-C-A-LANE-B-TEST-REDS-LANE-C-S-WORKSPACE-RUNS
+
+**Date:** 2026-09-14. **Lane:** C (the report; the test is lane B's). **OPEN.**
+
+**In short:** one test in `userspace/oils` fails under a loaded full-workspace
+run, and one failure out of 1,499 reds the whole thing, so lane C cannot merge
+behind it. It is not the product failing -- the test cannot arrange its own
+starting conditions when the machine is busy.
+
+`interp::tests::a_poll_before_the_grace_does_not_lose_the_exit_forever`,
+`userspace/oils/src/interp.rs:102674`, on the assertion *"the grace must NOT
+have passed yet"* -- a **premise** check, before it tests anything.
+
+**Why.** The setup sets every job's `born_at` to `Instant::now()` and then
+calls `poll_jobs`, which compares `born_at.elapsed() >= JOB_EXIT_NOTICE_GRACE`
+(20 ms). The premise holds only if fewer than 20 ms pass between two adjacent
+statements. Under a workspace run with dozens of test binaries resident, that
+deschedule is ordinary.
+
+The test's own comment records an earlier round of the same thing -- a 5 ms
+sleep against the 20 ms grace, with the note that *"`sleep` is a FLOOR, not a
+duration"*. The budget is the problem, not its size.
+
+**Not lane C's to fix** (`userspace/**` is lane B's), so it is filed as
+`requests/c-b-the-deterministic-oils-job-test-is-still-timing-dependent-and-it-blocks-merges.md`
+with a one-line suggestion: set `born_at` an hour in the future instead of now,
+since `Instant::elapsed` saturates at zero and no deschedule can then reach the
+grace.
+
+**Why this is recorded here and not merely re-run.** Because re-running is the
+honest response *today* and the corrosive one by next week. The next person to
+see this red will assume it is this test and merge anyway -- and on the day it
+is a genuine regression they will be right to have stopped and wrong to have
+carried on. A flake nobody writes down becomes a red nobody reads.
+
+**Do not "fix" it by raising `JOB_EXIT_NOTICE_GRACE` or adding `#[ignore]`.**
+The first changes shipped behaviour to suit a test. The second turns a red into
+a silence, and the race this test guards is real -- somebody did the work to
+find it, and the test is the only thing standing over it.
+
 ## TD-C-THE-PANE-CLOSE-ANIMATION-TEST-IS-FLAKY-UNDER-LOAD
 
 **Date:** 2026-09-14. **Lane:** C. **OPEN.**

@@ -13742,6 +13742,29 @@ clippy is quiet" standard.
 
 ### [REOPENED as WATCH 2026-08-25 — the PML4 cause is fixed and stays fixed; the *signature* recurred on a different rung] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang after the last thread of a just-reaped process exits — one cause (a freed PML4 still live in CR3) found and fixed in `0ecd5ff03`; a second, still-unidentified cause produced the same silence on 2026-08-25 — 2026-07-15
 
+**Occurrence 2026-09-15 (lane A), on a DIFFERENT test with the same
+signature.** `spawn-test-dash-statpath` -- a real dash running
+`[ -f /bin/dash ] && echo` under Path Z -- went silent after:
+
+```
+[thread] Process 380 has no threads left -- now zombie
+[sched] Task 353 exiting
+```
+
+No `#PF`, no PANIC, no FATAL; 2,078,194 bytes of serial and then nothing for
+the rest of the window. `boot-history` matched it to this entry
+automatically, which is the thing that saved the investigation -- the merge
+immediately before it brought only `apps/`, `Cargo.lock` and docs, so the
+hang could not have come from its content, and without the automatic match I
+would have spent a boot cycle proving that by bisection.
+
+Worth noting for the pattern: this is now **three different ring-3 tests**
+with one signature -- forkexec, and now statpath. Whatever idles is not
+specific to `fork`+`exec`; it is specific to a process going zombie with a
+waiter, which statpath reaches by a much shorter path (`[ -f ... ]` is one
+stat and an exit, no fork of its own). If anyone attacks this, statpath is
+the cheaper reproducer.
+
 **Symptom (1 occurrence, 2026-07-15):** During
 `self_test_linux_real_glibc_forkexec` (`spawn-test-glibc-forkexec`,
 main.rs:1791: a glibc program that `fork()`s, the child `execl()`s a second

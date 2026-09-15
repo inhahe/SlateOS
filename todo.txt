@@ -4848,7 +4848,38 @@ the next person to run these will see the same rows.
   For lane C's tree-walker: irqs will never appear under /sys/devices. Read
   /proc/interrupts.
 
-  net stays blocked on a naming decision, unchanged: InterfaceInfo has no name
+  net is NO LONGER BLOCKED, and the question dissolved rather than being
+  answered (lane A, 2026-09-15).
+
+  The blocker was "InterfaceInfo has no name field, so eth0 would be
+  invented". True, and it only matters if a NAME is needed. It is not:
+  `net::interface` exposes `info()` and `ns_info(ns_id)` and nothing else --
+  no enumeration, no count, no iterator. The kernel models exactly ONE
+  interface per namespace, so there is no interface N to name. `eth0` was
+  required only by the assumption that the tree must mirror Linux's
+  multi-interface `/sys/class/net/<name>/` shape.
+
+  Layout that invents nothing: `/sys/devices/net/{up,mac,ip,subnet_mask,
+  gateway,dns}` with no per-interface level, because a level that always has
+  exactly one entry is a structure the kernel does not have.
+
+  Emit-or-omit falls out cleanly from the default state,
+  `up: false, mac: [0;6], everything UNSPECIFIED`:
+
+    mac == 0                 no NIC        -> the directory is ABSENT
+    mac != 0, up == false    NIC, link down -> served, with up: 0
+
+  That second row matters: `up: 0` is a real measurement the kernel holds,
+  not a substituted zero, so serving it is honest where serving an all-zero
+  interface would not be. The distinction is the same one that made
+  `devices: 0` in dmevent a lie and `read_only: 0` on a real disk a fact.
+
+  If the kernel ever gains multiple interfaces, adding a level is a visible
+  intentional change at the moment the structure becomes real -- which is
+  the right time for it, rather than inventing the level now against a
+  future that may not arrive.
+
+  ORIGINAL, now moot: InterfaceInfo has no name
   field, so eth0 would be invented. dma and sound have no evident real source
   and should be checked for one before being built, not built and then
   sourced.

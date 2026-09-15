@@ -4527,6 +4527,44 @@
 
 ## Judgment Calls
 
+check-collapsed-messages has never scanned lane A's code (lane A, 2026-09-15).
+Found while acting on a report from lane C, not by running the gate.
+
+  Line 196: `for top in ("gui", "apps", "scripts")`. That is it. The gate does
+  not look at kernel/, deflate/, bench/, netproto/, posix/, userspace/ or
+  services/. Every "check-collapsed-messages: ok (382 source files)" in my
+  post-merge sweep was a clean result over lane C's territory plus scripts --
+  structurally unable to say anything about my own lane. The 382 files were not
+  too few; they were the wrong 382.
+
+  Which is the same lesson as the hardcoded ROOT one directory over, and worth
+  keeping together: a green verdict is only as meaningful as the corpus it was
+  computed over, and the corpus is usually invisible in the output. That gate
+  printed a file COUNT, which is the one number that would have exposed it, and
+  I read it as reassurance rather than as a question.
+
+  Answered by hand: driving the module's own `repair` over kernel/, deflate/,
+  bench/ and netproto/ -- 820 files -- gives 5 findings, all in
+  kernel/src/mm/mod.rs, and all COLUMN-ALIGNED OUTPUT:
+
+      PCPU: hit={}% ({}/{})  refills={}  drains={}
+      Heap: slab={}/{}  large={}  failures={}
+
+  Those double spaces are separators, not gaps. So lane A has zero genuine
+  collapsed messages, and the five are the false-positive class lane C is
+  rewriting the predicate to exclude -- prose for a human versus a format for
+  a column, where the whitespace IS the payload.
+
+  Note for when lane C's wider version lands: it scans 3,995 files and will
+  start reporting these five in my tree. They must not be "fixed" -- rewriting
+  them would corrupt the alignment of printed output. If the predicate change
+  does not exclude output macros, these need a baseline entry with that reason.
+
+  Do NOT relocate that script to test a wider corpus. Copying it to /tmp makes
+  its __file__-derived ROOT resolve to the filesystem root, so it scans nothing
+  and says so -- which is the portability fix working exactly as intended, and
+  cost me one confused run. Load it with importlib from its real path instead.
+
 After any merge, sweep the stale-artifact checkers BEFORE launching a boot
 (lane A, 2026-09-15). Cost two full cycles today by skipping it once.
 

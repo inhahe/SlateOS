@@ -217,6 +217,16 @@ struct Account {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// The kinds of account this app can model.
+///
+/// No variant is constructed in production, because nothing in production
+/// creates an account. That is the honest state of this program: the ledger,
+/// the budget arithmetic and the category rollups are written and tested, and
+/// there is no way to put a figure into them.
+#[allow(
+    dead_code,
+    reason = "a data model with no input path; see NO_DATA_LINES"
+)]
 enum AccountType {
     Checking,
     Savings,
@@ -289,7 +299,12 @@ struct FinanceApp {
     transactions: Vec<Transaction>,
     accounts: Vec<Account>,
     budgets: Vec<Budget>,
+    // Allocated by `add_transaction` and `add_account`, neither of which has
+    // a caller: nothing in this program creates a transaction or an account.
+    // See `NO_DATA_LINES`.
+    #[allow(dead_code, reason = "id allocator for a door with no caller")]
     next_tx_id: u32,
+    #[allow(dead_code, reason = "id allocator for a door with no caller")]
     next_account_id: u32,
     current_date: SimpleDate,
     view_month: SimpleDate, // first day of the month being viewed
@@ -316,7 +331,7 @@ struct FinanceApp {
 impl FinanceApp {
     fn new() -> Self {
         let today = SimpleDate::new(2026, 5, 18);
-        let mut app = Self {
+        Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: 1100.0,
             height: 750.0,
@@ -333,11 +348,33 @@ impl FinanceApp {
             search_active: false,
             category_filter: None,
             status_msg: String::from("Personal Finance"),
-        };
+        }
+    }
+
+    /// An app holding the accounts and transactions `new` used to invent.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about the ledger, the
+    /// budget arithmetic, the category filter, the month view and the search
+    /// -- all of which need *transactions*, not specifically invented ones.
+    #[cfg(test)]
+    fn with_sample_data() -> Self {
+        let mut app = Self::new();
         app.create_sample_data();
         app
     }
 
+    /// Accounts, budgets and transactions, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `new` called it, so the app opened on
+    /// a "Main Checking" holding 3,500, a "Savings" holding 12,000, seven
+    /// budget lines and a month of transactions including a 5,000 salary.
+    ///
+    /// Nobody would mistake these for their own accounts on sight. The harm is
+    /// downstream: the moment the user adds a real transaction, every total
+    /// this app computes -- net worth, budget remaining, category spend -- is
+    /// summed over their figure *and* the invented ones, and the answer looks
+    /// like arithmetic rather than like a mistake.
+    #[cfg(test)]
     fn create_sample_data(&mut self) {
         // Accounts
         let checking_id = self.add_account("Main Checking", AccountType::Checking, 350_000);
@@ -529,7 +566,9 @@ impl FinanceApp {
         );
     }
 
-    fn add_account(&mut self, name: &str, atype: AccountType, initial: i64) -> u32 {
+    /// One of the two doors data would come in through.
+    #[allow(dead_code, reason = "a door with no caller; see NO_DATA_LINES")]
+    pub fn add_account(&mut self, name: &str, atype: AccountType, initial: i64) -> u32 {
         let id = self.next_account_id;
         // Saturating rather than wrapping: a wrapped counter hands out an id
         // that already exists, and selection and deletion are both by id.
@@ -547,7 +586,9 @@ impl FinanceApp {
     // owning account, note, and recurring flag; these are independent scalar
     // fields with no natural grouping, so they are passed positionally.
     #[allow(clippy::too_many_arguments)]
-    fn add_transaction(
+    /// One of the two doors data would come in through.
+    #[allow(dead_code, reason = "a door with no caller; see NO_DATA_LINES")]
+    pub fn add_transaction(
         &mut self,
         date: SimpleDate,
         desc: &str,
@@ -648,6 +689,7 @@ impl FinanceApp {
         }
     }
 
+    #[allow(dead_code, reason = "a door with no caller; see NO_DATA_LINES")]
     fn set_budget(&mut self, category: Category, monthly_limit: i64) {
         if let Some(b) = self.budgets.iter_mut().find(|b| b.category == category) {
             b.monthly_limit = monthly_limit;
@@ -1021,6 +1063,34 @@ impl FinanceApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // After the background, or it would be painted over.
+        //
+        // Keyed on there being no accounts, so it retires itself as soon as the
+        // user enters one rather than sitting there contradicting their data.
+        if self.accounts.is_empty() {
+            for (i, line) in NO_DATA_LINES.iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: 10.0,
+                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                    y: 2.0 + i as f32 * 13.0,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 12.0 } else { 10.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(self.width - 20.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
 
         self.render_sidebar(&mut cmds);
         self.render_header(&mut cmds);
@@ -1987,6 +2057,27 @@ impl App for FinanceApp {
     }
 }
 
+/// What the window says, which is that it cannot hold anyone's finances.
+///
+/// The first draft of this said "add an account and a transaction, and every
+/// figure below will be yours" -- on the assumption that this app was merely
+/// *empty*, the way a new notebook is. It is not. `add_account` and
+/// `add_transaction` have no caller outside the sample data: there is no
+/// control anywhere in this program that creates either, and no filesystem
+/// access to save one if there were.
+///
+/// So that draft would have been a new fabrication written into the fix for an
+/// old one, and a worse kind: a promise about what the user can do next.
+///
+/// The compiler caught it. Once the sample data stopped constructing them,
+/// `AccountType`'s variants were reported as never constructed -- which is
+/// only true if nothing else in the program ever builds an account.
+const NO_DATA_LINES: [&str; 3] = [
+    "This app cannot record your finances.",
+    "There is no way to add an account or a transaction, and no way to save one -- it has no filesystem access.",
+    "It opened with an invented Main Checking of 3,500 and Savings of 12,000 until 2026-09-15. Nothing replaced them.",
+];
+
 fn main() -> ExitCode {
     let mut finance = FinanceApp::new();
     app::launch("finance", &mut finance)
@@ -2010,9 +2101,72 @@ mod tests {
 
     use super::*;
 
+    /// A fresh app holds no accounts and no money.
+    ///
+    /// `new` called `create_sample_data`, so the app opened on a "Main
+    /// Checking" holding 3,500, a "Savings" holding 12,000, a credit card, a
+    /// cash account, seven budget lines and a month of transactions including
+    /// a 5,000 salary.
+    ///
+    /// Nobody would mistake these for their own accounts on sight, which is
+    /// why it is worth being precise about where the harm is. It is
+    /// downstream: the moment the user adds one real transaction, every total
+    /// this app computes -- net worth, budget remaining, category spend -- is
+    /// summed over their figure *and* the invented ones, and the result looks
+    /// like arithmetic rather than like a mistake.
+    #[test]
+    fn a_fresh_app_holds_no_accounts_and_no_money() {
+        let app = FinanceApp::new();
+        assert!(app.accounts.is_empty(), "accounts appeared from nowhere");
+        assert!(
+            app.transactions.is_empty(),
+            "transactions appeared from nowhere"
+        );
+        assert_eq!(
+            app.total_balance(),
+            0,
+            "a balance was computed over invented money"
+        );
+    }
+
+    /// And the window says it cannot hold finances at all.
+    ///
+    /// This assertion exists because the first version of the message was
+    /// wrong in a way worth guarding against permanently. It said "add an
+    /// account and a transaction, and every figure below will be yours",
+    /// which assumed the app was merely empty. It has no control that creates
+    /// an account and no filesystem access to keep one.
+    ///
+    /// **A fix that promises a capability the program does not have is the
+    /// same defect it was fixing, pointed one step further into the future.**
+    #[test]
+    fn the_window_says_the_emptiness_is_correct() {
+        let app = FinanceApp::new();
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_DATA_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NO_DATA_LINES
+                .iter()
+                .any(|l| l.contains("no way to add an account")),
+            "the message implies data can be entered, which it cannot",
+        );
+    }
+
     #[test]
     fn test_new_app() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         assert!(!app.transactions.is_empty());
         assert!(!app.accounts.is_empty());
         assert!(!app.budgets.is_empty());
@@ -2021,19 +2175,19 @@ mod tests {
 
     #[test]
     fn test_sample_data_accounts() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         assert_eq!(app.accounts.len(), 4);
     }
 
     #[test]
     fn test_sample_data_budgets() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         assert_eq!(app.budgets.len(), 7);
     }
 
     #[test]
     fn test_add_account() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         let n = app.accounts.len();
         app.add_account("Test", AccountType::Cash, 1000);
         assert_eq!(app.accounts.len(), n + 1);
@@ -2041,7 +2195,7 @@ mod tests {
 
     #[test]
     fn test_add_transaction() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         let n = app.transactions.len();
         app.add_transaction(
             SimpleDate::new(2026, 5, 18),
@@ -2057,7 +2211,7 @@ mod tests {
 
     #[test]
     fn test_delete_transaction() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         let n = app.transactions.len();
         let id = app.transactions[0].id;
         app.delete_transaction(id);
@@ -2072,7 +2226,7 @@ mod tests {
     fn deleting_leaves_the_selection_on_a_row_that_still_exists() {
         // The old index-based selection re-pointed at whatever slid into the
         // gap; worse, deleting the last row left it past the end.
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.handle_key("Down", false, false);
         for _ in 0..3 {
             let Some(id) = app.selected_id else {
@@ -2098,7 +2252,7 @@ mod tests {
         // With a filter on, the arrow keys used to walk through hidden rows:
         // the highlight vanished for several presses and Ctrl+D then deleted
         // something the user could not see.
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.category_filter = Some(Category::Food);
         app.reanchor_selection();
         let visible = app.visible_ids();
@@ -2121,7 +2275,7 @@ mod tests {
     fn nothing_is_deleted_while_nothing_is_selected() {
         // Ctrl+D on a fresh window used to delete the first transaction, which
         // the user had never pointed at.
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         let n = app.transactions.len();
         assert!(app.selected_id.is_none(), "a fresh window selects nothing");
         app.handle_key("d", true, false);
@@ -2130,7 +2284,7 @@ mod tests {
 
     #[test]
     fn test_delete_out_of_bounds() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         let n = app.transactions.len();
         app.delete_transaction(999);
         assert_eq!(app.transactions.len(), n);
@@ -2138,7 +2292,7 @@ mod tests {
 
     #[test]
     fn test_set_budget_new() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         let n = app.budgets.len();
         app.set_budget(Category::Savings, 100_000);
         assert_eq!(app.budgets.len(), n + 1);
@@ -2146,21 +2300,21 @@ mod tests {
 
     #[test]
     fn test_month_income() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let income = app.month_income();
         assert!(income > 0);
     }
 
     #[test]
     fn test_month_expenses() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let expenses = app.month_expenses();
         assert!(expenses > 0);
     }
 
     #[test]
     fn test_month_savings() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let savings = app.month_savings();
         let income = app.month_income();
         let expenses = app.month_expenses();
@@ -2169,35 +2323,35 @@ mod tests {
 
     #[test]
     fn test_category_spending() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let food = app.category_spending(Category::Food);
         assert!(food > 0);
     }
 
     #[test]
     fn test_account_balance() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let bal = app.account_balance(1);
         assert!(bal != 0);
     }
 
     #[test]
     fn test_total_balance() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let total = app.total_balance();
         assert!(total > 0);
     }
 
     #[test]
     fn test_filtered_all() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let f = app.filtered_transactions();
         assert_eq!(f.len(), app.transactions.len());
     }
 
     #[test]
     fn test_filtered_by_category() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.category_filter = Some(Category::Food);
         let f = app.filtered_transactions();
         assert!(f.len() < app.transactions.len());
@@ -2208,7 +2362,7 @@ mod tests {
 
     #[test]
     fn test_filtered_by_search() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.search_query = String::from("grocery");
         let f = app.filtered_transactions();
         assert!(!f.is_empty());
@@ -2219,7 +2373,7 @@ mod tests {
 
     #[test]
     fn test_top_expense_categories() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let top = app.top_expense_categories();
         assert!(!top.is_empty());
         // Should be sorted descending
@@ -2338,7 +2492,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_screen_switch() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.handle_key("2", false, false);
         assert_eq!(app.screen, Screen::Transactions);
         app.handle_key("3", false, false);
@@ -2353,7 +2507,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_month_nav() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         let month = app.view_month.month;
         app.handle_key("Left", false, false);
         assert_eq!(app.view_month.month, month - 1);
@@ -2363,7 +2517,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_search() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.handle_key("/", false, false);
         assert!(app.search_active);
         app.handle_key("Escape", false, false);
@@ -2372,7 +2526,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_category_filter() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         assert!(app.category_filter.is_none());
         app.handle_key("c", false, false);
         assert!(app.category_filter.is_some());
@@ -2380,7 +2534,7 @@ mod tests {
 
     #[test]
     fn test_set_budget() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.set_budget(Category::Food, 80_000);
         // Observed on the store itself rather than through an accessor that
         // exists only for this test.
@@ -2424,7 +2578,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_navigation() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         let visible = app.visible_ids();
         assert!(visible.len() >= 2, "the sample data should fill the list");
         // Nothing is selected until the user moves, and the first move lands on
@@ -2442,7 +2596,7 @@ mod tests {
 
     #[test]
     fn test_handle_search_text() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.search_active = true;
         app.handle_search_text("test");
         assert_eq!(app.search_query, "test");
@@ -2450,14 +2604,14 @@ mod tests {
 
     #[test]
     fn test_render_dashboard() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_transactions() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.screen = Screen::Transactions;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -2465,7 +2619,7 @@ mod tests {
 
     #[test]
     fn test_render_budgets() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.screen = Screen::Budgets;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -2473,7 +2627,7 @@ mod tests {
 
     #[test]
     fn test_render_accounts() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.screen = Screen::Accounts;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -2481,7 +2635,7 @@ mod tests {
 
     #[test]
     fn test_render_reports() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.screen = Screen::Reports;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -2489,7 +2643,7 @@ mod tests {
 
     #[test]
     fn test_render_with_search() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.screen = Screen::Transactions;
         app.search_active = true;
         app.search_query = String::from("grocery");
@@ -2499,7 +2653,7 @@ mod tests {
 
     #[test]
     fn test_render_with_filter() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.screen = Screen::Transactions;
         app.category_filter = Some(Category::Food);
         let cmds = app.render_commands();
@@ -2529,7 +2683,7 @@ mod tests {
 
     #[test]
     fn test_month_transactions_only_current() {
-        let app = FinanceApp::new();
+        let app = FinanceApp::with_sample_data();
         let txs = app.month_transactions();
         for tx in &txs {
             assert!(tx.date.same_month(&app.view_month));
@@ -2538,7 +2692,7 @@ mod tests {
 
     #[test]
     fn test_different_month_no_transactions() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         app.view_month = SimpleDate::new(2025, 1, 1);
         let txs = app.month_transactions();
         assert!(txs.is_empty());
@@ -2546,7 +2700,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_delete() {
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
         let n = app.transactions.len();
         app.handle_key("Down", false, false);
         app.handle_key("d", true, false);
@@ -2584,7 +2738,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = FinanceApp::new();
+        let mut app = FinanceApp::with_sample_data();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

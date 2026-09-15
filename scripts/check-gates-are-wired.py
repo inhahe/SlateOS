@@ -150,20 +150,6 @@ PINNED: dict[str, str] = {
     # stop them rotting while they waited -- went with them: a self-test run
     # beside a real check that is now also run is duplicated work, and lane C's
     # version runs the fixture immediately before the check it guards.
-    "check-tested-but-uncalled.py":
-        "lane C, arrived with an origin/main merge on 2026-09-14 unwired, and "
-        "pinned rather than wired for two reasons. It has NO --self-test: the "
-        "flag is accepted by argv and ignored, so `--self-test` runs a live "
-        "scan and exits 1 on a finding. This tree wires gates fixture-first "
-        "precisely so a checker that stops agreeing with its own cases is "
-        "caught before its verdict is trusted, and there are no cases here to "
-        "run. Second, it currently reports one asymmetric pair -- "
-        "apps/passwordgen export_history/load_history -- which is lane C's "
-        "code; wiring it would refuse lane A and lane B builds over a finding "
-        "in a tree neither may edit, which is what this dict exists to avoid. "
-        "It is a good gate and found a real data-loss bug on its first run "
-        "(DesktopShell::load_shortcuts had no production caller). Unpin it "
-        "when it grows a self-test and its own tree is clean.",
     "check-drive-root-litter.py":
         "lane C, and DELIBERATELY unwired: it is a diagnostic about the "
         "MACHINE, not about the tree. It reports POSIX-looking directories at "

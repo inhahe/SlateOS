@@ -5736,6 +5736,40 @@ check_variant_lists() {
     # hardcoded to os-lane-c until 2026-09-14, so every lane's boot scanned
     # lane C -- their uncommitted edits could refuse your build, and every
     # green it gave described their tree rather than yours.
+    # Two lane-C gates, each of which found a real data-loss bug on its first
+    # useful run: a rebound shortcut that never came back, and a config export
+    # that assigned a String nothing rendered. Wired fixture-first.
+    echo "=== Checking for a tested function that production never calls ==="
+    if ! run_checker tested-but-uncalled-selftest "$py" "$PROJECT_ROOT/scripts/check-tested-but-uncalled.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-tested-but-uncalled.py no longer" >&2
+        echo "agrees with its own cases, so its verdict means nothing." >&2
+        return 1
+    fi
+    if ! run_checker tested-but-uncalled "$py" "$PROJECT_ROOT/scripts/check-tested-but-uncalled.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A save/load pair is asymmetric: one half" >&2
+        echo "is called in production and the other only from tests, so the data" >&2
+        echo "reaches disk and never comes back.  dead_code cannot see this --" >&2
+        echo "a test counts as a use." >&2
+        return 1
+    fi
+
+    echo "=== Checking for a field written and never read ==="
+    if ! run_checker fields-written-never-read-selftest "$py" "$PROJECT_ROOT/scripts/check-fields-written-never-read.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-fields-written-never-read.py no" >&2
+        echo "longer agrees with its own cases." >&2
+        return 1
+    fi
+    if ! run_checker fields-written-never-read "$py" "$PROJECT_ROOT/scripts/check-fields-written-never-read.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A field is assigned and never read, so" >&2
+        echo "the work that computes it is thrown away.  Either render it or" >&2
+        echo "delete it; if it is deliberate, add it to the baseline." >&2
+        return 1
+    fi
+
     echo "=== Checking for a hardcoded lane-worktree path in a script ==="
     if ! run_checker foreign-worktree-selftest "$py" "$PROJECT_ROOT/scripts/check-foreign-worktree-paths.py" --self-test; then
         echo "" >&2

@@ -67341,6 +67341,38 @@ to the asymmetric-pair shape it reports two, one of them a live data-loss bug.
 A gate answering 915 times is one nobody reads, which is its own way of being a
 check that cannot fire.
 
+**A sixth failure, and the only one where the check was right: the alarm was
+read through the assumption that caused the damage.** Distinct from the five
+above, all of which are ways a check fails to see. Here it saw perfectly.
+
+On 2026-09-14 lane C created `scripts/rustscan.py` with `cat >`, destroying an
+existing 418-line module imported by seven scripts. `check-gate-call-sites.py`
+refused the push within minutes, saying `rustscan.py` is invoked with
+`--self-test`, "which appears nowhere in the script". That is an exact
+description of a file somebody has replaced. It was read as "my new library
+needs a self-test", because the reader assumed the file it named was theirs --
+which is precisely the belief that caused the overwrite.
+
+Three tells were present and all were missed: `git status` said `M`, not `??`;
+the gate named the file; and the commit's own diffstat read
+`582 ++++++++-----------------`. **A file you just created cannot have
+deletions in it.** Any `-` in that bar proves the name was taken.
+
+**The remedy is not a better check.** It is a message that challenges the
+reading rather than describing the state. "`rustscan.py` is invoked with
+`--self-test`, which appears nowhere in it" is precise and passive; the same
+message ending "...and this file changed in your working tree 4 minutes ago" is
+unmissable, because the added clause contradicts the assumption instead of
+sitting quietly beside it. Where a gate can cheaply name *why now*, it should.
+
+**A verification rule falls out of the repair**, and it generalises past this
+incident: when checking that a thing is the original rather than a substitute,
+**at least one check must be a property a substitute would not bother to
+forge.** Confirming the restored file, a passing `--self-test`, seven present
+importers and a green call-site gate would all have held for a plausible
+replacement that happened to carry a self-test. Line count and git date would
+not. Three checks of the first kind are worth less than one of the second.
+
 **Where the four sit relative to each other.** A test that performs the missing step itself grants itself a premise;
 a dead instrument cannot fire at
 all; substitution fires correctly about the wrong subject; population blindness

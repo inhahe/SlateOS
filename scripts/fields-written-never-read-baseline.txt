@@ -26,8 +26,14 @@
 #     only because design-decisions 815 moves this whole panel into
 #     `apps/settings`, and fixing the copy that is about to be deleted is
 #     work done twice. The port must not carry it over.
-#   apps/netmanager/src/main.rs:diagnostics_running -- a spinner state set and
-#     never drawn, so "running diagnostics" may look like nothing happening.
+#   apps/netmanager/src/main.rs:diagnostics_running -- TRIAGED 2026-09-14, and
+#     it is not a drawing bug. `run_diagnostics` sets it true, builds six
+#     canned results, and sets it false again before returning, so no renderer
+#     can ever observe it as true. Drawing a spinner for it would be theatre.
+#     The flag becomes meaningful only when the diagnostics stop being
+#     simulated and acquire a real wait; until then it is dead state that a
+#     future async version will want, so it is kept and annotated rather than
+#     deleted.
 #   gui/desktop/src/lib.rs:shortcut_message -- a message composed for the user
 #     and never rendered.
 

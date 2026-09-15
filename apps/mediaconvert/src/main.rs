@@ -53,6 +53,19 @@ use std::time::Duration;
 // Layout constants
 // ============================================================================
 
+/// What the window says instead of a queue that runs.
+///
+/// Three lines. The third is the one with a cost attached: a conversion
+/// reported Completed is the point at which somebody deletes the original.
+/// That is the same shape as `apps/podcast`'s Downloaded mark and
+/// `apps/screenrecorder`'s history entry -- a durable claim that a file now
+/// exists somewhere, acted on later, when the thing it replaced is gone.
+const CANNOT_CONVERT_LINES: [&str; 3] = [
+    "This program cannot read or convert media files.",
+    "It has no filesystem access, so no source has been opened and no output can be written.",
+    "Nothing will ever reach Completed here -- do not delete an original on the strength of this queue.",
+];
+
 const SIDEBAR_WIDTH: f32 = 300.0;
 const SETTINGS_PANEL_WIDTH: f32 = 280.0;
 const TOOLBAR_HEIGHT: f32 = 40.0;
@@ -1198,6 +1211,8 @@ pub struct MediaConvertApp {
     pub audio_settings: AudioSettings,
     pub video_settings: VideoSettings,
     pub image_settings: ImageSettings,
+    /// Why the last Start did nothing.
+    pub status_line: String,
     pub show_queue: bool,
     pub window_width: f32,
     pub window_height: f32,
@@ -1234,6 +1249,7 @@ impl MediaConvertApp {
             audio_settings: AudioSettings::default(),
             video_settings: VideoSettings::default(),
             image_settings: ImageSettings::default(),
+            status_line: String::new(),
             show_queue: true,
             window_width: 1280.0,
             window_height: 800.0,
@@ -1364,6 +1380,13 @@ impl MediaConvertApp {
     /// In a method rather than in `main` because a test cannot call `main`, and
     /// a converter that opens on an empty file list looks broken rather than
     /// idle. One of each category, so every panel has something to show.
+    /// A few media files, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `main` called it, so the window opened
+    /// on `/music/song.flac` at 50 MB and `/videos/clip.mkv` at 1.5 GB --
+    /// paths with sizes and durations, none of which had been read. A filename
+    /// is a claim that a file exists.
+    #[cfg(test)]
     pub fn seed_sample_sources(&mut self) {
         self.add_source_with_duration(
             "/music/song.flac",
@@ -1650,7 +1673,33 @@ impl MediaConvertApp {
     }
 
     /// Start the next queued job (simulated).
+    /// Report that no job can be started.
+    ///
+    /// It used to move the next queued job to `Running`, after which the app's
+    /// tick advanced it and called `complete_job` with an estimated output
+    /// size -- so a queue drained itself to `Completed`, with byte counts, and
+    /// no file was read or written at any point.
+    ///
+    /// The queue itself is real and stays: it is a plan, and a plan is an
+    /// honest thing for this program to hold. What it cannot do is carry the
+    /// plan out. Refusing at the start rather than during is the same choice
+    /// as `soundrecorder` and `screenrecorder`: by the time a running job
+    /// reports trouble, somebody may have acted on the ones before it.
     pub fn start_next_job(&mut self) -> bool {
+        if self.jobs.iter().any(|j| j.status == JobStatus::Queued) {
+            self.status_line =
+                String::from("Cannot convert: nothing here can read a source or write an output");
+        }
+        false
+    }
+
+    /// Start the next queued job, the way the button used to.
+    ///
+    /// `#[cfg(test)]`. The job state machine, the progress accounting and the
+    /// queue ordering are real and worth testing; what is not is a conversion
+    /// that produces no file.
+    #[cfg(test)]
+    pub fn start_next_job_fixture(&mut self) -> bool {
         let ts = self.tick();
         if let Some(job) = self.jobs.iter_mut().find(|j| j.status == JobStatus::Queued) {
             job.start(ts);
@@ -1811,6 +1860,41 @@ impl MediaConvertApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // After the background, or it would be painted over.
+        for (i, line) in CANNOT_CONVERT_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                y: 1.0 + i as f32 * 12.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 11.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        if !self.status_line.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                y: 38.0,
+                text: self.status_line.clone(),
+                color: self.palette.ink(self.palette.peach),
+                font_size: 10.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         self.render_toolbar(&mut cmds, width);
         self.render_status_bar(&mut cmds, width, height);
@@ -2554,8 +2638,8 @@ impl App for MediaConvertApp {
 }
 
 fn main() -> ExitCode {
+    // Opens empty. It used to call `seed_sample_sources`.
     let mut app = MediaConvertApp::new();
-    app.seed_sample_sources();
     app::launch("mediaconvert", &mut app)
 }
 
@@ -2572,6 +2656,41 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// A fresh window holds no sources and says why.
+    ///
+    /// `main` called `seed_sample_sources`, so the window opened on
+    /// `/music/song.flac` at 50 MB and `/videos/clip.mkv` at 1.5 GB -- paths
+    /// with sizes and durations, none of which had been read. A filename is a
+    /// claim that a file exists.
+    #[test]
+    fn a_fresh_window_holds_no_sources_and_says_why() {
+        let app = MediaConvertApp::new();
+        assert!(app.sources.is_empty(), "sources appeared from nowhere");
+        assert!(app.jobs.is_empty(), "a queue appeared from nowhere");
+        assert!(app.history.is_empty(), "conversions appeared from nowhere");
+
+        let texts: Vec<String> = app
+            .render_commands(1200.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_CONVERT_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            CANNOT_CONVERT_LINES
+                .iter()
+                .any(|l| l.contains("do not delete an original")),
+            "nothing warns against acting on a queue that cannot run",
+        );
+    }
 
     // ------------------------------------------------------------------
     // Wiring
@@ -2630,44 +2749,77 @@ mod tests {
 
     /// `queue_all` had six tests and no caller: the button this program is
     /// named for did nothing.
-    #[test]
-    fn ctrl_enter_queues_everything_and_the_queue_runs_itself() {
-        let mut app = seeded();
-        assert_eq!(app.tick_interval(), None, "an idle queue needs no clock");
+    /// Queue everything and start the first job, the way Ctrl+Enter used to.
+    ///
+    /// Ctrl+Enter still queues -- a queue is a plan, and a plan is an honest
+    /// thing for this program to hold -- but `start_next_job` refuses since
+    /// 2026-09-15, because carrying the plan out means reading a source and
+    /// writing an output, and this crate can do neither.
+    ///
+    /// The job state machine, the progress accounting, the cancel path and the
+    /// queue ordering are all real, and this is how they stay tested.
+    fn start_queue(app: &mut MediaConvertApp) {
+        app.queue_all();
+        app.start_next_job_fixture();
+        app.active_panel = ActivePanel::Queue;
+    }
 
-        app.handle_event(&key_ev(Key::Enter, true));
-        assert_eq!(app.jobs.len(), 3, "every source should be queued");
-        assert_eq!(app.active_panel, ActivePanel::Queue);
-        assert!(app.tick_interval().is_some(), "a running queue does");
-        assert_eq!(
-            app.jobs
-                .iter()
-                .filter(|j| j.status == JobStatus::Running)
-                .count(),
-            1,
-            "one at a time"
-        );
-
+    /// Tick until the queue is empty, starting each job as the tick used to.
+    ///
+    /// `handle_tick` called `start_next_job` when nothing was running, which
+    /// is how a queue drained itself. That call refuses now, so the fixture
+    /// takes the job over: the *ordering* -- one at a time, next one up when
+    /// the last finishes -- is real queue behaviour and still worth pinning.
+    fn drain_queue(app: &mut MediaConvertApp) {
         for _ in 0..200 {
             if !app
                 .jobs
                 .iter()
                 .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
             {
-                break;
+                return;
             }
             app.handle_event(&tick());
+            if !app.jobs.iter().any(|j| j.status == JobStatus::Running) {
+                app.start_next_job_fixture();
+            }
         }
-        assert_eq!(
-            app.jobs
-                .iter()
-                .filter(|j| j.status == JobStatus::Completed)
-                .count(),
-            3,
-            "all three should have finished"
+    }
+
+    #[test]
+    fn ctrl_enter_queues_everything_and_then_says_it_cannot_run_it() {
+        // Was `..._and_the_queue_runs_itself`, which drove 200 ticks and
+        // asserted all three jobs reached Completed with entries in the
+        // history. They did, and nothing was read or written at any point.
+        let mut app = seeded();
+        assert_eq!(app.tick_interval(), None, "an idle queue needs no clock");
+
+        app.handle_event(&key_ev(Key::Enter, true));
+        assert_eq!(app.jobs.len(), 3, "every source should be queued");
+        assert_eq!(app.active_panel, ActivePanel::Queue);
+
+        // Queued, and going no further. A conversion reported Completed is the
+        // point at which somebody deletes the original, so the refusal belongs
+        // at the start rather than partway through a batch.
+        assert!(
+            app.jobs.iter().all(|j| j.status == JobStatus::Queued),
+            "a job started with nothing to read",
         );
-        assert_eq!(app.history.len(), 3, "and each should be in the history");
-        assert_eq!(app.tick_interval(), None, "and the clock should stop");
+        assert!(
+            app.status_line.contains("Cannot convert"),
+            "the queue stalled and nothing said why: {}",
+            app.status_line
+        );
+
+        // And ticking changes nothing, however long it goes on.
+        for _ in 0..200 {
+            app.handle_event(&tick());
+        }
+        assert!(
+            app.jobs.iter().all(|j| j.status == JobStatus::Queued),
+            "the queue drained itself",
+        );
+        assert!(app.history.is_empty(), "a conversion was recorded");
     }
 
     /// The progress bar the queue panel draws was empty or full and never
@@ -2676,7 +2828,7 @@ mod tests {
     #[test]
     fn a_running_job_moves_its_progress_bar() {
         let mut app = seeded();
-        app.handle_event(&key_ev(Key::Enter, true));
+        start_queue(&mut app);
 
         let mut seen = Vec::new();
         for _ in 0..10 {
@@ -2702,7 +2854,7 @@ mod tests {
     #[test]
     fn a_cancelled_job_stops_moving() {
         let mut app = seeded();
-        app.handle_event(&key_ev(Key::Enter, true));
+        start_queue(&mut app);
         for _ in 0..3 {
             app.handle_event(&tick());
         }
@@ -2757,7 +2909,7 @@ mod tests {
     #[test]
     fn ctrl_c_abandons_what_has_not_started() {
         let mut app = seeded();
-        app.handle_event(&key_ev(Key::Enter, true));
+        start_queue(&mut app);
         app.handle_event(&key_ev(Key::C, true));
         assert_eq!(
             app.jobs
@@ -2780,17 +2932,8 @@ mod tests {
     #[test]
     fn ctrl_l_sweeps_up_the_finished_jobs() {
         let mut app = seeded();
-        app.handle_event(&key_ev(Key::Enter, true));
-        for _ in 0..200 {
-            if !app
-                .jobs
-                .iter()
-                .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
-            {
-                break;
-            }
-            app.handle_event(&tick());
-        }
+        start_queue(&mut app);
+        drain_queue(&mut app);
         assert!(!app.jobs.is_empty());
         app.handle_event(&key_ev(Key::L, true));
         assert!(app.jobs.is_empty(), "the finished jobs should have gone");
@@ -2907,20 +3050,11 @@ mod tests {
         let mut app = seeded();
         assert_eq!(app.title(), "Media Converter");
 
-        app.handle_event(&key_ev(Key::Enter, true));
+        start_queue(&mut app);
         let title = app.title();
         assert!(title.contains("3 left"), "got {title:?}");
 
-        for _ in 0..200 {
-            if !app
-                .jobs
-                .iter()
-                .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
-            {
-                break;
-            }
-            app.handle_event(&tick());
-        }
+        drain_queue(&mut app);
         assert_eq!(app.title(), "Media Converter", "and back when it is done");
     }
 
@@ -3244,7 +3378,7 @@ mod tests {
         let mut app = MediaConvertApp::new();
         app.add_source("/a", "test.wav", 10000, MediaCategory::Audio);
         app.queue_all();
-        assert!(app.start_next_job());
+        assert!(app.start_next_job_fixture());
 
         let Some(job_id) = app.jobs.first().map(|j| j.id) else {
             panic!("expected at least one job");
@@ -3258,7 +3392,7 @@ mod tests {
         let mut app = MediaConvertApp::new();
         app.add_source("/a", "test.wav", 10000, MediaCategory::Audio);
         app.queue_all();
-        app.start_next_job();
+        app.start_next_job_fixture();
 
         let Some(job_id) = app.jobs.first().map(|j| j.id) else {
             panic!("expected at least one job");
@@ -3282,7 +3416,7 @@ mod tests {
         let mut app = MediaConvertApp::new();
         app.add_source("/a", "a", 100, MediaCategory::Audio);
         app.queue_all();
-        app.start_next_job();
+        app.start_next_job_fixture();
         let Some(job_id) = app.jobs.first().map(|j| j.id) else {
             panic!("expected at least one job");
         };
@@ -3313,7 +3447,7 @@ mod tests {
         app.add_source("/a", "a", 100, MediaCategory::Audio);
         app.add_source("/b", "b", 200, MediaCategory::Video);
         app.queue_all();
-        app.start_next_job();
+        app.start_next_job_fixture();
 
         let stats = app.queue_stats();
         assert_eq!(stats.total_jobs, 2);

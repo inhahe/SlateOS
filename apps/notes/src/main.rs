@@ -52,6 +52,15 @@ use std::collections::HashMap;
 // Layout constants
 // ============================================================================
 
+/// What the window says before anything has been written.
+///
+/// The second line is the one that matters for a notes app and it is not
+/// about the fabrication: nothing here survives the window closing.
+const NOTHING_YET_LINES: [&str; 2] = [
+    "No notes yet.",
+    "Nothing is saved between runs -- this app has no filesystem access, so anything you write here is gone when the window closes.",
+];
+
 const SIDEBAR_WIDTH: f32 = 200.0;
 const NOTE_LIST_WIDTH: f32 = 260.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
@@ -1707,6 +1716,16 @@ impl NotesApp {
     /// compositor: it built a sample library, rendered one frame and exited.
     /// It is a method so that the moment a store on disk exists, the caller
     /// in `main` is the one line that changes.
+    /// Notebooks and notes, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. It built notebooks called Personal,
+    /// Work, Projects, Meetings and Journal -- a personal organisational
+    /// structure, presented in the place the user's own belongs.
+    ///
+    /// The first note it wrote was genuinely fine: "Welcome to Notes",
+    /// documenting the app. That is the `apps/ebook` case, content the program
+    /// brought with it. The notebooks around it are not.
+    #[cfg(test)]
     pub fn seed_sample_content(&mut self) {
         // Create sample notebooks
         let personal = self.create_notebook("Personal");
@@ -1995,6 +2014,28 @@ impl NotesApp {
     /// Renders the full application frame, returning drawing commands.
     pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
+        // After the background, or it would be painted over.
+        for (i, line) in NOTHING_YET_LINES.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
+                y: 2.0 + i as f32 * 12.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 11.0 } else { 9.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Full window background.
         cmds.push(RenderCommand::FillRect {
@@ -3313,7 +3354,6 @@ fn main() -> ExitCode {
     // Until there is a store on disk this is what there is to show. It is
     // seeded here rather than in `new` so that the moment a store exists, this
     // is the one call that changes.
-    notes.seed_sample_content();
     app::launch("notes", &mut notes)
 }
 

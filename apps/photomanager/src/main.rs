@@ -1672,6 +1672,18 @@ impl PhotoApp {
     }
 
     /// Simulate importing from a directory, returning results.
+    /// Import a caller-supplied list of files, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. It has had no production caller since
+    /// this app gained a real file picker and a real EXIF read earlier the
+    /// same day -- `import_photo` is the live path. Left `pub` and ungated it
+    /// looked like production API, which is what `find-reachable-fixtures.py`
+    /// reported it as.
+    ///
+    /// Note that it never invented anything itself: the caller supplies the
+    /// names, formats and sizes. That is why it is a fixture rather than a
+    /// fabrication -- it makes no claim of its own.
+    #[cfg(test)]
     pub fn simulate_import(
         &mut self,
         dir: &str,

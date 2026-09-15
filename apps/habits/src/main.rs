@@ -56,6 +56,19 @@ use guitk::table::{Column, Fit, Table};
 // which is the arrangement that makes "does this cell fit its column?" a
 // question with no home. The 4px discount is the gap between columns, so it
 // belongs to the table, not to every cell.
+/// What the window says before any habit exists.
+///
+/// Three lines. The third is what makes this different from a reader shipping
+/// with a sample book: the invented data here was **a record of what the user
+/// did**, on dated days, and every streak and completion rate was computed
+/// over it. Their first real check-in would have been averaged in with
+/// forty-five days of days they never had.
+const NO_HABITS_LINES: [&str; 3] = [
+    "No habits yet.",
+    "This app opened with 45 days of check-ins until 2026-09-15 -- a record of days nobody had.",
+    "Nothing is saved between runs either: it has no filesystem access, so today's marks go when the window closes.",
+];
+
 const STATS_GAP: f32 = 4.0;
 const STATS_COLUMNS: &[Column] = &[
     Column {
@@ -153,6 +166,8 @@ impl Date {
     /// Was a hand-written Zeller's congruence, correct for years >= 1 and
     /// wrong below that: `y % 100` and `y / 100` truncate toward zero in
     /// Rust, not the flooring the formula assumes.
+    /// `#[cfg(test)]`: its only caller is `load_sample_habits`.
+    #[cfg(test)]
     fn day_of_week(self) -> u32 {
         u32::try_from(self.weekday().index()).unwrap_or(0)
     }
@@ -624,7 +639,7 @@ impl HabitTrackerApp {
             month: 5,
             day: 18,
         };
-        let mut app = Self {
+        Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: 1000.0,
             height: 700.0,
@@ -642,11 +657,34 @@ impl HabitTrackerApp {
             selected_day_col: 0,
             heatmap_habit_idx: 0,
             status_msg: String::from("Habit Tracker"),
-        };
+        }
+    }
+
+    /// An app holding the history `new` used to invent, for tests.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about the streak
+    /// arithmetic, the completion rates, the heatmap and the week view -- all
+    /// of which need *check-ins*, not specifically invented ones.
+    #[cfg(test)]
+    fn with_sample_habits() -> Self {
+        let mut app = Self::new();
         app.load_sample_habits();
         app
     }
 
+    /// Four habits with 45 days of check-ins behind them, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. `new` called it, so the window opened
+    /// on an exercise habit kept about 70% of the time for a month and a half,
+    /// and three more like it -- with streaks, completion rates and a heatmap
+    /// computed from them.
+    ///
+    /// This is not the `apps/ebook` case. A book shipped with a reader claims
+    /// nothing; **a check-in on a dated day is a claim about what the user
+    /// did**, and it is exactly the claim this app exists to record. It is the
+    /// `apps/finance` shape: the first real mark would have been averaged in
+    /// with forty-five days of days nobody had.
+    #[cfg(test)]
     fn load_sample_habits(&mut self) {
         let base = self.today.add_days(-45);
 
@@ -1157,6 +1195,32 @@ impl HabitTrackerApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+
+        // After the background, or it would be painted over. Keyed on the
+        // list being empty so it retires itself at the first real habit.
+        if self.habits.is_empty() {
+            for (i, line) in NO_HABITS_LINES.iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: 8.0,
+                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                    y: 2.0 + i as f32 * 12.0,
+                    text: (*line).to_string(),
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: if i == 0 { 11.0 } else { 9.0 },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(self.width - 16.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
 
         self.render_header(&mut cmds);
         self.render_nav(&mut cmds);
@@ -2395,6 +2459,37 @@ mod tests {
 
     use super::*;
 
+    /// And the window says why it is empty, and that nothing is kept.
+    ///
+    /// Two different absences, and the second is the one a habit tracker
+    /// cannot leave unsaid: there is no filesystem access, so a mark made
+    /// today is gone when the window closes. An app whose entire purpose is
+    /// to accumulate a record over weeks has to say if it cannot keep one.
+    #[test]
+    fn the_window_says_it_has_no_history_and_keeps_none() {
+        let app = HabitTrackerApp::new();
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_HABITS_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NO_HABITS_LINES
+                .iter()
+                .any(|l| l.contains("Nothing is saved between runs")),
+            "nothing warns that today's marks do not survive the window",
+        );
+    }
+
     // ── Date tests ──────────────────────────────────────────────────
 
     #[test]
@@ -2972,14 +3067,22 @@ mod tests {
     // ── App creation tests ──────────────────────────────────────────
 
     #[test]
-    fn test_app_new_has_sample_habits() {
-        let app = HabitTrackerApp::new();
-        assert_eq!(app.habits.len(), 5);
+    fn a_fresh_tracker_has_no_history_and_the_fixture_does() {
+        // Was `test_app_new_has_sample_habits`, asserting that a freshly
+        // opened tracker already held five habits with forty-five days of
+        // check-ins behind them -- a record of what the user had done, on
+        // dated days, that they had never done.
+        let fresh = HabitTrackerApp::new();
+        assert!(fresh.habits.is_empty(), "a history appeared from nowhere");
+
+        // And the fixture still supplies one for everything else to test.
+        let seeded = HabitTrackerApp::with_sample_habits();
+        assert_eq!(seeded.habits.len(), 5);
     }
 
     #[test]
     fn test_app_sample_habits_have_check_ins() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         for h in &app.habits {
             assert!(
                 !h.check_ins.is_empty(),
@@ -2991,13 +3094,13 @@ mod tests {
 
     #[test]
     fn test_app_default_screen() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         assert_eq!(app.screen, Screen::Dashboard);
     }
 
     #[test]
     fn test_app_date() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         assert_eq!(app.today.year, 2026);
         assert_eq!(app.today.month, 5);
         assert_eq!(app.today.day, 18);
@@ -3007,7 +3110,7 @@ mod tests {
 
     #[test]
     fn test_create_habit() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let count = app.habits.len();
         app.create_name = String::from("New Habit");
         app.create_category_idx = 0;
@@ -3019,7 +3122,7 @@ mod tests {
 
     #[test]
     fn test_create_habit_empty_name_rejected() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let count = app.habits.len();
         app.create_name.clear();
         app.create_habit();
@@ -3028,7 +3131,7 @@ mod tests {
 
     #[test]
     fn test_create_habit_weekly() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.create_name = String::from("Weekly");
         app.create_frequency_daily = false;
         app.create_weekly_count = 4;
@@ -3039,7 +3142,7 @@ mod tests {
 
     #[test]
     fn test_create_habit_clears_form() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.create_name = String::from("Test");
         app.show_create_form = true;
         app.create_habit();
@@ -3049,7 +3152,7 @@ mod tests {
 
     #[test]
     fn test_delete_habit() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let count = app.habits.len();
         app.delete_habit(0);
         assert_eq!(app.habits.len(), count - 1);
@@ -3057,7 +3160,7 @@ mod tests {
 
     #[test]
     fn test_delete_habit_out_of_bounds() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let count = app.habits.len();
         app.delete_habit(100);
         assert_eq!(app.habits.len(), count);
@@ -3065,14 +3168,14 @@ mod tests {
 
     #[test]
     fn test_archive_habit() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.archive_habit(0);
         assert!(app.habits[0].archived);
     }
 
     #[test]
     fn test_unarchive_habit() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.habits[0].archived = true;
         app.unarchive_habit(0);
         assert!(!app.habits[0].archived);
@@ -3080,7 +3183,7 @@ mod tests {
 
     #[test]
     fn test_active_habits_excludes_archived() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let before = app.active_habits().len();
         app.habits[0].archived = true;
         let after = app.active_habits().len();
@@ -3089,7 +3192,7 @@ mod tests {
 
     #[test]
     fn test_archived_habits_list() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         assert!(app.archived_habits().is_empty());
         app.habits[0].archived = true;
         app.habits[1].archived = true;
@@ -3100,14 +3203,14 @@ mod tests {
 
     #[test]
     fn test_category_filter_none_shows_all() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         assert!(app.category_filter.is_none());
         assert_eq!(app.active_habits().len(), 5);
     }
 
     #[test]
     fn test_category_filter_fitness() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.category_filter = Some(Category::Fitness);
         let active = app.active_habits();
         assert_eq!(active.len(), 1);
@@ -3116,7 +3219,7 @@ mod tests {
 
     #[test]
     fn test_category_filter_no_match() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.category_filter = Some(Category::Finance);
         assert!(app.active_habits().is_empty());
     }
@@ -3125,7 +3228,7 @@ mod tests {
 
     #[test]
     fn test_toggle_check_in_selected() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.selected_habit = 0;
         app.selected_day_col = 0; // today
         let idx = app.active_habits()[0];
@@ -3137,7 +3240,7 @@ mod tests {
 
     #[test]
     fn test_toggle_check_in_past_day() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.selected_habit = 0;
         app.selected_day_col = 3; // 3 days ago
         let idx = app.active_habits()[0];
@@ -3151,7 +3254,7 @@ mod tests {
 
     #[test]
     fn test_advance_day() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let original = app.today;
         app.advance_day();
         assert_eq!(app.today.days_since(original), 1);
@@ -3159,7 +3262,7 @@ mod tests {
 
     #[test]
     fn test_go_back_day() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let original = app.today;
         app.go_back_day();
         assert_eq!(original.days_since(app.today), 1);
@@ -3169,7 +3272,7 @@ mod tests {
 
     #[test]
     fn test_key_screen_switch() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.handle_key("2", false, false);
         assert_eq!(app.screen, Screen::Statistics);
         app.handle_key("3", false, false);
@@ -3182,14 +3285,14 @@ mod tests {
 
     #[test]
     fn test_key_new_habit() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.handle_key("n", false, false);
         assert!(app.show_create_form);
     }
 
     #[test]
     fn test_key_up_down() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         assert_eq!(app.selected_habit, 0);
         app.handle_key("Down", false, false);
         assert_eq!(app.selected_habit, 1);
@@ -3199,7 +3302,7 @@ mod tests {
 
     #[test]
     fn test_key_up_boundary() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.selected_habit = 0;
         app.handle_key("Up", false, false);
         assert_eq!(app.selected_habit, 0);
@@ -3207,7 +3310,7 @@ mod tests {
 
     #[test]
     fn test_key_down_boundary() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let max = app.active_habits().len() - 1;
         app.selected_habit = max;
         app.handle_key("Down", false, false);
@@ -3216,7 +3319,7 @@ mod tests {
 
     #[test]
     fn test_key_left_right_day_col() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         assert_eq!(app.selected_day_col, 0);
         app.handle_key("Left", false, false);
         assert_eq!(app.selected_day_col, 1);
@@ -3226,7 +3329,7 @@ mod tests {
 
     #[test]
     fn test_key_left_boundary() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.selected_day_col = 6;
         app.handle_key("Left", false, false);
         assert_eq!(app.selected_day_col, 6);
@@ -3234,7 +3337,7 @@ mod tests {
 
     #[test]
     fn test_key_right_boundary() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.selected_day_col = 0;
         app.handle_key("Right", false, false);
         assert_eq!(app.selected_day_col, 0);
@@ -3242,7 +3345,7 @@ mod tests {
 
     #[test]
     fn test_key_space_toggles_check_in() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.selected_habit = 0;
         app.selected_day_col = 0;
         let idx = app.active_habits()[0];
@@ -3254,7 +3357,7 @@ mod tests {
 
     #[test]
     fn test_key_archive() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.selected_habit = 0;
         let idx = app.active_habits()[0];
         app.handle_key("a", false, false);
@@ -3263,7 +3366,7 @@ mod tests {
 
     #[test]
     fn test_key_advance_date() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let d = app.today;
         app.handle_key("+", false, false);
         assert_eq!(app.today.days_since(d), 1);
@@ -3271,7 +3374,7 @@ mod tests {
 
     #[test]
     fn test_key_go_back_date() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let d = app.today;
         app.handle_key("-", false, false);
         assert_eq!(d.days_since(app.today), 1);
@@ -3279,7 +3382,7 @@ mod tests {
 
     #[test]
     fn test_key_cycle_filter() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         assert!(app.category_filter.is_none());
         app.handle_key("c", false, false);
         assert_eq!(app.category_filter, Some(Category::Health));
@@ -3289,7 +3392,7 @@ mod tests {
 
     #[test]
     fn test_key_cycle_filter_wraps() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.category_filter = Some(*Category::ALL.last().unwrap());
         app.handle_key("c", false, false);
         assert!(app.category_filter.is_none());
@@ -3297,14 +3400,14 @@ mod tests {
 
     #[test]
     fn test_key_page_down() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.handle_key("PageDown", false, false);
         assert!(app.scroll_offset > 0.0);
     }
 
     #[test]
     fn test_key_page_up_at_zero() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.handle_key("PageUp", false, false);
         assert_eq!(app.scroll_offset, 0.0);
     }
@@ -3313,7 +3416,7 @@ mod tests {
 
     #[test]
     fn test_create_form_escape() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         app.handle_key("Escape", false, false);
         assert!(!app.show_create_form);
@@ -3321,7 +3424,7 @@ mod tests {
 
     #[test]
     fn test_create_form_typing() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         app.handle_key("H", false, false);
         app.handle_key("i", false, false);
@@ -3330,7 +3433,7 @@ mod tests {
 
     #[test]
     fn test_create_form_backspace() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         app.create_name = String::from("Hello");
         app.handle_key("Backspace", false, false);
@@ -3339,7 +3442,7 @@ mod tests {
 
     #[test]
     fn test_create_form_tab_cycles_category() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         assert_eq!(app.create_category_idx, 0);
         app.handle_key("Tab", false, false);
@@ -3348,7 +3451,7 @@ mod tests {
 
     #[test]
     fn test_create_form_f1_toggles_frequency() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         assert!(app.create_frequency_daily);
         app.handle_key("F1", false, false);
@@ -3359,7 +3462,7 @@ mod tests {
 
     #[test]
     fn test_create_form_f2_cycles_weekly_count() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         app.create_weekly_count = 3;
         app.handle_key("F2", false, false);
@@ -3368,7 +3471,7 @@ mod tests {
 
     #[test]
     fn test_create_form_enter_creates() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         app.create_name = String::from("From Form");
         let count = app.habits.len();
@@ -3381,7 +3484,7 @@ mod tests {
 
     #[test]
     fn test_overall_completion_today() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         let (done, total) = app.overall_completion_today();
         assert_eq!(total, 5);
         // done depends on sample data, just check it's in range
@@ -3390,7 +3493,7 @@ mod tests {
 
     #[test]
     fn test_best_habit_streak() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         let (name, val) = app.best_habit_streak();
         assert!(!name.is_empty());
         assert!(val > 0);
@@ -3398,21 +3501,21 @@ mod tests {
 
     #[test]
     fn test_average_completion_7d() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         let avg = app.average_completion_7d();
         assert!((0.0..=1.0).contains(&avg));
     }
 
     #[test]
     fn test_average_completion_30d() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         let avg = app.average_completion_30d();
         assert!((0.0..=1.0).contains(&avg));
     }
 
     #[test]
     fn test_average_completion_no_habits() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.habits.clear();
         assert_eq!(app.average_completion_7d(), 0.0);
         assert_eq!(app.average_completion_30d(), 0.0);
@@ -3422,21 +3525,21 @@ mod tests {
 
     #[test]
     fn test_heatmap_data_length() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         let data = app.heatmap_data(0, 90);
         assert_eq!(data.len(), 90);
     }
 
     #[test]
     fn test_heatmap_data_full_year() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         let data = app.heatmap_data(0, 364);
         assert_eq!(data.len(), 364);
     }
 
     #[test]
     fn test_heatmap_data_invalid_index() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         let data = app.heatmap_data(999, 30);
         assert!(data.is_empty());
     }
@@ -3546,7 +3649,7 @@ mod tests {
         // on the strength of the legend alone -- which is exactly how the
         // flat graph went unnoticed under a gradient key in the first place.
         // The graph is the seven topmost rows; the legend sits below them.
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.screen = Screen::HeatMap;
         app.heatmap_habit_idx = 0;
         let today = app.today;
@@ -3612,7 +3715,7 @@ mod tests {
 
     #[test]
     fn test_render_dashboard() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
         assert!(cmds.len() > 20);
@@ -3620,7 +3723,7 @@ mod tests {
 
     #[test]
     fn test_render_statistics() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.screen = Screen::Statistics;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -3628,7 +3731,7 @@ mod tests {
 
     #[test]
     fn test_render_archive_empty() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.screen = Screen::Archive;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -3636,7 +3739,7 @@ mod tests {
 
     #[test]
     fn test_render_archive_with_items() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.screen = Screen::Archive;
         app.habits[0].archived = true;
         app.habits[1].archived = true;
@@ -3646,7 +3749,7 @@ mod tests {
 
     #[test]
     fn test_render_heatmap() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.screen = Screen::HeatMap;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -3654,7 +3757,7 @@ mod tests {
 
     #[test]
     fn test_render_create_form() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         let cmds = app.render_commands();
         assert!(cmds.len() > 30);
@@ -3662,7 +3765,7 @@ mod tests {
 
     #[test]
     fn test_render_empty_dashboard() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.habits.clear();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -3670,7 +3773,7 @@ mod tests {
 
     #[test]
     fn test_render_empty_heatmap() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.screen = Screen::HeatMap;
         app.habits.clear();
         let cmds = app.render_commands();
@@ -3679,7 +3782,7 @@ mod tests {
 
     #[test]
     fn test_render_with_category_filter() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.category_filter = Some(Category::Fitness);
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -3687,7 +3790,7 @@ mod tests {
 
     #[test]
     fn test_render_with_scroll() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.scroll_offset = 100.0;
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -3697,7 +3800,7 @@ mod tests {
 
     #[test]
     fn test_heatmap_left_right_navigation() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.screen = Screen::HeatMap;
         assert_eq!(app.heatmap_habit_idx, 0);
         app.handle_key("Right", false, false);
@@ -3708,7 +3811,7 @@ mod tests {
 
     #[test]
     fn test_heatmap_left_boundary() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.screen = Screen::HeatMap;
         app.heatmap_habit_idx = 0;
         app.handle_key("Left", false, false);
@@ -3717,7 +3820,7 @@ mod tests {
 
     #[test]
     fn test_heatmap_right_boundary() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.screen = Screen::HeatMap;
         let max = app.active_habits().len() - 1;
         app.heatmap_habit_idx = max;
@@ -3729,7 +3832,7 @@ mod tests {
 
     #[test]
     fn test_restore_from_archive_via_enter() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.habits[0].archived = true;
         app.screen = Screen::Archive;
         app.selected_habit = 0;
@@ -3753,7 +3856,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_d_deletes() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let count = app.habits.len();
         app.selected_habit = 0;
         app.handle_key("d", true, false);
@@ -3791,7 +3894,7 @@ mod tests {
 
     #[test]
     fn test_weekly_count_clamped() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.create_name = String::from("Clamped");
         app.create_frequency_daily = false;
         app.create_weekly_count = 99;
@@ -3802,7 +3905,7 @@ mod tests {
 
     #[test]
     fn test_heatmap_data_has_correct_dates() {
-        let app = HabitTrackerApp::new();
+        let app = HabitTrackerApp::with_sample_habits();
         let data = app.heatmap_data(0, 7);
         // Last entry should be today
         assert_eq!(data.last().unwrap().0, app.today);
@@ -3812,7 +3915,7 @@ mod tests {
 
     #[test]
     fn test_multiple_date_advances() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let start = app.today;
         for _ in 0..10 {
             app.advance_day();
@@ -3825,7 +3928,7 @@ mod tests {
         // Was `test_next_id_increments`, which watched a counter that nothing
         // ever read. What the test was reaching for -- that creating twice
         // creates two -- is asserted here against the list itself.
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let before = app.habits.len();
         app.create_name = String::from("A");
         app.create_habit();
@@ -3838,7 +3941,7 @@ mod tests {
 
     #[test]
     fn test_selected_habit_adjusts_on_delete() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         app.selected_habit = 4; // last
         app.delete_habit(4);
         assert!(app.selected_habit < app.active_habits().len());
@@ -3849,7 +3952,7 @@ mod tests {
     /// Two habits whose names share a long prefix and are far too wide for the
     /// 136px name column — the case a silent clip renders identically.
     fn app_with_long_habit_names() -> HabitTrackerApp {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         for suffix in ["before bed", "after lunch"] {
             app.create_name = format!("Read thirty minutes of a paper book {suffix}");
             app.create_habit();
@@ -3959,7 +4062,7 @@ mod tests {
     /// whether a keystroke can reach them.
     #[test]
     fn a_digit_switches_screens_through_the_event_path() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         assert!(app.handle_event(&key(Key::Num2, "2")));
         assert_eq!(app.screen, Screen::Statistics);
         assert!(app.handle_event(&key(Key::Num1, "1")));
@@ -4020,7 +4123,7 @@ mod tests {
     /// A key release is not a press.
     #[test]
     fn a_key_release_changes_nothing() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let before = app.screen;
         assert!(!app.handle_event(&Event::Key(KeyEvent {
             key: Key::Num2,
@@ -4039,7 +4142,7 @@ mod tests {
     /// ends still hold.
     #[test]
     fn the_selection_stops_at_both_ends() {
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
         let count = app.active_habits().len();
         assert!(
             count >= 2,
@@ -4090,7 +4193,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = HabitTrackerApp::new();
+        let mut app = HabitTrackerApp::with_sample_habits();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

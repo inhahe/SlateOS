@@ -138,13 +138,29 @@ def detect(roots=lanec_scan.LANE_C_ROOTS, root=None):
                 written = after.startswith("=") and not after.startswith(("==", "=>"))
                 (writes if written else reads)[(m.group(1), inside[n])] += 1
 
-    return {
-        name: where
-        for name, where in decls.items()
-        if writes[(name, False)] >= 1
-        and reads[(name, False)] == 0
-        and reads[(name, True)] >= 1
-    }
+    # Two categories, reported together because the action is the same for
+    # both: wire the field to the behaviour it names, or delete it.
+    #
+    # `nobody` is the stricter finding and was invisible here until 2026-09-15.
+    # The condition used to require `reads[(name, True)] >= 1` -- at least one
+    # test read -- so a field read by NO ONE fell outside a detector named for
+    # exactly that defect. It was found from the other direction: `auto_connect`
+    # in `apps/ircclient`, set on a pre-shipped IRC network and read nowhere.
+    #
+    # Worth knowing why the compiler does not cover it either. `SavedNetwork`
+    # derives `Debug`, and a derive READS every field, so `dead_code` cannot
+    # see the case by construction -- the same shape as "a `#[cfg(test)]`
+    # module is a use", one layer down. `cargo clippy --all-targets` on that
+    # crate reports zero warnings.
+    out = {}
+    for name, where in decls.items():
+        if writes[(name, False)] < 1 or reads[(name, False)] != 0:
+            continue
+        if reads[(name, True)] >= 1:
+            out[name] = (*where, "tests")
+        else:
+            out[name] = (*where, "nobody")
+    return out
 
 
 def baseline():
@@ -172,25 +188,23 @@ def main(argv):
     known = baseline()
 
     shown = []
-    for name, (path, line) in sorted(found.items(), key=lambda kv: kv[1]):
+    for name, (path, line, who) in sorted(found.items(), key=lambda kv: kv[1]):
         key = f"{path}:{name}"
         if key in known and not listing:
             continue
-        shown.append((path, line, name, key in known))
+        shown.append((path, line, name, key in known, who))
 
-    for path, line, name, was_known in shown:
+    for path, line, name, was_known, who in shown:
         mark = "  (baseline)" if was_known else ""
-        print(
-            f"{path}:{line}: `{name}` is written in production and read only "
-            f"by tests{mark}"
-        )
+        read_by = "read only by tests" if who == "tests" else "read by nothing at all"
+        print(f"{path}:{line}: `{name}` is written in production and {read_by}{mark}")
 
     # A baseline line that no longer matches anything is not harmless. It
     # silently suppresses that exact field if it ever comes back, and it
     # describes a tree that no longer exists -- the same stale-blocker shape
     # that had three documents in this repo telling readers a decided question
     # was still open. Reported, and fatal, so the file cannot rot quietly.
-    live = {f"{path}:{name}" for name, (path, _l) in found.items()}
+    live = {f"{path}:{name}" for name, (path, _l, _w) in found.items()}
     stale = sorted(known - live)
     for key in stale:
         print(
@@ -210,9 +224,16 @@ def main(argv):
             f"{len(found)} found)"
         )
         return 0
+    by_tests = sum(1 for row in unreported if row[4] == "tests")
+    by_nobody = len(unreported) - by_tests
     print(
-        f"{len(unreported)} field(s) written in production and read only by "
-        "tests. `dead_code` cannot see these: a test counts as a read."
+        f"{len(unreported)} field(s) written in production and never read by "
+        f"it: {by_tests} read only by tests, {by_nobody} read by nothing at all."
+    )
+    print(
+        "  `dead_code` cannot see either. A test counts as a read -- and so "
+        "does a derive, which is why a field on a struct deriving `Debug` is "
+        "invisible to it however dead the field is."
     )
     return 1
 

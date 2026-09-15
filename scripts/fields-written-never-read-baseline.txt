@@ -218,3 +218,176 @@ gui/desktop/src/startup_settings.rs:last_run_at
 #   job; enforcing it is the caller's, and there is no caller yet.
 net/dns/src/lib.rs:attempts
 net/httpclient/src/lib.rs:http_only
+
+# ---------------------------------------------------------------------------
+# SECOND CATEGORY, added 2026-09-15: written in production and read by
+# NOBODY -- not even a test.
+#
+# These were invisible until today. The gate's condition required at least
+# one *test* read, so a field read by no one at all fell outside a detector
+# named for exactly that defect. Found from the other direction, by a scan
+# for lists of records built in a constructor: `auto_connect`, set on a
+# pre-shipped IRC network in `apps/ircclient` and read nowhere.
+#
+# The compiler does not cover them either, and the reason is worth keeping:
+# a `#[derive(Debug)]` READS every field, so `dead_code` cannot see a dead
+# field on any struct that derives it. Same shape as "a `#[cfg(test)]`
+# module is a use", one layer down -- `cargo clippy --all-targets` on
+# `ircclient` reports zero warnings over `auto_connect`.
+#
+# Triaged by cluster rather than one line each: the clusters are where the
+# stories are, and forty shallow notes would be the amnesty this file's
+# header refuses.
+
+# apps/automator --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/automator/src/main.rs:modified_at_ms
+
+# apps/camera --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/camera/src/main.rs:current_frame
+apps/camera/src/main.rs:recording_id
+
+# apps/colorpicker --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/colorpicker/src/main.rs:pick_x
+apps/colorpicker/src/main.rs:pick_y
+
+# apps/diskimager --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/diskimager/src/main.rs:source_drive_id
+apps/diskimager/src/main.rs:target_drive_id
+
+# apps/filesearch --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/filesearch/src/main.rs:is_searching
+
+# apps/hexeditor --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/hexeditor/src/main.rs:last_match
+
+# apps/imageviewer --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/imageviewer/src/main.rs:directory
+
+# apps/installer --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/installer/src/lib.rs:step_name
+
+# apps/ircclient --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/ircclient/src/main.rs:topic_set_by
+
+# apps/musicplayer --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/musicplayer/src/main.rs:track_number
+
+# apps/paint --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/paint/src/main.rs:active_slider
+
+# apps/pdfviewer --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/pdfviewer/src/main.rs:pdf_version
+
+# apps/photomanager --
+# Seven EXIF fields the parser extracts and the window never shows: focal
+# length, whether the flash fired, GPS altitude, the writing software, the
+# copyright, the exposure program and the exposure bias. Same defect as the 39
+# ignored command-line options reported to lane B -- work done and discarded --
+# and the same choice: show them, or stop reading them. Showing is the better
+# half here, since the bytes are already decoded and a photo manager that knows
+# your flash fired and will not say so is the stranger of the two.
+apps/photomanager/src/main.rs:copyright
+apps/photomanager/src/main.rs:exposure_bias
+apps/photomanager/src/main.rs:exposure_program
+apps/photomanager/src/main.rs:flash_fired
+apps/photomanager/src/main.rs:focal_length_mm
+apps/photomanager/src/main.rs:gps_altitude
+apps/photomanager/src/main.rs:software
+
+# apps/rssreader --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/rssreader/src/main.rs:last_attempt
+
+# apps/spreadsheet --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/spreadsheet/src/main.rs:is_cut
+
+# apps/sysmonitor --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/sysmonitor/src/main.rs:process_count
+apps/sysmonitor/src/main.rs:running_count
+
+# apps/terminal --
+# `bracketed_paste` is set by DECSET 2004 and `blink` by SGR 5. Neither can be
+# applied: this terminal has no paste path at all -- it copies a selection out
+# and nothing pastes in -- and `blink` has no timer behind the renderer. Both
+# are RIGHT to record rather than drop: a program has asked for a mode, and
+# 'we forgot you asked' is worse than 'not yet'. Revisit when paste exists.
+# `blink` additionally needs a decision about whether this terminal blinks at
+# all, which is a taste question as much as a technical one.
+apps/terminal/src/main.rs:blink
+apps/terminal/src/main.rs:bracketed_paste
+
+# apps/tmux --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/tmux/src/main.rs:copy_end
+
+# apps/torrent --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/torrent/src/main.rs:completed_time
+
+# apps/whiteboard --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+apps/whiteboard/src/main.rs:marquee
+
+# gui/desktop --
+# Five shell fields. `low_battery_warned` is the one to look at first and is
+# probably a live bug: a flag whose whole purpose is 'do not warn twice', read
+# by nothing, either warns every tick or never warns -- and which of those it
+# is cannot be told from the field. The rest -- `ctrl_held`, `trusted`,
+# `last_snapshot`, `last_tick_ms` -- sit in modules that are themselves islands
+# in scripts/orphan-modules-baseline.txt, so they are downstream of that ledger
+# rather than separate work.
+gui/desktop/src/bluetooth.rs:trusted
+gui/desktop/src/file_drop.rs:ctrl_held
+gui/desktop/src/power.rs:low_battery_warned
+gui/desktop/src/resmon.rs:last_snapshot
+gui/desktop/src/window_peek.rs:last_tick_ms
+
+# gui/toolkit --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+gui/toolkit/src/modal.rs:has_validator
+
+# net/httpclient --
+# Not yet triaged individually. Each is a value computed and discarded, and
+# none is on a path a user can currently reach.
+net/httpclient/src/lib.rs:expires
+
+# net80211 --
+# Parsed out of an EAPOL frame's header where the parser then uses the slice
+# length instead. Harmless, and worth keeping while the frame layout is being
+# read against the standard: a field named in the spec and absent from the
+# struct is harder to check against the spec than one present and unused.
+net80211/src/supplicant.rs:key_data_len
+net80211/src/supplicant.rs:mic_algo

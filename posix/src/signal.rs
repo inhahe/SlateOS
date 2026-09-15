@@ -2588,7 +2588,7 @@ mod tests {
             assert_eq!(
                 mask & neighbour,
                 0,
-                "the bit for the signal below SIGPROF must not be set: the mask is                  bit n-1 for signal n, and shifting by n would set this one"
+                "the bit for the signal below SIGPROF must not be set: the mask is bit n-1 for signal n, and shifting by n would set this one"
             );
         });
     }

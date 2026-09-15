@@ -1171,7 +1171,7 @@ fn cmd_edit_unit(_out: &mut dyn Write, unit_name: &str, flags: &SystemctlFlags) 
 /// the whole of what this can honestly do.
 fn cmd_power(_out: &mut dyn Write, action: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
     eprintln!(
-        "systemctl: cannot {action}: this system exposes no power interface;          `powerctl` reports ENOSYS for the same reason"
+        "systemctl: cannot {action}: this system exposes no power interface; `powerctl` reports ENOSYS for the same reason"
     );
     Ok(1)
 }

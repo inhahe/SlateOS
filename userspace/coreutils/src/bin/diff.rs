@@ -449,16 +449,16 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                         .iter()
                         .collect();
                     let value = if rest.is_empty() {
-                        i += 1;
-                        if i >= args.len() {
+                        i = i.saturating_add(1);
+                        let Some(value) = args.get(i) else {
                             eprintln!("diff: option '-U' requires an argument");
                             eprintln!("diff: Try 'diff --help' for more information.");
                             process::exit(2);
-                        }
+                        };
                         // Decoded: this value is a COUNT, so a word that is
                         // not Unicode is simply not a number, and the
                         // diagnostic below echoes the original bytes anyway.
-                        args[i].to_str().unwrap_or("").to_string()
+                        value.to_str().unwrap_or("").to_string()
                     } else {
                         rest
                     };
@@ -534,7 +534,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         i += 1;
     }
 
-    if positional.len() != 2 {
+    let [operand1, operand2] = positional.as_slice() else {
         // GNU's two wordings, measured on all three counts rather than
         // inferred from two:
         //
@@ -558,7 +558,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         }
         eprintln!("diff: Try 'diff --help' for more information.");
         process::exit(2);
-    }
+    };
 
     // Default color: false (Slate OS does not have reliable isatty yet).
     let use_color = color.unwrap_or(false);
@@ -575,8 +575,8 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         .collect();
 
     ParseResult::Run(Config {
-        path1: positional[0].clone(),
-        path2: positional[1].clone(),
+        path1: operand1.clone(),
+        path2: operand2.clone(),
         format,
         context_lines: ctx,
         width,
@@ -1185,12 +1185,19 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
 
     // Group changes that are within `2 * context` lines of each other.
     let mut groups: Vec<(usize, usize)> = Vec::new(); // (first_change_idx, last_change_idx)
-    let mut group_start = change_indices[0];
-    let mut group_end = change_indices[0];
+    // `is_empty` was checked above, so `split_first` cannot fail -- and it
+    // hands back the tail the loop wants in the same operation.
+    let Some((&first_change, rest_changes)) = change_indices.split_first() else {
+        return Vec::new();
+    };
+    let mut group_start = first_change;
+    let mut group_end = first_change;
 
-    for &ci in &change_indices[1..] {
+    for &ci in rest_changes {
         // Count equal lines between group_end and ci.
-        let gap = ops[group_end + 1..ci]
+        let gap = ops
+            .get(group_end.saturating_add(1)..ci)
+            .unwrap_or_default()
             .iter()
             .filter(|e| e.op == Op::Equal)
             .count();
@@ -1212,7 +1219,7 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
         let hunk_start = gs.saturating_sub(context);
         let hunk_end = (ge + context + 1).min(ops.len());
 
-        let hunk_ops = &ops[hunk_start..hunk_end];
+        let hunk_ops = ops.get(hunk_start..hunk_end).unwrap_or_default();
 
         // Count lines from file1 and file2 within this hunk, and track start
         // positions.
@@ -1220,7 +1227,7 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
         let mut line2: usize = 0;
 
         // Count lines before hunk_start to determine the starting line numbers.
-        for Edit { op, .. } in &ops[..hunk_start] {
+        for Edit { op, .. } in ops.get(..hunk_start).unwrap_or_default() {
             match op {
                 Op::Equal => {
                     line1 += 1;
@@ -1901,10 +1908,10 @@ fn print_side_by_side(ops: &[Edit], config: &Config) {
     // lacking its final newline shows the line and nothing else, and simply
     // omits the newline from its own last line of output.
     let mut i = 0;
-    while i < ops.len() {
-        match ops[i].op {
+    while let Some(cur) = ops.get(i) {
+        match cur.op {
             Op::Equal => {
-                let text = &ops[i].text;
+                let text = &cur.text;
                 let left = truncate_or_pad(text, col_width);
                 let right = truncate_or_pad(text, col_width);
                 let line = [left.as_slice(), b"   ", &right].concat();
@@ -1915,20 +1922,24 @@ fn print_side_by_side(ops: &[Edit], config: &Config) {
                 // Collect this run of deletes and the run of inserts that
                 // follows it, then pair them off.
                 let del_start = i;
-                while i < ops.len() && matches!(ops[i].op, Op::Delete) {
-                    i += 1;
+                while ops.get(i).is_some_and(|e| matches!(e.op, Op::Delete)) {
+                    i = i.saturating_add(1);
                 }
-                let del = &ops[del_start..i];
+                let del = ops.get(del_start..i).unwrap_or_default();
                 let ins_start = i;
-                while i < ops.len() && matches!(ops[i].op, Op::Insert) {
-                    i += 1;
+                while ops.get(i).is_some_and(|e| matches!(e.op, Op::Insert)) {
+                    i = i.saturating_add(1);
                 }
-                let ins = &ops[ins_start..i];
+                let ins = ops.get(ins_start..i).unwrap_or_default();
 
+                // Zipping pairs them off and ends at the shorter, which is
+                // what the index bound was computing. `pairs` is still needed
+                // below, where the unpaired remainder of the longer run is
+                // printed on its own.
                 let pairs = del.len().min(ins.len());
-                for k in 0..pairs {
-                    let left = truncate_or_pad(&del[k].text, col_width);
-                    let right = truncate_or_pad(&ins[k].text, col_width);
+                for (d, n) in del.iter().zip(ins.iter()) {
+                    let left = truncate_or_pad(&d.text, col_width);
+                    let right = truncate_or_pad(&n.text, col_width);
                     let line = [left.as_slice(), b" | ", &right].concat();
                     write_body_line(&mut w, b"", &line, when(config.color, RED));
                 }
@@ -2008,31 +2019,27 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
     let mut all_names: Vec<OsString> = Vec::new();
     let mut i = 0;
     let mut j = 0;
-    while i < entries1.len() && j < entries2.len() {
-        match entries1[i].cmp(&entries2[j]) {
+    while let (Some(e1), Some(e2)) = (entries1.get(i), entries2.get(j)) {
+        match e1.cmp(e2) {
             std::cmp::Ordering::Less => {
-                all_names.push(entries1[i].clone());
-                i += 1;
+                all_names.push(e1.clone());
+                i = i.saturating_add(1);
             }
             std::cmp::Ordering::Greater => {
-                all_names.push(entries2[j].clone());
-                j += 1;
+                all_names.push(e2.clone());
+                j = j.saturating_add(1);
             }
             std::cmp::Ordering::Equal => {
-                all_names.push(entries1[i].clone());
-                i += 1;
-                j += 1;
+                all_names.push(e1.clone());
+                i = i.saturating_add(1);
+                j = j.saturating_add(1);
             }
         }
     }
-    while i < entries1.len() {
-        all_names.push(entries1[i].clone());
-        i += 1;
-    }
-    while j < entries2.len() {
-        all_names.push(entries2[j].clone());
-        j += 1;
-    }
+    // Whichever list still has entries; the other loop above stopped because
+    // one of them ran out.
+    all_names.extend(entries1.get(i..).unwrap_or_default().iter().cloned());
+    all_names.extend(entries2.get(j..).unwrap_or_default().iter().cloned());
 
     let mut worst_exit = 0;
 

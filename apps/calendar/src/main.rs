@@ -3170,10 +3170,18 @@ fn today_from_clock() -> Option<Date> {
 /// What the window says instead of listing events.
 ///
 /// Two lines, two different absences. The first is that nothing here is the
-/// user's; the second is that nothing the user adds will survive.
+/// user's; the second is that nothing the user adds survives on its own.
+///
+/// The second line used to read "this app has no filesystem access", which was
+/// true when it was written and false from the moment Ctrl+S opened a save
+/// dialog. A banner that denies a capability the program has is the same
+/// defect as one that claims a capability it lacks, and it is the more
+/// expensive direction: a false promise is found out by trying it, while a
+/// false denial stops the user trying at all. The warning underneath is still
+/// real -- there is no autosave -- so it stays, and now names the remedy.
 const NO_EVENTS_LINES: [&str; 2] = [
     "No events -- this calendar opened with a Team Standup and four others until 2026-09-15. Nobody had scheduled any of them.",
-    "Nothing is saved: this app has no filesystem access, so an event added today is gone when the window closes.",
+    "Nothing is saved automatically -- press Ctrl+S to write an .ics file, or an event added today is gone when the window closes.",
 ];
 
 /// A day's worth of events, for tests.

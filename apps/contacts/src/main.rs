@@ -55,9 +55,14 @@ use std::time::Duration;
 // ============================================================================
 
 /// What the window says before any contact exists.
+///
+/// The second line used to read "this app has no filesystem access", which was
+/// true when written and false from the moment Ctrl+S opened a save dialog.
+/// See `apps/calendar`'s NO_EVENTS_LINES for the reasoning; found by
+/// `scripts/find-stale-admissions.py`, which exists because of it.
 const NO_CONTACTS_LINES: [&str; 2] = [
     "No contacts.",
-    "Nothing is saved between runs -- this app has no filesystem access, so anyone you add is gone when the window closes.",
+    "Nothing is saved automatically -- press Ctrl+S to write a vCard file, or anyone you add is gone when the window closes.",
 ];
 
 const SIDEBAR_WIDTH: f32 = 280.0;
@@ -4414,7 +4419,14 @@ mod tests {
         assert!(
             NO_CONTACTS_LINES
                 .iter()
-                .any(|l| l.contains("Nothing is saved between runs")),
+                // The property, not the sentence. The old assertion pinned the
+                // words "Nothing is saved between runs", which stayed true of
+                // the test long after it stopped being true of the program:
+                // this app gained a vCard door and the banner still said it
+                // had no filesystem access. What must hold is that the warning
+                // names the remedy, so a reader who believes it knows what to
+                // do instead of concluding the app cannot save at all.
+                .any(|l| l.contains("Ctrl+S")),
             "nothing warns that a contact added today does not survive the window",
         );
     }

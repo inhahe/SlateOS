@@ -41,7 +41,6 @@ apps/diskcleanup/src/main.rs:min_age_days
 apps/emojipicker/src/main.rs:last_selected
 apps/hearts/src/main.rs:hearts_broken
 apps/netmanager/src/main.rs:diagnostics_running
-apps/regextester/src/main.rs:replace_result
 apps/reminders/src/main.rs:completed_at
 apps/remotedesktop/src/main.rs:content_size_bytes
 apps/videoplayer/src/main.rs:seek_preview_position

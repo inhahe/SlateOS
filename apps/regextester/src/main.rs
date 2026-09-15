@@ -1920,6 +1920,29 @@ impl App {
                 self.active_field == ActiveField::Replace,
             );
             next_y += 42.0;
+
+            // The replacement itself. `apply_replacement` has produced this on
+            // every keystroke since the program was written, into a field
+            // nothing drew -- so a user typed a replacement into a regex
+            // tester, was shown which parts matched, and never once saw the
+            // text that would come out. The matches are the working; this is
+            // the answer.
+            //
+            // Drawn even when there is nothing to draw, because a box that
+            // appears and disappears as the pattern compiles and fails is
+            // harder to read than an empty one that stays put.
+            let result_height = 72.0;
+            self.render_text_area(
+                cmds,
+                PADDING,
+                next_y,
+                self.window_width - 2.0 * PADDING,
+                result_height,
+                "Result:",
+                self.replace_result.as_deref().unwrap_or(""),
+                false,
+            );
+            next_y += result_height + 6.0;
         }
 
         // Split: left = input text, right = results
@@ -2967,6 +2990,59 @@ mod tests {
         clippy::arithmetic_side_effects,
         clippy::float_cmp
     )]
+
+    /// Every string this program draws at a plausible window size.
+    fn drawn(app: &mut App) -> Vec<String> {
+        app.render(1200.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An app with a pattern, some input and a replacement, all applied.
+    fn replacing() -> App {
+        let mut app = App::new();
+        app.pattern = "world".to_string();
+        app.input_text = "hello world".to_string();
+        app.replace_text = "earth".to_string();
+        app.show_replace = true;
+        app.update_regex();
+        app
+    }
+
+    /// **The replaced text is on the screen.**
+    ///
+    /// `apply_replacement` has filled `replace_result` on every keystroke
+    /// since this program was written and nothing drew it. The user was shown
+    /// which parts matched -- the working -- and never the answer.
+    #[test]
+    fn the_replacement_result_is_drawn() {
+        let mut app = replacing();
+        assert_eq!(app.replace_result.as_deref(), Some("hello earth"));
+
+        let texts = drawn(&mut app);
+        assert!(
+            texts.iter().any(|t| t == "hello earth"),
+            "the result is computed and not drawn; drawn: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "Result:"),
+            "the panel has no label; drawn: {texts:?}"
+        );
+    }
+
+    /// With Replace turned off there is no result panel to read.
+    #[test]
+    fn no_result_panel_until_replace_is_shown() {
+        let mut app = replacing();
+        app.show_replace = false;
+        let texts = drawn(&mut app);
+        assert!(!texts.iter().any(|t| t == "Result:"), "{texts:?}");
+    }
 
     use super::*;
 

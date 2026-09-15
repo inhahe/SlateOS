@@ -2653,7 +2653,12 @@ impl RssReaderApp {
             String::new()
         };
 
-        if body.get(..4096).unwrap_or(&body).to_ascii_lowercase().contains("<opml") {
+        if body
+            .get(..4096)
+            .unwrap_or(&body)
+            .to_ascii_lowercase()
+            .contains("<opml")
+        {
             return match self.import_opml(&body) {
                 Ok(added) => format!(
                     "{cut_note}Subscribed to {added} feed(s) from {}. \
@@ -2688,7 +2693,10 @@ impl RssReaderApp {
         self.ingest_parsed_feed(feed_id, &parsed, now_unix());
         let added = self.articles.len().saturating_sub(before);
         if added == 0 {
-            format!("{cut_note}{} holds no articles this feed did not already have", path.display())
+            format!(
+                "{cut_note}{} holds no articles this feed did not already have",
+                path.display()
+            )
         } else {
             format!("{cut_note}Added {added} article(s) from {}", path.display())
         }
@@ -5155,7 +5163,6 @@ mod tests {
             "the file was never parsed, so do not blame its contents: {said}"
         );
     }
-
 
     /// A fresh reader holds no feeds and no articles.
     ///

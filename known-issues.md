@@ -147799,7 +147799,25 @@ worth reading: a `pub fn sample()` that only tests call is a fixture in the
 wrong module, which is untidy. One the program calls is a fabrication.
 
 77 definitions matched the name; 63 are called from production. The count
-excludes signal-processing vocabulary — `sample_rate`, `bits_per_sample`,
+excludes signal-processing vocabulary
+
+**63 is a floor, and the method is why.** Lane B's objection, and it is right:
+`simulate_integer_benchmark` was caught because somebody named it honestly. The
+same function called `measure_integer_throughput` is invisible to a name grep,
+and there is no reason to think the careless cases are the ones that got the
+candid names — if anything the opposite. Do not let 63 settle in anyone's head
+as the size of the class; it is the size of what one keyhole showed.
+
+**The probe that does not depend on the name, which lane B proposed and which
+costs one test per suspect: vary the input, assert the output varies.** A
+benchmark that returns the same score on an idle machine and on a loaded one is
+refuted in a single measurement, whatever the function is called. A netscan
+reporting the same open ports against two different hosts, an undelete listing
+the same recoverable files on two different volumes — same probe. It tests the
+property that actually matters, that the output is a function of the world,
+rather than the property the name suggests. `apps/benchmark`'s
+`a_longer_piece_of_work_is_measured_as_longer` is that probe in its
+deterministic form. — `sample_rate`, `bits_per_sample`,
 `sample_count`, `record_sample`, and `sample` in `gui/compositor/src/blur.rs`
 and `gui/imagecodec/src/png.rs`, which are all the other meaning of the word.
 

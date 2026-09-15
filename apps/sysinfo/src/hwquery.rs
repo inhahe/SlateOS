@@ -11,9 +11,12 @@
 
 use crate::{
     CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
-    MemoryMapEntry, MemorySlot, NetworkAdapterInfo, PartitionInfo, PciDeviceInfo, ProcessEntry,
-    ServiceInfo, SoundInfo, StartupEntry, UsbDeviceInfo,
+    MemoryMapEntry, NetworkAdapterInfo, PartitionInfo, PciDeviceInfo, ProcessEntry, ServiceInfo,
+    SoundInfo, StartupEntry, UsbDeviceInfo,
 };
+// Only `StubProvider` builds these, and it is `#[cfg(test)]`.
+#[cfg(test)]
+use crate::MemorySlot;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -84,10 +87,21 @@ macro_rules! sysfs {
         concat!("/sys/hardware", $leaf)
     };
 }
-/// CPU info file.
-const SYSFS_CPU: &str = sysfs!("/cpu");
-/// Memory info file.
-const SYSFS_MEMORY: &str = sysfs!("/memory");
+/// The CPU tree, as `design-decisions.md` §850 settled it.
+///
+/// `/sys/devices`, not a second `/sys/hardware`: the kernel already publishes
+/// `core_id`, `physical_package_id`, `online` and cache geometry here, and a
+/// parallel tree would publish the same facts twice in two layouts.
+///
+/// This is a **directory of scalar files**, one value per file, which is the
+/// Linux shape -- not the single `key=value` file the older constants below
+/// still name. That difference is the whole of why §850 was more than a
+/// rename, and why these two queries have their own readers.
+const SYSDEV_CPU: &str = "/sys/devices/system/cpu";
+/// CPUID leaf 1 identity: `family`, `model`, `stepping`, one per file.
+const SYSDEV_CPUID: &str = "/sys/devices/system/cpu/cpuid";
+/// System memory: `total_kb` and `available_kb`, one per file.
+const SYSDEV_MEMORY: &str = "/sys/devices/system/memory";
 /// Block devices directory.
 const SYSFS_BLOCK: &str = sysfs!("/block");
 /// Network interfaces directory.
@@ -200,6 +214,53 @@ impl SyscallProvider {
     }
 
     /// Read a sysfs file, returning its contents or an error.
+    /// One scalar file's whole contents, trimmed.
+    ///
+    /// The unit of the `/sys/devices` tree. `read_sysfs` below reads a file of
+    /// `key=value` lines, which is what the older paths in this module serve;
+    /// the two are not interchangeable and the names say which is which.
+    fn read_scalar(&self, path: &str) -> Result<String, HwQueryError> {
+        Ok(self.read_sysfs(path)?.trim().to_string())
+    }
+
+    /// A scalar file parsed as a number.
+    fn read_num<T: core::str::FromStr>(&self, path: &str) -> Result<T, HwQueryError> {
+        self.read_scalar(path)?
+            .parse()
+            .map_err(|_| HwQueryError::NotAvailable {
+                path: path.to_string(),
+            })
+    }
+
+    /// How many CPUs a Linux-style range names: `"0-7"` is 8, `"0,2-3"` is 3.
+    ///
+    /// `None` for anything it cannot read as a range, rather than a count of
+    /// zero. A machine with no CPUs is not a possible answer, so a zero could
+    /// only mean the parse failed, and saying so is cheaper than making every
+    /// caller wonder.
+    fn count_range(spec: &str) -> Option<u32> {
+        let mut total = 0_u32;
+        for part in spec.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let n = match part.split_once('-') {
+                None => {
+                    part.parse::<u32>().ok()?;
+                    1
+                }
+                Some((lo, hi)) => {
+                    let lo: u32 = lo.trim().parse().ok()?;
+                    let hi: u32 = hi.trim().parse().ok()?;
+                    hi.checked_sub(lo)?.checked_add(1)?
+                }
+            };
+            total = total.checked_add(n)?;
+        }
+        (total > 0).then_some(total)
+    }
+
     fn read_sysfs(&self, path: &str) -> Result<String, HwQueryError> {
         // On the actual OS, this would use SYS_READ to read from the sysfs VFS.
         // For now, check the file cache (populated by refresh) or try a real read.
@@ -264,57 +325,115 @@ impl SyscallProvider {
         }
     }
 
-    /// Query CPU info using CPUID instruction and sysfs.
+    /// Read the processor from `/sys/devices/system/cpu`.
     ///
-    /// On native hardware, this reads CPUID results. The kernel exposes
-    /// processed CPUID data at `/sys/hardware/cpu`.
+    /// Scalar-per-file: `cpuid/` for the CPUID leaf 1 identity, `present` for
+    /// the logical count, `cpuN/topology/` for the physical core count,
+    /// `cpu0/cache/indexN/` for the cache geometry.
+    ///
+    /// **Four fields come back `None` and always will on this kernel.** There
+    /// is no brand string -- CPUID leaves 0x8000_0002..4 are not served -- no
+    /// vendor (leaf 0), and no `cpufreq/`, so neither clock can be read.
+    /// `sysfs.rs` gives the reason for the last and it covers all four: a file
+    /// reading 0 cannot be told from a real 0, so absent is the honest answer.
+    /// The fields are `Option` so this function cannot invent them.
     fn query_cpu_from_cpuid(&self) -> Result<CpuInfo, HwQueryError> {
-        let content = self.read_sysfs(SYSFS_CPU)?;
-        let kv = Self::parse_kv_file(&content);
+        // The identity must be present: if `cpuid/` is not there the tree is
+        // not there, and a CpuInfo of defaults would describe a machine.
+        let family = self.read_num(&format!("{SYSDEV_CPUID}/family"))?;
+        let model = self.read_num(&format!("{SYSDEV_CPUID}/model"))?;
+        let stepping = self.read_num(&format!("{SYSDEV_CPUID}/stepping"))?;
+
+        let logical_processors = self
+            .read_scalar(&format!("{SYSDEV_CPU}/present"))
+            .ok()
+            .and_then(|spec| Self::count_range(&spec))
+            .unwrap_or(1);
 
         Ok(CpuInfo {
-            brand: kv
-                .get("brand")
-                .cloned()
-                .unwrap_or_else(|| "Unknown CPU".to_string()),
-            vendor: kv
-                .get("vendor")
-                .cloned()
-                .unwrap_or_else(|| "Unknown".to_string()),
-            family: Self::field(&kv, "family", 0)?,
-            model: Self::field(&kv, "model", 0)?,
-            stepping: Self::field(&kv, "stepping", 0)?,
-            physical_cores: Self::field(&kv, "physical_cores", 1)?,
-            logical_processors: Self::field(&kv, "logical_processors", 1)?,
-            base_clock_mhz: Self::field(&kv, "base_clock_mhz", 0)?,
-            max_turbo_mhz: Self::field(&kv, "max_turbo_mhz", 0)?,
-            l1_data_kb: Self::field(&kv, "l1_data_kb", 0)?,
-            l1_inst_kb: Self::field(&kv, "l1_inst_kb", 0)?,
-            l2_kb: Self::field(&kv, "l2_kb", 0)?,
-            l3_kb: Self::field(&kv, "l3_kb", 0)?,
-            features: Self::parse_cpu_features(
-                kv.get("features").map(|s| s.as_str()).unwrap_or(""),
-            ),
+            brand: None,
+            vendor: None,
+            family,
+            model,
+            stepping,
+            physical_cores: self.physical_core_count(logical_processors),
+            logical_processors,
+            base_clock_mhz: None,
+            max_turbo_mhz: None,
+            l1_data_kb: self.cache_kb(1, "Data").unwrap_or(0),
+            l1_inst_kb: self.cache_kb(1, "Instruction").unwrap_or(0),
+            l2_kb: self.cache_kb(2, "Unified").unwrap_or(0),
+            l3_kb: self.cache_kb(3, "Unified").unwrap_or(0),
+            features: Vec::new(),
         })
     }
 
-    /// Parse CPU feature flags from a comma-separated string.
-    /// Format: "SSE,SSE2,!AVX-512" where ! prefix means not supported.
-    fn parse_cpu_features(features_str: &str) -> Vec<(String, bool)> {
-        if features_str.is_empty() {
-            return Vec::new();
-        }
-        features_str
-            .split(',')
-            .map(|f| {
-                let f = f.trim();
-                if let Some(name) = f.strip_prefix('!') {
-                    (name.to_string(), false)
-                } else {
-                    (f.to_string(), true)
+    /// Distinct `(socket, core)` pairs across the present CPUs.
+    ///
+    /// Counted rather than divided by an assumed two threads per core: a
+    /// machine without hyper-threading would come back at half its real core
+    /// count, and one with four threads per core at twice.
+    ///
+    /// Falls back to the logical count when the topology is unreadable, which
+    /// is right rather than convenient -- a machine with as many cores as
+    /// threads is plausible, one with zero cores is not.
+    fn physical_core_count(&self, logical: u32) -> u32 {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for cpu in 0..logical {
+            let dir = format!("{SYSDEV_CPU}/cpu{cpu}/topology");
+            let socket = self.read_scalar(&format!("{dir}/physical_package_id"));
+            let core = self.read_scalar(&format!("{dir}/core_id"));
+            if let (Ok(socket), Ok(core)) = (socket, core) {
+                let pair = (socket, core);
+                if !seen.contains(&pair) {
+                    seen.push(pair);
                 }
-            })
-            .collect()
+            }
+        }
+        u32::try_from(seen.len())
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(logical)
+    }
+
+    /// The size in KiB of the first cache matching `level` and `kind`.
+    ///
+    /// `size` is served the way Linux serves it, a number with a `K` or `M`
+    /// suffix, so it is parsed rather than assumed to be bytes -- reading
+    /// "32K" as 32 bytes would report a thirty-second of a kilobyte of L1.
+    fn cache_kb(&self, level: u32, kind: &str) -> Option<u32> {
+        for index in 0..8 {
+            let dir = format!("{SYSDEV_CPU}/cpu0/cache/index{index}");
+            let Ok(found_level) = self.read_num::<u32>(&format!("{dir}/level")) else {
+                continue;
+            };
+            let Ok(found_kind) = self.read_scalar(&format!("{dir}/type")) else {
+                continue;
+            };
+            if found_level != level || !found_kind.eq_ignore_ascii_case(kind) {
+                continue;
+            }
+            let Ok(size) = self.read_scalar(&format!("{dir}/size")) else {
+                continue;
+            };
+            return Self::parse_cache_size_kb(&size);
+        }
+        None
+    }
+
+    /// `"32K"` becomes 32, `"8M"` becomes 8192, a bare number is already KiB.
+    fn parse_cache_size_kb(text: &str) -> Option<u32> {
+        let text = text.trim();
+        let last = text.chars().last()?;
+        let kilo = last.eq_ignore_ascii_case(&'K');
+        let mega = last.eq_ignore_ascii_case(&'M');
+        let (digits, scale) = if kilo || mega {
+            let cut = text.len().checked_sub(1)?;
+            (text.get(..cut)?, if mega { 1024_u32 } else { 1_u32 })
+        } else {
+            (text, 1_u32)
+        };
+        digits.trim().parse::<u32>().ok()?.checked_mul(scale)
     }
 
     /// Parse a list of records from a sysfs directory.
@@ -363,44 +482,30 @@ impl HardwareProvider for SyscallProvider {
         self.query_cpu_from_cpuid()
     }
 
+    /// Read memory from `/sys/devices/system/memory`.
+    ///
+    /// Two scalar files, both from `mm::memory_info`. Lane A's producer
+    /// carries a boot-time cross-check asserting `total_kb` equals
+    /// `/proc/meminfo`'s `MemTotal`, so a later change to a frame counter that
+    /// includes non-usable holes goes red rather than quietly inflating what
+    /// this window reports.
+    ///
+    /// **No slots.** The physical layout -- part numbers, per-slot speeds, how
+    /// many sockets are populated -- is SMBIOS, which nothing in this tree
+    /// reads. The list is empty rather than invented; it used to carry two
+    /// 16 GB Corsair modules at 5,600 MHz.
     fn query_memory(&self) -> Result<MemoryInfo, HwQueryError> {
-        let content = self.read_sysfs(SYSFS_MEMORY)?;
-        let kv = Self::parse_kv_file(&content);
-
-        let mut slots = Vec::new();
-        // Parse slot entries if present (slot0_*, slot1_*, etc.)
-        for i in 0..16 {
-            let prefix = format!("slot{i}_");
-            if let Some(name) = kv.get(&format!("{prefix}name")) {
-                slots.push(MemorySlot {
-                    slot_name: name.clone(),
-                    size_mb: Self::field(&kv, &format!("{prefix}size_mb"), 0)?,
-                    mem_type: kv
-                        .get(&format!("{prefix}type"))
-                        .cloned()
-                        .unwrap_or_default(),
-                    speed_mhz: Self::field(&kv, &format!("{prefix}speed_mhz"), 0)?,
-                    manufacturer: kv
-                        .get(&format!("{prefix}manufacturer"))
-                        .cloned()
-                        .unwrap_or_default(),
-                });
-            }
-        }
-
-        let slots_used = slots.iter().filter(|s| s.size_mb > 0).count() as u32;
-
+        let total_kb: u64 = self.read_num(&format!("{SYSDEV_MEMORY}/total_kb"))?;
+        let available_kb: u64 = self.read_num(&format!("{SYSDEV_MEMORY}/available_kb"))?;
         Ok(MemoryInfo {
-            total_mb: Self::field(&kv, "total_mb", 0)?,
-            available_mb: Self::field(&kv, "available_mb", 0)?,
-            mem_type: kv
-                .get("type")
-                .cloned()
-                .unwrap_or_else(|| "Unknown".to_string()),
-            speed_mhz: Self::field(&kv, "speed_mhz", 0)?,
-            slots_used,
-            slots_total: Self::field(&kv, "slots_total", slots.len() as u32)?,
-            slots,
+            total_mb: total_kb / 1024,
+            available_mb: available_kb / 1024,
+            // The kind and speed of the memory are SMBIOS facts too.
+            mem_type: String::new(),
+            speed_mhz: 0,
+            slots_used: 0,
+            slots_total: 0,
+            slots: Vec::new(),
         })
     }
 
@@ -761,15 +866,15 @@ impl StubProvider {
 impl HardwareProvider for StubProvider {
     fn query_cpu(&self) -> Result<CpuInfo, HwQueryError> {
         Ok(CpuInfo {
-            brand: "Slate OS Virtual CPU @ 3.60GHz".to_string(),
-            vendor: "GenuineIntel".to_string(),
+            brand: Some("Fixture CPU".to_string()),
+            vendor: Some("FixtureVendor".to_string()),
             family: 6,
             model: 158,
             stepping: 13,
             physical_cores: 8,
             logical_processors: 16,
-            base_clock_mhz: 3600,
-            max_turbo_mhz: 5100,
+            base_clock_mhz: Some(3600),
+            max_turbo_mhz: Some(5100),
             l1_data_kb: 32,
             l1_inst_kb: 32,
             l2_kb: 256,
@@ -1203,13 +1308,20 @@ impl RefreshManager {
         self.provider.provider_name()
     }
 
-    /// Get CPU info (cached with TTL).
-    pub fn cpu(&mut self) -> CpuInfo {
+    /// The cached processor, or `None` if it has never been read.
+    ///
+    /// `Option` rather than a zero-filled `CpuInfo`. The last-resort branch
+    /// here used to build one with brand "Unknown", zero cores and zero
+    /// caches, which draws as a description of a very poor machine rather than
+    /// as an absence, and which a caller cannot tell from a real reading. The
+    /// stale-cache branch above it stays: a value read thirty seconds ago is a
+    /// real value, and serving it is different in kind from inventing one.
+    pub fn cpu(&mut self) -> Option<CpuInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.cpu_cache
             && !entry.is_stale(now)
         {
-            return entry.data.clone();
+            return Some(entry.data.clone());
         }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_cpu() {
@@ -1219,31 +1331,9 @@ impl RefreshManager {
                     timestamp: now,
                     ttl_secs: self.cpu_ttl,
                 });
-                info
+                Some(info)
             }
-            Err(_) => self
-                .cpu_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_else(|| {
-                    // Last resort: empty default
-                    CpuInfo {
-                        brand: "Unknown".to_string(),
-                        vendor: "Unknown".to_string(),
-                        family: 0,
-                        model: 0,
-                        stepping: 0,
-                        physical_cores: 0,
-                        logical_processors: 0,
-                        base_clock_mhz: 0,
-                        max_turbo_mhz: 0,
-                        l1_data_kb: 0,
-                        l1_inst_kb: 0,
-                        l2_kb: 0,
-                        l3_kb: 0,
-                        features: Vec::new(),
-                    }
-                }),
+            Err(_) => self.cpu_cache.as_ref().map(|e| e.data.clone()),
         }
     }
 
@@ -1726,7 +1816,7 @@ mod tests {
     fn test_stub_cpu() {
         let stub = StubProvider::new();
         let cpu = stub.query_cpu().expect("stub cpu");
-        assert!(cpu.brand.contains("Slate OS"));
+        assert_eq!(cpu.brand.as_deref(), Some("Fixture CPU"));
         assert_eq!(cpu.physical_cores, 8);
         assert_eq!(cpu.logical_processors, 16);
         assert!(!cpu.features.is_empty());
@@ -1810,28 +1900,6 @@ mod tests {
     }
 
     // -- CPU feature parsing --
-
-    #[test]
-    fn test_parse_cpu_features_basic() {
-        let features = SyscallProvider::parse_cpu_features("SSE,SSE2,!AVX-512");
-        assert_eq!(features.len(), 3);
-        assert_eq!(features[0], ("SSE".to_string(), true));
-        assert_eq!(features[1], ("SSE2".to_string(), true));
-        assert_eq!(features[2], ("AVX-512".to_string(), false));
-    }
-
-    #[test]
-    fn test_parse_cpu_features_empty() {
-        let features = SyscallProvider::parse_cpu_features("");
-        assert!(features.is_empty());
-    }
-
-    #[test]
-    fn test_parse_cpu_features_all_disabled() {
-        let features = SyscallProvider::parse_cpu_features("!A,!B,!C");
-        assert_eq!(features.len(), 3);
-        assert!(features.iter().all(|(_, enabled)| !enabled));
-    }
 
     // -- Key-value file parsing --
 
@@ -1963,12 +2031,12 @@ mod tests {
     #[test]
     fn test_refresh_manager_with_stub() {
         let mut mgr = RefreshManager::new(Box::new(StubProvider::new()));
-        let cpu = mgr.cpu();
-        assert!(cpu.brand.contains("Slate OS"));
+        let cpu = mgr.cpu().expect("a cpu from the stub");
+        assert_eq!(cpu.brand.as_deref(), Some("Fixture CPU"));
         assert_eq!(mgr.refresh_count(), 1);
 
         // Second access should be cached
-        let cpu2 = mgr.cpu();
+        let cpu2 = mgr.cpu().expect("a cached cpu");
         assert_eq!(cpu2.brand, cpu.brand);
         assert_eq!(mgr.refresh_count(), 1); // Still 1 — used cache
     }

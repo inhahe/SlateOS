@@ -357,15 +357,30 @@ impl Property {
 /// CPU information.
 #[derive(Clone, Debug)]
 pub struct CpuInfo {
-    pub brand: String,
-    pub vendor: String,
+    /// The marketing name, if anything publishes one. Nothing does.
+    ///
+    /// The kernel serves CPUID leaf 1 -- family, model, stepping -- and not
+    /// leaves 0x8000_0002..4, which are where a brand string lives. An empty
+    /// `String` would draw as a processor with no name rather than as a
+    /// question nobody answered, and the invented value it replaced was
+    /// "Intel Core i7-13700K".
+    pub brand: Option<String>,
+    /// The vendor string, on the same terms as [`CpuInfo::brand`]: CPUID leaf
+    /// 0, also not served.
+    pub vendor: Option<String>,
     pub family: u32,
     pub model: u32,
     pub stepping: u32,
     pub physical_cores: u32,
     pub logical_processors: u32,
-    pub base_clock_mhz: u32,
-    pub max_turbo_mhz: u32,
+    /// Base clock, if a frequency source exists. None does.
+    ///
+    /// Lane A's `sysfs.rs` says why there is no `cpufreq/`, and the reasoning
+    /// covers this field: *"a file reading 0 cannot be told from a real 0 MHz.
+    /// Absent is the honest answer until a CPUID leaf-16h reader exists."*
+    pub base_clock_mhz: Option<u32>,
+    /// Turbo clock, on the same terms as [`CpuInfo::base_clock_mhz`].
+    pub max_turbo_mhz: Option<u32>,
     pub l1_data_kb: u32,
     pub l1_inst_kb: u32,
     pub l2_kb: u32,
@@ -748,6 +763,24 @@ impl SysInfoState {
         )]
     }
 
+    /// A value the system did not report, said as an absence.
+    ///
+    /// "Not reported" rather than a blank, an "Unknown", or a zero. All three
+    /// read as facts about the machine: a blank looks like an empty name, and
+    /// a zero MHz looks like a stopped clock. This is the one phrasing that
+    /// cannot be mistaken for a reading.
+    const NOT_REPORTED: &'static str = "Not reported by this system";
+
+    /// Render an optional value, or say it was not reported.
+    fn or_absent(value: Option<&str>) -> String {
+        value.map_or_else(|| Self::NOT_REPORTED.to_string(), ToString::to_string)
+    }
+
+    /// Render an optional number with a unit, or say it was not reported.
+    fn num_or_absent(value: Option<u32>, unit: &str) -> String {
+        value.map_or_else(|| Self::NOT_REPORTED.to_string(), |n| format!("{n} {unit}"))
+    }
+
     fn props_system_summary(&self) -> Vec<Property> {
         let (Some(cpu), Some(mem)) = (&self.cpu_info, &self.memory_info) else {
             // The OS rows below are this program's own constants and stay
@@ -766,12 +799,15 @@ impl SysInfoState {
             Property::new("OS Build", "2026.05.17-nightly"),
             Property::new("Kernel Version", "0.1.0-slateos"),
             Property::new("System Manufacturer", "SMBIOS: To Be Filled By O.E.M."),
-            Property::new("Processor", &cpu.brand),
+            Property::new("Processor", &Self::or_absent(cpu.brand.as_deref())),
             Property::new(
                 "Cores / Threads",
                 &format!("{} / {}", cpu.physical_cores, cpu.logical_processors),
             ),
-            Property::new("Base Frequency", &format!("{} MHz", cpu.base_clock_mhz)),
+            Property::new(
+                "Base Frequency",
+                &Self::num_or_absent(cpu.base_clock_mhz, "MHz"),
+            ),
             Property::new(
                 "Total Physical Memory",
                 &format!(
@@ -801,15 +837,21 @@ impl SysInfoState {
             return Self::unreadable("Processor", "/sys/hardware/cpu");
         };
         let mut props = vec![
-            Property::new("Processor Name", &cpu.brand),
-            Property::new("Vendor", &cpu.vendor),
+            Property::new("Processor Name", &Self::or_absent(cpu.brand.as_deref())),
+            Property::new("Vendor", &Self::or_absent(cpu.vendor.as_deref())),
             Property::new("Family", &format!("{}", cpu.family)),
             Property::new("Model", &format!("{}", cpu.model)),
             Property::new("Stepping", &format!("{}", cpu.stepping)),
             Property::new("Physical Cores", &format!("{}", cpu.physical_cores)),
             Property::new("Logical Processors", &format!("{}", cpu.logical_processors)),
-            Property::new("Base Clock", &format!("{} MHz", cpu.base_clock_mhz)),
-            Property::new("Max Turbo Clock", &format!("{} MHz", cpu.max_turbo_mhz)),
+            Property::new(
+                "Base Clock",
+                &Self::num_or_absent(cpu.base_clock_mhz, "MHz"),
+            ),
+            Property::new(
+                "Max Turbo Clock",
+                &Self::num_or_absent(cpu.max_turbo_mhz, "MHz"),
+            ),
             Property::new(
                 "L1 Data Cache",
                 &format!("{} KiB (per core)", cpu.l1_data_kb),
@@ -2476,15 +2518,15 @@ mod tests {
     /// what it is in the one place a reader would see it.
     fn fixture_cpu() -> CpuInfo {
         CpuInfo {
-            brand: "Fixture CPU".to_string(),
-            vendor: "FixtureVendor".to_string(),
+            brand: Some("Fixture CPU".to_string()),
+            vendor: Some("FixtureVendor".to_string()),
             family: 1,
             model: 2,
             stepping: 3,
             physical_cores: 4,
             logical_processors: 8,
-            base_clock_mhz: 1000,
-            max_turbo_mhz: 2000,
+            base_clock_mhz: Some(1000),
+            max_turbo_mhz: Some(2000),
             l1_data_kb: 32,
             l1_inst_kb: 32,
             l2_kb: 512,

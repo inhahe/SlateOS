@@ -11,12 +11,15 @@
 
 use crate::{
     CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
-    MemoryMapEntry, NetworkAdapterInfo, PartitionInfo, PciDeviceInfo, ProcessEntry, ServiceInfo,
-    SoundInfo, StartupEntry, UsbDeviceInfo,
+    MemoryMapEntry, NetworkAdapterInfo, PciDeviceInfo, ProcessEntry, ServiceInfo, SoundInfo,
+    StartupEntry, UsbDeviceInfo,
 };
-// Only `StubProvider` builds these, and it is `#[cfg(test)]`.
+// Only `StubProvider` builds these, and it is `#[cfg(test)]`. `PartitionInfo`
+// joined them when `query_storage` stopped inventing partitions: the kernel
+// publishes no partition table under `/sys/devices/block`, so the real
+// provider has none to build.
 #[cfg(test)]
-use crate::MemorySlot;
+use crate::{MemorySlot, PartitionInfo};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -102,8 +105,17 @@ const SYSDEV_CPU: &str = "/sys/devices/system/cpu";
 const SYSDEV_CPUID: &str = "/sys/devices/system/cpu/cpuid";
 /// System memory: `total_kb` and `available_kb`, one per file.
 const SYSDEV_MEMORY: &str = "/sys/devices/system/memory";
-/// Block devices directory.
-const SYSFS_BLOCK: &str = sysfs!("/block");
+/// Block devices: `/sys/devices/block/<name>/{sector_count,sector_size,read_only}`.
+///
+/// `/sys/devices`, not `/sys/hardware`, for the reason §850 gives and that
+/// `SYSDEV_CPU` above already follows. This constant used to name
+/// `/sys/hardware/block`, **a path the kernel has never served**, so the
+/// Storage category reported "cannot read" on a machine whose disks were
+/// published the whole time.
+///
+/// A directory of scalar files, one value per file -- not the `key=value`
+/// file the older constants below still name.
+const SYSDEV_BLOCK: &str = "/sys/devices/block";
 /// Network interfaces directory.
 const SYSFS_NET: &str = sysfs!("/net");
 /// PCI devices directory.
@@ -197,6 +209,15 @@ pub trait HardwareProvider {
 pub struct SyscallProvider {
     /// Cache of file contents from sysfs reads.
     file_cache: HashMap<String, String>,
+    /// Prefixed to every path read, empty in a shipping build.
+    ///
+    /// The same seam `procinfo::ProcFs::at` provides, and for the same reason:
+    /// the constants here are absolute, so without it nothing that *lists* a
+    /// directory can be tested at all. `query_storage` reads the real
+    /// `/sys/devices/block` through `read_dir`, which the file cache cannot
+    /// stand in for -- a cache of file contents has no answer to "what is in
+    /// this directory".
+    root: String,
 }
 
 impl Default for SyscallProvider {
@@ -206,10 +227,25 @@ impl Default for SyscallProvider {
 }
 
 impl SyscallProvider {
+    /// A provider reading under `root` instead of `/`. **Tests only.**
+    #[cfg(test)]
+    pub fn at(root: &str) -> Self {
+        Self {
+            file_cache: HashMap::new(),
+            root: root.to_string(),
+        }
+    }
+
+    /// `path` as this provider should actually open it.
+    fn rooted(&self, path: &str) -> String {
+        format!("{}{path}", self.root)
+    }
+
     /// Create a new syscall-based provider.
     pub fn new() -> Self {
         Self {
             file_cache: HashMap::new(),
+            root: String::new(),
         }
     }
 
@@ -268,12 +304,13 @@ impl SyscallProvider {
             return Ok(cached.clone());
         }
 
-        // Attempt a real filesystem read
-        match std::fs::read_to_string(path) {
+        // Attempt a real filesystem read. The error names the path actually
+        // opened rather than the logical one, so a reader can go and look at
+        // it.
+        let opened = self.rooted(path);
+        match std::fs::read_to_string(&opened) {
             Ok(content) => Ok(content),
-            Err(_) => Err(HwQueryError::NotAvailable {
-                path: path.to_string(),
-            }),
+            Err(_) => Err(HwQueryError::NotAvailable { path: opened }),
         }
     }
 
@@ -509,56 +546,60 @@ impl HardwareProvider for SyscallProvider {
         })
     }
 
+    /// Read the registered block devices from `/sys/devices/block`.
+    ///
+    /// Capacity is `sector_count * sector_size`, and both names are read
+    /// rather than one assumed. Lane A's producer says why in
+    /// `kernel/src/fs/sysfs.rs`: Linux's `size` is in 512-byte units whatever
+    /// the device's real sector size is, so a reader that multiplied it by
+    /// `sector_size` would be wrong on any device that is not 512 -- and every
+    /// device here is 512 today, **which is the condition that lets that bug
+    /// ship unnoticed.**
+    ///
+    /// Three fields stay empty rather than being filled with something
+    /// plausible. The model string, the serial number and SMART health are
+    /// SMBIOS and ATA facts that nothing in this tree reads; the device's own
+    /// name is what there is, and it is put in `model` because that is the
+    /// column the window draws. **Partitions are empty for the same reason**
+    /// -- the kernel publishes no partition table here, and the previous
+    /// implementation read `part0_`-prefixed keys out of a file that does not
+    /// exist.
     fn query_storage(&self) -> Result<Vec<DiskInfo>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_BLOCK)?;
-        let mut disks = Vec::new();
+        let base_dir = self.rooted(SYSDEV_BLOCK);
+        let dir = std::fs::read_dir(&base_dir).map_err(|_| HwQueryError::NotAvailable {
+            path: base_dir.clone(),
+        })?;
 
-        for entry in &entries {
-            // Parse partitions from sub-entries
-            let mut partitions = Vec::new();
-            for i in 0..16 {
-                let prefix = format!("part{i}_");
-                if let Some(label) = entry.get(&format!("{prefix}label")) {
-                    partitions.push(PartitionInfo {
-                        label: label.clone(),
-                        filesystem: entry
-                            .get(&format!("{prefix}fs"))
-                            .cloned()
-                            .unwrap_or_default(),
-                        // Raw byte counts, not gigabytes. The node used to
-                        // publish `capacity_gb` as a float, which forced every
-                        // reader to guess whether the producer had divided by
-                        // 1000 or 1024 — and the display code guessed wrong.
-                        // Linux's `/sys/block/*/size` is a sector count for the
-                        // same reason: a kernel interface should report the
-                        // quantity, and leave scaling to whoever formats it.
-                        capacity_bytes: Self::field(entry, &format!("{prefix}capacity_bytes"), 0)?,
-                        used_bytes: Self::field(entry, &format!("{prefix}used_bytes"), 0)?,
-                        free_bytes: Self::field(entry, &format!("{prefix}free_bytes"), 0)?,
-                        mount_point: entry
-                            .get(&format!("{prefix}mount"))
-                            .cloned()
-                            .unwrap_or_default(),
-                    });
-                }
-            }
+        let mut disks = Vec::new();
+        for entry in dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let base = format!("{SYSDEV_BLOCK}/{name}");
+            // A device unregistered between the listing and the read is
+            // skipped rather than failing the whole query: the same race a
+            // process list has, and the same answer.
+            let (Ok(sector_count), Ok(sector_size)) = (
+                self.read_num::<u64>(&format!("{base}/sector_count")),
+                self.read_num::<u64>(&format!("{base}/sector_size")),
+            ) else {
+                continue;
+            };
+            let read_only = self
+                .read_num::<u8>(&format!("{base}/read_only"))
+                .unwrap_or(0);
 
             disks.push(DiskInfo {
-                model: entry
-                    .get("model")
-                    .cloned()
-                    .unwrap_or_else(|| "Unknown Disk".to_string()),
-                capacity_bytes: Self::field(entry, "capacity_bytes", 0)?,
-                interface: entry.get("interface").cloned().unwrap_or_default(),
-                serial: entry.get("serial").cloned().unwrap_or_default(),
-                smart_status: entry
-                    .get("smart_status")
-                    .cloned()
-                    .unwrap_or_else(|| "Unknown".to_string()),
-                partitions,
+                model: name,
+                capacity_bytes: sector_count.saturating_mul(sector_size),
+                interface: String::new(),
+                serial: String::new(),
+                smart_status: if read_only == 1 {
+                    String::from("read-only")
+                } else {
+                    String::new()
+                },
+                partitions: Vec::new(),
             });
         }
-
         Ok(disks)
     }
 

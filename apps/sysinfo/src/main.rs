@@ -2753,6 +2753,120 @@ mod tests {
         })
     }
 
+    /// The disks the kernel publishes are read, and nothing else is invented.
+    ///
+    /// `query_storage` read `/sys/hardware/block`, **a path this kernel has
+    /// never served**, and parsed `part0_`-prefixed keys out of it. Lane A
+    /// publishes `/sys/devices/block/<name>/{sector_count,sector_size,
+    /// read_only}` as scalar files, so the Storage category reported "cannot
+    /// read" on a machine whose disks were there the whole time.
+    ///
+    /// Capacity multiplies the two names that are read rather than assuming
+    /// 512-byte sectors -- lane A's own comment gives the reason, and it is
+    /// the sharpest kind: every device here is 512 today, **which is the
+    /// condition that lets a 512-assumption ship unnoticed.** The fixture
+    /// below uses 4096 so the assumption cannot pass.
+    #[test]
+    fn the_disks_the_kernel_publishes_are_read() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-block-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("sys/devices/block");
+        std::fs::create_dir_all(base.join("vda")).expect("fixture");
+        std::fs::create_dir_all(base.join("vdb")).expect("fixture");
+
+        std::fs::write(base.join("vda/sector_count"), b"2048\n").unwrap();
+        std::fs::write(base.join("vda/sector_size"), b"4096\n").unwrap();
+        std::fs::write(base.join("vda/read_only"), b"0\n").unwrap();
+
+        std::fs::write(base.join("vdb/sector_count"), b"100\n").unwrap();
+        std::fs::write(base.join("vdb/sector_size"), b"512\n").unwrap();
+        std::fs::write(base.join("vdb/read_only"), b"1\n").unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        let mut disks = {
+            use hwquery::HardwareProvider;
+            provider
+                .query_storage()
+                .expect("the fixture tree is readable")
+        };
+        disks.sort_by(|a, b| a.model.cmp(&b.model));
+
+        assert_eq!(disks.len(), 2, "one entry per device directory");
+
+        let vda = disks.first().expect("vda");
+        assert_eq!(vda.model, "vda");
+        assert_eq!(
+            vda.capacity_bytes,
+            2048 * 4096,
+            "capacity is sector_count times the device's own sector_size"
+        );
+        assert!(
+            vda.smart_status.is_empty(),
+            "a writable disk is not annotated"
+        );
+
+        let vdb = disks.get(1).expect("vdb");
+        assert_eq!(vdb.capacity_bytes, 100 * 512);
+        assert_eq!(vdb.smart_status, "read-only");
+
+        for d in &disks {
+            assert!(d.partitions.is_empty(), "invented a partition table");
+            assert!(d.serial.is_empty(), "invented a serial number");
+            assert!(d.interface.is_empty(), "invented an interface");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A device that vanishes between the listing and the read is skipped.
+    #[test]
+    fn a_block_device_with_no_scalars_is_skipped_not_fatal() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-block-gone-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("sys/devices/block");
+        std::fs::create_dir_all(base.join("vda")).expect("fixture");
+        // A directory with no files: the shape of a device unregistered while
+        // the list was being walked.
+        std::fs::create_dir_all(base.join("gone")).expect("fixture");
+        std::fs::write(base.join("vda/sector_count"), b"8\n").unwrap();
+        std::fs::write(base.join("vda/sector_size"), b"512\n").unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let disks = provider.query_storage().expect("readable");
+
+        assert_eq!(disks.len(), 1, "the half-gone device is skipped, not fatal");
+        assert_eq!(disks.first().expect("vda").model, "vda");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no such tree at all, it says so rather than reporting no disks.
+    ///
+    /// **Absent is not empty.** "This machine has no disks" and "I could not
+    /// look" are different answers, and only one of them is ever true here.
+    #[test]
+    fn an_absent_block_tree_is_an_error_not_an_empty_list() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-block-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        assert!(
+            provider.query_storage().is_err(),
+            "an unreadable tree reported as an empty disk list"
+        );
+    }
+
     fn ctrl(key: Key) -> Event {
         Event::Key(KeyEvent {
             key,

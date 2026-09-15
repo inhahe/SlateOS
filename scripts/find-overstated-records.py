@@ -268,8 +268,26 @@ SELF_TEST = [
 ]
 
 
-def self_test(capable):
-    """Check the predicate against the shapes it was narrowed on."""
+def self_test():
+    """Check the predicate against the shapes it was narrowed on.
+
+    Against a **synthetic** capability map, not the tree's. The first version
+    of this used the real one and went red the same afternoon -- because the
+    finding it was built from got fixed, so `renamer` acquired `std::fs` and
+    the two positive cases stopped firing. A self-test that passes or fails
+    depending on the code it happens to be sitting next to is testing the tree,
+    not the predicate, and the tree is the part that is supposed to change.
+    """
+    # Only the crate names the cases actually name. Deriving this from the
+    # headings' words instead made every word a candidate crate -- "td", "c",
+    # "only" -- so attribution was ambiguous for every case and none fired.
+    capable = {
+        c: False
+        for c in (
+            "renamer", "finance", "pdfviewer", "lockscreen",
+            "alarmclock", "weather", "terminal",
+        )
+    }
     bad = 0
     for line, heading, should, why in SELF_TEST:
         m = CREDIT.search(line)
@@ -292,7 +310,7 @@ def main():
         if arg.startswith("--docs="):
             docs = [d for d in arg.split("=", 1)[1].split(",") if d]
         elif arg == "--self-test":
-            return self_test(crates())
+            return self_test()
         else:
             print(f"unknown argument: {arg}", file=sys.stderr)
             return 2

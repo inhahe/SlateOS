@@ -178,12 +178,48 @@ def baseline():
 def main(argv):
     if selftestflag.wants_selftest(argv):
         return self_test()
-    unknown = selftestflag.unknown_options(argv, known=("--list",))
+    roots = None
+    rest = []
+    for arg in argv:
+        if arg.startswith("--roots="):
+            roots = [r for r in arg.split("=", 1)[1].split(",") if r]
+        else:
+            rest.append(arg)
+    unknown = selftestflag.unknown_options(rest, known=("--list",))
     if unknown:
         print(f"unrecognised option(s): {' '.join(unknown)}", file=sys.stderr)
         return 2
 
-    listing = "--list" in argv
+    listing = "--list" in rest
+
+    # `--roots` is report-only, and the refusal is the point of the flag rather
+    # than a limitation of it.
+    #
+    # The baseline is a list of `path:field`. Nothing in it records WHICH roots
+    # produced it, so a pass against different roots would be a true sentence
+    # about a population the run never looked at -- the failure this project
+    # keeps finding in its own gates. A flag that lets another lane scan their
+    # tree is useful; one that lets them collect a green tick for it is worse
+    # than not having the flag.
+    if roots is not None:
+        missing = [r for r in roots if not (lanec_scan.ROOT / r).is_dir()]
+        if missing:
+            print(f"no such directory: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        if listing is False:
+            print(
+                f"scanning {', '.join(sorted(roots))} (report only; the "
+                f"baseline in {BASELINE.as_posix()} describes lane C and is "
+                "not consulted)",
+                file=sys.stderr,
+            )
+        found = detect(roots=tuple(roots))
+        for name, (path, line, who) in sorted(found.items(), key=lambda kv: kv[1]):
+            read_by = "read only by tests" if who == "tests" else "read by nothing at all"
+            print(f"{path}:{line}: `{name}` is written in production and {read_by}")
+        print(f"-- {len(found)} field(s) in {', '.join(sorted(roots))}.")
+        return 0
+
     found = detect()
     known = baseline()
 

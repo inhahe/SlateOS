@@ -40,6 +40,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
@@ -139,6 +140,13 @@ pub enum ToolbarControl {
     ThumbSize,
     /// Start or stop the slideshow.
     Slideshow,
+    /// Open the file picker and bring a photograph in.
+    ///
+    /// The window had no way to add a photograph at all until 2026-09-15 --
+    /// every control here rearranged a library that `main` had invented. The
+    /// EXIF parser, the album model and the whole grid were real; there was no
+    /// door.
+    Import,
 }
 
 // ============================================================================
@@ -331,7 +339,13 @@ impl ExifData {
         Self::default()
     }
 
-    /// Create sample EXIF data for testing.
+    /// Sample EXIF data, for tests.
+    ///
+    /// `#[cfg(test)]` since 2026-09-15. It was reachable from production and
+    /// `seeded_library` used it, so every photo in the window that opened was
+    /// described as a Canon EOS R5 shot in San Francisco. A fixture that
+    /// production can reach is a fixture that eventually ships.
+    #[cfg(test)]
     pub fn sample() -> Self {
         Self {
             camera_make: Some("Canon".to_owned()),
@@ -1558,6 +1572,17 @@ pub struct PhotoApp {
     pub export_options: ExportOptions,
     pub window_width: f32,
     pub window_height: f32,
+    /// The file picker, while one is up.
+    ///
+    /// `None` most of the time. The picker is the only route a real photograph
+    /// has into this library.
+    pub file_dialog: Option<FileDialog>,
+    /// What the last import attempt did, shown in the status bar.
+    ///
+    /// Carries the failure too. An import that silently does nothing is the
+    /// defect this whole application was an instance of, so a file that cannot
+    /// be read says so rather than leaving the grid unchanged and unexplained.
+    pub last_import: Option<String>,
     photo_id_gen: IdGen,
     album_id_gen: IdGen,
     timestamp_counter: u64,
@@ -1598,6 +1623,8 @@ impl PhotoApp {
             export_options: ExportOptions::default(),
             window_width: 1400.0,
             window_height: 900.0,
+            file_dialog: None,
+            last_import: None,
             photo_id_gen: IdGen::new(1),
             album_id_gen: IdGen::new(1),
             timestamp_counter: 1000,
@@ -2264,6 +2291,15 @@ impl PhotoApp {
             },
         ));
         out.push((
+            ToolbarControl::Import,
+            Rect {
+                x: self.window_width - 196.0,
+                y: 8.0,
+                width: 88.0,
+                height: 24.0,
+            },
+        ));
+        out.push((
             ToolbarControl::Slideshow,
             Rect {
                 x: self.window_width - 100.0,
@@ -2360,12 +2396,89 @@ impl PhotoApp {
 
     /// Handle one input event. Returns whether anything changed.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The picker takes the event first while it is up, or a click meant
+        // for a filename lands on whatever is drawn beneath it.
+        if self.file_dialog.is_some() {
+            return self.file_dialog_event(event);
+        }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Tick { elapsed_ms } => self.advance_slideshow(*elapsed_ms),
             _ => false,
         }
+    }
+
+    /// Put the file picker up, listing the directory it starts in.
+    ///
+    /// The widget is pure -- it draws the entries it is given and does no I/O
+    /// -- so the host reads the directory and hands it over, which is the
+    /// convention `apps/fileassoc` and `apps/passwordgen` already follow.
+    pub fn open_import_dialog(&mut self) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::open().with_initial_path(start);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.file_dialog = Some(dialog);
+    }
+
+    /// Drive the picker, and import whatever it settles on.
+    fn file_dialog_event(&mut self, event: &Event) -> bool {
+        let (w, h) = (self.window_width, self.window_height);
+        let action = {
+            let Some(dialog) = self.file_dialog.as_mut() else {
+                return false;
+            };
+            match event {
+                Event::Key(key) if key.pressed => dialog.handle_event(key, h),
+                Event::Mouse(mouse) => dialog.handle_mouse(mouse, w, h),
+                _ => return false,
+            }
+        };
+        match action {
+            DialogAction::None => {}
+            DialogAction::Cancelled => self.file_dialog = None,
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                self.last_import = Some(self.import_from_disk(&path));
+            }
+        }
+        true
+    }
+
+    /// Read a file and put it in the library, EXIF and all.
+    ///
+    /// Returns what to say about it. The failure is a message rather than a
+    /// silent no-op on purpose: the whole of this application used to be a
+    /// window over a library that was never read from anywhere, and "nothing
+    /// visibly happened" is exactly how that survived.
+    fn import_from_disk(&mut self, path: &std::path::Path) -> String {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) => return format!("Could not read {name}: {err}"),
+        };
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some(format) = ImageFormat::from_extension(&ext) else {
+            return format!("{name} is not an image format this reads");
+        };
+        // The EXIF parser was written, tested and never given a real file.
+        let exif = parse_exif_from_bytes(&bytes);
+        let size = bytes.len() as u64;
+        self.import_photo_with_exif(&path.to_string_lossy(), &name, format, size, exif);
+        format!("Imported {name}")
     }
 
     /// Advance the slideshow clock. Returns whether the picture changed.
@@ -2443,6 +2556,7 @@ impl PhotoApp {
                     self.start_slideshow();
                 }
             }
+            ToolbarControl::Import => self.open_import_dialog(),
         }
     }
 
@@ -2677,6 +2791,12 @@ impl PhotoApp {
         let main_w = width - SIDEBAR_WIDTH - info_w;
         self.render_main_content(&mut cmds, main_x, content_y, main_w, content_h);
 
+        // The picker goes last so it sits over everything, which is the same
+        // order in which `handle_event` gives it the click.
+        if let Some(dialog) = &self.file_dialog {
+            cmds.extend(dialog.render(&self.palette, width, height));
+        }
+
         cmds
     }
 
@@ -2824,6 +2944,34 @@ impl PhotoApp {
             overflow: TextOverflow::Clip,
         });
 
+        // Import button.
+        //
+        // Drawn from the same rectangle the hit test uses, via `rect_of`,
+        // rather than from a second copy of the arithmetic: a control the
+        // pointer can reach and the eye cannot find is the same bug as one the
+        // eye finds and the pointer cannot reach, and both come from two
+        // predicates for one position.
+        let import_rect = rect_of(ToolbarControl::Import);
+        self.palette.push_surface(
+            cmds,
+            import_rect.x,
+            import_rect.y,
+            import_rect.width,
+            import_rect.height,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
+        cmds.push(RenderCommand::Text {
+            x: import_rect.x + 8.0,
+            y: 14.0,
+            text: "Import".to_owned(),
+            color: self.palette.subtext0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((import_rect.width - 12.0).max(1.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+
         // Slideshow button
         let ss_x = width - 100.0;
         self.palette.push_surface(
@@ -2889,9 +3037,19 @@ impl PhotoApp {
 
         let stats = self.library_stats();
         let visible = self.visible_photos().len();
-        let status_text = format!(
-            "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
-            visible, stats.total_photos, stats.total_albums, stats.trash_count,
+        let status_text = self.last_import.as_ref().map_or_else(
+            || {
+                format!(
+                    "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
+                    visible, stats.total_photos, stats.total_albums, stats.trash_count,
+                )
+            },
+            // The import result takes the bar until something else happens.
+            // A read that failed has to be visible somewhere, and the counts
+            // it replaces are the thing that would otherwise be read as the
+            // answer -- an unchanged total looks like a refusal nobody
+            // explained.
+            Clone::clone,
         );
         cmds.push(RenderCommand::Text {
             x: 12.0,
@@ -3229,6 +3387,9 @@ impl PhotoApp {
         if let Some(ref lens) = exif.lens {
             entries.push(("Lens", lens.clone()));
         }
+        if let Some(mm) = exif.focal_length_mm {
+            entries.push(("Focal Length", format!("{mm:.0} mm")));
+        }
         entries.push(("Resolution", exif.resolution_str()));
         if let Some(mp) = exif.megapixels() {
             entries.push(("Megapixels", format!("{mp:.1} MP")));
@@ -3237,11 +3398,29 @@ impl PhotoApp {
         if exposure != "No exposure data" {
             entries.push(("Exposure", exposure));
         }
+        if let Some(ref program) = exif.exposure_program {
+            entries.push(("Program", program.clone()));
+        }
+        if let Some(bias) = exif.exposure_bias {
+            // Signed, with the sign always shown. "0.3 EV" and "-0.3 EV" are a
+            // stop and a half apart in what they mean and one character apart
+            // on the panel, so the plus is not decoration.
+            entries.push(("Exp. Bias", format!("{bias:+.1} EV")));
+        }
+        if let Some(fired) = exif.flash_fired {
+            entries.push((
+                "Flash",
+                if fired { "Fired" } else { "Did not fire" }.to_owned(),
+            ));
+        }
         if let Some(ref date) = exif.date_taken {
             entries.push(("Date", date.clone()));
         }
         if let Some(gps) = exif.gps_str() {
             entries.push(("GPS", gps));
+        }
+        if let Some(alt) = exif.gps_altitude {
+            entries.push(("Altitude", format!("{alt:.0} m")));
         }
         if let Some(ref cs) = exif.color_space {
             entries.push(("Color Space", cs.clone()));
@@ -3251,6 +3430,13 @@ impl PhotoApp {
         }
         if let Some(ref mm) = exif.metering_mode {
             entries.push(("Metering", mm.clone()));
+        }
+        // Last, because they are about the file rather than the photograph.
+        if let Some(ref software) = exif.software {
+            entries.push(("Software", software.clone()));
+        }
+        if let Some(ref copyright) = exif.copyright {
+            entries.push(("Copyright", copyright.clone()));
         }
 
         entries
@@ -3746,45 +3932,20 @@ impl App for PhotoApp {
     }
 }
 
-/// A library with something in it, so the first window is not an empty grid.
-fn seeded_library() -> PhotoApp {
-    let mut app = PhotoApp::new();
-    let _album = app.create_album("Vacation 2025");
-    app.create_album("Family");
-
-    let p1 = app.import_photo_with_exif(
-        "/photos/IMG_0001.jpg",
-        "IMG_0001.jpg",
-        ImageFormat::Jpeg,
-        5_242_880,
-        ExifData::sample(),
-    );
-    let p2 = app.import_photo(
-        "/photos/IMG_0002.png",
-        "IMG_0002.png",
-        ImageFormat::Png,
-        3_145_728,
-    );
-    let _p3 = app.import_photo(
-        "/photos/sunset.raw",
-        "sunset.raw",
-        ImageFormat::Raw,
-        25_165_824,
-    );
-
-    app.rate_photo(p1, 5);
-    app.rate_photo(p2, 3);
-    app.add_tag(p1, "vacation");
-    app.add_tag(p1, "beach");
-    app.toggle_flag(p1);
-
-    let smart_id = app.create_smart_album("Best Photos", true);
-    app.add_smart_rule(smart_id, SmartRule::MinRating(4));
-    app
-}
-
 fn main() -> ExitCode {
-    let mut app = seeded_library();
+    // Starts empty. It used to call `seeded_library`, which built two albums
+    // ("Vacation 2025", "Family") and three photos at paths like
+    // `/photos/IMG_0001.jpg`, one of them carrying `ExifData::sample` -- a
+    // Canon EOS R5, an RF 24-70mm lens, Adobe Lightroom, and GPS coordinates
+    // in San Francisco. None of it was on the machine. The comment above that
+    // function said why: "so the first window is not an empty grid".
+    //
+    // An empty grid is the truth here, and the grid already has a message for
+    // it. A photo manager showing you albums you did not make, of photographs
+    // that do not exist, taken on a camera you do not own, is a worse first
+    // window than an empty one -- and it cannot be clicked through to anything
+    // real, so the impression it makes is the only thing it ever does.
+    let mut app = PhotoApp::new();
     app::launch("photomanager", &mut app)
 }
 
@@ -5113,8 +5274,225 @@ mod tests {
         assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
     }
 
+    /// A library with something in it, for the tests that need one.
+    ///
+    /// This was production code until 2026-09-15 and `main` called it, so the
+    /// window opened on albums and photographs that were not on the machine.
+    /// It is a perfectly good *fixture*; what was wrong was where it lived.
+    fn seeded_library() -> PhotoApp {
+        let mut app = PhotoApp::new();
+        let _album = app.create_album("Vacation 2025");
+        app.create_album("Family");
+
+        let p1 = app.import_photo_with_exif(
+            "/photos/IMG_0001.jpg",
+            "IMG_0001.jpg",
+            ImageFormat::Jpeg,
+            5_242_880,
+            ExifData::sample(),
+        );
+        let p2 = app.import_photo(
+            "/photos/IMG_0002.png",
+            "IMG_0002.png",
+            ImageFormat::Png,
+            3_145_728,
+        );
+        let _p3 = app.import_photo(
+            "/photos/sunset.raw",
+            "sunset.raw",
+            ImageFormat::Raw,
+            25_165_824,
+        );
+
+        app.rate_photo(p1, 5);
+        app.rate_photo(p2, 3);
+        app.add_tag(p1, "vacation");
+        app.add_tag(p1, "beach");
+        app.toggle_flag(p1);
+
+        let smart_id = app.create_smart_album("Best Photos", true);
+        app.add_smart_rule(smart_id, SmartRule::MinRating(4));
+        app
+    }
+
+    /// Every EXIF field the parser fills reaches the panel.
+    ///
+    /// Seven of them did not, and were found by
+    /// `scripts/check-fields-written-never-read.py`: focal length, whether the
+    /// flash fired, GPS altitude, the writing software, the copyright, the
+    /// exposure program and the exposure bias. The parser decoded all seven
+    /// out of the file and `collect_exif_entries` listed neither, so the work
+    /// was done and thrown away -- the same shape as an option a program
+    /// parses and ignores.
+    ///
+    /// Written against the labels rather than the field names because the
+    /// label is what a person actually sees, and a field renamed without its
+    /// row being added back would otherwise pass.
     #[test]
-    fn the_seeded_library_opens_on_something_to_look_at() {
+    fn every_parsed_exif_field_reaches_the_panel() {
+        let app = PhotoApp::new();
+        let mut exif = ExifData::sample();
+        exif.copyright = Some("(c) nobody".to_owned());
+        exif.exposure_program = Some("Aperture priority".to_owned());
+        exif.exposure_bias = Some(-0.7);
+        exif.metering_mode = Some("Matrix".to_owned());
+        exif.white_balance = Some("Auto".to_owned());
+        exif.color_space = Some("sRGB".to_owned());
+
+        let mut photo = Photo::new(1, "/photos/x.jpg", "x.jpg", ImageFormat::Jpeg, 1, 0);
+        photo.exif = exif;
+        let labels: Vec<&str> = app
+            .collect_exif_entries(&photo)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+
+        for expected in [
+            "Camera",
+            "Model",
+            "Lens",
+            "Focal Length",
+            "Exposure",
+            "Program",
+            "Exp. Bias",
+            "Flash",
+            "Date",
+            "GPS",
+            "Altitude",
+            "Color Space",
+            "White Bal.",
+            "Metering",
+            "Software",
+            "Copyright",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "the panel drops {expected:?}; it shows {labels:?}"
+            );
+        }
+    }
+
+    /// The exposure bias keeps its sign.
+    ///
+    /// "0.7 EV" and "-0.7 EV" are a stop and a half apart in what they mean
+    /// and one character apart on the panel, so the plus is not decoration.
+    #[test]
+    fn a_positive_exposure_bias_is_shown_as_positive() {
+        let app = PhotoApp::new();
+        let mut photo = Photo::new(1, "/photos/x.jpg", "x.jpg", ImageFormat::Jpeg, 1, 0);
+        photo.exif.exposure_bias = Some(0.7);
+        let entries = app.collect_exif_entries(&photo);
+        let bias = entries
+            .iter()
+            .find(|(label, _)| *label == "Exp. Bias")
+            .expect("no bias row");
+        assert_eq!(bias.1, "+0.7 EV");
+    }
+
+    /// The Import button is drawn where the hit test says it is.
+    ///
+    /// Both come from `toolbar_controls`, so this is not re-deriving the
+    /// arithmetic -- it checks that the renderer actually used it. A control
+    /// the pointer reaches and the eye cannot find is the same bug as the
+    /// reverse, and both come from two predicates for one position.
+    #[test]
+    fn the_import_button_is_drawn_where_it_can_be_clicked() {
+        let app = PhotoApp::new();
+        let rect = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Import)
+            .expect("no Import control")
+            .1;
+        assert_eq!(
+            app.toolbar_control_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+            Some(ToolbarControl::Import),
+            "the middle of the Import rectangle does not hit Import"
+        );
+        let drawn = app.render_commands(1000.0, 700.0).into_iter().any(|c| {
+            matches!(c, RenderCommand::Text { ref text, x, .. }
+                if text == "Import" && (x - (rect.x + 8.0)).abs() < 0.01)
+        });
+        assert!(drawn, "Import is clickable and never painted");
+    }
+
+    /// Pressing Import puts a picker up, and it is drawn.
+    #[test]
+    fn pressing_import_opens_a_picker_that_is_actually_drawn() {
+        let mut app = PhotoApp::new();
+        let before = app.render_commands(1000.0, 700.0).len();
+        app.press_toolbar(ToolbarControl::Import);
+        assert!(app.file_dialog.is_some(), "no picker came up");
+        assert!(
+            app.render_commands(1000.0, 700.0).len() > before,
+            "the picker is open and nothing more is drawn"
+        );
+    }
+
+    /// A file that cannot be read says so rather than doing nothing.
+    ///
+    /// The silent no-op is the failure this whole application was an instance
+    /// of: a window over a library nothing ever filled. An import that changes
+    /// no count and offers no reason is indistinguishable from one that was
+    /// never attempted.
+    #[test]
+    fn an_unreadable_file_reports_instead_of_failing_quietly() {
+        let mut app = PhotoApp::new();
+        let missing = std::env::temp_dir().join("photomanager-no-such-file.jpg");
+        let message = app.import_from_disk(&missing);
+        assert!(app.photos.is_empty(), "a failed read imported something");
+        assert!(
+            message.contains("Could not read"),
+            "the failure said {message:?}"
+        );
+    }
+
+    /// A real file on disk becomes a photo, with its EXIF read from the bytes.
+    ///
+    /// `parse_exif_from_bytes` was written, tested and never given a file that
+    /// existed -- the only EXIF this application ever held was
+    /// `ExifData::sample`, a Canon EOS R5 that was not there.
+    #[test]
+    fn a_file_on_disk_becomes_a_photo() {
+        let mut app = PhotoApp::new();
+        let path = std::env::temp_dir().join("photomanager-import-test.png");
+        std::fs::write(&path, b"not really a png, but it is really a file").expect("write");
+        let message = app.import_from_disk(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(app.photos.len(), 1, "the import said {message:?}");
+        let photo = app.photos.first().expect("no photo");
+        assert_eq!(photo.file_name, "photomanager-import-test.png");
+        assert_eq!(photo.format, ImageFormat::Png);
+        assert!(photo.file_size > 0, "the size did not come from the file");
+    }
+
+    /// The window opens on an empty grid now, and says so.
+    ///
+    /// Replaces `the_seeded_library_opens_on_something_to_look_at`, which
+    /// asserted the opposite and passed because `main` seeded a fake library.
+    #[test]
+    fn a_new_library_is_empty_and_the_grid_says_so() {
+        let app = PhotoApp::new();
+        assert!(app.photos.is_empty(), "a new library invented a photo");
+        assert!(app.albums.is_empty(), "a new library invented an album");
+        let text: Vec<String> = app
+            .render_commands(1000.0, 700.0)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.iter().any(|t| t.contains("No photos")),
+            "an empty grid drew no explanation: {text:?}"
+        );
+    }
+
+    /// The fixture still builds a library, which is what the tests below need.
+    #[test]
+    fn the_fixture_library_has_something_to_look_at() {
         let app = seeded_library();
         assert!(!app.photos.is_empty());
         assert!(!app.albums.is_empty());

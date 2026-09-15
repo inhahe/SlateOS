@@ -56,11 +56,20 @@
 
 # TRIAGED 2026-09-14, BOTH REAL, neither fixed yet.
 #
-#   `test_results` (archivemanager): `backend::verify` returns per-file
-#   results; `results.summary()` goes to the status bar and is seen, the
-#   detail is stored here and is not. So Test Archive answers "3 files
-#   failed" and cannot say which. Partial, not invisible: the fix is a
-#   detail panel, not a wire.
+#   `test_results` (archivemanager): RE-TRIAGED, and the first note was
+#   wrong. It said Test Archive "answers 3 files failed and cannot say
+#   which". It can: `summary()` sorts the failures, names the first by
+#   path, appends its reason for a `Corrupted(why)`, and adds "(and 2
+#   other files did too)". So the user gets a name, a reason and a count
+#   from one line, which is a good status line.
+#
+#   The real gap is narrower than claimed: with several failures you
+#   learn one name, not the list. That matters for an integrity test --
+#   knowing exactly which entries are bad is how you decide what can
+#   still be recovered -- but it is a second surface for a program that
+#   has one status line, not a missing wire. Left as a considered
+#   omission rather than a defect; if a detail view is ever added, the
+#   data is already here and complete.
 #
 #   `last_copied` (credmanager): FIXED 2026-09-14 -- the toolbar now says
 #   what was copied and counts down to the clipboard wipe.

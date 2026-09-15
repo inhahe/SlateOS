@@ -29,6 +29,7 @@ use appearance::Surface;
 use std::collections::HashMap;
 
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;
 use oswindow::app::{self, App, Response};
@@ -2054,7 +2055,35 @@ fn extract_snippet(text: &str, query: &str, context_chars: usize) -> String {
 // ============================================================================
 
 /// Main application state for the RSS reader.
+/// The most of a file one open will read.
+///
+/// Reported when it bites, and it is reported *first*. A cut feed almost
+/// always fails to parse -- the closing tags are in the part that was dropped
+/// -- so without this the user would be told their download is malformed when
+/// in fact it is merely long.
+pub const MAX_FEED_BYTES: usize = 8 * 1024 * 1024;
+
+/// Leads a message about a file operation that did not happen.
+const FILE_FAILED_PREFIX: &str = "Could not";
+
+/// Seconds since the Unix epoch, or 0 if the clock is unreadable.
+///
+/// Feeds opened from a file record *when they were actually read*.
+/// `ingest_feed_xml` used to pass a literal `1_700_000_000`, which put
+/// "updated 14 Nov 2023" under every feed regardless of when it happened --
+/// a fabricated fact in the one panel whose whole job is telling you whether
+/// a feed is stale.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 pub struct RssReaderApp {
+    /// The open or save picker, while one is up.
+    pub file_dialog: Option<FileDialog>,
+    /// Whether the picker that is up is saving rather than opening.
+    pub dialog_saves: bool,
     pub width: f32,
     pub height: f32,
 
@@ -2112,6 +2141,8 @@ impl RssReaderApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
+            file_dialog: None,
+            dialog_saves: false,
             feeds: Vec::new(),
             articles: Vec::new(),
             folders: Vec::new(),
@@ -2490,6 +2521,17 @@ impl RssReaderApp {
 
     /// Handle one event from the window.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes the event first while it is up, or a keystroke
+        // meant for a filename lands in the search box behind it.
+        if self.file_dialog.is_some() {
+            let (w, h) = (self.width, self.height);
+            let action = match (event, self.file_dialog.as_mut()) {
+                (Event::Key(key), Some(dialog)) if key.pressed => dialog.handle_event(key, h),
+                (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
+                _ => return EventResult::Ignored,
+            };
+            return self.apply_dialog_action(action);
+        }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Resize { width, height } => {
@@ -2504,6 +2546,159 @@ impl RssReaderApp {
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
+        }
+    }
+
+    /// Put the open or save picker up.
+    ///
+    /// `parse_feed`, `ingest_parsed_feed`, `parse_opml` and `generate_opml`
+    /// were all written, all tested, and none of them could be called: this
+    /// app had no way to obtain a byte. **The parsers were the hard part and
+    /// they were already finished.**
+    pub fn open_file_dialog(&mut self, saving: bool) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = if saving {
+            FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(String::from("subscriptions.opml"))
+        } else {
+            FileDialog::open().with_initial_path(start)
+        };
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.dialog_saves = saving;
+        self.file_dialog = Some(dialog);
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
+        match action {
+            DialogAction::None => EventResult::Consumed,
+            DialogAction::Cancelled => {
+                self.file_dialog = None;
+                EventResult::Consumed
+            }
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+                EventResult::Consumed
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                let saving = self.dialog_saves;
+                self.status_message = if saving {
+                    self.write_opml_file(&path)
+                } else {
+                    self.read_any_file(&path)
+                };
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Write the subscription list to `path` as OPML.
+    ///
+    /// Refuses on an empty list rather than writing an outline with no
+    /// entries: an OPML file with an empty body is valid, and imports
+    /// elsewhere as nothing, which the user cannot tell from an export that
+    /// failed.
+    pub fn write_opml_file(&mut self, path: &std::path::Path) -> String {
+        if self.feeds.is_empty() {
+            return String::from("No feeds to write");
+        }
+        let text = self.export_opml();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!("Wrote {} feed(s) to {}", self.feeds.len(), path.display()),
+            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path`, deciding from its *content* what it is.
+    ///
+    /// Two quite different things can be opened here and the difference
+    /// matters to the user:
+    ///
+    /// * **A feed** (`<rss>`, `<feed>`) is articles. This is the only way this
+    ///   program can obtain anything to read, since nothing in it fetches.
+    /// * **An OPML file** is a list of addresses and no articles at all.
+    ///   Importing one into a reader that cannot fetch fills the sidebar with
+    ///   names under which nothing will ever appear -- and an empty feed reads
+    ///   as *this site has posted nothing*, which is a claim about the site.
+    ///   So the import says plainly that the articles did not come with it.
+    ///
+    /// The choice is made on content rather than on the extension, because the
+    /// extension is a claim by whoever named the file and the content is not.
+    pub fn read_any_file(&mut self, path: &std::path::Path) -> String {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
+        };
+        let whole = text.len();
+        let truncated = whole > MAX_FEED_BYTES;
+        let body = if truncated {
+            let mut end = MAX_FEED_BYTES;
+            while end > 0 && !text.is_char_boundary(end) {
+                end = end.saturating_sub(1);
+            }
+            text.get(..end).unwrap_or("").to_string()
+        } else {
+            text
+        };
+        // Front-loaded, because a truncated document fails to parse and the
+        // parse error would otherwise be the only thing said.
+        let cut_note = if truncated {
+            format!("INCOMPLETE ({MAX_FEED_BYTES} of {whole} bytes read): ")
+        } else {
+            String::new()
+        };
+
+        if body
+            .get(..4096)
+            .unwrap_or(&body)
+            .to_ascii_lowercase()
+            .contains("<opml")
+        {
+            return match self.import_opml(&body) {
+                Ok(added) => format!(
+                    "{cut_note}Subscribed to {added} feed(s) from {}. \
+                     No articles came with them -- an OPML file holds addresses, \
+                     and nothing here can fetch one.",
+                    path.display()
+                ),
+                Err(err) => {
+                    format!("{cut_note}{FILE_FAILED_PREFIX} read that OPML: {err}")
+                }
+            };
+        }
+
+        let parsed = match parse_feed(&body) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                return format!(
+                    "{cut_note}{FILE_FAILED_PREFIX} read {} as a feed or an OPML list: {err}",
+                    path.display()
+                );
+            }
+        };
+        // Re-opening an updated download of the same file merges into the feed
+        // already there rather than making a second copy of it;
+        // `ingest_parsed_feed` de-duplicates the articles by title and link.
+        let key = path.display().to_string();
+        let feed_id = match self.feeds.iter().find(|f| f.url == key) {
+            Some(feed) => feed.id,
+            None => self.add_feed(&key, &key, None),
+        };
+        let before = self.articles.len();
+        self.ingest_parsed_feed(feed_id, &parsed, now_unix());
+        let added = self.articles.len().saturating_sub(before);
+        if added == 0 {
+            format!(
+                "{cut_note}{} holds no articles this feed did not already have",
+                path.display()
+            )
+        } else {
+            format!("{cut_note}Added {added} article(s) from {}", path.display())
         }
     }
 
@@ -2525,6 +2720,14 @@ impl RssReaderApp {
                 // and no caller.
                 Key::A => {
                     self.mark_all_read();
+                    EventResult::Consumed
+                }
+                Key::O => {
+                    self.open_file_dialog(false);
+                    EventResult::Consumed
+                }
+                Key::S => {
+                    self.open_file_dialog(true);
                     EventResult::Consumed
                 }
                 _ => EventResult::Ignored,
@@ -2688,7 +2891,7 @@ impl RssReaderApp {
     /// already exists and already works.
     pub fn ingest_feed_xml(&mut self, feed_id: FeedId, xml: &str) {
         match parse_feed(xml) {
-            Ok(parsed) => self.ingest_parsed_feed(feed_id, &parsed, 1_700_000_000),
+            Ok(parsed) => self.ingest_parsed_feed(feed_id, &parsed, now_unix()),
             // Reported rather than ignored: a feed that did not parse is worth
             // seeing on the status line, not worth a silently short list.
             Err(err) => {
@@ -3166,6 +3369,13 @@ impl RssReaderApp {
 
         if self.show_feed_health {
             self.render_feed_health_overlay(&mut cmds);
+        }
+
+        // Last, so it is above everything.
+        if let Some(dialog) = &self.file_dialog {
+            for cmd in dialog.render(&self.palette, self.width, self.height) {
+                cmds.push(cmd);
+            }
         }
 
         cmds
@@ -4796,6 +5006,163 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A downloaded feed file becomes articles you can actually read.
+    ///
+    /// `parse_feed` and `ingest_parsed_feed` were written, tested and
+    /// unreachable -- this app could not obtain a byte. The second open of the
+    /// same path is the half that matters: a reader you point at a file you
+    /// re-download every morning must merge into the feed already there, not
+    /// grow a second copy of it beside the first.
+    #[test]
+    fn a_downloaded_feed_becomes_articles_and_reopening_it_does_not_duplicate() {
+        let dir = std::env::temp_dir().join("slateos-rssreader-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("feed.xml");
+        std::fs::write(&path, RssReaderApp::SAMPLE_RSS).expect("write feed");
+
+        let mut app = RssReaderApp::new(1024.0, 768.0);
+        let feeds_before = app.feeds.len();
+        let said = app.read_any_file(&path);
+        assert!(
+            said.starts_with("Added ") && said.contains("article"),
+            "first open should count what it added, said: {said}"
+        );
+        assert_eq!(app.feeds.len(), feeds_before + 1, "one new feed");
+        let added = app.articles.len();
+        assert!(added > 0, "the sample feed has articles");
+
+        let said = app.read_any_file(&path);
+        assert!(
+            said.contains("did not already have"),
+            "second open should say nothing was new, said: {said}"
+        );
+        assert_eq!(app.articles.len(), added, "no duplicated articles");
+        assert_eq!(app.feeds.len(), feeds_before + 1, "no duplicated feed");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The feed records when it was *actually* read.
+    ///
+    /// `ingest_feed_xml` used to pass a literal `1_700_000_000`, so every feed
+    /// reported "updated 14 Nov 2023" whatever the date was -- an invented
+    /// fact in the one panel whose job is telling you whether a feed is stale.
+    /// The assertion is against that constant rather than against the wall
+    /// clock, so it tests the bug and not the machine.
+    #[test]
+    fn a_feed_read_from_a_file_is_not_dated_november_2023() {
+        let dir = std::env::temp_dir().join("slateos-rssreader-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("dated.xml");
+        std::fs::write(&path, RssReaderApp::SAMPLE_RSS).expect("write feed");
+
+        let mut app = RssReaderApp::new(1024.0, 768.0);
+        app.read_any_file(&path);
+        let opened = app
+            .feeds
+            .iter()
+            .find(|f| f.url == path.display().to_string())
+            .expect("the opened feed");
+        let ts = opened.health.last_success.expect("a success was recorded");
+        assert!(
+            ts > 1_700_000_000,
+            "the read should be dated now, not at the old literal: {ts}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An OPML import says, in the message, that no articles came with it.
+    ///
+    /// This is the point of the whole check. OPML is a list of *addresses*.
+    /// Importing one into a reader that cannot fetch fills the sidebar with
+    /// names under which nothing will ever appear -- and an empty feed reads
+    /// as "this site has posted nothing", which is a claim about the site
+    /// rather than about the program.
+    #[test]
+    fn an_opml_import_admits_the_articles_did_not_come_with_it() {
+        let dir = std::env::temp_dir().join("slateos-rssreader-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("subs.opml");
+
+        let mut source = RssReaderApp::new(1024.0, 768.0);
+        source.add_feed("Rust Blog", "https://blog.rust-lang.org/feed.xml", None);
+        source.add_feed("Planet Rust", "https://planet.rust-lang.org/atom.xml", None);
+        let said = source.write_opml_file(&path);
+        assert!(said.starts_with("Wrote 2 feed"), "said: {said}");
+
+        let mut target = RssReaderApp::new(1024.0, 768.0);
+        let feeds_before = target.feeds.len();
+        let articles_before = target.articles.len();
+        let said = target.read_any_file(&path);
+        assert_eq!(target.feeds.len(), feeds_before + 2, "both feeds arrived");
+        assert_eq!(
+            target.articles.len(),
+            articles_before,
+            "an OPML file carries no articles"
+        );
+        assert!(
+            said.contains("No articles came with them") && said.contains("fetch"),
+            "the import must say why the new feeds are empty, said: {said}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An export of nothing is refused rather than written.
+    ///
+    /// An OPML file with an empty body is valid, and imports elsewhere as
+    /// nothing at all -- which the user cannot tell apart from an export that
+    /// failed. Refusing says which of the two happened.
+    #[test]
+    fn an_empty_subscription_list_is_not_written() {
+        let path = std::env::temp_dir().join("slateos-rssreader-should-not-exist.opml");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = RssReaderApp::new(1024.0, 768.0);
+        app.feeds.clear();
+        let said = app.write_opml_file(&path);
+        assert_eq!(said, "No feeds to write");
+        assert!(!path.exists(), "nothing should have been created");
+    }
+
+    /// A file that is neither is named as neither.
+    #[test]
+    fn a_file_that_is_not_a_feed_says_so_and_changes_nothing() {
+        let dir = std::env::temp_dir().join("slateos-rssreader-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "shopping list\nbread\nmilk\n").expect("write junk");
+
+        let mut app = RssReaderApp::new(1024.0, 768.0);
+        let feeds_before = app.feeds.len();
+        let articles_before = app.articles.len();
+        let said = app.read_any_file(&path);
+        assert!(
+            said.starts_with("Could not read") && said.contains("as a feed or an OPML list"),
+            "the message should name both things it tried, said: {said}"
+        );
+        assert_eq!(app.feeds.len(), feeds_before, "a failed read adds no feed");
+        assert_eq!(app.articles.len(), articles_before, "and no articles");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A missing file is reported as a read failure, not as a bad feed.
+    #[test]
+    fn a_file_that_is_not_there_is_reported_as_a_read_failure() {
+        let path = std::env::temp_dir().join("slateos-rssreader-absent.xml");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = RssReaderApp::new(1024.0, 768.0);
+        let said = app.read_any_file(&path);
+        assert!(said.starts_with("Could not read"), "said: {said}");
+        assert!(
+            !said.contains("as a feed"),
+            "the file was never parsed, so do not blame its contents: {said}"
+        );
+    }
 
     /// A fresh reader holds no feeds and no articles.
     ///

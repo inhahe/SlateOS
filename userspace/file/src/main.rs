@@ -226,25 +226,35 @@ fn read_magic_bytes(path: &str) -> io::Result<Vec<u8>> {
 // ---------------------------------------------------------------------------
 // Bounded reads
 //
-// **Every one of these guarded itself with `offset + N`, and that addition can
-// overflow.** `file` takes its offsets FROM THE FILE IT IS EXAMINING -- a PE
-// header points at its own COFF header, an archive member names the next one
-// -- so the offset is attacker-controlled by construction.
+// Each of these used to guard itself with `offset + N`, which is an addition
+// that can overflow, and each now uses `get(offset..)`, which cannot.
 //
-// With `offset` near `usize::MAX`, `offset + needle.len()` wraps to something
-// small, `buf.len() < <small>` is false, and the guard lets the read through.
-// The slice that follows then panics with `slice index starts at N but ends at
-// M`. The check did not merely fail to prevent the panic -- **it was bypassed
-// on exactly the inputs it existed for**, and reported nothing on the way
-// past.
+// **This is defence in depth, NOT the repair of a live bug, and the first
+// version of this comment said otherwise.** It claimed the guard "was bypassed
+// on exactly the inputs it existed for". That is false on this target and the
+// reason is worth keeping: every offset `file` passes in comes from a `u32`
+// field widened to `usize` -- `pe_offset` is `read_u32_le(buf, 0x3C) as usize`
+// -- so on x86_64 the operands are bounded by 2^32 and their sum cannot reach
+// `usize::MAX`. The shape is the classic wrappable bounds check; the TYPES
+// make it unreachable here.
 //
-// `get(offset..)` cannot be fooled that way: an out-of-range start is `None`
-// rather than an arithmetic result. Every read below is expressed as a slice
-// lookup followed by a fixed-size `try_into`, so there is no addition left to
-// overflow and no index left to panic.
+// What is true, and why the rewrite stays:
 //
-// Found by putting this crate under the workspace lint policy, which had never
-// applied to it -- `arithmetic_side_effects` is what flagged the additions.
+//   * the functions are public to the rest of this file and nothing in their
+//     signatures says "offsets must be u32-bounded" -- the next caller to
+//     compute an offset rather than read one restores the hazard silently;
+//   * the same shape IS live on a 32-bit target, where `u32 as usize` spans
+//     the whole range;
+//   * `get(offset..)?.get(..N)?` is shorter than the guard it replaces and has
+//     no arithmetic to audit, so the safe version costs nothing.
+//
+// The test below pins the behaviour at `usize::MAX` directly, which is the
+// honest way to state it: the FUNCTION is now total over its argument domain,
+// whatever its callers happen to pass today.
+//
+// Found while putting this crate under the workspace lint policy, which had
+// never applied to it. `arithmetic_side_effects` flagged the additions; it
+// does not, and cannot, say whether a caller can reach them.
 // ---------------------------------------------------------------------------
 
 /// Check whether the buffer starts with the given byte sequence.
@@ -1253,14 +1263,16 @@ mod tests {
         b
     }
 
-    /// **The bug the bounded readers were rewritten for.** Every one of them
-    /// guarded itself with `offset + N`, and `file` takes its offsets from the
-    /// file being examined. With `offset` near `usize::MAX` that addition
-    /// wraps to something small, the `buf.len() < small` guard passes, and the
-    /// slice that follows panics -- so the check was bypassed on exactly the
-    /// inputs it existed for.
+    /// The readers are TOTAL over their argument domain: any offset, including
+    /// `usize::MAX`, gets `None` rather than a panic.
     ///
-    /// Against the old code every assertion here panics rather than failing.
+    /// Against the old code every assertion here panics rather than failing,
+    /// because `offset + N` overflows. **That does not mean a caller could
+    /// reach it** -- every offset this file passes in is a `u32` widened to
+    /// `usize`, so on x86_64 the sum is bounded well below `usize::MAX`. The
+    /// first version of this comment claimed a live bug; it is defence in
+    /// depth, and the distinction is the difference between reading a shape
+    /// and reading the types.
     #[test]
     fn a_huge_offset_cannot_wrap_the_bounds_check() {
         let buf = [0u8; 8];

@@ -2,6 +2,32 @@
 
 **From:** lane C · **To:** lane B · **Filed:** 2026-09-13
 
+**Status:** ✅ FULFILLED by lane B — `/dev` in `7e4b3fc9b`, `/var/run` with
+it, verified clean 2026-09-15. The line below is the 2026-09-13 interim note
+and is kept as filed; the table under it is the record of each path.
+
+**Verified 2026-09-15, by looking rather than by remembering:**
+
+    $ python scripts/check-drive-root-litter.py
+    ok -- no POSIX-looking directories at the root of E:
+
+    $ python scripts/check-test-root-writes.py --selftest
+    selftest: 24/24 cases pass
+
+`E:\dev`, `E:\etc`, `E:\sys` and `E:\var` are all gone — including the two
+you deliberately left in place in case something depended on them. The only
+POSIX-shaped thing left at the root is `E:\tmp`, which is MSYS's own scratch
+directory and carries all three lanes' working files; it is not a test
+artifact and I have not touched it.
+
+Both gates are wired into `scripts/hooks/pre-push`. You were right that it had
+to be behavioural: you pointed out that a checker refusing an absolute POSIX
+literal in `#[cfg(test)]` code finds three hits tree-wide, all of them strings
+never used as paths, and would have missed `udevd` entirely because that test
+named a production CONSTANT. The tool that shipped runs the crate's tests and
+diffs the drive root, which is the only form that can see a write reached
+through a constant.
+
 **Status (lane B, 2026-09-13):** PARTLY FIXED, and **section 3 contains a
 mistake of mine that you should not spend any more time on.**
 

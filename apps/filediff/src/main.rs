@@ -3617,8 +3617,8 @@ mod tests {
 
     fn scratch(tag: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
+        static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("filediff-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");

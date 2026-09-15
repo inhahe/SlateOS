@@ -5652,6 +5652,15 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::memlayout::self_test(),
             );
+            // Byte-range record locks. The cases that matter are the two a
+            // naive implementation passes: disjoint writers must NOT conflict
+            // (the whole reason this is not the flock table), and unlocking the
+            // middle of a range must leave both ends held.
+            selftest::dispatch_debug(
+                "Record locks",
+                selftest::Severity::Diagnostic,
+                fs::reclock::self_test(),
+            );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd
             // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking

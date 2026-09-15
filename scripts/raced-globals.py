@@ -137,6 +137,7 @@ history. `scripts/test-checkers-honour-head.py` is what keeps the flag honest.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import posixpath
 import re
@@ -1215,11 +1216,114 @@ fn b() { ran(); cache(); }
     at_ctype = {n: u for n, _s, u, _r in analyse_text("posix/src/ctype.rs", both)}
     expect("a path-keyed entry applies in its own file", "CACHED" in at_ctype, False)
 
+    # The order-gate coverage rule. Its failure mode is the familiar one: a
+    # comparison that quietly matches everything reports nothing missing and
+    # reads exactly like full coverage.
+    rule("order-gate coverage counts tests, not locks")
+    # One test cannot depend on its own order, however dirty it leaves things.
+    expect("one test does not qualify", qualifies(1, 0), False)
+    expect("one serialised test does not qualify", qualifies(0, 1), False)
+    # Two do -- and SERIALISED two still do, which is the point. A lock stops
+    # them colliding, not one reading what the other left.
+    expect("two unserialised qualify", qualifies(2, 0), True)
+    expect("two serialised still qualify", qualifies(0, 2), True)
+    expect("one of each qualifies", qualifies(1, 1), True)
+
+    rule("uncovered names the gap, and only the gap")
+    shared = {"posix": 47, "userspace/authlib": 1, "userspace/coreutils": 1}
+    expect("all covered", uncovered(shared, set(shared)), [])
+    expect("one missing", uncovered(shared, {"posix", "userspace/coreutils"}),
+           ["userspace/authlib"])
+    # The control: an empty covered set must report every crate, not none.
+    # This is the direction that matters -- a read failure that produced an
+    # empty set and a caller that reported "nothing missing" would be the
+    # silent pass this whole rule exists to prevent.
+    expect("nothing covered reports everything", uncovered(shared, set()),
+           ["posix", "userspace/authlib", "userspace/coreutils"])
+
     for f in failures:
         print(f"FAIL {f}", file=sys.stderr)
     bad = {f.split(":", 1)[0] for f in failures}
     print(f"selftest: {len(rules) - len(bad)}/{len(rules)} rules ok")
     return 1 if failures else 0
+
+
+# Gate 42 (scripts/check-test-order-independence.py) shuffles the test order
+# of a hand-written list of crates. Its own comment used to say "add a crate
+# here the first time it grows a shared-state test" -- a rule with nobody
+# executing it. On 2026-09-14 `userspace/authlib` grew one and was serialised
+# the same day; it was not added. The survey above already knows which crates
+# qualify, so the rule can be checked instead of remembered.
+#
+# This lives here rather than in that script for one reason: the survey costs
+# about a minute, this script already pays it on every push, and gate 42 would
+# have to pay it a second time to ask the same question.
+
+
+def qualifies(unserialised: int, serialised: int) -> bool:
+    """Can this global make its crate's result depend on test order?
+
+    Two or more tests must reach it. ONE cannot: a test that leaves a global
+    dirty and is the only test that reads it has nothing to interleave with,
+    whatever order it runs in. `gui/vulkan`'s two globals are each reached by
+    a single test, which is why they are not subjects.
+
+    Serialised counts the same as unserialised, and that is the whole point of
+    asking this separately from the race question above. A lock makes
+    concurrent access safe; it does NOT put a global back the way it was
+    found. Test A takes the lock, sets the value, releases; test B takes the
+    lock and reads A's leftovers. No data race, wrong answer, and only in some
+    orders -- which is exactly what `stdio.rs`'s StdStreamTestGuard was
+    written for, after `test_fputwc_ascii` failed
+    `test_fclose_stdout_flushes_only` 100% of the time when it ran first.
+    """
+    return unserialised + serialised >= 2
+
+
+def uncovered(shared: dict[str, int], covered: set[str]) -> list[str]:
+    """Crate dirs with shared-state tests that gate 42 does not shuffle."""
+    return sorted(d for d in shared if d not in covered)
+
+
+def order_gate_dirs() -> tuple[set[str] | None, str]:
+    """The crate directories gate 42 covers, or `(None, why)`.
+
+    `None` rather than an empty set on failure, because an empty set would
+    make every crate look uncovered -- noisy, but the safe direction. What
+    must never happen is the reverse: a read failure producing a set large
+    enough to forgive everything, or a caller that treats "could not ask" as
+    "nothing missing".
+    """
+    path = Path(__file__).resolve().parent / "check-test-order-independence.py"
+    try:
+        spec = importlib.util.spec_from_file_location("_order_gate", path)
+        if spec is None or spec.loader is None:
+            return None, "cannot load " + path.name
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        crates = mod.CRATES
+    except (OSError, SyntaxError, AttributeError, ImportError) as exc:
+        return None, type(exc).__name__ + ": " + str(exc)
+    try:
+        return {d for _pkg, d, *_rest in crates}, ""
+    except (TypeError, ValueError) as exc:
+        return None, "CRATES is not a list of (pkg, dir, extra): " + str(exc)
+
+
+def shared_state_crates(
+    tree: gittree.Tree,
+    raced: list[tuple[str, str, list[str], list[str]]],
+    guarded: list[tuple[str, str, list[str], list[str]]],
+) -> dict[str, int]:
+    """Crate dir -> how many qualifying globals it holds."""
+    out: dict[str, int] = {}
+    for _name, site, unser, ser in raced + guarded:
+        if not qualifies(len(unser), len(ser)):
+            continue
+        d = crate_dir(tree, site.rsplit(":", 1)[0])
+        if d:
+            out[d] = out.get(d, 0) + 1
+    return out
 
 
 def survey(
@@ -1288,6 +1392,8 @@ def main() -> int:
     with tree:
         raced, guarded, dead = survey(tree)
         known = load_baseline(tree)
+        # Inside the `with`: crate_dir reads through the tree.
+        shared = shared_state_crates(tree, raced, guarded)
 
     if dead:
         total = sum(n for files in dead.values() for _f, n in files)
@@ -1360,8 +1466,38 @@ def main() -> int:
         print("\nA test drives a mutable process-global that other tests also drive,")
         print("with no lock between them. Under load that is a wrong value at best")
         print("and a dead test binary at worst. See scripts/raced-globals.py.")
-        return 1
-    return 0
+        rc = 1
+    else:
+        rc = 0
+
+    # Gate 42's coverage, checked rather than remembered.
+    covered, why = order_gate_dirs()
+    if covered is None:
+        print()
+        print("CANNOT READ check-test-order-independence.py's CRATES: " + why)
+        print("Not reporting that as 'nothing missing' -- a comparison that could")
+        print("not be made is not a comparison that passed.")
+        rc = 1
+    else:
+        missing = uncovered(shared, covered)
+        print("order-gate coverage: " + str(len(shared)) + " crate(s) with "
+              "shared-state tests, " + str(len(shared) - len(missing))
+              + " shuffled by gate 42.")
+        if missing and check:
+            print()
+            print("THESE CRATES HAVE TESTS SHARING A GLOBAL AND ARE NEVER RUN IN")
+            print("ANY ORDER BUT CARGO'S ALPHABETICAL ONE:")
+            for d in missing:
+                print("    " + d + "  (" + str(shared[d])
+                      + " global(s) reached by 2+ tests)")
+            print()
+            print("A lock is not order-independence: it stops two tests colliding,")
+            print("not one test reading what another left behind. Add the crate to")
+            print("CRATES in scripts/check-test-order-independence.py as")
+            print("(package, directory, extra-cargo-args) -- scope it with --lib if")
+            print("the shared state is in the library and the binaries are many.")
+            rc = 1
+    return rc
 
 
 if __name__ == "__main__":

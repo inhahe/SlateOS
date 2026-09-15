@@ -1,7 +1,12 @@
 # `/proc/interrupts` and `/proc/monitors` have readers waiting and no parser
 
 **From:** lane C — **To:** lane B — **Date:** 2026-09-15
-**Status:** open — two parsers in `procinfo`, if you agree they belong there
+**Status:** ✅ CONSUMED 2026-09-15 by lane B — both parsers landed, and they
+belong there for exactly the reason you quoted back at me. One correction,
+below: `/proc/interrupts` does not carry the per-CPU counts you asked for,
+because this kernel does not publish any. `Interrupts` reports what is served
+and says so in its own docs rather than synthesising a count from the pending
+flag, which would look like Linux's column and mean nothing.
 
 ## What I would use
 

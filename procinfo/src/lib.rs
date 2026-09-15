@@ -1249,6 +1249,41 @@ impl ProcFs {
             .read_optional(&format!("{pid}/cmdline"))?
             .map(|c| cmdline_args(&c)))
     }
+
+    /// `/proc/interrupts`, parsed.
+    ///
+    /// Requested by lane C in
+    /// `requests/c-b-procinfo-could-parse-interrupts-and-monitors.md`, for
+    /// `apps/sysinfo`'s IRQ category. It had been reading `/sys/hardware/irqs`,
+    /// which this kernel has never served and -- per lane A's note of
+    /// 2026-09-15 -- deliberately never will, because a second kernel answer
+    /// to one question is what design-decisions 850 exists to prevent.
+    ///
+    /// Read [`Interrupts`] before displaying any of it: the file does not
+    /// carry per-interrupt counts, and the field that looks like activity is
+    /// an instantaneous pending flag.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)`.
+    pub fn interrupts(&self) -> io::Result<Option<Interrupts>> {
+        Ok(self
+            .read_optional("interrupts")?
+            .map(|c| Interrupts::parse(&c)))
+    }
+
+    /// `/proc/monitors`, parsed.
+    ///
+    /// Requested alongside [`ProcFs::interrupts`], for `apps/sysinfo`'s
+    /// Display category, which had been reading an equally unserved
+    /// `/sys/hardware/display`.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)`.
+    pub fn monitors(&self) -> io::Result<Option<Monitors>> {
+        Ok(self.read_optional("monitors")?.map(|c| Monitors::parse(&c)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1867,6 +1902,429 @@ pub fn trim_comm(raw: &[u8]) -> &[u8] {
         Some((&0x0a, head)) => head,
         _ => raw,
     }
+}
+
+// ---------------------------------------------------------------------------
+// /proc/interrupts and /proc/monitors
+// ---------------------------------------------------------------------------
+
+/// The first whitespace-delimited token of `line`, and everything after it.
+///
+/// [`split_ws`] discards the boundaries, which is right for a row of numbers
+/// and wrong for a row whose last column is free text. An IRQ description is
+/// `PIT timer / HPET`; rejoining its tokens with one space each would be a
+/// guess about spacing that happens to be correct today and has no reason to
+/// stay correct.
+fn split_first_token(line: &[u8]) -> Option<(&[u8], &[u8])> {
+    let start = line.iter().position(|b| !b.is_ascii_whitespace())?;
+    let body = line.get(start..)?;
+    let end = body
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(body.len());
+    Some((body.get(..end)?, body.get(end..)?))
+}
+
+/// Every token of `line` with the offset it starts at.
+///
+/// Needed where a field is identified by its *shape* rather than its index --
+/// a monitor's name may contain spaces, so the resolution token is what
+/// anchors the row, and the name is whatever precedes it. Recovering that name
+/// by re-joining tokens would normalise its spacing; recovering it by offset
+/// returns the bytes the kernel wrote.
+fn tokens_with_offsets(line: &[u8]) -> Vec<(usize, &[u8])> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(&b) = line.get(i) {
+        if b.is_ascii_whitespace() {
+            i = i.saturating_add(1);
+            continue;
+        }
+        let start = i;
+        while matches!(line.get(i), Some(c) if !c.is_ascii_whitespace()) {
+            i = i.saturating_add(1);
+        }
+        if let Some(tok) = line.get(start..i) {
+            out.push((start, tok));
+        }
+    }
+    out
+}
+
+/// ISR latency, in cycles, from the second line of `/proc/interrupts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IsrLatency {
+    /// Fastest observed interrupt service routine, in cycles.
+    pub min_cycles: u64,
+    /// Slowest observed.
+    pub max_cycles: u64,
+    /// Arithmetic mean over `samples`.
+    pub mean_cycles: u64,
+    /// How many measurements the three figures are drawn from. Reported
+    /// because a mean over four samples and a mean over four million are the
+    /// same number with very different standing.
+    pub samples: u64,
+}
+
+/// One row of the `IRQ PENDING DESCRIPTION` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Irq {
+    /// The IRQ line, as the IOAPIC numbers it.
+    pub number: u32,
+    /// Whether the IOAPIC currently shows the line asserted.
+    ///
+    /// A sample, not a total. Reading the file twice can show `false` both
+    /// times while thousands of interrupts were serviced in between, so this
+    /// must not be presented as activity -- see the note on [`Interrupts`].
+    pub pending: bool,
+    /// The kernel's fixed label for the line, e.g. `PIT timer / HPET`. Bytes,
+    /// because nothing guarantees this is UTF-8 and a lossy conversion here
+    /// would be a silent edit of a name.
+    pub description: Vec<u8>,
+}
+
+/// `/proc/interrupts`: APIC ticks, ISR latency, and per-IRQ pending state.
+///
+/// # This is not Linux's `/proc/interrupts`
+///
+/// Linux prints a counter per CPU per interrupt, and every tool written
+/// against that file reads columns of counts. This kernel prints a *pending*
+/// flag and a fixed description, with two aggregate lines above the table. The
+/// counts do not exist to be parsed.
+///
+/// That distinction is preserved here rather than papered over. Synthesising a
+/// count from `pending` -- 1 when asserted, 0 when not -- would produce a
+/// column that looks exactly like Linux's and means nothing at all, and the
+/// program displaying it would be wrong in a way no test of this crate could
+/// see. A caller ported from Linux finds [`Irq::pending`] where it expected
+/// counters, which is an obvious absence rather than a plausible fiction.
+///
+/// [`Interrupts::apic_timer_ticks`] is the one real counter in the file, and
+/// it is a total for the timer alone, not per-IRQ.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Interrupts {
+    /// `APIC timer ticks:` -- the only counter this file carries.
+    pub apic_timer_ticks: Option<u64>,
+    /// `ISR latency:`.
+    ///
+    /// `None` both when the kernel wrote `(no measurements)` -- sampling was
+    /// not active -- and when the line is absent or unparseable. The two are
+    /// not distinguished because no caller can act differently on them: in
+    /// every case there is no latency to show.
+    pub isr_latency: Option<IsrLatency>,
+    /// One entry per table row, in the order the kernel lists them. Empty is a
+    /// real answer for a kernel that served the header and no rows.
+    pub irqs: Vec<Irq>,
+}
+
+impl Interrupts {
+    /// Parse `/proc/interrupts`.
+    ///
+    /// Total rather than fallible: every field is independently optional, so a
+    /// file truncated after its first line still yields the tick count. A
+    /// row is taken only when its first token parses as an IRQ number *and*
+    /// its second is exactly `yes` or `no`, which is what keeps the
+    /// `IRQ  PENDING  DESCRIPTION` header itself out of the table.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let mut out = Self::default();
+        for line in content.split(|&b| b == b'\n') {
+            if let Some(value) = key_value(line, "APIC timer ticks") {
+                out.apic_timer_ticks = parse_u64(trim(&value));
+                continue;
+            }
+            if let Some(value) = key_value(line, "ISR latency") {
+                out.isr_latency = IsrLatency::parse_value(trim(&value));
+                continue;
+            }
+            if let Some(irq) = Irq::parse_line(line) {
+                out.irqs.push(irq);
+            }
+        }
+        out
+    }
+
+    /// The row for `number`, if the kernel listed it.
+    #[must_use]
+    pub fn irq(&self, number: u32) -> Option<&Irq> {
+        self.irqs.iter().find(|i| i.number == number)
+    }
+}
+
+impl IsrLatency {
+    /// Parse the text after `ISR latency:`.
+    ///
+    /// Shaped `min=A max=B mean=C cycles (N samples)`, or the literal
+    /// `(no measurements)`. All four numbers are required: three of them
+    /// without the sample count would be a summary with no weight, and the
+    /// kernel never emits a partial line, so a partial one means the format
+    /// moved and guessing at it is worse than reporting nothing.
+    fn parse_value(value: &[u8]) -> Option<Self> {
+        let mut min = None;
+        let mut max = None;
+        let mut mean = None;
+        let mut samples = None;
+        for tok in split_ws(value) {
+            if let Some(rest) = tok.strip_prefix(b"min=") {
+                min = parse_u64(rest);
+            } else if let Some(rest) = tok.strip_prefix(b"max=") {
+                max = parse_u64(rest);
+            } else if let Some(rest) = tok.strip_prefix(b"mean=") {
+                mean = parse_u64(rest);
+            } else if let Some(rest) = tok.strip_prefix(b"(") {
+                // `(42` of `(42 samples)`. `(no` of `(no measurements)` fails
+                // to parse, which is exactly the answer for that line.
+                samples = parse_u64(rest);
+            }
+        }
+        Some(Self {
+            min_cycles: min?,
+            max_cycles: max?,
+            mean_cycles: mean?,
+            samples: samples?,
+        })
+    }
+}
+
+impl Irq {
+    /// Parse one `IRQ PENDING DESCRIPTION` row, or `None` if this is not one.
+    #[must_use]
+    pub fn parse_line(line: &[u8]) -> Option<Self> {
+        let (number, rest) = split_first_token(line)?;
+        let number = u32::try_from(parse_u64(number)?).ok()?;
+        let (pending, description) = split_first_token(rest)?;
+        // Exactly these two spellings. Anything else is a line this parser
+        // does not understand, and treating an unknown word as `false` would
+        // turn a format change into a table of quiet negatives.
+        let pending = match pending {
+            b"yes" => true,
+            b"no" => false,
+            _ => return None,
+        };
+        Some(Self {
+            number,
+            pending,
+            description: trim(description).to_vec(),
+        })
+    }
+}
+
+/// The bounding box of the virtual desktop, from `desktop:`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopBounds {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Left edge. Signed: a monitor placed left of the primary puts the
+    /// desktop origin at a negative x, which is an ordinary arrangement and
+    /// not an error.
+    pub x: i32,
+    /// Top edge, signed for the same reason.
+    pub y: i32,
+}
+
+/// One output, from a row of `/proc/monitors`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Monitor {
+    /// Kernel-assigned id, the number before the colon.
+    pub id: u32,
+    /// Model name. Bytes, and may contain spaces -- which is why the
+    /// resolution token rather than a field index anchors the row.
+    pub name: Vec<u8>,
+    /// Current mode width in pixels.
+    pub width: u32,
+    /// Current mode height in pixels.
+    pub height: u32,
+    /// Refresh rate in Hz.
+    pub refresh_hz: u32,
+    /// Position of this output's top-left on the virtual desktop. Signed.
+    pub x: i32,
+    /// Vertical position, signed.
+    pub y: i32,
+    /// Scale as a percentage: 100 is 1x, 200 is 2x.
+    pub scale_pct: u32,
+    /// Connector label, e.g. `HDMI` or `DisplayPort`.
+    pub connector: Vec<u8>,
+    /// Whether the kernel marks this the primary output.
+    pub primary: bool,
+    /// Whether the output is enabled. A disabled monitor is still listed, and
+    /// still reports the mode it would use.
+    pub enabled: bool,
+}
+
+/// `/proc/monitors`: the display layout, and one row per output.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Monitors {
+    /// `monitors:` -- how many outputs the kernel knows about.
+    pub total: Option<u64>,
+    /// `enabled:` -- how many are enabled. Compare with [`Monitors::total`]
+    /// rather than counting [`Monitors::outputs`], which is the same number
+    /// by a different route and would hide a disagreement between them.
+    pub enabled: Option<u64>,
+    /// `layout_mode:` -- the kernel's word for the arrangement.
+    pub layout_mode: Option<Vec<u8>>,
+    /// `primary_id:`.
+    pub primary_id: Option<u64>,
+    /// `ops:` -- layout operations performed since boot.
+    pub ops: Option<u64>,
+    /// `desktop:` -- the bounding box of every enabled output.
+    pub desktop: Option<DesktopBounds>,
+    /// One entry per output row, in the kernel's order.
+    pub outputs: Vec<Monitor>,
+}
+
+impl Monitors {
+    /// Parse `/proc/monitors`.
+    ///
+    /// Total for the reason [`Interrupts::parse`] is: the header fields and
+    /// the rows are independent, and a caller asking only "how many outputs"
+    /// should not be denied it by one malformed row.
+    ///
+    /// A line is a row when the text before its first colon parses as a
+    /// number, and a header field when it does not. That test is what keeps
+    /// `monitors: 2` and `2: HDMI-1 ...` apart, and it is the kernel's own
+    /// distinction rather than a position in the file -- so a header field
+    /// added later does not shift the rows.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let mut out = Self::default();
+        for line in content.split(|&b| b == b'\n') {
+            if let Some(monitor) = Monitor::parse_line(line) {
+                out.outputs.push(monitor);
+                continue;
+            }
+            if let Some(v) = key_value(line, "monitors") {
+                out.total = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "enabled") {
+                out.enabled = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "layout_mode") {
+                out.layout_mode = Some(trim(&v).to_vec());
+            } else if let Some(v) = key_value(line, "primary_id") {
+                out.primary_id = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "ops") {
+                out.ops = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "desktop") {
+                out.desktop = DesktopBounds::parse_value(trim(&v));
+            }
+        }
+        out
+    }
+
+    /// The output the kernel marks primary, if any row does.
+    #[must_use]
+    pub fn primary(&self) -> Option<&Monitor> {
+        self.outputs.iter().find(|m| m.primary)
+    }
+}
+
+impl DesktopBounds {
+    /// Parse the text after `desktop:`, shaped `WxH at (X,Y)`.
+    fn parse_value(value: &[u8]) -> Option<Self> {
+        let tokens = split_ws(value);
+        let (width, height) = parse_wh(tokens.first()?)?;
+        // `at` is tokens[1]; the position is the last token, so a future
+        // addition between them does not move it.
+        let (x, y) = parse_paren_pair(tokens.last()?)?;
+        Some(Self {
+            width,
+            height,
+            x,
+            y,
+        })
+    }
+}
+
+impl Monitor {
+    /// Parse one output row, or `None` if this line is not one.
+    #[must_use]
+    pub fn parse_line(line: &[u8]) -> Option<Self> {
+        let colon = line.iter().position(|&b| b == b':')?;
+        let id = u32::try_from(parse_u64(trim(line.get(..colon)?))?).ok()?;
+        let rest = line.get(colon.saturating_add(1)..)?;
+
+        let tokens = tokens_with_offsets(rest);
+        // The mode token anchors the row. Taking the name as "token 0" would
+        // break on every monitor whose model name contains a space, and those
+        // are the common case.
+        let mode_at = tokens
+            .iter()
+            .position(|&(_, tok)| parse_mode(tok).is_some())?;
+        let &(mode_off, mode_tok) = tokens.get(mode_at)?;
+        let (width, height, refresh_hz) = parse_mode(mode_tok)?;
+        let name = trim(rest.get(..mode_off)?).to_vec();
+
+        let mut x = None;
+        let mut y = None;
+        let mut scale_pct = None;
+        let mut connector: Option<Vec<u8>> = None;
+        let mut primary = false;
+        // Enabled unless the kernel says otherwise: the marker is ` [disabled]`
+        // and there is no ` [enabled]` to look for.
+        let mut enabled = true;
+        for &(_, tok) in tokens.get(mode_at.saturating_add(1)..)?.iter() {
+            if let Some(inner) = tok.strip_prefix(b"pos=") {
+                if let Some((px, py)) = parse_paren_pair(inner) {
+                    x = Some(px);
+                    y = Some(py);
+                }
+            } else if let Some(pct) = tok
+                .strip_prefix(b"scale=")
+                .and_then(|r| r.strip_suffix(b"%"))
+            {
+                scale_pct = parse_u64(pct).and_then(|v| u32::try_from(v).ok());
+            } else if tok == b"[primary]" {
+                primary = true;
+            } else if tok == b"[disabled]" {
+                enabled = false;
+            } else if connector.is_none() {
+                // The one unlabelled token after the mode. Taken last so a
+                // bracketed flag can never be mistaken for it.
+                connector = Some(tok.to_vec());
+            }
+        }
+
+        Some(Self {
+            id,
+            name,
+            width,
+            height,
+            refresh_hz,
+            x: x?,
+            y: y?,
+            scale_pct: scale_pct?,
+            connector: connector.unwrap_or_default(),
+            primary,
+            enabled,
+        })
+    }
+}
+
+/// `WxH` as two `u32`.
+fn parse_wh(tok: &[u8]) -> Option<(u32, u32)> {
+    let at = tok.iter().position(|&b| b == b'x')?;
+    let w = parse_u64(tok.get(..at)?)?;
+    let h = parse_u64(tok.get(at.saturating_add(1)..)?)?;
+    Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?))
+}
+
+/// `WxH@RHz` as width, height, refresh.
+fn parse_mode(tok: &[u8]) -> Option<(u32, u32, u32)> {
+    let body = tok.strip_suffix(b"Hz")?;
+    let at = body.iter().position(|&b| b == b'@')?;
+    let (w, h) = parse_wh(body.get(..at)?)?;
+    let hz = parse_u64(body.get(at.saturating_add(1)..)?)?;
+    Some((w, h, u32::try_from(hz).ok()?))
+}
+
+/// `(A,B)` as two signed numbers. Signed because a monitor left of or above
+/// the primary has a negative origin.
+fn parse_paren_pair(tok: &[u8]) -> Option<(i32, i32)> {
+    let inner = tok.strip_prefix(b"(")?.strip_suffix(b")")?;
+    let comma = inner.iter().position(|&b| b == b',')?;
+    let a = parse_i64(inner.get(..comma)?)?;
+    let b = parse_i64(inner.get(comma.saturating_add(1)..)?)?;
+    Some((i32::try_from(a).ok()?, i32::try_from(b).ok()?))
 }
 
 #[cfg(test)]

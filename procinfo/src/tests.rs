@@ -1482,3 +1482,208 @@ nonvoluntary_ctxt_switches:	7
     assert_eq!(bare.voluntary_ctxt_switches, None);
     assert_eq!(bare.nonvoluntary_ctxt_switches, None);
 }
+
+// ---------------------------------------------------------------------------
+// /proc/interrupts
+// ---------------------------------------------------------------------------
+
+/// Exactly what `gen_interrupts` in `kernel/src/fs/procfs.rs` writes, including
+/// its `{:<4} {:<8}` column padding and the blank line before the table. Copied
+/// from the generator rather than invented, because a fixture that agrees with
+/// the parser and not with the kernel tests nothing.
+const INTERRUPTS: &[u8] = b"APIC timer ticks: 918273
+ISR latency:  min=412 max=93100 mean=1875 cycles (40213 samples)
+
+IRQ  PENDING  DESCRIPTION
+0    no       PIT timer / HPET
+1    yes      Keyboard (PS/2)
+11   no       PCI / AHCI
+";
+
+#[test]
+fn interrupts_reads_the_aggregate_lines_and_every_row() {
+    let it = Interrupts::parse(INTERRUPTS);
+    assert_eq!(it.apic_timer_ticks, Some(918_273));
+    let isr = it.isr_latency.unwrap();
+    assert_eq!(isr.min_cycles, 412);
+    assert_eq!(isr.max_cycles, 93_100);
+    assert_eq!(isr.mean_cycles, 1875);
+    assert_eq!(isr.samples, 40_213);
+    assert_eq!(it.irqs.len(), 3);
+    assert!(it.irq(1).unwrap().pending);
+    assert!(!it.irq(0).unwrap().pending);
+    assert_eq!(it.irq(99), None);
+}
+
+#[test]
+fn an_irq_description_keeps_the_spacing_the_kernel_wrote() {
+    // The reason `split_first_token` exists rather than `split_ws`. These two
+    // descriptions both contain characters that a re-join would normalise --
+    // the surrounding spaces of `/`, and the parenthesised `(PS/2)` -- and a
+    // display that shows `PIT timer/HPET` is quietly editing a kernel label.
+    let it = Interrupts::parse(INTERRUPTS);
+    assert_eq!(it.irq(0).unwrap().description, b"PIT timer / HPET");
+    assert_eq!(it.irq(1).unwrap().description, b"Keyboard (PS/2)");
+    assert_eq!(it.irq(11).unwrap().description, b"PCI / AHCI");
+}
+
+#[test]
+fn the_table_header_is_not_a_row() {
+    // The control for the row test above. `IRQ  PENDING  DESCRIPTION` has
+    // three whitespace-separated fields in the right places and is the line a
+    // position-based parser swallows; it is rejected because `IRQ` is not a
+    // number. Without this the parser could accept anything and the row count
+    // above would still be satisfiable.
+    assert_eq!(Irq::parse_line(b"IRQ  PENDING  DESCRIPTION"), None);
+    assert_eq!(Irq::parse_line(b""), None);
+    assert_eq!(Irq::parse_line(b"APIC timer ticks: 5"), None);
+}
+
+#[test]
+fn a_pending_word_the_kernel_does_not_write_rejects_the_row() {
+    // `pending` is a bool, so an unrecognised word has to become one of the
+    // two values or stop the row. Making it `false` would turn a format
+    // change into a table of quiet negatives -- every line present, every
+    // line idle -- which reads as a healthy machine.
+    assert_eq!(Irq::parse_line(b"3    maybe    COM2 / Serial"), None);
+    assert_eq!(Irq::parse_line(b"3    YES      COM2 / Serial"), None);
+    // ...while the two it does write are taken.
+    assert!(Irq::parse_line(b"3 yes COM2").unwrap().pending);
+    assert!(!Irq::parse_line(b"3 no COM2").unwrap().pending);
+}
+
+#[test]
+fn the_tick_count_survives_a_file_with_no_measurements_and_no_rows() {
+    // Each field is independently optional, so the shortest real file -- an
+    // early boot, before sampling and before the table -- still answers the
+    // one question it can.
+    let early = Interrupts::parse(b"APIC timer ticks: 7\nISR latency:  (no measurements)\n");
+    assert_eq!(early.apic_timer_ticks, Some(7));
+    assert_eq!(early.isr_latency, None);
+    assert!(early.irqs.is_empty());
+}
+
+#[test]
+fn a_partial_latency_line_is_no_latency_rather_than_a_guess() {
+    // Three figures without their sample count is a summary with no weight.
+    // The kernel never writes one, so a partial line means the format moved,
+    // and a mean over an unknown number of samples is worse than nothing.
+    let partial = Interrupts::parse(b"ISR latency:  min=1 max=2 mean=3 cycles\n");
+    assert_eq!(partial.isr_latency, None);
+}
+
+// ---------------------------------------------------------------------------
+// /proc/monitors
+// ---------------------------------------------------------------------------
+
+/// Exactly what `gen_monitors` writes. The second row exercises three things
+/// at once that the first does not: a name containing a space, a negative
+/// origin, and both bracketed flags being absent/present.
+const MONITORS: &[u8] = b"monitors: 2
+enabled: 1
+layout_mode: extended
+primary_id: 1
+ops: 14
+desktop: 3840x1200 at (-1920,0)
+1: DELL U2412 1920x1200@60Hz pos=(0,0) scale=100% DisplayPort [primary]
+2: HP-Z24 1920x1080@75Hz pos=(-1920,0) scale=125% HDMI [disabled]
+";
+
+#[test]
+fn monitors_reads_the_header_and_both_rows() {
+    let m = Monitors::parse(MONITORS);
+    assert_eq!(m.total, Some(2));
+    assert_eq!(m.enabled, Some(1));
+    assert_eq!(m.layout_mode.as_deref(), Some(&b"extended"[..]));
+    assert_eq!(m.primary_id, Some(1));
+    assert_eq!(m.ops, Some(14));
+    let d = m.desktop.unwrap();
+    assert_eq!((d.width, d.height, d.x, d.y), (3840, 1200, -1920, 0));
+    assert_eq!(m.outputs.len(), 2);
+    assert_eq!(m.primary().unwrap().id, 1);
+}
+
+#[test]
+fn a_monitor_name_containing_a_space_is_recovered_whole() {
+    // This is why the resolution token anchors the row rather than a field
+    // index. `DELL U2412` is two tokens and one name, and a parser that took
+    // "token 0" would report the model as `DELL` and then read the resolution
+    // out of `U2412`, which fails -- so the row would vanish rather than be
+    // wrong, which is how this would have gone unnoticed in a count test.
+    let m = Monitors::parse(MONITORS);
+    assert_eq!(m.outputs[0].name, b"DELL U2412");
+    assert_eq!(m.outputs[1].name, b"HP-Z24");
+}
+
+#[test]
+fn a_monitor_left_of_the_primary_has_a_negative_origin() {
+    // `x`/`y` are `i32` in the kernel's own struct. Parsing them as unsigned
+    // would not fail -- it would wrap, and a monitor at -1920 would be
+    // reported somewhere past four billion, which a layout view would draw
+    // off-screen and blame on itself.
+    let m = Monitors::parse(MONITORS);
+    assert_eq!((m.outputs[0].x, m.outputs[0].y), (0, 0));
+    assert_eq!((m.outputs[1].x, m.outputs[1].y), (-1920, 0));
+}
+
+#[test]
+fn the_flags_and_the_connector_do_not_get_confused_for_each_other() {
+    let m = Monitors::parse(MONITORS);
+    assert_eq!(m.outputs[0].connector, b"DisplayPort");
+    assert!(m.outputs[0].primary);
+    assert!(m.outputs[0].enabled);
+    assert_eq!(m.outputs[1].connector, b"HDMI");
+    assert!(!m.outputs[1].primary);
+    assert!(!m.outputs[1].enabled);
+    // An output with no flags at all is enabled and not primary -- the
+    // default has to come from the absence of `[disabled]`, since the kernel
+    // never writes an `[enabled]` marker for the parser to see.
+    let plain = Monitor::parse_line(b"3: X 800x600@60Hz pos=(0,0) scale=100% VGA").unwrap();
+    assert!(plain.enabled);
+    assert!(!plain.primary);
+    assert_eq!(plain.connector, b"VGA");
+}
+
+#[test]
+fn a_header_field_is_not_a_row_and_a_row_is_not_a_header_field() {
+    // Both directions, because the two live in one file and are told apart by
+    // a single test -- does the text before the colon parse as a number.
+    assert_eq!(Monitor::parse_line(b"monitors: 2"), None);
+    assert_eq!(Monitor::parse_line(b"layout_mode: extended"), None);
+    assert_eq!(Monitor::parse_line(b"desktop: 3840x1200 at (0,0)"), None);
+    // The control: the row that LOOKS most like the `monitors: 2` header --
+    // a number, a colon, a number -- is still rejected, because it carries no
+    // mode token. A parser that accepted it would invent an output.
+    assert_eq!(Monitor::parse_line(b"2: 2"), None);
+    assert!(Monitor::parse_line(b"2: HP-Z24 1920x1080@75Hz pos=(0,0) scale=100% HDMI").is_some());
+}
+
+#[test]
+fn the_header_count_and_the_row_count_are_reported_separately() {
+    // `enabled: 1` while two rows are listed is not a contradiction -- the
+    // second is `[disabled]` -- and the doc says to compare the header with
+    // itself rather than with the rows. This pins that they are independent,
+    // so a future change that derives one from the other has to break a test
+    // rather than quietly agree with itself.
+    let m = Monitors::parse(MONITORS);
+    assert_eq!(m.enabled, Some(1));
+    assert_eq!(m.outputs.len(), 2);
+    assert_eq!(m.outputs.iter().filter(|o| o.enabled).count(), 1);
+}
+
+#[test]
+fn both_files_read_through_procfs_and_absent_is_not_an_error() {
+    // The reader half: `Ok(None)` for a kernel that does not serve the node,
+    // which is the distinction this crate exists to get right.
+    let fixture = Fixture::new("irq-display");
+    fixture.write("interrupts", INTERRUPTS);
+    fixture.write("monitors", MONITORS);
+    let proc = fixture.procfs();
+    assert_eq!(proc.interrupts().unwrap().unwrap().irqs.len(), 3);
+    assert_eq!(proc.monitors().unwrap().unwrap().outputs.len(), 2);
+
+    let absent = Fixture::new("irq-display-absent");
+    let none = absent.procfs();
+    assert!(none.interrupts().unwrap().is_none());
+    assert!(none.monitors().unwrap().is_none());
+}

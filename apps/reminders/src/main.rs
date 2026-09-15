@@ -39,6 +39,7 @@ use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;
 use oswindow::app::{self, App, Response};
@@ -78,8 +79,16 @@ use guitk::text;
 const NO_TASKS_LINES: [&str; 3] = [
     "No reminders.",
     "This app opened with five tasks until 2026-09-15, one of them overdue. Nobody had been given any of them.",
-    "It has no filesystem access, so nothing is kept between runs -- an empty list here does not mean nothing is due.",
+    "Nothing is kept automatically -- press Ctrl+S to write the list to a file, or an empty list here does not mean nothing is due.",
 ];
+
+/// The most of a file one open will read.
+///
+/// Reported when it bites. `import_json` scans for task objects and stops when
+/// it stops finding them, so a cut file imports the tasks it could see and
+/// says nothing about the ones it could not -- and **a reminder list missing
+/// tomorrow's appointment looks exactly like a list that never had it.**
+pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 720.0;
@@ -1616,6 +1625,11 @@ fn parse_subtasks_json(json: &str) -> Vec<Subtask> {
 // ============================================================================
 
 pub struct RemindersApp {
+    /// The open or save picker. Holds the dialog, the saving flag and the
+    /// routing that ten applications used to write out by hand.
+    pub picker: FilePicker,
+    /// What the last open or save did, for the banner line.
+    pub last_file_action: Option<String>,
     pub width: f32,
     pub height: f32,
     pub today: Date,
@@ -1641,6 +1655,8 @@ impl RemindersApp {
     pub fn new(width: f32, height: f32, now: DateTime) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: FilePicker::new(),
+            last_file_action: None,
             width,
             height,
             today: now.date,
@@ -1765,6 +1781,27 @@ impl RemindersApp {
 
     /// Route a compositor event into the app.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up, or a keystroke meant
+        // for a filename lands in the search box behind it.
+        //
+        // A tick comes back as `Ignored` and falls through, which the hand
+        // written version got wrong: it returned early for everything that was
+        // not a key press or a click, so `Event::Tick => self.refresh_now()`
+        // never ran while a dialog was open and **the clock stopped** -- in an
+        // app whose whole job is telling you what is overdue.
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                let saving = self.picker.is_saving();
+                self.last_file_action = Some(if saving {
+                    self.write_json(&path)
+                } else {
+                    self.read_json(&path)
+                });
+                return EventResult::Consumed;
+            }
+            Picked::Handled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Tick { .. } => self.refresh_now(),
@@ -1789,6 +1826,91 @@ impl RemindersApp {
     /// The app had no input handling before it was wired to the compositor:
     /// every view, sort order and selection it can show was reachable only by a
     /// caller setting the field directly.
+    /// Put the open or save picker up.
+    ///
+    /// `export_json` and `import_json` were both written and both tested, and
+    /// nothing could call either: this app had no way to reach a file, so a
+    /// list of what you have to do survived exactly as long as the window did.
+    pub fn open_file_dialog(&mut self, saving: bool) {
+        if saving {
+            self.picker.open_to_write("reminders.json");
+        } else {
+            self.picker.open_to_read();
+        }
+    }
+
+    /// Write the task list to `path` as JSON.
+    ///
+    /// Refuses an empty list rather than writing `{"tasks":[]}`, which is
+    /// valid, imports as nothing, and cannot be told apart from a save that
+    /// failed -- by which time it has replaced the file that had the list in
+    /// it. See design-decisions 854.
+    pub fn write_json(&mut self, path: &std::path::Path) -> String {
+        if self.store.tasks.is_empty() {
+            return String::from("No reminders to write");
+        }
+        let text = self.store.export_json();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!(
+                "Wrote {} reminder(s) to {}",
+                self.store.tasks.len(),
+                path.display()
+            ),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read `path` and add every task in it.
+    ///
+    /// **`import_json` returns a count and cannot fail.** It scans for task
+    /// objects and stops when it stops finding them, so a file that is not a
+    /// reminders export imports zero tasks and reports success -- and "0
+    /// reminders added" reads as *that file was empty*, which is a claim about
+    /// the file rather than about this program's ability to read it.
+    ///
+    /// So the three outcomes are separated here. The shape check is a check on
+    /// the shape and is described as one: it asks whether the text contains
+    /// the key this app's own exporter writes, not whether the JSON is valid.
+    pub fn read_json(&mut self, path: &std::path::Path) -> String {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => return format!("Could not read {}: {err}", path.display()),
+        };
+        let whole = text.len();
+        let truncated = whole > MAX_JSON_BYTES;
+        let body = if truncated {
+            let mut end = MAX_JSON_BYTES;
+            while end > 0 && !text.is_char_boundary(end) {
+                end = end.saturating_sub(1);
+            }
+            text.get(..end).unwrap_or("")
+        } else {
+            text.as_str()
+        };
+        let cut_note = if truncated {
+            format!("INCOMPLETE ({MAX_JSON_BYTES} of {whole} bytes read): ")
+        } else {
+            String::new()
+        };
+
+        let now = self.now;
+        let added = self.store.import_json(body, now);
+        if added > 0 {
+            return format!(
+                "{cut_note}Added {added} reminder(s) from {}",
+                path.display()
+            );
+        }
+        if body.contains("\"tasks\"") {
+            format!("{cut_note}{} holds no reminders", path.display())
+        } else {
+            format!(
+                "{cut_note}{} is not a reminders export -- nothing in it looks like this app's own format, so nothing was added",
+                path.display()
+            )
+        }
+    }
+
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
@@ -1799,6 +1921,18 @@ impl RemindersApp {
             Key::Num3 => self.set_view(ViewFilter::All),
             Key::Num4 => self.set_view(ViewFilter::Overdue),
             Key::Num5 => self.set_view(ViewFilter::Completed),
+            // `Key::S if ctrl` must come first: a guard arm that sorts
+            // rather than saves would make Ctrl+S reorder the list.
+            // `Key::S if ctrl` must come first: a guard arm that sorts
+            // rather than saves would make Ctrl+S reorder the list.
+            Key::S if key.modifiers.ctrl => {
+                self.open_file_dialog(true);
+                EventResult::Consumed
+            }
+            Key::O if key.modifiers.ctrl => {
+                self.open_file_dialog(false);
+                EventResult::Consumed
+            }
             Key::S => {
                 self.cycle_sort();
                 EventResult::Consumed
@@ -1997,6 +2131,9 @@ impl RemindersApp {
 
         // Main task list
         self.render_task_list(&mut cmds, main_x, content_y, main_w, content_h);
+
+        // Last, so it is above everything.
+        cmds.extend(self.picker.render(&self.palette, self.width, self.height));
 
         cmds
     }
@@ -3833,6 +3970,182 @@ mod tests {
         assert!((app.height - 1024.0).abs() < f32::EPSILON);
     }
     use super::*;
+
+    fn door_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("slateos-reminders-door-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// A list survives a write and a read.
+    ///
+    /// `export_json` and `import_json` were both written and both tested, and
+    /// neither could be called: a list of what you have to do survived exactly
+    /// as long as the window did.
+    #[test]
+    fn a_list_survives_a_write_and_a_read() {
+        let now = make_now();
+        let path = door_dir().join("list.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, now);
+        app.store.add(Task::new(1, "Buy milk", now));
+        app.store.add(Task::new(2, "Call the dentist", now));
+        let said = app.write_json(&path);
+        assert!(said.starts_with("Wrote 2 reminder(s)"), "said: {said}");
+
+        let mut reopened = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, now);
+        let said = reopened.read_json(&path);
+        assert!(said.starts_with("Added 2 reminder(s)"), "said: {said}");
+        let titles: Vec<&str> = reopened
+            .store
+            .tasks
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert!(titles.contains(&"Buy milk"), "lost a task: {titles:?}");
+        assert!(
+            titles.contains(&"Call the dentist"),
+            "lost a task: {titles:?}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file this app cannot read is named as such, not reported as empty.
+    ///
+    /// This is the point of the whole check. `import_json` returns a count and
+    /// cannot fail: it scans for task objects and stops when it stops finding
+    /// them, so a file that is not a reminders export imports zero and looks
+    /// like a success. **"0 reminders added" reads as "that file was empty",
+    /// which is a claim about the file rather than about this program's
+    /// ability to read it.**
+    #[test]
+    fn a_file_that_is_not_a_reminders_export_is_not_reported_as_empty() {
+        let path = door_dir().join("foreign.json");
+        std::fs::write(
+            &path,
+            "{\"widgets\":[{\"id\":7,\"name\":\"nothing to do with us\"}]}",
+        )
+        .expect("write foreign json");
+
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        let said = app.read_json(&path);
+        assert!(
+            said.contains("is not a reminders export"),
+            "a file it cannot read must say so, said: {said}"
+        );
+        assert!(
+            !said.contains("holds no reminders"),
+            "that would be a claim about the file, said: {said}"
+        );
+        assert!(app.store.tasks.is_empty(), "nothing should have been added");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An export that genuinely holds nothing says *that*, which is the other
+    /// half of the same distinction.
+    #[test]
+    fn an_export_with_no_tasks_says_it_holds_none() {
+        let path = door_dir().join("empty.json");
+        std::fs::write(&path, "{\"tasks\":[]}").expect("write empty export");
+
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        let said = app.read_json(&path);
+        assert!(said.contains("holds no reminders"), "said: {said}");
+        assert!(!said.contains("is not a reminders export"), "said: {said}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An export of nothing is refused. See design-decisions 854.
+    #[test]
+    fn an_empty_list_is_not_written() {
+        let path = std::env::temp_dir().join("slateos-reminders-should-not-exist.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        let said = app.write_json(&path);
+        assert_eq!(said, "No reminders to write");
+        assert!(!path.exists(), "nothing should have been created");
+    }
+
+    /// A missing file is a read failure, not a verdict on its contents.
+    #[test]
+    fn a_missing_file_is_reported_as_a_read_failure() {
+        let path = std::env::temp_dir().join("slateos-reminders-absent.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        let said = app.read_json(&path);
+        assert!(said.starts_with("Could not read"), "said: {said}");
+        assert!(
+            !said.contains("not a reminders export"),
+            "the file was never examined, so do not judge its contents: {said}"
+        );
+    }
+
+    /// The clock keeps running while the picker is open.
+    ///
+    /// The hand-written intercept this replaced returned early for every
+    /// event that was not a key press or a click, so `Event::Tick` never
+    /// reached `refresh_now` while a dialog was up. **Time stopped in an app
+    /// whose entire job is telling you what is overdue**, for as long as the
+    /// save dialog stayed open. `FilePicker::handle` returns `Ignored` for a
+    /// tick precisely so it falls through.
+    #[test]
+    fn the_clock_keeps_running_while_the_picker_is_open() {
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        // A moment the real clock cannot be at, so any advance is visible.
+        let long_ago = DateTime::new(
+            Date::new(2000, 1, 1).expect("a real date"),
+            Time::new(0, 0).expect("a real time"),
+        );
+        app.now = long_ago;
+
+        app.open_file_dialog(true);
+        assert!(app.picker.is_open(), "no picker to test behind");
+
+        app.handle_event(&Event::Tick { elapsed_ms: 60_000 });
+        assert_ne!(
+            app.now, long_ago,
+            "the clock stopped because a dialog was open"
+        );
+        assert!(app.picker.is_open(), "the tick closed the dialog");
+    }
+
+    /// Ctrl+S saves; plain S still cycles the sort.
+    ///
+    /// The arms are ordered `Key::S if ctrl` before `Key::S`, and the other
+    /// order compiles and silently makes Ctrl+S reorder the user's list
+    /// instead of saving it -- a keystroke that does the wrong thing quietly.
+    #[test]
+    fn ctrl_s_opens_the_picker_and_plain_s_still_sorts() {
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        let sort_before = app.sort_mode;
+
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        app.handle_key(&KeyEvent {
+            key: Key::S,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::new(),
+        });
+        assert!(app.picker.is_open(), "Ctrl+S did not open the picker");
+        assert_eq!(app.sort_mode, sort_before, "Ctrl+S reordered the list");
+
+        app.picker.close();
+        app.handle_key(&KeyEvent {
+            key: Key::S,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert!(!app.picker.is_open(), "plain S opened a picker");
+        assert_ne!(app.sort_mode, sort_before, "plain S no longer sorts");
+    }
 
     /// A fresh window holds no obligations, and says the silence means nothing.
     ///

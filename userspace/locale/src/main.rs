@@ -1194,13 +1194,13 @@ fn run_locale(args: &[String]) {
         match arg.as_str() {
             "-a" | "--all-locales" => show_all = true,
             "-m" | "--charmaps" => show_charmaps = true,
-            "-k" | "--keyword" => show_keyword = true,
+            "-k" | "--keyword-name" | "--keyword" => show_keyword = true,
             "-c" | "--category-name" => show_category = true,
             "-h" | "--help" => {
                 println!("Usage: locale [OPTION...] [NAME...]");
                 println!("  -a, --all-locales    List all available locales");
                 println!("  -m, --charmaps       List available character maps");
-                println!("  -k, --keyword        Show keyword names with values");
+                println!("  -k, --keyword-name   Write names of selected keywords");
                 println!("  -c, --category-name  Show category name before values");
                 println!("  -h, --help           Show this help");
                 process::exit(0);

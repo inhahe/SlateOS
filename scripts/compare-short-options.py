@@ -42,11 +42,90 @@ OURS_B = re.compile(r'"(--[a-z0-9][a-z0-9-]*)"\s*\|\s*"(-[A-Za-z0-9])"')
 # `-x, --long` as every util-linux/GNU help formats it. The long name may be
 # followed by an argument spec (`<file>`, `[=<dir>]`, `=NAME`), which stops
 # the match rather than joining it.
-THEIRS = re.compile(r"(?:^|\s)(-[A-Za-z0-9]),\s+(--[a-z0-9][a-z0-9-]*)")
+#
+# The SHORT name may carry one too, and psmisc writes it that way:
+#
+#     -N TYPE, --ns-sort=TYPE
+#     -H PID, --highlight-pid=PID
+#
+# Without the optional `[A-Z]+` below, the comma is not adjacent to the letter
+# and the whole line was skipped -- so every option written in that style went
+# UNCOMPARED. That is a false negative, which costs more than a false positive
+# here: a spurious finding is a minute of checking, and a missed one is
+# silent. `pstree -N` went unexamined for exactly this reason.
+# The trailing `(?!\s*,\s*-)` rejects an ENUMERATION. Ubuntu's resolvconf
+# ends its help with a list of options it now ignores:
+#
+#     -I, -i, -l, -R, -r, -v, -V, --enable-updates, --disable-updates,
+#     --updates-are-enabled.
+#
+# which read as a definition of `-V` as `--enable-updates`. A definition is
+# followed by its description; a list is followed by another option.
+THEIRS = re.compile(
+    r"(?:^|\s)(-[A-Za-z0-9])(?:\s+[A-Z][A-Z_]*)?,\s+(--[a-z0-9][a-z0-9-]*)"
+    # `(?![a-z0-9-])` first: without it the capture BACKTRACKS to
+    # `--enable-update`, leaving `s` as the next character, and the
+    # enumeration guard below never fires.
+    r"(?![a-z0-9-])(?!\s*,\s*-)"
+)
 
 # `progname.ends_with("umount")` and friends: how this tree spells "which
 # program am I being run as".
 PERSONALITY = re.compile(r'ends_with\("([a-z][a-z0-9_-]*)"\)')
+
+# The other spelling: `match prog_name.as_str() { "mountpoint" => ... }`.
+#
+# Keyed on the SCRUTINEE NAME rather than on the shape of the arms, and
+# deliberately so. Collecting arms from any match at all would hand the
+# checker extra "personalities" whose option tables then EXCUSE real
+# collisions -- a false negative, which costs more here than a false positive,
+# because a missed collision is silent and a spurious one is a minute of
+# checking.
+# Bounded by `[^{}]` and stopped at the wildcard arm, NOT by scanning for a
+# closing brace. The first version captured to the next line starting with
+# `}` -- which is the enclosing FUNCTION's brace, because a match's own
+# closing brace is indented. So it swallowed every later match in the same
+# function.
+#
+# `userspace/perf` showed what that costs. Its argv[0] dispatch is fine, but
+# the capture ran on into the SUBCOMMAND dispatch and harvested `stat`, `top`,
+# `record` and `report` as personalities. `stat` and `top` are real programs,
+# so `perf stat -e` was then compared against coreutils `stat` -- an unrelated
+# tool's option table, reported as this one's defect.
+DISPATCH = re.compile(
+    r"match\s+(?:\w*(?:prog|argv0|personality|basename)\w*)"
+    r"(?:\.as_str\(\)|\.as_ref\(\))?\s*\{([^{}]*?)_\s*=>",
+    re.S | re.I,
+)
+DISPATCH_ARM = re.compile(r'"([a-z][a-z0-9_-]*)"\s*(?:\||=>)')
+
+# The third spelling: `match name { "lastlog" => Personality::Lastlog, .. }`.
+#
+# `userspace/last` is last, lastb and lastlog, and its scrutinee is called
+# plain `name` -- too generic to key on without collecting arms from every
+# unrelated match in the tree. The ARM is the specific part: a string literal
+# mapping to a `Personality::` variant says what it is with no ambiguity at
+# all, so this pattern can be exact rather than heuristic.
+PERSONALITY_ARM = re.compile(r'"([a-z][a-z0-9_-]*)"\s*=>\s*Personality::')
+
+# The fourth spelling: `stem.contains("id")`. `userspace/mktemp` is also
+# `id`, and decides that way -- neither a match arm nor an `ends_with`.
+#
+# Keyed on the RECEIVER, for the same reason `DISPATCH` is keyed on its
+# scrutinee: `.contains()` is far too common a call to harvest string
+# literals from indiscriminately.
+#
+# The obvious alternative -- harvesting the `Personality::` VARIANT names --
+# was tried and reverted in the same sitting. `userspace/perf` has
+# `Personality::Stat` and `Personality::Top` as shorthands for the multi-call
+# names `perf-stat` and `perf-top`; lowercased they are `stat` and `top`,
+# which are real and unrelated programs, so `perf stat -e` went straight back
+# to being compared against coreutils `stat`. A variant name is a label for a
+# personality, not the name the binary answers to.
+PERSONALITY_CONTAINS = re.compile(
+    r"(?:stem|base|basename|prog|progname|argv0|name)\.contains\("
+    r'"([a-z][a-z0-9_-]*)"\)'
+)
 
 
 def personalities(crate_name: str, source: str, cargo: str) -> list[str]:
@@ -62,12 +141,27 @@ def personalities(crate_name: str, source: str, cargo: str) -> list[str]:
     does define `-f, --force` and `-l, --lazy`. The binding was correct and
     the checker was comparing it against the wrong program.
 
+    `userspace/findmnt` is the same story told a second way -- it is findmnt
+    and `mountpoint`, dispatching on `match prog_name.as_str()` rather than on
+    `ends_with`, so the first version of this function could not see it and
+    the checker reported `-d`/`--fs-devno` as wrong. mountpoint(1) defines
+    exactly that.
+
+    And a third: `userspace/last` is last, lastb and lastlog, matching on a
+    scrutinee called plain `name`. `-t`/`--time` was reported wrong; lastlog
+    defines `-t, --time DAYS` exactly. Three spellings of one idea, and each
+    was found by checking a finding rather than acting on it.
+
     So: collect every name the crate answers to, and treat a short option as
     mis-bound only if it disagrees with EVERY reference that defines it.
     """
     names = {crate_name}
     names.update(PERSONALITY.findall(source))
     names.update(re.findall(r'^name\s*=\s*"([a-z][a-z0-9_-]*)"', cargo, re.M))
+    for block in DISPATCH.findall(source):
+        names.update(DISPATCH_ARM.findall(block))
+    names.update(PERSONALITY_ARM.findall(source))
+    names.update(PERSONALITY_CONTAINS.findall(source))
     # Only plausible command names: this tree also writes `ends_with(".rs")`
     # and similar, which are suffixes rather than programs.
     return sorted(n for n in names if not n.startswith(".") and len(n) > 1)
@@ -107,15 +201,55 @@ def strip_comments(source: str) -> str:
     return "\n".join(out)
 
 
+FN_START = re.compile(r"^fn\s+([a-z_][a-z0-9_]*)", re.M)
+
+
 def ours(source: str) -> dict[str, str]:
     """Short -> long, as this tree binds them."""
+    return {short: long for short, long, _ in ours_located(source)}
+
+
+def ours_located(source: str) -> list[tuple[str, str, str]]:
+    """Every binding, with the name of the function it sits in.
+
+    THE ENCLOSING FUNCTION IS WHICH PROGRAM THE BINDING BELONGS TO, and
+    without it a multi-personality crate is judged against whichever of its
+    references happens to be installed. `userspace/selinux` answers to twelve
+    names; only `chcon` is present on this machine, so `-r`/`--range` -- which
+    lives in `semanage_login`, and is real semanage syntax -- was reported
+    against chcon's `-r, --role`. Likewise `userspace/xdg`: `-n`/`--no-open`
+    is in `run_xdg_open`, and was judged against `mimeopen`.
+
+    Both were wrong, and neither was visible from the binding alone.
+    """
     source = strip_comments(source)
-    found: dict[str, str] = {}
-    for short, long in OURS_A.findall(source):
-        found.setdefault(short, long)
-    for long, short in OURS_B.findall(source):
-        found.setdefault(short, long)
-    return found
+    bounds = [(m.start(), m.group(1)) for m in FN_START.finditer(source)]
+
+    def enclosing(at: int) -> str:
+        name = ""
+        for start, fn in bounds:
+            if start > at:
+                break
+            name = fn
+        return name
+
+    out = []
+    for pat, swapped in ((OURS_A, False), (OURS_B, True)):
+        for m in pat.finditer(source):
+            short, long = (m.group(2), m.group(1)) if swapped else (m.group(1), m.group(2))
+            out.append((short, long, enclosing(m.start())))
+    return out
+
+
+def owning_personality(fn_name: str, names: list[str]) -> str | None:
+    """The personality a function belongs to, if its name says so.
+
+    `run_xdg_open` -> `xdg-open`, `semanage_login` -> `semanage`. Longest
+    match wins, so `xdg-mime` is not mistaken for `xdg`.
+    """
+    spelled = fn_name.replace("_", "-")
+    matches = [n for n in names if n in spelled]
+    return max(matches, key=len) if matches else None
 
 
 def theirs(help_text: str) -> dict[str, set[str]]:
@@ -202,6 +336,11 @@ def selftest() -> int:
     assert theirs(" -d, --no-encoding   don't encode") == {"-d": {"--no-encoding"}}
     assert theirs(" -n, --match-types <list>  filter") == {"-n": {"--match-types"}}
     assert theirs(" -m, --mount[=<file>] unshare mounts") == {"-m": {"--mount"}}
+    # psmisc's form: an argument on the SHORT name, before the comma.
+    assert theirs(" -N TYPE, --ns-sort=TYPE") == {"-N": {"--ns-sort"}}
+    assert theirs(" -H PID, --highlight-pid=PID") == {"-H": {"--highlight-pid"}}
+    cases += 2
+
     # One letter documented twice keeps BOTH.
     assert theirs(" -V, --verbose explain\n -V, --version display") == {
         "-V": {"--verbose", "--version"}
@@ -246,10 +385,70 @@ def selftest() -> int:
     ]
     cases += 3
 
-    # Personality extraction.
+    # An enumeration of ignored options is not a definition.
+    assert theirs(" -I, -i, -v, -V, --enable-updates, --disable-updates,") == {}
+    assert theirs(" -V, --version display version") == {"-V": {"--version"}}
+    # `stem.contains("id")` names a program; a `Personality::` variant does
+    # not -- perf's `Stat`/`Top` are shorthands for `perf-stat`/`perf-top`.
+    assert "id" in personalities("mktemp", 'if stem.contains("id") {', "")
+    assert "stat" not in personalities("perf", "Personality::Stat => 1,", "")
+    cases += 4
+
+    # Attribution: the enclosing function says which program a binding is.
+    located = ours_located(
+        'fn run_xdg_open(a: &[String]) {\n    "-n" | "--no-open" => {}\n}\n'
+        'fn run_mimeopen(a: &[String]) {\n    "-v" | "--verbose" => {}\n}\n'
+    )
+    assert ("-n", "--no-open", "run_xdg_open") in located
+    assert ("-v", "--verbose", "run_mimeopen") in located
+    assert owning_personality("run_xdg_open", ["xdg", "xdg-open", "mimeopen"]) == "xdg-open"
+    assert owning_personality("semanage_login", ["chcon", "semanage"]) == "semanage"
+    assert owning_personality("do_thing", ["chcon", "semanage"]) is None
+    cases += 7
+
+    # Personality extraction, all three spellings this tree uses.
     assert "umount" in personalities("mount", 'progname.ends_with("umount")', "")
     assert personalities("ss", "", 'name = "sockstat"') == ["sockstat", "ss"]
-    cases += 2
+    dispatch = (
+        "    match prog_name.as_str() {\n"
+        '        "mountpoint" => cmd_mountpoint(&rest),\n'
+        "        _ => cmd_findmnt(&rest),\n"
+        "    }\n}"
+    )
+    assert "mountpoint" in personalities("findmnt", dispatch, "")
+    # The `Personality::` arm form, whose scrutinee is too generic to key on.
+    enum_arms = '    match name {\n        "lastlog" => Personality::Lastlog,\n    }'
+    assert "lastlog" in personalities("last", enum_arms, "")
+    # A match on something that is NOT the program name must contribute
+    # nothing: extra personalities would excuse real collisions.
+    other = (
+        "    match direction.as_str() {\n"
+        '        "backward" => go_back(),\n'
+        "        _ => go_forward(),\n"
+        "    }\n}"
+    )
+    assert personalities("findmnt", other, "") == ["findmnt"]
+
+    # A SECOND match in the same function must not be swallowed by the first.
+    two = (
+        "fn main() {\n"
+        "    match prog_name.as_str() {\n"
+        '        "mountpoint" => a(),\n'
+        "        _ => b(),\n"
+        "    }\n"
+        "    match sub.as_str() {\n"
+        '        "stat" => c(),\n'
+        '        "top" => d(),\n'
+        "        _ => e(),\n"
+        "    }\n"
+        "}"
+    )
+    got = personalities("perf", two, "")
+    assert "mountpoint" in got, got
+    assert "stat" not in got and "top" not in got, (
+        f"subcommands harvested as personalities: {got}"
+    )
+    cases += 5
 
     print(f"selftest: {cases}/{cases} cases pass")
     return 0
@@ -277,7 +476,7 @@ def main(argv: list[str]) -> int:
         else sorted((ROOT / "userspace").iterdir())
     )
 
-    checked = cleared = 0
+    checked = cleared = unjudged = 0
     findings: list[tuple[str, str, str, str]] = []
     no_reference: list[str] = []
 
@@ -291,16 +490,32 @@ def main(argv: list[str]) -> int:
             continue
         cargo_path = crate / "Cargo.toml"
         cargo = cargo_path.read_text(encoding="utf-8", errors="replace") if cargo_path.is_file() else ""
-        refs = []
-        for name in personalities(crate.name, source, cargo):
+        names = personalities(crate.name, source, cargo)
+        tables: dict[str, dict[str, set[str]]] = {}
+        for name in names:
             help_text = reference_help(name)
             if help_text is not None:
-                refs.append(theirs(help_text))
-        if not refs:
+                tables[name] = theirs(help_text)
+        if not tables:
             no_reference.append(crate.name)
             continue
         checked += 1
-        bad = compare(mine, refs)
+
+        # Group bindings by the reference set that may judge them: a binding
+        # inside `semanage_login` is answerable only to semanage, and is
+        # SKIPPED when semanage is not installed rather than measured against
+        # whichever sibling is.
+        bad = []
+        general: dict[str, str] = {}
+        for short, long, fn_name in ours_located(source):
+            owner = owning_personality(fn_name, names)
+            if owner is None:
+                general.setdefault(short, long)
+            elif owner in tables:
+                bad.extend(compare({short: long}, [tables[owner]]))
+            else:
+                unjudged += 1
+        bad.extend(compare(general, list(tables.values())))
         if bad:
             for short, long, other in bad:
                 findings.append((crate.name, short, long, other))
@@ -316,7 +531,8 @@ def main(argv: list[str]) -> int:
 
     print()
     print(f"-- {checked} crate(s) compared, {cleared} clear, "
-          f"{len(no_reference)} with no reference available.")
+          f"{len(no_reference)} with no reference available"
+          + (f", {unjudged} binding(s) left unjudged." if unjudged else "."))
     return 0
 
 

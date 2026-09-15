@@ -61034,6 +61034,10 @@ reason `add_file` takes a path as a string.
 
 ### TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE — 2026-09-04 — OPEN
 
+> **Correction, 2026-09-15.** "A complete JSON importer" below is wrong. What
+> exists is a tokeniser -- string, number and escape parsing -- and nothing that
+> reconstructs a `Board`. See `TD-C-THE-IMPORTER-THAT-WAS-NOT-THERE`.
+
 **In short.** About half of the kanban app's model is written, tested, and
 cannot be reached from the keyboard. A complete JSON exporter and a complete
 JSON importer (ten tests each), swimlanes modelled end to end, three sort
@@ -150451,7 +150455,7 @@ three decks, which **stay** -- "the capital of France is Paris" is a true
 statement about the world, bundled as content -- while the silence scanner
 found the real defect. Where they overlap, the answer still has to be reasoned
 out per app.
-## TD-B-A-SHORT-OPTION-CAN-MEAN-SOMETHING-ELSE-THAN-IT-DOES-UPSTREAM -- OPEN 2026-09-15
+## TD-B-A-SHORT-OPTION-CAN-MEAN-SOMETHING-ELSE-THAN-IT-DOES-UPSTREAM -- FIXED 2026-09-15
 
 A defect class, not a single bug: a short option bound to the WRONG long
 option. The program accepts the flag, understands it as something else, and
@@ -150555,7 +150559,59 @@ case in both directions.
    `--flow-control` and `--highlight-all`. Surprising, but visibly so.
 5. The rest change output or units and fail loudly enough to notice.
 
-**Unchecked:** the 65 crates with no reference on this machine.
+**Unchecked:** the 60 crates with no reference on this machine, and 12
+individual bindings whose personality is not installed (a `semanage` arm
+inside `userspace/selinux`, an `xdg-open` arm inside `userspace/xdg`). Those
+are skipped rather than guessed at, and the report prints the count.
+
+## CLOSED 2026-09-15: 89 crates compared, 89 clear
+
+Every collision above is fixed. The tools that changed, and what each one had
+been doing:
+
+| tool | the letter | here | upstream |
+|---|---|---|---|
+| `blkid` | `-n` | `--no-encoding` | `--match-types` |
+| `hardlink` | `-x`/`-X` | swapped with each other | `--exclude` / `--respect-xattrs` |
+| `hardlink` | `-p`/`-o`/`-t` | `--respect-*`, and the DEFAULTS inverted | `--ignore-*` |
+| `dmesg` | `-c -T -f -s -n` | five different meanings | `--read-clear --ctime --facility --buffer-size --console-level` |
+| `getty` | `-h` | `--help` | `--flow-control` |
+| `getty` | `-o` | `--long-hostname` | `--login-options <opts>` |
+| `chpasswd` | `-s` | `--sha256`, a flag | `--sha-rounds <n>` |
+| `pstree` | `-g -h -t -N` | four different meanings | `--show-pgids --highlight-all --thread-names --ns-sort` |
+| `eject` | `-n` | `--no-unmount` | `--noop` |
+| `eject` | `-f` | `--force` | `--floppy` (force is `-F`) |
+| `xdg` | `-n` | `--no-open` | `--no-ask` |
+| `findmnt` | `-t` | `--type` | `--types` |
+| `flock`, `locale`, `logrotate`, `sysctl` | one each | long name only | -- |
+
+**The rule that decided every case.** A short LETTER may not be redefined,
+because being wrong about one is SILENT: the request is understood, acted on,
+and answered wrongly. A long NAME may be added freely, because being wrong
+about one is loud -- an unknown long option fails with a message. So every
+extension in the table above kept its long name and gave the letter back.
+
+**The checker was wrong eight times, in eight different ways**, and every one
+was caught by verifying a finding against the real tool before acting on it.
+Recorded because the pattern is the useful part, not the individual bugs: a
+crate that is several programs; a comment quoting a binding; a reference that
+binds one letter twice; a personality named only in a `match` arm; a binding
+judged against a sibling personality's table; a capture running past its own
+match into a subcommand dispatch; an enumeration of ignored options read as a
+definition; and an enum variant name mistaken for a program name.
+
+It was also wrong in the OTHER direction once, which cost more: psmisc writes
+`-N TYPE, --ns-sort=TYPE`, and the reference parser wanted the comma beside
+the letter, so every option in that style went uncompared. `pstree -N` had
+been sitting behind that.
+
+**Two classes this cannot find, and neither is hypothetical.** `eject -n`
+was `--noop` by NAME and `--no-unmount` in BEHAVIOUR -- the checker compares
+spellings, not meanings, and that one was found by reading. And `dmesg -n`
+was a bare `"-n" =>` arm with no long partner at all, so there was nothing to
+compare; it was found by reading the help text. A clean run from
+`scripts/compare-short-options.py` means the SPELLINGS agree, and no more
+than that.
 
 **Two near-misses worth keeping.** `unshare` has no `-c` for
 `--map-current-user` where util-linux does, and our `blkid -c` has no
@@ -150661,6 +150717,366 @@ precisely.
 the transferable part: `spreadsheet`, `credmanager`, `defrag` and
 `systemrestore` all documented their own missing capability accurately, in the
 source, and the accuracy is what made it look handled.
+
+## TD-C-A-BANNER-THAT-DENIES-A-CAPABILITY-THE-PROGRAM-HAS -- FIXED 2026-09-15
+
+**In short:** three apps told the user "this app has no filesystem access, so
+anything you write here is gone when the window closes" on the same day they
+each gained a working Save. The sentences were true when written and were made
+false by the fix. They are corrected, and there is now a checker for the class,
+because adding a capability is exactly what creates it.
+
+### The class
+
+Two of the checkers in `scripts/` look for a program saying **too much** (data
+it invented) and saying **too little** (an empty screen with no explanation).
+Neither can see a third thing: a program that says something that *used to be
+true*.
+
+**A banner that denies a capability the program has is the same defect as one
+that claims a capability it lacks, pointed the other way.** Both leave the user
+believing something about the program that is not so.
+
+It is the more expensive direction of the two. A false promise is discovered by
+trying it -- the user presses the button, nothing happens, and now they know. A
+false denial is not discovered at all: the user reads "this app cannot save",
+believes it, and never presses anything. **The feature might as well not have
+been built**, and no bug report is ever filed, because from where the user sits
+nothing is broken.
+
+### What was found
+
+`apps/dbviewer` prompted it. Its sidebar carried a constant written carefully
+and honestly for the purpose:
+
+    No database open -- this program cannot open one
+    It has no filesystem access and no database driver, so nothing was read
+
+True the day it was written. False from the moment Import could reach a file.
+Nothing would have caught it: the fixture scanner sees no invented data here,
+and the other two scanners skip any crate that *has* a door.
+
+`scripts/find-stale-admissions.py` was written for the class and immediately
+found three more, all of them mine, all from the same day's work:
+`apps/calendar`, `apps/contacts` and `apps/spreadsheet` had each just gained a
+file dialog and each still said "this app has no filesystem access".
+
+### The fix, and what it preserved
+
+The warning underneath those banners was *real and still is*: none of these
+apps autosaves, so closing the window loses the work. That half stays. What
+changed is that the sentence is now true and names the remedy:
+
+    Nothing is saved automatically -- press Ctrl+S to write a vCard file,
+    or anyone you add is gone when the window closes
+
+`dbviewer`'s constants were renamed `NO_TABLES_*`, because the old name was
+also wrong about when the line shows: it appears for a freshly created empty
+database too, which *is* open.
+
+### The test that held the wrong wording in place
+
+`apps/contacts` asserted that some banner line contained the words `"Nothing is
+saved between runs"`. That assertion stayed green through the entire
+regression. The words were still there; they were simply no longer true.
+
+**A test that pins wording keeps passing for exactly as long as the wording is
+wrong.** It now asserts the property -- that the warning names the remedy
+(`Ctrl+S`) -- which is what has to hold for the sentence to do its job.
+
+### Why this needs a tool and not a habit
+
+Every door added to this tree manufactures a fresh opportunity for it. Six apps
+gained file access in one sweep and half of them acquired a false banner in the
+same commit that made them useful. Remembering to re-read the empty-state text
+after adding a capability is exactly the kind of discipline that works until
+the day it matters.
+
+`python scripts/find-stale-admissions.py --roots=apps,gui`
+
+It pairs capabilities with denials rather than matching both loosely -- a crate
+that reads files and truthfully says it cannot reach the network is not a
+finding. Denials carrying a format placeholder are counted but not printed:
+`"cannot read {path}: {err}"` is the program reporting what just happened,
+which is the opposite of a claim about what it can ever do.
+
+**Report-only, like the others, and for the same reason:** entries are
+legitimate often enough that a gate would train the next reader to silence it
+rather than read it. One report stands today, `gui/compositor`'s "the mode-set
+the kernel would have refused was never sent", which is a display mode-set and
+not a packet. It is named in the script's own docstring so nobody investigates
+it twice.
+
+## TD-C-A-CHECKER-THAT-REPORTS-LESS-NEVER-SAYS-SO -- FIXED 2026-09-15
+
+**In short:** the script that finds programs which stay silent about what they
+cannot do was itself silently missing most of them. Four separate bugs, found
+in one sitting, every one of them causing it to report *fewer* crates than it
+should -- and none of them causing it to report an error. It went from 36
+findings to 58 with no change to what it was looking for.
+
+### Why this direction matters more than the other
+
+A checker can be wrong two ways. If it **accuses** honest code, somebody reads
+the entry, disagrees, and the noise is visible -- the worst case is that the
+tool gets distrusted. If it **excuses** code it should have reported, the
+output still looks plausible, the count still looks healthy, and **nobody goes
+looking for what a tool did not print.** There is no reader for the absent
+line.
+
+`find-silent-incapacity.py` is unusually exposed to this, because its logic is
+subtractive twice over: a crate is skipped if it looks *capable*, and skipped
+again if it looks like it *admits*. Anything that inflates either judgement
+removes a crate from the report entirely.
+
+### The four
+
+1. **Literals pulled with `re.findall('"(...)"')` over raw source.** One
+   quotation mark inside a `//` comment pairs with the next one in code, and
+   the source between them comes back as a "literal". Any comment containing
+   the word "cannot" made a crate that admits nothing look like one that does.
+   **7 crates.**
+
+2. **Concatenate, then truncate at the first `#[cfg(test)] mod tests`.** Every
+   file sorting after that one was discarded. `apps/editor` is four files;
+   `highlight.rs` sorts first, so `main.rs` -- the one holding the file dialog
+   -- was thrown away. **The door model of the entire sweep appeared on the
+   list of programs that have no door.** 2 crates.
+
+3. **Test code cut at `mod tests` rather than blanked per item**, so a
+   `#[cfg(test)]` helper elsewhere survived -- and a test's assertion message
+   is written in exactly the vocabulary this check looks for. `apps/chess` was
+   excused by `"the king cannot move at all"`; `apps/mixer` by `"muting forgot
+   where the fader was, so unmuting cannot put it back"`. **18 crates.** A
+   test's failure message is not something the user reads.
+
+4. **The capability regex run over raw source.** A mention in a comment counted
+   as the real thing. `apps/undelete`'s module header says the crate "contains
+   no reference to `std::fs` or `safeio`" -- so **the sentence denying the
+   capability was itself the evidence that the crate had it.** 7 crates.
+
+### The fix
+
+All four are the same fix: ask the question of the right text. Literals come
+from `rustlex.string_literals`, code from `rustlex.strip_noise`, and test code
+goes via `rustlex.live_code`, which blanks every `#[cfg(test)]` item by brace
+matching rather than cutting at the first one.
+
+`scripts/rustlex.py` already existed for precisely this -- it was written
+because twelve scripts had each rolled their own masker and three got raw
+strings wrong. **I nearly destroyed it**: I wrote a second lexer over the top
+of the 408-line original, whose opening line is "One Rust lexer for the
+checkers". The pre-push hook caught it, via a caller whose self-test I had
+broken. The lesson is the one the module's own docstring already makes, and it
+took a second demonstration: when a shared helper looks absent, look harder
+before writing another.
+
+`string_literals` is an addition to it rather than a replacement, and derives
+its spans from the two passes already there rather than lexing a third time.
+
+### The residual worth knowing
+
+The count is now 58, and most of the list is games -- a sudoku needs no
+filesystem and owes nobody an explanation. **The output is a list to read, not
+a list to empty.** The number going up was the point; it is not a backlog.
+
+## TD-C-A-DIALOG-THAT-STOPPED-THE-CLOCK -- FIXED 2026-09-15
+
+**In short:** in three apps, opening a Save dialog quietly froze time. Podcast
+playback stopped advancing, the reminders app stopped noticing that something
+had become overdue, and the calendar never rolled over to the next day. Nothing
+crashed and nothing looked wrong; the window behind the dialog simply stopped
+being told that time had passed. The bug was in code that eleven applications
+had each written out by hand, and it was found by collecting that code into one
+place rather than by anyone noticing the symptom.
+
+### The shape of it
+
+An app with a file dialog has to route events to the dialog while it is up, or
+a keystroke meant for a filename reaches the window behind it. Nine of the
+eleven wrote that as an early return:
+
+```rust
+if self.file_dialog.is_some() {
+    let action = match (event, self.file_dialog.as_mut()) {
+        (Event::Key(key), Some(d)) if key.pressed => d.handle_event(key, h),
+        (Event::Mouse(m), Some(d)) => d.handle_mouse(m, w, h),
+        _ => return EventResult::Ignored,   // <-- here
+    };
+    return self.apply_dialog_action(action);
+}
+```
+
+The `_` arm is meant to say "not an input event, nothing for the dialog to do".
+What it actually does is **return from the whole event handler**, so
+`Event::Tick` never reaches the application at all.
+
+### What each one lost
+
+| App | What the tick does | Consequence |
+|---|---|---|
+| `podcast` | advances playback and the download queue | audio stops because you opened Save |
+| `reminders` | re-reads the clock, fires notifications | stops noticing what has become overdue |
+| `calendar` | midnight rollover | "today" stays on yesterday, in blue, in five places |
+
+The other six with this shape (`contacts`, `dbviewer`, `jsonviewer`, `notes`,
+`rssreader`, `spreadsheet`) never ask for ticks, so their instance is **latent
+rather than live** -- it would have become a bug the day any of them grew a
+clock, an autosave or a progress indicator.
+
+`filesearch` and `hexeditor` wrote the intercept as guard arms on the outer
+match instead:
+
+```rust
+match event {
+    Event::Key(k) if self.file_dialog.is_some() => self.dialog_key(k),
+    Event::Mouse(m) if self.file_dialog.is_some() => self.dialog_mouse(m),
+    Event::Key(k) => self.handle_key(k),
+    ...
+}
+```
+
+which lets every other event fall through to its own arm. **Two of eleven got
+it right, and they got it right by using a structure that made the wrong
+answer inexpressible** rather than by thinking about ticks.
+
+### Why nobody caught it
+
+There was no test anywhere, in any of the nine. The bug lives in the arm nobody
+thinks about: you write the intercept to solve the keystroke problem, you test
+the keystroke problem, and the `_` arm is the part you wrote to make the match
+exhaustive.
+
+It is also invisible from the outside. Nothing errors. The window redraws on
+the next keypress and the clock appears to catch up, so even someone watching
+it happen would see only that the app was briefly slow.
+
+### The fix
+
+`guitk::dialog::FilePicker` owns the routing once. `FilePicker::handle` takes
+**input** -- key presses, key releases and mouse events -- and returns
+`Picked::Ignored` for **time and geometry**, so a tick or a resize falls
+through to the application:
+
+```rust
+match self.picker.handle(event, w, h) {
+    Picked::Chose(path) => { /* the one arm that differs per app */ }
+    Picked::Handled => return EventResult::Consumed,
+    Picked::Ignored => {}
+}
+```
+
+A key *release* is still taken, so the window behind never acts on half a
+keystroke whose press the dialog handled.
+
+Each of the three live cases has a regression test that sets its clock to a
+moment the real one cannot be at (1 Jan 2000), opens the picker, sends a tick
+and asserts time moved. All three were watched to fail by restoring the
+swallow.
+
+### The transferable part
+
+**Collecting duplicated code is how you find out the copies disagree.** In the
+commit that added `FilePicker` I wrote that the eight hand-rolled
+character-boundary truncation loops agreed -- I had read all eight -- and that
+the extraction fixed no bug. That was true of the truncation loops. It was not
+true of the intercepts, which I had not compared as carefully, and the
+disagreement only became visible when a shared type forced a single answer to
+"what should a dialog take?".
+
+Duplication is not only a maintenance cost paid later. It is a place where
+**two copies can already differ today and nothing reports it**, because each
+one is locally plausible and no test compares them.
+
+## TD-C-THE-IMPORTER-THAT-WAS-NOT-THERE -- OPEN 2026-09-15
+
+**In short:** a tracking entry in this file said `apps/kanban` has "a complete
+JSON importer" that only needs a file chooser to become useful. It does not.
+What exists is the *pieces* of one -- a string parser, a number parser, an
+escape decoder -- and nothing that turns parsed JSON back into a board. Anyone
+who read the entry and budgeted an afternoon for "add a file chooser" would
+have found half a parser missing. This entry corrects that one, and records
+why the mistake was easy to make.
+
+Corrects: `TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE`.
+
+### What is actually there
+
+`JsonImporter` has exactly six functions:
+
+    parse_string  parse_unicode_escape  parse_hex4  parse_number
+    skip_ws       validate_export
+
+There is no `parse_value`, no `parse_object`, no `parse_array`, and nothing
+with `Board` in its return type. The export side is genuinely complete --
+`export_board` writes name, columns, cards, labels, swimlane flags and names --
+so the round trip is missing exactly one half, and it is the harder half.
+
+### Why it read as finished
+
+**The tests are real, and thorough, and they test the wrong scope.** Ten of
+them exercise `parse_string` and `parse_number` against genuinely awkward
+input: escaped quotes, `\uXXXX` escapes, surrogate pairs, an unpaired high
+surrogate. That is careful work. It is also work on the tokeniser, and a
+tokeniser is not a parser.
+
+This sweep keeps finding that **polish is what makes something read as
+complete**: a fixture with plausible dates and reserved phone numbers reads as
+meant rather than invented. This is the same effect one level up -- **a
+well-tested part reads as a finished whole**, and the better the part's tests
+are, the more finished the whole looks.
+
+The comment above the type says so in as many words, and is wrong:
+
+    /// Minimal JSON parser for board import (handles the structure exported above).
+    // The reader for what the exporter writes. Same position, plus a file
+    // chooser it would also need.
+
+It does not handle the structure exported above. It handles the strings and
+numbers inside it.
+
+### `validate_export` verifies nothing
+
+```rust
+/// Validate that we can round-trip a board through export.
+fn validate_export(board: &Board) -> bool {
+    let json = JsonExporter::export_board(board);
+    !json.is_empty()
+}
+```
+
+There is no round trip here: it exports and asks whether the result is a
+non-empty string. `export_board` always writes at least
+`{"name":"","columns":[],...}`, so **this function cannot return false.** Its
+name, its doc comment and its return type all promise a check, and it performs
+none -- the same shape as `apps/remotedesktop` recording `success: true` before
+the attempt it describes.
+
+It is worse than absent, because a future session wiring up the importer would
+reasonably call it and read a passing result as evidence.
+
+### What the `dead_code` reasons say, and what is true
+
+Every unreachable item in this file carries a scoped
+`#[allow(dead_code, reason = "…")]` naming what it waits for -- a good practice,
+and the reason on the importer is `"import needs a file chooser"`. That is
+true of `parse_string` in the sense that a chooser is *one* of the things
+standing between it and use. It is misleading as a description of the feature,
+and the reason strings are what someone greps to size the work.
+
+### The proper fix
+
+1. Delete `validate_export`. A validator that cannot fail is not a weaker
+   check than a real one; it is a false statement about the code.
+2. Correct the comment on `JsonImporter` to say it is a tokeniser.
+3. Change the `dead_code` reasons to name both missing pieces.
+4. Write `parse_value`/`parse_object`/`parse_array` over the existing
+   primitives, and a `Board` reconstructor over that; then the door.
+
+Until (4), **kanban's door would be export-only**, and an export you cannot
+read back is not a backup. That is a defensible thing to ship if it is said
+plainly -- JSON is readable and portable, so the file is not a dead end -- but
+it must be said, and the app must not imply otherwise.
 
 ## A-THE-BOOT-TEST-NEVER-MOUNTS-FAT-SO-A-WHOLE-FILESYSTEMS-WRITE-PATHS-ARE-UNGATED (lane A, 2026-09-15) — **Status: FIXED** (the openat2 half; the coverage gap remains open)
 

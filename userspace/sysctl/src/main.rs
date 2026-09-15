@@ -452,7 +452,7 @@ fn parse_args(args: &[String]) -> Action {
                 continue;
             }
 
-            "-n" | "--values-only" => {
+            "-n" | "--values" | "--values-only" => {
                 value_only = true;
                 i += 1;
                 continue;
@@ -505,7 +505,7 @@ fn print_usage() {
     println!("  -w, --write         Write mode: -w <name> <value>");
     println!("  -p, --load [file]   Load settings from file (default: {DEFAULT_CONF})");
     println!("  --search <pattern>  Search names for substring (case-insensitive)");
-    println!("  -n, --values-only   Print only the value, not the key");
+    println!("  -n, --values        Print only values of the given variable(s)");
     println!("  -q, --quiet         Suppress the key name on read");
     println!("  -h, --help          Show this help");
     println!();

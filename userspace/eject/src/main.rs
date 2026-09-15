@@ -40,6 +40,14 @@ struct EjectOptions {
     force: bool,
     verbose: bool,
     no_unmount: bool,
+    /// `-n, --noop`: report the device and do nothing to it.
+    ///
+    /// A SEPARATE FLAG from `no_unmount`, which is the whole point. `-n` was
+    /// bound to `--no-unmount` here and means `--noop` in util-linux -- "don't
+    /// eject, just show device found". So `eject -n` asked for a dry run and
+    /// got "eject without unmounting first", which is close to the opposite:
+    /// the most cautious spelling selecting the least cautious behaviour.
+    noop: bool,
     _proc_mount: bool,
     _removable_only: bool,
 }
@@ -52,6 +60,7 @@ impl Default for EjectOptions {
             force: false,
             verbose: false,
             no_unmount: false,
+            noop: false,
             _proc_mount: false,
             _removable_only: true,
         }
@@ -351,6 +360,30 @@ fn do_eject(opts: &EjectOptions) -> i32 {
 // ============================================================================
 
 fn eject_main(args: &[OsString]) -> i32 {
+    match parse_eject_args(args) {
+        Ok(opts) => {
+            // `--noop` answers and stops, before anything is attempted.
+            // Placed here rather than inside `do_eject` so that "do nothing
+            // to the device" is visibly true of the whole path rather than
+            // of one branch of it.
+            if opts.noop {
+                println!("eject: device found: {}", dshow(&opts.device));
+                return 0;
+            }
+            do_eject(&opts)
+        }
+        Err(code) => code,
+    }
+}
+
+/// Parse eject's argv.
+///
+/// `Err(code)` means the run is already finished -- `--help`, `--list`,
+/// `--default` and `--version` answer and stop -- and the caller has only to
+/// return the code. Split out so the BINDINGS can be asserted without a
+/// process: nothing in this crate could reach them before, which is how `-n`
+/// came to mean `--no-unmount` with nine tests passing.
+fn parse_eject_args(args: &[OsString]) -> Result<EjectOptions, i32> {
     let mut opts = EjectOptions::default();
     let mut i = 0;
 
@@ -391,12 +424,19 @@ fn eject_main(args: &[OsString]) -> i32 {
                     }
                 }
             }
-            "-f" | "--force" => opts.force = true,
+            // `-F`, not `-f`. Upstream `-f, --floppy` ejects a floppy and
+            // `-F, --force` is "don't care about device type"; this build had
+            // force on `-f`, so `eject -f` meant one thing here and another
+            // everywhere else. `-f` is left unbound rather than claimed:
+            // there is no floppy support to give it to, and an unknown option
+            // fails out loud.
+            "-F" | "--force" => opts.force = true,
             "-v" | "--verbose" => opts.verbose = true,
-            "-n" | "--noop" | "--no-unmount" => opts.no_unmount = true,
+            "-n" | "--noop" => opts.noop = true,
+            "-m" | "--no-unmount" => opts.no_unmount = true,
             "-d" | "--default" => {
                 println!("eject: default device: {}", dshow(&default_device()));
-                return 0;
+                return Err(0);
             }
             "-p" | "--proc" => opts._proc_mount = true,
             "--list" => {
@@ -408,7 +448,7 @@ fn eject_main(args: &[OsString]) -> i32 {
                         println!("{} ({})", dev.name, dev.device_type);
                     }
                 }
-                return 0;
+                return Err(0);
             }
             "--help" | "-h" => {
                 println!("Usage: eject [options] [device|mountpoint]");
@@ -421,31 +461,32 @@ fn eject_main(args: &[OsString]) -> i32 {
                 println!("  -l, --lock         Lock the drive door");
                 println!("  -L, --unlock       Unlock the drive door");
                 println!("  -x, --cdspeed N    Set CD-ROM speed");
-                println!("  -f, --force        Force eject (non-removable)");
+                println!("  -F, --force        Don't care about device type");
                 println!("  -v, --verbose      Verbose output");
-                println!("  -n, --no-unmount   Don't unmount before ejecting");
+                println!("  -n, --noop         Don't eject, just show device found");
+                println!("  -m, --no-unmount   Don't unmount before ejecting");
                 println!("  -d, --default      Display default device");
                 println!("  --list             List removable devices");
                 println!("  -h, --help         Display this help");
                 println!("  --version          Display version");
-                return 0;
+                return Err(0);
             }
             "--version" => {
                 println!("eject (Slate OS coreutils) {VERSION}");
-                return 0;
+                return Err(0);
             }
             _ if !s.starts_with('-') => {
                 opts.device = resolve_device(arg);
             }
             other => {
                 eprintln!("eject: unknown option {}", quoteaf_os(other));
-                return 1;
+                return Err(1);
             }
         }
         i += 1;
     }
 
-    do_eject(&opts)
+    Ok(opts)
 }
 
 // ============================================================================
@@ -528,6 +569,51 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ejargv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// `-n` is a DRY RUN, and `-m` is the one that skips unmounting.
+    ///
+    /// They were the same flag: `-n | --noop | --no-unmount` all set
+    /// `no_unmount`. So `eject -n` asked for "don't eject, just show device
+    /// found" and selected "eject without unmounting first" -- the most
+    /// cautious spelling picking the least cautious behaviour. Today that
+    /// suppresses the still-mounted warning; the day a CD-ROM driver lands it
+    /// would move a disc.
+    #[test]
+    fn noop_and_no_unmount_are_different_options() {
+        let opts = parse_eject_args(&ejargv(&["-n"])).expect("-n parses");
+        assert!(opts.noop, "-n is --noop");
+        assert!(!opts.no_unmount, "-n must not skip the unmount");
+
+        let opts = parse_eject_args(&ejargv(&["-m"])).expect("-m parses");
+        assert!(opts.no_unmount, "-m is --no-unmount");
+        assert!(!opts.noop, "-m is not a dry run");
+
+        // Long spellings agree with their letters.
+        assert!(parse_eject_args(&ejargv(&["--noop"])).expect("parses").noop);
+        assert!(
+            parse_eject_args(&ejargv(&["--no-unmount"]))
+                .expect("parses")
+                .no_unmount
+        );
+    }
+
+    /// `-F` is force; `-f` is upstream's `--floppy` and is left unbound.
+    #[test]
+    fn force_is_uppercase_f() {
+        assert!(parse_eject_args(&ejargv(&["-F"])).expect("-F parses").force);
+        assert!(
+            parse_eject_args(&ejargv(&["--force"]))
+                .expect("--force parses")
+                .force
+        );
+        // `-f` is refused rather than silently forcing, which is the visible
+        // failure a missing option should have.
+        assert!(matches!(parse_eject_args(&ejargv(&["-f"])), Err(1)));
+    }
 
     #[test]
     fn test_resolve_device_absolute() {

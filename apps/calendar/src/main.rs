@@ -10,7 +10,7 @@
 
 use appearance::Palette;
 use guitk::color::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 // The shared civil-date arithmetic. This app used to carry its own: a Zeller's
 // congruence for the weekday, a *separate* Julian day number for differences,
 // its own leap rule, and an ISO week number its own comment admitted was "a
@@ -1218,9 +1218,9 @@ const FILE_FAILED_PREFIX: &str = "Could not";
 
 pub struct CalendarApp {
     /// The open or save picker, while one is up.
-    pub file_dialog: Option<FileDialog>,
-    /// Whether the picker that is up is saving rather than opening.
-    pub dialog_saves: bool,
+    /// The open or save picker. Holds the dialog, the saving flag and the
+    /// routing that ten applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the last open or save did, for the status line.
     pub last_file_action: Option<String>,
     pub width: f32,
@@ -1279,8 +1279,7 @@ impl CalendarApp {
             today,
             selected_date: today,
             view_date: today,
-            file_dialog: None,
-            dialog_saves: false,
+            picker: FilePicker::new(),
             last_file_action: None,
             store: EventStore::new(),
             sidebar_visible: true,
@@ -1704,11 +1703,10 @@ impl CalendarApp {
         }
 
         // Last, so it is above everything.
-        if let Some(dialog) = &self.file_dialog {
-            for cmd in dialog.render(&self.palette, layout.window.w, layout.window.h) {
-                frame.push(cmd);
-            }
-        }
+        frame.extend(
+            self.picker
+                .render(&self.palette, layout.window.w, layout.window.h),
+        );
 
         frame
     }
@@ -2746,16 +2744,26 @@ fn draw_nav_button(frame: &mut Frame, pal: &Palette, rect: Rect, glyph: &str, ta
 
 /// The one body both the window and the test probe drive the calendar through.
 pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
-    // The picker takes the event first while it is up, or a keystroke meant
-    // for a filename lands in the search box behind it.
-    if state.file_dialog.is_some() {
-        let (w, h) = (state.width, state.height);
-        let action = match (event, state.file_dialog.as_mut()) {
-            (Event::Key(key), Some(dialog)) if key.pressed => dialog.handle_event(key, h),
-            (Event::Mouse(mouse), Some(dialog)) => dialog.handle_mouse(mouse, w, h),
-            _ => return EventResult::Ignored,
-        };
-        return state.apply_dialog_action(action);
+    // The picker takes input first while it is up, or a keystroke meant for
+    // a filename lands in the search box behind it.
+    //
+    // A tick comes back as `Ignored` and falls through, which the hand
+    // written version got wrong: it returned early for everything that was
+    // not a key press or a click, so the midnight rollover below never ran
+    // while a dialog was open. Leave a save dialog up across midnight and
+    // "today" stayed on yesterday, in blue, in five places.
+    match state.picker.handle(event, state.width, state.height) {
+        Picked::Chose(path) => {
+            let saving = state.picker.is_saving();
+            state.last_file_action = Some(if saving {
+                state.write_ics(&path)
+            } else {
+                state.read_ics(&path)
+            });
+            return EventResult::Consumed;
+        }
+        Picked::Handled => return EventResult::Consumed,
+        Picked::Ignored => {}
     }
     match event {
         Event::Key(key) if key.pressed => handle_key(state, key),
@@ -2803,44 +2811,10 @@ impl CalendarApp {
     /// real iCalendar, with BEGIN:VCALENDAR, VERSION:2.0 and a PRODID. The
     /// format was the hard part and it was already finished.
     pub fn open_file_dialog(&mut self, saving: bool) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = if saving {
-            FileDialog::save()
-                .with_initial_path(start)
-                .with_filename(String::from("calendar.ics"))
+        if saving {
+            self.picker.open_to_write("calendar.ics");
         } else {
-            FileDialog::open().with_initial_path(start)
-        };
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.dialog_saves = saving;
-        self.file_dialog = Some(dialog);
-    }
-
-    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
-        match action {
-            DialogAction::None => EventResult::Consumed,
-            DialogAction::Cancelled => {
-                self.file_dialog = None;
-                EventResult::Consumed
-            }
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-                EventResult::Consumed
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                let saving = self.dialog_saves;
-                self.last_file_action = Some(if saving {
-                    self.write_ics(&path)
-                } else {
-                    self.read_ics(&path)
-                });
-                EventResult::Consumed
-            }
+            self.picker.open_to_read();
         }
     }
 
@@ -3422,6 +3396,37 @@ mod tests {
     /// the hard part and it was finished -- found by
     /// `scripts/find-stranded-serialisers.py`, which reports 92 such
     /// functions across 37 crates.
+    /// Midnight still arrives while the picker is open.
+    ///
+    /// The hand-written intercept this replaced returned early for every
+    /// event that was not a key press or a click, so `Event::Tick` never
+    /// reached the rollover. Leave a save dialog up across midnight and
+    /// **"today" stayed on yesterday, in blue, in five different places** --
+    /// until something else happened to cause a repaint.
+    ///
+    /// `FilePicker::handle` returns `Ignored` for a tick precisely so it falls
+    /// through to the application.
+    #[test]
+    fn midnight_still_arrives_while_the_picker_is_open() {
+        // A day the real clock cannot be on, so any rollover is visible.
+        let long_ago = Date {
+            year: 2000,
+            month: 1,
+            day: 1,
+        };
+        let mut app = CalendarApp::new(1024.0, 768.0, long_ago);
+
+        app.open_file_dialog(true);
+        assert!(app.picker.is_open(), "no picker to test behind");
+
+        handle_event(&mut app, &Event::Tick { elapsed_ms: 60_000 });
+        assert_ne!(
+            app.today, long_ago,
+            "the date stopped advancing because a dialog was open"
+        );
+        assert!(app.picker.is_open(), "the tick closed the dialog");
+    }
+
     #[test]
     fn a_calendar_survives_a_write_and_a_read() {
         let dir = std::env::temp_dir().join("slateos-calendar-door-test");

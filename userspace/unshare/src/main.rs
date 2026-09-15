@@ -111,42 +111,38 @@ const NS_TYPES: &[NsType] = &[
 
 struct UnshareOpts {
     namespaces: u64,
-    fork: bool,
-    map_root_user: bool,
-    map_current_user: bool,
-    map_auto: bool,
-    map_users: Option<String>,
-    map_groups: Option<String>,
-    keep_caps: bool,
-    kill_child: Option<i32>,
-    propagation: Option<String>,
-    setuid: Option<u32>,
-    setgid: Option<u32>,
-    root: Option<String>,
-    wd: Option<String>,
-    monotonic: Option<u64>,
-    boottime: Option<u64>,
+    /// Options accepted, and named in the refusal.
+    ///
+    /// FIFTEEN FIELDS USED TO LIVE HERE -- `fork`, `keep_caps`, `setuid`,
+    /// `propagation` and the rest -- every one of them written by the parser
+    /// and read by nothing. Fifteen tests asserted each had been STORED,
+    /// which looks like coverage and is not: a test that a value was written
+    /// says nothing about whether anything reads it, and nothing did.
+    ///
+    /// They collapse to this because the program refuses. There is no
+    /// behaviour to configure, so there is nothing to configure it WITH --
+    /// only a record of what was asked for, which the refusal can then name.
+    /// That makes the list read, makes the tests mean something (the refusal
+    /// prints what they assert), and leaves the parser accepting every option
+    /// it did before, so a script passing `--keep-caps` still gets the
+    /// refusal rather than a usage error.
+    requested: Vec<&'static str>,
     command: Vec<String>,
+}
+
+impl UnshareOpts {
+    /// Record an option the caller asked for, once.
+    fn asked(&mut self, name: &'static str) {
+        if !self.requested.contains(&name) {
+            self.requested.push(name);
+        }
+    }
 }
 
 fn parse_args(args: &[String]) -> UnshareOpts {
     let mut opts = UnshareOpts {
         namespaces: 0,
-        fork: false,
-        map_root_user: false,
-        map_current_user: false,
-        map_auto: false,
-        map_users: None,
-        map_groups: None,
-        keep_caps: false,
-        kill_child: None,
-        propagation: None,
-        setuid: None,
-        setgid: None,
-        root: None,
-        wd: None,
-        monotonic: None,
-        boottime: None,
+        requested: Vec::new(),
         command: Vec::new(),
     };
 
@@ -155,13 +151,15 @@ fn parse_args(args: &[String]) -> UnshareOpts {
         let arg = &args[i];
 
         // Check for --propagation=VALUE form.
-        if let Some(val) = arg.strip_prefix("--propagation=") {
-            opts.propagation = Some(val.to_string());
+        // The `=VALUE` forms. The value is discarded with the rest, but the
+        // arm must stay so the word is not mistaken for the command.
+        if arg.starts_with("--propagation=") {
+            opts.asked("--propagation");
             i += 1;
             continue;
         }
-        if let Some(val) = arg.strip_prefix("--kill-child=") {
-            opts.kill_child = val.parse().ok();
+        if arg.starts_with("--kill-child=") {
+            opts.asked("--kill-child");
             i += 1;
             continue;
         }
@@ -175,80 +173,96 @@ fn parse_args(args: &[String]) -> UnshareOpts {
                 println!("unshare {VERSION}");
                 process::exit(0);
             }
-            "-f" | "--fork" => opts.fork = true,
+            // Each arm still CONSUMES what it consumed before. Dropping a
+            // value without dropping its argument would push that argument
+            // into `command`, and the refusal names the command -- so a
+            // `--setuid 0` would have been reported as the thing refused to
+            // run.
+            "-f" | "--fork" => opts.asked("--fork"),
             "-r" | "--map-root-user" => {
-                opts.map_root_user = true;
+                opts.asked("--map-root-user");
                 opts.namespaces |= CLONE_NEWUSER;
             }
             "--map-current-user" => {
-                opts.map_current_user = true;
+                opts.asked("--map-current-user");
                 opts.namespaces |= CLONE_NEWUSER;
             }
             "--map-auto" => {
-                opts.map_auto = true;
+                opts.asked("--map-auto");
                 opts.namespaces |= CLONE_NEWUSER;
             }
             "--map-users" => {
                 i += 1;
                 if i < args.len() {
-                    opts.map_users = Some(args[i].clone());
+                    opts.asked("--map-users");
                     opts.namespaces |= CLONE_NEWUSER;
                 }
             }
             "--map-groups" => {
                 i += 1;
                 if i < args.len() {
-                    opts.map_groups = Some(args[i].clone());
+                    opts.asked("--map-groups");
                     opts.namespaces |= CLONE_NEWUSER;
                 }
             }
-            "--keep-caps" => opts.keep_caps = true,
-            "--kill-child" => {
-                opts.kill_child = Some(9); // Default SIGKILL.
-            }
+            "--keep-caps" => opts.asked("--keep-caps"),
+            "--kill-child" => opts.asked("--kill-child"),
             "--propagation" => {
                 i += 1;
                 if i < args.len() {
-                    opts.propagation = Some(args[i].clone());
+                    opts.asked("--propagation");
                 }
             }
             "-S" | "--setuid" => {
                 i += 1;
                 if i < args.len() {
-                    opts.setuid = args[i].parse().ok();
+                    opts.asked("--setuid");
                 }
             }
             "-G" | "--setgid" => {
                 i += 1;
                 if i < args.len() {
-                    opts.setgid = args[i].parse().ok();
+                    opts.asked("--setgid");
                 }
             }
             "-R" | "--root" => {
                 i += 1;
                 if i < args.len() {
-                    opts.root = Some(args[i].clone());
+                    opts.asked("--root");
                 }
             }
             "-w" | "--wd" => {
                 i += 1;
                 if i < args.len() {
-                    opts.wd = Some(args[i].clone());
+                    opts.asked("--wd");
                 }
             }
             "--monotonic" => {
                 i += 1;
                 if i < args.len() {
-                    opts.monotonic = args[i].parse().ok();
+                    opts.asked("--monotonic");
                     opts.namespaces |= CLONE_NEWTIME;
                 }
             }
             "--boottime" => {
                 i += 1;
                 if i < args.len() {
-                    opts.boottime = args[i].parse().ok();
+                    opts.asked("--boottime");
                     opts.namespaces |= CLONE_NEWTIME;
                 }
+            }
+            // `--` ENDS THE OPTIONS and is not itself the command. Without
+            // this arm it fell through to "everything from here is the
+            // command", so `unshare -m -- true` set the command to `["--",
+            // "true"]`. Measured against util-linux: `unshare -- echo hello`
+            // prints `hello`, so the separator is consumed there.
+            //
+            // Today that only mis-names the program in the refusal
+            // ("refusing to run --"), which is how it was noticed. It becomes
+            // an attempt to execute `--` the day a namespace subsystem lands.
+            "--" => {
+                opts.command = args.get(i.saturating_add(1)..).unwrap_or_default().to_vec();
+                break;
             }
             s => {
                 // Check namespace flags.
@@ -375,6 +389,16 @@ namespace subsystem.",
         err,
         "unshare: unshare(2) validates its arguments and returns ENOSYS."
     );
+    if !opts.requested.is_empty() {
+        // Named so the refusal accounts for everything asked for, not just
+        // the namespaces. A caller who passed `--keep-caps` should be able to
+        // see that it was read and is going nowhere, rather than wonder.
+        let _ = writeln!(
+            err,
+            "unshare: also requested, and equally not honoured: {}",
+            opts.requested.join(", ")
+        );
+    }
     let _ = writeln!(
         err,
         "unshare: refusing to run {what}, because running it UNISOLATED is not \
@@ -400,6 +424,50 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// `--` ends the options; it is not the program.
+    ///
+    /// Without its own arm it fell through to "everything from here is the
+    /// command", so `unshare -m -- true` set the command to `["--", "true"]`
+    /// and the refusal said "refusing to run --". Measured against
+    /// util-linux, where `unshare -- echo hello` prints `hello`.
+    #[test]
+    fn double_dash_ends_the_options() {
+        let args = vec!["-m".to_string(), "--".to_string(), "true".to_string()];
+        let opts = parse_args(&args);
+        assert_eq!(opts.command, vec!["true".to_string()]);
+
+        // With arguments of its own, including ones that look like options.
+        let args = vec!["--".to_string(), "ls".to_string(), "-l".to_string()];
+        let opts = parse_args(&args);
+        assert_eq!(opts.command, vec!["ls".to_string(), "-l".to_string()]);
+
+        // A trailing `--` leaves no command, rather than a command of `--`.
+        let opts = parse_args(&["-m".to_string(), "--".to_string()]);
+        assert!(opts.command.is_empty());
+    }
+
+    /// Options that cannot be honoured are recorded, and recorded once.
+    ///
+    /// The fields these replaced were written and never read, and the tests
+    /// asserted only that they had been STORED -- which is what a test looks
+    /// like when nothing consumes the value.
+    #[test]
+    fn requested_options_are_recorded_for_the_refusal() {
+        let args = vec![
+            "-m".to_string(),
+            "--keep-caps".to_string(),
+            "--setuid".to_string(),
+            "0".to_string(),
+            "--keep-caps".to_string(),
+        ];
+        let opts = parse_args(&args);
+        assert_eq!(opts.requested, vec!["--keep-caps", "--setuid"]);
+
+        // A plain invocation records nothing, so the refusal stays short.
+        let opts = parse_args(&["-m".to_string()]);
+        assert!(opts.requested.is_empty());
+    }
+
     use super::*;
 
     #[test]
@@ -471,14 +539,14 @@ mod tests {
     fn test_parse_fork() {
         let args = vec!["-f".to_string(), "-p".to_string()];
         let opts = parse_args(&args);
-        assert!(opts.fork);
+        assert!(opts.requested.contains(&"--fork"));
     }
 
     #[test]
     fn test_parse_map_root_user() {
         let args = vec!["-r".to_string()];
         let opts = parse_args(&args);
-        assert!(opts.map_root_user);
+        assert!(opts.requested.contains(&"--map-root-user"));
         // Should implicitly add user namespace.
         assert!(opts.namespaces & CLONE_NEWUSER != 0);
     }
@@ -493,50 +561,50 @@ mod tests {
             "0".to_string(),
         ];
         let opts = parse_args(&args);
-        assert_eq!(opts.setuid, Some(0));
-        assert_eq!(opts.setgid, Some(0));
+        assert!(opts.requested.contains(&"--setuid"));
+        assert!(opts.requested.contains(&"--setgid"));
     }
 
     #[test]
     fn test_parse_root_dir() {
         let args = vec!["-m".to_string(), "-R".to_string(), "/newroot".to_string()];
         let opts = parse_args(&args);
-        assert_eq!(opts.root, Some("/newroot".to_string()));
+        assert!(opts.requested.contains(&"--root"));
     }
 
     #[test]
     fn test_parse_wd() {
         let args = vec!["-m".to_string(), "-w".to_string(), "/tmp".to_string()];
         let opts = parse_args(&args);
-        assert_eq!(opts.wd, Some("/tmp".to_string()));
+        assert!(opts.requested.contains(&"--wd"));
     }
 
     #[test]
     fn test_parse_keep_caps() {
         let args = vec!["--user".to_string(), "--keep-caps".to_string()];
         let opts = parse_args(&args);
-        assert!(opts.keep_caps);
+        assert!(opts.requested.contains(&"--keep-caps"));
     }
 
     #[test]
     fn test_parse_kill_child() {
         let args = vec!["-m".to_string(), "--kill-child".to_string()];
         let opts = parse_args(&args);
-        assert_eq!(opts.kill_child, Some(9));
+        assert!(opts.requested.contains(&"--kill-child"));
     }
 
     #[test]
     fn test_parse_kill_child_signal() {
         let args = vec!["-m".to_string(), "--kill-child=15".to_string()];
         let opts = parse_args(&args);
-        assert_eq!(opts.kill_child, Some(15));
+        assert!(opts.requested.contains(&"--kill-child"));
     }
 
     #[test]
     fn test_parse_propagation() {
         let args = vec!["-m".to_string(), "--propagation=shared".to_string()];
         let opts = parse_args(&args);
-        assert_eq!(opts.propagation, Some("shared".to_string()));
+        assert!(opts.requested.contains(&"--propagation"));
     }
 
     #[test]
@@ -547,7 +615,7 @@ mod tests {
             "100".to_string(),
         ];
         let opts = parse_args(&args);
-        assert_eq!(opts.monotonic, Some(100));
+        assert!(opts.requested.contains(&"--monotonic"));
         assert!(opts.namespaces & CLONE_NEWTIME != 0);
     }
 
@@ -596,7 +664,7 @@ mod tests {
     fn test_map_auto_implies_user_ns() {
         let args = vec!["--map-auto".to_string()];
         let opts = parse_args(&args);
-        assert!(opts.map_auto);
+        assert!(opts.requested.contains(&"--map-auto"));
         assert!(opts.namespaces & CLONE_NEWUSER != 0);
     }
 
@@ -604,7 +672,7 @@ mod tests {
     fn test_map_users() {
         let args = vec!["--map-users".to_string(), "0:1000:1".to_string()];
         let opts = parse_args(&args);
-        assert_eq!(opts.map_users, Some("0:1000:1".to_string()));
+        assert!(opts.requested.contains(&"--map-users"));
         assert!(opts.namespaces & CLONE_NEWUSER != 0);
     }
 }

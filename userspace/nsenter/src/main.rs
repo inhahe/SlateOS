@@ -104,16 +104,27 @@ struct NsenterOpts {
     target_pid: Option<u32>,
     namespaces: Vec<String>,
     all_ns: bool,
-    root: Option<String>,
-    wd: Option<String>,
-    wd_fd: bool,
-    no_fork: bool,
-    setuid: Option<u32>,
-    setgid: Option<u32>,
-    preserve_creds: bool,
+    /// Options accepted, and named in the refusal.
+    ///
+    /// `root`, `wd`, `wd_fd`, `no_fork`, `setuid`, `setgid` and
+    /// `preserve_creds` used to be seven separate fields, each written by the
+    /// parser and read by nothing, with tests asserting each had been STORED.
+    /// The same collapse `unshare` just had, for the same reason: a program
+    /// that refuses has no behaviour to configure, only a record of what was
+    /// asked for.
+    requested: Vec<&'static str>,
     command: Vec<String>,
     /// Per-namespace file path overrides (e.g., --mount=/proc/42/ns/mnt).
     ns_files: Vec<(String, String)>,
+}
+
+impl NsenterOpts {
+    /// Record an option the caller asked for, once.
+    fn asked(&mut self, name: &'static str) {
+        if !self.requested.contains(&name) {
+            self.requested.push(name);
+        }
+    }
 }
 
 fn parse_args(args: &[String]) -> NsenterOpts {
@@ -121,13 +132,7 @@ fn parse_args(args: &[String]) -> NsenterOpts {
         target_pid: None,
         namespaces: Vec::new(),
         all_ns: false,
-        root: None,
-        wd: None,
-        wd_fd: false,
-        no_fork: false,
-        setuid: None,
-        setgid: None,
-        preserve_creds: false,
+        requested: Vec::new(),
         command: Vec::new(),
         ns_files: Vec::new(),
     };
@@ -172,36 +177,34 @@ fn parse_args(args: &[String]) -> NsenterOpts {
                 }
             }
             "-a" | "--all" => opts.all_ns = true,
-            "-F" | "--no-fork" => opts.no_fork = true,
-            "--preserve-credentials" => opts.preserve_creds = true,
+            "-F" | "--no-fork" => opts.asked("--no-fork"),
+            "--preserve-credentials" => opts.asked("--preserve-credentials"),
+            // The argument is still consumed. Leaving it behind would push it
+            // into `command`, and the refusal names the command.
             "-r" | "--root" => {
                 i += 1;
-                opts.root = if i < args.len() {
-                    Some(args[i].clone())
-                } else {
-                    Some("/".to_string())
-                };
+                opts.asked("--root");
             }
             "-w" | "--wd" => {
                 i += 1;
-                opts.wd = if i < args.len() {
-                    Some(args[i].clone())
-                } else {
-                    None
-                };
+                opts.asked("--wd");
             }
-            "-W" | "--wdns" => opts.wd_fd = true,
+            "-W" | "--wdns" => opts.asked("--wdns"),
             "-S" | "--setuid" => {
                 i += 1;
-                if i < args.len() {
-                    opts.setuid = args[i].parse().ok();
-                }
+                opts.asked("--setuid");
             }
             "-G" | "--setgid" => {
                 i += 1;
-                if i < args.len() {
-                    opts.setgid = args[i].parse().ok();
-                }
+                opts.asked("--setgid");
+            }
+            // `--` ENDS THE OPTIONS and is not itself the command. Measured
+            // against util-linux: `nsenter -- echo hello` prints `hello`.
+            // Without this arm it fell through to "everything from here is
+            // the command", so the refusal named `--` as the program.
+            "--" => {
+                opts.command = args.get(i.saturating_add(1)..).unwrap_or_default().to_vec();
+                break;
             }
             s => {
                 // Check short namespace flags.
@@ -373,6 +376,15 @@ has no namespace subsystem.",
         err,
         "nsenter: setns(2) validates its arguments and returns ENOSYS."
     );
+    if !opts.requested.is_empty() {
+        // Named so the refusal accounts for everything asked for, not just
+        // the namespaces.
+        let _ = writeln!(
+            err,
+            "nsenter: also requested, and equally not honoured: {}",
+            opts.requested.join(", ")
+        );
+    }
     let _ = writeln!(
         err,
         "nsenter: refusing to run {what}, because running it in THIS namespace \
@@ -398,6 +410,48 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// `--` ends the options; it is not the program.
+    ///
+    /// Measured against util-linux, where `nsenter -- echo hello` prints
+    /// `hello`. Without its own arm it fell through to "everything from here
+    /// is the command", so the refusal named `--` as the thing it would not
+    /// run.
+    #[test]
+    fn double_dash_ends_the_options() {
+        let opts = parse_args(&[
+            "-t".to_string(),
+            "1".to_string(),
+            "--".to_string(),
+            "true".to_string(),
+        ]);
+        assert_eq!(opts.command, vec!["true".to_string()]);
+
+        let opts = parse_args(&["--".to_string(), "ls".to_string(), "-l".to_string()]);
+        assert_eq!(opts.command, vec!["ls".to_string(), "-l".to_string()]);
+
+        let opts = parse_args(&["--".to_string()]);
+        assert!(opts.command.is_empty());
+    }
+
+    /// Options that cannot be honoured are recorded, once, for the refusal.
+    #[test]
+    fn requested_options_are_recorded_for_the_refusal() {
+        let opts = parse_args(&[
+            "--no-fork".to_string(),
+            "--setuid".to_string(),
+            "0".to_string(),
+            "--no-fork".to_string(),
+        ]);
+        assert_eq!(opts.requested, vec!["--no-fork", "--setuid"]);
+        assert!(
+            opts.command.is_empty(),
+            "--setuid must consume its argument, or 0 becomes the command"
+        );
+
+        let opts = parse_args(&["-t".to_string(), "1".to_string()]);
+        assert!(opts.requested.is_empty());
+    }
+
     use super::*;
 
     #[test]
@@ -474,15 +528,15 @@ mod tests {
             "1".to_string(),
         ];
         let opts = parse_args(&args);
-        assert_eq!(opts.setuid, Some(1000));
-        assert_eq!(opts.setgid, Some(1000));
+        assert!(opts.requested.contains(&"--setuid"));
+        assert!(opts.requested.contains(&"--setgid"));
     }
 
     #[test]
     fn test_parse_no_fork() {
         let args = vec!["-F".to_string(), "-t".to_string(), "1".to_string()];
         let opts = parse_args(&args);
-        assert!(opts.no_fork);
+        assert!(opts.requested.contains(&"--no-fork"));
     }
 
     #[test]
@@ -493,7 +547,7 @@ mod tests {
             "1".to_string(),
         ];
         let opts = parse_args(&args);
-        assert!(opts.preserve_creds);
+        assert!(opts.requested.contains(&"--preserve-credentials"));
     }
 
     #[test]
@@ -505,7 +559,7 @@ mod tests {
             "1".to_string(),
         ];
         let opts = parse_args(&args);
-        assert_eq!(opts.root, Some("/newroot".to_string()));
+        assert!(opts.requested.contains(&"--root"));
     }
 
     #[test]
@@ -517,7 +571,7 @@ mod tests {
             "1".to_string(),
         ];
         let opts = parse_args(&args);
-        assert_eq!(opts.wd, Some("/tmp".to_string()));
+        assert!(opts.requested.contains(&"--wd"));
     }
 
     #[test]

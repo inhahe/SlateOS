@@ -2130,6 +2130,51 @@ command was deleted has to reconstruct the argument as I just did.
 
 ## B-Q17 — [B] `sbctl` said it signed your kernel and did not. It refuses now — should the commands be deleted instead? — Status: OPEN
 
+**Added 2026-09-15: this answer governs more than `sbctl`, and a gate is now
+blocked on the ambiguity.**
+
+`scripts/audit-cli-fabrication.py --check` is red on `main`, and
+`scripts/pre-boot.py` runs it, so no lane can currently get past pre-boot. It
+names two commands. One, `passwd`, is the audit being wrong -- its work is real
+and delegated to helper crates the audit does not follow, and lane C has been
+told. The other is `unshare`, and it is red for exactly the reason this
+question asks about: **it refuses now, and §1006 as quoted says a command that
+does not work should be deleted rather than left refusing.**
+
+So the two readings give opposite answers for the same command:
+
+| reading | `unshare` | the gate |
+|---|---|---|
+| refusing is enough -- the defect was the false claim | keep it | the audit should not flag a refusing command |
+| §1006 means delete -- existence is itself a claim | delete it | the audit is right and I should act |
+
+**The commands your answer decides, beyond `sbctl`'s six.** All were made to
+refuse on 2026-09-15 for the same reason -- each stated something it had not
+done -- and all could work later if the missing kernel support arrives:
+
+| command | what it could not do | could it work later |
+|---|---|---|
+| `unshare` | create namespaces; `unshare(2)` is not there | yes |
+| `nsenter` | enter a namespace, same gap | yes |
+| `dbus-daemon`, `dbus-send`, `dbus-monitor` | speak to a bus that does not exist | yes |
+| `lp`, `lprm` | reach a print spooler | yes |
+| `eject` | tell a drive to open | probably not |
+
+**Your words in `open-questions-answers.txt` point at deletion**, and I want to
+be sure I am reading them the way you meant, because they were about the 2,288
+fabricating commands rather than about this narrower set: *"The ones that don't
+work but could work later can simply be added when we actually implement
+them?"* Taken literally that settles it -- delete all of the above. I have not,
+because deleting eleven more commands on my reading of a sentence written about
+a different set is exactly the kind of inference worth checking first.
+
+**If you do not answer:** the gate stays red, which blocks boot tests for all
+three lanes. I can unblock it today by teaching the audit that "refuses" is not
+"states a fact it did not measure" -- those are genuinely different things and
+its own error text says the first. That leaves the deletion question open
+rather than answering it by default, which is why I would rather do that than
+pin either command.
+
 **In short:** `sbctl` is the tool that manages Secure Boot — the firmware
 feature that refuses to start a kernel unless it carries a cryptographic
 signature the machine recognises. Ours reported creating those signing keys,

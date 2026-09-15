@@ -130,6 +130,67 @@ program does not control.
 
 ---
 
+## TD-B-BIGNAT-ADD-BACK-IS-UNREACHED-BY-ANY-TEST — 2026-09-15 — OPEN
+
+**In short:** the big-number division in `coreutils` has a rare correction step
+that fixes up an answer which came out one too big. No test in the suite ever
+makes it run. Deleting the line that does the fixing leaves all 23 tests
+passing, so if that step is wrong, nothing here would say so.
+
+**Where.** `userspace/coreutils/src/bignat.rs`, `Nat::divmod` -- Knuth 4.2
+Algorithm D, step D6, the `if t < 0` branch that does `q[j] -= 1` and adds the
+divisor back into the running remainder.
+
+**How it was found, and it was not by looking for it.** I was about to put a
+narrow `#[allow(clippy::indexing_slicing)]` on `divmod`, justified by "the
+algorithm's loop bounds keep the indices in range, and the tests check the
+outcome". Before writing that I checked what the tests actually cover. Two
+probes:
+
+    delete `q[j] -= 1`            -> 23/23 tests still pass
+    put `panic!()` in the branch  -> 23/23 tests still pass
+
+The second is conclusive: the branch does not execute during the suite.
+
+**It is not reachable by chance, either.** Knuth puts the probability of
+needing D6 at about `2/b`, which for 32-bit limbs is one division in two
+billion. A search of 20,000 divisions shaped to be hard -- divisor's top limb
+in the upper half of its range, dividend one limb longer -- fired it zero
+times, which is what that probability predicts.
+
+**What the two new tests DO cover, measured rather than assumed.** Disabling
+D3's estimate-correction loop fails
+`long_division_corrects_an_estimate_of_a_whole_limb` and
+`long_division_identity_holds_beyond_u128`, and no other test in the module.
+So before those two, D3's correction was as untested as D6 is now. The
+`u128`-based tests cannot reach either: they cap at four limbs because they
+need a native reference to compare against.
+
+**A correction worth recording.** Hacker's Delight gives `u = 2^95`,
+`v = 2^63 + 1` as its `divmnu` ADD-BACK vector, and I added it under that
+name. It is not an add-back case for this implementation: after D3 walks the
+estimate back from `2^32` to `0xFFFF_FFFF`, the multiply-subtract stays
+non-negative and D6 never runs. The test is renamed to what it demonstrably
+exercises. Had the probe not been run, the suite would carry a test whose name
+claims coverage it does not have -- which is worse than the gap, because it
+stops anyone else looking.
+
+**The proper fix** is a constructed D6 vector. It needs `qhat` to still be one
+too large *after* D3, which requires the divisor's top two limbs and the
+dividend's leading three to sit in a specific relation; Knuth exercise 4.2.2-21
+and the `divmnu` test suite both carry such vectors. Until one is in place,
+`divmod`'s D6 arm is code that has never run in this tree.
+
+**If never fixed:** no regression -- the branch is as exercised as it has ever
+been, which is not at all. The risk is that a future edit to `divmod` breaks
+D6 and every test still passes. That is precisely the condition an
+`#[allow]` on this function would have been justified by, which is why the
+allow is not being added yet.
+
+**Where it lives:** `userspace/coreutils/src/bignat.rs`, `Nat::divmod`.
+
+---
+
 ## TD-B-COREUTILS-HAS-913-DEFENSIVE-LINT-FINDINGS — 2026-09-15 — OPEN
 
 **In short:** the 83 commands in `userspace/coreutils` are now checked by the

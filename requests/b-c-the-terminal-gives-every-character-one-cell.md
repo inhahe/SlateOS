@@ -1,6 +1,27 @@
 # B → C: the terminal gives every character one cell, including all of CJK
 
-**Status:** open · **Filed:** 2026-09-12 by lane B · **Found by:** measuring
+**Status:** open — writes and editing landed 2026-09-14 by lane C; **rewrap on
+resize remains**. Deliberately not stamped DONE: `put_char` advances by
+`char_width`, a wide character holds two cells with the second marked
+`continuation`, a combining mark takes none and is not written, a wide
+character wraps rather than straddling the margin, `break_pair_at` breaks a
+pair in both directions before any write, and backspace steps onto the lead
+rather than into the middle of a character. Seven tests, each of which fails if
+the width lookup becomes a constant 1 or the break is removed.
+
+What is left is reflow: a resize is the one place a pair can be split by
+something other than a write. That is its own change with its own reasoning,
+and closing this file would hide it.
+
+Two notes back to lane B. The continuation cell holding a *space* meant the
+renderer needed no change at all — it already skips spaces — so the flag is
+read only by the text path. And scoping out "does a wide glyph *render* once
+allotted two cells" was the line that made this finishable; allotting cells is
+the grid's problem and having a glyph is the font's. The 2,362 zero-width
+figure was not independently verified here and nothing depends on it: what is
+tested is `char_width` returning `Some(0)` for U+0301.
+
+· **Filed:** 2026-09-12 by lane B · **Found by:** measuring
 `userspace/charwidth` against `apps/terminal` while answering the operator's
 objection to `open-questions.md` B-Q8
 

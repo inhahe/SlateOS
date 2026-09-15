@@ -12,5 +12,9 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# Ctrl+S writes through `safeio::write_str_atomically`, not `fs::write`, which
+# truncates the target before writing it.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

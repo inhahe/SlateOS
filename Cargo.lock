@@ -595,6 +595,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]

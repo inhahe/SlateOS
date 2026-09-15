@@ -25,6 +25,7 @@ use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, FileDialog};
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1459,6 +1460,15 @@ pub struct HexEditor {
     pub show_inspector: bool,
     /// Recent file paths.
     pub recent_files: VecDeque<String>,
+    /// The file picker, while one is up.
+    ///
+    /// The only route a real file has into this editor. Until 2026-09-15 there
+    /// was none: `main` filled the first document with `(0..=255).collect()`
+    /// and labelled it `/demo/sample.bin`, so the window named a file it was
+    /// not showing.
+    pub file_dialog: Option<FileDialog>,
+    /// What the last open attempt did, shown in the status bar.
+    pub last_open: Option<String>,
     /// Window width.
     pub window_width: f32,
     /// Window height.
@@ -1504,6 +1514,8 @@ impl HexEditor {
             search: SearchState::default(),
             show_inspector: true,
             recent_files: VecDeque::new(),
+            file_dialog: None,
+            last_open: None,
             window_width: width,
             window_height: height,
             focused_panel: FocusedPanel::HexView,
@@ -1781,6 +1793,10 @@ impl HexEditor {
         // Global shortcuts (regardless of focus).
         if key.modifiers.ctrl {
             match key.key {
+                Key::O => {
+                    self.open_file_dialog();
+                    return EventResult::Consumed;
+                }
                 Key::Z => {
                     self.active_doc_mut().undo();
                     return EventResult::Consumed;
@@ -2377,8 +2393,117 @@ impl HexEditor {
     /// The three handlers below it — keys, clicks and the wheel — already
     /// existed and were already tested; nothing dispatched to them, because
     /// nothing delivered an event. This is that dispatch.
+    /// Put the file picker up, listing the directory it starts in.
+    ///
+    /// The widget does no I/O: the host reads the listing and hands it over,
+    /// the convention `apps/fileassoc`, `apps/photomanager` and
+    /// `apps/filesearch` all follow.
+    pub fn open_file_dialog(&mut self) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::open().with_initial_path(start);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.file_dialog = Some(dialog);
+    }
+
+    fn dialog_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        let height = self.window_height;
+        let action = match self.file_dialog.as_mut() {
+            Some(dialog) => dialog.handle_event(key, height),
+            None => return EventResult::Ignored,
+        };
+        self.apply_dialog_action(action)
+    }
+
+    fn dialog_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        let (w, h) = (self.window_width, self.window_height);
+        let action = match self.file_dialog.as_mut() {
+            Some(dialog) => dialog.handle_mouse(mouse, w, h),
+            None => return EventResult::Ignored,
+        };
+        self.apply_dialog_action(action)
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
+        match action {
+            DialogAction::None => EventResult::Consumed,
+            DialogAction::Cancelled => {
+                self.file_dialog = None;
+                EventResult::Consumed
+            }
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+                EventResult::Consumed
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                self.last_open = Some(self.open_path(&path));
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Read `path` into a document. Returns what to say about it.
+    ///
+    /// A failure is a message rather than a silent no-op: an editor whose
+    /// window does not change and offers no reason cannot be told from one
+    /// that was never asked.
+    ///
+    /// Bounded at [`MAX_OPEN_BYTES`], and it **says so when it truncates**. A
+    /// hex editor showing the first sixteen mebibytes of a file without
+    /// mentioning it is worse than one that refuses: every offset past the cut
+    /// is a real offset in a file that has different bytes there.
+    pub fn open_path(&mut self, path: &std::path::Path) -> String {
+        let shown = path.display().to_string();
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) => return format!("Could not read {shown}: {err}"),
+        };
+        let whole = bytes.len();
+        let truncated = whole > MAX_OPEN_BYTES;
+        let data = if truncated {
+            bytes.get(..MAX_OPEN_BYTES).unwrap_or(&bytes).to_vec()
+        } else {
+            bytes
+        };
+        let len = data.len();
+        let doc = HexDocument::from_file(&shown, data);
+
+        // Replace an untouched empty document rather than opening a second
+        // tab beside it: the editor starts with one, and leaving it there
+        // would mean every session began with a stray "Untitled".
+        let replace = self
+            .documents
+            .get(self.active_tab)
+            .is_some_and(|d| d.data.is_empty() && !d.modified);
+        if replace {
+            if let Some(slot) = self.documents.get_mut(self.active_tab) {
+                *slot = doc;
+            }
+        } else {
+            self.documents.push(doc);
+            self.active_tab = self.documents.len().saturating_sub(1);
+        }
+
+        if truncated {
+            format!(
+                "Opened the first {len} bytes of {shown} -- it is {whole} bytes and the rest is not shown"
+            )
+        } else {
+            format!("Opened {shown} ({len} bytes)")
+        }
+    }
+
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
+            Event::Key(key_ev) if self.file_dialog.is_some() => self.dialog_key(key_ev),
+            Event::Mouse(mouse) if self.file_dialog.is_some() => self.dialog_mouse(mouse),
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
             Event::Resize { width, height } => {
@@ -3348,23 +3473,48 @@ impl App for HexEditor {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.window_width = width;
         self.window_height = height;
-        self.render_tree()
+        let mut tree = self.render_tree();
+        // The picker goes last so it sits over everything, which is the same
+        // order in which `handle_event` gives it the click.
+        //
+        // This was a comment claiming the picker was drawn, above code that
+        // did not draw it, for about four minutes. It would have shipped a
+        // dialog that takes every keystroke and every click while being
+        // invisible -- and the comment would have told the next reader to look
+        // somewhere else. `the_picker_is_drawn_when_it_is_open` exists because
+        // of it.
+        if let Some(dialog) = &self.file_dialog {
+            tree.commands
+                .extend(dialog.render(&self.palette, width, height));
+        }
+        tree
     }
 }
 
 fn main() -> ExitCode {
+    // Opens empty. It used to fill the first document with `(0..=255)` -- every
+    // byte value once -- and label it `/demo/sample.bin`, a path that does not
+    // exist, so the window named a file it was not showing you. The comment
+    // above that said "until a file can be opened this is what there is to
+    // edit", which was true of the program and not of the system: the file
+    // picker and `std::fs` were both already here.
+    //
+    // A hex editor is for looking at a particular file's actual bytes. There
+    // is no version of that a synthetic buffer satisfies, which is why this one
+    // starts on an empty document and says how to open something instead.
     let mut editor = HexEditor::new(1200.0, 800.0);
-    // Until a file can be opened this is what there is to edit: every byte
-    // value once, which is also the most useful thing to look at while the
-    // rendering is being worked on.
-    let sample: Vec<u8> = (0..=255).collect();
-    let mut doc = HexDocument::from_data(sample);
-    doc.file_path = Some(String::from("/demo/sample.bin"));
-    if let Some(first) = editor.documents.first_mut() {
-        *first = doc;
-    }
+    editor.last_open = Some(String::from("Press Ctrl+O to open a file"));
     app::launch("hexeditor", &mut editor)
 }
+
+/// The most of a file one open will read.
+///
+/// A hex editor asked to open a four-gigabyte file would otherwise read all of
+/// it into memory before drawing anything. The cap is reported when it bites,
+/// because every offset past the cut is a real offset in a file that has
+/// different bytes there -- a silently truncated view is a view that lies
+/// about a specific address.
+pub const MAX_OPEN_BYTES: usize = 16 * 1024 * 1024;
 
 // ============================================================================
 // Tests
@@ -3553,6 +3703,133 @@ mod tests {
         }
     }
     use super::*;
+
+    // -- Opening a real file --
+
+    /// A scratch file unique to one test, removed when it is done.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn with(tag: &str, bytes: &[u8]) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "slateos-hexeditor-{tag}-{}-{unique}.bin",
+                std::process::id()
+            ));
+            std::fs::write(&path, bytes).expect("scratch file");
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            drop(std::fs::remove_file(&self.0));
+        }
+    }
+
+    /// The bytes on screen are the bytes in the file.
+    ///
+    /// Before 2026-09-15 they could not be: `main` filled the first document
+    /// with `(0..=255)` and there was no way to read anything else.
+    #[test]
+    fn opening_a_file_shows_that_files_bytes() {
+        let scratch = Scratch::with("open", &[0xDE, 0xAD, 0xBE, 0xEF]);
+        let mut editor = HexEditor::new(1200.0, 800.0);
+        let said = editor.open_path(&scratch.0);
+
+        let doc = editor.documents.get(editor.active_tab).expect("a document");
+        assert_eq!(doc.data, vec![0xDE, 0xAD, 0xBE, 0xEF], "{said}");
+        assert_eq!(
+            doc.file_path.as_deref(),
+            Some(scratch.0.display().to_string().as_str()),
+            "the document does not name the file it came from"
+        );
+    }
+
+    /// A file that cannot be read says so rather than doing nothing.
+    #[test]
+    fn an_unreadable_file_reports_instead_of_failing_quietly() {
+        let mut editor = HexEditor::new(1200.0, 800.0);
+        let missing = std::env::temp_dir().join("slateos-hexeditor-no-such-file.bin");
+        let said = editor.open_path(&missing);
+        assert!(said.contains("Could not read"), "said {said:?}");
+        let doc = editor.documents.get(editor.active_tab).expect("a document");
+        assert!(doc.data.is_empty(), "a failed read put bytes on screen");
+    }
+
+    /// A truncated view says it is truncated.
+    ///
+    /// Every offset past the cut is a real offset in a file that has different
+    /// bytes there, so a silent truncation is a view that lies about a
+    /// specific address -- worse than refusing the file outright.
+    #[test]
+    fn a_file_past_the_cap_says_it_was_cut() {
+        let big = vec![0x41_u8; MAX_OPEN_BYTES + 32];
+        let scratch = Scratch::with("big", &big);
+        let mut editor = HexEditor::new(1200.0, 800.0);
+        let said = editor.open_path(&scratch.0);
+
+        let doc = editor.documents.get(editor.active_tab).expect("a document");
+        assert_eq!(doc.data.len(), MAX_OPEN_BYTES);
+        assert!(
+            said.contains("not shown"),
+            "a truncated open did not say so: {said:?}"
+        );
+        assert!(
+            said.contains(&big.len().to_string()),
+            "the message does not give the real size: {said:?}"
+        );
+    }
+
+    /// The picker is drawn while it is open.
+    ///
+    /// This test exists because the first version of the change added a
+    /// *comment* saying the picker was drawn, above a `render` that did not
+    /// draw it. It compiled, every other test passed, and the result would
+    /// have been a dialog that swallowed every keystroke and every click while
+    /// being invisible. A comment is not a rendering.
+    #[test]
+    fn the_picker_is_drawn_when_it_is_open() {
+        let mut editor = HexEditor::new(1200.0, 800.0);
+        let before = editor.render(1200.0, 800.0).commands.len();
+        editor.open_file_dialog();
+        let after = editor.render(1200.0, 800.0).commands.len();
+        assert!(
+            after > before,
+            "the picker is open and nothing more is drawn ({before} then {after})"
+        );
+    }
+
+    /// Opening a second file does not lose the first.
+    ///
+    /// The editor has tabs, so a second file joins them rather than replacing
+    /// what you were looking at. The empty document the window starts with is
+    /// the one exception, or every session would begin with a stray
+    /// "Untitled" beside the file you asked for.
+    #[test]
+    fn a_second_file_opens_beside_the_first() {
+        let one = Scratch::with("one", &[1, 2, 3]);
+        let two = Scratch::with("two", &[4, 5, 6, 7]);
+        let mut editor = HexEditor::new(1200.0, 800.0);
+
+        editor.open_path(&one.0);
+        assert_eq!(
+            editor.documents.len(),
+            1,
+            "the empty document was not reused"
+        );
+
+        editor.open_path(&two.0);
+        assert_eq!(
+            editor.documents.len(),
+            2,
+            "the second file replaced the first"
+        );
+        let active = editor.documents.get(editor.active_tab).expect("a document");
+        assert_eq!(active.data, vec![4, 5, 6, 7], "the new tab is not focused");
+    }
 
     // ====================================================================
     // Hex formatting utilities

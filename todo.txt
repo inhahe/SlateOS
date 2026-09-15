@@ -4538,6 +4538,20 @@ After any merge, sweep the stale-artifact checkers BEFORE launching a boot
   The sweep is seconds, not minutes:
 
     python scripts/gen-script-index.py --check
+
+  RUN EACH ONE PLAIN -- never `--check || <tool>`. I wrote the sweep as
+  `python tool.py --check || python tool.py`, meaning "check, and if that is
+  not a thing it supports, just run it". For a GENERATOR that is not a
+  fallback, it is a repair: gen-script-index.py with no argument REWRITES
+  INDEX.md. On 2026-09-15 the sweep therefore found a stale index, silently
+  regenerated it, and printed rc=0 -- reporting success for a tool that had
+  just taken an action, which is the exact defect the sweep exists to catch,
+  in the sweep itself.
+
+  It only surfaced because `git status` afterwards showed INDEX.md modified
+  when nothing should have touched it. A sweep that repairs is worse than one
+  that fails: the failure is information, and the repair is a commit you did
+  not decide to make.
     python scripts/scan-orphan-modules.py --check
     python scripts/check-fields-written-never-read.py
     python scripts/check-design-decisions-bands.py

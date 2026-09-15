@@ -18,6 +18,22 @@ now live, exercised by the daemon, and the kernel is the one holding the second
 implementation of a format that something else already depends on. Adopting the
 remaining two functions is the same argument the constants already won.
 
+**The one thing that needed checking before adopting `write_echo`, checked.**
+The two encoders do not share a checksum call: `build_echo_request` uses the
+kernel's `ipv4::ip_checksum`, `write_echo` uses `netproto::checksum::internet`.
+Swapping them would change which implementation computes bytes that go on a
+wire, and a checksum that differs is a packet peers drop silently -- worth
+confirming rather than assuming.
+
+It is safe, and by construction rather than by luck:
+`kernel/src/net/checksum.rs` is a thin wrapper over netproto
+(`accumulate` at :84, `fold` at :99 and :110). So the kernel's
+`ip_checksum(d)` is `!fold(accumulate(0, d))` and netproto's `internet(d)` is
+the same composition of the same primitives. The adoption is byte-identical,
+not merely equivalent-looking — which also confirms this request's claim that
+the kernel already depends on netproto's checksum. It does, through a wrapper,
+which is why grepping `netproto::checksum` in `icmp.rs` finds nothing.
+
 Remaining work is lane A's and is queued behind a boot-test green; nothing is
 needed from lane C.
 **Size:** small — three constants and two functions.

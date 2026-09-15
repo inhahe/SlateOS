@@ -169,6 +169,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/find-silent-incapacity.py` | Which programs cannot do the thing they are for, and do not say so? |
 | `scripts/find-stale-admissions.py` | Which programs still deny a capability they have since acquired? |
 | `scripts/find-stranded-serialisers.py` | Which finished serialisers can nobody reach? |
+| `scripts/find-swallowed-ticks.py` | Which event dispatchers can return before reaching their own Tick arm? |
 | `scripts/flake-hunt.sh` | flake-hunt.sh — run a crate's test suite N times and report only the runs |
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
@@ -376,4 +377,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_366 scripts._
+_367 scripts._

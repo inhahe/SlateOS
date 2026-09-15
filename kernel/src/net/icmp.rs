@@ -725,18 +725,56 @@ fn send_echo_reply(request_ip: &Ipv4Packet<'_>, ns_id: crate::netns::NetNsId) ->
         return Ok(());
     }
 
-    let mut reply = Vec::from(data);
-    // Change type to Echo Reply.
-    reply[0] = wire::TYPE_ECHO_REPLY;
-    // Recompute checksum.
-    reply[2] = 0;
-    reply[3] = 0;
-    let checksum = ipv4::ip_checksum(&reply);
-    reply[2] = (checksum >> 8) as u8;
-    reply[3] = checksum as u8;
+    // Parse and re-encode through netproto rather than mutating the request in
+    // place. This is the last half of lane C's duplication request, and unlike
+    // `write_echo` it CHANGES BEHAVIOUR -- twice, both chosen rather than
+    // inherited from the parser's strictness:
+    //
+    //  1. The reply's code is 0, per RFC 792. The old path copied the request's
+    //     bytes and flipped only byte 0, so a non-zero code was echoed back.
+    //  2. A request whose code is non-zero is now DROPPED rather than answered,
+    //     because `Echo::parse` refuses it. A well-formed ping always carries
+    //     code 0, so no real client changes behaviour -- only malformed ones,
+    //     which stop receiving a reply that told them their own bad byte.
+    //
+    // `parse` re-validates the checksum that `process_icmp` has already checked.
+    // Harmless, and the outer check must stay: it guards the paths that never
+    // reach here.
+    let Some(reply) = build_echo_reply(data)? else {
+        return Ok(());
+    };
 
     // Reply from the namespace the request arrived in.
     ipv4::send_ns(ns_id, request_ip.src, PROTO_ICMP, &reply)
+}
+
+/// Build the echo reply for a received echo request.
+///
+/// `Ok(None)` means the bytes are not a well-formed echo request and no reply
+/// should be sent. `Err` is reserved for the unreachable buffer case.
+///
+/// Separate from [`send_echo_reply`] so it can be tested WITHOUT a NIC: the
+/// send needs an interface, the construction does not. That split exists
+/// because this is where the behaviour changed, and `send_echo_reply` has
+/// exactly one caller -- the inbound packet path -- which no self-test drives.
+/// Without it the change would have shipped with nothing executing it.
+fn build_echo_reply(data: &[u8]) -> KernelResult<Option<Vec<u8>>> {
+    let Some(req) = wire::Echo::parse(data) else {
+        // Malformed echo -- wrong type, non-zero code, or a checksum that does
+        // not fold. Dropped silently, exactly as the length check above already
+        // does for a truncated one.
+        return Ok(None);
+    };
+    let total = wire::HEADER_LEN + req.data.len();
+    let mut reply = alloc::vec![0u8; total];
+    let Some(n) = wire::reply_to(&mut reply, &req) else {
+        // `reply_to` returns None only for a non-request or a buffer too small;
+        // `parse` established the first and `total` the second. Surfaced rather
+        // than sent short, because a reply with a zero checksum reads as loss.
+        return Err(crate::error::KernelError::InvalidArgument);
+    };
+    reply.truncate(n);
+    Ok(Some(reply))
 }
 
 // ---------------------------------------------------------------------------
@@ -820,6 +858,7 @@ pub fn self_test() -> KernelResult<()> {
     test_verify_checksum_valid()?;
     test_verify_checksum_invalid()?;
     test_build_trace_echo_request()?;
+    test_echo_reply_construction()?;
     test_ping_tracking()?;
     test_reason_strings()?;
 
@@ -905,6 +944,74 @@ fn test_verify_checksum_invalid() -> KernelResult<()> {
     }
 
     crate::serial_println!("[icmp]   verify checksum (invalid): OK (rejected)");
+    Ok(())
+}
+
+/// The echo-reply construction, which is where 2026-09-15's behaviour change
+/// lives. Both halves are asserted:
+///
+///  * a well-formed request yields a reply whose code byte is 0 (RFC 792),
+///    where the old path copied the request's bytes and echoed its code;
+///  * a request with a non-zero code yields NO reply, where the old path
+///    answered it.
+fn test_echo_reply_construction() -> KernelResult<()> {
+    let mut req = alloc::vec![0u8; wire::HEADER_LEN + 4];
+    if wire::write_echo(&mut req, true, 0x1234, 9, &[1, 2, 3, 4]).is_none() {
+        crate::serial_println!("[icmp]   FAIL: could not build a request fixture");
+        return Err(crate::error::KernelError::InvalidArgument);
+    }
+    let Some(reply) = build_echo_reply(&req)? else {
+        crate::serial_println!("[icmp]   FAIL: a well-formed echo request produced no reply");
+        return Err(crate::error::KernelError::IoError);
+    };
+    if reply.first() != Some(&wire::TYPE_ECHO_REPLY) {
+        crate::serial_println!("[icmp]   FAIL: reply type is not Echo Reply");
+        return Err(crate::error::KernelError::IoError);
+    }
+    if reply.get(1) != Some(&0) {
+        crate::serial_println!(
+            "[icmp]   FAIL: reply code is {:?}, RFC 792 requires 0",
+            reply.get(1)
+        );
+        return Err(crate::error::KernelError::IoError);
+    }
+    if !verify_checksum(&reply) {
+        crate::serial_println!("[icmp]   FAIL: reply checksum does not fold");
+        return Err(crate::error::KernelError::IoError);
+    }
+
+    // The half that changed: a non-zero code is refused rather than echoed.
+    //
+    // The checksum is recomputed AFTER setting the code, so the only defect
+    // in this packet is the code byte. Skip that and `Echo::parse` refuses it
+    // for a bad checksum instead, and the case passes for the wrong reason --
+    // which is the predicate-miss shape from design-decisions 942.
+    let mut bad = req.clone();
+    if bad.len() < 4 {
+        return Err(crate::error::KernelError::InvalidArgument);
+    }
+    bad[1] = 3;
+    bad[2] = 0;
+    bad[3] = 0;
+    let csum = ipv4::ip_checksum(&bad);
+    bad[2] = (csum >> 8) as u8;
+    bad[3] = csum as u8;
+    if !verify_checksum(&bad) {
+        crate::serial_println!(
+            "[icmp]   FAIL: the fixture for the code case has a bad checksum, so a\
+             refusal below would not be attributable to the code byte"
+        );
+        return Err(crate::error::KernelError::IoError);
+    }
+    if build_echo_reply(&bad)?.is_some() {
+        crate::serial_println!(
+            "[icmp]   FAIL: an echo request with code 3 was answered; RFC 792 says\
+             code must be 0 and such a request is not a well-formed echo"
+        );
+        return Err(crate::error::KernelError::IoError);
+    }
+
+    crate::serial_println!("[icmp]   echo reply: code 0 on a good request, no reply to code 3: OK");
     Ok(())
 }
 

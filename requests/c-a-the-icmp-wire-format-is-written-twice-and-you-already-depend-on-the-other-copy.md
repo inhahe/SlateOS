@@ -24,6 +24,25 @@ riding along on a swap that was provably byte-identical. Filed here so the
 distinction is on record: `write_echo` could not change a packet, `reply_to`
 can.
 
+**It is TWO behaviour changes, not one** -- worth writing down before doing it,
+since only the first is obvious. `Echo::parse` also refuses a request whose
+code byte is non-zero (`if buf[1] != 0 { return None }`), because RFC 792
+specifies Code = 0 for echo. So adopting `reply_to` means:
+
+1. the reply's code becomes 0 instead of whatever the request carried; and
+2. a request with a non-zero code stops being answered at all, where today it
+   gets a reply with its malformed code echoed back.
+
+Both are RFC-correct and neither touches a well-formed ping, which always has
+code 0 -- so no real client changes behaviour. But (2) is a silent drop where
+there used to be a response, and that is the kind of change that should be
+chosen rather than inherited from a parser's strictness.
+
+`parse` also re-validates the checksum, which `process_icmp` has already done
+by then. Harmless, and worth noting so nobody later removes the outer check on
+the grounds that the parser covers it -- the outer one guards the paths that do
+not go through `reply_to`.
+
 One premise has also changed since filing, and it strengthens the case rather
 than weakening it: netproto's copy is no longer "an island nobody calls" —
 `services/netstack/src/main.rs:506` calls `icmp::reply_to`. So the encoder is

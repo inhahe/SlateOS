@@ -52,6 +52,7 @@ use std::fmt;
 // search tools in this desktop gave different answers to the same pattern.
 // See the `globmatch` module docs.
 pub use globmatch::{glob_match, glob_match_chars};
+use guitk::dialog::{DialogAction, FileDialog};
 
 // ─── Simple Regex Engine ─────────────────────────────────────────────
 
@@ -961,6 +962,24 @@ pub struct FileSearchApp {
     pub status_message: String,
     pub is_searching: bool,
     pub search_time_ms: u64,
+    /// The folder picker, while one is up.
+    ///
+    /// The only route a real file has into this index. Until 2026-09-15 there
+    /// was none: `main` called `populate_sample_index` and the entire search
+    /// machinery -- by name, by glob, by regular expression, by category, with
+    /// sorting -- ran against records written into the source.
+    pub file_dialog: Option<FileDialog>,
+    /// How many entries the last index pass could not represent.
+    ///
+    /// A name on this system is bytes, not text: every byte but `/` and NUL is
+    /// legal. `IndexEntry` holds `String`, and `globmatch::glob_match` takes
+    /// `&str`, so a name that is not UTF-8 cannot be matched against a pattern
+    /// at all. Those entries are **skipped and counted** rather than decoded
+    /// lossily -- `guitk`'s own `DirEntry::extension` explains why in the same
+    /// words: decoding lossily "could make it match one it should not", which
+    /// in a search tool is the whole game. The count is shown, because a file
+    /// search that silently omits files is worse than one that says it did.
+    pub skipped_unrepresentable: usize,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -981,6 +1000,8 @@ impl FileSearchApp {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             index: FileIndex::new(),
+            file_dialog: None,
+            skipped_unrepresentable: 0,
             criteria: SearchCriteria::new(""),
             results: Vec::new(),
             selected_result: None,
@@ -1123,8 +1144,130 @@ impl FileSearchApp {
     // ------------------------------------------------------------------
 
     /// Route a compositor event into the app.
+    /// Put the folder picker up, listing the directory it starts in.
+    ///
+    /// `select_folder` rather than `open`: this indexes a tree, so the thing
+    /// being chosen is a directory. The widget does no I/O -- the host reads
+    /// the listing and hands it over, which is the convention `apps/fileassoc`
+    /// and `apps/photomanager` follow.
+    pub fn open_folder_dialog(&mut self) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::select_folder().with_initial_path(start);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.file_dialog = Some(dialog);
+    }
+
+    fn handle_dialog_key(&mut self, key: &guitk::event::KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        let action = match self.file_dialog.as_mut() {
+            Some(dialog) => dialog.handle_event(key, window_height()),
+            None => return EventResult::Ignored,
+        };
+        self.apply_dialog_action(action)
+    }
+
+    fn handle_dialog_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
+        let action = match self.file_dialog.as_mut() {
+            Some(dialog) => dialog.handle_mouse(mouse, window_width(), window_height()),
+            None => return EventResult::Ignored,
+        };
+        self.apply_dialog_action(action)
+    }
+
+    fn apply_dialog_action(&mut self, action: DialogAction) -> EventResult {
+        match action {
+            DialogAction::None => EventResult::Consumed,
+            DialogAction::Cancelled => {
+                self.file_dialog = None;
+                EventResult::Consumed
+            }
+            DialogAction::NavigatedTo(path) => {
+                if let Some(dialog) = self.file_dialog.as_mut() {
+                    dialog.set_entries(guitk::dialog::list_directory(&path));
+                }
+                EventResult::Consumed
+            }
+            DialogAction::Selected(path) => {
+                self.file_dialog = None;
+                self.index_directory(&path);
+                self.execute_search();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Walk `root` and put what is there into the index.
+    ///
+    /// Replaces the index rather than adding to it: two folders indexed in
+    /// turn would otherwise leave results from the first still matching, and a
+    /// search tool reporting a file from a folder you are no longer looking at
+    /// is worse than one reporting nothing.
+    ///
+    /// Bounded at [`MAX_INDEXED`] entries. A walk of a whole disk in a single
+    /// frame would hang the window, and an unbounded one would hang it for
+    /// however long the disk takes. The bound is reported when it is hit, so a
+    /// truncated index cannot be mistaken for a complete one.
+    pub fn index_directory(&mut self, root: &std::path::Path) {
+        self.index.clear();
+        self.skipped_unrepresentable = 0;
+        let mut queue = vec![root.to_path_buf()];
+        let mut indexed = 0_usize;
+        let mut truncated = false;
+
+        while let Some(dir) = queue.pop() {
+            let Ok(listing) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in listing.flatten() {
+                if indexed >= MAX_INDEXED {
+                    truncated = true;
+                    break;
+                }
+                let path = entry.path();
+                let is_dir = path.is_dir();
+                if is_dir {
+                    queue.push(path.clone());
+                }
+                let (Some(path_text), Some(name_text)) =
+                    (path.to_str(), path.file_name().and_then(|n| n.to_str()))
+                else {
+                    // Not text, so no pattern can be matched against it.
+                    self.skipped_unrepresentable = self.skipped_unrepresentable.saturating_add(1);
+                    continue;
+                };
+                let meta = entry.metadata().ok();
+                let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+                let modified = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs());
+                self.index.add(IndexEntry::new(
+                    path_text, name_text, size, modified, modified, is_dir,
+                ));
+                indexed = indexed.saturating_add(1);
+            }
+            if truncated {
+                break;
+            }
+        }
+
+        self.status_message = describe_index_pass(
+            &root.to_string_lossy(),
+            indexed,
+            self.skipped_unrepresentable,
+            truncated,
+        );
+    }
+
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
+            Event::Key(key_ev) if self.file_dialog.is_some() => self.handle_dialog_key(key_ev),
+            Event::Mouse(mouse) if self.file_dialog.is_some() => self.handle_dialog_mouse(mouse),
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Resize { .. } => {
                 // The layout is computed from the size it is handed at render
@@ -1173,6 +1316,10 @@ impl FileSearchApp {
             // Sorting, on Ctrl so the bare letters stay available as query
             // text. Pressing the current column again reverses it, which is
             // what a column header does everywhere else.
+            Key::O if ctrl => {
+                self.open_folder_dialog();
+                EventResult::Consumed
+            }
             Key::N if ctrl => self.sort_by(SortColumn::Name),
             Key::S if ctrl => self.sort_by(SortColumn::Size),
             Key::M if ctrl => self.sort_by(SortColumn::Modified),
@@ -1891,9 +2038,13 @@ impl App for FileSearchApp {
     }
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
-        RenderTree {
-            commands: self.render_commands(width, height),
+        let mut commands = self.render_commands(width, height);
+        // Last, so it is on top -- the same order in which `handle_event`
+        // gives it the click.
+        if let Some(dialog) = &self.file_dialog {
+            commands.extend(dialog.render(&self.palette, width, height));
         }
+        RenderTree { commands }
     }
 }
 
@@ -1901,18 +2052,48 @@ impl App for FileSearchApp {
 ///
 /// The layout is computed from whatever size `render` is handed, so these are
 /// only the opening request rather than an assumption the drawing depends on.
+/// The window size the picker is laid out against.
+///
+/// The dialog needs the *current* size to place itself, and this app does not
+/// track resizes -- `Event::Resize` only recomputes the row count. These two
+/// return the size the window opens at, which is right until the user drags a
+/// corner; `known-issues.md` carries the rest.
+#[must_use]
+fn window_width() -> f32 {
+    f32::from(u16::try_from(WINDOW_WIDTH).unwrap_or(u16::MAX))
+}
+
+#[must_use]
+fn window_height() -> f32 {
+    f32::from(u16::try_from(WINDOW_HEIGHT).unwrap_or(u16::MAX))
+}
+
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 800;
 
 fn main() -> ExitCode {
+    // Starts empty. It used to call `populate_sample_index`, under a comment
+    // saying "until a real index exists this is what there is to search" --
+    // which was true, and the missing piece turned out to be nearer than the
+    // `indexer` service that comment pointed at. Ctrl+O reads a real folder.
     let mut app = FileSearchApp::new();
-    // Until a real index exists this is what there is to search. It is one call
-    // so that the moment `indexer` can be asked, this is the line that changes.
-    populate_sample_index(&mut app.index);
-    app.execute_search();
+    app.status_message = String::from("Press Ctrl+O to choose a folder to search");
     app::launch("filesearch", &mut app)
 }
 
+/// The most entries one pass will index.
+///
+/// A whole disk walked in a single frame would hang the window. The bound is
+/// reported when it is reached, so a truncated index is never mistaken for a
+/// complete one -- which matters more here than in most places, because "no
+/// results" from a search tool reads as "no such file".
+/// Representative entries, for tests only.
+///
+/// `#[cfg(test)]` since 2026-09-15. `main` called it, so the search ran
+/// against records written into the source -- and since the application had
+/// no way to reach a real file, those records were the only thing it could
+/// ever search. A fixture production can reach is a fixture that ships.
+#[cfg(test)]
 fn populate_sample_index(index: &mut FileIndex) {
     let now: u64 = 1_779_000_000;
     let files = [
@@ -2061,6 +2242,23 @@ fn populate_sample_index(index: &mut FileIndex) {
     for (path, name) in &dirs {
         index.add(IndexEntry::new(path, name, 0, now, now - 2_592_000, true));
     }
+}
+
+pub const MAX_INDEXED: usize = 20_000;
+
+/// What to say about an index pass. Separated so a test can read it.
+#[must_use]
+pub fn describe_index_pass(root: &str, indexed: usize, skipped: usize, truncated: bool) -> String {
+    let mut out = format!("Indexed {indexed} entries from {root}");
+    if truncated {
+        out.push_str(&format!(" (stopped at the {MAX_INDEXED} limit)"));
+    }
+    if skipped > 0 {
+        out.push_str(&format!(
+            " -- {skipped} skipped: their names are not text and no pattern can match them"
+        ));
+    }
+    out
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
@@ -2337,6 +2535,166 @@ mod tests {
         }
     }
     use super::*;
+
+    // -- The directory walk --
+    //
+    // Added with the walk itself rather than after it. The rewrite that gave
+    // `apps/sysinfo` its reader deleted three tests and added none, and for one
+    // commit that file had fewer tests and more untested code; this is that
+    // lesson applied on the same day.
+
+    /// A scratch directory unique to one test, removed when it is done.
+    ///
+    /// Unique per call because the suite runs in parallel: a fixed name let two
+    /// tests delete each other's files in `apps/benchmark` earlier today, and
+    /// there the symptom was a measurement that silently came back as nothing.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "slateos-filesearch-{tag}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+
+        fn file(&self, name: &str, contents: &str) {
+            std::fs::write(self.0.join(name), contents).expect("scratch file");
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // Best effort: a leaked scratch directory is untidy, and panicking
+            // in a `Drop` during an already-failing test would hide the real
+            // failure behind an abort.
+            drop(std::fs::remove_dir_all(&self.0));
+        }
+    }
+
+    /// Files on disk become entries that the search can find.
+    ///
+    /// The whole point of the change: before it, `index.add` was called only by
+    /// tests and by `populate_sample_index`, so no file the user had could ever
+    /// appear in a result.
+    #[test]
+    fn a_folder_on_disk_becomes_something_searchable() {
+        let scratch = Scratch::new("basic");
+        scratch.file("alpha.txt", "one");
+        scratch.file("beta.rs", "two");
+        scratch.file("gamma.txt", "three");
+
+        let mut app = FileSearchApp::new();
+        app.index_directory(&scratch.0);
+
+        assert_eq!(app.index.entries.len(), 3, "{}", app.status_message);
+
+        app.criteria = SearchCriteria::new("alpha");
+        app.execute_search();
+        assert_eq!(app.results.len(), 1, "searching for alpha found nothing");
+
+        let found = app
+            .index
+            .entries
+            .get(*app.results.first().expect("a result"))
+            .expect("an entry");
+        assert_eq!(found.name, "alpha.txt");
+        assert!(found.size > 0, "the size did not come from the file");
+    }
+
+    /// A glob reaches the real names, not just the literal ones.
+    #[test]
+    fn a_glob_matches_what_is_on_disk() {
+        let scratch = Scratch::new("glob");
+        scratch.file("alpha.txt", "one");
+        scratch.file("beta.rs", "two");
+        scratch.file("gamma.txt", "three");
+
+        let mut app = FileSearchApp::new();
+        app.index_directory(&scratch.0);
+        let hits = app.index.search_glob("*.txt");
+        assert_eq!(hits.len(), 2, "glob found {} of 2", hits.len());
+    }
+
+    /// Indexing a second folder replaces the first rather than adding to it.
+    ///
+    /// A search tool reporting a file from a folder you are no longer looking
+    /// at is worse than one reporting nothing: the path looks real, because it
+    /// is, and nothing on screen says it is from somewhere else.
+    #[test]
+    fn a_second_folder_replaces_the_first() {
+        let first = Scratch::new("first");
+        first.file("only-in-first.txt", "x");
+        let second = Scratch::new("second");
+        second.file("only-in-second.txt", "y");
+
+        let mut app = FileSearchApp::new();
+        app.index_directory(&first.0);
+        app.index_directory(&second.0);
+
+        let names: Vec<&str> = app.index.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"only-in-second.txt"),
+            "the second folder was not indexed: {names:?}"
+        );
+        assert!(
+            !names.contains(&"only-in-first.txt"),
+            "the first folder's files survived: {names:?}"
+        );
+    }
+
+    /// An unreadable folder reports rather than looking like an empty one.
+    #[test]
+    fn a_folder_that_is_not_there_is_reported_as_zero_rather_than_ignored() {
+        let mut app = FileSearchApp::new();
+        let missing = std::env::temp_dir().join("slateos-filesearch-no-such-dir");
+        app.index_directory(&missing);
+        assert!(app.index.entries.is_empty());
+        assert!(
+            app.status_message.contains("0 entries"),
+            "said {:?}",
+            app.status_message
+        );
+    }
+
+    /// The status line says when the index was truncated.
+    ///
+    /// "No results" from a search tool reads as "no such file", so a cap that
+    /// did not announce itself would turn a partial index into a confident
+    /// wrong answer.
+    #[test]
+    fn a_truncated_index_says_so() {
+        let quiet = describe_index_pass("/tmp/x", 10, 0, false);
+        assert!(!quiet.contains("limit"), "said {quiet:?}");
+
+        let capped = describe_index_pass("/tmp/x", MAX_INDEXED, 0, true);
+        assert!(
+            capped.contains(&MAX_INDEXED.to_string()),
+            "a truncated pass did not name the limit: {capped:?}"
+        );
+    }
+
+    /// Names that are not text are counted, not hidden.
+    ///
+    /// They cannot be matched -- `globmatch::glob_match` takes `&str` -- so
+    /// they are skipped, and a file search that silently omits files is worse
+    /// than one that says it did.
+    #[test]
+    fn skipped_names_are_reported() {
+        let silent = describe_index_pass("/tmp/x", 5, 0, false);
+        assert!(!silent.contains("skipped"), "said {silent:?}");
+
+        let noisy = describe_index_pass("/tmp/x", 5, 2, false);
+        assert!(
+            noisy.contains('2') && noisy.contains("not text"),
+            "the skipped count is not explained: {noisy:?}"
+        );
+    }
 
     // Glob matching tests
     #[test]

@@ -147938,9 +147938,32 @@ worth reading: a `pub fn sample()` that only tests call is a fixture in the
 wrong module, which is untidy. One the program calls is a fabrication.
 
 77 definitions matched the name; 63 are called from production. The count
-excludes signal-processing vocabulary — `sample_rate`, `bits_per_sample`,
+excludes signal-processing vocabulary
+
+**63 is a floor, and the method is why.** Lane B's objection, and it is right:
+`simulate_integer_benchmark` was caught because somebody named it honestly. The
+same function called `measure_integer_throughput` is invisible to a name grep,
+and there is no reason to think the careless cases are the ones that got the
+candid names — if anything the opposite. Do not let 63 settle in anyone's head
+as the size of the class; it is the size of what one keyhole showed.
+
+**The probe that does not depend on the name, which lane B proposed and which
+costs one test per suspect: vary the input, assert the output varies.** A
+benchmark that returns the same score on an idle machine and on a loaded one is
+refuted in a single measurement, whatever the function is called. A netscan
+reporting the same open ports against two different hosts, an undelete listing
+the same recoverable files on two different volumes — same probe. It tests the
+property that actually matters, that the output is a function of the world,
+rather than the property the name suggests. `apps/benchmark`'s
+`a_longer_piece_of_work_is_measured_as_longer` is that probe in its
+deterministic form. — `sample_rate`, `bits_per_sample`,
 `sample_count`, `record_sample`, and `sample` in `gui/compositor/src/blur.rs`
 and `gui/imagecodec/src/png.rs`, which are all the other meaning of the word.
+
+**PAID OFF 2026-09-15: `apps/benchmark`, all sixteen.** Four CPU and four
+memory tests are measured; one disk test is measured and four report why they
+are not; three graphics tests are measured and renamed. Details below, and the
+commits carry the numbers. That is 16 of the 63.
 
 **The one verified in detail, because it is the worst and it is instructive.**
 `apps/benchmark` has sixteen `simulate_*` functions and `run_cpu_benchmark`
@@ -147996,3 +148019,401 @@ file); **wire it** where a real source exists in the tree (the Accounts page
 onto `gui/loginusers`); **say so** where neither is possible (Sound, Updates,
 Privacy, Network). What is never right is leaving it, and what is never enough
 is a comment — three of the six fixed today had one.
+
+**FIXING AN INSTANCE AND LEAVING THE CLASS — added 2026-09-15.**
+
+Lane B put this better than I had: *"the detector's real value was not finding
+`-l`; it was showing me I had fixed an instance and left the class."* They had
+implemented `patch --ignore-whitespace` after I reported it, and the detector
+then found `-N`, `-F` and `-Z` in the same file, under the same doc comment
+whose argument they had just spent a commit refuting.
+
+It is worth writing down because it is the shape of both our days, and it has a
+cause rather than being carelessness: **the instance is easy to see precisely
+because someone wrote down the reasoning that covers the class.** A rationale
+for leaving one thing inert is a rationale for leaving all of them, so the
+moment it is refuted, every sibling it covered becomes a finding — and nothing
+announces that. The same applies here: six fabricated Settings pages were fixed
+before anyone asked how many more there were, and the answer was 63.
+
+The check that follows from it costs nothing: **when a fix refutes a written
+rationale, grep for the other things that rationale covered** before closing
+the task. For `patch` that was the three other options under the same comment.
+For the Settings pages it would have been `SettingsState::new` — where all five
+sat together, in one constructor, visible in a single screen.
+
+**A better axis than mine, also from lane B.** They ranked their 110 by whether
+the option is advertised in the program's own `--help`: 50 are, and 24 of those
+are read by nothing at all. That is mechanical where my ordering by "what
+believing it costs" needs a judgement per row, and it gets at the same thing —
+a promise in `--help` is the program telling the user what to believe. The GUI
+analogue is not `--help` but the window itself, and by that measure all 63 here
+are advertised, which is why the ordering here has to be by consequence.
+
+**THE CHECK WORKED IMMEDIATELY, AND FOUND A BETTER INSTRUMENT.**
+
+Applying the rule above to my own day — grep for the other things the refuted
+rationale covered — turned up something the name sweep had no way to see.
+`apps/photomanager`'s `seeded_library` carried the comment *"so the first window
+is not an empty grid"*. That sentence is not unique to it:
+
+* `apps/videoplayer` — *"Sample content, so the first window is not an empty
+  black rectangle."*
+* `apps/devicemanager`, `apps/netmanager`, `apps/partmanager`,
+  `apps/remotedesktop`, `apps/sysinfo`, `apps/vpnmanager` — all six declare it
+  in their **module-level `//!` documentation**, in near-identical words:
+  *"…through Slate OS syscalls; stubbed with representative data for initial
+  development."*
+* `apps/netscan`, `apps/speedtest`, `apps/procexplorer`, `apps/rssreader`,
+  `apps/sysmonitor` carry the same admission in other forms.
+
+**CORRECTION, same day: the count above said "ten apps in total" and the real
+figure is 32.** Recounted with the pattern written out properly rather than
+typed from memory: **14** apps carry a module-level `//!` self-declaration and
+**24** carry one in a function or comment, for a union of 32. The ten I first
+listed were the ones the first grep happened to surface.
+
+The correction is worth more than the number. I published a count from a
+narrower pattern than the one I had just argued was the better instrument, and
+nothing would have caught it — a count has no test. What caught it was
+re-running the search before relying on the figure again, which is the only
+check available for a number in prose.
+
+**This is a better detector than the one that found the 63**, and it is worth
+saying why rather than just switching to it. A name grep asks whether somebody
+*happened to name a function candidly*; this asks whether the file *declares
+itself stubbed*. The second is evidence rather than a hint — the code is
+stating the fact, not hinting at it — and it cannot be evaded by renaming a
+function, which was lane B's whole objection to the 63 being treated as a
+count.
+
+**And it is exactly the `patch -l` shape at application scale.** Every one of
+these declares the stub in a module doc that only a maintainer reads, while the
+window shows the data as though it were the machine's. `apps/sysinfo` is the
+one I would look at first on that basis: a system information tool is read
+precisely when someone wants to know what hardware they have.
+
+None of the ten are fixed. They are listed here so that the next sweep starts
+from the self-declarations rather than from the names.
+
+## TD-C-SYSINFO-INVENTS-A-WHOLE-MACHINE-WHILE-THE-REAL-QUERY-LAYER-SITS-UNUSED -- FIXED 2026-09-15
+
+**In short:** the System Information app tells you your machine has a
+GenuineIntel processor, an Intel I225-V network adapter, Intel Wi-Fi 6E AX211
+and an AMD Radeon RX 7900 XTX. It is describing no machine in particular — the
+values are written into `main.rs` as constants. Meanwhile a complete, layered
+hardware query module sits in the same crate with **no callers at all**.
+
+**Date:** 2026-09-15. **Lane:** C. First of the ten self-declared stubs on two
+independent grounds, which is why it is first rather than merely early.
+
+*Most harmful:* a system information tool is read precisely when someone wants
+to know what hardware they have, so a plausible invention there is worse than
+anywhere else on the list.
+
+*Cheapest — and this was wrong when I wrote it; see the correction below:* it
+is the only one of the ten whose real **client** already exists.
+Checked rather than assumed — every other app on that list is a single
+`main.rs` with no sibling module at all, so `devicemanager`, `netmanager`,
+`partmanager`, `remotedesktop`, `vpnmanager`, `netscan`, `speedtest`,
+`sysmonitor` and `videoplayer` each need a data *source* built before there is
+anything to wire, and most of those are blocked on the OS not exposing the data
+yet. `procexplorer` does have a second module, `features.rs`, but it is an
+unreached *feature* set — a window picker, a blocking analyser, affinity
+control — not a provider, so it belongs to the island ledger's "a widget
+becomes reachable when an application draws it" category rather than to this
+one.
+
+So the ten are not one task repeated ten times. Nine are blocked on the system;
+one is a wiring.
+
+**The two halves.** `apps/sysinfo/src/main.rs` builds everything in its
+constructor: `populate_cpu`, `populate_memory`, `populate_storage`,
+`populate_network`, `populate_display`, `populate_pci`, `populate_services`,
+`populate_processes`, `populate_drivers`, `populate_env_vars` and more, each
+returning hardcoded values. `apps/sysinfo/src/hwquery.rs` is 2,152 lines
+implementing a `HardwareProvider` trait with seventeen query methods, a
+`SyscallProvider` that reads `/sys/hardware/*`, a `StubProvider`, a
+`FallbackProvider`, and a `RefreshManager` with a TTL cache. `main.rs`
+references `hwquery::` **zero times**. It is on the island ledger as
+`apps/sysinfo/hwquery.rs`.
+
+So this is one defect wearing two of this tree's recurring shapes at once: an
+island, and a fabrication, each of which is the other's fix.
+
+**The trap in the obvious wiring, which is why this is a note and not a
+one-liner.** `FallbackProvider` tries the syscall provider and falls back to
+`StubProvider` on error. Wiring `main` to it would compile, run, and display
+exactly the same fictional machine — because the syscall path fails on any host
+without `/sys/hardware`, which is every host today. That is the fabrication with
+more steps and a longer call stack, and it would look like a fix.
+
+**What the fix is.** Wire `main` to `SyscallProvider` directly, and render
+`HwQueryError::NotAvailable { path }` as a row saying the value could not be
+read and from where. The error type already carries the path, so the honest
+message is available without inventing one. `StubProvider` becomes
+`#[cfg(test)]` — it is a perfectly good fixture, and the same "a fixture
+production can reach is a fixture that eventually ships" rule that moved
+`ExifData::sample` applies. `FallbackProvider` goes: falling back to fabricated
+data is the defect, not a feature.
+
+The app's own types will need `Option` where a category can be absent, the same
+move `apps/benchmark`'s `SubTestResult::score` needed today and for the same
+reason: a zero-filled `CpuInfo` reads as a processor with no cores rather than
+as an unanswered question.
+
+**AND THE FIRST THING THE RECOUNT FOUND WAS MY OWN.**
+
+`apps/benchmark` is on the module-level list — after being fixed. Its `//!`
+doc still reads:
+
+> simulated with representative computation; on real Slate OS hardware the
+> stubs would be replaced with timed kernel/driver calls.
+
+Thirteen of its sixteen tests measure the machine now and the other three say
+why they do not. So the code was corrected and the documentation that described
+the old behaviour was left, which is the same defect as the one being fixed,
+pointing the other way: before, the source admitted a fabrication the window
+denied; now the source claims a fabrication the code has stopped committing.
+
+Both directions mislead the next reader, and the second is the one more likely
+to survive — a doc that *understates* what the code does attracts no complaints
+from anyone. Fixed in the same commit as this note.
+
+The general form, for the checklist: **a fix is not finished until the prose
+that described the defect has been re-read.** Every one of the six settings
+pages got this right because rewriting the page forced the comment to be
+rewritten with it. `benchmark` got it wrong because the stale claim lived in a
+module header twelve hundred lines away from anything I edited.
+
+**CORRECTION: `hwquery` is a client, and the interface it reads has no server.**
+
+Lane B asked the right question — is the query layer dead because it is broken,
+or dead because nobody connected it? — and the answer is neither. It is dead
+because **the thing it reads does not exist**.
+
+`SyscallProvider` reads `/sys/hardware/cpu`, `/sys/hardware/memory`,
+`/sys/hardware/block`, `/sys/hardware/net` and so on. Grepping `kernel/`,
+`services/` and `userspace/` for `sys/hardware` returns **nothing**. No
+component in this tree has ever produced those files. The module is 2,152 lines
+and 33 tests of a well-built client for an interface with no server, which is
+the same defect as the fifteen private clipboards and the service with no
+clients — inverted.
+
+So my "nine are blocked on the system; one is a wiring" was wrong, and wrong in
+the flattering direction: sysinfo is blocked too, just one layer further along
+than the other nine. What it has that they lack is the *client* half already
+written and tested, so when a producer appears the app needs no new parsing
+code.
+
+**The wiring is still worth doing now, and this is why.** Pointing `main` at
+`SyscallProvider` today produces an application that says it cannot read the
+hardware — which is true, and is better than one that says you own a Radeon RX
+7900 XTX. It also means that on the day `/sys/hardware` gains a producer the
+app starts working with no further change. The alternative, waiting, leaves the
+invented machine on screen for the whole of that wait.
+
+**What the producer needs**, for whoever writes it: the format is already
+pinned by `hwquery`'s parser and its 33 tests — flat `key=value` files, one per
+category, with the field names `SyscallProvider::field` looks up. A producer
+written against those tests cannot disagree with the consumer, which is the one
+piece of luck in this arrangement.
+
+**FIXED, and the correction above needs one of its own.**
+
+The application no longer invents anything: `main` queries
+`hwquery::SyscallProvider` directly, 642 lines of constants are gone, and the
+window says it cannot read the hardware. `hwquery` left the island ledger.
+`FallbackProvider` was deleted rather than wired — it dropped to `StubProvider`
+whenever the syscall path failed, which is every host without the tree, so its
+purpose in practice was to display hardware nobody had.
+
+**The `/sys/hardware` premise in the correction above was itself stale, and the
+decision it contradicted is lane C's own.** `design-decisions.md` §850, dated
+2026-09-14: hardware facts are served under `/sys/devices`, not a second
+`/sys/hardware` tree, because the kernel already publishes `core_id`,
+`physical_package_id` and cache geometry there. Lane A proposed that and
+withdrew their own first choice; **lane C made the final call**, and lane C then
+spent an hour writing a request asking lane A to build the tree §850 had
+retired.
+
+Two things in that request were wrong and the second was dangerous. It scoped
+the change as "thirteen constants and one macro", when the trees differ in
+*data model* — `/sys/devices` is scalar-per-file, `hwquery` read one
+`key=value` file — so the reader changes, not the constants. And it said *"take
+the tests as the specification, not my field list"*, which would have pointed a
+producer author at 33 green tests pinning the very format the decision moved
+away from. Written against them, a producer would have satisfied its consumer
+perfectly, contradicted `main`, and passed everything.
+
+**The general form, which lane A recorded as §937 in these words:** tests pin
+the format the consumer currently parses, which is only the specification if the
+format is not the thing under decision. Where a format has been decided
+against, its tests are the strongest available argument for keeping it — green,
+executable, and evidence of intent — and they are wrong. Pointing at them feels
+like rigour rather than inertia, and thirty-three of them are harder to argue
+with than one sentence in `design-decisions.md`.
+
+**The reader is rewritten** for `/sys/devices`, scalar-per-file: `cpuid/` for
+the CPUID leaf 1 identity, `present` for the logical count, `cpuN/topology/`
+for distinct `(socket, core)` pairs, `cpu0/cache/indexN/` for geometry. Four
+`CpuInfo` fields are `Option` and always `None` on this kernel — there is no
+brand or vendor (CPUID leaves 0 and 0x8000_0002..4 are not served) and no
+`cpufreq/` — and the panel says "Not reported by this system" rather than
+drawing an empty name or a stopped clock.
+
+**Still outstanding:** lane A serves `cpu` and `memory` today and has offered
+`block` and `net` next. Everything else the window lists — PCI, USB, sound,
+IRQs, I/O ports, the memory map, DMA — has no producer, and the window says so
+per category rather than as one banner, which is right: those are separate
+facts and will arrive separately.
+
+## TD-C-ONE-HUNDRED-AND-FIFTEEN-OF-THE-HUNDRED-AND-THIRTY-NINE-APPS-CANNOT-OPEN-A-FILE
+
+**In short:** the invented data in these programs is not the disease. It is the
+symptom. **115 of the 139 applications with a `main.rs` have no filesystem
+access of any kind** — no file picker, no `std::fs`, no `safeio`. They cannot
+open a document, save one, or read anything the user has. The seeded libraries
+and sample records exist because there is no other way for a window to have
+anything in it, and one of them says so in its own comment: *"so the first
+window is not an empty grid"*.
+
+**Date:** 2026-09-15. **Lane:** C. Found by asking, after fixing the photo
+manager, how many other applications were in the state it had been in.
+
+**The measurement.** For each `apps/*/src/`, count references to `FileDialog`,
+`std::fs` and `safeio::`. 115 of 139 score zero. Games are a legitimate part of
+that number — `chess` needs no files — so the count alone overstates it, and
+the named cases below are the argument rather than the total.
+
+**Three that are worth reading twice:**
+
+* **`apps/filesearch` cannot search files.** Its dependencies are `globmatch`,
+  `guitk`, `oswindow` and `appearance` — nothing that reads a directory. The
+  search machinery is *complete*: search by name, by glob, by regular
+  expression, by category, with sorting. It runs against `Index::entries`, and
+  `index.add(...)` is called from **tests only**. So a finished search engine
+  runs against an index production never fills.
+* **`apps/filediff` cannot read files.** It depends on `diffcore`, which is a
+  real diff implementation, and on nothing that opens a file.
+* **`apps/email` has neither network nor storage.** It depends on `guitk`,
+  `oswindow` and `appearance`, and seeds itself with `seed_sample_mail`.
+
+`apps/photomanager` was in exactly this class until 2026-09-15: a real EXIF
+parser, a real album model, an invented library, and no picker. It took one
+`FileDialog` and `guitk::dialog::list_directory` to fix, both of which already
+existed.
+
+**Why this changes the order of the remaining work.** The 63 fixture functions
+and the 32 self-declared stubs are two views of one cause. Fixing them
+app-by-app — replacing invented records with an honest "nothing here" — makes
+each program truthful and leaves it useless, which is the right trade when
+nothing better is available and a poor one when something is. For this class
+something is: the toolkit has had a working file picker all along.
+
+**So the cheap fix is a shared one.** Every app in this class needs the same
+three things the photo manager needed: a control that opens
+`guitk::dialog::FileDialog`, a handler that reads the chosen path, and an
+empty-state that says what to do. That is a per-app change, but it is the same
+change, and it converts "honest and empty" into "works".
+
+**What this does not cover.** The other class — `sysinfo`, `devicemanager`,
+`partmanager`, `netmanager`, `netscan`, `sysmonitor`, `undelete`, `speedtest` —
+needs data the *system* must produce, not data the user can hand over, and
+those stay blocked on kernel work whatever this does. `sysinfo` is the worked
+example: its client is finished and waiting on `/sys/devices` producers.
+
+**The honest caveat on the number.** 115 counts every `main.rs` app including
+games and toys. I have not classified all 139, and the per-app judgement of
+"should this open files" is exactly the kind of thing that should be made when
+someone picks the app up rather than pre-decided in a list here.
+
+**A SHARPER NUMBER, AND THE SAME SENTENCE THREE TIMES.**
+
+115 of 139 counts games, which need no files. A better discriminator is an app
+that **has no filesystem access and whose own code talks about files anyway** —
+ten or more mentions of save, load, export, import, document, filename or
+file_path. That is **28 applications**, and the list reads like a list of
+document editors: `hexeditor`, `jsonviewer`, `pdfviewer`, `diagram`, `slides`,
+`notes`, `kanban`, `renamer`, `contacts`, `dbviewer`, `email`, `clipmanager`,
+`credmanager`, `flashcards`, `reminders`, `rssreader`, `screenrecorder`,
+`soundrecorder`, `startupmanager`, `systemrestore`, `undelete`, `netscan`,
+`speedtest`, `remotedesktop`, `defrag`, `camera`, `alarmclock`, `terminal`.
+
+(`terminal` is probably a false positive — it names paths without needing to
+open them. The rest are not.)
+
+**The evidence that this is one cause rather than 28 coincidences is that three
+authors wrote the same sentence.**
+
+* `apps/photomanager`: *"A library with something in it, so the first window is
+  not an empty grid."*
+* `apps/filesearch`: *"Until a real index exists this is what there is to
+  search. It is one call so that the moment `indexer` can be asked, this is the
+  line that changes."*
+* `apps/hexeditor`: *"Until a file can be opened this is what there is to edit:
+  every byte value once, which is also the most useful thing to look at while
+  the rendering is being worked on."*
+
+Three programs, three authors, one structure: *this is placeholder, the real
+thing is blocked, here is why the placeholder is reasonable.* None of them was
+wrong about the reasoning. All three were wrong about the blocker — the file
+picker and `std::fs` were there the whole time. `filesearch`'s comment even
+names the wrong dependency: it waits for the `indexer` service, and the
+filesystem was nearer.
+
+**`apps/hexeditor` is the sharpest of the three** and should probably be next.
+It opens on `(0..=255).collect()` — every byte value once — with
+`file_path = Some("/demo/sample.bin")`, a path that does not exist, so the
+window names a file it is not showing you. A hex editor is for looking at a
+specific file's actual bytes; there is no version of that which a synthetic
+buffer satisfies.
+
+**Two are done.** `apps/photomanager` and `apps/filesearch` both took the same
+three pieces — a control that opens `guitk::dialog::FileDialog`, a handler for
+the chosen path, and an empty state that says what to do — and all three
+already existed in the toolkit.
+
+**THE RECIPE, AFTER DOING IT THREE TIMES.**
+
+`photomanager`, `filesearch` and `hexeditor` were the same change. Written out
+so the remaining twenty-five are cheaper, and because the parts that took the
+longest were not the obvious ones.
+
+1. **A field** — `file_dialog: Option<FileDialog>` on the app state.
+2. **A way in** — `Ctrl+O`, or a toolbar control. Check which chords the app
+   already uses; `filesearch` had six taken.
+3. **`FileDialog::open()`** for a file, **`select_folder()`** for a directory,
+   filled by `guitk::dialog::list_directory(dialog.current_path())`. The widget
+   does no I/O by design: the host reads the listing and hands it over.
+4. **Intercept events while it is up** — `Event::Key(..) if self.file_dialog
+   .is_some()` ahead of the app's own handlers, or a click meant for a filename
+   lands on whatever is drawn beneath.
+5. **`DialogAction`** has four arms and all four matter: `NavigatedTo` must
+   re-list, or the dialog shows the old directory under the new name.
+6. **Render it last**, so it is above everything — the same order in which the
+   events reach it.
+7. **Delete the seeded data** and make `main` start empty with a line saying
+   how to begin.
+8. **Move the seeder into `#[cfg(test)]`.** All three had tests resting on it.
+   A fixture production can reach is a fixture that ships.
+
+**The three things that cost the most time, none of which are in that list:**
+
+*The picker must actually be drawn.* In `hexeditor` I wrote a comment saying it
+was, above a `render` that was not. It compiled, 189 tests passed, and the
+result would have been a dialog swallowing every keystroke while invisible. Now
+pinned by `the_picker_is_drawn_when_it_is_open`, which counts render commands
+before and after opening — a test that is hard to write vacuously.
+
+*Bounds must announce themselves.* `filesearch` caps the walk at 20,000 entries
+and `hexeditor` caps a read at 16 MiB. Both say so when they bite. A silent cap
+turns a partial answer into a confident wrong one: "no results" reads as "no
+such file", and a truncated hex view lies about a specific address.
+
+*Names are bytes.* `guitk`'s `DirEntry` is deliberately `OsString`, and its own
+doc explains why — decoding lossily "could make it match one it should not". In
+`filesearch` that is the whole game, so non-UTF-8 names are **skipped and
+counted** rather than decoded, and the count is shown. `IndexEntry` holding
+`String` and `globmatch::glob_match` taking `&str` is the real limit; fixing it
+properly means byte-capable matching, which is its own task.

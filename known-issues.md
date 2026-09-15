@@ -150882,10 +150882,11 @@ a list to empty.** The number going up was the point; it is not a backlog.
 
 ## TD-C-A-DIALOG-THAT-STOPPED-THE-CLOCK -- FIXED 2026-09-15
 
-**In short:** in four apps, opening a file dialog quietly froze time. Podcast
+**In short:** in five apps, opening a dialog quietly froze time. Podcast
 playback stopped advancing, the reminders app stopped noticing that something
-had become overdue, the calendar never rolled over to the next day, and the
-photo manager's slideshow stopped between one picture and the next. Nothing
+had become overdue, the calendar never rolled over to the next day, the photo
+manager's slideshow stopped between one picture and the next, and **the file
+manager stopped copying files** for as long as a confirmation was on screen. Nothing
 crashed and nothing looked wrong; the window behind the dialog simply stopped
 being told that time had passed. The bug was in code that eleven applications
 had each written out by hand, and it was found by collecting that code into one
@@ -150925,6 +150926,7 @@ What it actually does is **return from the whole event handler**, so
 | `reminders` | re-reads the clock, fires notifications | stops noticing what has become overdue |
 | `calendar` | midnight rollover | "today" stays on yesterday, in blue, in five places |
 | `photomanager` | advances the slideshow | the slideshow stops until the dialog is closed |
+| `explorer` | retires a batch of a file operation | **a copy stalls** while any confirmation is open |
 
 **The same defect appears in a third shape**, which is the point: it is not
 tied to an idiom. `photomanager` and `fileassoc` route through a helper that
@@ -150989,6 +150991,61 @@ Each of the three live cases has a regression test that sets its clock to a
 moment the real one cannot be at (1 Jan 2000), opens the picker, sends a tick
 and asserts time moved. All three were watched to fail by restoring the
 swallow.
+
+### The fifth case, and why no amount of reading would have found it
+
+`apps/explorer` is the worst of the five and the only one a scanner found.
+
+The other four froze something the user *looks at* -- a clock, a slideshow, a
+date. Explorer froze something the user is **waiting for**: its tick retires a
+batch of a running file operation, so a paste stopped making progress for as
+long as any confirmation or notice was on screen. Its own `tick_interval` asks
+for the frame interval because a file operation is, in that function's words,
+"the thing the user is watching".
+
+**Every earlier instance was found by reading the thirteen apps that hold a
+`file_dialog`.** Explorer holds a `modal`. No search for a dialog field would
+ever have reached it, and by that point I had already been wrong twice about
+how many callers there were -- both times by searching for one spelling of the
+thing and reading the count back as complete.
+
+So `scripts/find-swallowed-ticks.py` looks for the shape of the **consequence**
+rather than the shape of the code: a `match event` whose arms mention
+`Event::Tick`, with a `return` reachable before it. 72 dispatchers in `apps/`
+have a tick arm; 6 can return before reaching one.
+
+Most of those 6 are correct, and the script's docstring says so above the
+results, because a checker whose hits are mostly noise teaches its reader to
+skim. The two correct shapes both trip it:
+
+* **`apps/diskimager` is the model.** It ticks the dialog itself *above* the
+  guard, and the guard is `matches!(event, Event::Key(_) | Event::Mouse(_))`.
+  It is the only place in this tree that **names the distinction between input
+  and time**, and it names it in a comment as well: "A tick drives the
+  confirmation's fade as well as the write's progress, and the dialog has to
+  keep animating while it is up."
+* Anything on `guitk::dialog::FilePicker` returns on `Picked::Handled` and
+  falls through on `Picked::Ignored`, which is correct and indistinguishable
+  from a bug at this level of analysis.
+
+`apps/filesearch` and `apps/hexeditor` are not reported at all, and that is the
+right answer for the right reason: they write the intercept as guard arms on
+the outer match, so every other event meets its own arm **by construction**.
+Two of thirteen got this right, and they did it by choosing a shape in which
+the wrong answer cannot be expressed.
+
+### The fix in explorer, and one thing it was careful about
+
+The modal still receives the tick -- the toolkit's `AlertDialog` uses it for a
+fade -- and the work behind it receives one too. The combination is `|` rather
+than `||`: the operation must step even when the fade has already answered
+"yes, there is something to redraw", and `||` would short-circuit past the call
+rather than merely past its answer.
+
+The tick arm's body moved into `tick_work()` so both paths call one function.
+Leaving the modal path to repeat the two calls is precisely how the two copies
+would drift, which is the lesson from the eleven hand-written intercepts one
+level down.
 
 ### The transferable part
 
@@ -151093,6 +151150,59 @@ Until (4), **kanban's door would be export-only**, and an export you cannot
 read back is not a backup. That is a defensible thing to ship if it is said
 plainly -- JSON is readable and portable, so the file is not a dead end -- but
 it must be said, and the app must not imply otherwise.
+
+## TD-B-A-FUNCTION-THE-SUITE-CANNOT-REACH-IS-A-FUNCTION-NOTHING-CHECKS -- OPEN 2026-09-15
+
+`#[cfg(not(test))]` on anything other than `main` removes that code from the
+test build entirely. Not "untested" -- UNREACHABLE. No test can call it,
+`cargo test` compiles a binary that does not contain it, and every coverage
+signal the project has says nothing about it either way.
+
+**Found because dbus-daemon fabricated for as long as it did.** It printed
+"system bus listening at ...", wrote a pid file containing "1", and returned
+0 without creating a socket, with 132 tests passing. `run_dbus_daemon` was
+`cfg(not(test))`. Its two sibling personalities, `run_dbus_send` and
+`run_dbus_monitor`, were gated the same way and were fabricating the same
+way -- and the second was found by looking for the gate, not by looking for
+the defect.
+
+**The sweep.** Seven crates in `userspace/` gate a function other than
+`main`:
+
+| crate | gated functions |
+|---|---|
+| `dbus` | `parse_send_args`, `run_dbus_send`, `run_dbus_monitor`, `run_main` -- **all fixed and ungated 2026-09-15** |
+| `ctags` | `collect_dir`, `extract_tags_from_file`, `read_stdin_filelist`, `read_existing_ctags`, `print_help`, `run_main` |
+| `lp` | `get_next_job_id`, `get_default_printer`, `current_username`, `run_lp`, `run_lprm`, `print_help` |
+| `lex` | `print_help`, `print_version`, `run` |
+| `yacc` | `run_main` |
+| `chpasswd` | `print_help`, `print_version` |
+| `mesg` | `print_help`, `print_version` |
+
+**Not all of these are equal, and the difference is the point.** `print_help`
+and `print_version` behind the gate cost little -- they print a constant and
+exit. `collect_dir`, `extract_tags_from_file`, `read_existing_ctags`,
+`run_lp` and `run_lprm` are ordinary logic with inputs and outputs, hidden
+from the suite for no reason that shows at the call site.
+
+`lp` is the one to look at next: `userspace/lp`'s `cancel_purge` is also on
+the written-never-read list, which is the same pair of symptoms dbus had --
+a dead field in a crate whose entry point nothing can call.
+
+**Why the gate is usually there at all.** These crates build `#![no_main]`
+for the real target and define a `main` the test harness must not duplicate.
+That justifies gating `main`, and nothing else; the rest gets swept along
+because it was written next to it. In `dbus` the only casualty of ungating
+was two constants and an unused import.
+
+**How to check:**
+
+    grep -Pzo '#\[cfg\(not\(test\)\)\]\s*\n(?:#\[[^\n]*\]\s*\n)*(?:pub )?fn\s+\w+' \
+        userspace/*/src/main.rs
+
+or the Python in the commit that opened this entry. It cannot be a gate: a
+crate may have a legitimate reason to gate a helper, and the check has no way
+to tell one from an accident. It is a list to work through.
 
 ## A-THE-BOOT-TEST-NEVER-MOUNTS-FAT-SO-A-WHOLE-FILESYSTEMS-WRITE-PATHS-ARE-UNGATED (lane A, 2026-09-15) — **Status: FIXED** (the openat2 half; the coverage gap remains open)
 

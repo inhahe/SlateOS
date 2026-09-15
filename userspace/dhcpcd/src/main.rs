@@ -1237,6 +1237,74 @@ fn detect_interface() -> Option<String> {
     None
 }
 
+/// Apply a static configuration, bypassing DHCP entirely.
+///
+/// `static ip_address=` in `dhcpcd.conf` means "do not run DHCP on this
+/// interface; use this address". That is what it means in dhcpcd(8) and it is
+/// what an operator writing it expects.
+///
+/// It was PARSED FAITHFULLY and then dropped: `static_ip`, `static_routers`
+/// and `static_dns` were filled in from the file and read by nothing, so the
+/// client went on to broadcast a DISCOVER and applied whatever lease came
+/// back. An operator who pinned a server's address got a DHCP address
+/// instead -- and the failure is not visible at the point of the mistake,
+/// because the interface does come up, with the wrong address, and whatever
+/// pointed at the static one breaks later.
+///
+/// The record is built by the same `build_lease_record` the DHCP path uses,
+/// so the two cannot drift: a field the kernel preserves for a lease is
+/// preserved for a static address too.
+///
+/// The mask is not configurable here yet -- `static ip_address=` in dhcpcd(8)
+/// takes a CIDR suffix and this parser does not read one -- so /24 is assumed
+/// and said out loud rather than quietly chosen.
+fn configure_static(iface: &str, cfg: &Config) -> bool {
+    let Some(ip) = cfg.static_ip else {
+        return false;
+    };
+    if cfg.no_configure {
+        return true;
+    }
+
+    let gateway = if cfg.no_gateway {
+        None
+    } else {
+        cfg.static_routers.first().map(|&gw| gw.to_be_bytes())
+    };
+    let mask: u32 = 0xFFFF_FF00;
+    let rec = build_lease_record(ip.to_be_bytes(), mask.to_be_bytes(), gateway);
+    let ret = net_if_config(&rec);
+
+    if cfg.debug {
+        eprintln!(
+            "  apply static ip={} mask={} gw={} up -> rc={}",
+            ip_to_string(ip),
+            ip_to_string(mask),
+            gateway.map_or_else(
+                || "none".to_string(),
+                |g| ip_to_string(u32::from_be_bytes(g))
+            ),
+            ret
+        );
+        if !cfg.static_dns.is_empty() {
+            // Named, not applied: SYS_NET_IF_CONFIG has a DNS field this
+            // build does not set for leases either, so claiming to have
+            // configured resolvers would be the same defect one field over.
+            eprintln!(
+                "  static domain_name_servers parsed but not applied ({} server(s))",
+                cfg.static_dns.len()
+            );
+        }
+    }
+    if ret < 0 {
+        eprintln!(
+            "dhcpcd: failed to apply the static address to {iface}: errno {}",
+            -ret
+        );
+    }
+    true
+}
+
 /// Configure the interface with the acquired lease.
 fn configure_interface(iface: &str, lease: &LeaseInfo, cfg: &Config) {
     if cfg.no_configure {
@@ -1472,6 +1540,14 @@ fn error_log(msg: &str) {
 
 /// Run the full DHCP client state machine.
 fn run_dhcp(cfg: &Config) -> Result<(), String> {
+    // A static address means no DHCP at all -- checked before the MAC read
+    // and the socket bind, because neither is needed and both can fail on an
+    // interface that is deliberately not doing DHCP.
+    if configure_static(&cfg.interface, cfg) {
+        debug_log(cfg, "static configuration applied; not running DHCP");
+        return Ok(());
+    }
+
     let mac = read_mac(&cfg.interface).ok_or_else(|| {
         format!(
             "cannot read MAC for interface {}",
@@ -1969,6 +2045,56 @@ mod tests {
     }
 
     // ---- SYS_NET_IF_CONFIG lease-record building ----
+
+    /// A static address means DHCP does not run.
+    ///
+    /// `static ip_address=` was parsed into `cfg.static_ip` and read by
+    /// nothing, so the client broadcast a DISCOVER anyway and applied
+    /// whatever lease came back -- an operator who pinned a server's address
+    /// got a DHCP one, and found out later, somewhere else.
+    ///
+    /// `no_configure` is set so the test exercises the DECISION without
+    /// issuing a syscall: the question is whether the static path is taken,
+    /// not what the kernel does with it.
+    #[test]
+    fn a_static_address_bypasses_dhcp() {
+        let mut cfg = Config::default_config();
+        cfg.no_configure = true;
+
+        // No static address: the static path declines, and DHCP proceeds.
+        assert!(
+            !configure_static("eth0", &cfg),
+            "without a static address this must not claim the interface"
+        );
+
+        // With one: the static path takes it, and `run_dhcp` returns before
+        // reading a MAC or binding a socket.
+        cfg.static_ip = Some(0xC0A8_0105); // 192.168.1.5
+        assert!(configure_static("eth0", &cfg));
+        assert!(
+            run_dhcp(&cfg).is_ok(),
+            "a statically configured interface must not attempt DHCP"
+        );
+    }
+
+    /// The static record is built exactly like a lease record.
+    ///
+    /// Same builder, so a field the kernel preserves for a lease is
+    /// preserved for a static address too, and the two cannot drift.
+    #[test]
+    fn a_static_record_matches_the_lease_record_shape() {
+        let ip: u32 = 0xC0A8_0105;
+        let gw: u32 = 0xC0A8_0101;
+        let rec = build_lease_record(ip.to_be_bytes(), [255, 255, 255, 0], Some(gw.to_be_bytes()));
+        assert_eq!(&rec[0..4], &ip.to_be_bytes());
+        assert_eq!(&rec[8..12], &gw.to_be_bytes());
+        assert_eq!(rec[16], 1, "the interface is brought up");
+        assert_eq!(
+            rec[17] & cfg_mask::GATEWAY,
+            cfg_mask::GATEWAY,
+            "the gateway field must be marked present"
+        );
+    }
 
     #[test]
     fn test_build_lease_record_with_gateway() {

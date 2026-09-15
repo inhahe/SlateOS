@@ -40,7 +40,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
-use guitk::dialog::{DialogAction, FileDialog};
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
@@ -1572,11 +1572,9 @@ pub struct PhotoApp {
     pub export_options: ExportOptions,
     pub window_width: f32,
     pub window_height: f32,
-    /// The file picker, while one is up.
-    ///
-    /// `None` most of the time. The picker is the only route a real photograph
-    /// has into this library.
-    pub file_dialog: Option<FileDialog>,
+    /// The open picker. Holds the dialog and the routing thirteen
+    /// applications used to write out by hand.
+    pub picker: FilePicker,
     /// What the last import attempt did, shown in the status bar.
     ///
     /// Carries the failure too. An import that silently does nothing is the
@@ -1623,7 +1621,7 @@ impl PhotoApp {
             export_options: ExportOptions::default(),
             window_width: 1400.0,
             window_height: 900.0,
-            file_dialog: None,
+            picker: FilePicker::new(),
             last_import: None,
             photo_id_gen: IdGen::new(1),
             album_id_gen: IdGen::new(1),
@@ -2408,10 +2406,25 @@ impl PhotoApp {
 
     /// Handle one input event. Returns whether anything changed.
     pub fn handle_event(&mut self, event: &Event) -> bool {
-        // The picker takes the event first while it is up, or a click meant
-        // for a filename lands on whatever is drawn beneath it.
-        if self.file_dialog.is_some() {
-            return self.file_dialog_event(event);
+        // The picker takes input first while it is up, or a click meant for a
+        // filename lands on whatever is drawn beneath it.
+        //
+        // A tick comes back as `Ignored` and falls through, which the helper
+        // this replaced got wrong: it returned `false` for anything that was
+        // not input and `handle_event` returned on that, so
+        // `Event::Tick => self.advance_slideshow(..)` never ran while the
+        // import dialog was open. **The slideshow stopped between one picture
+        // and the next**, for as long as the dialog stayed up.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.last_import = Some(self.import_from_disk(&path));
+                return true;
+            }
+            Picked::Handled => return true,
+            Picked::Ignored => {}
         }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
@@ -2427,41 +2440,7 @@ impl PhotoApp {
     /// -- so the host reads the directory and hands it over, which is the
     /// convention `apps/fileassoc` and `apps/passwordgen` already follow.
     pub fn open_import_dialog(&mut self) {
-        let start = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let mut dialog = FileDialog::open().with_initial_path(start);
-        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.file_dialog = Some(dialog);
-    }
-
-    /// Drive the picker, and import whatever it settles on.
-    fn file_dialog_event(&mut self, event: &Event) -> bool {
-        let (w, h) = (self.window_width, self.window_height);
-        let action = {
-            let Some(dialog) = self.file_dialog.as_mut() else {
-                return false;
-            };
-            match event {
-                Event::Key(key) if key.pressed => dialog.handle_event(key, h),
-                Event::Mouse(mouse) => dialog.handle_mouse(mouse, w, h),
-                _ => return false,
-            }
-        };
-        match action {
-            DialogAction::None => {}
-            DialogAction::Cancelled => self.file_dialog = None,
-            DialogAction::NavigatedTo(path) => {
-                if let Some(dialog) = self.file_dialog.as_mut() {
-                    dialog.set_entries(guitk::dialog::list_directory(&path));
-                }
-            }
-            DialogAction::Selected(path) => {
-                self.file_dialog = None;
-                self.last_import = Some(self.import_from_disk(&path));
-            }
-        }
-        true
+        self.picker.open_to_read();
     }
 
     /// Read a file and put it in the library, EXIF and all.
@@ -2805,9 +2784,7 @@ impl PhotoApp {
 
         // The picker goes last so it sits over everything, which is the same
         // order in which `handle_event` gives it the click.
-        if let Some(dialog) = &self.file_dialog {
-            cmds.extend(dialog.render(&self.palette, width, height));
-        }
+        cmds.extend(self.picker.render(&self.palette, width, height));
 
         cmds
     }
@@ -5428,13 +5405,84 @@ mod tests {
         assert!(drawn, "Import is clickable and never painted");
     }
 
+    /// An app holding two real photos, which a slideshow needs.
+    ///
+    /// `PhotoApp::new()` opens empty -- this app invents nothing -- so
+    /// `start_slideshow` is a no-op without them. The first version of the
+    /// test below used `new()` and its own control caught that: "no slideshow
+    /// to advance" rather than a green pass proving nothing.
+    fn app_with_photos(tag: &str) -> PhotoApp {
+        let mut app = PhotoApp::new();
+        let dir = std::env::temp_dir().join("slateos-photomanager-slideshow");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for i in 0..2 {
+            let path = dir.join(format!("{tag}-{i}.png"));
+            std::fs::write(&path, b"a real file, if not a real png").expect("write");
+            app.import_from_disk(&path);
+        }
+        assert_eq!(app.photos.len(), 2, "the fixture did not import its photos");
+        app
+    }
+
+    /// The slideshow keeps running while the picker is open.
+    ///
+    /// The helper this replaced returned `false` for anything that was not
+    /// input, and `handle_event` returned on that -- so `Event::Tick` never
+    /// reached `advance_slideshow`. **The slideshow stopped between one
+    /// picture and the next** for as long as the import dialog was up, and
+    /// `tick_interval` asks for ticks exactly when a slideshow is running, so
+    /// this was live rather than latent.
+    ///
+    /// The test carries a control, because the obvious version of it passes
+    /// whether or not the intercept is there: if the slideshow were not
+    /// actually advancing in this fixture, "it did not advance" would hold for
+    /// the wrong reason.
+    #[test]
+    fn the_slideshow_keeps_running_while_the_picker_is_open() {
+        // The observable is which picture is showing, not the elapsed
+        // counter: a tick past the interval resets that counter to zero, so
+        // "elapsed_ms changed" is false at exactly the moment the slideshow
+        // DID move on. The control caught that too.
+        let tick = Event::Tick { elapsed_ms: 10_000 };
+
+        // The control: with no picker up, a tick advances the slideshow.
+        let mut control = app_with_photos("control");
+        control.start_slideshow();
+        assert!(
+            control.slideshow.is_some(),
+            "no slideshow to advance -- the control cannot prove anything"
+        );
+        let before = control.slideshow.as_ref().map(|s| s.current_index);
+        control.handle_event(&tick);
+        assert_ne!(
+            control.slideshow.as_ref().map(|s| s.current_index),
+            before,
+            "the control is broken: a tick does not move the slideshow on here"
+        );
+
+        // The case: the same tick, with the import picker up.
+        let mut app = app_with_photos("case");
+        app.start_slideshow();
+        let before = app.slideshow.as_ref().map(|s| s.current_index);
+        app.press_toolbar(ToolbarControl::Import);
+        assert!(app.picker.is_open(), "no picker came up");
+
+        app.handle_event(&tick);
+        assert_ne!(
+            app.slideshow.as_ref().map(|s| s.current_index),
+            before,
+            "the slideshow stopped because a dialog was open"
+        );
+        assert!(app.picker.is_open(), "the tick closed the dialog");
+    }
+
     /// Pressing Import puts a picker up, and it is drawn.
     #[test]
     fn pressing_import_opens_a_picker_that_is_actually_drawn() {
         let mut app = PhotoApp::new();
         let before = app.render_commands(1000.0, 700.0).len();
         app.press_toolbar(ToolbarControl::Import);
-        assert!(app.file_dialog.is_some(), "no picker came up");
+        assert!(app.picker.is_open(), "no picker came up");
         assert!(
             app.render_commands(1000.0, 700.0).len() > before,
             "the picker is open and nothing more is drawn"

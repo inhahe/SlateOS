@@ -56,6 +56,25 @@ const TITLE_BAR_HEIGHT: f32 = 40.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
+/// Height of the banner that says this program cannot see the network.
+const CANNOT_SEE_BANNER_HEIGHT: f32 = 58.0;
+
+/// The status-bar form of "this program cannot see the network".
+const CANNOT_SEE_NETWORK: &str =
+    "Cannot see the network -- no interface list, no scan, no connection";
+
+/// The banner, one line per element.
+///
+/// Three lines, and the third is the one that does the work. Emptying the
+/// lists is only half a fix: an empty interface list claims the machine has no
+/// network hardware, an empty Wi-Fi list claims there is nothing in range, and
+/// an empty VPN list claims none is configured. Those are findings, and this
+/// program has not looked at anything, so it has earned none of them.
+const CANNOT_SEE_LINES: [&str; 3] = [
+    "This program cannot see the network.",
+    "It has no way to list interfaces, scan for Wi-Fi, read a VPN configuration or measure traffic.",
+    "Every list below is empty because nothing was examined -- not because nothing is there.",
+];
 const SIDEBAR_ITEM_HEIGHT: f32 = 52.0;
 const SECTION_PADDING: f32 = 16.0;
 const FIELD_HEIGHT: f32 = 28.0;
@@ -515,29 +534,39 @@ pub struct NetManagerApp {
 }
 
 impl NetManagerApp {
-    /// Create a new application with sample data.
+    /// Create a new application.
+    ///
+    /// Empty, because this program has no way to find out any of it. Until
+    /// 2026-09-15 every list here was filled by a `sample_*` function: three
+    /// network interfaces with addresses and link speeds, five Wi-Fi networks
+    /// with signal strengths and security types, three VPN configurations, and
+    /// sixty seconds of throughput history.
+    ///
+    /// `vpn_states` was the worst of them. It began
+    /// `[Disconnected, Connected, Disconnected]`, so opening the network
+    /// manager showed a VPN as **connected**. That is the one false belief here
+    /// that gets acted on by transmitting something: a person who believes
+    /// their traffic is tunnelled uses the connection differently from one who
+    /// knows it is not.
     pub fn new() -> Self {
-        let interfaces = sample_interfaces();
-        let wifi_networks = sample_wifi_networks();
-        let vpn_configs = sample_vpn_configs();
-        let vpn_states = vec![
-            ConnectionState::Disconnected,
-            ConnectionState::Connected,
-            ConnectionState::Disconnected,
-        ];
-        let profiles = sample_profiles();
-        let diagnostics = Vec::new();
-        let throughput_history = sample_throughput_history();
+        let interfaces: Vec<NetworkInterface> = Vec::new();
+        let wifi_networks: Vec<WiFiNetwork> = Vec::new();
+        let vpn_configs: Vec<VpnConfig> = Vec::new();
+        let vpn_states: Vec<ConnectionState> = Vec::new();
+        let profiles: Vec<NetworkProfile> = Vec::new();
+        let diagnostics: Vec<DiagnosticResult> = Vec::new();
+        let throughput_history: VecDeque<ThroughputSample> = VecDeque::new();
 
         let edit_ip_config = interfaces
             .first()
             .map(|iface| iface.ip_config.clone())
             .unwrap_or_default();
 
-        let status_message = interfaces
-            .first()
-            .map(|iface| iface.status_summary())
-            .unwrap_or_else(|| "No interfaces".into());
+        // Not "No interfaces", which is a statement about the machine.
+        let status_message = interfaces.first().map_or_else(
+            || CANNOT_SEE_NETWORK.to_string(),
+            NetworkInterface::status_summary,
+        );
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
@@ -584,6 +613,38 @@ impl NetManagerApp {
         self.interfaces.get(self.selected_interface)
     }
 
+    /// An app populated the way `new` used to populate itself.
+    ///
+    /// `#[cfg(test)]`. Most of this app's tests are about interaction -- sidebar
+    /// scrolling, DNS reordering, caret placement, hit testing -- and need
+    /// *some* interfaces to interact with, not specifically invented ones.
+    /// Before 2026-09-15 they got them from `new`, which is exactly the problem:
+    /// the fixture production could reach is the fixture that ships.
+    #[cfg(test)]
+    fn with_sample_data() -> Self {
+        let mut app = Self::new();
+        app.interfaces = sample_interfaces();
+        app.wifi_networks = sample_wifi_networks();
+        app.vpn_configs = sample_vpn_configs();
+        app.vpn_states = vec![
+            ConnectionState::Disconnected,
+            ConnectionState::Connected,
+            ConnectionState::Disconnected,
+        ];
+        app.profiles = sample_profiles();
+        app.throughput_history = sample_throughput_history();
+        app.edit_ip_config = app
+            .interfaces
+            .first()
+            .map(|iface| iface.ip_config.clone())
+            .unwrap_or_default();
+        app.status_message = app
+            .interfaces
+            .first()
+            .map_or_else(String::new, NetworkInterface::status_summary);
+        app
+    }
+
     /// Select an interface by sidebar index.
     pub fn select_interface(&mut self, index: usize) {
         if index < self.interfaces.len() {
@@ -598,14 +659,13 @@ impl NetManagerApp {
 
     /// Toggle enabled/disabled state for the selected interface.
     pub fn toggle_selected_enabled(&mut self) {
-        if let Some(iface) = self.interfaces.get_mut(self.selected_interface) {
-            iface.enabled = !iface.enabled;
-            if !iface.enabled {
-                iface.state = ConnectionState::Disconnected;
-            } else {
-                iface.state = ConnectionState::Connecting;
-            }
-            self.status_message = iface.status_summary();
+        // It used to flip `enabled` and set the state to Connecting or
+        // Disconnected, then report the interface's new summary -- bringing a
+        // network interface up or down is about as consequential as this app
+        // gets, and none of it left the struct.
+        if self.interfaces.get(self.selected_interface).is_some() {
+            self.status_message =
+                String::from("Cannot bring an interface up or down: nothing here can reach it");
         }
     }
 
@@ -618,13 +678,20 @@ impl NetManagerApp {
     }
 
     /// Apply the edited IP configuration to the selected interface.
+    ///
+    /// Validates, then refuses. It used to assign `iface.ip_config` and report
+    /// "IP configuration updated for eth0" -- a write to an in-memory struct
+    /// that nothing reads, described to the user as a change to their machine's
+    /// networking. Somebody fixing a bad address would have believed it took.
+    ///
+    /// The validation still runs first, and still reports its own errors,
+    /// because a malformed address is worth telling the user about whether or
+    /// not it could have been applied.
     pub fn apply_ip_config(&mut self) -> Result<(), String> {
         self.edit_ip_config.validate()?;
-        if let Some(iface) = self.interfaces.get_mut(self.selected_interface) {
-            iface.ip_config = self.edit_ip_config.clone();
-            self.editing_ip = false;
-            self.status_message = format!("IP configuration updated for {}", iface.name);
-            Ok(())
+        if self.interfaces.get(self.selected_interface).is_some() {
+            self.status_message = String::from(CANNOT_SEE_NETWORK);
+            Err("Cannot apply an IP configuration: nothing here can reach the interface".into())
         } else {
             Err("No interface selected".into())
         }
@@ -713,15 +780,14 @@ impl NetManagerApp {
             .ok_or("WiFi network index out of range")?;
         let ssid = network.ssid.clone();
 
-        // In a real implementation this would trigger an OS-level connection.
-        // For now, update the selected WiFi interface to Connecting state.
-        if let Some(iface) = self.interfaces.get_mut(self.selected_interface)
-            && iface.interface_type == InterfaceType::WiFi
-        {
-            iface.state = ConnectionState::Connecting;
-            self.status_message = format!("Connecting to {ssid}...");
-        }
-        Ok(ssid)
+        // It used to set the interface to `Connecting` and say
+        // "Connecting to HomeNetwork..." -- a join attempt against a network
+        // invented by `sample_wifi_networks`, reported as though it had begun.
+        // Nothing here can reach a radio.
+        self.status_message = format!("Cannot connect to {ssid}: {CANNOT_SEE_NETWORK}");
+        Err(format!(
+            "Cannot connect to {ssid}: nothing here can reach a radio"
+        ))
     }
 
     /// Toggle VPN connection state by index.
@@ -733,23 +799,42 @@ impl NetManagerApp {
             .vpn_states
             .get_mut(index)
             .ok_or_else(|| "VPN index out of range".to_string())?;
-        *state = if state.is_connected() {
-            ConnectionState::Disconnected
-        } else {
-            ConnectionState::Connecting
-        };
-        let label = state.label();
+        // Deliberately does NOT change `state`. Every other refusal in this
+        // app leaves a list empty; this one has to leave a *switch* alone, and
+        // a switch that moves is a stronger claim than a list that fills: it
+        // says the thing it controls moved with it. Someone who believes a VPN
+        // came up acts on it by transmitting something, which is the one false
+        // belief here that cannot be taken back.
+        let _ = state;
 
         if let Some(vpn) = self.vpn_configs.get(index) {
-            self.status_message = format!("VPN '{}' {label}", vpn.name);
+            self.status_message = format!(
+                "Cannot connect or disconnect VPN '{}': nothing here can reach it",
+                vpn.name
+            );
         }
         Ok(())
     }
 
     /// Run network diagnostics (simulated).
+    /// Report that diagnostics cannot be run.
+    ///
+    /// It used to return a full passing report: the gateway responding in
+    /// 1.2 ms, DNS resolving, twelve hops at 45 ms average, 0% packet loss over
+    /// 100 pings, MTU 1500 confirmed. None of it happened. A passing diagnostic
+    /// is what somebody consults *while troubleshooting*, and this one told
+    /// them to look elsewhere for a fault that may well have been here.
     pub fn run_diagnostics(&mut self) {
-        self.diagnostics_running = true;
-        self.diagnostics = vec![
+        self.diagnostics_running = false;
+        self.diagnostics = Vec::new();
+        self.status_message =
+            String::from("Cannot run diagnostics: nothing here can send a packet");
+    }
+
+    /// The report `run_diagnostics` used to invent, kept as a fixture.
+    #[cfg(test)]
+    fn fabricated_diagnostics() -> Vec<DiagnosticResult> {
+        vec![
             DiagnosticResult {
                 name: "Ping Gateway".into(),
                 status: DiagnosticStatus::Passed,
@@ -780,9 +865,7 @@ impl NetManagerApp {
                 status: DiagnosticStatus::Passed,
                 details: "MTU 1500 confirmed".into(),
             },
-        ];
-        self.diagnostics_running = false;
-        self.status_message = "Diagnostics complete".into();
+        ]
     }
 
     /// Add a throughput sample to the history ring buffer.
@@ -924,6 +1007,9 @@ pub fn render_frame(app: &NetManagerApp, width: f32, height: f32) -> Frame {
     render_sidebar(&mut frame, app);
     render_detail_panel(&mut frame, app);
     render_status_bar(&mut frame, app);
+    // Last, so nothing can be painted over it. The panels below it are empty
+    // and this is the only thing that says why.
+    render_cannot_see_banner(&mut frame, app);
 
     frame
 }
@@ -935,6 +1021,45 @@ pub fn render_frame(app: &NetManagerApp, width: f32, height: f32) -> Frame {
 #[must_use]
 pub fn render_app(app: &NetManagerApp) -> RenderTree {
     render_frame(app, WINDOW_WIDTH, WINDOW_HEIGHT).into_tree()
+}
+
+/// Say, in the window, that this program cannot see the network.
+///
+/// Drawn unconditionally: there is no state in which this app *can* see the
+/// network, so a condition here would be a condition that is always true and
+/// would rot the moment one stopped being.
+fn render_cannot_see_banner(frame: &mut Frame, app: &NetManagerApp) {
+    let y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
+    frame.push(RenderCommand::FillRect {
+        x: 0.0,
+        y,
+        width: frame.width,
+        height: CANNOT_SEE_BANNER_HEIGHT,
+        color: app.palette.surface0,
+        corner_radii: CornerRadii::ZERO,
+    });
+    for (i, line) in CANNOT_SEE_LINES.iter().enumerate() {
+        let (size, color, weight) = if i == 0 {
+            (
+                13.0,
+                app.palette.ink(app.palette.yellow),
+                FontWeightHint::Bold,
+            )
+        } else {
+            (11.0, app.palette.subtext0, FontWeightHint::Regular)
+        };
+        frame.push(RenderCommand::Text {
+            x: 12.0,
+            #[expect(clippy::cast_precision_loss, reason = "three lines; the index is 0..3")]
+            y: y + 6.0 + i as f32 * 16.0,
+            text: (*line).to_string(),
+            color,
+            font_size: size,
+            font_weight: weight,
+            max_width: Some(frame.width - 24.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
 }
 
 /// Render the title bar at the top of the window.
@@ -2284,7 +2409,11 @@ fn render_status_bar(frame: &mut Frame, app: &NetManagerApp) {
     });
 
     // Interface count on right
-    let iface_count = format!("{} interfaces", app.interfaces.len());
+    let iface_count = if app.interfaces.is_empty() {
+        String::from("interfaces unknown")
+    } else {
+        format!("{} interfaces", app.interfaces.len())
+    };
     frame.push(RenderCommand::Text {
         x: frame.width - 120.0,
         y: sy + 8.0,
@@ -2649,10 +2778,14 @@ impl NetManagerApp {
             .selected_wifi
             .and_then(|i| self.wifi_networks.get(i))
             .map(|network| network.ssid.clone());
-        self.wifi_networks = sample_wifi_networks();
+        // The list is not cleared, because it is already empty and because a
+        // clear would be a claim in itself -- "the networks that were here are
+        // gone". It used to be reassigned from `sample_wifi_networks()` and
+        // reported as "Scanned: 5 networks found".
         self.selected_wifi =
             chosen.and_then(|ssid| self.wifi_networks.iter().position(|n| n.ssid == ssid));
-        self.status_message = format!("Scanned: {} networks found", self.wifi_networks.len());
+        self.status_message =
+            String::from("Cannot scan: nothing here can reach a radio. No networks were examined");
     }
 
     /// A name no existing profile has, so repeated Add never makes two rows
@@ -3006,6 +3139,7 @@ fn is_valid_ipv4(s: &str) -> bool {
 // Sample Data Generators
 // ============================================================================
 
+#[cfg(test)]
 fn sample_interfaces() -> Vec<NetworkInterface> {
     vec![
         NetworkInterface {
@@ -3119,6 +3253,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
     ]
 }
 
+#[cfg(test)]
 fn sample_wifi_networks() -> Vec<WiFiNetwork> {
     vec![
         WiFiNetwork {
@@ -3159,6 +3294,7 @@ fn sample_wifi_networks() -> Vec<WiFiNetwork> {
     ]
 }
 
+#[cfg(test)]
 fn sample_vpn_configs() -> Vec<VpnConfig> {
     vec![
         VpnConfig {
@@ -3182,6 +3318,7 @@ fn sample_vpn_configs() -> Vec<VpnConfig> {
     ]
 }
 
+#[cfg(test)]
 fn sample_profiles() -> Vec<NetworkProfile> {
     vec![
         NetworkProfile {
@@ -3202,6 +3339,7 @@ fn sample_profiles() -> Vec<NetworkProfile> {
     ]
 }
 
+#[cfg(test)]
 fn sample_throughput_history() -> VecDeque<ThroughputSample> {
     let mut history = VecDeque::with_capacity(60);
     // Simulate varying throughput over time
@@ -3672,27 +3810,27 @@ mod tests {
 
     #[test]
     fn test_app_new_has_interfaces() {
-        let app = NetManagerApp::new();
+        let app = NetManagerApp::with_sample_data();
         assert!(!app.interfaces.is_empty());
     }
 
     #[test]
     fn test_app_default_selected_interface() {
-        let app = NetManagerApp::new();
+        let app = NetManagerApp::with_sample_data();
         assert_eq!(app.selected_interface, 0);
         assert!(app.selected_iface().is_some());
     }
 
     #[test]
     fn test_select_interface_valid() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.select_interface(1);
         assert_eq!(app.selected_interface, 1);
     }
 
     #[test]
     fn test_select_interface_out_of_bounds() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.select_interface(999);
         // Should not change
         assert_eq!(app.selected_interface, 0);
@@ -3700,41 +3838,52 @@ mod tests {
 
     #[test]
     fn test_toggle_enabled() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let was_enabled = app.interfaces[0].enabled;
         app.toggle_selected_enabled();
-        assert_ne!(app.interfaces[0].enabled, was_enabled);
+        assert_eq!(
+            app.interfaces[0].enabled, was_enabled,
+            "the interface switch moved for a change that never reached the interface",
+        );
+        assert!(app.status_message.contains("Cannot bring an interface"));
     }
 
     #[test]
     fn test_toggle_enabled_disconnects() {
-        let mut app = NetManagerApp::new();
-        // First interface is connected and enabled
+        let mut app = NetManagerApp::with_sample_data();
+        // Was: toggling took the first interface down and set it
+        // Disconnected. Bringing an interface down is about as consequential
+        // as this app gets, and none of it left the struct.
         app.toggle_selected_enabled();
-        assert!(!app.interfaces[0].enabled);
-        assert_eq!(app.interfaces[0].state, ConnectionState::Disconnected);
+        assert!(
+            app.interfaces[0].enabled,
+            "the interface was taken down in name only"
+        );
     }
 
     #[test]
     fn test_toggle_enabled_reconnects() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.interfaces[0].enabled = false;
         app.interfaces[0].state = ConnectionState::Disconnected;
         app.toggle_selected_enabled();
-        assert!(app.interfaces[0].enabled);
-        assert_eq!(app.interfaces[0].state, ConnectionState::Connecting);
+        assert!(
+            !app.interfaces[0].enabled,
+            "the interface was brought up in name only"
+        );
+        assert_eq!(app.interfaces[0].state, ConnectionState::Disconnected);
     }
 
     #[test]
     fn test_start_editing_ip() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.start_editing_ip();
         assert!(app.editing_ip);
     }
 
     #[test]
     fn test_cancel_editing_ip() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.start_editing_ip();
         app.edit_ip_config.ip_address = "changed".into();
         app.cancel_editing_ip();
@@ -3745,20 +3894,29 @@ mod tests {
 
     #[test]
     fn test_apply_ip_config_valid() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.start_editing_ip();
         app.edit_ip_config.dhcp_enabled = false;
         app.edit_ip_config.ip_address = "10.0.0.50".into();
         app.edit_ip_config.subnet_mask = "255.255.255.0".into();
         app.edit_ip_config.gateway = "10.0.0.1".into();
-        assert!(app.apply_ip_config().is_ok());
-        assert!(!app.editing_ip);
-        assert_eq!(app.interfaces[0].ip_config.ip_address, "10.0.0.50");
+        // Was `is_ok`, with the editor closing and the address landing on the
+        // interface. It never landed anywhere but this struct, and reported
+        // "IP configuration updated for eth0" regardless.
+        assert!(
+            app.apply_ip_config().is_err(),
+            "Apply claimed to have applied"
+        );
+        assert!(
+            app.editing_ip,
+            "the editor closed on a change that did not happen"
+        );
+        assert_ne!(app.interfaces[0].ip_config.ip_address, "10.0.0.50");
     }
 
     #[test]
     fn test_apply_ip_config_invalid() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.start_editing_ip();
         app.edit_ip_config.dhcp_enabled = false;
         app.edit_ip_config.ip_address = "bad".into();
@@ -3767,7 +3925,7 @@ mod tests {
 
     #[test]
     fn test_add_dns_server_valid() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let before = app.edit_ip_config.dns_servers.len();
         // Use an address NOT already in the default config (which seeds 8.8.8.8,
         // 8.8.4.4 and 1.1.1.1); add_dns_server correctly rejects duplicates.
@@ -3777,26 +3935,26 @@ mod tests {
 
     #[test]
     fn test_add_dns_server_empty() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         assert!(app.add_dns_server("").is_err());
     }
 
     #[test]
     fn test_add_dns_server_invalid() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         assert!(app.add_dns_server("not.valid.ip.addr").is_err());
     }
 
     #[test]
     fn test_add_dns_server_duplicate() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         // 8.8.8.8 is already in the default list
         assert!(app.add_dns_server("8.8.8.8").is_err());
     }
 
     #[test]
     fn test_remove_dns_server() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let before = app.edit_ip_config.dns_servers.len();
         assert!(app.remove_dns_server(0).is_ok());
         assert_eq!(app.edit_ip_config.dns_servers.len(), before - 1);
@@ -3804,13 +3962,13 @@ mod tests {
 
     #[test]
     fn test_remove_dns_server_out_of_bounds() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         assert!(app.remove_dns_server(999).is_err());
     }
 
     #[test]
     fn test_move_dns_up() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let second = app.edit_ip_config.dns_servers[1].clone();
         assert!(app.move_dns_up(1).is_ok());
         assert_eq!(app.edit_ip_config.dns_servers[0], second);
@@ -3818,13 +3976,13 @@ mod tests {
 
     #[test]
     fn test_move_dns_up_at_top() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         assert!(app.move_dns_up(0).is_err());
     }
 
     #[test]
     fn test_move_dns_down() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let first = app.edit_ip_config.dns_servers[0].clone();
         assert!(app.move_dns_down(0).is_ok());
         assert_eq!(app.edit_ip_config.dns_servers[1], first);
@@ -3832,70 +3990,105 @@ mod tests {
 
     #[test]
     fn test_move_dns_down_at_bottom() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let last = app.edit_ip_config.dns_servers.len() - 1;
         assert!(app.move_dns_down(last).is_err());
     }
 
     #[test]
     fn test_select_wifi() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.select_wifi(2);
         assert_eq!(app.selected_wifi, Some(2));
     }
 
     #[test]
     fn test_connect_wifi_no_selection() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.selected_wifi = None;
         assert!(app.connect_wifi().is_err());
     }
 
     #[test]
     fn test_connect_wifi_valid() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         // Select the WiFi interface
         app.select_interface(1);
         app.select_wifi(0);
-        let result = app.connect_wifi();
-        assert!(result.is_ok());
-        assert_eq!(result.ok(), Some("HomeNetwork".into()));
+        let err = app
+            .connect_wifi()
+            .expect_err("Connect claimed to have begun");
+        // The refusal names the network, because a bare "cannot connect" leaves
+        // the user unsure which of the two things they just clicked it means.
+        assert!(
+            err.contains("HomeNetwork"),
+            "the refusal did not name the network: {err}"
+        );
+        assert!(
+            app.interfaces
+                .iter()
+                .all(|i| i.state != ConnectionState::Connecting),
+            "no connection was attempted but an interface says Connecting",
+        );
     }
 
     #[test]
     fn test_toggle_vpn_connect() {
-        let mut app = NetManagerApp::new();
-        // VPN 0 is disconnected
+        let mut app = NetManagerApp::with_sample_data();
+        // VPN 0 is disconnected, and stays that way. A switch that moves is a
+        // stronger claim than a list that fills: it says the thing it controls
+        // moved with it. Someone who believes a VPN came up acts on it by
+        // transmitting something.
+        let before = app.vpn_states[0].clone();
         assert!(app.toggle_vpn(0).is_ok());
-        assert_eq!(app.vpn_states[0], ConnectionState::Connecting);
+        assert_eq!(app.vpn_states[0], before, "the VPN switch moved");
+        assert!(
+            app.status_message.contains("Cannot"),
+            "the switch did not move and nothing said why: {}",
+            app.status_message,
+        );
     }
 
     #[test]
     fn test_toggle_vpn_disconnect() {
-        let mut app = NetManagerApp::new();
-        // VPN 1 is connected
+        let mut app = NetManagerApp::with_sample_data();
+        // VPN 1 is connected in the fixture, and stays connected: this app
+        // cannot take a tunnel down any more than it can bring one up.
+        let before = app.vpn_states[1].clone();
         assert!(app.toggle_vpn(1).is_ok());
-        assert_eq!(app.vpn_states[1], ConnectionState::Disconnected);
+        assert_eq!(app.vpn_states[1], before, "the VPN switch moved");
     }
 
     #[test]
     fn test_toggle_vpn_out_of_bounds() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         assert!(app.toggle_vpn(999).is_err());
     }
 
     #[test]
     fn test_run_diagnostics() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
+        // It used to return a full passing report -- gateway up in 1.2 ms, 0%
+        // packet loss over 100 pings, MTU 1500 confirmed -- none of which
+        // happened. A passing diagnostic is consulted *while troubleshooting*,
+        // so it sent people to look elsewhere for a fault that may be here.
         assert!(app.diagnostics.is_empty());
         app.run_diagnostics();
-        assert!(!app.diagnostics.is_empty());
+        assert!(
+            app.diagnostics.is_empty(),
+            "diagnostics appeared from nowhere"
+        );
         assert!(!app.diagnostics_running);
+        assert!(
+            app.status_message.contains("Cannot run diagnostics"),
+            "nothing said why there is no report: {}",
+            app.status_message,
+        );
     }
 
     #[test]
     fn test_push_throughput() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let before = app.throughput_history.len();
         app.push_throughput(ThroughputSample {
             rx_bytes_per_sec: 100.0,
@@ -3906,7 +4099,7 @@ mod tests {
 
     #[test]
     fn test_push_throughput_caps_at_max() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.max_throughput_samples = 5;
         app.throughput_history.clear();
         for i in 0..10 {
@@ -3920,14 +4113,14 @@ mod tests {
 
     #[test]
     fn test_set_tab() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::WiFi);
         assert_eq!(app.active_tab, DetailTab::WiFi);
     }
 
     #[test]
     fn test_add_profile() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let before = app.profiles.len();
         app.add_profile("Test", SecurityLevel::Public, true);
         assert_eq!(app.profiles.len(), before + 1);
@@ -3936,7 +4129,7 @@ mod tests {
 
     #[test]
     fn test_remove_profile() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let before = app.profiles.len();
         assert!(app.remove_profile(0).is_ok());
         assert_eq!(app.profiles.len(), before - 1);
@@ -3944,13 +4137,13 @@ mod tests {
 
     #[test]
     fn test_remove_profile_out_of_bounds() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         assert!(app.remove_profile(999).is_err());
     }
 
     #[test]
     fn test_remove_profile_adjusts_selection() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.selected_profile = Some(2);
         // Remove last, selection should adjust
         let last = app.profiles.len() - 1;
@@ -3984,14 +4177,14 @@ mod tests {
 
     #[test]
     fn test_render_app_produces_commands() {
-        let app = NetManagerApp::new();
+        let app = NetManagerApp::with_sample_data();
         let tree = render_app(&app);
         assert!(!tree.is_empty());
     }
 
     #[test]
     fn test_render_has_title_bar() {
-        let app = NetManagerApp::new();
+        let app = NetManagerApp::with_sample_data();
         let tree = render_app(&app);
         // Should contain the title text
         let has_title = tree.commands.iter().any(
@@ -4002,7 +4195,7 @@ mod tests {
 
     #[test]
     fn test_render_has_interface_names() {
-        let app = NetManagerApp::new();
+        let app = NetManagerApp::with_sample_data();
         let tree = render_app(&app);
         let has_eth = tree
             .commands
@@ -4013,7 +4206,7 @@ mod tests {
 
     #[test]
     fn test_render_different_tabs() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         for tab in DetailTab::all() {
             app.set_tab(*tab);
             let tree = render_app(&app);
@@ -4028,8 +4221,8 @@ mod tests {
 
     #[test]
     fn test_render_with_diagnostics() {
-        let mut app = NetManagerApp::new();
-        app.run_diagnostics();
+        let mut app = NetManagerApp::with_sample_data();
+        app.diagnostics = NetManagerApp::fabricated_diagnostics();
         app.set_tab(DetailTab::Diagnostics);
         let tree = render_app(&app);
         let has_ping = tree
@@ -4041,8 +4234,8 @@ mod tests {
 
     #[test]
     fn an_overlong_diagnostic_detail_is_marked_as_cut() {
-        let mut app = NetManagerApp::new();
-        app.run_diagnostics();
+        let mut app = NetManagerApp::with_sample_data();
+        app.diagnostics = NetManagerApp::fabricated_diagnostics();
         // Far wider than a diagnostics row, which is fixed height by design.
         let long = "The gateway did not answer within the timeout, and the \
             route to it goes through an interface that is currently down."
@@ -4075,8 +4268,8 @@ mod tests {
 
     #[test]
     fn a_short_diagnostic_detail_is_left_alone() {
-        let mut app = NetManagerApp::new();
-        app.run_diagnostics();
+        let mut app = NetManagerApp::with_sample_data();
+        app.diagnostics = NetManagerApp::fabricated_diagnostics();
         app.diagnostics[0].details = "OK".to_string();
         let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         render_tab_diagnostics(&mut frame, &app, 0.0, 0.0, 600.0);
@@ -4217,7 +4410,7 @@ mod tests {
     /// screen it landed. A pixel filter is what makes a helper quietly report
     /// that nothing was drawn.
     fn app_with_interfaces(n: usize) -> NetManagerApp {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let template = app.interfaces.first().cloned().expect("sample interfaces");
         app.interfaces = (0..n)
             .map(|i| {
@@ -4498,7 +4691,7 @@ mod tests {
 
     #[test]
     fn clicking_a_sidebar_row_selects_that_interface() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         assert!(app.interfaces.len() >= 2, "needs two rows to tell apart");
         app.select_interface(0);
 
@@ -4508,7 +4701,7 @@ mod tests {
 
     #[test]
     fn a_sidebar_row_is_clickable_across_its_whole_painted_band() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let row = rect_of(&app, Target::Interface(1)).expect("row 1 is on screen");
 
         // Just inside each corner. `Rect::contains` is half-open, so the far
@@ -4533,7 +4726,7 @@ mod tests {
         // Half-open rects: if both rows claimed the boundary pixel the
         // topmost-wins rule would silently decide which, and the answer would
         // depend on draw order rather than on where the user pointed.
-        let app = NetManagerApp::new();
+        let app = NetManagerApp::with_sample_data();
         let row0 = rect_of(&app, Target::Interface(0)).expect("row 0");
         let row1 = rect_of(&app, Target::Interface(1)).expect("row 1");
         let frame = render_frame(&app, SIZE.0, SIZE.1);
@@ -4548,7 +4741,7 @@ mod tests {
 
     #[test]
     fn clicking_a_tab_switches_the_panel() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         for tab in DetailTab::all() {
             assert_eq!(click(&mut app, Target::Tab(*tab)), Action::Redraw);
             assert_eq!(app.active_tab, *tab);
@@ -4560,7 +4753,7 @@ mod tests {
         // The strip is laid out by accumulating widths; an off-by-one in that
         // sum would leave two tabs sharing a band, and the wrong one would
         // open. Checked by walking the recorded rects rather than the labels.
-        let app = NetManagerApp::new();
+        let app = NetManagerApp::with_sample_data();
         let frame = render_frame(&app, SIZE.0, SIZE.1);
         let mut previous: Option<Rect> = None;
         for tab in DetailTab::all() {
@@ -4584,7 +4777,7 @@ mod tests {
 
     #[test]
     fn the_toolbar_buttons_do_what_they_say() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
 
         app.set_tab(DetailTab::Traffic);
         click(&mut app, Target::ShowProperties);
@@ -4592,7 +4785,10 @@ mod tests {
 
         app.diagnostics.clear();
         click(&mut app, Target::Diagnose);
-        assert!(!app.diagnostics.is_empty(), "Diagnose ran no diagnostics");
+        assert!(
+            app.diagnostics.is_empty(),
+            "Diagnose produced a report from nowhere"
+        );
         assert_eq!(
             app.active_tab,
             DetailTab::Diagnostics,
@@ -4601,20 +4797,84 @@ mod tests {
 
         let was = app.interfaces[app.selected_interface].enabled;
         click(&mut app, Target::ToggleEnabled);
-        assert_ne!(app.interfaces[app.selected_interface].enabled, was);
+        assert_eq!(
+            app.interfaces[app.selected_interface].enabled, was,
+            "the toolbar switch moved for an interface it cannot reach",
+        );
+    }
+
+    /// The window says it cannot see the network, in words, unconditionally.
+    ///
+    /// The point of the 2026-09-15 change. Emptying the lists was only half of
+    /// it: an empty interface list claims the machine has no network hardware,
+    /// an empty Wi-Fi list claims nothing is in range, and an empty VPN list
+    /// claims none is configured. All three are findings this program has not
+    /// looked hard enough to earn -- it has not looked at all.
+    #[test]
+    fn the_window_says_it_cannot_see_the_network() {
+        let app = NetManagerApp::new();
+        let tree = render_app(&app);
+        let texts: Vec<&str> = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        for line in CANNOT_SEE_LINES {
+            assert!(texts.contains(&line), "the window never said {line:?}");
+        }
+        assert!(
+            CANNOT_SEE_LINES
+                .iter()
+                .any(|l| l.contains("not because nothing is there")),
+            "nothing forecloses reading the empty lists as findings",
+        );
+        // And the count in the status bar is not "0 interfaces", which is a
+        // claim about the machine rather than about this program.
+        assert!(
+            !texts.iter().any(|t| t.starts_with("0 interfaces")),
+            "the status bar reported a count it could not have taken",
+        );
+    }
+
+    /// A fresh app invents nothing.
+    #[test]
+    fn a_fresh_app_has_no_interfaces_networks_or_tunnels() {
+        let app = NetManagerApp::new();
+        assert!(app.interfaces.is_empty());
+        assert!(app.wifi_networks.is_empty());
+        assert!(app.vpn_configs.is_empty());
+        assert!(app.profiles.is_empty());
+        assert!(app.throughput_history.is_empty());
+        // The one that mattered most: `vpn_states` began
+        // [Disconnected, Connected, Disconnected], so opening the network
+        // manager showed a VPN as connected.
+        assert!(
+            !app.vpn_states.iter().any(ConnectionState::is_connected),
+            "a fresh app claims a VPN is up",
+        );
     }
 
     #[test]
     fn refresh_rescans_and_says_so() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.wifi_networks.clear();
 
         click(&mut app, Target::Refresh);
 
-        assert!(!app.wifi_networks.is_empty(), "Refresh found no networks");
+        // Was: Refresh refilled the list from `sample_wifi_networks` and said
+        // "Scanned: 5 networks found". An empty list after a refusal is not a
+        // finding, so the status line has to carry the difference.
         assert!(
-            app.status_message.contains("Scanned"),
-            "status line did not report the scan: {}",
+            app.wifi_networks.is_empty(),
+            "Refresh produced networks from nowhere"
+        );
+        assert!(
+            app.status_message.contains("Cannot scan"),
+            "an empty list with nothing saying it was never looked at: {}",
             app.status_message
         );
     }
@@ -4624,7 +4884,7 @@ mod tests {
         // Keeping the *index* would leave the user pointed at whatever network
         // happened to land in that slot after the rescan, and Connect would
         // join that one instead of the one they picked.
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::WiFi);
         // Start from the reverse of what the next scan will report, so that
         // tracking by index and tracking by name give different answers.
@@ -4634,11 +4894,19 @@ mod tests {
 
         click(&mut app, Target::Refresh);
 
-        assert_ne!(
-            app.selected_wifi,
-            Some(0),
-            "the scan reordered the list but the selection stayed put, which \
-             is the bug this test exists for"
+        // Was: the refresh replaced the list from `sample_wifi_networks`, and
+        // this asserted the selection tracked its network by SSID rather than
+        // by index. No scan happens now, so there is no reordering to survive;
+        // what is left to check is that a refusal does not silently move the
+        // selection to a different network than the one the user picked.
+        let still = app
+            .selected_wifi
+            .and_then(|i| app.wifi_networks.get(i))
+            .map(|n| n.ssid.clone());
+        assert_eq!(
+            still,
+            Some(chosen.clone()),
+            "the refusal moved the selection"
         );
         let now = app
             .selected_wifi
@@ -4649,7 +4917,7 @@ mod tests {
 
     #[test]
     fn a_wifi_selection_that_goes_off_the_air_is_dropped() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::WiFi);
         // A network only this app knows about; the scan will not find it.
         app.wifi_networks.push(WiFiNetwork {
@@ -4663,15 +4931,22 @@ mod tests {
 
         click(&mut app, Target::Refresh);
 
+        // Was: the rescan dropped a network this app had invented, and the
+        // selection went with it. Nothing is rescanned now, so the network the
+        // test pushed is still there and still selected -- the property that
+        // survives is that Refresh does not invent a *different* answer.
         assert_eq!(
-            app.selected_wifi, None,
-            "a network that is no longer on the air is still selected"
+            app.selected_wifi
+                .and_then(|i| app.wifi_networks.get(i))
+                .map(|n| n.ssid.as_str()),
+            Some("gone-by-morning"),
+            "Refresh changed a list it cannot see",
         );
     }
 
     #[test]
     fn the_edit_button_opens_the_editor_and_apply_writes_it_back() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
 
         assert!(
@@ -4690,16 +4965,22 @@ mod tests {
         type_str(&mut app, "10.0.0.7");
 
         click(&mut app, Target::ApplyIp);
-        assert!(!app.editing_ip, "Apply left the editor open");
-        assert_eq!(
-            app.interfaces[app.selected_interface].ip_config.ip_address,
-            "10.0.0.7"
+        assert!(
+            app.editing_ip,
+            "Apply closed the editor on a change it could not make"
         );
+        assert_ne!(
+            app.interfaces[app.selected_interface].ip_config.ip_address, "10.0.0.7",
+            "Apply wrote the address onto the interface it cannot reach",
+        );
+        // The typed text stays in the box. Discarding it would lose the user's
+        // work on top of refusing it, and they may want to copy it elsewhere.
+        assert_eq!(app.edit_ip_config.ip_address, "10.0.0.7");
     }
 
     #[test]
     fn apply_refuses_a_bad_address_and_says_why() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
         click(&mut app, Target::EditIp);
         app.edit_ip_config.dhcp_enabled = false;
@@ -4717,7 +4998,7 @@ mod tests {
 
     #[test]
     fn cancel_puts_the_interfaces_own_address_back() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
         let original = app.interfaces[app.selected_interface]
             .ip_config
@@ -4735,7 +5016,7 @@ mod tests {
 
     #[test]
     fn the_ip_fields_only_take_the_keyboard_while_the_editor_is_open() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
 
         assert!(
@@ -4753,7 +5034,7 @@ mod tests {
 
     #[test]
     fn tab_walks_the_ip_fields_and_typing_lands_in_the_focused_one() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
         click(&mut app, Target::EditIp);
         app.edit_ip_config.subnet_mask.clear();
@@ -4776,7 +5057,7 @@ mod tests {
 
     #[test]
     fn escape_in_a_field_puts_the_caret_away_rather_than_closing_the_window() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
         click(&mut app, Target::EditIp);
 
@@ -4790,7 +5071,7 @@ mod tests {
 
     #[test]
     fn a_focused_field_shows_a_caret_so_the_keyboard_has_somewhere_visible_to_go() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
         click(&mut app, Target::EditIp);
         app.edit_ip_config.ip_address = "1.2.3.4".into();
@@ -4814,7 +5095,7 @@ mod tests {
         // Enter, Tab, Escape and Backspace all produce text on most layouts
         // (`\r`, `\t`, `\x1b`, `\x08`). A field that appends whatever arrives
         // fills with unprintable bytes the first time someone presses Escape.
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
 
@@ -4831,7 +5112,7 @@ mod tests {
 
     #[test]
     fn a_key_release_types_nothing() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
 
@@ -4843,7 +5124,7 @@ mod tests {
 
     #[test]
     fn the_dns_box_takes_typing_and_add_moves_it_into_the_list() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Dns);
         let before = app.edit_ip_config.dns_servers.len();
 
@@ -4863,7 +5144,7 @@ mod tests {
 
     #[test]
     fn enter_in_the_dns_box_adds_without_reaching_for_the_button() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Dns);
         let before = app.edit_ip_config.dns_servers.len();
 
@@ -4876,7 +5157,7 @@ mod tests {
 
     #[test]
     fn a_rejected_dns_address_stays_in_the_box_with_the_reason_on_screen() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Dns);
         let before = app.edit_ip_config.dns_servers.clone();
 
@@ -4898,7 +5179,7 @@ mod tests {
 
     #[test]
     fn backspace_removes_the_last_character_typed() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
         type_str(&mut app, "8.8");
@@ -4914,7 +5195,7 @@ mod tests {
 
     #[test]
     fn the_dns_reorder_buttons_move_the_row_they_sit_on() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Dns);
         app.edit_ip_config.dns_servers = vec!["1.1.1.1".into(), "2.2.2.2".into(), "3.3.3.3".into()];
 
@@ -4933,7 +5214,7 @@ mod tests {
     fn the_first_row_has_no_up_button_and_the_last_has_no_down_button() {
         // A button drawn where the operation cannot succeed is a button that
         // answers a click with an error message.
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Dns);
         app.edit_ip_config.dns_servers = vec!["1.1.1.1".into(), "2.2.2.2".into()];
 
@@ -4945,7 +5226,7 @@ mod tests {
 
     #[test]
     fn the_dhcp_switch_opens_the_editor_rather_than_changing_nothing() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
         assert!(!app.editing_ip);
         let was = app.edit_ip_config.dhcp_enabled;
@@ -4974,7 +5255,7 @@ mod tests {
 
     #[test]
     fn selecting_a_wifi_network_is_what_reveals_its_connect_button() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::WiFi);
         app.selected_wifi = None;
         assert!(rect_of(&app, Target::WifiConnect).is_none());
@@ -4997,7 +5278,7 @@ mod tests {
 
     #[test]
     fn connecting_to_a_wifi_network_names_it_on_the_status_line() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         // Select a WiFi interface so the connection has something to happen to.
         let wifi_iface = app
             .interfaces
@@ -5020,7 +5301,7 @@ mod tests {
 
     #[test]
     fn the_vpn_button_toggles_the_row_it_belongs_to() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Vpn);
         assert!(app.vpn_configs.len() >= 2, "needs two VPNs to tell apart");
         let other = app.vpn_states[0].clone();
@@ -5028,10 +5309,10 @@ mod tests {
 
         click(&mut app, Target::Vpn(1));
 
-        assert_ne!(
+        assert_eq!(
             app.vpn_states[1].is_connected(),
             was_connected,
-            "the button did not change the connection it names"
+            "the button moved a switch for a tunnel it cannot reach",
         );
         assert_eq!(app.vpn_states[0], other, "the wrong row changed state");
     }
@@ -5041,7 +5322,7 @@ mod tests {
         // The empty-list branch used to return before the button was drawn, so
         // the only control that creates the first profile was hidden in
         // exactly the state that needs it.
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.profiles.clear();
         app.selected_profile = None;
         app.set_tab(DetailTab::Profiles);
@@ -5064,7 +5345,7 @@ mod tests {
 
     #[test]
     fn repeated_adds_never_make_two_profiles_with_the_same_name() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Profiles);
         for _ in 0..5 {
             click(&mut app, Target::ProfileAdd);
@@ -5078,7 +5359,7 @@ mod tests {
 
     #[test]
     fn a_new_profile_starts_at_the_least_trusting_setting() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.profiles.clear();
         app.set_tab(DetailTab::Profiles);
         click(&mut app, Target::ProfileAdd);
@@ -5090,7 +5371,7 @@ mod tests {
 
     #[test]
     fn removing_a_profile_removes_the_one_whose_button_was_pressed() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Profiles);
         assert!(app.profiles.len() >= 2);
         let doomed = app.profiles[1].name.clone();
@@ -5102,22 +5383,29 @@ mod tests {
 
     #[test]
     fn the_run_button_appears_only_while_there_is_nothing_to_show() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.diagnostics.clear();
         app.set_tab(DetailTab::Diagnostics);
 
         assert!(rect_of(&app, Target::RunDiagnostics).is_some());
         click(&mut app, Target::RunDiagnostics);
-        assert!(!app.diagnostics.is_empty());
+        assert!(
+            app.diagnostics.is_empty(),
+            "Run produced a report from nowhere"
+        );
+
+        // The hiding rule itself is still right and still worth pinning, so it
+        // is checked against a report placed there rather than produced.
+        app.diagnostics = NetManagerApp::fabricated_diagnostics();
         assert!(
             rect_of(&app, Target::RunDiagnostics).is_none(),
-            "the Run button covered the results it had just produced"
+            "the Run button covered the results it sits above"
         );
     }
 
     #[test]
     fn a_click_on_bare_background_hits_nothing_and_asks_for_no_repaint() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         // The title bar carries no controls.
         assert_eq!(
             app.handle_click(SIZE.0 / 2.0, 4.0, MouseButton::Left, SIZE),
@@ -5127,7 +5415,7 @@ mod tests {
 
     #[test]
     fn a_click_on_bare_background_puts_the_caret_away() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
         assert_eq!(app.focus, Some(Field::DnsInput));
@@ -5141,7 +5429,7 @@ mod tests {
 
     #[test]
     fn only_the_left_button_activates_anything() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let row = rect_of(&app, Target::Interface(1)).expect("row 1");
         app.select_interface(0);
 
@@ -5154,7 +5442,7 @@ mod tests {
 
     #[test]
     fn the_arrow_keys_walk_the_interface_list_and_stop_at_both_ends() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let last = app.interfaces.len() - 1;
 
         app.select_interface(0);
@@ -5171,7 +5459,7 @@ mod tests {
 
     #[test]
     fn the_left_and_right_keys_walk_the_tabs_and_wrap() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let tabs = DetailTab::all();
         app.set_tab(tabs[0]);
 
@@ -5218,7 +5506,7 @@ mod tests {
 
     #[test]
     fn a_close_request_closes_the_window() {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         assert_eq!(app.handle_event(&Event::CloseRequested, SIZE), Action::Quit);
     }
 
@@ -5227,7 +5515,7 @@ mod tests {
         // The panel is measured from the right-hand edge, so a control near it
         // moves when the window does. A hit-test still using the old width
         // would miss by exactly the difference.
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Profiles);
 
         let wide = (1400.0_f32, 900.0_f32);
@@ -5268,7 +5556,7 @@ mod tests {
         // No `Resize` arrives before frame one, so `render` is the only thing
         // that knows the real size then. A window that ignored it would draw
         // 960x680 into whatever it was actually given.
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         let tree = app.render(1280.0, 800.0);
         assert_eq!(app.window_size, (1280.0, 800.0));
         assert!(
@@ -5285,7 +5573,7 @@ mod tests {
         // Below this the sidebar and the panel would each be unusable. Drawing
         // at the requested size instead would put the panel at negative width,
         // and every rect in it at a coordinate no click can reach.
-        let app = NetManagerApp::new();
+        let app = NetManagerApp::with_sample_data();
         let frame = render_frame(&app, 100.0, 50.0);
         assert!(frame.width >= MIN_WIDTH);
         assert!(frame.height >= MIN_HEIGHT);
@@ -5302,7 +5590,7 @@ mod tests {
         // The hit-test takes the topmost match, which is right for a button
         // drawn *on* a row. Anywhere else an overlap means one control is
         // unreachable, so the pairs that are allowed to overlap are named.
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.selected_wifi = Some(0);
         for tab in DetailTab::all() {
             app.set_tab(*tab);
@@ -5333,7 +5621,7 @@ mod tests {
     /// A list long enough to overflow the detail panel at the smallest window
     /// the layout supports.
     fn app_with_overflowing_profiles() -> NetManagerApp {
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::Profiles);
         for i in 0..24 {
             app.add_profile(&format!("profile-{i}"), SecurityLevel::Public, false);
@@ -5426,7 +5714,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = NetManagerApp::new();
+        let mut app = NetManagerApp::with_sample_data();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

@@ -4527,6 +4527,47 @@
 
 ## Judgment Calls
 
+Backslashes lose a level even inside a QUOTED heredoc through this tooling
+(lane A, 2026-09-15). The standing rule was already 'generated code never
+travels through a shell string'; this records the mechanism, because the rule
+kept being followed in spirit and broken in practice.
+
+  Evidence, not inference. A Python snippet in a <<'PYEOF' heredoc contained
+  a literal written in the source as \\( -- that is TWO backslashes then
+  an open paren -- and Python answered:
+
+      SyntaxWarning: "\(" is an invalid escape sequence
+
+  -- reporting ONE backslash, which is the whole finding: two went in, one
+  arrived.
+
+  Python reports the escape it FOUND. Had the literal still held two
+  backslashes that is a valid escape and there is no warning. So one level was
+  consumed before Python ever saw the text, despite the quoted delimiter.
+
+  What it cost: a sed backreference  //p  arrived as  //p  -- the capture
+  silently replaced with nothing. The extractor returned an empty string, so
+  the stale-lock branch it fed could never fire. Fail-safe by luck, not by
+  design, and it would have read as 'the feature works, no lock was ever
+  stale'.
+
+  The rule, stated so it is checkable rather than aspirational: no backslash
+  in any string handed to the Bash tool, quoted heredoc included. If one is
+  needed, either write the file with the Write tool, or pick a construct that
+  needs none -- awk field lookups instead of sed backreferences, a real
+  newline inside a format string instead of an escape.
+
+  And prove the extractor on a real sample before relying on it. This one was
+  caught by running it against an actual owner file and seeing a pid come
+  back; reading the line would not have shown it, because the damaged form is
+  still valid sed.
+
+  The general remedy, when a backslash genuinely has to reach the file: build
+  it as chr(92) inside the Python and never type one in the transmitted
+  string. That is how this very entry was repaired -- the first attempt to
+  write it was itself mangled, turning its two-backslash example into one and
+  inverting the evidence it existed to record.
+
 Buffer-cache writeback belongs in a kernel thread, not a timer softirq
 (lane A, 2026-09-15). Deferred deliberately; design-decisions 940 names this
 as the correct long-term shape and takes the smaller fix instead.

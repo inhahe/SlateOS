@@ -1919,6 +1919,32 @@ fn seek_output(dd: &mut Dd, records: i64, bytes: &mut i64) -> Result<Skipped, Dd
 /// Returns the exit status. `Err` means the same thing with the statistics
 /// still to print — see [`DdError`].
 #[allow(clippy::too_many_lines)]
+/// `buf[start..end]`, or an abort.
+///
+/// Every window in the copy loop is sized from the buffer's own capacity, so
+/// `None` is unreachable. It REFUSES rather than clamping, and that choice is
+/// the whole point: clamping would copy a different number of bytes than the
+/// caller asked for, and `dd` writing a file of the wrong length without
+/// saying so is the one failure this program exists not to have.
+///
+/// A panic would also be safe. There is a `Result` in hand, so the error is
+/// reported instead -- which is what separates this from `bignat::divmod`,
+/// where the indices are equally provable and there is nowhere to report to.
+fn win(buf: &[u8], start: usize, end: usize) -> Result<&[u8], DdError> {
+    buf.get(start..end).ok_or_else(|| {
+        stdfd::diag_line("dd: internal error: buffer window out of range");
+        DdError::Aborted
+    })
+}
+
+/// [`win`], for a window that is written through.
+fn win_mut(buf: &mut [u8], start: usize, end: usize) -> Result<&mut [u8], DdError> {
+    buf.get_mut(start..end).ok_or_else(|| {
+        stdfd::diag_line("dd: internal error: buffer window out of range");
+        DdError::Aborted
+    })
+}
+
 fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdError> {
     let mut exit_status = 0u8;
     // Size of the previous read if it was short, else 0. What makes
@@ -1963,13 +1989,13 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
             let fill = usize::try_from(fill)
                 .unwrap_or(usize::MAX)
                 .min(dd.obuf.len());
-            dd.obuf[..fill].fill(0);
+            win_mut(&mut dd.obuf, 0, fill)?.fill(0);
             loop {
                 let size = if write_records != 0 { dd.obs } else { bytes };
                 let size = usize::try_from(size)
                     .unwrap_or(usize::MAX)
                     .min(dd.obuf.len());
-                if dd.out.iwrite(&dd.obuf[..size]) != size {
+                if dd.out.iwrite(win(&dd.obuf, 0, size)?) != size {
                     stdfd::diag_line(&format!(
                         "dd: writing to {}: {}",
                         quoteaf_os(&dd.out.name),
@@ -2021,7 +2047,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
             } else {
                 0
             };
-            ibuf[..ibs].fill(pad);
+            win_mut(&mut ibuf, 0, ibs)?.fill(pad);
         }
 
         // The last record of a `count=` given in bytes is short by design.
@@ -2031,7 +2057,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
             ibs
         };
 
-        let mut n_bytes_read = match reader.read_block(&mut ibuf[..want]) {
+        let mut n_bytes_read = match reader.read_block(win_mut(&mut ibuf, 0, want)?) {
             Ok(0) => break,
             Ok(n) => {
                 reader.advance(i64::try_from(n).unwrap_or(i64::MAX));
@@ -2080,7 +2106,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
                     } else {
                         0
                     };
-                    ibuf[n_bytes_read..ibs].fill(pad);
+                    win_mut(&mut ibuf, n_bytes_read, ibs)?.fill(pad);
                 }
                 n_bytes_read = ibs;
             }
@@ -2093,7 +2119,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
         // all. This is the `bs=` shape, and the reason `bs=4096` on a pipe
         // reports `0+2 records out` where `ibs=4096 obs=4096` reports `0+1`.
         if !dd.two_bufs {
-            let nwritten = dd.out.iwrite(&ibuf[..n_bytes_read]);
+            let nwritten = dd.out.iwrite(win(&ibuf, 0, n_bytes_read)?);
             dd.stats.w_bytes += i64::try_from(nwritten).unwrap_or(i64::MAX);
             if nwritten != n_bytes_read {
                 stdfd::diag_line(&format!(
@@ -2112,14 +2138,14 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
         }
 
         if dd.trans.needed {
-            translate_buffer(&dd.trans.table, &mut ibuf[..n_bytes_read]);
+            translate_buffer(&dd.trans.table, win_mut(&mut ibuf, 0, n_bytes_read)?);
         }
         let start = if swab {
             swab_buffer(&mut ibuf, &mut n_bytes_read, &mut saved_byte)
         } else {
             0
         };
-        dd.copy_block(&ibuf[start..start + n_bytes_read])?;
+        dd.copy_block(win(&ibuf, start, start.saturating_add(n_bytes_read))?)?;
     }
 
     // `conv=swab` holds a byte back whenever it has an odd one; at the end of
@@ -2148,7 +2174,7 @@ fn dd_copy(dd: &mut Dd, reader: &mut Reader, set: &Settings) -> Result<u8, DdErr
 
     if dd.oc != 0 {
         let oc = dd.oc;
-        let nwritten = dd.out.iwrite(&dd.obuf[..oc]);
+        let nwritten = dd.out.iwrite(win(&dd.obuf, 0, oc)?);
         dd.stats.w_bytes += i64::try_from(nwritten).unwrap_or(i64::MAX);
         if nwritten != 0 {
             dd.stats.w_partial += 1;
@@ -2699,7 +2725,14 @@ fn run_main() -> ExitCode {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic, clippy::pedantic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::pedantic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::{
         C_ASCII, C_BLOCK, C_EBCDIC, C_LCASE, C_NOERROR, C_SPARSE, C_SWAB, C_SYNC, C_TWOBUFS,

@@ -456,39 +456,59 @@ impl DesktopIconLayer {
         self.icons.iter_mut().find(|icon| icon.id == id)
     }
 
-    /// Populate default desktop icons (This PC, Recycle Bin, Documents, Home).
+    /// Populate default desktop icons.
     ///
     /// Stacked down the first column. Written as a list rather than four calls
     /// each spelling out its own row offset, because `y_start + cell_height *
     /// 3` is a row number encoded in arithmetic, and the fourth one is where a
     /// typo hides.
+    ///
+    /// **Home and Documents appear only if `HOME` is set.** They used to point
+    /// at the literal strings `/home/user` and `/home/user/Documents` --
+    /// correct for a user named "user" and wrong for everyone else, which is a
+    /// class of wrong that is invisible in every test and on every machine
+    /// where the developer happens to be called "user".
+    ///
+    /// Omitted rather than defaulted, which is lane A's emit-or-omit rule from
+    /// `/sys/devices`: an icon pointing at a guessed home is indistinguishable
+    /// from one pointing at a real one until it is clicked, and the guess is
+    /// wrong far more often than it is right.
+    ///
+    /// "This PC" and "Recycle Bin" are unconditional and are not paths -- they
+    /// launch the explorer with a flag, which is a destination this system
+    /// defines rather than a claim about a filesystem.
     pub fn populate_defaults(&mut self) {
-        let defaults = [
+        let mut defaults = vec![
             (
-                "This PC",
+                "This PC".to_string(),
                 IconType::Computer,
                 IconAction::LaunchSystem("explorer --computer".to_string()),
             ),
             (
-                "Recycle Bin",
+                "Recycle Bin".to_string(),
                 IconType::RecycleBin,
                 IconAction::LaunchSystem("explorer --recycle-bin".to_string()),
             ),
-            (
-                "Documents",
-                IconType::Folder,
-                IconAction::OpenPath("/home/user/Documents".to_string()),
-            ),
-            (
-                "Home",
-                IconType::Folder,
-                IconAction::OpenPath("/home/user".to_string()),
-            ),
         ];
+
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = std::path::PathBuf::from(home);
+            let docs = home.join("Documents");
+            defaults.push((
+                "Documents".to_string(),
+                IconType::Folder,
+                IconAction::OpenPath(docs.to_string_lossy().into_owned()),
+            ));
+            defaults.push((
+                "Home".to_string(),
+                IconType::Folder,
+                IconAction::OpenPath(home.to_string_lossy().into_owned()),
+            ));
+        }
 
         for (row, (label, icon_type, action)) in defaults.into_iter().enumerate() {
             let (x, y) = self.cell_origin(0, i32::try_from(row).unwrap_or(i32::MAX));
-            self.add_icon(label, icon_type, action, x, y);
+            self.add_icon(&label, icon_type, action, x, y);
         }
     }
 

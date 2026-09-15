@@ -12522,6 +12522,33 @@ instantly under QEMU and make the interrupt-timing path a fallback rather than
 the only source), or once the `syscall3` ABI change lands and `GRND_INSECURE`
 can give callers a real escape hatch from the wait.
 
+> **UPDATE 2026-09-15 (lane B, standing expiry audit in `todo.txt`): THE
+> SECOND CONDITION HAS FIRED — and the decision survives it.**
+>
+> * **`GRND_INSECURE` works.** The `syscall3` ABI change landed 2026-08-18
+>   (`requests/a-b-getrandom-kernel-now-reads-arg2-step-2-landed.md`), and the
+>   flag is honoured and self-tested: `kernel/src/syscall/dispatch.rs` asserts
+>   `getrandom(32, GRND_INSECURE)` returns 32 bytes *in the uncredited pool
+>   state*, which is the escape hatch this clause was waiting for.
+> * **The first condition has NOT fired.** There is still no hardware RNG
+>   driver. `kernel/src/fs/hwrng.rs` looks like one and is not — it is an
+>   entropy *accounting* surface (`record_generation`, `pool_status`), and
+>   `VIRTIO_ID_RNG` appears only in device-ID tables. Stated because the module
+>   name alone would have been enough to call this fired, wrongly.
+>
+> **What the revisit concludes: nothing here changes.** Waiting for a credited
+> pool is still right, and `TimedOut → EIO` is still the honest failure. What
+> the escape hatch changes is the *advice*, so the Consequences bullet above
+> now has a companion: a caller that genuinely cannot wait should pass
+> `GRND_INSECURE` and accept what that means, **not** substitute its own
+> generator. The flag makes the weak draw explicit at the call site instead of
+> hidden in a fallback branch.
+>
+> **Checked rather than assumed:** no caller in `posix/` or `userspace/` falls
+> back to a weaker generator on a failed `getrandom`. That is the defect this
+> entry warns about, and it is absent — a clean negative, recorded so the next
+> audit does not have to re-derive it.
+
 **Reference:** Linux `drivers/char/random.c` — `crng_init`, `crng_ready()`,
 `credit_init_bits()`, `add_timer_randomness()`, and the 5.18 rewrite that
 replaced the old entropy-estimator with this accounting.

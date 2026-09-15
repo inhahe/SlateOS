@@ -48,6 +48,22 @@
 #   gui/desktop/src/lib.rs:shortcut_message -- a message composed for the user
 #     and never rendered.
 
+# TRIAGED 2026-09-14, BOTH REAL, neither fixed yet.
+#
+#   `test_results` (archivemanager): `backend::verify` returns per-file
+#   results; `results.summary()` goes to the status bar and is seen, the
+#   detail is stored here and is not. So Test Archive answers "3 files
+#   failed" and cannot say which. Partial, not invisible: the fix is a
+#   detail panel, not a wire.
+#
+#   `last_copied` (credmanager): the worse of the two. `copy_field` puts
+#   a credential on the clipboard and records which one here, and this
+#   program has NO status line, toast or banner of any kind -- nothing
+#   renders any message. So pressing Copy on a password shows the user
+#   absolutely nothing, and the only way to find out whether it worked
+#   is to paste somewhere and look. For a password manager that is the
+#   difference between "copied" and "copied the wrong row". The fix is
+#   a feedback surface first; the field is already correct.
 apps/archivemanager/src/main.rs:test_results
 apps/contacts/src/main.rs:member_count
 apps/credmanager/src/main.rs:last_copied

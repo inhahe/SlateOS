@@ -3033,6 +3033,11 @@ impl Editor {
 // --------------------------------------------------------------------- tests --
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;

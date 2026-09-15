@@ -42,6 +42,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -782,6 +783,16 @@ enum Clipboard {
 /// The main presentation application state.
 #[derive(Debug)]
 pub struct SlidesApp {
+    /// The export picker.
+    ///
+    /// `export_html` was written and tested and had no caller: a DOCTYPE, a
+    /// charset, a viewport, escaped text, a stylesheet and per-slide `<div>`s
+    /// with working navigation controls -- **a whole presentation format that
+    /// nothing could ask for.** This crate had no `std::fs` and no dialog, so
+    /// a deck lived exactly as long as the window did.
+    pub picker: FilePicker,
+    /// What the last export did.
+    pub status_message: Option<String>,
     /// All slides in the presentation.
     slides: Vec<Slide>,
     /// The currently selected/displayed slide index.
@@ -826,6 +837,8 @@ impl SlidesApp {
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: FilePicker::default(),
+            status_message: None,
             slides: vec![first],
             current_index: 0,
             theme,
@@ -1333,7 +1346,38 @@ impl SlidesApp {
     // ------------------------------------------------------------------
 
     /// Route a compositor event into the app.
+    /// Ask where to put the exported presentation.
+    pub fn export_as(&mut self) {
+        self.picker.open_to_write("presentation.html");
+    }
+
+    /// Write the presentation to `path`, and say what happened.
+    pub fn write_html(&mut self, path: &std::path::Path) -> String {
+        let text = self.export_html();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!(
+                "Exported {} slide(s) to {}",
+                self.slides.len(),
+                path.display()
+            ),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up, or a filename is typed
+        // into the slide behind it.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.status_message = Some(self.write_html(&path));
+                return EventResult::Consumed;
+            }
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Resize { width, height } => {
@@ -1367,6 +1411,11 @@ impl SlidesApp {
         }
         let ctrl = key.modifiers.ctrl;
         match key.key {
+            // The one key that lets a deck leave this window.
+            Key::E if ctrl => {
+                self.export_as();
+                EventResult::Consumed
+            }
             // Views.
             Key::Num1 => self.set_view(ViewMode::Edit),
             Key::Num2 => self.set_view(ViewMode::Sorter),
@@ -1497,6 +1546,12 @@ impl SlidesApp {
             ViewMode::Edit => self.render_edit_mode(&mut cmds),
             ViewMode::Sorter => self.render_sorter_mode(&mut cmds),
         }
+
+        // The picker last, so it draws over the slide rather than under it.
+        cmds.extend(
+            self.picker
+                .render(&self.palette, self.window_width, self.window_height),
+        );
 
         cmds
     }
@@ -2748,6 +2803,81 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    // ---- The door ----
+
+    fn ctrl_e() -> Event {
+        Event::Key(KeyEvent {
+            key: Key::E,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// The presentation reaches the disk, and reads back as what was exported.
+    ///
+    /// `export_html` was written and tested and had no caller. It emits a
+    /// DOCTYPE, a charset, a viewport, escaped text, a stylesheet and
+    /// per-slide `<div>`s with working navigation -- **a whole presentation
+    /// format nothing could ask for.**
+    #[test]
+    fn a_presentation_reaches_the_disk() {
+        let dir =
+            std::env::temp_dir().join(format!("slides-export-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("deck.html");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = SlidesApp::new(1280.0, 720.0);
+        app.seed_sample_deck();
+        let expected = app.export_html();
+        let count = app.slide_count();
+        let said = app.write_html(&path);
+
+        let back = std::fs::read_to_string(&path).expect("the file it said it wrote");
+        assert_eq!(
+            back, expected,
+            "what was read back is not what was composed"
+        );
+        assert!(
+            back.starts_with("<!DOCTYPE html>"),
+            "not a document: {said}"
+        );
+        assert!(said.contains(&format!("{count} slide(s)")), "said: {said}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl+E asks where to put it, and the picker is drawn.
+    #[test]
+    fn ctrl_e_asks_and_the_picker_is_drawn() {
+        let mut app = SlidesApp::new(1280.0, 720.0);
+        assert!(!app.picker.is_open(), "nothing should be open at rest");
+        let closed = app.render_commands().len();
+
+        assert_eq!(app.handle_event(&ctrl_e()), EventResult::Consumed);
+        assert!(app.picker.is_open(), "Ctrl+E should ask for a destination");
+
+        let own = app.render_commands().len().saturating_sub(closed);
+        assert!(
+            own > 0,
+            "the open picker contributed {own} commands; it is not being drawn"
+        );
+    }
+
+    /// A failed write is reported rather than passed over.
+    #[test]
+    fn a_failed_export_is_reported() {
+        let dir =
+            std::env::temp_dir().join(format!("slides-nodir-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut app = SlidesApp::new(1280.0, 720.0);
+        // A path under a directory that does not exist.
+        let said = app.write_html(&dir.join("deep").join("deck.html"));
+        assert!(said.starts_with("Could not write "), "said: {said}");
+    }
 
     // ------------------------------------------------------------------
     // Events

@@ -828,6 +828,13 @@ fn rename_maybe_noreplace(from: &Path, to: &Path, replace: Replace) -> io::Resul
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use scratchdir::ScratchDir;

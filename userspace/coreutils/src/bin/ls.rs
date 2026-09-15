@@ -2951,7 +2951,7 @@ impl Colors {
     /// turns *off* the directory colour rather than setting it to the reset
     /// sequence.
     fn is_colored(&self, ind: Ind) -> bool {
-        match self.seq[ind as usize].as_deref() {
+        match self.seq.get(ind as usize).and_then(Option::as_deref) {
             None | Some(b"") | Some(b"0") | Some(b"00") => false,
             Some(_) => true,
         }
@@ -2962,7 +2962,7 @@ impl Colors {
     /// it just does not count as a colour for the purposes of the tests that
     /// ask whether one is in effect.
     fn get(&self, ind: Ind) -> Option<&[u8]> {
-        self.seq[ind as usize].as_deref()
+        self.seq.get(ind as usize).and_then(Option::as_deref)
     }
 }
 
@@ -3243,12 +3243,11 @@ fn parse_ls_color(env: &Environment) -> (ColorSetup, Vec<String>) {
             Some(_) => {
                 // `PS_START` -> `PS_2` -> `PS_3`: exactly two label bytes and
                 // then an `=`, all three consumed unconditionally.
-                let Some(label) = text.get(p..p.saturating_add(2)) else {
+                let Some(&label) = text.get(p..).and_then(<[u8]>::first_chunk::<2>) else {
                     // `PS_2` with nothing after the first byte.
                     failed = true;
                     break;
                 };
-                let label: [u8; 2] = [label[0], label[1]];
                 p = p.saturating_add(2);
                 let sep = text.get(p).copied();
                 p = p.saturating_add(1);
@@ -3270,7 +3269,9 @@ fn parse_ls_color(env: &Environment) -> (ColorSetup, Vec<String>) {
                 // Not `is_colored`: an explicitly empty `di=` is stored as an
                 // empty string, which upstream distinguishes from `nullptr`
                 // nowhere that matters but stores faithfully.
-                colors.seq[slot] = Some(seq);
+                if let Some(cell) = colors.seq.get_mut(slot) {
+                    *cell = Some(seq);
+                }
             }
         }
     }
@@ -5368,6 +5369,12 @@ fn run_main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[expect(
     clippy::unwrap_used,
     reason = "a test that cannot build its own fixture should fail loudly"

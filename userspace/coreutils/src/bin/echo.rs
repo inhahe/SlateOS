@@ -135,8 +135,8 @@ fn parse_args(args: &[OsString], posixly_correct: bool) -> Request {
         !posixly_correct || args.first().is_some_and(|a| os_bytes(a).as_ref() == b"-n");
 
     // `argc == 2`: the long options exist only as the whole command line.
-    if allow_options && args.len() == 1 {
-        match os_bytes(&args[0]).as_ref() {
+    if let (true, [only]) = (allow_options, args) {
+        match os_bytes(only).as_ref() {
             b"--help" => return Request::Help,
             b"--version" => return Request::Version,
             _ => {}

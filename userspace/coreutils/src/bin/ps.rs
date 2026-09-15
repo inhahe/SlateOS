@@ -618,7 +618,11 @@ fn parse_columns(list: &str, into: &mut Vec<Spec>) -> Result<(), String> {
                 "error: unknown user-defined format specifier {name:?}"
             ));
         };
-        let title = title.unwrap_or_else(|| COLUMNS[col].title.to_string());
+        let title = title.unwrap_or_else(|| {
+            COLUMNS
+                .get(col)
+                .map_or_else(String::new, |c| c.title.to_string())
+        });
         into.push(Spec { col, title });
     }
     Ok(())
@@ -1376,6 +1380,11 @@ fn format_cpu_time(utime: u64, stime: u64) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     /// A newline, built rather than escaped.

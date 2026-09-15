@@ -1087,6 +1087,13 @@ impl Drop for Stream {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::{BUFFER, Buffering, Inner, Stream};
     use std::io::Write;

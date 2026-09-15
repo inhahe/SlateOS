@@ -9,5 +9,9 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# The export replaces a file the user chose. `fs::write` truncates the
+# target before writing it.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

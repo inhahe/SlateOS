@@ -2703,6 +2703,20 @@ impl TorrentApp {
                     self.resume_all();
                     EventResult::Consumed
                 }
+                // **This arm used to be in the match below**, which is only
+                // reached when Ctrl is NOT held -- the block it is in now
+                // returns for every Ctrl chord, so `Key::O if
+                // key.modifiers.ctrl` down there could never fire and Ctrl+O
+                // did nothing at all.
+                //
+                // The door was shut and the test suite was green, because the
+                // open test called `picker.open_to_read()` directly rather
+                // than pressing the key. A guard narrows only the arm it is
+                // on; an early `return match` narrows everything after it.
+                Key::O => {
+                    self.picker.open_to_read();
+                    EventResult::Consumed
+                }
                 _ => EventResult::Ignored,
             };
         }
@@ -2728,10 +2742,6 @@ impl TorrentApp {
                         self.resume_torrent(id);
                     }
                 }
-                EventResult::Consumed
-            }
-            Key::O if key.modifiers.ctrl => {
-                self.picker.open_to_read();
                 EventResult::Consumed
             }
             Key::Delete => {
@@ -4130,6 +4140,44 @@ mod tests {
     /// `TorrentMetainfo::from_bencode` was written, tested and unreachable:
     /// the program had no way to obtain a byte. Opening one tells the user the
     /// name, the size and which trackers it names, and contacts nothing.
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event; the
+    /// writer test calls the writer with a path directly and never touches the
+    /// dialog. This is the half routing actually decides -- with a dialog up,
+    /// a keystroke belongs to the dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_list() {
+        let mut app = TorrentApp::new();
+        app.seed_sample_torrents();
+        // Seeding does not select: the control assertion below caught the
+        // first version of this test, which would otherwise have compared
+        // `None` against `None` and passed with the dialog doing nothing.
+        app.selected_torrent = app.torrents.first().map(|t| t.id);
+        let before = app.selected_torrent;
+        assert!(before.is_some(), "control: something must be selected");
+        assert!(
+            app.torrents.len() > 1,
+            "control: one row cannot move, so the fixture needs two"
+        );
+
+        assert_eq!(
+            app.handle_event(&key_ev(Key::O, true)),
+            EventResult::Consumed
+        );
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(&press(Key::Down));
+        assert_eq!(
+            app.selected_torrent, before,
+            "Down at the open dialog moved the selection behind it"
+        );
+    }
+
     #[test]
     fn opening_a_torrent_file_lists_what_is_in_it() {
         let path = torrent_dir().join("thing.torrent");

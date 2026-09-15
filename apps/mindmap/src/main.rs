@@ -3200,6 +3200,66 @@ mod tests {
         Event::Mouse(MouseEvent { x, y, kind })
     }
 
+    /// A key with Ctrl held, for the picker tests.
+    fn ctrl_press(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event; the
+    /// writer test calls the writer with a path directly and never touches the
+    /// dialog. This is the half routing actually decides -- with a dialog up,
+    /// a keystroke belongs to the dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_map() {
+        let mut app = MindMapApp::new();
+        // Down selects the first CHILD, and needs both a selection to start
+        // from and a child to move to. A new map has neither: `selected_node`
+        // is `None`, so `select_first_child` returns immediately. Two earlier
+        // versions of this test asserted `None == None` and passed with the
+        // dialog doing nothing -- the scanner caught both, by cutting the
+        // routing and staying green.
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        let child = app.add_child_to_selected(String::from("a child"));
+        // **Back to the root.** `add_child_to_selected` selects the node it
+        // creates, so without this the selection is already the leaf and Down
+        // has nowhere further to go -- which is what the two previous versions
+        // of this fixture actually tested, and why the scanner kept saying the
+        // routing was unpinned while the test passed.
+        app.selected_node = Some(root);
+        assert!(
+            child.is_some(),
+            "control: the fixture needs somewhere to move to"
+        );
+        let before = app.selected_node;
+        assert!(
+            before.is_some(),
+            "control: something must be selected to move from"
+        );
+
+        app.handle_event(&ctrl_press(Key::O));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(&press(Key::Down));
+        assert_eq!(
+            app.selected_node, before,
+            "Down at the open dialog moved the selection behind it"
+        );
+    }
+
     #[test]
     fn a_click_selects_the_node_under_it_at_a_zoom_that_is_not_one() {
         // The hit test and the drag routines work in canvas space and the mouse

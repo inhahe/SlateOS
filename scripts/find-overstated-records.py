@@ -55,7 +55,14 @@ Report-only, and no --check mode, like the rest of the set: an entry may be
 worded loosely and still be understood by everyone who reads it, and a gate
 would train the next reader to reword rather than to look.
 
-Usage:  python scripts/find-overstated-records.py [--docs=known-issues.md,roadmap.md]
+Usage:  python scripts/find-overstated-records.py
+          [--docs=known-issues.md,roadmap.md] [--roots=apps,userspace]
+
+**The subjects are crates, not documents.** With the default `--roots=apps` a
+clean report means no document credits an *application* with an act it cannot
+perform; it says nothing at all about entries whose subject is the kernel, or
+`userspace/`, or anything else outside the roots. Lane A hit exactly that on
+2026-09-15 and nearly reported their documents clean on the strength of it.
 """
 
 import importlib.util
@@ -139,8 +146,25 @@ CREDIT = re.compile(
 )
 
 
-def crates(root="apps"):
-    """Crate name -> whether its production code reaches outside the process."""
+def crates(roots=("apps",)):
+    """Crate name -> whether its production code reaches outside the process.
+
+    `roots` is a parameter rather than the constant `"apps"` it started as.
+    Lane A ran this over the whole tree, got zero findings, and nearly reported
+    "my documents are clean" on the strength of it -- when the universe was
+    `apps/` and the tool had no opinion whatever about kernel documents.
+    **That is the corpus error `check-collapsed-messages` was caught making
+    this same morning** -- "the 382 files were not too few; they were the wrong
+    382" -- rebuilt here a few hours after it was written down. The summary
+    line now names what it looked at, for the same reason.
+    """
+    out = {}
+    for root in roots:
+        out.update(_crates_under(root))
+    return out
+
+
+def _crates_under(root):
     out = {}
     base = ROOT / root
     if not base.is_dir():
@@ -306,18 +330,25 @@ def self_test():
 
 def main():
     docs = ["known-issues.md", "roadmap.md", "todo.txt"]
+    roots = ["apps"]
     for arg in sys.argv[1:]:
         if arg.startswith("--docs="):
             docs = [d for d in arg.split("=", 1)[1].split(",") if d]
+        elif arg.startswith("--roots="):
+            roots = [r for r in arg.split("=", 1)[1].split(",") if r]
         elif arg == "--self-test":
             return self_test()
         else:
             print(f"unknown argument: {arg}", file=sys.stderr)
             return 2
 
-    capable = crates()
+    capable = crates(roots)
     if not capable:
-        print("no apps/ crates found -- refusing to call that a pass", file=sys.stderr)
+        print(
+            f"no crates with a src/ under {', '.join(roots)} "
+            "-- refusing to call that a pass",
+            file=sys.stderr,
+        )
         return 2
 
     findings, scanned = [], 0
@@ -342,10 +373,14 @@ def main():
                 break
 
     incapable = sum(1 for v in capable.values() if not v)
+    # Naming the corpus, not just its size. A count without its subject is
+    # read as coverage -- which is exactly how a clean report on `apps/` was
+    # nearly read as a clean report on the kernel's documents.
     print(
         f"{len(findings)} record(s) credit an act to a program that reaches nothing\n"
-        f"({scanned} entries across {len(docs)} document(s); "
-        f"{incapable} of {len(capable)} apps/ crates reach nothing outside the process)\n"
+        f"(subjects: crates under {', '.join(roots)}; "
+        f"{incapable} of {len(capable)} reach nothing outside the process)\n"
+        f"(documents: {', '.join(docs)} -- {scanned} entries)\n"
     )
     if findings:
         print("  READ THE ENTRY. Loose wording about an in-memory action trips")

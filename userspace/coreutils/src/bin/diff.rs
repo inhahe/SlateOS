@@ -280,8 +280,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
     let mut end_of_opts = false;
     let mut i = 1;
 
-    while i < args.len() {
-        let arg = &args[i];
+    while let Some(arg) = args.get(i) {
         // `""` for a word that is not Unicode: it matches no option and is
         // taken as an operand, which is what it must be. Decoding is for
         // MATCHING only -- the operand arm below keeps `arg` itself.
@@ -331,15 +330,15 @@ fn parse_args(args: &[OsString]) -> ParseResult {
             } else if a == "--side-by-side" {
                 format = Format::SideBySide;
             } else if a == "--width" {
-                i += 1;
-                if i >= args.len() {
+                i = i.saturating_add(1);
+                let Some(value) = args.get(i) else {
                     eprintln!("diff: option '--width' requires an argument");
                     process::exit(2);
-                }
-                match args[i].to_str().unwrap_or("").parse::<usize>() {
+                };
+                match value.to_str().unwrap_or("").parse::<usize>() {
                     Ok(w) => width = w,
                     Err(_) => {
-                        eprintln!("diff: invalid width {}", quoteaf_os(&args[i]));
+                        eprintln!("diff: invalid width {}", quoteaf_os(value));
                         process::exit(2);
                     }
                 }
@@ -398,12 +397,16 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         // taken as an operand, so anything reaching here is ASCII.
         let chars: Vec<char> = a.get(1..).unwrap_or("").chars().collect();
         let mut j = 0;
-        while j < chars.len() {
-            match chars[j] {
+        while let Some(&cj) = chars.get(j) {
+            match cj {
                 'u' => {
                     format = Format::Unified;
                     // Check for optional inline number: `-u3`
-                    let rest: String = chars[j + 1..].iter().collect();
+                    let rest: String = chars
+                        .get(j.saturating_add(1)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
                     if !rest.is_empty()
                         && let Ok(n) = rest.parse::<usize>()
                     {
@@ -415,7 +418,11 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                 }
                 'c' => {
                     format = Format::Context;
-                    let rest: String = chars[j + 1..].iter().collect();
+                    let rest: String = chars
+                        .get(j.saturating_add(1)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
                     if !rest.is_empty()
                         && let Ok(n) = rest.parse::<usize>()
                     {
@@ -436,18 +443,22 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                 // a flag.
                 'U' => {
                     format = Format::Unified;
-                    let rest: String = chars[j + 1..].iter().collect();
+                    let rest: String = chars
+                        .get(j.saturating_add(1)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
                     let value = if rest.is_empty() {
-                        i += 1;
-                        if i >= args.len() {
+                        i = i.saturating_add(1);
+                        let Some(value) = args.get(i) else {
                             eprintln!("diff: option '-U' requires an argument");
                             eprintln!("diff: Try 'diff --help' for more information.");
                             process::exit(2);
-                        }
+                        };
                         // Decoded: this value is a COUNT, so a word that is
                         // not Unicode is simply not a number, and the
                         // diagnostic below echoes the original bytes anyway.
-                        args[i].to_str().unwrap_or("").to_string()
+                        value.to_str().unwrap_or("").to_string()
                     } else {
                         rest
                     };
@@ -469,7 +480,11 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                 'y' => format = Format::SideBySide,
                 'W' => {
                     // -W may have value glued on or as next arg.
-                    let rest: String = chars[j + 1..].iter().collect();
+                    let rest: String = chars
+                        .get(j.saturating_add(1)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
                     if !rest.is_empty() {
                         match rest.parse::<usize>() {
                             Ok(w) => width = w,
@@ -479,15 +494,15 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                             }
                         }
                     } else {
-                        i += 1;
-                        if i >= args.len() {
+                        i = i.saturating_add(1);
+                        let Some(value) = args.get(i) else {
                             eprintln!("diff: option '-W' requires an argument");
                             process::exit(2);
-                        }
-                        match args[i].to_str().unwrap_or("").parse::<usize>() {
+                        };
+                        match value.to_str().unwrap_or("").parse::<usize>() {
                             Ok(w) => width = w,
                             Err(_) => {
-                                eprintln!("diff: invalid width {}", quoteaf_os(&args[i]));
+                                eprintln!("diff: invalid width {}", quoteaf_os(value));
                                 process::exit(2);
                             }
                         }
@@ -519,7 +534,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         i += 1;
     }
 
-    if positional.len() != 2 {
+    let [operand1, operand2] = positional.as_slice() else {
         // GNU's two wordings, measured on all three counts rather than
         // inferred from two:
         //
@@ -543,7 +558,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         }
         eprintln!("diff: Try 'diff --help' for more information.");
         process::exit(2);
-    }
+    };
 
     // Default color: false (Slate OS does not have reliable isatty yet).
     let use_color = color.unwrap_or(false);
@@ -560,8 +575,8 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         .collect();
 
     ParseResult::Run(Config {
-        path1: positional[0].clone(),
-        path2: positional[1].clone(),
+        path1: operand1.clone(),
+        path2: operand2.clone(),
         format,
         context_lines: ctx,
         width,
@@ -867,6 +882,22 @@ fn compute_diff(
 
 /// LCS-based diff using dynamic programming. O(NM) time and space.
 /// Suitable for files up to ~10K lines.
+// `indexing_slicing` is allowed on this function and on `myers_diff`, and
+// nowhere else in this file.
+//
+// Every index is a cell in the `dp` table, which is built `(n + 1) x (m + 1)`
+// immediately above and walked with `i in 1..=n` and `j in 1..=m`. The bounds
+// are the algorithm's, not this code's.
+//
+// They cannot be made provable: `n` and `m` are run-time, so no slice type can
+// carry "length n + 1". There is nowhere to report a violation to either --
+// this returns `Vec<Edit>`.
+//
+// And a fallback would be worse than the panic. A wrong `dp` cell does not
+// crash; it produces a WRONG DIFF, quietly, in a tool whose entire output is a
+// claim about whether two files match. An out-of-range index is loud and
+// immediate; a substituted zero is neither.
+#[allow(clippy::indexing_slicing)]
 fn lcs_diff(
     norm_a: &[Vec<u8>],
     norm_b: &[Vec<u8>],
@@ -916,6 +947,15 @@ fn lcs_diff(
 }
 
 /// Myers diff algorithm for large files. O(ND) time where D is edit distance.
+// See `lcs_diff` above for the reasoning; the same three answers hold here,
+// with one addition that is specific to this pair.
+//
+// `lcs_diff` is NOT a fallback for this function -- the two are alternatives
+// chosen by size (`lcs_diff` at or below 10,000 lines a side, this one above),
+// because `lcs_diff` is O(n*m). So failing over to it on an internal
+// inconsistency would trade a wrong answer for a hang, on exactly the inputs
+// that selected this algorithm.
+#[allow(clippy::indexing_slicing, clippy::expect_used)]
 fn myers_diff(
     norm_a: &[Vec<u8>],
     norm_b: &[Vec<u8>],
@@ -953,7 +993,20 @@ fn myers_diff(
     let offset = max_d as isize;
 
     // Helper to index into v with potentially negative k.
-    let idx = |k: isize| -> usize { (k + offset) as usize };
+    //
+    // `k + offset` lands in `0..v_size` for every k these loops visit: `k`
+    // runs `-d..=d`, `d` runs `0..=max_d`, and `offset` is `max_d`, so the sum
+    // is between 0 and `2 * max_d`, which is `v_size - 1`.
+    //
+    // `try_from` rather than `as`, and this is the one behavioural change in
+    // this commit. An `as` cast turns a negative sum into a huge `usize`, so a
+    // broken invariant would surface as an out-of-bounds panic somewhere
+    // downstream, pointing at the array rather than at the k-line arithmetic
+    // that actually went wrong. Same failure, named at its cause.
+    let idx = |k: isize| -> usize {
+        usize::try_from(k.saturating_add(offset))
+            .expect("k-line index: k runs -d..=d and offset is max_d, so k + offset >= 0")
+    };
 
     let mut found_d: Option<usize> = None;
 
@@ -1132,12 +1185,19 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
 
     // Group changes that are within `2 * context` lines of each other.
     let mut groups: Vec<(usize, usize)> = Vec::new(); // (first_change_idx, last_change_idx)
-    let mut group_start = change_indices[0];
-    let mut group_end = change_indices[0];
+    // `is_empty` was checked above, so `split_first` cannot fail -- and it
+    // hands back the tail the loop wants in the same operation.
+    let Some((&first_change, rest_changes)) = change_indices.split_first() else {
+        return Vec::new();
+    };
+    let mut group_start = first_change;
+    let mut group_end = first_change;
 
-    for &ci in &change_indices[1..] {
+    for &ci in rest_changes {
         // Count equal lines between group_end and ci.
-        let gap = ops[group_end + 1..ci]
+        let gap = ops
+            .get(group_end.saturating_add(1)..ci)
+            .unwrap_or_default()
             .iter()
             .filter(|e| e.op == Op::Equal)
             .count();
@@ -1159,7 +1219,7 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
         let hunk_start = gs.saturating_sub(context);
         let hunk_end = (ge + context + 1).min(ops.len());
 
-        let hunk_ops = &ops[hunk_start..hunk_end];
+        let hunk_ops = ops.get(hunk_start..hunk_end).unwrap_or_default();
 
         // Count lines from file1 and file2 within this hunk, and track start
         // positions.
@@ -1167,7 +1227,7 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
         let mut line2: usize = 0;
 
         // Count lines before hunk_start to determine the starting line numbers.
-        for Edit { op, .. } in &ops[..hunk_start] {
+        for Edit { op, .. } in ops.get(..hunk_start).unwrap_or_default() {
             match op {
                 Op::Equal => {
                     line1 += 1;
@@ -1848,10 +1908,10 @@ fn print_side_by_side(ops: &[Edit], config: &Config) {
     // lacking its final newline shows the line and nothing else, and simply
     // omits the newline from its own last line of output.
     let mut i = 0;
-    while i < ops.len() {
-        match ops[i].op {
+    while let Some(cur) = ops.get(i) {
+        match cur.op {
             Op::Equal => {
-                let text = &ops[i].text;
+                let text = &cur.text;
                 let left = truncate_or_pad(text, col_width);
                 let right = truncate_or_pad(text, col_width);
                 let line = [left.as_slice(), b"   ", &right].concat();
@@ -1862,20 +1922,24 @@ fn print_side_by_side(ops: &[Edit], config: &Config) {
                 // Collect this run of deletes and the run of inserts that
                 // follows it, then pair them off.
                 let del_start = i;
-                while i < ops.len() && matches!(ops[i].op, Op::Delete) {
-                    i += 1;
+                while ops.get(i).is_some_and(|e| matches!(e.op, Op::Delete)) {
+                    i = i.saturating_add(1);
                 }
-                let del = &ops[del_start..i];
+                let del = ops.get(del_start..i).unwrap_or_default();
                 let ins_start = i;
-                while i < ops.len() && matches!(ops[i].op, Op::Insert) {
-                    i += 1;
+                while ops.get(i).is_some_and(|e| matches!(e.op, Op::Insert)) {
+                    i = i.saturating_add(1);
                 }
-                let ins = &ops[ins_start..i];
+                let ins = ops.get(ins_start..i).unwrap_or_default();
 
+                // Zipping pairs them off and ends at the shorter, which is
+                // what the index bound was computing. `pairs` is still needed
+                // below, where the unpaired remainder of the longer run is
+                // printed on its own.
                 let pairs = del.len().min(ins.len());
-                for k in 0..pairs {
-                    let left = truncate_or_pad(&del[k].text, col_width);
-                    let right = truncate_or_pad(&ins[k].text, col_width);
+                for (d, n) in del.iter().zip(ins.iter()) {
+                    let left = truncate_or_pad(&d.text, col_width);
+                    let right = truncate_or_pad(&n.text, col_width);
                     let line = [left.as_slice(), b" | ", &right].concat();
                     write_body_line(&mut w, b"", &line, when(config.color, RED));
                 }
@@ -1955,31 +2019,27 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
     let mut all_names: Vec<OsString> = Vec::new();
     let mut i = 0;
     let mut j = 0;
-    while i < entries1.len() && j < entries2.len() {
-        match entries1[i].cmp(&entries2[j]) {
+    while let (Some(e1), Some(e2)) = (entries1.get(i), entries2.get(j)) {
+        match e1.cmp(e2) {
             std::cmp::Ordering::Less => {
-                all_names.push(entries1[i].clone());
-                i += 1;
+                all_names.push(e1.clone());
+                i = i.saturating_add(1);
             }
             std::cmp::Ordering::Greater => {
-                all_names.push(entries2[j].clone());
-                j += 1;
+                all_names.push(e2.clone());
+                j = j.saturating_add(1);
             }
             std::cmp::Ordering::Equal => {
-                all_names.push(entries1[i].clone());
-                i += 1;
-                j += 1;
+                all_names.push(e1.clone());
+                i = i.saturating_add(1);
+                j = j.saturating_add(1);
             }
         }
     }
-    while i < entries1.len() {
-        all_names.push(entries1[i].clone());
-        i += 1;
-    }
-    while j < entries2.len() {
-        all_names.push(entries2[j].clone());
-        j += 1;
-    }
+    // Whichever list still has entries; the other loop above stopped because
+    // one of them ran out.
+    all_names.extend(entries1.get(i..).unwrap_or_default().iter().cloned());
+    all_names.extend(entries2.get(j..).unwrap_or_default().iter().cloned());
 
     let mut worst_exit = 0;
 
@@ -2413,6 +2473,7 @@ fn main() {
 /// The fix is for `parse_args` to return a `Result` and let `main` exit;
 /// recorded in `todo.txt` rather than done in the same change as the port.
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
@@ -2888,6 +2949,39 @@ mod tests {
     }
 
     // ---------------- parse_args ----------------
+
+    /// `--width 80` and `-W 80` take the FOLLOWING word.
+    ///
+    /// Nothing covered this. The attached forms `--width=80` and `-W80` were
+    /// exercised through other paths, and the two-word form was not, which is
+    /// how a refactor nearly shipped a `diff --width 80` that parsed
+    /// `"--width"` as the number and exited 2.
+    ///
+    /// Both sites read `args[i]` AFTER an `i += 1`, so they LOOK like the
+    /// argument the loop is holding and are not. A scripted rewrite of this
+    /// file treated them as the loop's own `arg`; the only thing that stopped
+    /// it was the anchor matching twice instead of once.
+    #[test]
+    fn width_takes_the_following_word() {
+        // Two words, long and short.
+        assert_eq!(run(&["diff", "--width", "80", "a", "b"]).width, 80);
+        assert_eq!(run(&["diff", "-W", "80", "a", "b"]).width, 80);
+
+        // Attached, which is what was already covered.
+        assert_eq!(run(&["diff", "--width=80", "a", "b"]).width, 80);
+        assert_eq!(run(&["diff", "-W80", "a", "b"]).width, 80);
+
+        // The operand after the value is still an operand: `-W` must consume
+        // exactly one word, not two.
+        let c = run(&["diff", "-W", "80", "left", "right"]);
+        assert_eq!(c.path1, "left");
+        assert_eq!(c.path2, "right");
+
+        // And the default survives, so a passing assertion above cannot be
+        // the default agreeing with the expected value by accident.
+        assert_eq!(run(&["diff", "a", "b"]).width, 130);
+    }
+
     /// A bare `-` is an OPERAND, not an option.
     ///
     /// It was falling into the option branch on `starts_with('-')`, so

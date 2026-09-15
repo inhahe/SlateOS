@@ -69,5 +69,18 @@ gui/desktop/src/sound_settings.rs:output_device_id
 gui/desktop/src/startup_settings.rs:last_run_at
 gui/desktop/src/tray_dnd.rs:show_ghost
 gui/desktop/src/tray_dnd.rs:dragging_key
+# TRIAGED 2026-09-14, SOUND. Both of these are library API with no
+# consumer yet, which is the island problem rather than this one.
+#
+#   `attempts` is parsed from `options attempts:N` in resolv.conf. This
+#   crate has no retry loop and no transport -- it encodes and decodes
+#   DNS messages and parses the config -- so applying the count belongs
+#   to whoever sends the query. The same is true of `timeout_ms` beside
+#   it. It becomes a real defect the moment a resolver here sends
+#   anything and hardcodes a number instead.
+#
+#   `http_only` is a cookie attribute parsed from Set-Cookie and exposed
+#   as a `pub` field. Parsing it and offering it IS the library's whole
+#   job; enforcing it is the caller's, and there is no caller yet.
 net/dns/src/lib.rs:attempts
 net/httpclient/src/lib.rs:http_only

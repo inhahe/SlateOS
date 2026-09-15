@@ -147944,3 +147944,50 @@ precisely when someone wants to know what hardware they have.
 
 None of the ten are fixed. They are listed here so that the next sweep starts
 from the self-declarations rather than from the names.
+
+## TD-C-SYSINFO-INVENTS-A-WHOLE-MACHINE-WHILE-THE-REAL-QUERY-LAYER-SITS-UNUSED
+
+**In short:** the System Information app tells you your machine has a
+GenuineIntel processor, an Intel I225-V network adapter, Intel Wi-Fi 6E AX211
+and an AMD Radeon RX 7900 XTX. It is describing no machine in particular — the
+values are written into `main.rs` as constants. Meanwhile a complete, layered
+hardware query module sits in the same crate with **no callers at all**.
+
+**Date:** 2026-09-15. **Lane:** C. First of the ten self-declared stubs, on the
+grounds that a system information tool is read precisely when someone wants to
+know what hardware they have.
+
+**The two halves.** `apps/sysinfo/src/main.rs` builds everything in its
+constructor: `populate_cpu`, `populate_memory`, `populate_storage`,
+`populate_network`, `populate_display`, `populate_pci`, `populate_services`,
+`populate_processes`, `populate_drivers`, `populate_env_vars` and more, each
+returning hardcoded values. `apps/sysinfo/src/hwquery.rs` is 2,152 lines
+implementing a `HardwareProvider` trait with seventeen query methods, a
+`SyscallProvider` that reads `/sys/hardware/*`, a `StubProvider`, a
+`FallbackProvider`, and a `RefreshManager` with a TTL cache. `main.rs`
+references `hwquery::` **zero times**. It is on the island ledger as
+`apps/sysinfo/hwquery.rs`.
+
+So this is one defect wearing two of this tree's recurring shapes at once: an
+island, and a fabrication, each of which is the other's fix.
+
+**The trap in the obvious wiring, which is why this is a note and not a
+one-liner.** `FallbackProvider` tries the syscall provider and falls back to
+`StubProvider` on error. Wiring `main` to it would compile, run, and display
+exactly the same fictional machine — because the syscall path fails on any host
+without `/sys/hardware`, which is every host today. That is the fabrication with
+more steps and a longer call stack, and it would look like a fix.
+
+**What the fix is.** Wire `main` to `SyscallProvider` directly, and render
+`HwQueryError::NotAvailable { path }` as a row saying the value could not be
+read and from where. The error type already carries the path, so the honest
+message is available without inventing one. `StubProvider` becomes
+`#[cfg(test)]` — it is a perfectly good fixture, and the same "a fixture
+production can reach is a fixture that eventually ships" rule that moved
+`ExifData::sample` applies. `FallbackProvider` goes: falling back to fabricated
+data is the defect, not a feature.
+
+The app's own types will need `Option` where a category can be absent, the same
+move `apps/benchmark`'s `SubTestResult::score` needed today and for the same
+reason: a zero-filled `CpuInfo` reads as a processor with no cores rather than
+as an unanswered question.

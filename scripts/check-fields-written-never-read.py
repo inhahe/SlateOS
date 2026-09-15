@@ -50,7 +50,7 @@ import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import rustscan  # noqa: E402  (needs the path above)
+import lanec_scan  # noqa: E402  (needs the path above)
 import selftestflag  # noqa: E402
 
 BASELINE = (
@@ -69,14 +69,14 @@ DESTRUCTURE_OPEN = re.compile(r"^\s*let\s+(?:Self|[A-Z]\w*)\s*\{")
 BOUND_NAME = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*,?\s*$")
 
 
-def detect(roots=rustscan.LANE_C_ROOTS, root=None):
+def detect(roots=lanec_scan.LANE_C_ROOTS, root=None):
     """`{field name: (relative path, line)}` for every asymmetric field."""
     decls = {}
     writes = collections.Counter()
     reads = collections.Counter()
-    base = pathlib.Path(root) if root else rustscan.ROOT
+    base = pathlib.Path(root) if root else lanec_scan.ROOT
 
-    for path, lines, inside in rustscan.scanned(roots, root):
+    for path, lines, inside in lanec_scan.scanned(roots, root):
         in_struct = False
         in_destructure = False
         depth = 0

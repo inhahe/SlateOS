@@ -838,7 +838,23 @@ fn unescape_unit_name(input: &str) -> String {
 /// Parsed global flags for systemctl.
 #[derive(Clone, Debug, Default)]
 struct SystemctlFlags {
+    /// `--user` / `--system`: which service manager to address.
+    ///
+    /// Read by `no_unit_interface`, which names it in the refusal.
     user_scope: bool,
+    /// Output-formatting flags, accepted and inert.
+    ///
+    /// These are NOT the same defect as a parsed-and-ignored option, and the
+    /// distinction is worth keeping. Each one shapes a listing -- suppress
+    /// the pager, drop the column headings, flatten the tree -- and every
+    /// command in this build refuses before producing a listing. So they are
+    /// vacuous rather than wrong: there is no output for them to fail to
+    /// format.
+    ///
+    /// They stay accepted because removing them would break scripts that
+    /// pass them unconditionally, and a field-level scan will keep reporting
+    /// them, which is correct. The day a per-unit interface lands they become
+    /// real, and they are already parsed.
     no_pager: bool,
     no_legend: bool,
     plain: bool,
@@ -996,8 +1012,32 @@ fn service_counts() -> Option<(u64, u64)> {
 }
 
 /// The diagnostic every unit-level subcommand shares, on stderr.
-fn no_unit_interface(what: &str) {
-    eprintln!("systemctl: cannot {what}: this system exposes no per-unit interface");
+/// Refuse, naming the manager the caller asked about.
+///
+/// `--user` and `--system` select which service manager systemctl talks to.
+/// Neither is reachable here, so the OUTCOME is the same either way -- but
+/// the request was still read, and saying which one was asked for is the
+/// difference between a refusal that answers the question and one that
+/// ignores it.
+///
+/// It is phrased "for the user manager" rather than "the user manager is
+/// unreachable" deliberately: the second would imply the system one is not,
+/// and both are equally absent.
+/// The refusal text, as a value, so it can be asserted.
+///
+/// The message goes to stderr -- deliberately, it is a diagnostic -- and
+/// the test helper in this file captures stdout. Splitting the wording from
+/// the printing is what makes the part that can be wrong testable.
+fn unit_interface_refusal(what: &str, flags: &SystemctlFlags) -> String {
+    let scope = if flags.user_scope { "user" } else { "system" };
+    format!(
+        "systemctl: cannot {what} for the {scope} manager: this system exposes \
+no per-unit interface"
+    )
+}
+
+fn no_unit_interface(what: &str, flags: &SystemctlFlags) {
+    eprintln!("{}", unit_interface_refusal(what, flags));
     match service_counts() {
         Some((total, running)) => eprintln!(
             "systemctl: /proc/servicemgr reports {total} service(s), {running} running, \
@@ -1011,21 +1051,21 @@ fn no_unit_interface(what: &str) {
 // Systemctl sub-commands
 // ============================================================================
 
-fn cmd_list_units(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
-    no_unit_interface("list units");
+fn cmd_list_units(_out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
+    no_unit_interface("list units", flags);
     Ok(1)
 }
 
-fn cmd_list_unit_files(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
-    no_unit_interface("list unit files");
+fn cmd_list_unit_files(_out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
+    no_unit_interface("list unit files", flags);
     Ok(1)
 }
 
-fn cmd_status(_out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
+fn cmd_status(_out: &mut dyn Write, unit_name: &str, flags: &SystemctlFlags) -> io::Result<i32> {
     // Deliberately NOT exit 4. systemd's 4 means "no such unit", and this
     // program cannot tell a unit that does not exist from one it cannot see.
     // Claiming the former would be the same defect facing the other way.
-    no_unit_interface(&format!("report the status of {unit_name}"));
+    no_unit_interface(&format!("report the status of {unit_name}"), flags);
     Ok(1)
 }
 
@@ -1033,9 +1073,9 @@ fn cmd_show(
     _out: &mut dyn Write,
     unit_name: &str,
     _property: Option<&str>,
-    _flags: &SystemctlFlags,
+    flags: &SystemctlFlags,
 ) -> io::Result<i32> {
-    no_unit_interface(&format!("show properties of {unit_name}"));
+    no_unit_interface(&format!("show properties of {unit_name}"), flags);
     Ok(1)
 }
 
@@ -1066,55 +1106,55 @@ fn cmd_unit_action(
     _out: &mut dyn Write,
     action: &str,
     unit_name: &str,
-    _flags: &SystemctlFlags,
+    flags: &SystemctlFlags,
 ) -> io::Result<i32> {
-    no_unit_interface(&format!("{action} {}", with_unit_suffix(unit_name)));
+    no_unit_interface(&format!("{action} {}", with_unit_suffix(unit_name)), flags);
     Ok(1)
 }
 
-fn cmd_is_active(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
+fn cmd_is_active(out: &mut dyn Write, unit_name: &str, flags: &SystemctlFlags) -> io::Result<i32> {
     // `unknown` is what systemd prints for a unit it cannot resolve, and the
     // non-zero status is what a script branches on. This is the subcommand
     // that mattered most: it used to exit 0 for four hard-coded names, so
     // `systemctl is-active sshd || start_it` never started anything.
     writeln!(out, "unknown")?;
-    no_unit_interface(&format!("determine whether {unit_name} is active"));
+    no_unit_interface(&format!("determine whether {unit_name} is active"), flags);
     Ok(1)
 }
 
 fn cmd_is_enabled(
     _out: &mut dyn Write,
     unit_name: &str,
-    _flags: &SystemctlFlags,
+    flags: &SystemctlFlags,
 ) -> io::Result<i32> {
-    no_unit_interface(&format!("determine whether {unit_name} is enabled"));
+    no_unit_interface(&format!("determine whether {unit_name} is enabled"), flags);
     Ok(1)
 }
 
-fn cmd_is_failed(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
+fn cmd_is_failed(out: &mut dyn Write, unit_name: &str, flags: &SystemctlFlags) -> io::Result<i32> {
     writeln!(out, "unknown")?;
-    no_unit_interface(&format!("determine whether {unit_name} has failed"));
+    no_unit_interface(&format!("determine whether {unit_name} has failed"), flags);
     Ok(1)
 }
 
-fn cmd_daemon_reload(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
+fn cmd_daemon_reload(_out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
     // Printed "Reloading daemon configuration..." and exited 0 without a
     // service manager to ask.
-    no_unit_interface("reload the service manager's configuration");
+    no_unit_interface("reload the service manager's configuration", flags);
     Ok(1)
 }
 
-fn cmd_cat_unit(_out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
-    no_unit_interface(&format!("show the unit file for {unit_name}"));
+fn cmd_cat_unit(_out: &mut dyn Write, unit_name: &str, flags: &SystemctlFlags) -> io::Result<i32> {
+    no_unit_interface(&format!("show the unit file for {unit_name}"), flags);
     Ok(1)
 }
 
-fn cmd_edit_unit(_out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
+fn cmd_edit_unit(_out: &mut dyn Write, unit_name: &str, flags: &SystemctlFlags) -> io::Result<i32> {
     // Printed "Editing /etc/slateos/system/<unit>.d/override.conf..." then
     // "(editor not available in this environment)" and exited 0. The second
     // line is honest and the first names a file it did not open; exiting 0
     // told any caller the edit had happened.
-    no_unit_interface(&format!("edit {unit_name}"));
+    no_unit_interface(&format!("edit {unit_name}"), flags);
     Ok(1)
 }
 
@@ -1136,37 +1176,37 @@ fn cmd_power(_out: &mut dyn Write, action: &str, _flags: &SystemctlFlags) -> io:
     Ok(1)
 }
 
-fn cmd_isolate(_out: &mut dyn Write, target: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
+fn cmd_isolate(_out: &mut dyn Write, target: &str, flags: &SystemctlFlags) -> io::Result<i32> {
     // Printed "Isolating X..." and "Stopping all units not required by X." --
     // the second sentence asserting that units had been stopped -- then
     // exited 0 having enumerated nothing and stopped nothing.
-    no_unit_interface(&format!("isolate {target}"));
+    no_unit_interface(&format!("isolate {target}"), flags);
     Ok(1)
 }
 
-fn cmd_list_timers(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
+fn cmd_list_timers(_out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
     // Printed one invented row -- `logwatch.timer`, next "Mon 2026-01-02
     // 00:00:00", "23h left", last "Mon 2026-01-01 00:00:00", "1h ago" --
     // followed by "1 timers listed.", on a system with no timer units and no
     // way to enumerate them. Specific dates on a named unit are what make an
     // invented reading convincing.
-    no_unit_interface("list timers");
+    no_unit_interface("list timers", flags);
     Ok(1)
 }
 
-fn cmd_list_sockets(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
+fn cmd_list_sockets(_out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
     // Printed one hard-coded row -- /run/dbus/system_bus_socket, Stream,
     // dbus.socket -- followed by "1 sockets listed.", whether or not that
     // socket existed and without enumerating anything. Socket units are unit
     // state like any other, and there is no per-unit interface to read.
-    no_unit_interface("list sockets");
+    no_unit_interface("list sockets", flags);
     Ok(1)
 }
 
 fn cmd_list_dependencies(
     _out: &mut dyn Write,
     unit_name: &str,
-    _flags: &SystemctlFlags,
+    flags: &SystemctlFlags,
 ) -> io::Result<i32> {
     // The comment on the deleted body said it plainly: "Produce a synthetic
     // dependency tree." It matched three unit names and invented children for
@@ -1174,7 +1214,7 @@ fn cmd_list_dependencies(
     // and anything else got a single basic.target. A dependency graph is the
     // thing you consult to decide what stopping a unit will take down with
     // it, so an invented one is worse than none.
-    no_unit_interface(&format!("list the dependencies of {unit_name}"));
+    no_unit_interface(&format!("list the dependencies of {unit_name}"), flags);
     Ok(1)
 }
 
@@ -2128,11 +2168,11 @@ fn run_systemctl(args: &[String]) -> io::Result<i32> {
         "daemon-reload" => cmd_daemon_reload(&mut out, &flags),
         "cat" => {
             let u = unit.unwrap_or("");
-            cmd_cat_unit(&mut out, u)
+            cmd_cat_unit(&mut out, u, &flags)
         }
         "edit" => {
             let u = unit.unwrap_or("");
-            cmd_edit_unit(&mut out, u)
+            cmd_edit_unit(&mut out, u, &flags)
         }
         "poweroff" | "reboot" | "halt" | "suspend" | "hibernate" => {
             cmd_power(&mut out, cmd, &flags)
@@ -2647,6 +2687,29 @@ mod tests {
     }
 
     // Helper to capture output.
+    /// The refusal names the manager that was asked for.
+    ///
+    /// `--user` and `--system` select which service manager systemctl talks
+    /// to. Neither is reachable here, so the outcome is identical either way
+    /// -- but the flag was parsed into a field nothing read, so the request
+    /// was taken and discarded. It reaches the message now.
+    #[test]
+    fn the_refusal_names_the_requested_manager() {
+        let system = SystemctlFlags::default();
+        let user = SystemctlFlags {
+            user_scope: true,
+            ..SystemctlFlags::default()
+        };
+        assert!(unit_interface_refusal("list units", &system).contains("for the system manager"));
+        assert!(unit_interface_refusal("list units", &user).contains("for the user manager"));
+        // The two must actually DIFFER, or both assertions above would pass
+        // against a function that ignored the flag and said "system" twice.
+        assert_ne!(
+            unit_interface_refusal("list units", &system),
+            unit_interface_refusal("list units", &user)
+        );
+    }
+
     fn capture<F>(f: F) -> (String, i32)
     where
         F: FnOnce(&mut Vec<u8>) -> io::Result<i32>,
@@ -3448,7 +3511,8 @@ mod tests {
 
     #[test]
     fn test_cat_known_unit() {
-        let (out, code) = capture(|buf| cmd_cat_unit(buf, "sshd.service"));
+        let (out, code) =
+            capture(|buf| cmd_cat_unit(buf, "sshd.service", &SystemctlFlags::default()));
         assert_eq!(code, 1);
         assert!(
             out.is_empty(),
@@ -3458,7 +3522,8 @@ mod tests {
 
     #[test]
     fn test_cat_unknown_unit() {
-        let (out, code) = capture(|buf| cmd_cat_unit(buf, "nope.service"));
+        let (out, code) =
+            capture(|buf| cmd_cat_unit(buf, "nope.service", &SystemctlFlags::default()));
         assert_eq!(code, 1);
         assert!(out.is_empty());
     }
@@ -3933,7 +3998,8 @@ mod tests {
 
     #[test]
     fn test_edit_unit() {
-        let (out, code) = capture(|buf| cmd_edit_unit(buf, "sshd.service"));
+        let (out, code) =
+            capture(|buf| cmd_edit_unit(buf, "sshd.service", &SystemctlFlags::default()));
         // Refuses, and prints nothing on stdout. Empty stdout is the
         // assertion that matters: the fabrication was a stdout line, and a
         // caller parsing stdout must come away with no claim at all.

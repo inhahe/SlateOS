@@ -150221,9 +150221,10 @@ a list to empty.** The number going up was the point; it is not a backlog.
 
 ## TD-C-A-DIALOG-THAT-STOPPED-THE-CLOCK -- FIXED 2026-09-15
 
-**In short:** in three apps, opening a Save dialog quietly froze time. Podcast
+**In short:** in four apps, opening a file dialog quietly froze time. Podcast
 playback stopped advancing, the reminders app stopped noticing that something
-had become overdue, and the calendar never rolled over to the next day. Nothing
+had become overdue, the calendar never rolled over to the next day, and the
+photo manager's slideshow stopped between one picture and the next. Nothing
 crashed and nothing looked wrong; the window behind the dialog simply stopped
 being told that time had passed. The bug was in code that eleven applications
 had each written out by hand, and it was found by collecting that code into one
@@ -150232,8 +150233,13 @@ place rather than by anyone noticing the symptom.
 ### The shape of it
 
 An app with a file dialog has to route events to the dialog while it is up, or
-a keystroke meant for a filename reaches the window behind it. Nine of the
-eleven wrote that as an early return:
+a keystroke meant for a filename reaches the window behind it. **Thirteen apps
+in this tree do that** -- a count corrected twice, because the first grep
+(`fn apply_dialog_action`) missed `fileassoc` and `photomanager`, which route
+through a `file_dialog_event` helper instead, and a later one matched
+`startupmanager`, where the string is in a *test name*.
+
+Nine of the thirteen wrote the routing as an early return:
 
 ```rust
 if self.file_dialog.is_some() {
@@ -150257,10 +150263,20 @@ What it actually does is **return from the whole event handler**, so
 | `podcast` | advances playback and the download queue | audio stops because you opened Save |
 | `reminders` | re-reads the clock, fires notifications | stops noticing what has become overdue |
 | `calendar` | midnight rollover | "today" stays on yesterday, in blue, in five places |
+| `photomanager` | advances the slideshow | the slideshow stops until the dialog is closed |
 
-The other six with this shape (`contacts`, `dbviewer`, `jsonviewer`, `notes`,
-`rssreader`, `spreadsheet`) never ask for ticks, so their instance is **latent
-rather than live** -- it would have become a bug the day any of them grew a
+**The same defect appears in a third shape**, which is the point: it is not
+tied to an idiom. `photomanager` and `fileassoc` route through a helper that
+returns `false` (or `Some(Consumed)`) for anything that is not input, and the
+caller returns on that -- so a tick never reaches the application there either.
+`photomanager`'s `tick_interval` fires exactly when a slideshow is running,
+which makes it the fourth live case. What the nine have in common is not a
+syntax; it is **routing to the dialog and then returning, without deciding
+which events that covers.**
+
+The six early-return apps that never ask for ticks (`contacts`, `dbviewer`,
+`jsonviewer`, `notes`, `rssreader`, `spreadsheet`) have it **latent rather
+than live** -- it would have become a bug the day any of them grew a
 clock, an autosave or a progress indicator.
 
 `filesearch` and `hexeditor` wrote the intercept as guard arms on the outer

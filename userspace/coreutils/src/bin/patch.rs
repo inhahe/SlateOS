@@ -231,18 +231,27 @@ struct Options {
     reject_file: Option<OsString>,
     /// `--no-backup-if-mismatch`: do not save `<target>.orig` when a hunk fails.
     no_backup_if_mismatch: bool,
-    /// Accepted and currently inert: `-N/--forward`, `-f/--force`,
-    /// `-F/--fuzz`, `-Z/--set-utc`.
+    /// `-N/--forward`: do not ask about a reversed or already-applied patch,
+    /// just skip it. IMPLEMENTED.
     ///
-    /// These are NOT silently ignored in the sense that matters -- each was
-    /// measured against GNU on the cases this tree exercises, and on those the
-    /// behaviour coincides exactly with the default. `-F 3` differs only when a
-    /// hunk would match at a fuzz distance, `-N` only when a patch is already
-    /// applied, `-f` only where GNU would otherwise prompt, `-Z` only in the
-    /// timestamps it sets. Accepting them is therefore correct today and
-    /// incomplete rather than wrong; known-issues records which is which, so
-    /// nobody reads a passing harness as evidence that fuzz is implemented.
+    /// The difference is the two prompt lines and nothing else -- measured.
+    /// Without it GNU writes the detection, `Assume -R? [n] `, `Apply anyway?
+    /// [n] ` and `Skipping patch.` on four lines; with it, the detection and
+    /// `Skipping patch.` share ONE line and the questions are not asked. The
+    /// reject file, the `ignored` count and the exit status are identical
+    /// either way, which is why an inert `-N` agreed with GNU on every case
+    /// this tree had.
     forward: bool,
+    /// Accepted and currently inert: `-f/--force`, `-Z/--set-utc`.
+    ///
+    /// Each was measured against GNU on the cases this tree exercises, and on
+    /// those the behaviour coincides with the default: `-f` differs only where
+    /// GNU would otherwise prompt, `-Z` only in the timestamps it sets.
+    ///
+    /// That argument is weaker than it reads, and `-l` is why. An option the
+    /// `--help` text ADVERTISES is one the user has been told works, so
+    /// "coincides on the cases we exercise" stops being a defence the moment
+    /// the case is a user's rather than a harness's. These two are next.
     force: bool,
     fuzz: Option<usize>,
     set_utc: bool,
@@ -1784,9 +1793,21 @@ fn main() {
             }
             if !opts.silent {
                 let detected = if opts.reverse {
-                    "Unreversed patch detected!  Ignore -R? [n] "
+                    "Unreversed patch detected!  "
                 } else {
-                    "Reversed (or previously applied) patch detected!  Assume -R? [n] "
+                    "Reversed (or previously applied) patch detected!  "
+                };
+                // `-N/--forward` asks nothing. Measured: GNU drops BOTH prompt
+                // lines and puts `Skipping patch.` on the same line as the
+                // detection, so the question text and the newline after it go
+                // together -- printing one without the other would leave a
+                // line break GNU does not write.
+                let prompts = if opts.forward {
+                    ""
+                } else if opts.reverse {
+                    "Ignore -R? [n] \nApply anyway? [n] \n"
+                } else {
+                    "Assume -R? [n] \nApply anyway? [n] \n"
                 };
                 let n = hunks.len();
                 let plural = if n == 1 { "hunk" } else { "hunks" };
@@ -1799,10 +1820,9 @@ fn main() {
                 // Assembled as bytes: the reject path goes in RAW, the way
                 // GNU writes it on stdout, so a name this OS allows and
                 // Unicode does not still names the file it wrote.
-                let mut msg: Vec<u8> = format!(
-                    "{detected}\nApply anyway? [n] \nSkipping patch.\n{n} out of {n} {plural} ignored"
-                )
-                .into_bytes();
+                let mut msg: Vec<u8> =
+                    format!("{detected}{prompts}Skipping patch.\n{n} out of {n} {plural} ignored")
+                        .into_bytes();
                 if !opts.dry_run {
                     msg.extend_from_slice(b" -- saving rejects to file ");
                     msg.extend_from_slice(&reject_path);

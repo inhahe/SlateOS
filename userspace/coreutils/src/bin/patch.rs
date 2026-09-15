@@ -366,6 +366,18 @@ fn parse_args(args: &[OsString]) -> Result<Options, String> {
                 Ok(n) => opts.fuzz = Some(n),
                 Err(_) => return Err("invalid fuzz factor".to_string()),
             }
+        } else if let Some(v) = a.strip_prefix("-F")
+            && !v.is_empty()
+        {
+            // `-F1` with the number GLUED ON. Measured: GNU takes all four of
+            // `-F1`, `-F 1`, `--fuzz=1` and `--fuzz 1`; this build took the
+            // last three, so `patch -F1` answered `invalid option -- 'F'`.
+            // Must sit after the bare `-F` arm above, which claims the
+            // separate-word spelling.
+            match v.parse::<usize>() {
+                Ok(n) => opts.fuzz = Some(n),
+                Err(_) => return Err("invalid fuzz factor".to_string()),
+            }
         } else if a == "-r" || a == "--reject-file" {
             i = i.saturating_add(1);
             match args.get(i) {
@@ -1033,7 +1045,8 @@ fn apply_hunk(
     hunk: &Hunk,
     offset: i64,
     loose: bool,
-) -> Option<(Vec<Vec<u8>>, i64)> {
+    max_fuzz: usize,
+) -> Option<(Vec<Vec<u8>>, i64, usize)> {
     // A HUNK THAT REMOVES NOTHING NAMES THE LINE TO INSERT *AFTER*, so its
     // 0-based insertion point is `old_start` itself and the usual `- 1` is
     // wrong. For delete and change, `old_start` is the first affected line and
@@ -1059,33 +1072,45 @@ fn apply_hunk(
         .max(0);
     let target_start = usize::try_from(target_start_signed).unwrap_or(0);
 
-    // Try exact position first, then search outward (fuzz).
-    let max_fuzz: usize = 50;
-    let mut best_pos: Option<usize> = None;
+    // SLIDE and FUZZ are two different things, and this constant used to be
+    // called `max_fuzz` while meaning the first. Sliding is how far the hunk
+    // may move from the line its header names, looking for an exact match --
+    // what GNU reports as `(offset N lines)`. Fuzz is how many CONTEXT lines
+    // may be ignored at each end of the hunk -- what GNU reports as `with
+    // fuzz N`. One name over two mechanisms, and the name belonged to the one
+    // that was not implemented.
+    const MAX_SLIDE: usize = 50;
 
-    'outer: for fuzz in 0..=max_fuzz {
-        if fuzz == 0 {
-            if try_hunk_at(lines, hunk, target_start, loose) {
-                best_pos = Some(target_start);
-                break;
+    // Exact first, then looser. GNU tries every position at fuzz 0 before it
+    // tries any position at fuzz 1, so a clean match further away beats a
+    // fuzzy one nearby -- which is the order that keeps a hunk from silently
+    // eating a neighbouring block that merely resembles it.
+    let mut best: Option<(usize, usize)> = None;
+
+    'outer: for fz in 0..=max_fuzz {
+        for slide in 0..=MAX_SLIDE {
+            if slide == 0 {
+                if try_hunk_at(lines, hunk, target_start, loose, fz) {
+                    best = Some((target_start, fz));
+                    break 'outer;
+                }
+                continue;
             }
-            continue;
-        }
-        // Try -fuzz, then +fuzz.
-        if let Some(pos) = target_start.checked_sub(fuzz)
-            && try_hunk_at(lines, hunk, pos, loose)
-        {
-            best_pos = Some(pos);
-            break 'outer;
-        }
-        let pos = target_start.saturating_add(fuzz);
-        if try_hunk_at(lines, hunk, pos, loose) {
-            best_pos = Some(pos);
-            break;
+            if let Some(pos) = target_start.checked_sub(slide)
+                && try_hunk_at(lines, hunk, pos, loose, fz)
+            {
+                best = Some((pos, fz));
+                break 'outer;
+            }
+            let pos = target_start.saturating_add(slide);
+            if try_hunk_at(lines, hunk, pos, loose, fz) {
+                best = Some((pos, fz));
+                break 'outer;
+            }
         }
     }
 
-    let pos = best_pos?;
+    let (pos, fuzz_used) = best?;
 
     // Build the new file content.
     let mut result = Vec::new();
@@ -1138,10 +1163,9 @@ fn apply_hunk(
         .saturating_add(i64::try_from(hunk.new_count).unwrap_or(i64::MAX))
         .saturating_sub(i64::try_from(hunk.old_count).unwrap_or(i64::MAX));
 
-    Some((result, new_offset))
+    Some((result, new_offset, fuzz_used))
 }
 
-/// Check if a hunk's context/remove lines match at the given position.
 /// Compare one hunk line against one file line, honouring `-l`.
 fn lines_match(actual: &[u8], expected: &[u8], loose: bool) -> bool {
     if loose {
@@ -1221,18 +1245,79 @@ fn loose_eq(a: &[u8], b: &[u8]) -> bool {
     }
 }
 
-fn try_hunk_at(lines: &[Vec<u8>], hunk: &Hunk, pos: usize, loose: bool) -> bool {
+/// How many CONTEXT lines a hunk opens and closes with.
+///
+/// Fuzz is spent at the ENDS, so these two counts are its budget. A hunk that
+/// begins with a removal has no leading context and no leading fuzz is
+/// possible -- measured: GNU refuses a perturbed removal even at `-F3`.
+fn leading_context(hunk: &Hunk) -> usize {
+    hunk.lines
+        .iter()
+        .take_while(|l| matches!(l, HunkLine::Context(_)))
+        .count()
+}
+
+fn trailing_context(hunk: &Hunk) -> usize {
+    hunk.lines
+        .iter()
+        .rev()
+        .take_while(|l| matches!(l, HunkLine::Context(_)))
+        .count()
+}
+
+/// Does the hunk's context match the file at `pos`, allowing `fuzz`?
+///
+/// `fuzz` is GNU's `-F`: ignore up to that many CONTEXT lines at EACH end of
+/// the hunk. Measured, with a hunk carrying three context lines either side:
+///
+/// | perturbed | GNU applies at |
+/// |---|---|
+/// | the outermost leading context line | fuzz 1 |
+/// | outermost leading AND outermost trailing | fuzz 1 |
+/// | two leading and one trailing | fuzz 2 |
+/// | a REMOVED line, at any `-F` | never |
+///
+/// The second row is what makes "at each end" the right reading rather than
+/// "in total": two wrong lines still cost only fuzz 1, because they sit at
+/// opposite ends. The default is 2, also measured -- three wrong leading
+/// context lines fail without an explicit `-F 3`.
+///
+/// An ignored context line is still CONSUMED: it occupies its file line, it
+/// is simply not compared. What the file holds there is kept, which
+/// `apply_hunk` handles by emitting context from the file rather than the
+/// patch.
+fn try_hunk_at(lines: &[Vec<u8>], hunk: &Hunk, pos: usize, loose: bool, fuzz: usize) -> bool {
+    // Fuzz can only ever spend itself on context, so it is capped by how much
+    // context there is. `-F 100` on a hunk with two leading context lines
+    // ignores two, not a hundred, and still compares every removal.
+    let skip_lead = fuzz.min(leading_context(hunk));
+    let skip_trail = fuzz.min(trailing_context(hunk));
+    let old_total = hunk
+        .lines
+        .iter()
+        .filter(|l| matches!(l, HunkLine::Context(_) | HunkLine::Remove(_)))
+        .count();
+    let trail_from = old_total.saturating_sub(skip_trail);
+
     let mut line_idx = pos;
+    let mut old_seen: usize = 0;
     for hl in &hunk.lines {
         match hl {
             HunkLine::Context(expected) | HunkLine::Remove(expected) => {
                 let Some(actual) = lines.get(line_idx) else {
                     return false;
                 };
-                if !lines_match(actual, expected, loose) {
+                // A skipped line still has to EXIST -- the hunk occupies it
+                // either way. Only the comparison is waived, and only for
+                // context: a removal is a line this hunk is about to delete,
+                // so agreeing about it is not optional.
+                let skipped = matches!(hl, HunkLine::Context(_))
+                    && (old_seen < skip_lead || old_seen >= trail_from);
+                if !skipped && !lines_match(actual, expected, loose) {
                     return false;
                 }
                 line_idx = line_idx.saturating_add(1);
+                old_seen = old_seen.saturating_add(1);
             }
             HunkLine::Add(_) => {
                 // Added lines don't consume original lines.
@@ -1749,7 +1834,14 @@ fn main() {
         let mut offset: i64 = 0;
         let mut hunks_applied = 0;
         let mut hunks_failed = 0;
+        // Did any hunk need fuzz to land? GNU treats that as the patch not
+        // matching the file, which decides whether a `.orig` is written.
+        let mut any_fuzz = false;
         let mut rejected: Vec<Hunk> = Vec::new();
+
+        // GNU's default fuzz is 2, measured: three wrong leading context
+        // lines are refused without an explicit `-F 3`, two are not.
+        let max_fuzz = opts.fuzz.unwrap_or(2);
 
         let hunks: Vec<Hunk> = if opts.reverse {
             fp.hunks.iter().map(reverse_hunk).collect()
@@ -1781,11 +1873,11 @@ fn main() {
         };
         let forward_fails = hunks
             .iter()
-            .any(|h| apply_hunk(&lines, h, 0, opts.ignore_whitespace).is_none());
+            .any(|h| apply_hunk(&lines, h, 0, opts.ignore_whitespace, max_fuzz).is_none());
         let opposite_applies = !opposite.is_empty()
             && opposite
                 .iter()
-                .all(|h| apply_hunk(&lines, h, 0, opts.ignore_whitespace).is_some());
+                .all(|h| apply_hunk(&lines, h, 0, opts.ignore_whitespace, max_fuzz).is_some());
         if forward_fails && opposite_applies {
             any_failed = true;
             // `-r FILE` names the reject file outright; without it the reject
@@ -1856,9 +1948,13 @@ fn main() {
         }
 
         for (hunk_idx, hunk) in hunks.iter().enumerate() {
-            match apply_hunk(&lines, hunk, offset, opts.ignore_whitespace) {
-                Some((new_lines, new_offset)) => {
-                    if opts.verbose && !opts.silent {
+            match apply_hunk(&lines, hunk, offset, opts.ignore_whitespace, max_fuzz) {
+                Some((new_lines, new_offset, fuzz_used)) => {
+                    any_fuzz = any_fuzz || fuzz_used > 0;
+                    // GNU reports a fuzzy hunk WITHOUT `-v`: a clean apply is
+                    // silent, one that needed fuzz says so. Measured -- plain
+                    // `patch` prints `Hunk #1 succeeded at 2 with fuzz 1.`
+                    if (opts.verbose || fuzz_used > 0) && !opts.silent {
                         // The line the hunk landed on, which is its start
                         // shifted by everything applied before it -- not the
                         // number in the header. A second hunk in a file whose
@@ -1869,9 +1965,15 @@ fn main() {
                             .unwrap_or(i64::MAX)
                             .saturating_add(offset)
                             .max(1);
+                        let fuzz_note = if fuzz_used > 0 {
+                            format!(" with fuzz {fuzz_used}")
+                        } else {
+                            String::new()
+                        };
                         let mut out = Stream::stdout();
                         let _ = out.write_all(
-                            format!("Hunk #{} succeeded at {at}.\n", hunk_idx + 1).as_bytes(),
+                            format!("Hunk #{} succeeded at {at}{fuzz_note}.\n", hunk_idx + 1)
+                                .as_bytes(),
                         );
                     }
                     lines = new_lines;
@@ -2013,8 +2115,26 @@ fn main() {
         }
 
         if !opts.dry_run && hunks_applied > 0 {
-            // Create backup if requested.
-            if opts.backup && Path::new(&file_path_os).exists() {
+            // `-b` asks for a backup outright. GNU ALSO writes one when the
+            // patch did not apply EXACTLY -- `--backup-if-mismatch` is its
+            // default -- and a hunk that needed fuzz is exactly that.
+            //
+            // Measured, and the last row is the one worth keeping:
+            //
+            // | apply | `.orig` |
+            // |---|---|
+            // | exact | no |
+            // | fuzz 1 | YES |
+            // | fuzz 1 with `--no-backup-if-mismatch` | no |
+            // | `-l`, tab against spaces | NO |
+            //
+            // A loose match is not a mismatch. That is not obvious -- it is
+            // every bit as inexact as a fuzzy one -- but `-l` says those lines
+            // ARE equal, so nothing about the match was approximate once the
+            // flag was given. The harness found this the honest way: the
+            // `-l` case passed while the fuzz case differed by one file.
+            let backup_for_mismatch = any_fuzz && !opts.no_backup_if_mismatch;
+            if (opts.backup || backup_for_mismatch) && Path::new(&file_path_os).exists() {
                 let backup_path = [file_path.as_slice(), b".orig"].concat();
                 if let Err(e) = fs::copy(&file_path_os, quote::os_from_bytes(&backup_path)) {
                     diag!(
@@ -2533,19 +2653,138 @@ mod tests {
     #[test]
     fn try_hunk_at_matches_correct_position() {
         let l = lines(&["line1", "line2", "line3"]);
-        assert!(try_hunk_at(&l, &modify_hunk(), 0, false));
+        assert!(try_hunk_at(&l, &modify_hunk(), 0, false, 0));
     }
 
     #[test]
     fn try_hunk_at_fails_on_mismatch() {
         let l = lines(&["lineA", "lineB", "lineC"]);
-        assert!(!try_hunk_at(&l, &modify_hunk(), 0, false));
+        assert!(!try_hunk_at(&l, &modify_hunk(), 0, false, 0));
     }
 
     #[test]
     fn try_hunk_at_fails_past_end() {
         let l = lines(&["line1"]);
-        assert!(!try_hunk_at(&l, &modify_hunk(), 0, false));
+        assert!(!try_hunk_at(&l, &modify_hunk(), 0, false, 0));
+    }
+
+    // ---------------- -F / fuzz ----------------
+
+    /// A hunk with `n` context lines either side of a one-line change.
+    fn fuzz_hunk() -> Hunk {
+        Hunk {
+            old_start: 1,
+            old_count: 7,
+            new_start: 1,
+            new_count: 7,
+            lines: vec![
+                HunkLine::Context("c1".into()),
+                HunkLine::Context("c2".into()),
+                HunkLine::Context("c3".into()),
+                HunkLine::Remove("mid".into()),
+                HunkLine::Add("MID".into()),
+                HunkLine::Context("c4".into()),
+                HunkLine::Context("c5".into()),
+                HunkLine::Context("c6".into()),
+            ],
+        }
+    }
+
+    /// The fuzz budget is PER END, not per hunk. Two wrong context lines at
+    /// opposite ends still cost only fuzz 1 -- measured against GNU, and the
+    /// row that makes "at each end" the right reading.
+    #[test]
+    fn fuzz_is_budgeted_at_each_end_not_across_the_hunk() {
+        let h = fuzz_hunk();
+        // Outermost leading wrong.
+        let one = lines(&["XX", "c2", "c3", "mid", "c4", "c5", "c6"]);
+        assert!(!try_hunk_at(&one, &h, 0, false, 0), "fuzz 0 must refuse");
+        assert!(try_hunk_at(&one, &h, 0, false, 1), "fuzz 1 must accept");
+
+        // Outermost wrong at BOTH ends: still fuzz 1, because each end has
+        // its own budget. Under a per-hunk budget this would need fuzz 2.
+        let both = lines(&["XX", "c2", "c3", "mid", "c4", "c5", "YY"]);
+        assert!(!try_hunk_at(&both, &h, 0, false, 0));
+        assert!(
+            try_hunk_at(&both, &h, 0, false, 1),
+            "one per end, not one in total"
+        );
+
+        // Two deep on the leading side needs 2.
+        let two = lines(&["XX", "ZZ", "c3", "mid", "c4", "c5", "YY"]);
+        assert!(!try_hunk_at(&two, &h, 0, false, 1));
+        assert!(try_hunk_at(&two, &h, 0, false, 2));
+    }
+
+    /// Fuzz never excuses a REMOVED line. Measured: GNU refuses a perturbed
+    /// removal at `-F3`, and it must, because that is a line the hunk is
+    /// about to delete -- applying anyway would destroy content the patch
+    /// never matched.
+    #[test]
+    fn fuzz_never_excuses_a_removed_line() {
+        let h = fuzz_hunk();
+        let bad = lines(&["c1", "c2", "c3", "WRONG", "c4", "c5", "c6"]);
+        for fuzz in 0..=9 {
+            assert!(
+                !try_hunk_at(&bad, &h, 0, false, fuzz),
+                "fuzz {fuzz} must not excuse a removal"
+            );
+        }
+    }
+
+    /// Fuzz is capped by how much context there actually is, so a hunk that
+    /// opens with a removal gets no leading fuzz at all however large `-F` is.
+    #[test]
+    fn fuzz_is_capped_by_the_context_a_hunk_actually_has() {
+        let h = Hunk {
+            old_start: 1,
+            old_count: 3,
+            new_start: 1,
+            new_count: 3,
+            lines: vec![
+                HunkLine::Remove("first".into()),
+                HunkLine::Add("FIRST".into()),
+                HunkLine::Context("c1".into()),
+                HunkLine::Context("c2".into()),
+            ],
+        };
+        assert_eq!(leading_context(&h), 0, "it opens with a removal");
+        assert_eq!(trailing_context(&h), 2);
+
+        let bad = lines(&["WRONG", "c1", "c2"]);
+        assert!(!try_hunk_at(&bad, &h, 0, false, 99));
+
+        // The trailing end still fuzzes normally.
+        let tail_wrong = lines(&["first", "c1", "YY"]);
+        assert!(!try_hunk_at(&tail_wrong, &h, 0, false, 0));
+        assert!(try_hunk_at(&tail_wrong, &h, 0, false, 1));
+    }
+
+    /// A fuzzed context line keeps what the FILE holds there, and the fuzz
+    /// level is reported back so the caller can say `with fuzz N` and decide
+    /// whether to write a `.orig`.
+    #[test]
+    fn a_fuzzed_context_line_keeps_the_files_text_and_reports_its_level() {
+        let h = fuzz_hunk();
+        let file = lines(&["XX", "c2", "c3", "mid", "c4", "c5", "c6"]);
+        let (out, _, fuzz_used) = apply_hunk(&file, &h, 0, false, 2).expect("fuzz 1 applies");
+        assert_eq!(fuzz_used, 1);
+        // `XX` survives: the hunk did not match it and does not get to
+        // replace it with the `c1` the patch spells.
+        assert_eq!(out, lines(&["XX", "c2", "c3", "MID", "c4", "c5", "c6"]));
+    }
+
+    /// Both spellings of the flag, including the glued one this build used to
+    /// answer `invalid option -- 'F'` to.
+    #[test]
+    fn fuzz_parses_in_every_spelling_gnu_takes() {
+        assert_eq!(parse_args(&s(&["-F1"])).unwrap().fuzz, Some(1));
+        assert_eq!(parse_args(&s(&["-F", "1"])).unwrap().fuzz, Some(1));
+        assert_eq!(parse_args(&s(&["--fuzz=1"])).unwrap().fuzz, Some(1));
+        assert_eq!(parse_args(&s(&["--fuzz", "1"])).unwrap().fuzz, Some(1));
+        assert_eq!(parse_args(&s(&["-F0"])).unwrap().fuzz, Some(0));
+        // Unasked-for, it stays None so the default of 2 applies.
+        assert_eq!(parse_args(&s(&[])).unwrap().fuzz, None);
     }
 
     // ---------------- -l / --ignore-whitespace ----------------
@@ -2631,10 +2870,10 @@ mod tests {
         };
 
         assert!(
-            apply_hunk(&file, &hunk, 0, false).is_none(),
+            apply_hunk(&file, &hunk, 0, false, 0).is_none(),
             "exact matching must still refuse a whitespace difference"
         );
-        let (out, _) = apply_hunk(&file, &hunk, 0, true).expect("-l must apply it");
+        let (out, _, _) = apply_hunk(&file, &hunk, 0, true, 0).expect("-l must apply it");
         // GNU writes the PATCH's replacement text, not the file's -- measured.
         assert_eq!(out, lines(&["start", "CHANGED", "end"]));
     }
@@ -2654,7 +2893,7 @@ mod tests {
     #[test]
     fn apply_hunk_modifies_buffer() {
         let l = lines(&["line1", "line2", "line3"]);
-        let (new_lines, new_offset) = apply_hunk(&l, &modify_hunk(), 0, false).unwrap();
+        let (new_lines, new_offset, _) = apply_hunk(&l, &modify_hunk(), 0, false, 0).unwrap();
         assert_eq!(new_lines, lines(&["line1", "line2 modified", "line3"]));
         assert_eq!(new_offset, 0); // new_count(3) - old_count(3) = 0
     }
@@ -2662,14 +2901,19 @@ mod tests {
     #[test]
     fn apply_hunk_returns_none_on_mismatch() {
         let l = lines(&["nope", "nope", "nope"]);
-        assert!(apply_hunk(&l, &modify_hunk(), 0, false).is_none());
+        assert!(apply_hunk(&l, &modify_hunk(), 0, false, 0).is_none());
     }
 
     #[test]
-    fn apply_hunk_finds_via_fuzz() {
-        // Add a blank prefix line — hunk says start=1 but actual match is at line 2.
+    fn apply_hunk_slides_to_find_its_match() {
+        // A blank prefix line: the hunk header says 1 and the match is at 2.
+        // This is SLIDING, not fuzz -- every line still matches exactly, the
+        // hunk just sits elsewhere -- which is why it passes fuzz 0. The test
+        // was called `apply_hunk_finds_via_fuzz` while the constant it
+        // exercised was called `max_fuzz`, and both names belonged to the
+        // other mechanism.
         let l = lines(&["blank", "line1", "line2", "line3"]);
-        let (new_lines, _) = apply_hunk(&l, &modify_hunk(), 0, false).unwrap();
+        let (new_lines, _, _) = apply_hunk(&l, &modify_hunk(), 0, false, 0).unwrap();
         assert_eq!(
             new_lines,
             lines(&["blank", "line1", "line2 modified", "line3"])
@@ -2691,7 +2935,7 @@ mod tests {
             ],
         };
         let l = lines(&["x"]);
-        let (new_lines, offset) = apply_hunk(&l, &h, 0, false).unwrap();
+        let (new_lines, offset, _) = apply_hunk(&l, &h, 0, false, 0).unwrap();
         assert_eq!(new_lines, lines(&["a", "b", "c"]));
         assert_eq!(offset, 2); // 3 - 1
     }
@@ -3001,7 +3245,7 @@ mod tests {
 
         // The observable half: applied to five lines, `new` lands fifth.
         let original = lines(&["1", "2", "3", "4", "5"]);
-        let (out, _) = apply_hunk(&original, h, 0, false).expect("a pure insertion applies");
+        let (out, _, _) = apply_hunk(&original, h, 0, false, 0).expect("a pure insertion applies");
         assert_eq!(out, lines(&["1", "2", "3", "4", "new", "5"]));
     }
 
@@ -3012,8 +3256,8 @@ mod tests {
         let ps = parse_patch(ctx("--- x/f.txt~+++ y/f.txt~@@ -1,0 +2 @@~+X~").as_bytes());
         let h = &ps[0].hunks[0];
         assert_eq!(h.old_count, 0, "a -U0 insertion removes nothing");
-        let (out, _) =
-            apply_hunk(&lines(&["a", "b", "c"]), h, 0, false).expect("a pure insertion applies");
+        let (out, _, _) =
+            apply_hunk(&lines(&["a", "b", "c"]), h, 0, false, 0).expect("a pure insertion applies");
         // Measured against GNU patch 2.7.6: `a X b c`, not `X a b c`.
         assert_eq!(out, lines(&["a", "X", "b", "c"]));
     }

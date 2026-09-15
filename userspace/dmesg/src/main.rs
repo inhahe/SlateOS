@@ -286,6 +286,12 @@ struct Config {
     level_filter: Option<LogLevel>,
     search: Option<String>,
     clear: bool,
+    /// `-C, --clear`: clear without printing first.
+    ///
+    /// `-c, --read-clear` prints and then clears; this suppresses the print.
+    /// Kept as a separate flag rather than a mode so the two share one code
+    /// path and cannot drift apart.
+    clear_only: bool,
     human_time: bool,
     json_output: bool,
     since_secs: Option<u64>,
@@ -380,13 +386,14 @@ fn print_usage() {
     println!("  dmesg [options]");
     println!();
     println!("OPTIONS:");
-    println!("  -n <count>      Show last N messages");
-    println!("  -f, --follow    Follow (live tail)");
-    println!("  -l <level>      Filter by minimum level:");
+    println!("  --lines <count>  Show last N messages (extension)");
+    println!("  -w, --follow     Wait for new messages");
+    println!("  -l, --level <lvl> Filter by minimum level:");
     println!("                    emerg, alert, crit, err, warn, notice, info, debug");
-    println!("  -s <string>     Search for substring in messages");
-    println!("  -c              Clear the ring buffer after reading");
-    println!("  -T              Human-readable timestamps (HH:MM:SS.mmm)");
+    println!("  --search <string> Search for substring in messages (extension)");
+    println!("  -c, --read-clear Read and clear all messages");
+    println!("  -C, --clear      Clear the ring buffer without printing");
+    println!("  -T, --ctime      Human-readable timestamps (HH:MM:SS.mmm)");
     println!("  --json          JSON-lines output");
     println!("  --since <secs>  Messages from last N seconds only");
     println!("  --nocolor       Disable colored output");
@@ -405,6 +412,7 @@ fn main() {
         level_filter: None,
         search: None,
         clear: false,
+        clear_only: false,
         human_time: false,
         json_output: false,
         since_secs: None,
@@ -414,7 +422,18 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-n" => {
+            // `--lines`, not `-n`. "Show the last N messages" is an
+            // EXTENSION -- upstream has no such option and expects
+            // `dmesg | tail` -- and it had taken `-n`, which upstream gives
+            // to `--console-level <level>`. So `dmesg -n 4` means "print
+            // levels up to warning on the console" everywhere else and meant
+            // "show 4 messages" here.
+            //
+            // Missed by `compare-short-options.py`: it reads
+            // `"-x" | "--long"` pairs, and this arm had no long partner at
+            // all, so there was nothing for it to compare. Found by reading
+            // the help text while fixing the other three.
+            "--lines" => {
                 if i + 1 >= args.len() {
                     eprintln!("error: -n requires a count");
                     process::exit(1);
@@ -422,13 +441,22 @@ fn main() {
                 config.count = Some(args[i + 1].parse().unwrap_or(20));
                 i += 2;
             }
-            "-f" | "--follow" => {
+            // `-w`, not `-f`. Upstream `-f, --facility <list>` restricts
+            // output to named facilities and CONSUMES AN ARGUMENT; its follow
+            // is `-w, --follow`. So `dmesg -f kern` upstream filters, and
+            // here it started following and left `kern` to be read as
+            // something else -- the shape that made `blkid -n` dangerous.
+            //
+            // `-f` is not re-bound to `--facility`, because facility
+            // filtering is not implemented: leaving it unknown fails out
+            // loud, which is the right failure for a missing feature.
+            "-w" | "--follow" => {
                 config.follow = true;
                 i += 1;
             }
             "-l" | "--level" => {
                 if i + 1 >= args.len() {
-                    eprintln!("error: -l requires a level name");
+                    eprintln!("error: --level requires a level name");
                     process::exit(1);
                 }
                 config.level_filter = match LogLevel::from_str(&args[i + 1]) {
@@ -440,19 +468,34 @@ fn main() {
                 };
                 i += 2;
             }
-            "-s" | "--search" => {
+            // `--search` is an EXTENSION -- upstream dmesg has no search --
+            // and it had taken `-s`, which upstream gives to
+            // `--buffer-size <size>`. An extension may add a long option; it
+            // may not quietly redefine a letter the reference already uses,
+            // because that is invisible to the person typing it. Long-only
+            // now.
+            "--search" => {
                 if i + 1 >= args.len() {
-                    eprintln!("error: -s requires a search string");
+                    eprintln!("error: --search requires a search string");
                     process::exit(1);
                 }
                 config.search = Some(args[i + 1].clone());
                 i += 2;
             }
-            "-c" | "--clear" => {
+            // `-c` is `--read-clear` upstream: read AND clear. That is what
+            // this already did -- the messages are displayed before the clear
+            // is attempted -- so only the NAME was wrong. `-C, --clear` is
+            // upstream's clear-without-reading, and is new here.
+            "-c" | "--read-clear" => {
                 config.clear = true;
                 i += 1;
             }
-            "-T" | "--human-time" => {
+            "-C" | "--clear" => {
+                config.clear = true;
+                config.clear_only = true;
+                i += 1;
+            }
+            "-T" | "--ctime" => {
                 config.human_time = true;
                 i += 1;
             }
@@ -528,9 +571,11 @@ fn main() {
         messages = messages.split_off(messages.len() - count);
     }
 
-    // Display.
-    for msg in &messages {
-        display_message(msg, &config);
+    // Display, unless `-C` asked for a clear without one.
+    if !config.clear_only {
+        for msg in &messages {
+            display_message(msg, &config);
+        }
     }
 
     // Clear ring buffer if requested.

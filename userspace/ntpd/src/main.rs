@@ -154,11 +154,14 @@ impl NtpTimestamp {
     /// Convert to Unix seconds (returns None if before Unix epoch).
     #[allow(dead_code)]
     fn to_unix_secs(self) -> Option<u64> {
-        let ntp = u64::from(self.seconds);
-        if ntp < NTP_UNIX_DELTA {
-            return None;
-        }
-        Some(ntp - NTP_UNIX_DELTA)
+        u64::from(self.seconds).checked_sub(NTP_UNIX_DELTA)
+    }
+
+    /// The eight bytes this timestamp occupies on the wire.
+    fn to_bytes(self) -> [u8; 8] {
+        let s = self.seconds.to_be_bytes();
+        let f = self.fraction.to_be_bytes();
+        [s[0], s[1], s[2], s[3], f[0], f[1], f[2], f[3]]
     }
 
     /// Convert to a floating-point seconds value for arithmetic.
@@ -211,10 +214,10 @@ impl NtpPacket {
         buf[4..8].copy_from_slice(&self.root_delay.to_be_bytes());
         buf[8..12].copy_from_slice(&self.root_dispersion.to_be_bytes());
         buf[12..16].copy_from_slice(&self.ref_id);
-        Self::write_ts(&mut buf[16..24], &self.ref_ts);
-        Self::write_ts(&mut buf[24..32], &self.origin_ts);
-        Self::write_ts(&mut buf[32..40], &self.receive_ts);
-        Self::write_ts(&mut buf[40..48], &self.transmit_ts);
+        buf[16..24].copy_from_slice(&self.ref_ts.to_bytes());
+        buf[24..32].copy_from_slice(&self.origin_ts.to_bytes());
+        buf[32..40].copy_from_slice(&self.receive_ts.to_bytes());
+        buf[40..48].copy_from_slice(&self.transmit_ts.to_bytes());
         buf
     }
 
@@ -231,24 +234,23 @@ impl NtpPacket {
             root_delay: u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]),
             root_dispersion: u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]),
             ref_id: [buf[12], buf[13], buf[14], buf[15]],
-            ref_ts: Self::read_ts(&buf[16..24]),
-            origin_ts: Self::read_ts(&buf[24..32]),
-            receive_ts: Self::read_ts(&buf[32..40]),
-            transmit_ts: Self::read_ts(&buf[40..48]),
+            ref_ts: NtpTimestamp {
+                seconds: u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]),
+                fraction: u32::from_be_bytes([buf[20], buf[21], buf[22], buf[23]]),
+            },
+            origin_ts: NtpTimestamp {
+                seconds: u32::from_be_bytes([buf[24], buf[25], buf[26], buf[27]]),
+                fraction: u32::from_be_bytes([buf[28], buf[29], buf[30], buf[31]]),
+            },
+            receive_ts: NtpTimestamp {
+                seconds: u32::from_be_bytes([buf[32], buf[33], buf[34], buf[35]]),
+                fraction: u32::from_be_bytes([buf[36], buf[37], buf[38], buf[39]]),
+            },
+            transmit_ts: NtpTimestamp {
+                seconds: u32::from_be_bytes([buf[40], buf[41], buf[42], buf[43]]),
+                fraction: u32::from_be_bytes([buf[44], buf[45], buf[46], buf[47]]),
+            },
         }
-    }
-
-    /// Read an NTP timestamp from an 8-byte slice.
-    fn read_ts(data: &[u8]) -> NtpTimestamp {
-        let seconds = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        let fraction = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        NtpTimestamp { seconds, fraction }
-    }
-
-    /// Write an NTP timestamp into an 8-byte slice.
-    fn write_ts(dest: &mut [u8], ts: &NtpTimestamp) {
-        dest[0..4].copy_from_slice(&ts.seconds.to_be_bytes());
-        dest[4..8].copy_from_slice(&ts.fraction.to_be_bytes());
     }
 
     /// True if the server response indicates Kiss-of-Death.
@@ -332,7 +334,7 @@ fn compute_offset_delay(
     let t3f = t3.to_f64();
     let t4f = t4.to_f64();
 
-    let offset = ((t2f - t1f) + (t3f - t4f)) / 2.0;
+    let offset = f64::midpoint(t2f - t1f, t3f - t4f);
     let delay = (t4f - t1f) - (t3f - t2f);
 
     // Convert to microseconds.
@@ -353,19 +355,11 @@ fn compute_offset_delay(
 /// Select the best sample from a set using a simple median-of-offsets,
 /// minimum-delay heuristic.
 fn clock_filter(samples: &mut [NtpSample]) -> Option<NtpSample> {
-    if samples.is_empty() {
-        return None;
-    }
-    if samples.len() == 1 {
-        return Some(samples[0].clone());
-    }
-
     // Sort by delay ascending -- the sample with the least network asymmetry
-    // is most likely to have the most accurate offset.
+    // is most likely to have the most accurate offset. Sorting fewer than two
+    // samples is a no-op, so the empty and single cases need no special arm.
     samples.sort_by_key(|a| a.delay_us);
-
-    // Take the sample with the minimum delay.
-    Some(samples[0].clone())
+    samples.first().cloned()
 }
 
 /// Compute the jitter (RMS of offset differences from the mean) in microseconds.
@@ -456,12 +450,14 @@ fn datetime_to_unix(dt: &DateTime) -> Result<u64, String> {
     }
     let mut days: u64 = 0;
     for y in 1970..dt.year {
-        days += if is_leap_year(y) { 366 } else { 365 };
+        days = days.saturating_add(if is_leap_year(y) { 366 } else { 365 });
     }
     for m in 1..dt.month {
-        days += u64::from(days_in_month(dt.year, m).ok_or_else(|| format!("invalid month: {m}"))?);
+        days = days.saturating_add(u64::from(
+            days_in_month(dt.year, m).ok_or_else(|| format!("invalid month: {m}"))?,
+        ));
     }
-    days += u64::from(dt.day.saturating_sub(1));
+    days = days.saturating_add(u64::from(dt.day.saturating_sub(1)));
 
     let secs = days
         .checked_mul(86400)
@@ -488,8 +484,8 @@ fn unix_to_datetime(mut secs: u64) -> DateTime {
         if days < year_days {
             break;
         }
-        days -= year_days;
-        year += 1;
+        days = days.saturating_sub(year_days);
+        year = year.saturating_add(1);
     }
 
     let mut month: u32 = 1;
@@ -498,11 +494,11 @@ fn unix_to_datetime(mut secs: u64) -> DateTime {
         if days < u64::from(md) {
             break;
         }
-        days -= u64::from(md);
-        month += 1;
+        days = days.saturating_sub(u64::from(md));
+        month = month.saturating_add(1);
     }
 
-    let day = days as u32 + 1;
+    let day = (days as u32).saturating_add(1);
     DateTime {
         year,
         month,
@@ -530,9 +526,10 @@ fn format_human(unix_secs: u64) -> String {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let mi = dt.month.saturating_sub(1).min(11) as usize;
+    let month_name = MONTHS.get(mi).copied().unwrap_or("???");
     format!(
         "{:02} {} {:04} {:02}:{:02}:{:02}",
-        dt.day, MONTHS[mi], dt.year, dt.hour, dt.minute, dt.second,
+        dt.day, month_name, dt.year, dt.hour, dt.minute, dt.second,
     )
 }
 
@@ -811,12 +808,15 @@ fn ntp_query_multi(
             Ok(s) => samples.push(s),
             Err(e) => {
                 if debug {
-                    eprintln!("ntpd: query {}/{count} to {server} failed: {e}", i + 1);
+                    eprintln!(
+                        "ntpd: query {}/{count} to {server} failed: {e}",
+                        i.saturating_add(1)
+                    );
                 }
             }
         }
         // Brief pause between queries to avoid rate limiting.
-        if i + 1 < count {
+        if i.saturating_add(1) < count {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
@@ -1273,7 +1273,9 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
 
         // Use the sample from the best (lowest-delay) server.
         all_samples.sort_by_key(|a| a.delay_us);
-        let best = &all_samples[0];
+        let Some(best) = all_samples.first() else {
+            continue;
+        };
 
         if opts.debug {
             eprintln!(
@@ -1392,18 +1394,18 @@ fn parse_ntpdate_args(args: &[String]) -> Result<NtpdateOpts, String> {
     };
 
     let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
             "-q" => opts.query_only = true,
             "-p" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let val = args.get(i).ok_or("-p requires an argument")?;
                 opts.num_samples = val
                     .parse()
                     .map_err(|_| format!("-p: invalid number: {val}"))?;
             }
             "-t" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let val = args.get(i).ok_or("-t requires an argument")?;
                 opts.timeout_secs = val
                     .parse()
@@ -1420,7 +1422,7 @@ fn parse_ntpdate_args(args: &[String]) -> Result<NtpdateOpts, String> {
                 opts.servers.push(server.to_string());
             }
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     Ok(opts)
@@ -1436,8 +1438,8 @@ fn parse_ntpd_args(args: &[String]) -> Result<NtpdOpts, String> {
     };
 
     let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
             "-g" => opts.allow_first_step = true,
             "-n" => opts.no_daemonize = true,
             "-q" => opts.set_and_exit = true,
@@ -1446,7 +1448,7 @@ fn parse_ntpd_args(args: &[String]) -> Result<NtpdOpts, String> {
                 opts.no_daemonize = true; // -d implies -n
             }
             "-c" => {
-                i += 1;
+                i = i.saturating_add(1);
                 opts.config_path = args.get(i).ok_or("-c requires a config file path")?.clone();
             }
             "--help" | "-h" => {
@@ -1460,7 +1462,7 @@ fn parse_ntpd_args(args: &[String]) -> Result<NtpdOpts, String> {
                 // ntpd doesn't take positional args
             }
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     Ok(opts)
@@ -1571,6 +1573,14 @@ fn main() {
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp
+)]
 mod tests {
     use super::*;
 

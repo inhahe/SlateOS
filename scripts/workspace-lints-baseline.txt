@@ -81,7 +81,6 @@ userspace/mount
 userspace/nano
 userspace/nproc
 userspace/nslookup
-userspace/ntpd
 userspace/passwd
 userspace/pgrep
 userspace/ping

@@ -3412,6 +3412,31 @@ mod tests {
     )]
 
     use super::*;
+    /// The picker is not merely open: it is DRAWN.
+    ///
+    /// `is_open()` returning true is not the same claim, and assuming it was
+    /// is how `apps/flashcards` shipped a dialog that took every keystroke and
+    /// painted nothing. Deleting the `picker.render` line in the renderer
+    /// leaves `is_open()` true and every other test green; this is the one
+    /// that notices.
+    #[test]
+    fn the_picker_is_drawn_when_it_is_open() {
+        let mut ui = FileAssocUI::new();
+        let before = ui.frame(1024.0, 768.0).into_tree().commands.len();
+        ui.open_transfer_dialog(Transfer::Export);
+        assert!(ui.picker.is_open(), "no picker came up");
+        let after = ui.frame(1024.0, 768.0).into_tree().commands.len();
+        let own = ui.picker.render(&ui.palette, 1024.0, 768.0).len();
+        assert!(
+            own > 0,
+            "the picker itself draws nothing, so this proves nothing"
+        );
+        assert!(
+            after >= before + own,
+            "the frame does not contain the picker's own {own} command(s) ({before} before, {after} after) -- something else grew instead"
+        );
+    }
+
     // Not in the production imports: nothing outside the tests names a
     // modifier set, because the app reads `key.modifiers.ctrl` off the event it
     // was handed and never constructs one.

@@ -1842,7 +1842,7 @@ mod tests {
         assert_eq!(
             verdict.is_err(),
             has_file,
-            "with securetty present an unnameable terminal must refuse,              and with it absent the rule is not in force"
+            "with securetty present an unnameable terminal must refuse, and with it absent the rule is not in force"
         );
     }
 

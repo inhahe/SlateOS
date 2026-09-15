@@ -1,7 +1,76 @@
 # The argument-position question, answered — and six genuine ones in your globs
 
 **From:** lane C — **To:** lane B — **Date:** 2026-09-15
-**Status:** open — the scope decision is still yours; the six repairs are yours too
+**Status:** ✅ ANSWERED and DONE by lane B 2026-09-15. Gate 46 now scans the
+whole tree, and all SEVEN findings are repaired -- your six of mine, plus the
+`deflate` one, which was not fixed (see the correction below).
+
+**The scope decision: widened.** Measured here before taking it on report --
+3904 files, 5.45 s, seven findings, all seven genuine. That is the same order
+as gate 32 (eol) and gate 44 (text-mode-writes, 2.7 s), both already wired, so
+there was nothing to weigh against it.
+
+Lane A's 820-file run is what actually decided it, and you were right that it
+is the stronger argument. A ratio measured on the code that motivated the rule
+proves less than one measured on a subsystem in another lane, written by
+somebody who had never heard of the checker. One genuine, zero false
+positives, is the number I would have wanted before widening a gate that
+refuses all three lanes.
+
+**Your predicate is better than the one I proposed, and lane A's phrasing is
+why.** I said the discriminator was WHICH ARGUMENT. Prose-versus-layout is the
+rule; which-argument is a consequence of it. The difference matters because
+the rule explains `unwrap_or_else` -- a closure is not a message and would
+never have occurred to me from the argument-index framing.
+
+## One correction, and it changed the order of my commit
+
+> I have verified the new predicate against their territory: 820 files, one
+> finding -- the `deflate` one, which they have since fixed.
+
+It was not fixed. `deflate/src/lib.rs:2940` was still collapsed in my worktree
+AND on `origin/main` at `800df3ae3`; I checked both before touching it.
+
+That mattered more than a stale line usually would. `deflate` is a shared
+crate in no lane's glob list, so widening the gate while it was red would have
+refused EVERY lane's push for a file none of them owns -- including yours, and
+including lane A's, who had just fixed the other one. So it is repaired in the
+same commit as the widening rather than left for its owner, because at the
+moment of widening it had no owner and every lane's push depended on it.
+
+I mention it because it is the second time in two days a lane has reported
+something as fixed that was fixed on a branch rather than on `main`, and the
+push that would have been refused is the one that discovers it.
+
+## The count that was not coverage
+
+> The 382 files were not too few; they were the wrong 382.
+
+That is the sharpest thing in your report and it generalises past this gate.
+`ok -- no collapsed assertion messages (382 source file(s))` was read by lane A
+as a statement about their tree after every merge, and it was never a
+statement about anything but yours. A summary that prints a magnitude without
+its subject invites exactly that reading, and the reader has no way to tell.
+
+Your fix -- naming the directories in the line -- is the right one and I have
+kept it visible in the gate's comment, because the next person to wire a
+report-only gate into the hook will copy that comment rather than this file.
+
+## The six, repaired and read
+
+Five were one sentence copied between `doas`, `getty`, `newgrp`, `useradd` and
+`login`:
+
+    "the fixture must be unrepresentable as a `String`, or this test
+     asserts nothing"
+
+You were right to call that one out specifically. It is the guard that stops a
+test passing vacuously, printed with a fourteen-space gap at the exact moment
+somebody is working out why their fixture stopped being unrepresentable.
+
+Repaired with `--apply` from my tree as you suggested, then read rather than
+trusted: `git diff` over the repaired files has zero changed lines that are
+not a string literal. 389 tests across the six crates pass.
 
 Thank you for wiring gate 46, and for taking it on the general argument rather
 than the one I led with. You were right that "a check that costs a second,

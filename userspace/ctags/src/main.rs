@@ -40,7 +40,6 @@ use quoting::quoteaf_os;
 use std::collections::BTreeSet;
 #[cfg(not(test))]
 use std::env;
-#[cfg(not(test))]
 use std::fs;
 use std::io::{self, Write};
 #[cfg(not(test))]
@@ -420,7 +419,22 @@ fn collect_dir(dir: &Path, excludes: &[String], out: &mut Vec<String>) {
         let path = entry.path();
         let path_str = path.to_string_lossy().to_string();
 
-        // Normalise path separators to forward slash.
+        // ONLY ON WINDOWS. This was unconditional, and a backslash is a
+        // separator only there. Slate OS allows every byte in a filename
+        // except `/` and NUL -- design.txt says so outright -- so on the
+        // target we ship to, rewriting `\` to `/` turns one legal filename
+        // into a different path.
+        //
+        // Two ways that goes wrong, and the second is worse. A file named
+        // `a\b.rs` is rewritten to `a/b.rs`, which usually does not exist, so
+        // it is silently missing from the index. But if `a/b.rs` DOES exist,
+        // the walker indexes that file and files its tags under the name of
+        // the other one -- an index that points somewhere real and wrong.
+        //
+        // The normalisation is still needed on Windows, where `read_dir`
+        // yields `a\b.rs` for a file that genuinely lives in directory `a`,
+        // and where `is_excluded`'s glob patterns are written with `/`.
+        #[cfg(windows)]
         let path_str = path_str.replace('\\', "/");
 
         if is_excluded(&path_str, excludes) {
@@ -1844,18 +1858,37 @@ fn write_etags<W: Write>(tags: &[Tag], out: &mut W) -> io::Result<()> {
 // ============================================================================
 
 /// Read existing ctags entries from a file, returning them as raw lines.
-#[cfg(not(test))]
-fn read_existing_ctags(path: &str) -> Vec<String> {
+///
+/// `Ok(empty)` ONLY when the file is genuinely absent. Every other error is
+/// returned, and that distinction is the whole of this function.
+///
+/// It used to be `Err(_) => return Vec::new()`. The only caller is the
+/// `--append` path, and appending in ctags format is implemented as
+/// read-old, merge, then `File::create` -- which TRUNCATES. So an existing
+/// tags file that could not be read for any reason other than absence --
+/// a permission bit, a transient I/O error, a directory in its place --
+/// produced an empty "existing" set, and the truncating write then replaced
+/// the whole index with just the files named on this command line.
+///
+/// The user asked to ADD to an index and silently lost the rest of it. The
+/// failure is invisible at the moment it happens: the command exits 0, the
+/// tags file exists, and it is only wrong in what is missing from it.
+///
+/// Not-found must stay `Ok(empty)`, because `ctags -a` on a tree with no
+/// tags file yet is ordinary and must start from nothing. That case is
+/// exactly what the old swallow was written for; it just did not stop there.
+fn read_existing_ctags(path: &str) -> io::Result<Vec<String>> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return Vec::new(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
 
-    content
+    Ok(content
         .lines()
         .filter(|l| !l.starts_with("!_TAG_"))
         .map(|l| l.to_string())
-        .collect()
+        .collect())
 }
 
 /// Parse a raw ctags line back into a Tag (best-effort).
@@ -1975,7 +2008,19 @@ fn run(config: &Config) -> i32 {
     });
 
     if config.append && config.format == OutputFormat::Ctags {
-        let existing_lines = read_existing_ctags(&output_name);
+        // REFUSING rather than truncating. The write below replaces the file,
+        // so continuing without the old entries would delete them.
+        let existing_lines = match read_existing_ctags(&output_name) {
+            Ok(lines) => lines,
+            Err(e) => {
+                eprintln!("ctags: cannot read the existing tags in {output_name}: {e}");
+                eprintln!(
+                    "ctags: refusing to --append, because appending rewrites the whole \
+file and every tag already in it would be lost."
+                );
+                return 1;
+            }
+        };
         // Remove tags from files we are re-scanning.
         let scanned_files: BTreeSet<&str> = files
             .iter()
@@ -2075,6 +2120,54 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// `--append` must tell "no tags file yet" from "cannot read the one there".
+    ///
+    /// Appending in ctags format is read-old, merge, then `File::create`,
+    /// which TRUNCATES. So the two cases have opposite correct answers:
+    /// absent means start from nothing, and unreadable means stop, because
+    /// continuing replaces an index we could not read with a fraction of it.
+    ///
+    /// `read_existing_ctags` used to answer both with an empty vector.
+    #[test]
+    fn append_distinguishes_an_absent_tags_file_from_an_unreadable_one() {
+        let dir = std::env::temp_dir().join("ctags-append-probe");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch dir");
+
+        // Absent: legitimate, and must read as an empty starting point.
+        let missing = dir.join("no-such-tags");
+        let got = read_existing_ctags(missing.to_str().expect("utf8 path"));
+        assert!(
+            matches!(got, Ok(ref v) if v.is_empty()),
+            "an absent tags file is where `ctags -a` legitimately starts"
+        );
+
+        // Present and readable: the header lines are dropped, entries kept.
+        let real = dir.join("tags");
+        fs::write(
+            &real,
+            "!_TAG_FILE_SORTED\t1\t//\nalpha\tsrc/a.rs\t/^fn alpha/;\"\tf\n",
+        )
+        .expect("write tags");
+        let got =
+            read_existing_ctags(real.to_str().expect("utf8 path")).expect("a readable tags file");
+        assert_eq!(got.len(), 1, "the !_TAG_ header must not be kept");
+        assert!(got[0].starts_with("alpha\t"), "got {got:?}");
+
+        // Unreadable: a DIRECTORY where the tags file should be. Portable --
+        // a permission bit is not, on this host -- and it is the same class:
+        // the path exists and cannot be read as a file.
+        let blocked = dir.join("blocked-tags");
+        fs::create_dir_all(&blocked).expect("directory in the tags file's place");
+        let got = read_existing_ctags(blocked.to_str().expect("utf8 path"));
+        assert!(
+            got.is_err(),
+            "a tags file that exists and cannot be read must not read as empty"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
     use super::*;
 
     // ---- Language detection ----

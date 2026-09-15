@@ -302,21 +302,21 @@ apps/paint/src/main.rs:active_slider
 # none is on a path a user can currently reach.
 apps/pdfviewer/src/main.rs:pdf_version
 
-# apps/photomanager --
-# Seven EXIF fields the parser extracts and the window never shows: focal
-# length, whether the flash fired, GPS altitude, the writing software, the
-# copyright, the exposure program and the exposure bias. Same defect as the 39
-# ignored command-line options reported to lane B -- work done and discarded --
-# and the same choice: show them, or stop reading them. Showing is the better
-# half here, since the bytes are already decoded and a photo manager that knows
-# your flash fired and will not say so is the stranger of the two.
-apps/photomanager/src/main.rs:copyright
-apps/photomanager/src/main.rs:exposure_bias
-apps/photomanager/src/main.rs:exposure_program
-apps/photomanager/src/main.rs:flash_fired
-apps/photomanager/src/main.rs:focal_length_mm
-apps/photomanager/src/main.rs:gps_altitude
-apps/photomanager/src/main.rs:software
+# apps/photomanager -- PAID OFF 2026-09-15, all seven.
+# Focal length, whether the flash fired, GPS altitude, the writing software,
+# the copyright, the exposure program and the exposure bias were decoded out of
+# the file and never shown. They are rows in the info panel now, pinned by
+# `every_parsed_exif_field_reaches_the_panel`, which asserts on the LABELS a
+# person sees rather than on field names -- a field renamed without its row
+# being put back would otherwise pass. Checked against a removed row: it fails
+# with "the panel drops \"Flash\"".
+#
+# Worth recording why this one was worth doing rather than baselining. The
+# question "show them or stop reading them" only had an answer once the app
+# could open a real photograph, which it could not: it had no file picker at
+# all and `main` seeded an invented library. Displaying them before that would
+# have meant surfacing more of `ExifData::sample` -- a Canon EOS R5 that was
+# not on the machine -- which is more fabrication, not less.
 
 # apps/rssreader --
 # Not yet triaged individually. Each is a value computed and discarded, and

@@ -1913,10 +1913,24 @@ impl RecycleBin {
 
     /// Create a `RecycleBin` at the default location (`~/.recycle/`)
     /// with 30-day auto-purge.
+    ///
+    /// `var_os`, not `var`. This read `HOME` as UTF-8 and fell back to `/tmp`
+    /// when it was not, which put the recycle bin of anyone with a home
+    /// directory holding undecodable bytes in a directory that is cleared on
+    /// restart -- so "move to recycle bin" became "delete on next boot",
+    /// silently, for exactly the users this module is otherwise careful about.
+    /// [`Self::send_to_bin`] below goes to real trouble to record an original
+    /// path losslessly so a non-UTF-8 name can be restored; that care was
+    /// undone one function earlier by the location itself.
+    ///
+    /// The `/tmp` fallback now applies only when `HOME` is genuinely unset,
+    /// which is its own hazard and is left alone here: it is the pre-existing
+    /// behaviour for a case this change does not touch, and conflating the two
+    /// would hide which one was the bug.
     pub fn default_location() -> Self {
-        let home = std::env::var("HOME")
+        let home = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"));
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
         Self::new(home.join(".recycle"), DEFAULT_RECYCLE_MAX_AGE)
     }
 

@@ -178,6 +178,15 @@ def _self_test() -> int:
     expect("an unrelated allow is left alone",
            bool(ALLOW.search("#[allow(unused_variables)]\n")), False)
 
+    # The package name is not the directory name, and reading the wrong one
+    # produced sixteen confident false positives.
+    expect("the package name comes from Cargo.toml",
+           package_of(ROOT / "gui" / "font"), "osfont")
+    expect("...and is not the directory name",
+           package_of(ROOT / "gui" / "toolkit"), "guitk")
+    expect("a directory with no manifest is not guessed at",
+           package_of(ROOT / "scripts"), None)
+
     out = "warning: method `export_json` is never used\nwarning: field `raw` is never read\n"
     expect("both warning shapes are read",
            set(NEVER_USED.findall(out)), {"export_json", "raw"})
@@ -185,6 +194,35 @@ def _self_test() -> int:
     print(f"find-stale-dead-code-allows: self-test "
           f"{'passed' if not failures else 'FAILED'} ({failures} failure(s))")
     return 1 if failures else 0
+
+
+PKG_NAME = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
+
+
+def package_of(crate: Path) -> str | None:
+    """The crate's package name, which is **not** its directory name.
+
+    `gui/font` is `osfont`, `apps/tmux` is `tmux-app`, `gui/toolkit` is
+    `guitk`. Passing the directory name to `-p` produced
+
+        error: package ID specification `font` did not match any packages
+
+    which contains neither `error[E` nor `error: could not compile`, so the
+    build-failed check below read it as a clean build with no warnings -- and
+    every allow in every such crate was then reported as suppressing nothing,
+    because removing one also produced no warnings. Three crates, sixteen
+    allows, all wrong, and the wrongness was silent.
+
+    This is the same trap `audit-cli-fabrication.py` hit with `sysinfo`, whose
+    package is `sysinfo-app`: four passing runs that were building a crates.io
+    crate of the same name.
+    """
+    try:
+        text = (crate / "Cargo.toml").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = PKG_NAME.search(text.split("[dependencies]")[0])
+    return m.group(1) if m else None
 
 
 def warnings_of(name: str) -> tuple[set[str], bool]:
@@ -199,13 +237,20 @@ def warnings_of(name: str) -> tuple[set[str], bool]:
         capture_output=True, text=True, errors="replace", cwd=ROOT,
     )
     out = r.stdout + r.stderr
-    if "error[E" in out or "error: could not compile" in out:
+    # Any error line, not two specific ones. `error: package ID specification
+    # ... did not match any packages` matched neither of the originals and was
+    # read as a clean build; a non-zero exit is the fact that matters.
+    if r.returncode != 0 or re.search(r"^error", out, re.M):
         return set(), True
     return {ln.strip() for ln in out.splitlines() if NEVER_USED.search(ln)}, False
 
 
 def check_crate(crate: Path) -> int:
-    name = crate.name
+    name = package_of(crate)
+    if name is None:
+        print(f"--   {crate.name}: no package name in Cargo.toml; not evidence",
+              flush=True)
+        return 0
     files = sorted(crate.rglob("*.rs"))
     originals = {f: f.read_bytes() for f in files}
     digests = {f: hashlib.sha256(b).hexdigest() for f, b in originals.items()}

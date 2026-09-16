@@ -58321,3 +58321,37 @@ lane C; theirs to act on or not.
 still the reason the 1 was found, and every false positive here took under a
 minute to clear by reading. The cost is that a future reader will re-clear them
 unless the triage is written down, which is what this entry is for.
+
+---
+
+## logind `KillUser`: the partial-success reply has no host test path
+
+**What is untested.** `bus::kill_user` replies `[signalled, total]` — two
+numbers so a partial result can say "2 of 3". The path that produces a
+non-empty `signalled` cannot run in `cargo test`, so the reply shape that is
+the whole reason the method returns a pair is exercised only by its error arm.
+
+**Why.** `libcall::kill` is `#[cfg(unix)]` for the syscall and
+`#[cfg(not(unix))] -> ENOSYS` for everything else, like every other syscall in
+that crate. Host tests build for `x86_64-pc-windows-gnu`, so every pid fails
+with `Unsupported`, `signalled` stays empty, and `Daemon::kill_user` takes
+`Some(e) if signalled.is_empty() => Err(e)` every time. No fixture can change
+this: it is decided at compile time by the target, not by the test's inputs.
+
+**Why that is not a defect in the design.** `toolchain/x86_64-slateos.json`
+declares `"target-family": ["unix"]`, so the real target compiles the syscall
+arm. The host arm is a test-build stub, not the shipping behaviour — checked
+before writing this, because if the real target had *also* been `not(unix)`
+then `kill-session` and `kill-user` would be permanently inert and the commit
+that added them would be worse than nothing.
+
+**What would cover it.** A ring-3 self-test on SlateOS itself, in the
+`services/ctest-*` family: fork two children that block, `KillUser` their uid,
+assert both are reaped and the reply reads `2 2`; then make one unkillable and
+assert `1 2`. That needs the boot path, so it belongs with the other fixtures
+rather than in `cargo test`. Trigger: next time a logind fixture is built.
+
+**What IS covered** (`bus.rs`, `kill_user_refuses_a_payload_it_cannot_read`):
+arity, an unparsable signal, a session whose leader pid is 0, and a uid with
+no sessions — each as a distinct error, so the four refusals cannot collapse
+into one another unnoticed.

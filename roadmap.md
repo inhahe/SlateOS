@@ -1022,11 +1022,23 @@ Roadmap:
     * **Nobody has ever run it interactively.** That is the actual state, and
       no measurement here replaces doing so. Everything above says the path
       should work; none of it says it does.
-    * Two gaps found while checking, neither blocking a first run:
+    * ~~Two gaps found while checking, neither blocking a first run:
       `known-issues.md` -> `B-NO-ALTERNATE-SIGNAL-STACK-...` (CPython's
       `faulthandler` gets no alternate stack, so a Python stack overflow faults
       without its traceback) and `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`
-      (`signal.setitimer` and friends report success and never fire).
+      (`signal.setitimer` and friends report success and never fire).~~
+      **Both closed, and this line outlived them by three and six days**
+      (struck 2026-09-15). The timers reach the kernel's real interval timer
+      through `SYS_ITIMER_SET`/`SYS_ITIMER_GET` (1069/1070) as of 2026-09-12,
+      and `SIGALRM` arrives; `sigaltstack` stores and *uses* the stack, with
+      the kernel half landed as `SYS_SIGNAL_ALTSTACK` (1071) on 2026-09-10.
+      Neither `known-issues.md` entry claims otherwise -- both were stamped
+      when fixed. **Only this copy went on saying it**, which is the whole
+      lesson: the entry that gets restamped is the one somebody is looking at
+      when the fix lands, and a summary elsewhere is by definition not that
+      one. Found by reading, not by a query -- a pattern scan for stale status
+      matched 699 lines across the four documents and missed this one, because
+      it is phrased in the present tense rather than as "blocked on".
   **coreutils half measured and closed 2026-08-21:** all **107** binaries of
   GNU coreutils 9.5, unmodified, link against our `libc.a` with zero missing
   symbols and zero duplicates (`scripts/coreutils-spike/README.md`). The first

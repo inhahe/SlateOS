@@ -107,6 +107,33 @@ impl FileCategory {
         Self::Other,
     ];
 
+    /// The sidebar group a toolkit category belongs to.
+    ///
+    /// The toolkit distinguishes sixteen kinds; this program groups them into
+    /// seven, because the list on the left of the window is a way to find a
+    /// file type rather than a statement about what a file *is*. So this is a
+    /// deliberate narrowing, not a copy that has fallen behind: a spreadsheet
+    /// and a presentation are both things you open to read, and a separate row
+    /// for each would make the list longer without making anything easier to
+    /// find.
+    ///
+    /// Total by construction -- every toolkit variant is named, so adding one
+    /// there fails to compile here rather than silently landing in `Other`.
+    fn from_toolkit(category: guitk::filetypes::FileCategory) -> Self {
+        use guitk::filetypes::FileCategory as Tk;
+        match category {
+            Tk::Document | Tk::Spreadsheet | Tk::Presentation => Self::Documents,
+            Tk::Image => Self::Images,
+            Tk::Audio => Self::Audio,
+            Tk::Video => Self::Video,
+            Tk::Archive | Tk::Package | Tk::DiskImage => Self::Archives,
+            Tk::Code | Tk::Config => Self::Code,
+            // Executables, libraries, raw data, system files and the unknown
+            // are not a group anyone browses *for*; they are what is left.
+            Tk::Executable | Tk::Library | Tk::Data | Tk::System | Tk::Unknown => Self::Other,
+        }
+    }
+
     /// Human-readable label.
     pub fn label(self) -> &'static str {
         match self {
@@ -784,186 +811,22 @@ impl AssociationRegistry {
 
     // -- Built-in data -------------------------------------------------------
 
-    /// Populate with 30+ built-in file types covering all categories.
+    /// Populate with every file type the toolkit's table knows.
     fn add_default_file_types(&mut self) {
-        // (extension, mime_type, description, category)
-        let defaults: &[(&str, &str, &str, FileCategory)] = &[
-            // Documents
-            (
-                "txt",
-                "text/plain",
-                "Plain Text Document",
-                FileCategory::Documents,
-            ),
-            (
-                "pdf",
-                "application/pdf",
-                "PDF Document",
-                FileCategory::Documents,
-            ),
-            (
-                "doc",
-                "application/msword",
-                "Word Document",
-                FileCategory::Documents,
-            ),
-            (
-                "docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "Word Document (OOXML)",
-                FileCategory::Documents,
-            ),
-            (
-                "xls",
-                "application/vnd.ms-excel",
-                "Excel Spreadsheet",
-                FileCategory::Documents,
-            ),
-            (
-                "xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "Excel Spreadsheet (OOXML)",
-                FileCategory::Documents,
-            ),
-            (
-                "pptx",
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                "PowerPoint Presentation",
-                FileCategory::Documents,
-            ),
-            (
-                "odt",
-                "application/vnd.oasis.opendocument.text",
-                "OpenDocument Text",
-                FileCategory::Documents,
-            ),
-            (
-                "rtf",
-                "application/rtf",
-                "Rich Text Format",
-                FileCategory::Documents,
-            ),
-            (
-                "csv",
-                "text/csv",
-                "Comma-Separated Values",
-                FileCategory::Documents,
-            ),
-            // Images
-            ("png", "image/png", "PNG Image", FileCategory::Images),
-            ("jpg", "image/jpeg", "JPEG Image", FileCategory::Images),
-            ("jpeg", "image/jpeg", "JPEG Image", FileCategory::Images),
-            ("gif", "image/gif", "GIF Image", FileCategory::Images),
-            ("bmp", "image/bmp", "Bitmap Image", FileCategory::Images),
-            (
-                "svg",
-                "image/svg+xml",
-                "SVG Vector Image",
-                FileCategory::Images,
-            ),
-            ("webp", "image/webp", "WebP Image", FileCategory::Images),
-            ("ico", "image/x-icon", "Icon File", FileCategory::Images),
-            // Audio
-            ("mp3", "audio/mpeg", "MP3 Audio", FileCategory::Audio),
-            ("wav", "audio/wav", "WAV Audio", FileCategory::Audio),
-            ("flac", "audio/flac", "FLAC Audio", FileCategory::Audio),
-            ("ogg", "audio/ogg", "OGG Audio", FileCategory::Audio),
-            ("m4a", "audio/mp4", "M4A Audio", FileCategory::Audio),
-            // Video
-            ("mp4", "video/mp4", "MP4 Video", FileCategory::Video),
-            (
-                "mkv",
-                "video/x-matroska",
-                "Matroska Video",
-                FileCategory::Video,
-            ),
-            ("avi", "video/x-msvideo", "AVI Video", FileCategory::Video),
-            ("webm", "video/webm", "WebM Video", FileCategory::Video),
-            (
-                "mov",
-                "video/quicktime",
-                "QuickTime Video",
-                FileCategory::Video,
-            ),
-            // Archives
-            (
-                "zip",
-                "application/zip",
-                "ZIP Archive",
-                FileCategory::Archives,
-            ),
-            (
-                "tar",
-                "application/x-tar",
-                "Tar Archive",
-                FileCategory::Archives,
-            ),
-            (
-                "gz",
-                "application/gzip",
-                "Gzip Archive",
-                FileCategory::Archives,
-            ),
-            (
-                "7z",
-                "application/x-7z-compressed",
-                "7-Zip Archive",
-                FileCategory::Archives,
-            ),
-            (
-                "rar",
-                "application/vnd.rar",
-                "RAR Archive",
-                FileCategory::Archives,
-            ),
-            // Code
-            ("rs", "text/x-rust", "Rust Source", FileCategory::Code),
-            ("py", "text/x-python", "Python Source", FileCategory::Code),
-            (
-                "js",
-                "text/javascript",
-                "JavaScript Source",
-                FileCategory::Code,
-            ),
-            (
-                "ts",
-                "text/typescript",
-                "TypeScript Source",
-                FileCategory::Code,
-            ),
-            ("html", "text/html", "HTML Document", FileCategory::Code),
-            ("css", "text/css", "CSS Stylesheet", FileCategory::Code),
-            ("json", "application/json", "JSON Data", FileCategory::Code),
-            ("xml", "application/xml", "XML Document", FileCategory::Code),
-            (
-                "toml",
-                "application/toml",
-                "TOML Config",
-                FileCategory::Code,
-            ),
-            ("yaml", "text/yaml", "YAML Config", FileCategory::Code),
-            ("c", "text/x-c", "C Source", FileCategory::Code),
-            ("cpp", "text/x-c++", "C++ Source", FileCategory::Code),
-            ("h", "text/x-c", "C/C++ Header", FileCategory::Code),
-            // Other
-            ("log", "text/plain", "Log File", FileCategory::Other),
-            ("ini", "text/plain", "INI Config File", FileCategory::Other),
-            (
-                "iso",
-                "application/x-iso9660-image",
-                "Disc Image",
-                FileCategory::Other,
-            ),
-            (
-                "bin",
-                "application/octet-stream",
-                "Binary File",
-                FileCategory::Other,
-            ),
-        ];
-
-        for (ext, mime, desc, category) in defaults {
-            self.register_file_type(FileType::new(ext, mime, desc), *category);
+        // Derived from the toolkit's table rather than written again here.
+        // `guitk::filetypes::FILE_TYPE_TABLE` already carries the extension,
+        // MIME type, description and category of every type this system
+        // recognises, and `apps/explorer` already resolves through it. A second
+        // list of the same facts drifts silently: a format added there and not
+        // here would be a type the file manager knows and this program cannot
+        // associate. It also raises what this registry knows from about two
+        // dozen types to every type in the table.
+        for info in guitk::filetypes::all() {
+            let ext = info.extension.strip_prefix('.').unwrap_or(info.extension);
+            self.register_file_type(
+                FileType::new(ext, info.mime_type, info.description),
+                FileCategory::from_toolkit(info.category),
+            );
         }
     }
 
@@ -4566,19 +4429,61 @@ mod tests {
         assert!(probe::is_visible(&ui, Target::ResetButton));
     }
 
+    /// Every type the toolkit knows is a type this program can associate.
+    ///
+    /// The point of deriving the defaults rather than listing them again. If
+    /// the two ever diverge, the file manager would recognise a format that
+    /// this editor could not assign a program to -- a gap with no error
+    /// anywhere, because each side is internally consistent.
+    #[test]
+    fn the_registry_knows_every_type_the_toolkit_does() {
+        let reg = AssociationRegistry::with_defaults();
+        for info in guitk::filetypes::all() {
+            let ext = info.extension.strip_prefix('.').unwrap_or(info.extension);
+            assert!(
+                reg.get_file_type(ext).is_some(),
+                "the toolkit lists .{ext} and the registry does not know it"
+            );
+        }
+        // Exactly as many as the table holds, which is a stronger statement
+        // than "at least N" and needs no number maintaining. It also catches a
+        // duplicate in the toolkit's table: two entries whose extensions strip
+        // to the same key would collapse into one registry entry, and the
+        // count would drop below the table's without any assertion above
+        // firing. The old hand-written list here held about two dozen.
+        assert_eq!(
+            reg.file_type_count(),
+            guitk::filetypes::all().count(),
+            "the registry and the toolkit table disagree on how many types exist"
+        );
+    }
+
     #[test]
     fn the_add_dialog_registers_a_file_type_that_was_typed_into_it() {
         let mut ui = FileAssocUI::new();
         let before = ui.registry.file_type_count();
 
+        // An extension the registry cannot already know, asserted rather than
+        // assumed. This test used "opus" until 2026-09-16, when the default
+        // types started coming from the toolkit's table -- which has `.opus` in
+        // it. The dialog then correctly refused a duplicate, and the test
+        // failed reporting only that a dialog had stayed open. A fixture that
+        // quietly stops being the case under test is worse than one that
+        // breaks, so the precondition is now checked here.
+        const UNKNOWN_EXT: &str = "slateunknown";
+        assert!(
+            ui.registry.get_file_type(UNKNOWN_EXT).is_none(),
+            ".{UNKNOWN_EXT} is already a known type, so this test no longer adds a new one"
+        );
+
         probe::click(&mut ui, Target::AddButton);
         assert_eq!(ui.new_field, NewField::Extension);
-        probe::type_str(&mut ui, "opus");
+        probe::type_str(&mut ui, UNKNOWN_EXT);
         probe::key(&mut ui, &probe::press(Key::Tab));
         assert_eq!(ui.new_field, NewField::MimeType);
-        probe::type_str(&mut ui, "audio/opus");
+        probe::type_str(&mut ui, "application/x-slate-unknown");
         probe::key(&mut ui, &probe::press(Key::Tab));
-        probe::type_str(&mut ui, "Opus Audio");
+        probe::type_str(&mut ui, "Slate Test Type");
 
         // Clicking the category button cycles it, which is the only way to set
         // it -- there is no room in a 400-pixel dialog for a seven-item list.
@@ -4591,10 +4496,10 @@ mod tests {
         assert_eq!(ui.registry.file_type_count(), before + 1);
         let added = ui
             .registry
-            .get_file_type("opus")
-            .expect(".opus was not registered");
-        assert_eq!(added.mime_type, "audio/opus");
-        assert_eq!(added.description, "Opus Audio");
+            .get_file_type(UNKNOWN_EXT)
+            .expect("the typed extension was not registered");
+        assert_eq!(added.mime_type, "application/x-slate-unknown");
+        assert_eq!(added.description, "Slate Test Type");
     }
 
     #[test]

@@ -1628,6 +1628,18 @@ pub fn category_from_extension(ext: &str) -> FileCategory {
     detect_from_extension(ext).category
 }
 
+/// Every file type this table knows.
+///
+/// The table itself stays private: a caller that could index it could also
+/// come to depend on its order, and the order here is grouping-by-hand rather
+/// than a guarantee. An iterator gives what a caller legitimately needs --
+/// `apps/fileassoc` builds its registry of known types from this, instead of
+/// the second hand-written table of extensions, MIME types and descriptions it
+/// used to carry.
+pub fn all() -> impl Iterator<Item = &'static FileTypeInfo> {
+    FILE_TYPE_TABLE.iter()
+}
+
 /// Every extension this table files under `category`, without leading dots.
 ///
 /// The reverse of [`category_from_extension`], from the same table, which is

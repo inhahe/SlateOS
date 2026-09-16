@@ -3716,6 +3716,15 @@ check_eol
 # false positive, which is loud and self-correcting, while one that
 # OVER-reports turns a real defect into silence, which is not.
 check_manifest_producers() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== manifest-producer check: skipped (no python) ===" >&2
+        return 0
+    fi
     echo "=== Checking the manifest-producer gate against the tree it grades ==="
     if ! run_checker check-manifest-producers-selftest "$py" \
             "$PROJECT_ROOT/scripts/check-manifest-producers.py" --self-test; then
@@ -3752,6 +3761,15 @@ check_manifest_producers
 # that drops NULs reports a difference as agreement, and one that mangles
 # every byte reports agreement as a difference.
 check_cp_diff_sees_nul() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== NUL-visibility check: skipped (no python) ===" >&2
+        return 0
+    fi
     echo "=== Checking the NUL-visibility gate against itself ==="
     if ! run_checker check-cp-diff-sees-nul-selftest "$py" \
             "$PROJECT_ROOT/scripts/check-cp-diff-sees-nul.py" --self-test; then

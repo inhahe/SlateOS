@@ -68295,6 +68295,35 @@ block devices, three installed drivers, a website. This is a fabricated
 whole of the difference. A wrong fact misinforms; a wrong instruction
 recruits the reader into acting on it.
 
+### Lane B's addition: a fabricated action has a sign, and one sign is worse
+
+Their instance, found the same day: `upowerd` printed `CRITICAL: battery at
+3% -- executing PowerOff` and contains no power action of any kind. No
+syscall, no libcall, no spawned `powerctl`. "Executing" is present tense, so
+the one person who ever reads that line -- somebody watching a laptop at 3%
+-- was told the machine was powering itself down.
+
+Put beside the firmware case it exposes a distinction neither of us had
+alone. **A fabricated action is most dangerous when the action it fabricates
+is one that relieves the reader of a duty.**
+
+| | fabricated action | what the reader is told | correct response to the lie | cost |
+|---|---|---|---|---|
+| firmware | a flash completed | *you must reboot* | reboot | a wasted reboot -- the lie **created** work |
+| battery | a shutdown is running | *nothing is required of you* | do nothing | the unsaved work on the disk -- the lie **removed** work |
+
+Same lie, opposite sign. And the removing kind is the one nobody notices in
+review, because a line that tells the reader to do nothing produces no
+follow-up action whose absence anyone could observe. A false instruction to
+*act* gets caught by the act failing; a false assurance that something is
+already handled is only caught by the loss it was supposed to prevent.
+
+So when auditing for this shape, the priority order is not by subsystem
+stakes. It is: **first the claims that say a protective action is already
+under way**, then the claims that demand one, then the claims that merely
+describe. Lane B's wording for the whole family is the one to keep -- both
+are "instructions wearing the clothes of descriptions".
+
 ### What the attention failure looked like
 
 The call site already carried a careful, correct comment about the danger

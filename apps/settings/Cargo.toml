@@ -51,5 +51,10 @@ compositor = { path = "../../gui/compositor" }
 # so the module exists for `cargo test` and nowhere else.
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
+# The one model of which program opens which kind of file. This page reports
+# what is set; `apps/fileassoc` writes it and `apps/explorer` obeys it, and all
+# three used to spell the group name separately. See gui/filetypes/src/lib.rs.
+associations = { path = "../../gui/associations" }
+
 [lints]
 workspace = true

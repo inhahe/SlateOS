@@ -1,49 +1,46 @@
-//! Which program opens which kind of file, read from the file the file
-//! manager actually obeys.
+//! Which program opens which kind of file.
 //!
-//! # Why this page exists and `StartupApps` does not
+//! The one model behind the file-type associations: `apps/fileassoc` writes
+//! them, `apps/explorer` obeys them on every open, and `apps/settings` reports
+//! them. Before this crate existed all three named the group with a bare
+//! string of their own, each carrying a doc comment warning that if the
+//! spellings ever drifted the file manager would read a file nobody wrote and
+//! *nothing would fail to compile*. Three warnings about the same hazard is
+//! the tree asking for a crate.
 //!
-//! The test both pages were put to is the same: *does a consumer exist that
-//! makes the displayed claim true?* `StartupApps` fails it -- nothing in this
-//! tree launches a startup entry, so a row saying "Enabled - Session" would
-//! promise a program runs when nothing runs it (see the comment on the
-//! placeholder arm in `main.rs`).
+//! `apps/explorer` put the reason for the old arrangement plainly: "named here
+//! rather than imported because `apps/fileassoc` is a *binary*: there is
+//! nothing to link against". That was true, and it is the thing this fixes --
+//! there is something to link against now.
 //!
-//! This page passes it. `apps/explorer`'s `open_entry` looks the extension up
-//! in exactly the file read here and spawns what it finds:
+//! # What a consumer is
+//!
+//! The rule these types are shaped by is design-decisions 856: a setting is
+//! real when something obeys it. The consumer here is concrete --
+//! `apps/explorer`'s `open_entry` looks the extension up in this file and
+//! spawns what it finds:
 //!
 //! ```text
 //! settingsfile::load("fileassoc") -> ["associations", <ext>] -> a program path
 //!   -> Command::new(program).arg(path).spawn()
 //! ```
 //!
-//! So a row here reports a real setting with a real effect: change it and the
-//! next double-click in the file manager runs a different program.
+//! # Extensions and categories
 //!
-//! # The name of the file is duplicated, deliberately
-//!
-//! [`ASSOC_CONFIG_NAME`] repeats a constant `apps/explorer` also declares.
-//! Neither can import the other's: `apps/fileassoc`, which *writes* the file,
-//! is a binary with nothing to link against, and explorer's own comment gives
-//! that as the reason its association records a runnable path rather than an
-//! application id. Three crates therefore agree on one string by convention,
-//! which is worth stating plainly rather than leaving to be discovered: if
-//! this string and explorer's ever drift, this page will show associations the
-//! file manager does not use, and nothing will fail to compile.
-//!
-//! # Read-only here
-//!
-//! The associations are *set* by the File Associations application, which owns
-//! the file. This page reports them. That is a deliberate split rather than a
-//! missing feature -- see the note the page draws.
+//! Extensions are what is stored, because they are what the file manager
+//! resolves. A [`Category`] is a *view* over them -- "Music" is defined as its
+//! extension set, not stored as a name -- so choosing a program for a category
+//! writes each extension in it. See design-decisions 857, which also records
+//! why there is no "web browser", "email" or "documents" category.
 
+use guitk::filetypes::FileCategory;
 use yamldoc::Document;
 
-/// The File Associations program's configuration group.
+/// The settings group the associations live in.
 ///
-/// Must match `apps/explorer`'s `ASSOC_CONFIG_NAME`. See the module doc for
-/// why the string is repeated instead of shared.
-pub const ASSOC_CONFIG_NAME: &str = "fileassoc";
+/// The single definition. Every consumer imports this rather than spelling the
+/// string again, which is what the crate is for.
+pub const CONFIG_NAME: &str = "fileassoc";
 
 /// The mapping key under which associations live, inside that group.
 const ASSOCIATIONS: &str = "associations";
@@ -115,34 +112,69 @@ pub fn associations_from(doc: &Document) -> Vec<Association> {
     out
 }
 
+/// The program set for `extension`, or `None` if nothing usable is.
+///
+/// The lookup itself, so that a consumer does not have to spell the key path.
+/// `apps/explorer` used to hold its own copy of it, which meant the string
+/// `"associations"` appeared in three binaries as well as the group name.
+///
+/// Lower-cases before looking up, because that is how the entries are written.
+/// An entry whose value is blank answers `None`: a key present with no program
+/// reaches `Command::new("")` in the caller and fails there, so reporting it as
+/// found would hand the caller something it cannot run.
+#[must_use]
+pub fn program_for(doc: &Document, extension: &str) -> Option<String> {
+    let extension = extension.to_lowercase();
+    let program = doc.get_str(&[ASSOCIATIONS, extension.as_str()])?;
+    if program.trim().is_empty() {
+        return None;
+    }
+    Some(program)
+}
+
 /// A named group of file kinds that share one program.
 ///
-/// See design-decisions 857. A category is *defined* as its extension set
-/// rather than stored as a name: the file the file manager obeys has no idea
-/// what "Music" is, so a category that were stored separately would be a claim
-/// with nothing behind it.
+/// See design-decisions 857. A category is *defined* as a
+/// [`FileCategory`] over the toolkit's table rather than as a list of its own:
+/// the tree already holds one mapping of extension to kind, and a second copy
+/// here would drift the moment a format was added to one and not the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Category {
     /// How the group is written on the row.
     pub name: &'static str,
-    /// The extensions it covers, without dots, lower-cased.
-    ///
-    /// Lower-cased because `apps/explorer` lower-cases before it looks up, so
-    /// an upper-case entry here would write a key it can never match.
-    pub extensions: &'static [&'static str],
+    /// The kind it covers, in the toolkit's vocabulary.
+    pub kind: FileCategory,
+}
+
+impl Category {
+    /// The extensions this group covers, without dots.
+    pub fn extensions(&self) -> impl Iterator<Item = &'static str> {
+        guitk::filetypes::extensions_in(self.kind)
+    }
 }
 
 /// The groups offered, in the order they are shown.
 ///
 /// Three, not the six the shell's dead panel drew. "Web browser" and "email"
 /// are protocol categories with no consumer anywhere in the tree, and
-/// "documents" is not one kind of file -- a text file and a PDF do not share a
-/// program, so the row could only impose a wrong association. 857 has the
-/// evidence for each.
+/// "documents" is not one kind of file -- the toolkit's table files both `txt`
+/// and `pdf` under `Document`, and those do not share a program, so the row
+/// could only impose a wrong association. 857 has the evidence for each, and
+/// `guitk::filetypes`' own tests check the `Document` half of it against the
+/// table rather than trusting this comment.
 pub const CATEGORIES: &[Category] = &[
-    Category { name: "Music", extensions: &["aac", "flac", "m4a", "mp3", "ogg", "wav"] },
-    Category { name: "Video", extensions: &["avi", "mkv", "mov", "mp4", "webm"] },
-    Category { name: "Images", extensions: &["bmp", "gif", "jpeg", "jpg", "png", "webp"] },
+    Category {
+        name: "Music",
+        kind: FileCategory::Audio,
+    },
+    Category {
+        name: "Video",
+        kind: FileCategory::Video,
+    },
+    Category {
+        name: "Images",
+        kind: FileCategory::Image,
+    },
 ];
 
 /// What a category currently resolves to.
@@ -172,7 +204,7 @@ pub fn category_default(doc: &Document, category: &Category) -> CategoryDefault 
     let mut agreed: Option<&str> = None;
     let mut any_unset = false;
     let mut programs: Vec<String> = Vec::new();
-    for extension in category.extensions {
+    for extension in category.extensions() {
         let program = doc.get_str(&[ASSOCIATIONS, extension]).unwrap_or_default();
         if program.trim().is_empty() {
             any_unset = true;
@@ -200,7 +232,7 @@ pub fn category_default(doc: &Document, category: &Category) -> CategoryDefault 
 /// 857: the file manager resolves an extension, so an extension is the only
 /// thing worth writing.
 pub fn set_category(doc: &mut Document, category: &Category, program: &str) {
-    for extension in category.extensions {
+    for extension in category.extensions() {
         doc.set_str(&[ASSOCIATIONS, extension], program);
     }
 }
@@ -313,6 +345,34 @@ mod tests {
         );
     }
 
+    /// The lookup finds what was written, whatever case it is asked in.
+    #[test]
+    fn a_program_is_found_by_extension_in_any_case() {
+        let mut d = Document::parse("");
+        d.set_str(&[ASSOCIATIONS, "mp3"], "/usr/bin/musicplayer");
+        assert_eq!(
+            program_for(&d, "mp3").as_deref(),
+            Some("/usr/bin/musicplayer")
+        );
+        assert_eq!(
+            program_for(&d, "MP3").as_deref(),
+            Some("/usr/bin/musicplayer")
+        );
+        assert_eq!(program_for(&d, "flac"), None);
+    }
+
+    /// A key present with no program is not a find.
+    ///
+    /// The caller would reach `Command::new("")` and fail. Answering `None`
+    /// lets it say "nothing is set to open this" instead of reporting a
+    /// program that cannot start.
+    #[test]
+    fn a_blank_program_is_not_found() {
+        let mut d = Document::parse("");
+        d.set_str(&[ASSOCIATIONS, "txt"], "   ");
+        assert_eq!(program_for(&d, "txt"), None);
+    }
+
     /// A machine nobody has configured has no default for a group.
     #[test]
     fn an_unconfigured_category_is_unset() {
@@ -336,7 +396,7 @@ mod tests {
         for category in CATEGORIES {
             let mut d = Document::parse("");
             set_category(&mut d, category, "/usr/bin/chosen");
-            for extension in category.extensions {
+            for extension in category.extensions() {
                 assert_eq!(
                     d.get_str(&[ASSOCIATIONS, extension]).as_deref(),
                     Some("/usr/bin/chosen"),
@@ -357,7 +417,8 @@ mod tests {
         let category = &CATEGORIES[0];
         let mut d = Document::parse("");
         set_category(&mut d, category, "/usr/bin/one");
-        d.set_str(&[ASSOCIATIONS, category.extensions[1]], "/usr/bin/two");
+        let second = category.extensions().nth(1).expect("the group has two");
+        d.set_str(&[ASSOCIATIONS, second], "/usr/bin/two");
         assert_eq!(category_default(&d, category), CategoryDefault::Mixed);
     }
 
@@ -372,12 +433,16 @@ mod tests {
     fn a_partly_set_category_is_mixed_not_agreed() {
         let category = &CATEGORIES[0];
         let mut d = Document::parse("");
-        d.set_str(&[ASSOCIATIONS, category.extensions[0]], "/usr/bin/one");
+        let first = category
+            .extensions()
+            .next()
+            .expect("the group is not empty");
+        d.set_str(&[ASSOCIATIONS, first], "/usr/bin/one");
         assert_eq!(
             category_default(&d, category),
             CategoryDefault::Mixed,
             "a category with one of {} extensions set claimed to be settled",
-            category.extensions.len()
+            category.extensions().count()
         );
     }
 
@@ -390,7 +455,7 @@ mod tests {
     #[test]
     fn every_listed_extension_is_lower_case() {
         for category in CATEGORIES {
-            for extension in category.extensions {
+            for extension in category.extensions() {
                 assert_eq!(
                     *extension,
                     extension.to_lowercase(),
@@ -401,33 +466,15 @@ mod tests {
         }
     }
 
-    /// No extension belongs to two groups.
-    ///
-    /// A hand-written table drifts: an overlap would mean choosing a video
-    /// player silently changed the music default, and the page would show one
-    /// group reverting for no reason the user could see.
-    #[test]
-    fn no_extension_is_claimed_by_two_categories() {
-        let mut seen: Vec<(&str, &str)> = Vec::new();
-        for category in CATEGORIES {
-            for extension in category.extensions {
-                if let Some((other, _)) = seen.iter().find(|(_, e)| e == extension) {
-                    panic!(".{extension} is in both {other} and {}", category.name);
-                }
-                seen.push((category.name, extension));
-            }
-        }
-    }
-
     /// A group is a group: one extension would add nothing over its own row.
     #[test]
     fn every_category_groups_more_than_one_extension() {
         for category in CATEGORIES {
             assert!(
-                category.extensions.len() > 1,
+                category.extensions().count() > 1,
                 "{} covers {} extension(s)",
                 category.name,
-                category.extensions.len()
+                category.extensions().count()
             );
         }
     }

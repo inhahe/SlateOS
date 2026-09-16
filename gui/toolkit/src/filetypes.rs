@@ -1628,6 +1628,23 @@ pub fn category_from_extension(ext: &str) -> FileCategory {
     detect_from_extension(ext).category
 }
 
+/// Every extension this table files under `category`, without leading dots.
+///
+/// The reverse of [`category_from_extension`], from the same table, which is
+/// the point: a caller that needs "all the audio extensions" would otherwise
+/// write its own list, and a second hand-written list of the same facts drifts
+/// from this one silently -- nothing would fail to compile when a format was
+/// added here and not there.
+///
+/// Used by `gui/associations` to turn "set the music player" into the set of
+/// extensions to write. See design-decisions 857.
+pub fn extensions_in(category: FileCategory) -> impl Iterator<Item = &'static str> {
+    FILE_TYPE_TABLE.iter().filter_map(move |info| {
+        (info.category == category)
+            .then(|| info.extension.strip_prefix('.').unwrap_or(info.extension))
+    })
+}
+
 /// `true` if the extension is known to represent human-readable text.
 pub fn is_text_file(ext: &str) -> bool {
     detect_from_extension(ext).is_text
@@ -2197,5 +2214,66 @@ mod tests {
     #[test]
     fn dir_icon_is_folder() {
         assert_eq!(DIR_ICON_GLYPH, '\u{1F4C1}');
+    }
+
+    /// The two directions agree, for every extension in the table.
+    ///
+    /// This is the property that makes `extensions_in` safe to build a
+    /// settings page on: if it ever returned an extension that
+    /// `category_from_extension` files elsewhere, choosing a music player
+    /// would write an association for something that is not audio.
+    #[test]
+    fn every_listed_extension_maps_back_to_its_own_category() {
+        for category in [
+            FileCategory::Audio,
+            FileCategory::Video,
+            FileCategory::Image,
+            FileCategory::Document,
+            FileCategory::Archive,
+            FileCategory::Code,
+        ] {
+            for extension in extensions_in(category) {
+                assert_eq!(
+                    category_from_extension(extension),
+                    category,
+                    ".{extension} is listed under {category:?} but resolves elsewhere"
+                );
+            }
+        }
+    }
+
+    /// The categories a default-application row is offered for are not empty.
+    ///
+    /// A category with no extensions would make a row that wrote nothing --
+    /// the silent no-op design-decisions 856 is about.
+    #[test]
+    fn the_offered_categories_have_extensions() {
+        for category in [
+            FileCategory::Audio,
+            FileCategory::Video,
+            FileCategory::Image,
+        ] {
+            assert!(
+                extensions_in(category).count() > 1,
+                "{category:?} covers {} extension(s)",
+                extensions_in(category).count()
+            );
+        }
+    }
+
+    /// Documents genuinely span programs, which is why there is no such row.
+    ///
+    /// 857 drops the Documents category on the claim that its members do not
+    /// share a program -- a .txt is edited and a .pdf is viewed. That claim is
+    /// about *this* table, so it is checked here rather than asserted in prose:
+    /// if the table ever stopped filing both under Document, the decision
+    /// would need revisiting and this test is what would say so.
+    #[test]
+    fn the_document_category_spans_kinds_that_do_not_share_a_program() {
+        let documents: Vec<&str> = extensions_in(FileCategory::Document).collect();
+        assert!(
+            documents.contains(&"txt") && documents.contains(&"pdf"),
+            "Document holds {documents:?}"
+        );
     }
 }

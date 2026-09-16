@@ -6,7 +6,6 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha) by default.
 
-mod defaultapps;
 mod dyndns;
 mod lockscreen;
 mod remote;
@@ -600,7 +599,7 @@ pub struct SettingsState {
     /// [`SettingsState::refresh_default_apps`] when the page is entered, which
     /// is the same moment `apps/explorer` re-reads it: neither program caches
     /// an association across the action that uses it.
-    default_apps: Vec<defaultapps::Association>,
+    default_apps: Vec<associations::Association>,
     /// Every font family installed here, for the Fonts page's picker.
     ///
     /// Held rather than asked for while drawing: `available_families` walks
@@ -826,8 +825,8 @@ impl SettingsState {
     ///
     /// I/O, and so out of [`new`](Self::new) for the reason given above.
     pub fn refresh_default_apps(&mut self) {
-        let doc = settingsfile::load(defaultapps::ASSOC_CONFIG_NAME);
-        self.default_apps = defaultapps::associations_from(&doc);
+        let doc = settingsfile::load(associations::CONFIG_NAME);
+        self.default_apps = associations::associations_from(&doc);
     }
 
     /// Move to `page`, doing whatever entering a page requires.
@@ -5720,9 +5719,9 @@ mod tests {
     #[test]
     fn the_default_apps_page_shows_a_real_association() {
         settingsfile::testing::with_scratch_config("settings-default-apps", |_root| {
-            let mut doc = settingsfile::load(defaultapps::ASSOC_CONFIG_NAME);
+            let mut doc = settingsfile::load(associations::CONFIG_NAME);
             doc.set_str(&["associations", "txt"], "/usr/bin/chosen-editor");
-            settingsfile::store(defaultapps::ASSOC_CONFIG_NAME, &doc)
+            settingsfile::store(associations::CONFIG_NAME, &doc)
                 .expect("the scratch configuration should be writable");
 
             let mut app = SettingsState::new();

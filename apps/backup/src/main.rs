@@ -5090,7 +5090,16 @@ mod tests {
         use std::ffi::OsString;
         use std::os::windows::ffi::OsStringExt;
 
-        let dest = PathBuf::from(OsString::from_wide(&[0xD800_u16]));
+        // Built inside a scratch directory rather than as a bare relative
+        // path. The refusal happens before anything is created, so nothing
+        // should be written either way -- but when this test was first run
+        // against a deliberately broken version, `create_dir_all` reached the
+        // path and left a directory named with an unpaired surrogate sitting
+        // in the source tree, which `cargo fmt` then tripped over. A test
+        // whose failure mode litters the repository is one nobody will want to
+        // run twice.
+        let scratch = temp_dir("schedule_nonutf8");
+        let dest = scratch.dir().join(OsString::from_wide(&[0xD800_u16]));
         assert!(
             dest.to_str().is_none(),
             "the fixture is not the case under test"

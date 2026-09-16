@@ -167,6 +167,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/find-claimed-acts.py` | Which programs tell the user they DID something they cannot do? |
 | `scripts/find-diff.sh` | Differential test: our find against GNU find. |
+| `scripts/find-echoed-settings.py` | Which settings does the program only ever read in order to print back? |
 | `scripts/find-overstated-records.py` | Which of our own documents credit a program with an act it cannot perform? |
 | `scripts/find-reachable-fixtures.py` | Which invented-data builders can a *shipping* build reach? |
 | `scripts/find-silent-incapacity.py` | Which programs cannot do the thing they are for, and do not say so? |
@@ -286,6 +287,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/rustlex.py` | One Rust lexer for the checkers that need to ignore comments and strings. |
 | `scripts/rustrungs.py` | Read what a Rust rung asserts, so an oracle can check the assertion itself. |
 | `scripts/rustscan.py` | Read Rust source the way a *gate* has to read it: production code only. |
+| `scripts/sabotage.py` | Break the code on purpose and report which tests noticed. |
 | `scripts/scan-orphan-modules.py` | Find library modules whose entire public surface is named by no other file. |
 | `scripts/scan-unwired.py` | Find work that no path from an entry point reaches, but a test does. |
 | `scripts/scan-unwrap.py` | Find `.unwrap()` / `.expect(...)` in *production* kernel code. |
@@ -381,4 +383,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_371 scripts._
+_373 scripts._

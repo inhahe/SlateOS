@@ -983,53 +983,115 @@ impl ProcessExplorerState {
 
     /// Kill the selected process.
     pub fn kill_selected(&mut self) {
-        if let Some(sel) = self.selected_index
-            && let Some(&proc_idx) = self.visible_indices.get(sel)
-            && let Some(proc) = self.processes.get(proc_idx)
-        {
-            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "killed");
+        self.signal_selected(libcall::SIGKILL, "kill");
+    }
+
+    /// Send `sig` to the selected process and report what the kernel said.
+    ///
+    /// **The row is not touched.** These three controls used to report the act
+    /// and then make the report come true in the display -- the process
+    /// vanished from the list exactly as it would have if it had died. Now
+    /// that a real signal is sent, the temptation is stronger and the rule is
+    /// the same: the list is rebuilt from `/proc` on the next refresh, and
+    /// what it shows then is the kernel's answer rather than ours. A signal
+    /// that was accepted is not a process that has exited -- `SIGTERM` is
+    /// catchable, and even `SIGKILL` leaves the task visible until it is
+    /// reaped.
+    fn signal_selected(&mut self, sig: i32, verb: &str) {
+        let Some(sel) = self.selected_index else {
+            return;
+        };
+        let Some(&proc_idx) = self.visible_indices.get(sel) else {
+            return;
+        };
+        let Some(pid) = self.processes.get(proc_idx).map(|p| p.pid) else {
+            return;
+        };
+        self.signal_pid(pid, sig, verb);
+    }
+
+    /// Signal a process named by pid, from the toolbar or the right-click menu.
+    ///
+    /// **One function, because there are two doors to it.** The toolbar and the
+    /// menu are the same three controls, and when they were repaired the first
+    /// time only the toolbar was: `kill_selected` stopped claiming a kill while
+    /// the menu two lines away went on claiming one, and it took a scanner to
+    /// notice. Two call sites of one function cannot drift; two copies of one
+    /// behaviour did, within the hour.
+    fn signal_pid(&mut self, pid: u32, sig: i32, verb: &str) {
+        let Some(name) = self
+            .processes
+            .iter()
+            .find(|p| p.pid == pid)
+            .map(|p| p.name.clone())
+        else {
+            return;
+        };
+        self.status_message = Self::signal_outcome(&name, pid, verb, Self::send(pid, sig));
+    }
+
+    /// `libcall::kill` with the pid widened, or `EINVAL` if it does not fit.
+    ///
+    /// `ProcessInfo::pid` is a `u32` and `kill` takes an `i32`. A value above
+    /// `i32::MAX` is not a pid this system can name, and `as` would wrap it
+    /// into a negative -- which `libcall::kill` refuses as a broadcast, so the
+    /// failure would be reported correctly by luck rather than by intent.
+    fn send(pid: u32, sig: i32) -> Result<(), i32> {
+        let Ok(pid) = i32::try_from(pid) else {
+            return Err(libcall::EINVAL);
+        };
+        libcall::kill(pid, sig)
+    }
+
+    /// What to show the operator for a signal that was or was not delivered.
+    ///
+    /// Separated from the call so the mapping is testable: on this host the
+    /// `kill` arm is `cfg(unix)` and every call answers `ENOSYS`, so a test
+    /// that went through `send` could only ever exercise one branch.
+    ///
+    /// The errors are told apart on purpose. A manager that folds them into
+    /// one "could not signal" makes the two most useful facts -- it is already
+    /// gone, you are not allowed -- indistinguishable, and the operator's next
+    /// action differs completely between them.
+    fn signal_outcome(name: &str, pid: u32, verb: &str, r: Result<(), i32>) -> String {
+        match r {
+            // Not "Killed X". The signal was accepted; whether the process
+            // exits is the kernel's business and the next refresh's news.
+            Ok(()) => format!("Sent {verb} to {name} (PID {pid})"),
+            Err(libcall::ESRCH) => {
+                format!("{name} (PID {pid}) is already gone -- nothing to {verb}")
+            }
+            Err(libcall::EPERM) => {
+                format!("Not permitted to {verb} {name} (PID {pid})")
+            }
+            Err(libcall::ENOSYS) => format!(
+                "{name} (PID {pid}) was not sent {verb}: this system cannot signal processes"
+            ),
+            Err(libcall::EINVAL) => {
+                format!("{name} (PID {pid}) is not a process this can signal")
+            }
+            Err(e) => format!("{name} (PID {pid}) was not sent {verb}: error {e}"),
         }
     }
 
-    /// Why a signal cannot be sent, named for the process it was aimed at.
+    /// May this process be signalled right now?
     ///
-    /// These three controls used to report the act and then **make the report
-    /// come true in the display**: `kill_selected` said "Killed process X" and
-    /// removed the row, `pause_selected` said "Paused X" and set the row to
-    /// Stopped. That is the worst form this defect takes, because the window
-    /// then agrees with itself -- the process disappears from the list exactly
-    /// as it would have if it had died, so **nothing inside the program can
-    /// tell the user otherwise.** A person who believes a runaway process is
-    /// dead stops trying to kill it.
-    ///
-    /// Sending a signal needs `kill(2)`, which is stateful and therefore
-    /// reachable only through the C ABI per `design-decisions.md` §768 --
-    /// `posix::signal::kill` as a Rust dependency is the route that looks
-    /// right and resolves to a stub answering `-ENOSYS`. That makes it
-    /// `libcall`'s to expose, and `libcall` is not in this lane's tree; see
-    /// `requests/c-b-a-process-manager-needs-a-way-to-send-a-signal.md`.
-    fn cannot_signal(name: &str, pid: u32, verb: &str) -> String {
-        format!("{name} (PID {pid}) was not {verb}: nothing here can signal a process yet")
+    /// Signal 0 delivers nothing and reports whether the target exists and is
+    /// permitted, which is what a greyed-out Kill should be greyed on. The
+    /// alternative is an enabled button that fails, and a button that fails is
+    /// how the operator finds out.
+    pub fn can_signal(&self, pid: u32) -> bool {
+        Self::send(pid, 0).is_ok()
     }
 
     /// Pause (stop) the selected process.
     pub fn pause_selected(&mut self) {
-        if let Some(sel) = self.selected_index
-            && let Some(&proc_idx) = self.visible_indices.get(sel)
-            && let Some(proc) = self.processes.get_mut(proc_idx)
-        {
-            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "paused");
-        }
+        self.signal_selected(libcall::SIGSTOP, "pause");
     }
 
     /// Resume the selected process.
     pub fn resume_selected(&mut self) {
-        if let Some(sel) = self.selected_index
-            && let Some(&proc_idx) = self.visible_indices.get(sel)
-            && let Some(proc) = self.processes.get_mut(proc_idx)
-        {
-            self.status_message = Self::cannot_signal(&proc.name, proc.pid, "resumed");
-        }
+        self.signal_selected(libcall::SIGCONT, "resume");
     }
 
     /// Set sort column. If the same column is clicked again, toggle direction.
@@ -1402,30 +1464,18 @@ impl ProcessExplorerState {
 
     /// Execute a context menu action on a target process.
     fn execute_context_action(&mut self, action: ContextAction, target_pid: u32) {
-        // Find the process by PID.
-        let proc_idx = self.processes.iter().position(|p| p.pid == target_pid);
-
+        // The lookup moved into `signal_pid`, which is the only arm that
+        // needed it. Left here it was a write with no reader -- the shape
+        // gate 52 exists to find, in the same commit that removed its uses.
         match action {
             // The same three controls again, reached from the right-click
             // menu rather than the toolbar. Repairing `kill_selected` alone
             // would have left this pair saying "Killed X" two lines away --
             // `scripts/find-claimed-acts.py` is what caught them, having been
             // written for this exact defect an hour earlier.
-            ContextAction::Kill => {
-                if let Some(proc) = proc_idx.and_then(|i| self.processes.get(i)) {
-                    self.status_message = Self::cannot_signal(&proc.name, target_pid, "killed");
-                }
-            }
-            ContextAction::Pause => {
-                if let Some(proc) = proc_idx.and_then(|i| self.processes.get(i)) {
-                    self.status_message = Self::cannot_signal(&proc.name, target_pid, "paused");
-                }
-            }
-            ContextAction::Resume => {
-                if let Some(proc) = proc_idx.and_then(|i| self.processes.get(i)) {
-                    self.status_message = Self::cannot_signal(&proc.name, target_pid, "resumed");
-                }
-            }
+            ContextAction::Kill => self.signal_pid(target_pid, libcall::SIGKILL, "kill"),
+            ContextAction::Pause => self.signal_pid(target_pid, libcall::SIGSTOP, "pause"),
+            ContextAction::Resume => self.signal_pid(target_pid, libcall::SIGCONT, "resume"),
             ContextAction::ChangePriority => {
                 self.status_message = format!("Change priority for PID {target_pid} (dialog NYI)");
             }
@@ -3415,6 +3465,186 @@ mod tests {
         assert_eq!(app.selected_index, None);
     }
 
+    /// A signal does not change the row. The next refresh does.
+    ///
+    /// These three controls used to report the act and then **make the report
+    /// come true in the display**: `kill_selected` said "Killed process X" and
+    /// removed the row, `pause_selected` said "Paused X" and set the row to
+    /// Stopped. That is the worst form the defect takes, because the window
+    /// then agrees with itself, and nothing inside the program can tell the
+    /// user otherwise. A person who believes a runaway process is dead stops
+    /// trying to kill it.
+    ///
+    /// **Now that a real signal is sent, the temptation is stronger and the
+    /// rule is unchanged.** A signal that was accepted is not a process that
+    /// has exited: `SIGTERM` is catchable, `SIGSTOP` takes effect when the
+    /// kernel schedules it, and even `SIGKILL` leaves the task in the table
+    /// until it is reaped. The list is rebuilt from `/proc`, and what it shows
+    /// is the kernel's answer rather than ours.
+    #[test]
+    fn a_signal_does_not_change_the_row_it_was_aimed_at() {
+        let mut state = ProcessExplorerState::new();
+        state.load_demo_data();
+        state.rebuild_visible_list();
+        let before = state.processes.len();
+        assert!(before > 0, "control: the fixture must hold processes");
+        state.selected_index = Some(0);
+        // The row the toolbar acts on, so the menu acts on the same one.
+        let row = state.visible_indices[0];
+        let pid = state.processes[row].pid;
+
+        // **Not the fixture's own status.** A resume that writes the row sets
+        // it to Running, and the demo's first process is already Running -- so
+        // against an unmodified fixture "the status did not change" is
+        // satisfied by that write as readily as by its absence. Sysmonitor's
+        // identical test proved it under sabotage: the restyle stayed green
+        // until the fixture started somewhere else.
+        state.processes[row].status = ProcessStatus::Sleeping;
+        let was = state.processes[row].status;
+        assert_ne!(
+            was,
+            ProcessStatus::Running,
+            "control: the starting status must differ from the one a bad resume would write, or this assertion cannot fail"
+        );
+        for act in [
+            ProcessExplorerState::kill_selected,
+            ProcessExplorerState::pause_selected,
+            ProcessExplorerState::resume_selected,
+        ] {
+            act(&mut state);
+            assert_eq!(
+                state.processes.len(),
+                before,
+                "a row was removed to agree with the message: {}",
+                state.status_message
+            );
+            assert_eq!(
+                state.processes[row].status, was,
+                "a row was restyled to agree with the message: {}",
+                state.status_message
+            );
+        }
+
+        for action in [
+            ContextAction::Kill,
+            ContextAction::Pause,
+            ContextAction::Resume,
+        ] {
+            state.execute_context_action(action, pid);
+            assert_eq!(state.processes.len(), before, "the menu removed the row");
+            assert_eq!(
+                state.processes[row].status, was,
+                "the menu restyled the row"
+            );
+        }
+    }
+
+    /// The message is what the kernel said, and the failures are told apart.
+    ///
+    /// Tested through `signal_outcome` rather than through a real `kill`,
+    /// because on this host the signalling arm is `cfg(unix)` and every call
+    /// answers `ENOSYS` -- so a test that went through `send` could exercise
+    /// exactly one of these branches and would report full coverage of a
+    /// mapping it had never run.
+    ///
+    /// They are separate messages on purpose. `ESRCH` and `EPERM` are the two
+    /// most useful things the kernel can say -- it is already gone, you are
+    /// not allowed -- and the operator's next action differs completely
+    /// between them. A manager that folds them into one "could not signal"
+    /// throws away the only part of the answer that was actionable.
+    #[test]
+    fn a_signal_is_reported_as_what_the_kernel_said() {
+        let cases: [(Result<(), i32>, &str, &str); 6] = [
+            (
+                Ok(()),
+                "Sent kill to editor (PID 203)",
+                "an accepted signal",
+            ),
+            (
+                Err(libcall::ESRCH),
+                "already gone",
+                "a process that exited first",
+            ),
+            (
+                Err(libcall::EPERM),
+                "Not permitted",
+                "a process not ours to signal",
+            ),
+            (
+                Err(libcall::ENOSYS),
+                "cannot signal processes",
+                "a system without signals",
+            ),
+            (
+                Err(libcall::EINVAL),
+                "not a process this can signal",
+                "a pid that is not one",
+            ),
+            (Err(4242), "error 4242", "an errno with no name here"),
+        ];
+        for (result, expected, what) in cases {
+            let msg = ProcessExplorerState::signal_outcome("editor", 203, "kill", result);
+            assert!(
+                msg.contains(expected),
+                "{what}: expected {expected:?} in {msg:?}"
+            );
+            assert!(
+                msg.contains("editor") && msg.contains("203"),
+                "{what}: the message does not name the process: {msg:?}"
+            );
+        }
+
+        // The one wording that must never appear: a past-tense claim that the
+        // process died. `Ok` means the signal was accepted, nothing more.
+        let ok = ProcessExplorerState::signal_outcome("editor", 203, "kill", Ok(()));
+        assert!(
+            !ok.starts_with("Killed") && !ok.contains("has been"),
+            "claimed the process died, when all that happened was a signal: {ok}"
+        );
+    }
+
+    /// The toolbar and the right-click menu give the same answer.
+    ///
+    /// They are the same three controls behind two doors, and when they were
+    /// repaired the first time only one door was: `kill_selected` stopped
+    /// claiming a kill while the menu two lines away went on claiming one, for
+    /// an hour, until `scripts/find-claimed-acts.py` noticed. This is the pin
+    /// that makes them impossible to repair singly again.
+    #[test]
+    fn the_toolbar_and_the_menu_give_the_same_answer() {
+        let mut state = ProcessExplorerState::new();
+        state.load_demo_data();
+        state.rebuild_visible_list();
+        state.selected_index = Some(0);
+        // Through `visible_indices`, not `processes[0]`. The list is sorted,
+        // so row 0 on screen is not row 0 in the vector -- the first version
+        // of this test compared the toolbar's answer about `editor` with the
+        // menu's about `init` and reported the two doors as disagreeing.
+        let pid = state.processes[state.visible_indices[0]].pid;
+
+        for (act, action) in [
+            (
+                ProcessExplorerState::kill_selected as fn(&mut ProcessExplorerState),
+                ContextAction::Kill,
+            ),
+            (ProcessExplorerState::pause_selected, ContextAction::Pause),
+            (ProcessExplorerState::resume_selected, ContextAction::Resume),
+        ] {
+            act(&mut state);
+            let from_toolbar = state.status_message.clone();
+            state.status_message.clear();
+            state.execute_context_action(action, pid);
+            assert_eq!(
+                from_toolbar, state.status_message,
+                "the two doors to one control disagree"
+            );
+            assert!(
+                !from_toolbar.is_empty(),
+                "control: neither door said anything, so this compares nothing"
+            );
+        }
+    }
+
     #[test]
     fn the_status_bar_does_not_open_the_kill_menu() {
         // The one that matters: this menu's actions include killing the
@@ -4179,98 +4409,6 @@ mod tests {
         assert_eq!(
             state.ms_since_refresh, 0,
             "reaching the interval must refresh and reset"
-        );
-    }
-
-    /// A kill that cannot happen is not reported as one.
-    ///
-    /// This is the shape worth keeping in mind: the old `kill_selected` said
-    /// "Killed process X (PID n)" **and removed the row**, so the window then
-    /// agreed with its own claim -- the process vanished from the list exactly
-    /// as it would have if it had died. Nothing inside the program could tell
-    /// the user otherwise.
-    #[test]
-    fn killing_a_process_neither_happens_nor_is_claimed() {
-        let mut state = ProcessExplorerState::new();
-        state.load_demo_data();
-        state.rebuild_visible_list();
-        let before = state.processes.len();
-        assert!(before > 0, "control: the fixture must hold processes");
-
-        state.selected_index = Some(0);
-        state.kill_selected();
-
-        assert_eq!(
-            state.processes.len(),
-            before,
-            "the row was removed, which makes the false claim consistent"
-        );
-        assert!(
-            !state.status_message.starts_with("Killed"),
-            "claimed a kill it cannot perform: {}",
-            state.status_message
-        );
-        assert!(
-            state.status_message.contains("not killed"),
-            "should name what did not happen: {}",
-            state.status_message
-        );
-    }
-
-    /// The right-click menu is the same three controls and had the same defect.
-    #[test]
-    fn the_context_menu_neither_signals_nor_claims_to() {
-        let mut state = ProcessExplorerState::new();
-        state.load_demo_data();
-        state.rebuild_visible_list();
-        let before = state.processes.len();
-        let pid = state.processes.first().map(|p| p.pid).unwrap_or(0);
-        assert!(before > 0, "control: the fixture must hold processes");
-
-        state.execute_context_action(ContextAction::Kill, pid);
-        assert_eq!(state.processes.len(), before, "the menu removed the row");
-        assert!(
-            state.status_message.contains("not killed"),
-            "{}",
-            state.status_message
-        );
-
-        let was = state.processes[0].status;
-        state.execute_context_action(ContextAction::Pause, pid);
-        assert_eq!(state.processes[0].status, was, "the menu changed the row");
-        assert!(
-            state.status_message.contains("not paused"),
-            "{}",
-            state.status_message
-        );
-    }
-
-    /// Pause and resume likewise leave the process alone and say so.
-    #[test]
-    fn pausing_and_resuming_neither_happen_nor_are_claimed() {
-        let mut state = ProcessExplorerState::new();
-        state.load_demo_data();
-        state.rebuild_visible_list();
-        state.selected_index = Some(0);
-        let was = state.processes[0].status;
-
-        state.pause_selected();
-        assert_eq!(
-            state.processes[0].status, was,
-            "the row was changed to match the claim"
-        );
-        assert!(
-            state.status_message.contains("not paused"),
-            "{}",
-            state.status_message
-        );
-
-        state.resume_selected();
-        assert_eq!(state.processes[0].status, was);
-        assert!(
-            state.status_message.contains("not resumed"),
-            "{}",
-            state.status_message
         );
     }
 

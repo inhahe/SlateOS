@@ -1379,9 +1379,20 @@ impl Dictionary {
         &self.query
     }
 
+    /// The status line: the last file outcome if there is one, else the hint.
+    ///
+    /// **`file_status` was written and read by nothing.** A failed open set it
+    /// to `Could not read /path: <err>` and the window said nothing at all --
+    /// the picker closed, the lists were unchanged, and that is exactly what a
+    /// file which loaded and happened to be empty looks like. The user's next
+    /// move is to wonder where their favourites went.
+    ///
+    /// It takes precedence over the search hint while it is set, because a
+    /// hint is always true and this is news. `handle_key` clears it on the
+    /// next keystroke, so it does not outlive the moment it belongs to.
     #[must_use]
     pub fn status(&self) -> &str {
-        &self.status
+        self.file_status.as_deref().unwrap_or(&self.status)
     }
 
     #[must_use]
@@ -2734,6 +2745,10 @@ impl Dictionary {
         if !ev.pressed {
             return EventResult::Ignored;
         }
+        // The last file outcome belongs to the moment it happened. Cleared on
+        // the next keystroke so the status line goes back to the hint rather
+        // than reporting an open from five minutes ago as if it were now.
+        self.file_status = None;
         let m = ev.modifiers;
         if m.alt || m.super_key {
             return EventResult::Ignored;
@@ -4799,6 +4814,77 @@ mod tests {
                 "{screen:?}: the status line is not drawn"
             );
         }
+    }
+
+    /// A failed open says so, in the window.
+    ///
+    /// `file_status` held the outcome of the last open or save -- including
+    /// `Could not read /path: <err>` -- and **nothing read it**. The picker
+    /// closed, the lists were unchanged, and that is precisely what a file
+    /// which loaded and happened to be empty looks like. The user's next move
+    /// is to wonder where their favourites went.
+    ///
+    /// Reported by lane A's gate 52 (a field written in production and read by
+    /// nothing), and the third of three in this lane today where the dead
+    /// field was a missing feature rather than leftover code: `jsonviewer`'s
+    /// `last_open` was a truncation warning nobody drew, `renamer`'s
+    /// `raw_name` was the un-lossy name the rename should have used.
+    #[test]
+    fn a_failed_open_reaches_the_status_bar() {
+        let mut d = sized(Dictionary::SIZE);
+        let missing = std::env::temp_dir().join(format!(
+            "dictionary-no-such-file-{}-{}.txt",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&missing);
+
+        let said = load_lists(&mut d, &missing);
+        assert!(
+            said.contains("Could not read"),
+            "control: the fixture must fail to read: {said}"
+        );
+
+        d.file_status = Some(said.clone());
+        assert_eq!(
+            d.status(),
+            said,
+            "the status line did not take the file outcome"
+        );
+        assert!(
+            shows(&d, Dictionary::SIZE, "Could not read"),
+            "the window never drew the failure"
+        );
+    }
+
+    /// ...and goes away again on the next keystroke.
+    ///
+    /// A hint is always true; this is news. News that stays on the line
+    /// reports an open from five minutes ago as though it were now, which is
+    /// its own small false claim.
+    #[test]
+    fn a_file_outcome_does_not_outstay_the_moment() {
+        let mut d = sized(Dictionary::SIZE);
+        d.file_status = Some(String::from("Could not read /nowhere: no such file"));
+        assert!(shows(&d, Dictionary::SIZE, "Could not read"), "control");
+
+        handle_event(
+            &mut d,
+            &Event::Key(KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::from("a"),
+            }),
+        );
+        assert!(
+            d.file_status.is_none(),
+            "the file outcome survived a keystroke"
+        );
+        assert!(
+            !d.status().is_empty(),
+            "clearing it left the status line empty"
+        );
     }
 
     #[test]

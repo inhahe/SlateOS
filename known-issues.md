@@ -148367,7 +148367,8 @@ produced output indistinguishable from a verdict:
    captures were empty -- and empty equals empty, so the gate announced
    "two trees differing only in NUL bytes compare EQUAL" and told the reader
    `contents()` needed its hash line back. **The harness was fine.**
-2. `Path.write_text` translated the function to CRLF. `contents() {` is a
+2. `Path.write_text` translated the function to CRLF. `contents() {
+` is a
    syntax error, so the function was never defined. Same empty, same verdict.
 3. Under `bash -c`, a function is NOT visible inside a command substitution on
    this Git Bash -- MSYS emulates fork by re-execing and the definition does
@@ -151515,7 +151516,7 @@ Duplication is not only a maintenance cost paid later. It is a place where
 **two copies can already differ today and nothing reports it**, because each
 one is locally plausible and no test compares them.
 
-## TD-C-THE-IMPORTER-THAT-WAS-NOT-THERE -- OPEN 2026-09-15
+## TD-C-THE-IMPORTER-THAT-WAS-NOT-THERE -- FIXED 2026-09-16, AND THIS ENTRY WAS ITSELF STALE
 
 **In short:** a tracking entry in this file said `apps/kanban` has "a complete
 JSON importer" that only needs a file chooser to become useful. It does not.
@@ -151526,6 +151527,37 @@ have found half a parser missing. This entry corrects that one, and records
 why the mistake was easy to make.
 
 Corrects: `TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE`.
+
+**Status 2026-09-16: all four steps are done, and this entry became wrong in
+the other direction.** `JsonValue`, `parse_value`, `parse_object`,
+`parse_array` and `import_board` all exist; `import_board` has a caller; the
+file picker is wired. `validate_export` -- the validator that could not return
+false -- is deleted, with a note where it stood and a real round-trip test in
+its place.
+
+**Read this before trusting the next entry of its kind.** This entry was
+written to correct an earlier one that overstated the importer ("a complete
+JSON importer needing only a file chooser"). It then outlived its own subject
+and overstated the *absence*. A reader who believed it -- and I did, this
+morning, far enough to scope four slices and start writing a JSON value parser
+that already existed -- would have spent an afternoon rebuilding working code.
+
+The stop was reading the source, not re-reading the entry. The specific near
+miss is worth recording: I had staged a "correction" changing the `dead_code`
+reasons from `"import needs a file chooser"` to `"no value parser above it,
+and no file chooser"`, which would have replaced a nearly-right reason with a
+definitely-wrong one, on this document's authority.
+
+**Two defects the correction turned up, both invisible to the entry:**
+
+  * Six `#[allow(dead_code, …)]` attributes that outlived their reason.
+    Removing all six leaves the crate compiling cleanly. `check-dead-code-allows`
+    reports "0 new" for these, correctly -- a stale allow is not a new one, and
+    the gate is built to catch additions rather than survivals.
+  * `KanbanApp::export_json`, superseded by `write_board` and kept alive by a
+    test asserting its output was non-empty and contained the board name. Both
+    true, neither able to fail. **A test on the wrong function is how a
+    superseded function survives being superseded.**
 
 ### What is actually there
 

@@ -154984,7 +154984,25 @@ spec usually did so to depart from normal somewhere -- and those are exactly
 the places where an implementer's instinct and the design disagree without
 either noticing.
 
-## TD-C-THE-COLUMN-VIEW-DOES-THE-ONE-THING-THE-SPEC-FORBIDS
+## TD-C-THE-COLUMN-VIEW-DOES-THE-ONE-THING-THE-SPEC-FORBIDS -- FIXED 2026-09-16
+
+**Fixed the same day, in the order this entry set out.** The picker was built
+first (`apps/explorer` column menu on the Details header, with per-folder and
+global saves through `columnprefs`), and `auto_detect_columns` was deleted in
+the change that made it unnecessary -- not before, because until the picker
+existed the guess was the only way any column beyond the default set appeared.
+
+The removal reached further than the function: **six tests pinned the forbidden
+behaviour**, all passing, and `FileInfo` existed only to be passed to it. A
+test can be a careful, green assertion that the wrong thing happens, and
+nothing about it looks wrong from inside the file -- the compiler found four of
+the six after the first two were deleted by hand.
+
+One difference from the spec is left and is smaller: the out-of-the-box set is
+name, size, date-modified **and type**, where §4.1 says "fixed and minimal --
+name, size, datetime modified". Not folded into this change because it is a
+different bullet, and because the reason §4.1 gives for minimal ("the user
+expands from there") only became true when the picker landed.
 
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `apps/explorer/src/columns.rs` — `auto_detect_columns` (~587);

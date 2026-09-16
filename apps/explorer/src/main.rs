@@ -41,7 +41,7 @@ use guitk::scrollbar;
 use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 
-use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
+use columns::{ColumnId, ColumnManager, ColumnValue, SortOrder};
 use drives::DriveSet;
 use guitk::disabled::DisabledState;
 use guitk::filetypes::{self, FileCategory};
@@ -935,16 +935,15 @@ impl ExplorerState {
 
         self.sort_entries();
         self.update_status();
-        // A preference the user saved wins over anything guessed from the
-        // folder's contents. The guess itself is what `roadmap-detailed.md`
-        // §4.1 forbids outright, and it goes when the picker can replace it --
-        // see known-issues
-        // TD-C-THE-COLUMN-VIEW-DOES-THE-ONE-THING-THE-SPEC-FORBIDS. Until
-        // then it is the only way a column beyond the default set appears, so
-        // it stays as the last resort rather than the first.
-        if !self.apply_saved_columns() {
-            detect_columns(&mut self.columns, &self.entries);
-        }
+        // A folder shows what the user saved for it, the default they saved,
+        // or the fixed out-of-the-box set -- and nothing derived from what is
+        // inside it. `roadmap-detailed.md` §4.1 forbids content-based column
+        // selection outright: it makes the view change shape as you navigate,
+        // lets one odd file alter the columns, and leaves "why did my columns
+        // change?" with no answer a user can reach. Until the picker landed,
+        // the guess was the only way any extra column ever appeared, which is
+        // why it outlived the rule.
+        self.apply_saved_columns();
         self.queue_thumbnails();
     }
 
@@ -3666,25 +3665,6 @@ const fn entry_category(entry: &FileEntry) -> ThumbCategory {
 
 /// Re-derive the active column set from what the directory actually holds.
 ///
-/// A free function rather than a method because it borrows two fields of
-/// [`ExplorerState`] at once — the entries immutably and the manager mutably —
-/// which the borrow checker allows at a call site but not through `&mut self`.
-///
-/// Paths are converted with [`Path::to_str`], not `to_string_lossy`: a name
-/// that is not valid UTF-8 simply does not vote on which columns appear, which
-/// is right, since every extension auto-detection looks for is ASCII. Making
-/// one up with replacement characters could only produce a wrong answer.
-fn detect_columns(columns: &mut ColumnManager, entries: &[FileEntry]) {
-    let infos: Vec<FileInfo<'_>> = entries
-        .iter()
-        .map(|e| FileInfo {
-            path: e.path.to_str().unwrap_or(""),
-            extension: e.path.extension().and_then(|x| x.to_str()).unwrap_or(""),
-        })
-        .collect();
-    columns.auto_detect_columns(&infos);
-}
-
 /// Check that `name` is usable as a single entry name in a directory.
 ///
 /// The rule the OS itself enforces is "all bytes except `/` and NUL" — see
@@ -7504,21 +7484,6 @@ mod tests {
                 // knows it is Rust -- went unread.
                 ColumnValue::Text("Rust Source File".to_string()),
             ]
-        );
-    }
-
-    /// A directory of source gains the code columns without the user asking.
-    #[test]
-    fn a_folder_of_source_grows_the_code_columns() {
-        let root_scratch = temp_dir("cols_detect");
-        let root = root_scratch.dir().to_path_buf();
-        write(&root.join("main.rs"), "fn main() {}");
-
-        let state = state_at(&root);
-        assert!(
-            state.columns.is_visible(ColumnId::LANGUAGE),
-            "a .rs file should switch on the Language column: {:?}",
-            state.columns.active_columns()
         );
     }
 

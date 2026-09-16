@@ -31,7 +31,6 @@
 
 use appearance::Palette;
 use guitk::color::Color;
-use guitk::filetypes::FileCategory;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -345,14 +344,6 @@ pub trait ColumnProvider {
 }
 
 // ============================================================================
-// File info — lightweight struct passed to auto_detect_columns
-// ============================================================================
-
-/// Minimal file info needed for column auto-detection.
-pub struct FileInfo<'a> {
-    pub path: &'a str,
-    pub extension: &'a str,
-}
 
 // ============================================================================
 // Column manager
@@ -628,62 +619,6 @@ impl ColumnManager {
             .iter()
             .map(|&id| self.get_value(path, id))
             .collect()
-    }
-
-    // ------------------------------------------------------------------
-    // Auto-detection
-    // ------------------------------------------------------------------
-
-    /// Examine the files in view and automatically enable relevant
-    /// category columns.  For example, if the directory contains .png
-    /// and .jpg files, the Image columns become active.
-    pub fn auto_detect_columns(&mut self, files: &[FileInfo<'_>]) {
-        // Always keep standard columns.
-        let mut detected: Vec<ColumnId> = vec![
-            ColumnId::NAME,
-            ColumnId::SIZE,
-            ColumnId::DATE_MODIFIED,
-            ColumnId::TYPE,
-        ];
-
-        let mut has_image = false;
-        let mut has_audio = false;
-        let mut has_code = false;
-        let mut has_archive = false;
-
-        for file in files {
-            // The registry, not a fourth extension list. This one was narrower
-            // than the other three and disagreed with them: `.webp` was an
-            // image to the file list and nothing at all here, so a folder of
-            // them suggested no image columns.
-            match guitk::filetypes::category_from_extension(file.extension) {
-                FileCategory::Image => has_image = true,
-                FileCategory::Audio => has_audio = true,
-                FileCategory::Code | FileCategory::Config | FileCategory::Data => has_code = true,
-                FileCategory::Archive | FileCategory::Package | FileCategory::DiskImage => {
-                    has_archive = true;
-                }
-                _ => {}
-            }
-        }
-
-        if has_image {
-            detected.push(ColumnId::DIMENSIONS);
-        }
-        if has_audio {
-            detected.push(ColumnId::DURATION);
-            detected.push(ColumnId::ARTIST);
-        }
-        if has_code {
-            detected.push(ColumnId::LINE_COUNT);
-            detected.push(ColumnId::LANGUAGE);
-        }
-        if has_archive {
-            detected.push(ColumnId::COMPRESSED_SIZE);
-            detected.push(ColumnId::FILE_COUNT_INSIDE);
-        }
-
-        self.active_columns = detected;
     }
 
     // ------------------------------------------------------------------
@@ -2180,120 +2115,6 @@ mod tests {
         let prov = AudioColumns;
         let val = prov.value("/music/song.mp3", ColumnId::DURATION);
         assert_eq!(val, ColumnValue::Duration(222));
-    }
-
-    // ------------------------------------------------------------------
-    // Auto-detect columns
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_auto_detect_images() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo {
-                path: "photo.png",
-                extension: "png",
-            },
-            FileInfo {
-                path: "readme.txt",
-                extension: "txt",
-            },
-        ];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::DIMENSIONS));
-        assert!(!mgr.is_visible(ColumnId::DURATION));
-    }
-
-    #[test]
-    fn test_auto_detect_audio() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [FileInfo {
-            path: "song.mp3",
-            extension: "mp3",
-        }];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::DURATION));
-        assert!(mgr.is_visible(ColumnId::ARTIST));
-        assert!(!mgr.is_visible(ColumnId::DIMENSIONS));
-    }
-
-    #[test]
-    fn test_auto_detect_code() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo {
-                path: "main.rs",
-                extension: "rs",
-            },
-            FileInfo {
-                path: "lib.py",
-                extension: "py",
-            },
-        ];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::LINE_COUNT));
-        assert!(mgr.is_visible(ColumnId::LANGUAGE));
-    }
-
-    #[test]
-    fn test_auto_detect_archives() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [FileInfo {
-            path: "backup.zip",
-            extension: "zip",
-        }];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::COMPRESSED_SIZE));
-        assert!(mgr.is_visible(ColumnId::FILE_COUNT_INSIDE));
-    }
-
-    #[test]
-    fn test_auto_detect_mixed() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo {
-                path: "photo.png",
-                extension: "png",
-            },
-            FileInfo {
-                path: "song.mp3",
-                extension: "mp3",
-            },
-            FileInfo {
-                path: "main.rs",
-                extension: "rs",
-            },
-            FileInfo {
-                path: "backup.zip",
-                extension: "zip",
-            },
-        ];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::DIMENSIONS));
-        assert!(mgr.is_visible(ColumnId::DURATION));
-        assert!(mgr.is_visible(ColumnId::LINE_COUNT));
-        assert!(mgr.is_visible(ColumnId::COMPRESSED_SIZE));
-    }
-
-    #[test]
-    fn test_auto_detect_no_special() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo {
-                path: "readme.txt",
-                extension: "txt",
-            },
-            FileInfo {
-                path: "notes.doc",
-                extension: "doc",
-            },
-        ];
-        mgr.auto_detect_columns(&files);
-        // Only standard columns.
-        assert!(mgr.is_visible(ColumnId::NAME));
-        assert!(mgr.is_visible(ColumnId::SIZE));
-        assert!(!mgr.is_visible(ColumnId::DIMENSIONS));
-        assert!(!mgr.is_visible(ColumnId::DURATION));
     }
 
     // ------------------------------------------------------------------

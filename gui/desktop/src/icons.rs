@@ -1141,10 +1141,16 @@ impl DesktopIconLayer {
     // Where the icons were left
     //
     // `design-decisions.md` 933 (open-questions A-Q8): desktop icon layout is
-    // not a kernel concern. `fs::deskicons` and `/proc/deskicons` go, and this
-    // layer becomes the authority, persisting positions in userspace. Lane C
-    // wires first and lane A deletes after, so no reboot loses positions in
-    // between -- which is why this half exists before that half.
+    // not a kernel concern. This layer is the authority and persists positions
+    // in userspace; `fs::deskicons` and `/proc/deskicons` are gone.
+    //
+    // The order was deliberate -- lane C wired first and lane A deleted after,
+    // so no reboot lost positions in between, which is why this half was
+    // written before that half. Both halves landed; confirmed 2026-09-16 in
+    // `requests/a-c-deskicons-is-a-persistence-layer-the-shell-is-the-layout-authority.md`.
+    // Stated in the past tense on purpose: it described a deletion that had
+    // already happened as though it were still owed, which is how a comment
+    // becomes a claim nobody re-checks.
     // ======================================================================
 
     /// The key an icon's position is filed under.

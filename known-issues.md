@@ -153913,7 +153913,31 @@ Wiring it is a contained job -- `apps/sysinfo`, `apps/procexplorer` and
 the widget both telling the truth until they are.
 
 
-## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- PARTLY FIXED 2026-09-15
+## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- LANE C DONE 2026-09-16
+
+**Re-read 2026-09-16: all three rows this entry left "real, open" are closed,
+two of them by work done after it was written.** Checked one at a time rather
+than trusted:
+
+| row | state on re-reading |
+|---|---|
+| `videoplayer` screenshot settings | **fixed.** The options are drawn with the fact that none can be taken, and `the_screenshot_options_say_no_screenshot_can_be_taken` pins it. |
+| `fontmanager` default size | **fixed.** `SETTINGS_NOT_CARRIED` is drawn directly under the value, deliberately there rather than at the foot of the panel, because "the numbers above are what read as confirmation". |
+| `settings/remote.rs` | **superseded.** `remote::` is named nowhere in `apps/settings/src/main.rs`, so the page cannot be opened and its values confirm themselves to nobody. Whether it is wired up or deleted is open-questions C-Q17, which is the operator's. A disclaimer on an unreachable page would be a notice nobody can read. |
+
+**Two rows of the `gui/` table above are now moot**: `backup_settings` was
+deleted on 2026-09-16 (see
+`TD-C-THREE-MORE-SHELL-SETTINGS-MODULES-ARE-REACHED-BY-NOTHING`), and
+`power_settings` survives only because it is kept deliberately
+(`TD-C-POWER-SETTINGS-IS-KEPT-ON-PURPOSE-DO-NOT-SWEEP-IT`). The disclaimers
+they gained were not wasted -- they were true while those pages existed -- but
+do not go looking for them.
+
+**Why this note exists at all.** The entry says its table is "what makes the
+second reading a lookup instead of an investigation", and on the second reading
+it was not: three rows said open and two of them had been fixed the same day
+the entry was written. A tracking file that lags is worse than one that is
+missing, because it is trusted. Marking work done is part of doing it.
 
 **In short:** across this tree there are 78 settings that a program reads for
 exactly one purpose: to show the value back to the person who set it. Nothing

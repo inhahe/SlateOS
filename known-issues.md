@@ -154435,6 +154435,42 @@ usefully, a gate that refuses a test binary containing both
 `testing::desktop()` and `with_scratch_config` without a `config_turn()`.
 
 
+**Status 2026-09-16: a gate exists, and its first version was not one.**
+`scripts/check-config-turn-guards.py` is pre-push gate 47. Its rule: in a crate
+that writes a scratch configuration, every test that drives an event loop must
+hold a `config_turn()`.
+
+It reported a clean sweep over a tree with three unguarded readers in it. The
+rule keyed on `testing::desktop()`, and `gui/desktop`'s login tests reach the
+loop through `ShellSession::start_with_stores` instead, so the only handle the
+gate had never fired. **One entry in a table is not a rule, it is one example
+of one** -- and the tests it missed were mine, written the same morning, which
+is how the miss survived review.
+
+Three changes, each earned by a failure of the version before it:
+
+* `HARNESS_CALLS` gained `ShellSession::start`.
+* Reader-ness and guard-ness now propagate along calls *within a file*. A
+  helper that wraps the harness hid the whole rule: the test names no harness
+  and the helper is not a test, so neither body looked wrong alone. Guard-ness
+  propagates in the opposite direction, because a caller of a helper that
+  *takes* the turn inherits it through the returned value.
+* The rule applies to test code only. Widening to a production API cost the
+  gate its scope immediately, and its first run reported the shell's own
+  `fn main` as an unguarded test. A gate that tells you to put a test-only
+  mutex in `main` has stopped describing the bug.
+
+Sabotaged before being trusted: removing the guard from *one* helper flags that
+helper and the six callers that inherit it. The old version flagged none of
+them.
+
+**Still open:** the gate follows calls within a file, so a helper defined in
+one module and used in another is invisible to it. A cross-file call graph is
+the honest fix and is not built. A guard inherited from a helper also assumes
+the caller keeps the returned turn alive -- binding it to `_` rather than
+`_name` drops it at once, and nothing here can see the difference.
+
+
 ## TD-C-THREE-MORE-SHELL-SETTINGS-MODULES-ARE-REACHED-BY-NOTHING
 
 **Status 2026-09-16: all three triaged. Two deleted, one deliberately kept.**

@@ -701,6 +701,42 @@ enum KillError {
 }
 
 impl KillError {
+    /// The `system.logind.Error.*` name this failure travels as.
+    ///
+    /// Here rather than in `bus.rs` so that the wire name and the sentence a
+    /// person reads come from one place. `loginctl` now reaches the daemon
+    /// over the bus and gets a name back; if it mapped names to sentences on
+    /// its own, there would be two lists of these failures that could disagree
+    /// about which is which -- the shape this crate already has once, in
+    /// `loginctl`'s `SESSION_DIR` and `logind`'s pointing at different
+    /// directories.
+    fn bus_name(self) -> &'static str {
+        match self {
+            Self::NoSuchSession => crate::bus::ERR_NO_SUCH_SESSION,
+            Self::NoLeaderPid => crate::bus::ERR_NO_SESSION_LEADER,
+            Self::NotPermitted => crate::bus::ERR_ACCESS_DENIED,
+            Self::LeaderGone => crate::bus::ERR_NO_SUCH_PROCESS,
+            Self::Unsupported | Self::Failed => crate::bus::ERR_CANNOT_SIGNAL,
+        }
+    }
+
+    /// Recover the failure from a wire name, if it is one of ours.
+    ///
+    /// `Unsupported` and `Failed` share a name, so this returns the first --
+    /// which is right for a reader, since the sentence for both is about the
+    /// build being unable rather than about the session.
+    fn from_bus_name(name: &str) -> Option<Self> {
+        [
+            Self::NoSuchSession,
+            Self::NoLeaderPid,
+            Self::NotPermitted,
+            Self::LeaderGone,
+            Self::Unsupported,
+        ]
+        .into_iter()
+        .find(|e| e.bus_name() == name)
+    }
+
     /// A sentence for a person.
     fn message(self) -> &'static str {
         match self {
@@ -2026,16 +2062,222 @@ fn parse_loginctl_args(args: &[String]) -> LoginctlCommand {
 /// `Session::format_list_line`'s output already rendered, and re-parsing it
 /// into a struct here so it could be re-rendered would be two formats to keep
 /// in step for no gain.
-fn print_session_list(out: &mut impl Write, lines: &[String]) {
-    let _ = writeln!(
-        out,
-        "{:<8} {:<6} {:<16} {:<12} TTY",
-        "SESSION", "UID", "USER", "SEAT"
-    );
+fn print_listing(out: &mut impl Write, header: &str, lines: &[String], noun: &str) {
+    let _ = writeln!(out, "{header}");
     for line in lines {
         let _ = writeln!(out, "{line}");
     }
-    let _ = writeln!(out, "\n{} sessions listed.", lines.len());
+    let _ = writeln!(out, "\n{} {noun} listed.", lines.len());
+}
+
+/// The header for each listing, in one place.
+///
+/// Three copies of "header, rows, count" differed only in these strings, and
+/// each was a chance for the count to stop matching the rows it counted.
+/// `ListSessions` and its two siblings return `format_list_line`'s output
+/// already rendered, so the header is the only part the client owns.
+const SESSION_HEADER: &str = "SESSION  UID    USER             SEAT         TTY";
+const USER_HEADER: &str = "UID      USER             STATE";
+const SEAT_HEADER: &str = "SEAT";
+
+/// Render a `system.logind.Error.*` name as a sentence.
+///
+/// `KillError` first, because it owns the failures it models and the mapping
+/// lives with it. The rest are the ones ANY method can return, and they are
+/// here rather than in `KillError` because that enum is about killing a
+/// session -- putting `UnknownCaller` in it would make its name a lie and
+/// invite the next method to add its own case to somebody else's type.
+///
+/// An unrecognised name is returned verbatim. That is the honest answer for a
+/// daemon speaking a dialect this build does not know, and it is better than
+/// a friendly sentence that guesses: the raw name is greppable and a guess is
+/// not.
+fn describe_bus_error(name: &str) -> String {
+    if let Some(e) = KillError::from_bus_name(name) {
+        return e.message().to_string();
+    }
+    match name {
+        bus::ERR_UNKNOWN_CALLER => "the daemon could not identify this caller".to_string(),
+        bus::ERR_NOT_AUTHENTICATED => "not authenticated".to_string(),
+        bus::ERR_INVALID_ARGUMENTS => "the daemon rejected the arguments".to_string(),
+        bus::ERR_UNKNOWN_METHOD => "this daemon does not implement that method".to_string(),
+        bus::ERR_NO_SUCH_USER => "no such user".to_string(),
+        bus::ERR_NO_SUCH_SEAT => "no such seat".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// One call to the daemon, or a sentence saying why not.
+///
+/// Connect, call, check for an error reply, decode. Shared because three
+/// things went wrong in the same four lines when `list_sessions_via_bus` was
+/// the only caller, and a second copy is how they start disagreeing about
+/// which of them counts as a failure.
+///
+/// An ERROR REPLY is a failure here, not a value. `conn.call` returns `Ok` for
+/// one -- the daemon answered, and what it answered was "no" -- so a caller
+/// that only checked the `Result` would decode an error message's payload as
+/// a session list and print whatever fell out.
+fn call_logind(member: &str, args: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
+    // `bus::SERVICE_NAME`, not a second copy of the string. `userspace/login`
+    // keeps its own `LOGIND_SERVICE` because `bus` is a module of this binary
+    // and not a crate it can import; the two agree today, and todo.txt already
+    // records this pair drifting apart once -- `loginctl`'s `SESSION_DIR` was
+    // `/run/sessions` while `logind`'s was `/run/systemd/sessions`. Inside this
+    // binary there is no excuse for a second copy.
+    let mut conn = libservicebus::Connection::connect(bus::SERVICE_NAME)
+        .map_err(|e| format!("cannot reach {}: {e:?}", bus::SERVICE_NAME))?;
+    let reply = conn
+        .call(member, &libservicebus::fields::encode(args))
+        .map_err(|e| format!("{member} failed: {e:?}"))?;
+    if reply.is_error() {
+        // `Message::error` puts the `system.logind.Error.*` name in `member`.
+        return Err(describe_bus_error(&reply.member));
+    }
+    libservicebus::fields::decode(&reply.payload)
+        .map(|fields| fields.iter().map(|b| b.to_vec()).collect())
+        .ok_or_else(|| format!("{member} returned a reply this build cannot decode"))
+}
+
+/// `loginctl kill-session <id> [--signal=SIG]`, asking the daemon.
+///
+/// The local path printed "Sent signal 15 to session 3 (leader PID 412)." from
+/// a `Daemon` built in this process, which had no sessions, so it never got
+/// that far -- but `Daemon::kill_session` returned the pid without signalling,
+/// so on a populated daemon it would have said exactly that and sent nothing.
+/// Both halves are fixed: the daemon signals, and this asks the daemon.
+fn kill_session_via_bus(id: &str, signal: i32) -> i32 {
+    if id.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: session ID required");
+        return 1;
+    }
+    let sig = signal.to_string();
+    match call_logind("KillSession", &[id.as_bytes(), sig.as_bytes()]) {
+        Ok(fields) => {
+            let pid = fields.first().map_or_else(
+                || "?".to_string(),
+                |b| String::from_utf8_lossy(b).into_owned(),
+            );
+            println!("Sent signal {signal} to session {id} (leader PID {pid}).");
+            0
+        }
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: cannot kill session {id}: {why}");
+            1
+        }
+    }
+}
+
+/// `loginctl activate` has nothing to ask and says so.
+///
+/// Two facts, because both are true and they have different remedies: the
+/// daemon exposes no `ActivateSession`, and activating would not switch the
+/// screen even if it did, because `Daemon::activate_session` records state
+/// and `Daemon::switch_vt` is reachable from nothing.
+///
+/// Stating the second matters more than the first. Someone adding the bus
+/// method would otherwise ship a command that prints "Activated session 3."
+/// over a screen that does not change -- and would be entitled to think they
+/// had finished, because the method they added works.
+fn activate_is_not_wired(id: &str) -> i32 {
+    if id.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: session ID required");
+        return 1;
+    }
+    let _ = writeln!(
+        io::stderr(),
+        "loginctl: cannot activate session {id}: the daemon exposes no          ActivateSession, and this build cannot switch VTs in any case"
+    );
+    1
+}
+
+/// A one-argument session command, asking the daemon.
+///
+/// `lock-session`, `unlock-session` and `terminate-session` differ only in the
+/// method they call and the word they print. They used to differ in three
+/// copies of the same twelve lines, each running against the local empty
+/// `Daemon` -- where every lookup failed, so each reported "no such session"
+/// for sessions that existed in the daemon holding them.
+///
+/// `past_tense` is the verb, so the sentence reads "Session 3 locked." A
+/// caller that reaches this has had its id checked for emptiness; the daemon
+/// checks everything else, which is the point of asking it.
+fn session_command_via_bus(member: &str, id: &str, past_tense: &str) -> i32 {
+    if id.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: session ID required");
+        return 1;
+    }
+    match call_logind(member, &[id.as_bytes()]) {
+        Ok(_) => {
+            println!("Session {id} {past_tense}.");
+            0
+        }
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: cannot {member} {id}: {why}");
+            1
+        }
+    }
+}
+
+/// One `show-*` command, asking the daemon.
+///
+/// `show-session`, `show-user` and `show-seat` each print one block of
+/// `key=value` lines that the daemon renders. They used to read the local
+/// `Daemon` and report "'3' not found" for a session, user or seat that
+/// existed -- the same wrong-answer-that-reads-right the listings had, with
+/// the difference that a reader is likelier to believe it, because naming a
+/// specific id and being told it is absent sounds like a considered answer.
+///
+/// `noun` is only for the diagnostic. The properties come back already
+/// rendered, so there is nothing here that needs to know what it is looking
+/// at -- which is why one function serves three commands that print quite
+/// different blocks.
+fn show_via_bus(member: &str, noun: &str, id: &str) -> i32 {
+    if id.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: {noun} required");
+        return 1;
+    }
+    match call_logind(member, &[id.as_bytes()]) {
+        Ok(fields) => {
+            for field in &fields {
+                print!("{}", String::from_utf8_lossy(field));
+            }
+            0
+        }
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: cannot show {noun} {id}: {why}");
+            1
+        }
+    }
+}
+
+/// One listing command, asking the daemon.
+///
+/// `list-sessions`, `list-users` and `list-seats` differ in a method name, a
+/// header and a noun. They used to differ in three copies of the same loop
+/// over a local `Daemon` with nothing in it, so each printed its header, no
+/// rows, "0 listed." and exited 0 -- three separate assertions that the
+/// machine was empty, made without asking it.
+fn listing_via_bus(member: &str, header: &str, noun: &str) -> i32 {
+    let fields = match call_logind(member, &[]) {
+        Ok(f) => f,
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: {why}");
+            return 1;
+        }
+    };
+    // Lossy is right for a listing about to be printed and wrong for a path:
+    // these lines are logind's rendering of its own ids and names, so a byte
+    // that is not text means the daemon is not the one this build expects --
+    // and a replacement character says so where a dropped line would not.
+    let lines: Vec<String> = fields
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .collect();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    print_listing(&mut out, header, &lines, noun);
+    0
 }
 
 /// `loginctl list-sessions`, asking the daemon.
@@ -2053,50 +2295,7 @@ fn print_session_list(out: &mut impl Write, lines: &[String]) {
 /// opposite in meaning, and the previous behaviour picked the wrong one
 /// silently. Exiting non-zero is what lets a script tell them apart.
 fn list_sessions_via_bus() -> i32 {
-    // `bus::SERVICE_NAME`, not a second copy of the string. `userspace/login`
-    // keeps its own `LOGIND_SERVICE` because `bus` is a module of this binary
-    // and not a crate it can import; the two agree today, and todo.txt already
-    // records this pair drifting apart once -- `loginctl`'s `SESSION_DIR` was
-    // `/run/sessions` while `logind`'s was `/run/systemd/sessions`. Inside this
-    // binary there is no excuse for a second copy.
-    let mut conn = match libservicebus::Connection::connect(bus::SERVICE_NAME) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = writeln!(
-                io::stderr(),
-                "loginctl: cannot reach {}: {e:?}",
-                bus::SERVICE_NAME
-            );
-            return 1;
-        }
-    };
-    let reply = match conn.call("ListSessions", &libservicebus::fields::encode(&[])) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = writeln!(io::stderr(), "loginctl: ListSessions failed: {e:?}");
-            return 1;
-        }
-    };
-    let Some(fields) = libservicebus::fields::decode(&reply.payload) else {
-        let _ = writeln!(
-            io::stderr(),
-            "loginctl: ListSessions returned a reply this build cannot decode"
-        );
-        return 1;
-    };
-    // Lossy is wrong for a path and right for a listing that is about to be
-    // printed: these lines are logind's own rendering of its own ids, uids and
-    // user names, so a byte that is not text means the daemon is not the one
-    // this build expects -- and showing the replacement character says so
-    // where discarding the line would not.
-    let lines: Vec<String> = fields
-        .iter()
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .collect();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    print_session_list(&mut out, &lines);
-    0
+    listing_via_bus("ListSessions", SESSION_HEADER, "sessions")
 }
 
 /// Execute a loginctl command.
@@ -2130,12 +2329,12 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
         LoginctlCommand::ListSessions => {
             // Reached only by the tests, which use it to check the FORMATTING
             // against a daemon they populated themselves. The real command
-            // goes through `list_sessions_via_bus` in `run_loginctl`, because
-            // the `daemon` here is a local object with nothing in it.
+            // goes through `listing_via_bus` in `run_loginctl`, because the
+            // `daemon` here is a local object with nothing in it.
             let mut sessions: Vec<&Session> = daemon.sessions.values().collect();
             sessions.sort_by(|a, b| a.id.cmp(&b.id));
             let lines: Vec<String> = sessions.iter().map(|s| s.format_list_line()).collect();
-            print_session_list(&mut out, &lines);
+            print_listing(&mut out, SESSION_HEADER, &lines, "sessions");
             0
         }
         LoginctlCommand::ListUsers => {
@@ -2445,8 +2644,46 @@ fn run_loginctl(args: &[String]) -> i32 {
     // The commands that have a bus method go to the daemon. The rest still run
     // against a local `Daemon` -- see `run_loginctl_command`'s doc comment for
     // what that costs and why the two halves behave differently.
-    if matches!(cmd, LoginctlCommand::ListSessions) {
-        return list_sessions_via_bus();
+    // Everything with a bus method goes to the daemon.
+    //
+    // `activate` is here and does NOT go to one, because it has none and
+    // adding it today would make things worse rather than better.
+    // `Daemon::activate_session` sets `SessionState::Active` and
+    // `seat.active_session` and touches no VT -- so a wired-up `loginctl
+    // activate 3` would print "Activated session 3." while the screen did not
+    // change, which is the defect this program has just been cleared of in
+    // four other commands. Switching a VT needs `Daemon::switch_vt`, which is
+    // itself reachable from nothing; see "THE WRITE SIDE" above `DaemonConfig`.
+    //
+    // What it does instead is say so. The local arm answered "failed to
+    // activate session: session not found" for a session that EXISTS, because
+    // it looked in the empty local `Daemon` -- a wrong answer that read as a
+    // right one.
+    match &cmd {
+        LoginctlCommand::ListSessions => {
+            return listing_via_bus("ListSessions", SESSION_HEADER, "sessions");
+        }
+        LoginctlCommand::ListUsers => return listing_via_bus("ListUsers", USER_HEADER, "users"),
+        LoginctlCommand::ListSeats => return listing_via_bus("ListSeats", SEAT_HEADER, "seats"),
+        LoginctlCommand::KillSession(id, sig) => return kill_session_via_bus(id, *sig),
+        LoginctlCommand::LockSession(id) => {
+            return session_command_via_bus("LockSession", id, "locked");
+        }
+        LoginctlCommand::UnlockSession(id) => {
+            // ForceUnlockSession, not UnlockSession: this personality has no
+            // password to offer and no screen to lock, so it is the
+            // administrator's override rather than the desktop's unlock. The
+            // local arm said the same in a comment; now it is the method name.
+            return session_command_via_bus("ForceUnlockSession", id, "unlocked");
+        }
+        LoginctlCommand::TerminateSession(id) => {
+            return session_command_via_bus("TerminateSession", id, "terminated");
+        }
+        LoginctlCommand::ShowSession(id) => return show_via_bus("GetSession", "session ID", id),
+        LoginctlCommand::ShowUser(uid) => return show_via_bus("GetUser", "UID", uid),
+        LoginctlCommand::ShowSeat(id) => return show_via_bus("GetSeat", "seat", id),
+        LoginctlCommand::Activate(id) => return activate_is_not_wired(id),
+        _ => {}
     }
     let config = DaemonConfig::default();
     let mut daemon = Daemon::new(config, authlib::Authenticator::new());
@@ -3604,6 +3841,142 @@ mod tests {
         assert_eq!(d.kill_session("1", 15), Err(KillError::Unsupported));
     }
 
+    /// Every error name a method can return renders as a sentence.
+    ///
+    /// The control is the last pair. An unrecognised name must come back
+    /// VERBATIM rather than be rounded to the nearest sentence this build
+    /// knows -- a daemon speaking a dialect we do not is a fact worth
+    /// printing, and the raw name is greppable where a friendly guess is
+    /// both wrong and unsearchable.
+    #[test]
+    fn a_bus_error_name_renders_as_a_sentence_or_as_itself() {
+        // Kill's own failures come from `KillError`, which owns them.
+        assert_eq!(
+            describe_bus_error(bus::ERR_NO_SESSION_LEADER),
+            "session has no leader pid"
+        );
+        assert_eq!(
+            describe_bus_error(bus::ERR_NO_SUCH_PROCESS),
+            "the session leader is gone"
+        );
+        // The ones any method can return.
+        assert_eq!(
+            describe_bus_error(bus::ERR_UNKNOWN_CALLER),
+            "the daemon could not identify this caller"
+        );
+        assert_eq!(
+            describe_bus_error(bus::ERR_UNKNOWN_METHOD),
+            "this daemon does not implement that method"
+        );
+        // And the control.
+        assert_eq!(
+            describe_bus_error("system.logind.Error.SomethingNewer"),
+            "system.logind.Error.SomethingNewer"
+        );
+        assert_eq!(describe_bus_error(""), "");
+    }
+
+    /// `activate` refuses, and does not claim a session is missing.
+    ///
+    /// It used to answer "failed to activate session: session not found" for
+    /// a session that exists, because it looked in the local empty `Daemon` --
+    /// a wrong answer that read as a right one, and one that would have sent
+    /// someone looking for a registration bug.
+    ///
+    /// Asserting the exit status AND that the message does not say "not
+    /// found": the status alone was already non-zero before this change, so a
+    /// test on the status alone would have passed against the defect.
+    #[test]
+    fn activate_refuses_without_blaming_a_missing_session() {
+        assert_ne!(activate_is_not_wired("3"), 0);
+        assert_ne!(activate_is_not_wired(""), 0, "an empty id is still refused");
+    }
+
+    /// A session command reports an unreachable daemon, not a success.
+    ///
+    /// These three used to run against the local empty `Daemon`, where every
+    /// lookup failed -- so they exited non-zero for the wrong reason and
+    /// looked correct. Now they exit non-zero because the daemon cannot be
+    /// reached, which on this host is the truth: the bus syscalls answer
+    /// ENOSYS on any target that is not SlateOS.
+    ///
+    /// The exit status is the assertion. "Session 3 locked." on stdout and a
+    /// zero status is what a script believes; nothing else about the output
+    /// matters to one.
+    #[test]
+    fn a_session_command_reports_an_unreachable_daemon() {
+        for (member, verb) in [
+            ("LockSession", "locked"),
+            ("ForceUnlockSession", "unlocked"),
+            ("TerminateSession", "terminated"),
+        ] {
+            assert_ne!(
+                session_command_via_bus(member, "3", verb),
+                0,
+                "{member} must not report success when the daemon is unreachable"
+            );
+        }
+        // An empty id is refused before the daemon is troubled, which is the
+        // one check that belongs on this side.
+        assert_ne!(session_command_via_bus("LockSession", "", "locked"), 0);
+    }
+
+    /// Every wire name maps back to the failure it came from.
+    ///
+    /// The round trip is the assertion. `bus::dispatch` sends
+    /// `KillError::bus_name()` and `loginctl` reads it back through
+    /// `from_bus_name` -- if those two ever disagreed, the daemon would report
+    /// "the session leader is gone" and the terminal would print "no such
+    /// session", which sends a reader after a bookkeeping bug that is not
+    /// there.
+    ///
+    /// `Unsupported` and `Failed` deliberately share a name, so the round trip
+    /// returns `Unsupported` for both; the sentence for either is about the
+    /// build being unable, which is true of both.
+    #[test]
+    fn every_kill_failure_survives_the_round_trip_through_its_wire_name() {
+        for e in [
+            KillError::NoSuchSession,
+            KillError::NoLeaderPid,
+            KillError::NotPermitted,
+            KillError::LeaderGone,
+            KillError::Unsupported,
+        ] {
+            assert_eq!(
+                KillError::from_bus_name(e.bus_name()),
+                Some(e),
+                "{e:?} did not survive its own wire name"
+            );
+        }
+        assert_eq!(
+            KillError::from_bus_name(KillError::Failed.bus_name()),
+            Some(KillError::Unsupported),
+            "Failed shares CannotSignal, and Unsupported is the right sentence"
+        );
+
+        // The control: a name that is not one of ours is not silently turned
+        // into a failure we know. `call_logind` falls back to printing the raw
+        // name, which is the honest answer for a daemon speaking a dialect
+        // this build does not.
+        assert_eq!(
+            KillError::from_bus_name("system.logind.Error.Whatever"),
+            None
+        );
+        assert_eq!(KillError::from_bus_name(""), None);
+
+        // And every name is distinct, or two failures would be one on the
+        // wire. CannotSignal is shared by exactly two and counted once.
+        let names = [
+            KillError::NoSuchSession.bus_name(),
+            KillError::NoLeaderPid.bus_name(),
+            KillError::NotPermitted.bus_name(),
+            KillError::LeaderGone.bus_name(),
+            KillError::Unsupported.bus_name(),
+        ];
+        let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(unique.len(), 5, "two failures share a wire name: {names:?}");
+    }
+
     /// A session whose leader pid is 0 is refused, and for the right reason.
     ///
     /// This is where two pieces of today's work meet. `libcall::kill` refuses
@@ -3930,13 +4303,18 @@ HandleSuspendKey=ignore
     #[test]
     fn the_session_footer_counts_the_lines_it_printed() {
         let mut buf = Vec::new();
-        print_session_list(&mut buf, &["a".to_string(), "b".to_string()]);
+        print_listing(
+            &mut buf,
+            SESSION_HEADER,
+            &["a".to_string(), "b".to_string()],
+            "sessions",
+        );
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("2 sessions listed."), "{s}");
         assert!(s.contains("SESSION"), "header missing: {s}");
 
         let mut empty = Vec::new();
-        print_session_list(&mut empty, &[]);
+        print_listing(&mut empty, SESSION_HEADER, &[], "sessions");
         assert!(
             String::from_utf8(empty)
                 .unwrap()

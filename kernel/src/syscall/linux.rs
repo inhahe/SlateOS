@@ -2851,7 +2851,25 @@ fn read_user_ptr_array(ptr: u64, max_entries: usize) -> Result<alloc::vec::Vec<u
 /// to the new entry point with a clean register state, matching the
 /// native `sys_process_exec_with_frame` behaviour.  On failure the
 /// caller observes a Linux `-errno` and continues running.
+/// ROUND-6 DISCRIMINATOR. Round 5 wrapped `linux_exec_common` and its FAILED
+/// line did not appear at all for `/mnt/bin/true`, so the failure is upstream
+/// of it: `linux_execve` returns early, or the call never arrives here.
+/// This wrapper reports both, including the filename pointer -- if
+/// `read_user_cstr` is the failing step, the pointer is the thing to look at.
 fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    let ptr = frame.arg0;
+    let rc = linux_execve_inner(frame);
+    if rc < 0 {
+        crate::serial_println!(
+            "[exec] linux_execve ENTERED and failed early: filename_ptr={:#x} errno={}",
+            ptr,
+            -rc
+        );
+    }
+    rc
+}
+
+fn linux_execve_inner(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     let filename_ptr = frame.arg0;
     let argv_user = frame.arg1;
     let envp_user = frame.arg2;

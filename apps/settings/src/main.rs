@@ -2880,8 +2880,22 @@ impl SettingsState {
             // A claim is the only way to say "this window, not the others",
             // which is the same reason the chord grab works that way.
             //
+            // Nor does it need a new wake: `Server::run_with` already drives
+            // `tick` on the frame interval, so a deadline check costs nothing
+            // and there is nothing to schedule. Design-decisions 812 refuses
+            // waking an *idle desktop* to poll a file; the compositor is
+            // already running, so that objection does not reach this.
+            //
+            // The compositor half of it landed on 2026-09-16:
+            // `Compositor::last_input`, stamped in `handle_input` because
+            // every event passes through there.
+            //
             // What is genuinely open is smaller than it looked: where the
-            // timeout setting lives and who owns it.
+            // timeout setting lives. No existing domain crate fits --
+            // `appearance` is visual, `inputsettings` is pointer and keyboard,
+            // `notifsettings` is notifications, `loginusers` is accounts --
+            // and the tree's habit is one small crate per settings domain,
+            // `loginusers` being 313 lines.
             //
             // `InstalledApps`, same date, shorter answer: there is no package
             // database to read. No `installed_packages`, no `package_db`, no

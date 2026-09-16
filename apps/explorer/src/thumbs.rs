@@ -15,8 +15,6 @@
 //! Background generation is supported via a request queue that can be polled
 //! for completed thumbnails, keeping the UI thread non-blocking.
 
-#![allow(dead_code)]
-
 use guitk::canvas::Canvas;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -124,6 +122,11 @@ pub struct Thumbnail {
 
 impl Thumbnail {
     /// Total number of pixels.
+    // Kept deliberately, and now said to the compiler rather than to a
+    // blanket allow over the whole file: `is_valid` exists because `pixels`,
+    // `width` and `height` are public and a `Thumbnail` can be built outside
+    // this module, and `pixel_count` exists for `is_valid`.
+    #[allow(dead_code, reason = "a guard for Thumbnails this module did not build")]
     fn pixel_count(&self) -> usize {
         (self.width as usize).saturating_mul(self.height as usize)
     }
@@ -134,6 +137,7 @@ impl Thumbnail {
     /// is the only constructor here and it cannot produce a `Thumbnail` for
     /// which this is false. It survives because `pixels`, `width` and `height`
     /// are public, so code outside the module can still assemble one by hand.
+    #[allow(dead_code, reason = "see pixel_count above")]
     fn is_valid(&self) -> bool {
         self.pixels.len() == self.pixel_count().saturating_mul(4)
     }

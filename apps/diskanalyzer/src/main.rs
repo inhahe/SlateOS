@@ -34,6 +34,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::filetypes::FileCategory;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -766,26 +767,36 @@ fn color_for_node(node: &FileNode, pal: &Palette) -> Color {
     color_for_extension(&ext, pal)
 }
 
-/// Map a file extension to a Catppuccin Mocha color.
+/// Map a file extension to a colour, through the toolkit's one table.
+///
+/// The colours are this program's policy -- "video is blue" is a choice about
+/// a treemap, not a fact about files -- but *which files are video* is not,
+/// and it used to be a second list of 59 extensions maintained here. It had
+/// already drifted: the list knew `.tiff` and `.zst` and not `.mpg`, `.m4v` or
+/// `.psd`, so a disk full of MPEG video drew in the fallback grey.
+///
+/// See known-issues `TD-C-FOUR-PLACES-DECIDE-WHAT-KIND-OF-FILE-SOMETHING-IS`.
 fn color_for_extension(ext: &str, pal: &Palette) -> Color {
-    match ext {
-        // Video
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" => pal.blue,
-        // Images
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp" | "tiff" => pal.green,
-        // Documents
-        "pdf" | "doc" | "docx" | "odt" | "txt" | "rtf" | "xls" | "xlsx" => pal.yellow,
-        // Code
-        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "rb" | "toml" | "json"
-        | "yaml" | "xml" | "html" | "css" => pal.peach,
-        // Archives
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" => pal.red,
-        // Audio
-        "mp3" | "flac" | "wav" | "ogg" | "aac" | "wma" => pal.mauve,
-        // Executables / binaries
-        "exe" | "dll" | "so" | "dylib" | "bin" | "elf" => pal.teal,
-        // Fallback
-        _ => pal.surface0,
+    // Four the toolkit deliberately does not classify, kept here so the
+    // treemap does not lose colours it has today. `exe`, `dll` and `dylib` are
+    // foreign executables this system cannot run, and `bin` is any binary blob
+    // at all; `gui/toolkit`'s `foreign_executables_are_absent_on_purpose`
+    // records that leaving them out of the table is a decision rather than an
+    // omission. If that decision is ever made, this list goes with it.
+    if matches!(ext, "exe" | "dll" | "dylib" | "bin") {
+        return pal.teal;
+    }
+    match guitk::filetypes::category_from_extension(ext) {
+        FileCategory::Video => pal.blue,
+        FileCategory::Image => pal.green,
+        FileCategory::Document | FileCategory::Spreadsheet | FileCategory::Presentation => {
+            pal.yellow
+        }
+        FileCategory::Code | FileCategory::Config => pal.peach,
+        FileCategory::Archive | FileCategory::Package | FileCategory::DiskImage => pal.red,
+        FileCategory::Audio => pal.mauve,
+        FileCategory::Executable | FileCategory::Library | FileCategory::System => pal.teal,
+        FileCategory::Data | FileCategory::Unknown => pal.surface0,
     }
 }
 
@@ -3652,6 +3663,43 @@ mod tests {
     const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
 
     // -- Color helpers ---------------------------------------------------------
+
+    /// Formats the old hand-written list had drifted away from now colour.
+    ///
+    /// The whole reason for reading the toolkit's table instead of keeping a
+    /// second list here. Every one of these drew in the fallback grey before
+    /// 2026-09-16: a disk full of MPEG video looked like a disk full of
+    /// nothing in particular.
+    #[test]
+    fn formats_the_old_list_had_missed_now_colour() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        for ext in ["mpg", "mpeg", "m4v", "vob"] {
+            assert_eq!(
+                color_for_extension(ext, &pal),
+                pal.blue,
+                ".{ext} is video and did not draw as video"
+            );
+        }
+        assert_eq!(color_for_extension("psd", &pal), pal.green);
+        assert_eq!(color_for_extension("cab", &pal), pal.red);
+        assert_eq!(color_for_extension("so", &pal), pal.teal);
+    }
+
+    /// The four the toolkit will not classify keep their colour here.
+    ///
+    /// They are held out of the table on purpose, so deriving from it would
+    /// have quietly taken a colour away from every Windows binary on the disk.
+    #[test]
+    fn the_formats_the_toolkit_refuses_are_still_coloured() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        for ext in ["exe", "dll", "dylib", "bin"] {
+            assert_eq!(
+                color_for_extension(ext, &pal),
+                pal.teal,
+                ".{ext} lost its colour when the list moved to the toolkit"
+            );
+        }
+    }
 
     #[test]
     fn test_color_for_extension_videos() {

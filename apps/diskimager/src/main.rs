@@ -111,13 +111,18 @@ const ISO_DATETIME_LEN: usize = 17;
 /// bytes are centiseconds and a timezone offset, which this view does not show.
 const ISO_DATETIME_DIGITS: usize = 14;
 
-// The destructive-confirmation dialog used to be sized here, by six constants
-// giving its title, message, warning and button row their shares of a box this
-// file drew itself. `guitk::modal::AlertDialog` owns all of that now --
-// including the rule those constants existed for: a drive name comes from the
-// device rather than from us, so the prose has to be bounded, and the bound
-// has to cut the *name* rather than the warning underneath it.
-const DEFAULT_BLOCK_SIZE: u64 = 4096;
+// `DEFAULT_BLOCK_SIZE` is gone, and so are the `block_size` fields it
+// seeded. It was 4096, nothing in the program could change it, and every
+// transfer used `IO_CHUNK` -- so the window read "Block size: 4096 bytes"
+// while copying in 1 MiB chunks. That is not an inert setting; it is a
+// statement of fact about the program's own behaviour, and it was false.
+//
+// Deleted rather than wired up, because the chunk size is not a preference.
+// `IO_CHUNK`'s own comment gives the reason it is 1 MiB: a chunk is one read
+// plus one write between two event-loop ticks, so 4096 would make a 4 GiB
+// image four million ticks instead of four thousand. A user who "set" it to
+// 4096 and got it would have made the program worse in a way it could not
+// explain.
 
 // ============================================================================
 // Write tab layout
@@ -1461,7 +1466,6 @@ pub struct RecentImage {
 pub struct CreateOptions {
     pub source_drive_id: String,
     pub output_path: PathBuf,
-    pub block_size: u64,
     pub compress: bool,
     pub format: ImageFormat,
 }
@@ -1471,7 +1475,6 @@ impl Default for CreateOptions {
         Self {
             source_drive_id: String::new(),
             output_path: PathBuf::new(),
-            block_size: DEFAULT_BLOCK_SIZE,
             compress: false,
             format: ImageFormat::Raw,
         }
@@ -1484,7 +1487,6 @@ pub struct WriteOptions {
     pub image_path: PathBuf,
     pub target_drive_id: String,
     pub verify_after_write: bool,
-    pub block_size: u64,
 }
 
 impl Default for WriteOptions {
@@ -1493,7 +1495,6 @@ impl Default for WriteOptions {
             image_path: PathBuf::new(),
             target_drive_id: String::new(),
             verify_after_write: true,
-            block_size: DEFAULT_BLOCK_SIZE,
         }
     }
 }
@@ -3216,7 +3217,7 @@ impl DiskImagerApp {
         rt.push(RenderCommand::Text {
             x: px,
             y: lay.block_size_y,
-            text: format!("Block size: {} bytes", self.write_options.block_size),
+            text: format!("Block size: {IO_CHUNK} bytes"),
             color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -3419,7 +3420,7 @@ impl DiskImagerApp {
         rt.push(RenderCommand::Text {
             x: px,
             y: cy,
-            text: format!("Block size: {} bytes", self.create_options.block_size),
+            text: format!("Block size: {IO_CHUNK} bytes"),
             color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -4728,6 +4729,56 @@ mod tests {
     // ----------------------------------------------------------------
     // ImageFormat detection
     // ----------------------------------------------------------------
+
+    /// The block size the window shows is the block size the copy uses.
+    ///
+    /// **It used to say 4096 while copying in 1 MiB chunks.**
+    /// `CreateOptions` and `WriteOptions` each carried a `block_size` seeded
+    /// from a `DEFAULT_BLOCK_SIZE` of 4096, nothing in the program could
+    /// change either, and every transfer went through `IO_CHUNK`. So the panel
+    /// stated a fact about the program's own behaviour and the fact was false.
+    ///
+    /// Deleted rather than wired up: the chunk size is not a preference.
+    /// `IO_CHUNK` is 1 MiB because a chunk is one read plus one write between
+    /// two event-loop ticks, and 4096 would make a 4 GiB image four million
+    /// ticks instead of four thousand. A user who set it to 4096 and got it
+    /// would have made the program worse in a way it could not explain.
+    ///
+    /// Found by following `scripts/find-echoed-settings.py`, which reported
+    /// `block_size` as read only into output -- true, and an understatement.
+    #[test]
+    fn the_block_size_shown_is_the_block_size_used() {
+        let mut app = app_with_many_drives();
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        let texts: Vec<String> = rt
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let shown: Vec<&String> = texts
+            .iter()
+            .filter(|t| t.starts_with("Block size:"))
+            .collect();
+        // The control. Without it this passes when no block size is drawn at
+        // all, and "none of zero rows is wrong" reads as a pass.
+        assert!(
+            !shown.is_empty(),
+            "control: the panel must be drawing a block size for this test to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        for t in shown {
+            assert_eq!(
+                t,
+                &format!("Block size: {IO_CHUNK} bytes"),
+                "the panel names a block size the copy does not use"
+            );
+        }
+    }
 
     #[test]
     fn test_format_from_extension_iso() {

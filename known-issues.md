@@ -154713,3 +154713,59 @@ absent is the opposite of the defect.
 or a battery source. At that point the *screens* go to `apps/settings` under
 815 and this file goes with them — but until then, deleting it loses the only
 written description of what those screens should do.
+
+## TD-C-FOUR-PLACES-DECIDE-WHAT-KIND-OF-FILE-SOMETHING-IS
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** `gui/toolkit/src/filetypes.rs` (the one with a real table),
+`apps/filesearch/src/main.rs` (~315, ~350), `apps/diskanalyzer/src/main.rs`
+(~771), and until today `apps/fileassoc/src/main.rs`.
+
+**In short:** four different parts of this system each decide, from the letters
+after the dot, what kind of thing a file is — and each keeps its own list.
+They already disagree. Add a new format to one and the others carry on not
+knowing about it, with nothing failing to build and no error anywhere. Two of
+the four were merged into one list today; the other two are recorded here
+because merging them would quietly remove things a user can currently see.
+
+**What is where.**
+
+| place | what it decides | how |
+|---|---|---|
+| `guitk::filetypes` | extension -> kind, MIME, description, icon | a 97-entry table, the real one |
+| `apps/fileassoc` | which types exist to associate | **fixed 2026-09-16** — derives from the table |
+| `apps/filesearch` (~350) | the search facet a result falls under | its own `match`, its own 11-variant enum |
+| `apps/diskanalyzer` (~771) | the colour a file gets in the usage map | its own `match`, extensions to palette roles |
+
+**Why the remaining two were not simply merged, which is the useful part.**
+`apps/filesearch` has `Font` and `Database` facets. The toolkit files `.ttf`
+and `.woff` under `System`, and does not know `.db` or `.sqlite` at all. So
+deriving filesearch from the toolkit today would take two working search
+filters away from the user and replace them with `Other` — a regression
+delivered as a cleanup, which is the worst way to receive one. The duplicate
+list is not redundant; it is *better informed* in two places and worse in the
+rest.
+
+`apps/diskanalyzer` maps extensions to palette roles rather than to a kind, so
+the shape is not the same: it wants "video is blue", which is a colour policy,
+not a fact about files. Its extension lists are what duplicate the table.
+
+**The proper fix, in order:**
+
+1. Add what filesearch knows and the table does not: a `Font` category (or a
+   deliberate decision that fonts stay `System`), and the database extensions.
+   This is a change to a shared enum used by `apps/explorer` and
+   `apps/fileassoc`, so it is a design decision rather than a tidy-up — which
+   is why it is written down instead of done in passing.
+2. Then derive filesearch's facet from `category_from_extension`, mapping the
+   toolkit's kinds to its facets the way `fileassoc::FileCategory::from_toolkit`
+   does — an explicit total match, so a new toolkit kind fails to compile
+   rather than landing silently in `Other`.
+3. Then give diskanalyzer its colour policy over toolkit kinds instead of over
+   its own extension lists.
+
+**Also noticed:** `guitk::filetypes::icon_for_extension` has no caller outside
+its own tests. The table carries an `icon_glyph` per type and nothing draws it.
+That is worth checking before anything is built on it — an icon nobody asks for
+may mean the file lists get their glyphs somewhere else, which would be a fifth
+place deciding what kind of file something is.

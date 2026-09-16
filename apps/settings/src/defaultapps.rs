@@ -148,8 +148,13 @@ mod tests {
     /// what file order would do.
     #[test]
     fn the_list_is_alphabetical_whatever_the_file_order() {
-        let d = doc("associations:\n  zip: /usr/bin/archivemanager\n  aaa: /usr/bin/a\n  md: /usr/bin/editor\n");
-        let got: Vec<String> = associations_from(&d).into_iter().map(|a| a.extension).collect();
+        let d = doc(
+            "associations:\n  zip: /usr/bin/archivemanager\n  aaa: /usr/bin/a\n  md: /usr/bin/editor\n",
+        );
+        let got: Vec<String> = associations_from(&d)
+            .into_iter()
+            .map(|a| a.extension)
+            .collect();
         assert_eq!(got, vec!["aaa", "md", "zip"], "not sorted: {got:?}");
     }
 
@@ -168,23 +173,38 @@ mod tests {
     fn an_entry_with_no_program_is_kept_and_flagged() {
         let d = doc("associations:\n  txt:\n  png: /usr/bin/imageviewer\n");
         let got = associations_from(&d);
-        let txt = got.iter().find(|a| a.extension == "txt").expect("the empty entry was dropped");
-        assert!(!txt.is_runnable(), "an empty program was reported as runnable");
-        let png = got.iter().find(|a| a.extension == "png").expect("the good entry was dropped");
+        let txt = got
+            .iter()
+            .find(|a| a.extension == "txt")
+            .expect("the empty entry was dropped");
+        assert!(
+            !txt.is_runnable(),
+            "an empty program was reported as runnable"
+        );
+        let png = got
+            .iter()
+            .find(|a| a.extension == "png")
+            .expect("the good entry was dropped");
         assert!(png.is_runnable(), "a real program was reported as broken");
     }
 
     /// Whitespace is not a program either.
     #[test]
     fn a_whitespace_only_program_is_not_runnable() {
-        let a = Association { extension: "txt".into(), program: "   ".into() };
+        let a = Association {
+            extension: "txt".into(),
+            program: "   ".into(),
+        };
         assert!(!a.is_runnable());
     }
 
     /// The label is what a reader expects to see.
     #[test]
     fn the_label_carries_a_dot() {
-        let a = Association { extension: "txt".into(), program: "/usr/bin/editor".into() };
+        let a = Association {
+            extension: "txt".into(),
+            program: "/usr/bin/editor".into(),
+        };
         assert_eq!(a.label(), ".txt");
     }
 
@@ -197,6 +217,9 @@ mod tests {
     fn a_mixed_case_extension_is_shown_as_stored() {
         let d = doc("associations:\n  TXT: /usr/bin/editor\n");
         let got = associations_from(&d);
-        assert_eq!(got[0].extension, "TXT", "the stored spelling was normalised away");
+        assert_eq!(
+            got[0].extension, "TXT",
+            "the stored spelling was normalised away"
+        );
     }
 }

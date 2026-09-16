@@ -55,6 +55,12 @@ const PROC_HOSTNAME: &str = "/proc/sys/kernel/hostname";
 /// Persistent host name, read at boot. Written by us and by `dhcpcd`.
 const ETC_HOSTNAME: &str = "/etc/hostname";
 
+/// The hosts table, consulted for this machine's fully qualified name.
+///
+/// nsswitch puts `files` before `dns` on every normal system, so this is what
+/// the resolver would look at first and what `hostname -f` reports.
+const ETC_HOSTS: &str = "/etc/hosts";
+
 /// Where the kernel keeps the NIS/YP domain name.
 ///
 /// The sibling of `PROC_HOSTNAME`, and read the same way for the same reason:
@@ -415,10 +421,19 @@ fn fqdn_of(name: &[u8], domain: Option<&[u8]>) -> Vec<u8> {
 
 /// Everything after the first dot of the fully qualified name, or nothing.
 fn domain_of(name: &[u8], domain: Option<&[u8]>) -> Vec<u8> {
-    let fqdn = fqdn_of(name, domain);
+    domain_part(&fqdn_of(name, domain)).to_vec()
+}
+
+/// Everything after the first dot of an already-qualified name.
+///
+/// Split out so `-d` can derive its answer from the SAME fully qualified name
+/// `-f` reports. Looking the domain up by a second route is how the two come
+/// to disagree about which domain this host is in, which is worse than either
+/// of them being wrong.
+fn domain_part(fqdn: &[u8]) -> &[u8] {
     match fqdn.iter().position(|&b| b == b'.') {
-        Some(i) => fqdn.get(i.saturating_add(1)..).unwrap_or_default().to_vec(),
-        None => Vec::new(),
+        Some(i) => fqdn.get(i.saturating_add(1)..).unwrap_or_default(),
+        None => &[],
     }
 }
 
@@ -537,6 +552,68 @@ fn read_hostname() -> Result<Vec<u8>, String> {
 fn read_domain() -> Option<Vec<u8>> {
     let content = fs::read(RESOLV_CONF).ok()?;
     parse_resolv_conf(&content)
+}
+
+/// The canonical name `/etc/hosts` gives for `name`, if it has one.
+///
+/// A hosts line is `ADDRESS CANONICAL [ALIAS...]`. When our short host name
+/// appears anywhere in the name list, the FIRST name on that line is this
+/// machine's fully qualified name -- which is what nsswitch, and therefore
+/// net-tools' `hostname`, reports.
+///
+/// # Why this is read here rather than through the resolver
+///
+/// `known-issues.md` -> `B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS`
+/// records the libc route and why it is blocked: `getaddrinfo` with
+/// `AI_CANONNAME` now returns a non-NULL name, but the name it returns is the
+/// QUERY echoed back, because `SYS_DNS_RESOLVE` carries four address bytes and
+/// has nowhere to put a canonical name. Going that way would trade an invented
+/// FQDN for a short one, which is not an improvement.
+///
+/// This program is file-based by deliberate design -- see the module header --
+/// and already reads `/proc/sys/kernel/hostname`, `/etc/hostname`,
+/// `/etc/resolv.conf`, `/proc/net/if_inet` and `/sys/class/net` directly. One
+/// more file needs nothing from the resolver and nothing from another lane.
+///
+/// A line is only accepted when the short name matches a WHOLE name on it,
+/// compared case-insensitively as host names are. Substring matching would let
+/// `ox` claim the line for `equinox.example.com`.
+fn canonical_from_hosts(name: &[u8]) -> Option<Vec<u8>> {
+    canonical_in_hosts(&fs::read(ETC_HOSTS).ok()?, name)
+}
+
+/// The parsing half of [`canonical_from_hosts`], over content rather than a
+/// path, so the rules can be tested on a host that has no `/etc/hosts` — which
+/// is every run of this suite, since the development host is Windows. A helper
+/// that can only be exercised where the file exists is a helper nothing checks.
+fn canonical_in_hosts(content: &[u8], name: &[u8]) -> Option<Vec<u8>> {
+    let short = short_of(name);
+    for line in content.split(|&b| b == b'\n') {
+        // `#` starts a comment anywhere on the line.
+        let line = match line.iter().position(|&b| b == b'#') {
+            Some(i) => line.get(..i).unwrap_or(&[]),
+            None => line,
+        };
+        let mut fields = line
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|f| !f.is_empty());
+        // The address is discarded: which address the FQDN is attached to does
+        // not matter, and on a normal Linux host it is the 127.0.1.1 line.
+        let Some(_addr) = fields.next() else { continue };
+        let names: Vec<&[u8]> = fields.collect();
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(short)) {
+            continue;
+        }
+        let canonical = names.first()?;
+        // Only useful if it is actually qualified. A hosts line reading
+        // `127.0.0.1 localhost` for a machine called `localhost` names no
+        // domain, and answering with the short name again would be the very
+        // trade the entry above warns against.
+        if canonical.contains(&b'.') {
+            return Some((*canonical).to_vec());
+        }
+    }
+    None
 }
 
 /// Addresses on every interface: the address table if it has any, otherwise a
@@ -691,11 +768,26 @@ fn show(query: &Query) -> Result<u8, String> {
         Query::Short => Ok(write_line(short_of(&read_hostname()?))),
         Query::Fqdn => {
             let name = read_hostname()?;
-            Ok(write_line(&fqdn_of(&name, read_domain().as_deref())))
+            // `/etc/hosts` first, the resolver's search domain only as a
+            // fallback: the search list is for COMPLETING QUERIES, not for
+            // naming this host, and using it was how `-f` invented
+            // `Logoplex3.attlocal.net` for a machine every other resolver user
+            // on the box calls `Logoplex3.localdomain`.
+            match canonical_from_hosts(&name) {
+                Some(fqdn) => Ok(write_line(&fqdn)),
+                None => Ok(write_line(&fqdn_of(&name, read_domain().as_deref()))),
+            }
         }
         Query::Domain => {
             let name = read_hostname()?;
-            Ok(write_line(&domain_of(&name, read_domain().as_deref())))
+            match canonical_from_hosts(&name) {
+                // The domain is everything after the first dot of the FQDN,
+                // so it is derived from the same answer rather than looked up
+                // separately -- `-f` and `-d` disagreeing about which domain
+                // this host is in would be worse than either being wrong.
+                Some(fqdn) => Ok(write_line(domain_part(&fqdn))),
+                None => Ok(write_line(&domain_of(&name, read_domain().as_deref()))),
+            }
         }
         // An unset NIS domain reads as the literal `(none)` on Linux, and GNU
         // prints it unchanged rather than treating it as absent -- so this
@@ -783,6 +875,71 @@ mod tests {
 
     fn parsed(items: &[&str]) -> Action {
         parse_args(&a(items)).unwrap()
+    }
+
+    /// The real `/etc/hosts` shape, from the development machine's WSL guest.
+    const HOSTS: &[u8] = b"127.0.0.1\tlocalhost\n\
+127.0.1.1\tLogoplex3.localdomain\tLogoplex3\n\
+::1     ip6-localhost ip6-loopback\n";
+
+    #[test]
+    fn the_fqdn_comes_from_the_hosts_table_not_the_search_domain() {
+        // The line that started this: `hostname -f` answered
+        // `Logoplex3.attlocal.net` -- built from resolv.conf's SEARCH list --
+        // where every other resolver user on the box says
+        // `Logoplex3.localdomain`, which is what /etc/hosts records.
+        //
+        // A search list is for COMPLETING QUERIES, not for naming this host.
+        assert_eq!(
+            canonical_in_hosts(HOSTS, b"Logoplex3").as_deref(),
+            Some(&b"Logoplex3.localdomain"[..])
+        );
+        // And `-d` is derived from that same answer rather than looked up
+        // again, so the two cannot disagree about which domain this host is in.
+        assert_eq!(domain_part(b"Logoplex3.localdomain"), b"localdomain");
+    }
+
+    #[test]
+    fn a_hosts_line_matches_a_whole_name_and_not_a_substring() {
+        let hosts = b"10.0.0.1 equinox.example.com equinox\n";
+        // The real name matches.
+        assert_eq!(
+            canonical_in_hosts(hosts, b"equinox").as_deref(),
+            Some(&b"equinox.example.com"[..])
+        );
+        // A substring of it must NOT: `ox` would otherwise claim this line and
+        // report a machine called `ox` as being `equinox.example.com`.
+        assert_eq!(canonical_in_hosts(hosts, b"ox"), None);
+        assert_eq!(canonical_in_hosts(hosts, b"nox"), None);
+        // Host names compare case-insensitively.
+        assert_eq!(
+            canonical_in_hosts(hosts, b"EQUINOX").as_deref(),
+            Some(&b"equinox.example.com"[..])
+        );
+    }
+
+    #[test]
+    fn an_unqualified_hosts_entry_is_not_an_fqdn() {
+        // `127.0.0.1 localhost` names no domain. Answering with the short name
+        // again would replace an invented FQDN with a useless one, which is
+        // the trade `B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS` warns
+        // against -- so this declines and the search-domain path runs instead.
+        assert_eq!(
+            canonical_in_hosts(b"127.0.0.1 localhost\n", b"localhost"),
+            None
+        );
+        // A comment is not a match, wherever it starts.
+        assert_eq!(
+            canonical_in_hosts(b"# 10.0.0.1 box.example.com box\n", b"box"),
+            None
+        );
+        assert_eq!(
+            canonical_in_hosts(b"10.0.0.1 box.example.com box # note\n", b"box").as_deref(),
+            Some(&b"box.example.com"[..])
+        );
+        // No table at all, or no matching line, leaves the caller to fall back.
+        assert_eq!(canonical_in_hosts(b"", b"box"), None);
+        assert_eq!(canonical_in_hosts(HOSTS, b"othermachine"), None);
     }
 
     // ---------------- the bug that started this ----------------

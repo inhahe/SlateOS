@@ -1422,6 +1422,44 @@ one: **an absence proved by grepping for a signature is only as good as the
 modifiers in the pattern.** `unsafe`, `pub(crate)`, `async`, `const` and a
 line break after `fn` all defeat it. Grep for the bare name first, then narrow.
 
+### MOSTLY FIXED 2026-09-16 — by a route this entry ruled out without considering
+
+`hostname -f` and `-d` now read `/etc/hosts` directly and agree with
+net-tools. `scripts/hostname-diff.sh` went **13 passed / 47 differed to 21 /
+39**; the eight rows that went green are this family.
+
+**The blockage above is real and was not the only path.** Everything this
+entry says about `getaddrinfo` holds: `AI_CANONNAME` returns the query echoed
+back, `SYS_DNS_RESOLVE` carries four address bytes with nowhere to put a name,
+and going that way would trade an invented FQDN for a short one. That reasoning
+is sound and the conclusion drawn from it — "both are lane A's, so both are
+requests rather than work" — did not follow, because it was reasoning about
+*one mechanism*.
+
+`hostname` is **file-based by deliberate design**, which its own module header
+explains at length, and it already read five files directly:
+`/proc/sys/kernel/hostname`, `/etc/hostname`, `/etc/resolv.conf`,
+`/proc/net/if_inet` and `/sys/class/net`. A sixth needs no resolver, no
+syscall and no other lane. nsswitch consults `files` before `dns` on every
+normal system, so reading the hosts table *is* what the C library would have
+done first.
+
+**The lesson is about the shape of the blockage, not about hosts files.** This
+entry blocked on "the mechanism I chose cannot answer" and then generalised to
+"this cannot be answered here". Those are different statements, and the second
+does not follow from the first. The question worth asking before filing a
+request is not *"is my approach blocked?"* but *"is every approach blocked?"* —
+and the answer here was sitting in the program's own module header.
+
+**What remains genuinely blocked**, and is correctly described above: a host
+whose FQDN lives only in DNS, with nothing in `/etc/hosts`. That still needs
+the resolver to carry a canonical name, and that is still lane A's. The new
+code falls back to the old search-domain behaviour there, so nothing regressed
+— it is better where the hosts table answers and unchanged where it does not.
+
+The remaining 39 rows are other causes: `-i`/`-I` address formatting, `-a` and
+`-A`, and `-b`. They are not this entry.
+
 ## B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER (lane B, 2026-09-14) — OPEN, fix is lane A's
 
 `getaddrinfo("localhost", …)` and `gethostbyname("localhost")` send a DNS query

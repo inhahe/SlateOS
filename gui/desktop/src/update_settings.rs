@@ -132,6 +132,22 @@ impl UpdateKind {
 // Available update
 // ============================================================================
 
+/// What the page says beside the active hours it reads back to you.
+///
+/// `active_hours_start` and `active_hours_end` are clamped to 0-23 on the way
+/// in and read in exactly one place: the `format!` that draws them as
+/// "09:00 - 17:00". Found by `scripts/find-echoed-settings.py`.
+///
+/// **Nothing in this tree updates anything.** `UpdateConfig` is named by no
+/// file but this one, and there is no updater under `userspace/` --
+/// `update-alternatives` manages symlinks and `updatedb` indexes filenames;
+/// neither downloads or installs a thing. An active-hours window is a promise
+/// about when a restart will *not* happen, which is a promise only something
+/// that restarts can make.
+const UPDATES_NOT_APPLIED: &str = "Not applied: nothing on this system \
+installs updates, so no restart will be scheduled inside or outside these \
+hours.";
+
 /// An individual available update.
 #[derive(Clone, Debug)]
 pub struct AvailableUpdate {
@@ -710,6 +726,18 @@ impl UpdateSettingsUI {
             ),
         );
         y += 24.0;
+        cmds.push(RenderCommand::Text {
+            x,
+            y,
+            text: UPDATES_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: p.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        y += 28.0;
+
         Self::render_toggle(
             p,
             cmds,
@@ -958,6 +986,43 @@ mod tests {
     /// The dark palette, which is what every deleted constant used to hold.
     fn test_palette() -> Palette {
         Palette::for_mode(false)
+    }
+
+    /// The active hours are drawn with the fact that nothing updates.
+    ///
+    /// `UpdateConfig` is named by no file but this one, and there is no
+    /// updater under `userspace/` -- `update-alternatives` manages symlinks
+    /// and `updatedb` indexes filenames; neither downloads or installs a
+    /// thing. An active-hours window is a promise about when a restart will
+    /// *not* happen, which only something that restarts can make.
+    ///
+    /// Found by `scripts/find-echoed-settings.py`.
+    #[test]
+    fn the_active_hours_are_drawn_with_the_fact_that_nothing_updates() {
+        let ui = wound_ui(UpdateStatus::UpToDate, 1, false, true);
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 500.0);
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control. Without it this passes against a page that draws no
+        // such row at all, which is not what is being pinned.
+        assert!(
+            texts.iter().any(|t| t == "Active hours"),
+            "control: the page must be drawing its active hours for this test to be \
+about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("installs updates")),
+            "the page drew its active hours and did not say nothing applies it"
+        );
     }
 
     #[test]

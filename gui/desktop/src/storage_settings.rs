@@ -112,6 +112,19 @@ impl StorageCategory {
     ];
 }
 
+/// What the page says beside the threshold it reads back to you.
+///
+/// `low_space_threshold_pct` is clamped to 50-99 on the way in -- which reads
+/// as a system that takes it seriously -- and read in exactly one place: the
+/// `format!` that draws it as "90% used". Found by
+/// `scripts/find-echoed-settings.py`.
+///
+/// **Nothing watches the disk.** `StorageSenseConfig` is named by no file but
+/// this one. The threshold is the trigger for a cleanup that has no trigger
+/// and no cleanup behind it.
+const SENSE_NOT_APPLIED: &str = "Not applied: nothing watches free space or \
+deletes anything on this system.";
+
 /// Disk usage entry for one category.
 #[derive(Clone, Debug)]
 pub struct UsageEntry {
@@ -800,6 +813,17 @@ impl StorageSettingsUI {
             );
             y += 24.0;
         }
+        cmds.push(RenderCommand::Text {
+            x,
+            y,
+            text: SENSE_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: p.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        y += 28.0;
 
         y += 8.0;
         cmds.push(RenderCommand::Text {
@@ -1006,6 +1030,44 @@ mod tests {
 
     fn test_palette() -> Palette {
         Palette::for_mode(false)
+    }
+
+    /// The cleanup threshold is drawn with the fact that nothing watches the disk.
+    ///
+    /// `low_space_threshold_pct` is clamped to 50-99 on the way in, which
+    /// reads as a system taking it seriously, and `StorageSenseConfig` is
+    /// named by no file but this one. The threshold is the trigger for a
+    /// cleanup that has no trigger and no cleanup behind it.
+    ///
+    /// Found by `scripts/find-echoed-settings.py`.
+    #[test]
+    fn the_cleanup_threshold_is_drawn_with_the_fact_that_nothing_watches_the_disk() {
+        let mut ui = StorageSettingsUI::with_settings(wound_settings(1, true));
+        ui.set_active_tab(1);
+        ui.settings_mut().sense.frequency = SenseFrequency::WhenLow;
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 500.0);
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control. Without it this passes against a page that draws no
+        // such row at all, which is not what is being pinned.
+        assert!(
+            texts.iter().any(|t| t == "Trigger at"),
+            "control: the page must be drawing a cleanup threshold for this test to be \
+about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("watches free space")),
+            "the page drew a cleanup threshold and did not say nothing applies it"
+        );
     }
 
     #[test]

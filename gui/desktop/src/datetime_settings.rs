@@ -53,6 +53,24 @@ use tzrules::Tz;
 // Timezone
 // ============================================================================
 
+/// What the page says beside the sync interval it reads back to you.
+///
+/// `sync_interval_secs` is read in exactly one place: the `format!` that
+/// draws it as minutes. Found by `scripts/find-echoed-settings.py`.
+///
+/// **`userspace/ntpd` exists and does not read this.** It is a real NTP
+/// client, and its poll interval is the protocol's own -- log2 seconds,
+/// between 64 and 1024, moved by the server's reachability rather than by a
+/// preference. So this setting is inert twice over: nothing carries it to
+/// `ntpd`, and `ntpd` would not honour a number outside that range if
+/// something did.
+///
+/// That second half is why the notice says "chooses its own" rather than
+/// "not implemented". A reader told only the first half would file a request
+/// to wire it up, and the answer would be no.
+const NTP_INTERVAL_NOT_APPLIED: &str = "Not applied: the time client chooses \
+its own polling interval, as the protocol requires.";
+
 /// A selectable timezone: an IANA identifier, display strings, and the POSIX
 /// `TZ` rule that says what the clock actually reads.
 ///
@@ -939,6 +957,17 @@ impl DateTimeSettingsUI {
             &format!("{} min", ntp.sync_interval_secs / 60),
         );
         cy += 36.0;
+        cmds.push(RenderCommand::Text {
+            x,
+            y: cy,
+            text: NTP_INTERVAL_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: p.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cy += 28.0;
 
         // NTP servers
         cmds.push(RenderCommand::Text {
@@ -1200,6 +1229,48 @@ mod tests {
             .into_iter()
             .find(|t| t.tz_id == tz_id)
             .unwrap_or_else(|| panic!("{tz_id} should be in the default table"))
+    }
+
+    /// The sync interval is drawn with the fact that the client picks its own.
+    ///
+    /// `userspace/ntpd` exists, is a real NTP client, and does not read this.
+    /// Its poll interval is the protocol's own -- log2 seconds, 64 to 1024,
+    /// moved by the server's reachability rather than by a preference. The
+    /// setting is inert twice over: nothing carries it to `ntpd`, and `ntpd`
+    /// would not honour a number outside that range if something did.
+    ///
+    /// Found by `scripts/find-echoed-settings.py`.
+    #[test]
+    fn the_sync_interval_is_drawn_with_the_fact_that_the_client_picks_its_own() {
+        let mut ui = DateTimeSettingsUI::default();
+        // The Sync tab. The default is Date & Time, which draws eleven text
+        // commands and none of them an interval -- the control caught that
+        // rather than the assertion, which is what a control is for.
+        ui.set_tab(DateTimeTab::Ntp);
+        ui.settings.ntp.enabled = true;
+        let cmds = ui.render(&Palette::for_mode(false), 600.0, 800.0);
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control. Without it this passes against a page that draws no
+        // such row at all, which is not what is being pinned.
+        assert!(
+            texts.iter().any(|t| t == "Sync interval"),
+            "control: the page must be drawing a sync interval for this test to be \
+about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("chooses its own")),
+            "the page drew a sync interval and did not say nothing applies it"
+        );
     }
 
     #[test]

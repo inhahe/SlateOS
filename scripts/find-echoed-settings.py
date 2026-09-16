@@ -36,6 +36,26 @@ That exonerates a `--show-config` dump wholesale without exonerating a
 straggler hiding inside one. It is the reason this is worth running at all
 rather than being the obvious idea everyone rejects.
 
+## This checker cannot see its own fix, and that is on purpose
+
+The repair for an echoed setting is not to delete the field. It is for the
+program to say, beside the value, that nothing applies it -- `gui/desktop`'s
+seven settings pages now do. **The field is still read only into output
+afterwards, so it still reports here, forever.**
+
+That is the right behaviour and not a wart. The finding is "this value reaches
+the operator and nothing acts on it", which remains true of a disclaimed
+setting; what changed is that the program stopped implying otherwise. A
+checker that went quiet when a disclaimer appeared would be measuring the
+disclaimer rather than the defect, and the day someone wires the setting up for
+real it would have nothing to say.
+
+The cost is re-triage: the next person runs this and re-reads rows already
+dealt with. **That is paid with a note, not with a looser rule.** The entry
+`TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES` in `known-issues.md` lists which
+have been answered and how, so the second reading is a lookup rather than an
+investigation.
+
 ## Why this reports and does not gate
 
 The rule above is a good discriminator, not a proof. Three shapes defeat it

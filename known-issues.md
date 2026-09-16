@@ -154750,6 +154750,37 @@ rest.
 the shape is not the same: it wants "video is blue", which is a colour policy,
 not a fact about files. Its extension lists are what duplicate the table.
 
+**Measured 2026-09-16, so step 1 is a lookup rather than an investigation.**
+`filesearch` names 107 extensions; the toolkit's table holds 94; **30 are known
+to `filesearch` and not to the table**:
+
+```
+accdb app bash bin cab db dll dylib elf eot exe fish lz4 m4v mdb mpeg mpg
+msi properties ps1 psd raw so sqlite sqlite3 tex vob wasm yml zsh
+```
+
+They are not one kind of gap, which is why this is not a bulk import:
+
+* **Plainly missing** — `mpg`, `mpeg`, `m4v`, `vob`, `psd`, `raw`, `yml`,
+  `tex`, `bash`, `zsh`, `fish`, `ps1`, `properties`. Formats this system has
+  every reason to recognise, absent for no reason anyone recorded.
+* **Possibly deliberate** — `exe`, `dll`, `msi`, `app`, `dylib`. Foreign
+  executables this OS does not run. Adding them to the table makes the file
+  manager offer to classify something it can do nothing with, so the omission
+  may be a decision rather than an oversight. It is not written down either
+  way, which is the actual defect.
+* **Ours and missing anyway** — `elf`, `so`, `wasm`, `bin`. A POSIX system
+  ought to know an ELF binary and a shared object.
+* **Needs the enum first** — `db`, `sqlite`, `sqlite3`, `mdb`, `accdb`, `eot`,
+  and the font extensions, since `Font` and `Database` are `filesearch` facets
+  the toolkit's sixteen kinds cannot express.
+
+So the order matters: the first group can be added with no decision at all; the
+second needs somebody to say whether this OS classifies formats it cannot open;
+the fourth needs the enum. Do not derive `filesearch` from the table before
+those land -- it would turn 30 working classifications into `Other`, and a
+regression arriving as a cleanup is the worst way to receive one.
+
 **The proper fix, in order:**
 
 1. Add what filesearch knows and the table does not: a `Font` category (or a

@@ -155283,3 +155283,46 @@ hand today, and the compiler found two instantly the moment they appeared in a
 binary crate with no suppression. The lint works. These ten files are where it
 has been switched off, and `fileops.rs` shows what accumulates behind one: an
 advertised feature list with two entries nothing can choose.
+
+## TD-C-THE-FEATURE-INVENTORY-WAS-WRONG-IN-BOTH-DIRECTIONS -- METHOD 2026-09-16
+
+**In short:** fifteen items in `roadmap-detailed.md` were checked against the
+code in one evening. Six were built and marked unstarted, two contradicted the
+design while looking finished, one was built and unreachable, and four were
+partly done with no sign of which part. Five were genuinely unstarted. **An
+unticked box in that file carried almost no information**, and the errors ran
+in both directions, which is what made them expensive.
+
+**Date:** 2026-09-16. **Lane:** C.
+
+| what the box said | what the code said | count |
+|---|---|---|
+| unstarted | built and working | 6 |
+| unstarted | built, unreachable by any user | 1 |
+| unstarted | partly built, no record of which part | 4 |
+| unstarted | genuinely unstarted | 5 |
+| (not flagged at all) | **built and contradicting the design** | 2 |
+
+**The two that contradicted the design are the ones to remember.** The file
+list auto-selected columns from a folder's contents, which §4.1 forbids in bold
+with four reasons; and a folder's Size cell was blank, justified in a comment
+as "what every file manager does" -- which is the convention §4.1 considered
+and rejected. Neither showed up as a missing feature, because nothing is
+missing. They were *finished work pointing the wrong way*, and no checkbox
+state can express that.
+
+**What made the check cheap.** Look for the type and the entry point, not the
+word. Grepping "tab" in `apps/editor` returns 260 hits, nearly all tab
+characters; the answer came from finding `Tabs<Document>` and a `render_tabs`
+that the frame calls. A count measures vocabulary, not behaviour -- the same
+error that matched `dmi` inside "admin" earlier the same day.
+
+**And what to check after finding the code:** whether anything reaches it. Four
+of today's fifteen had working code behind no caller, no menu row and no key.
+`[x]` on those would be the fabrication design-decisions 856 is about, moved
+into the planning file.
+
+**Recommendation for the next sweep:** record "checked and absent" explicitly,
+because after this the empty box no longer implies it. Five of the fifteen now
+say so, and that is the only way the next reader can tell a searched shelf from
+an unsearched one.

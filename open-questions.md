@@ -2414,6 +2414,74 @@ Recorded in `known-issues.md` as
 `TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED`, which had the analysis but
 was not in this file — so it was never actually in front of you.
 
+## B-Q21 — [B] 211 of our 214 userspace programs are never installed. Should they be? — Status: OPEN
+
+**In short:** we have written about 214 small programs for this OS. Only three
+of them actually end up on the disk image that boots — everything else is built,
+tested, and then left behind. The reason is size: they all together are bigger
+than the image we build. The question is whether to make the image bigger, pick
+a subset deliberately, or leave things as they are.
+
+**The numbers, measured 2026-09-16** (alias lines of the form `ranlib = ar`
+resolved to their producer, so these count crates rather than names).
+`scripts/rootfs-bin-manifest.txt` has 75 entries:
+
+| producer | names it supplies |
+|---|---|
+| `coreutils` | 70 |
+| `ar` | 3 (`ar`, `ranlib`, `strip`) |
+| `logrotate` | 1 |
+| **no producer anywhere in the tree** | 1 — `awk` |
+
+So **3 of 214 `userspace/` crates reach `/bin`**, and `/bin` is the only
+place userspace binaries land: the rootfs script's only other destinations
+are `/tests`, `/lib` and `/usr/share/make`, with no `/sbin` or `/usr/bin`.
+
+**`awk` is a separate small finding, noted here rather than filed alone.**
+The manifest names it and nothing in the tree implements it — no
+`userspace/awk`, no `awk.rs`, no multicall alias. The rootfs build counts it
+in `SLATE_MISSING` and reports it, so this is loud rather than silent: the
+manifest is promising something that has never existed, not regressing.
+
+**Why, and it is a real constraint rather than an oversight.** All 276 built
+binaries come to 204 MiB against a fixed 384 MiB image that already carries
+~127 MiB of fastpy test fixtures. They do not fit. `IMG_SIZE` is a variable in
+`scripts/create-ext4-rootfs.sh` and nothing outside that script reads it.
+
+| | *What changes* |
+|---|---|
+| **A. Raise `IMG_SIZE` and stage everything that builds** | Every utility we write is on the machine and can be run. The image grows past 384 MiB — roughly 600 MiB to hold all 204 MiB with headroom. Boot-test download/copy times grow with it. |
+| **B. Curate: decide which utilities earn their bytes** | Someone picks a list; the rest stay unshipped. The image stays small. Requires a judgement per program, and the list needs maintaining as programs are added. |
+| **C. Leave it** (today) | `coreutils` and a couple of others ship. Everything else is a library that compiles and a test suite that passes, reachable only by a developer. |
+
+**What you may actually be deciding.** Not disk space — it is a VM image and
+the host has room. It is whether "we wrote a `logind`" means a user has one.
+Today it does not, and nothing in the tree says so at the point where someone
+would look; I found it only by grepping the manifest for a program I had spent
+a day improving.
+
+**My recommendation: B, but A first as a stopgap** if you want the question
+answered later rather than now. A costs bytes on a VM image, which is cheap,
+and buys the ability to *run* what we build — which is currently untested for
+almost everything. B is the right long-term answer and needs a criterion, and I
+do not think I should invent that criterion on your behalf: "which utilities
+earn their bytes" is a question about what this OS is for.
+
+**If this is never answered:** nothing breaks. The build stays green, the tests
+stay green, and the work keeps accumulating out of reach. The cost is invisible
+and compounding — it is effort spent on programs no one can run, and the longer
+it runs the larger the pile of code whose first real execution is still ahead of
+it.
+
+**Related but different:** `deferred-questions.md` D-Q1 asks which *implementation*
+(fastpy or Rust) a stock install should prefer once one is proven better. That
+assumes both ship. This asks whether they ship at all. Recorded in
+`known-issues.md` under the image-staging entry, which names "which utilities
+earn their bytes" as a real question and correctly declines to answer it — but
+named it there rather than here, so it has never been in front of you.
+
+
+
 
 
 # Resolved

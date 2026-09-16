@@ -120,10 +120,50 @@ safe-but-incidentally so (an `is_empty()` check two lines above an `[0]`, a
 separate the guard from the access. Clippy refuses the build if `arg[0]`
 returns -- verified by putting it back.
 
-**What is left:** the same treatment for the other eight. None has the `arg[0]`
-argv pattern (checked), so there is no known panic in them today; what is
-unknown is whether any of their 500-odd allowed sites touches a length the
-program does not control.
+~~**What is left:** the same treatment for the other eight. None has the
+`arg[0]` argv pattern (checked), so there is no known panic in them today; what
+is unknown is whether any of their 500-odd allowed sites touches a length the
+program does not control.~~
+
+### That unknown is now measured, 2026-09-16: no defect in any of the eight
+
+Every parser in the eight crates that reads a length the program does not
+control was read. **All eight check before they index.** Stated per crate,
+because "I looked and it was fine" is not a measurement anyone can re-check:
+
+| crate | the uncontrolled-length path | the guard that makes it safe |
+|---|---|---|
+| `zip` | central directory, `data[pos + N]` for N up to 45, where `pos` comes from a field *in the file* | `if pos + 46 > data.len()` immediately above the loop body; `cd_offset + cd_size > data.len()` before that. Extraction adds an output cap (`inflate_limited`), a declared-size comparison and a CRC. |
+| `readelf` | ELF header/section reads at a file-supplied offset | `if end > data.len()` returning a structured `TruncatedData { what, offset, needed, available }` |
+| `objdump` | same shape, same code | same guard, character for character |
+| `ar` | archive member headers | `data.len() < AR_MAGIC.len()`, then `offset + AR_HDR_SIZE > data.len()` each iteration |
+| `stty` | the `-g` restore string, which a user pastes in | `parts.len() < 39` before `parts[0..38]` |
+| `telnet` | bytes off the wire | **`process_incoming` does not index at all** -- it is a `for &byte in input` state machine. `handle_subnegotiation` guards with `is_empty()` and reads its second byte with `.get(1)`. |
+| `ftp` | PASV reply, and the command line | `parts.len() != 6` before `parts[0]`; the other site is `splitn(3, ..)`, which yields at least one element by construction |
+| `ldd` | ELF reads | bounded, and its allow carries a written justification; uses `saturating_sub` for the reported remainder |
+
+**The arithmetic half is safe for a reason worth writing down rather than
+rechecking each time.** The offsets come from `u32` fields widened with
+`as usize`. On the 64-bit target `cd_offset + cd_size` cannot overflow a
+`usize`, so the additions in the guards are sound *because of the widening*,
+not because anyone bounded them. On a 32-bit target they would not be, and the
+guard would be the thing that overflows.
+
+**What this does and does not retire.** It retires the open question -- there is
+no reachable panic behind these allows. It does not retire the debt: the
+guarantee is still by inspection, and `gdb` is the proof that inspection fails,
+since its allow was justified as "gated by length checks at the call site" and
+two argv sites were not. The remedy the entry proposes -- re-arm the lint on
+the input parsers specifically -- is still worth doing and is now cheap, because
+the sites that would need it have been identified.
+
+**Method, since the count in this entry came from a grep.** `cargo clippy
+-- --force-warn clippy::indexing_slicing --force-warn
+clippy::arithmetic_side_effects` reports through a crate-level `allow`, so the
+real population is measurable without editing anything: 73 findings in `ftp`
+and `telnet` alone, against the 96 bare `[0]`s a grep suggested across all
+eight. Neither number is the finding; the finding is which of them sit behind
+an unchecked length, and that is 0.
 
 **Where it lives:** the nine `userspace/<crate>/src/main.rs` crate attributes;
 `gdb`'s is the worked example.
@@ -127824,7 +127864,45 @@ prompt. For an encrypted key that is currently right — there is no passphrase
 prompt to offer — but it stops being right the moment there is one. Revisit §778
 together with this entry.
 
-## TD-B-SSHD-ACCEPTS-ONLY-ONE-AUTHORIZEDKEYSFILE-PATH-WHERE-OPENSSH-ACCEPTS-A-LIST (lane B, 2026-09-05)
+## TD-B-SSHD-ACCEPTS-ONLY-ONE-AUTHORIZEDKEYSFILE-PATH-WHERE-OPENSSH-ACCEPTS-A-LIST (lane B, 2026-09-05) -- FIXED 2026-09-16
+
+`AuthorizedKeysFile` now takes a list. `authorized_keys_paths` splits the
+setting on whitespace and resolves each pattern independently;
+`pubkey_auth_for_account` reads every named file and a key in any of them
+authorises, which is what OpenSSH does. 235 -> 240 tests, clippy clean.
+
+**Two decisions inside it that are not obvious.**
+
+*The discard-on-error rule moved from the setting to each file.* An unreadable
+file authorising nothing -- indistinguishable from an empty one, so an
+unauthenticated peer cannot probe which accounts exist -- was right and stays.
+Applied to the whole SETTING it would have made a missing first file hide a
+present second one, which is precisely the `authorized_keys` +
+`authorized_keys2` case this entry is about.
+
+*The contents are joined with a newline, not concatenated.* A file whose last
+line lacks a trailing newline would otherwise be spliced onto the first line of
+the next, destroying one key from each and producing a single corrupt entry out
+of two valid ones -- a failure nobody would trace back to a missing byte.
+
+**Fail-closed on an empty setting:** zero patterns resolve to zero paths, so
+nothing is authorised. Resolving an empty setting to the home directory would
+have the daemon read a directory as a key list on every login.
+
+**Probed by restoring the defect** -- `vec![authorized_keys_path(setting, user)]`,
+the whole setting as one filename. Four of the five new tests fail; the fifth,
+`a_single_pattern_is_unchanged_by_list_support`, correctly still passes, because
+it pins the behaviour that was always right. A control that failed under the
+sabotage would have meant it was testing the bug rather than the invariant.
+
+**Not implemented, and named so nobody assumes it:** `AuthorizedKeysFile none`,
+which OpenSSH accepts to disable publickey auth entirely. Today `none` resolves
+as a relative filename (`~/none`), which almost certainly does not exist, so the
+effect is the same by accident. Worth doing properly if anyone relies on it.
+
+The description below is kept in the tense it was written in.
+
+**The original entry, 2026-09-05, follows.**
 
 **In short:** `sshd_config` has a setting, `AuthorizedKeysFile`, naming the file
 that lists which keys may log into an account. Real OpenSSH lets an
@@ -138310,7 +138388,63 @@ Land a new `services/ctest-*/` with a source and no ELF, then run
 reports OK. Build the ELF and it correctly reports the image STALE, which is the
 asymmetry: the check sees a fixture that is *newer* than the image but not one that
 is *missing* from it.
-## B-TWO-SESSION-REGISTRIES (lane B, 2026-09-10) — open
+## B-TWO-SESSION-REGISTRIES (lane B, 2026-09-10) — open, and ENTIRELY OFF-IMAGE
+
+**Severity corrected 2026-09-16, downward, and the direction is the point.**
+The "What it costs" section below states user-visible harms in the present
+tense. No user can reach any of them, because **none of the four programs
+involved is on the image**:
+
+| | in `scripts/rootfs-bin-manifest.txt`? |
+|---|---|
+| `who` | no |
+| `su` | no |
+| `loginctl` | no |
+| `logind` | no |
+
+Checked rather than inferred from the manifest alone, because the manifest is
+not the only path into `/bin`: the rootfs script also stages a handful of named
+tools (`dash`, `make`, `tcc`, `bash`, `pkgconf`) and "promoted" `fastpy-*`
+fixtures. None of those is one of these four. `who` and `su` are not coreutils
+personalities either -- there is no `who.rs` or `su.rs` under
+`userspace/coreutils/src/bin/`. `loginctl` appears in the tree only in three
+tooling baselines (`argv-utf8`, `multicall-aliases`, `workspace-lints`), never
+in staging, and `init/` does not start `logind`.
+
+So the split is **latent**: real in the source, unreachable from a booted
+system. Every consequence listed below is a consequence of shipping these,
+which nothing currently does.
+
+**This is a size constraint, not an oversight, and the distinction matters to
+whoever reads it next.** `TD-B-...-NOT-ON-THE-IMAGE`'s analysis already
+explains it: all 276 userspace binaries build and come to 204 MiB against a
+fixed 384M image already carrying ~127 MiB of fastpy test ELFs. They do not
+fit. Raising `IMG_SIZE` is available and nothing outside the rootfs script
+reads it, but "which utilities earn their bytes" is a real question and staging
+everything that compiles is not an answer to it. Measured while checking this:
+**3 of 214 `userspace/` crates reach `/bin`** -- `coreutils` provides 69 of the
+75 manifest names, two have their own crate, and four are aliases.
+
+**Why write this down rather than quietly lower the priority.** A severity
+stated too high costs the same thing as one stated too low -- it moves work in
+front of other work on evidence that does not hold. This entry reads like a
+user-facing breakage and is a latent design defect, and the next person
+triaging by severity would have started here.
+
+**It also re-frames a day's work of mine honestly.** On 2026-09-15 I routed
+nine `loginctl` commands through the service bus to the daemon, replacing a
+local empty `Daemon` that answered every query wrongly. That work is correct
+and tested and **is not reachable by any user**, for the same reason. It
+improves the code; it does not yet improve the system. The prerequisite for
+either that work or this entry to matter is wiring `logind` into the image and
+starting it from `init/`, which nothing has asked for yet.
+
+**What has NOT changed:** the two registries are still two, and the `su` record
+that outlives a process that died without cleanup is still unreconciled. If
+`logind` is ever shipped, this becomes live on the same day and should be fixed
+before it is rather than after.
+
+## B-TWO-SESSION-REGISTRIES (lane B, 2026-09-10) — original entry, 2026-09-10
 
 **In short:** this system keeps two separate lists of who is logged in. The
 programs that *show* you the list read one of them; the daemon whose job is to

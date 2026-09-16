@@ -4386,6 +4386,37 @@ pub enum PubkeyOutcome {
 /// `AuthorizedKeysFile` (which is how `.ssh/authorized_keys2` survives). A
 /// pattern containing a space is one path with a space in it here. That is a
 /// deliberate omission rather than an oversight -- see known-issues.md.
+/// Every path `AuthorizedKeysFile` names, in the order the administrator wrote
+/// them.
+///
+/// # OpenSSH takes a LIST here, and we took the whole line as one name
+///
+/// `AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2` made this
+/// daemon look for a single file whose name contained a space. It does not
+/// exist, so publickey authentication stopped working for every account, and
+/// the client was told only that its key was not accepted.
+///
+/// The list form is not obscure. It is how `.ssh/authorized_keys2` is still
+/// configured, and how an administrator adds a system-wide file
+/// (`/etc/ssh/authorized_keys/%u`) *alongside* the user's own rather than
+/// instead of it -- the standard recipe for "the admin can grant access and so
+/// can the user". The configs most likely to use it are the ones written by
+/// someone being careful.
+///
+/// # Whitespace, and why an empty setting yields nothing
+///
+/// Split on any run of whitespace, so tabs and doubled spaces behave. An empty
+/// or whitespace-only setting resolves to NO paths rather than to the home
+/// directory, which is the fail-closed direction: zero files authorise zero
+/// keys. Resolving it to `~` would have the daemon try to read a directory as
+/// a key list on every login.
+fn authorized_keys_paths(setting: &str, user: &PasswdEntry) -> Vec<String> {
+    setting
+        .split_whitespace()
+        .map(|pattern| authorized_keys_path(pattern, user))
+        .collect()
+}
+
 fn authorized_keys_path(pattern: &str, user: &PasswdEntry) -> String {
     let expanded = expand_path_tokens(pattern, user);
     // `has_root`, not `starts_with('/')`, and not `is_absolute` either.
@@ -4556,7 +4587,9 @@ fn pubkey_auth_for_account(
     config: &SshdConfig,
     user: &PasswdEntry,
 ) -> Result<PubkeyOutcome, SshdError> {
-    let keys_path = authorized_keys_path(&config.authorized_keys_file, user);
+    // EVERY file the setting names, in order. A key listed in any of them
+    // authorises, which is what OpenSSH does -- it tries each in turn.
+    //
     // A file we cannot read authorises no keys, so the error is discarded
     // rather than propagated: the overwhelmingly common cause is that the user
     // has no `authorized_keys` at all, which is not a fault and must not fail
@@ -4564,10 +4597,25 @@ fn pubkey_auth_for_account(
     // outcome is identical to an empty file's, and deliberately so; reporting
     // *which* it was would tell an unauthenticated peer whether an account
     // exists.
-    let Ok(data) = fs_read_file(Path::new(&keys_path)) else {
+    //
+    // That reasoning is now per-file rather than for the whole setting: a
+    // missing first file must not hide a present second one, which is exactly
+    // the `authorized_keys` + `authorized_keys2` case.
+    let mut parts: Vec<String> = Vec::new();
+    for keys_path in authorized_keys_paths(&config.authorized_keys_file, user) {
+        if let Ok(data) = fs_read_file(Path::new(&keys_path)) {
+            parts.push(String::from_utf8_lossy(&data).into_owned());
+        }
+    }
+    if parts.is_empty() {
         return Ok(PubkeyOutcome::Rejected);
-    };
-    let keys_content = String::from_utf8_lossy(&data).into_owned();
+    }
+    // Joined with a newline, not concatenated. A file whose last line has no
+    // trailing newline would otherwise be spliced onto the first line of the
+    // next, producing one corrupt entry out of two valid ones -- and the two
+    // it destroys are the last key of one file and the first of another, which
+    // is not a failure anyone would connect to a missing byte.
+    let keys_content = parts.join("\n");
 
     decide_pubkey_auth(
         payload,
@@ -8360,6 +8408,86 @@ DenyGroups nogroup
                 &account("daemon", 1, "/var/lib/daemon")
             ),
             "/var/lib/daemon/.ssh/authorized_keys"
+        );
+    }
+
+    /// `AuthorizedKeysFile` naming several files resolves to several paths.
+    ///
+    /// The defect: the whole setting was taken as ONE filename, so a config
+    /// using the list form made the daemon look for a file whose name contained
+    /// a space. It does not exist, so publickey auth stopped working for every
+    /// account and the client was told only that its key was not accepted.
+    #[test]
+    fn a_list_of_patterns_resolves_to_one_path_each() {
+        let alice = account("alice", 1000, "/home/alice");
+        let paths = authorized_keys_paths(".ssh/authorized_keys .ssh/authorized_keys2", &alice);
+        assert_eq!(
+            paths,
+            vec![
+                "/home/alice/.ssh/authorized_keys".to_string(),
+                "/home/alice/.ssh/authorized_keys2".to_string(),
+            ],
+            "the list form must not be read as one filename containing a space"
+        );
+    }
+
+    /// Absolute and relative patterns mix, and each is resolved on its own.
+    ///
+    /// This is the combination the list form mostly exists for: a system-wide
+    /// file the administrator controls, ALONGSIDE the user's own rather than
+    /// instead of it. Resolving the pair as a unit would get one of them wrong
+    /// whichever rule was applied.
+    #[test]
+    fn a_list_mixes_absolute_and_relative_patterns() {
+        let alice = account("alice", 1000, "/home/alice");
+        let paths =
+            authorized_keys_paths("/etc/ssh/authorized_keys/%u .ssh/authorized_keys", &alice);
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert_eq!(paths[0], "/etc/ssh/authorized_keys/alice");
+        assert_eq!(paths[1], "/home/alice/.ssh/authorized_keys");
+    }
+
+    /// Runs of whitespace, tabs included, separate patterns.
+    ///
+    /// A hand-edited config is the likeliest place this arrives from, and a
+    /// doubled space producing an empty third path would resolve to the home
+    /// directory -- a directory read as a key list on every login.
+    #[test]
+    fn whitespace_runs_do_not_produce_empty_paths() {
+        let alice = account("alice", 1000, "/home/alice");
+        let paths = authorized_keys_paths("  a\t\tb   c ", &alice);
+        assert_eq!(paths.len(), 3, "{paths:?}");
+        for p in &paths {
+            assert_ne!(
+                p, "/home/alice",
+                "an empty pattern resolved to the home dir"
+            );
+        }
+    }
+
+    /// An empty setting authorises nothing, rather than naming the home dir.
+    ///
+    /// Fail-closed: zero files authorise zero keys. The alternative has the
+    /// daemon try to read a directory as a key list on every connection.
+    #[test]
+    fn an_empty_setting_resolves_to_no_paths_at_all() {
+        let alice = account("alice", 1000, "/home/alice");
+        assert!(authorized_keys_paths("", &alice).is_empty());
+        assert!(authorized_keys_paths("   \t  ", &alice).is_empty());
+    }
+
+    /// A single pattern still resolves exactly as it always did.
+    ///
+    /// The control. Without it, a resolver that returned nothing at all would
+    /// satisfy the empty-setting test above and every list test would still
+    /// pass on its own terms while publickey auth was dead for the default
+    /// configuration.
+    #[test]
+    fn a_single_pattern_is_unchanged_by_list_support() {
+        let alice = account("alice", 1000, "/home/alice");
+        assert_eq!(
+            authorized_keys_paths(".ssh/authorized_keys", &alice),
+            vec!["/home/alice/.ssh/authorized_keys".to_string()]
         );
     }
 

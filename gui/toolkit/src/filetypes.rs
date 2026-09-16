@@ -169,6 +169,126 @@ pub struct FileTypeInfo {
 /// use a linear scan with case-folding so order is not critical for
 /// correctness.
 const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
+    // -- Added 2026-09-16 ---------------------------------------------------
+    //
+    // Twelve formats `apps/filesearch` classified and this table did not, found
+    // by diffing the two lists (known-issues
+    // TD-C-FOUR-PLACES-DECIDE-WHAT-KIND-OF-FILE-SOMETHING-IS). Only the group
+    // that needed no decision is here: media and text formats this system has
+    // every reason to recognise. Deliberately still absent are `exe`, `dll`,
+    // `msi`, `app` and `dylib` -- foreign executables this OS cannot run, where
+    // listing them would have the table claim a kind for something nothing can
+    // open, and whether that is wanted is a question nobody has answered.
+    // `raw` is absent too: it names camera images and raw byte dumps equally,
+    // so any single description would be a guess.
+    FileTypeInfo {
+        extension: ".mpg",
+        description: "MPEG Video",
+        mime_type: "video/mpeg",
+        category: FileCategory::Video,
+        icon_glyph: '\u{25B6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".mpeg",
+        description: "MPEG Video",
+        mime_type: "video/mpeg",
+        category: FileCategory::Video,
+        icon_glyph: '\u{25B6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".m4v",
+        description: "MPEG-4 Video",
+        mime_type: "video/x-m4v",
+        category: FileCategory::Video,
+        icon_glyph: '\u{25B6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".vob",
+        description: "DVD Video Object",
+        mime_type: "video/mpeg",
+        category: FileCategory::Video,
+        icon_glyph: '\u{25B6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".psd",
+        description: "Photoshop Document",
+        mime_type: "image/vnd.adobe.photoshop",
+        category: FileCategory::Image,
+        icon_glyph: '\u{1F5BC}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".yml",
+        description: "YAML Document",
+        mime_type: "application/x-yaml",
+        category: FileCategory::Config,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".tex",
+        description: "LaTeX Document",
+        mime_type: "text/x-tex",
+        category: FileCategory::Document,
+        icon_glyph: '\u{1F4C4}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".bash",
+        description: "Bash Script",
+        mime_type: "application/x-shellscript",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".zsh",
+        description: "Zsh Script",
+        mime_type: "application/x-shellscript",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".fish",
+        description: "Fish Script",
+        mime_type: "application/x-shellscript",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".ps1",
+        description: "PowerShell Script",
+        mime_type: "application/x-powershell",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".properties",
+        description: "Java Properties",
+        mime_type: "text/plain",
+        category: FileCategory::Config,
+        icon_glyph: '\u{2699}',
+        is_text: true,
+        is_executable: false,
+    },
     // -- OS-specific --------------------------------------------------------
     FileTypeInfo {
         extension: ".nx",
@@ -2185,5 +2305,70 @@ mod tests {
             documents.contains(&"txt") && documents.contains(&"pdf"),
             "Document holds {documents:?}"
         );
+    }
+
+    /// The formats added on 2026-09-16 classify as intended.
+    ///
+    /// Named one at a time rather than counted: a count would pass if an entry
+    /// were added under the wrong category, which is the mistake a bulk edit
+    /// actually makes.
+    #[test]
+    fn the_formats_added_from_filesearch_resolve() {
+        for (ext, want) in [
+            ("mpg", FileCategory::Video),
+            ("mpeg", FileCategory::Video),
+            ("m4v", FileCategory::Video),
+            ("vob", FileCategory::Video),
+            ("psd", FileCategory::Image),
+            ("yml", FileCategory::Config),
+            ("tex", FileCategory::Document),
+            ("bash", FileCategory::Code),
+            ("zsh", FileCategory::Code),
+            ("fish", FileCategory::Code),
+            ("ps1", FileCategory::Code),
+            ("properties", FileCategory::Config),
+        ] {
+            assert_eq!(
+                category_from_extension(ext),
+                want,
+                ".{ext} does not classify as {want:?}"
+            );
+        }
+    }
+
+    /// Foreign executables stay out until somebody decides they belong.
+    ///
+    /// Pinned because the next person diffing this table against
+    /// `apps/filesearch` will find them missing and be tempted to "finish the
+    /// job". Listing them would have the table claim a kind for a file nothing
+    /// on this system can open, and that is a decision, not an omission. If it
+    /// is ever made, delete this test in the same change.
+    #[test]
+    fn foreign_executables_are_absent_on_purpose() {
+        for ext in ["exe", "dll", "msi", "app", "dylib"] {
+            assert_eq!(
+                category_from_extension(ext),
+                FileCategory::Unknown,
+                ".{ext} was added without the decision that gates it"
+            );
+        }
+    }
+
+    /// No two entries claim the same extension.
+    ///
+    /// `detect_from_extension` returns the first match, so a duplicate makes
+    /// the second entry unreachable and every count over the table wrong by
+    /// one, with nothing failing anywhere.
+    #[test]
+    fn no_extension_appears_twice_in_the_table() {
+        let mut seen: Vec<&str> = Vec::new();
+        for info in all() {
+            let ext = info.extension.strip_prefix('.').unwrap_or(info.extension);
+            assert!(
+                !seen.contains(&ext),
+                "the table lists .{ext} more than once"
+            );
+            seen.push(ext);
+        }
     }
 }

@@ -123,3 +123,48 @@ utilities go through fastpy's own runtime. 70 static Rust ELFs exercising
 ports each surfaced real libc gaps the moment they were first linked. I would
 expect the first `ls` to find something, and I would rather find it now than
 after the count grows to 278.
+
+---
+
+## Update 2026-09-16: the assertion now exists as a fixture — it needs a rung
+
+`services/ctest-coreutils-runs` is built and linked (1,430,272 bytes). It is
+the assertion this request asked you for, in the form your other `ctest-*`
+rungs already take, so the work left on your side is one call rather than a
+test to design.
+
+**Four binaries, each adding one capability to the one before**, so a failure
+names the layer rather than saying "the userland does not work":
+
+| | proves |
+|---|---|
+| `/bin/true` | exec, run, exit 0. No argv, no output, no libc beyond start-up and `exit`. If this fails nothing below it is interpretable. |
+| `/bin/false` | the same, exiting 1. **With `true` this proves the exit STATUS is carried** rather than that a process merely ended — a `wait` that always reported 0 passes `true` alone, and every shell script reads that value. |
+| `/bin/echo hi` | argv reaches the program, and its stdout reaches a pipe. |
+| `/bin/basename /usr/lib/x.so` | the first that **computes**: `x.so` out. |
+
+All four are in `scripts/rootfs-bin-manifest.txt`, so all four are staged.
+
+**The output comparison is exact, not a substring.** `echo hi` must produce
+exactly `hi\n`. A substring test would pass on a program printing a usage
+message containing the word — and a usage message is what a broken argv handler
+prints, so the substring version would be green on precisely the defect it
+exists to catch.
+
+**Plumbing failures are kept distinct from findings.** Exit 1, 2 and 9 are this
+fixture's own `pipe`, `fork` and `wait` failing; 3–8 are verdicts about the
+utilities. A broken pipe here must never read as a broken userland.
+
+Bounds are structural — `poll(POLLIN|POLLHUP, 0)` plus a counted spin with
+`sched_yield`, no `alarm` — for the reason `ctest-pty` gives: a fixture's
+bounds should not depend on a subsystem other than the one under test.
+
+**Why this one might be worth ordering ahead of my other two.** `ctest-keylayout`
+tests a syscall whose consumer does not exist yet, and `ctest-python-repl` tests
+an interpreter. This one tests whether **any** of the 71 Rust binaries we put in
+`/bin` runs at all — and if the answer is no, it is the finding that reorders
+everything else in this lane. Exit 3 would mean the loader or the entry stub is
+wrong for our own ELFs, which would explain a great deal and is the cheapest of
+the four to diagnose.
+
+No urgency implied, and it queues behind whatever your boot reports.

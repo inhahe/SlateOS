@@ -568,6 +568,7 @@ dependencies = [
  "notifsettings",
  "oswindow",
  "posix",
+ "procinfo",
  "scratchdir",
  "settingsfile",
  "tzrules",

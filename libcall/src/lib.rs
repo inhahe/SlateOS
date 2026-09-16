@@ -89,6 +89,22 @@ pub const ENAMETOOLONG: i32 = 36;
 /// Function not implemented.
 pub const ENOSYS: i32 = 38;
 
+/// No such process.
+///
+/// The answer a process manager gets for a row whose process exited between
+/// the listing and the keypress, which is the ordinary case rather than an
+/// error in the program: a process list is a photograph of something moving.
+pub const ESRCH: i32 = 3;
+
+/// Terminate. Catchable, so a process may clean up or ignore it.
+pub const SIGTERM: i32 = 15;
+/// Terminate, uncatchable.
+pub const SIGKILL: i32 = 9;
+/// Suspend, uncatchable. A process manager's Pause.
+pub const SIGSTOP: i32 = 19;
+/// Resume a stopped process. A process manager's Resume.
+pub const SIGCONT: i32 = 18;
+
 /// The longest hostname the kernel will store, not counting the NUL.
 /// A buffer of `HOST_NAME_MAX + 1` always suffices for [`hostname_into`].
 pub const HOST_NAME_MAX: usize = 255;
@@ -130,6 +146,7 @@ mod sys {
         pub fn setdomainname(name: *const u8, len: usize) -> i32;
         pub fn gethostname(name: *mut u8, len: usize) -> i32;
         pub fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32;
+        pub fn kill(pid: i32, sig: i32) -> i32;
         pub fn __errno_location() -> *mut i32;
     }
 }
@@ -395,6 +412,71 @@ pub fn klog_clear() -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+/// Send `sig` to the single process `pid`.
+///
+/// Requested by lane C in
+/// `requests/c-b-a-process-manager-needs-a-way-to-send-a-signal.md`:
+/// `apps/procexplorer` and `apps/sysmonitor` have Kill, Pause and Resume
+/// controls that could not signal anything. One function covers all three --
+/// Pause is [`SIGSTOP`] and Resume is [`SIGCONT`] -- and it is here rather
+/// than in the apps for the reason this crate exists.
+///
+/// # A single process, deliberately
+///
+/// `kill(2)` gives `pid <= 0` three broadcast meanings: the caller's process
+/// group, every process the caller may signal, and a named group. `posix`
+/// implements all of them, correctly and on the same permission path.
+///
+/// This refuses them with [`EINVAL`], and that is a decision rather than an
+/// omission. Every caller in this tree is acting on one row of a process
+/// list, and the distance between "the row I selected" and "every process in
+/// my own group" is one mis-parsed field -- an empty `/proc` entry, a pid
+/// column that came back blank. A GUI process manager that sends `SIGKILL`
+/// to group 0 kills itself and everything beside it, and it does so in
+/// response to a keypress meaning "kill that one".
+///
+/// So the broadcast forms are not reached by *accident* here; they are
+/// reachable by writing a differently-named function, on the day something
+/// actually wants one. That is the same reasoning §768 used to put this call
+/// in a crate rather than at each call site: the correct route and the
+/// catastrophic one looked identical at the point of use.
+///
+/// `sig == 0` is still permitted and still useful -- it sends nothing and
+/// reports whether the process exists and may be signalled, which is exactly
+/// what a manager wants before enabling a control.
+///
+/// # Errors
+///
+/// The `errno` set by `kill(2)`:
+///
+/// * [`EINVAL`] -- `pid` is not a single process, or `sig` is not a signal.
+/// * [`ESRCH`] -- no such process. Expected, not exceptional.
+/// * [`EPERM`] -- not permitted to signal it. Worth showing as itself: a
+///   manager that filters the list instead cannot explain the absence.
+/// * [`ENOSYS`] -- built for a host, where there is no Slate kernel to ask.
+pub fn kill(pid: i32, sig: i32) -> Result<(), i32> {
+    // Before the target split, so it is the same rule on every build and the
+    // host test binary can prove it. A guard compiled only for the target is
+    // a guard nothing here runs.
+    if pid <= 0 {
+        return Err(EINVAL);
+    }
+    kill_one(pid, sig)
+}
+
+#[cfg(unix)]
+fn kill_one(pid: i32, sig: i32) -> Result<(), i32> {
+    // SAFETY: `kill` reads no user memory -- both arguments are scalars --
+    // so there is no buffer whose lifetime or length could be wrong.
+    let rc = unsafe { sys::kill(pid, sig) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn kill_one(_pid: i32, _sig: i32) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,10 +507,51 @@ mod tests {
             posix::unistd::SYSLOG_ACTION_READ_ALL
         );
         assert_eq!(SYSLOG_ACTION_CLEAR, posix::unistd::SYSLOG_ACTION_CLEAR);
+        assert_eq!(ESRCH, posix::errno::ESRCH);
+        assert_eq!(SIGTERM, posix::signal::SIGTERM);
+        assert_eq!(SIGKILL, posix::signal::SIGKILL);
+        assert_eq!(SIGSTOP, posix::signal::SIGSTOP);
+        assert_eq!(SIGCONT, posix::signal::SIGCONT);
         assert_eq!(
             SYSLOG_ACTION_SIZE_BUFFER,
             posix::unistd::SYSLOG_ACTION_SIZE_BUFFER
         );
+    }
+
+    /// A broadcast pid is refused before it can reach the libc.
+    ///
+    /// The whole point of the guard, and it is checked on the HOST build --
+    /// which is the one place it can be, since the `cfg(unix)` arm that
+    /// actually signals is not compiled here. Putting the guard above the
+    /// split is what makes this test possible at all; below it, the rule
+    /// would exist only in a configuration no test in this repository runs.
+    #[test]
+    fn a_broadcast_pid_is_refused_rather_than_sent() {
+        // 0 is the caller's own process group: a GUI manager that sent
+        // SIGKILL here would kill itself and every sibling, in response to a
+        // keypress meaning "kill that one".
+        assert_eq!(kill(0, SIGKILL), Err(EINVAL));
+        // -1 is every process the caller may signal.
+        assert_eq!(kill(-1, SIGKILL), Err(EINVAL));
+        // A named process group.
+        assert_eq!(kill(-42, SIGTERM), Err(EINVAL));
+        // The guard is about the PID and not the signal, so it refuses even
+        // the harmless existence probe rather than letting `sig == 0` through
+        // as a special case -- `kill(0, 0)` would report on the group.
+        assert_eq!(kill(0, 0), Err(EINVAL));
+    }
+
+    /// ...and a real pid is NOT refused by the guard.
+    ///
+    /// The control. Without it the test above passes just as well against a
+    /// `kill` that refuses everything, which would be a function that cannot
+    /// signal anything -- the exact state lane C asked to have fixed.
+    /// `ENOSYS` is the host arm declining, which is one step further than the
+    /// guard and proves the guard let it past.
+    #[test]
+    fn a_single_pid_reaches_the_libc_arm() {
+        assert_eq!(kill(1, SIGTERM), Err(ENOSYS));
+        assert_eq!(kill(i32::MAX, SIGCONT), Err(ENOSYS));
     }
 
     /// The priority mask and the prefer bit do not overlap.

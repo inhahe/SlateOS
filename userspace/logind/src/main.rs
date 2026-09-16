@@ -667,6 +667,53 @@ impl Inhibitor {
     }
 }
 
+/// Why a [`Daemon::kill_session`] did not happen.
+///
+/// An enum rather than a message string, because two callers need these and
+/// they need them differently: `bus::dispatch` turns each into its own
+/// `system.logind.Error.*` name, and `loginctl` turns each into a sentence.
+/// A `&'static str` would have made one of those two match on the other's
+/// wording -- and `terminate_session` beside it already shows the other
+/// failure, collapsing every cause into `NoSuchSession` so that a caller
+/// denied permission is told the session does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillError {
+    /// No session with that id.
+    NoSuchSession,
+    /// The session has no leader pid, or one that is not a pid.
+    ///
+    /// Distinct from the rest because `libcall::kill` refuses a non-positive
+    /// pid: `kill(2)` reads it as a process GROUP, and 0 is the caller's own.
+    /// `Session::new` defaults `leader_pid` to 0, so this is the ordinary
+    /// state of a session registered without one, not a corruption.
+    NoLeaderPid,
+    /// EPERM. Worth its own case: a manager that hides the session instead
+    /// cannot explain why it is gone.
+    NotPermitted,
+    /// ESRCH -- the leader exited already. Ordinary rather than exceptional:
+    /// a process list is a photograph of something moving.
+    LeaderGone,
+    /// ENOSYS. A fact about the build, not about the session, which is why it
+    /// must not be reported as either of the two above.
+    Unsupported,
+    /// Any other errno.
+    Failed,
+}
+
+impl KillError {
+    /// A sentence for a person.
+    fn message(self) -> &'static str {
+        match self {
+            Self::NoSuchSession => "no such session",
+            Self::NoLeaderPid => "session has no leader pid",
+            Self::NotPermitted => "not permitted to signal the session leader",
+            Self::LeaderGone => "the session leader is gone",
+            Self::Unsupported => "this build cannot signal a process",
+            Self::Failed => "failed to signal the session leader",
+        }
+    }
+}
+
 /// Power action request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PowerAction {
@@ -1349,6 +1396,8 @@ impl Daemon {
     /// Send a signal to all processes in a session.
     /// Send `signal` to the session's leader, and report which pid it went to.
     ///
+    /// See [`KillError`] for the failure cases and why they are distinct.
+    ///
     /// It used to look the session up, return `leader_pid`, and send nothing,
     /// while `loginctl` printed "Sent signal 15 to session 3 (leader PID
     /// 412)." -- a present-tense claim about a signal that did not exist. The
@@ -1374,17 +1423,19 @@ impl Daemon {
     ///   exceptional: a leader can exit between a listing and a keypress.
     /// * `this build cannot signal a process` -- ENOSYS, which is every
     ///   non-SlateOS target, including the one the tests run on.
-    fn kill_session(&self, session_id: &str, signal: i32) -> Result<u32, &'static str> {
-        let session = self.sessions.get(session_id).ok_or("session not found")?;
-        let pid =
-            i32::try_from(session.leader_pid).map_err(|_| "session leader pid is not a pid")?;
+    fn kill_session(&self, session_id: &str, signal: i32) -> Result<u32, KillError> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .ok_or(KillError::NoSuchSession)?;
+        let pid = i32::try_from(session.leader_pid).map_err(|_| KillError::NoLeaderPid)?;
         match libcall::kill(pid, signal) {
             Ok(()) => Ok(session.leader_pid),
-            Err(libcall::EINVAL) => Err("session has no leader pid"),
-            Err(libcall::EPERM) => Err("not permitted to signal the session leader"),
-            Err(libcall::ESRCH) => Err("the session leader is gone"),
-            Err(libcall::ENOSYS) => Err("this build cannot signal a process"),
-            Err(_) => Err("failed to signal the session leader"),
+            Err(libcall::EINVAL) => Err(KillError::NoLeaderPid),
+            Err(libcall::EPERM) => Err(KillError::NotPermitted),
+            Err(libcall::ESRCH) => Err(KillError::LeaderGone),
+            Err(libcall::ENOSYS) => Err(KillError::Unsupported),
+            Err(_) => Err(KillError::Failed),
         }
     }
 
@@ -2262,7 +2313,11 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
                     0
                 }
                 Err(e) => {
-                    let _ = writeln!(io::stderr(), "loginctl: failed to kill session: {e}");
+                    let _ = writeln!(
+                        io::stderr(),
+                        "loginctl: cannot kill session {id}: {}",
+                        e.message()
+                    );
                     1
                 }
             }
@@ -3546,10 +3601,7 @@ mod tests {
     #[test]
     fn killing_a_session_says_it_cannot_rather_than_reporting_a_signal() {
         let d = test_daemon();
-        assert_eq!(
-            d.kill_session("1", 15),
-            Err("this build cannot signal a process")
-        );
+        assert_eq!(d.kill_session("1", 15), Err(KillError::Unsupported));
     }
 
     /// A session whose leader pid is 0 is refused, and for the right reason.
@@ -3581,7 +3633,7 @@ mod tests {
         assert_eq!(d.sessions[&id].leader_pid, 0, "the default really is 0");
         assert_eq!(
             d.kill_session(&id, 15),
-            Err("session has no leader pid"),
+            Err(KillError::NoLeaderPid),
             "pid 0 means the caller's own process group, not this session"
         );
     }

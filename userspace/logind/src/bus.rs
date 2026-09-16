@@ -79,6 +79,19 @@ pub const ERR_NOT_AUTHENTICATED: &str = "system.logind.Error.NotAuthenticated";
 /// prevent, arrived at through the mechanism meant to prevent it.
 pub const ERR_TOO_MANY_INHIBITORS: &str = "system.logind.Error.TooManyInhibitors";
 
+/// The session has no leader process to signal.
+pub const ERR_NO_SESSION_LEADER: &str = "system.logind.Error.NoSessionLeader";
+
+/// The leader existed and is gone -- ESRCH.
+///
+/// Separate from [`ERR_NO_SUCH_SESSION`] on purpose: the session is real and
+/// the process is not, and a caller told "no such session" would go looking
+/// for a bookkeeping bug that is not there.
+pub const ERR_NO_SUCH_PROCESS: &str = "system.logind.Error.NoSuchProcess";
+
+/// This build cannot signal a process at all.
+pub const ERR_CANNOT_SIGNAL: &str = "system.logind.Error.CannotSignal";
+
 // ---------------------------------------------------------------------------
 // Outcome wire codes
 // ---------------------------------------------------------------------------
@@ -228,6 +241,7 @@ pub fn dispatch(
         "TerminateSession" => one_arg(payload, |id| terminate_session(daemon, id, caller)),
         "AuthenticateSession" => authenticate_session(daemon, payload, caller),
         "SetIdleHint" => set_idle_hint(daemon, payload, caller),
+        "KillSession" => kill_session(daemon, payload, caller),
         "AddInhibitor" => add_inhibitor(daemon, payload, caller),
         "ReleaseInhibitor" => release_inhibitor(daemon, caller),
         "ListInhibitors" => list_inhibitors(daemon, caller),
@@ -434,6 +448,45 @@ fn terminate_session(daemon: &mut Daemon, id: &str, caller: Option<Credentials>)
     match daemon.terminate_session(id) {
         Ok(()) => Reply::empty(),
         Err(_) => Reply::Error(ERR_NO_SUCH_SESSION),
+    }
+}
+
+/// `KillSession(id, signal) -> pid`
+///
+/// Sends `signal` to the session's leader and returns the pid it went to.
+///
+/// [`Required::Owner`], as `TerminateSession` and `LockSession` are: your own
+/// session is yours to signal, and root may signal any. The session lookup is
+/// inside `Daemon::kill_session`, and `authorize` runs first, so a stranger
+/// cannot learn which ids exist by watching which error comes back.
+///
+/// # Each failure keeps its own name
+///
+/// `terminate_session` beside this maps every error to
+/// [`ERR_NO_SUCH_SESSION`], which tells a caller denied permission that the
+/// session does not exist. The cases here are genuinely different questions:
+/// a leader that is gone (ESRCH) is a session that is real and a process that
+/// is not; a build that cannot signal is neither.
+fn kill_session(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>) -> Reply {
+    let Some(args) = fields::decode_exact(payload, 2) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let text = |i: usize| args.get(i).and_then(|b| core::str::from_utf8(b).ok());
+    let (Some(id), Some(signal)) = (text(0), text(1).and_then(|s| s.parse::<i32>().ok())) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    if let Err(e) = authorize(daemon, id, caller, Required::Owner) {
+        return Reply::Error(e);
+    }
+    match daemon.kill_session(id, signal) {
+        Ok(pid) => Reply::Return(fields::encode(&[pid.to_string().as_bytes()])),
+        Err(crate::KillError::NoSuchSession) => Reply::Error(ERR_NO_SUCH_SESSION),
+        Err(crate::KillError::NoLeaderPid) => Reply::Error(ERR_NO_SESSION_LEADER),
+        Err(crate::KillError::NotPermitted) => Reply::Error(ERR_ACCESS_DENIED),
+        Err(crate::KillError::LeaderGone) => Reply::Error(ERR_NO_SUCH_PROCESS),
+        Err(crate::KillError::Unsupported | crate::KillError::Failed) => {
+            Reply::Error(ERR_CANNOT_SIGNAL)
+        }
     }
 }
 
@@ -920,6 +973,123 @@ mod tests {
             "the one line should be alice's: {:?}",
             String::from_utf8_lossy(mine[0])
         );
+    }
+
+    // -- KillSession ------------------------------------------------------
+
+    /// The failure cases stay distinct, which is the whole point of the enum.
+    ///
+    /// `terminate_session` beside this maps every error to
+    /// `ERR_NO_SUCH_SESSION`, so a caller denied permission is told the
+    /// session does not exist. These three are different questions and get
+    /// different answers:
+    ///
+    /// * a session with a real leader, on a host that cannot signal at all;
+    /// * a session whose leader pid is 0, which must be refused even where
+    ///   signalling works, because `kill(2)` reads a non-positive pid as a
+    ///   process GROUP and 0 is the caller's own;
+    /// * a session id that does not exist.
+    ///
+    /// If any two collapsed into one name, a caller could not tell "your
+    /// machine cannot do this" from "this session has nothing to signal".
+    #[test]
+    fn killing_a_session_keeps_its_failure_cases_apart() {
+        let (mut d, alice, _bob) = two_user_daemon();
+
+        // Real leader, host that cannot signal. `two_user_daemon` does not set
+        // one, so give this session a leader to separate the two cases.
+        d.sessions.get_mut(&alice).expect("alice").leader_pid = 4242;
+        assert_eq!(
+            call(
+                &mut d,
+                "KillSession",
+                &[alice.as_bytes(), b"15"],
+                Some(creds(0))
+            ),
+            Reply::Error(ERR_CANNOT_SIGNAL)
+        );
+
+        // Leader pid 0 -- refused for its own reason, on every target.
+        let noleader = d
+            .create_session(CreateSessionParams {
+                uid: 1002,
+                user: "carol",
+                seat_id: "seat0",
+                ..Default::default()
+            })
+            .expect("carol");
+        assert_eq!(
+            d.sessions[&noleader].leader_pid, 0,
+            "the default really is 0"
+        );
+        assert_eq!(
+            call(
+                &mut d,
+                "KillSession",
+                &[noleader.as_bytes(), b"15"],
+                Some(creds(0))
+            ),
+            Reply::Error(ERR_NO_SESSION_LEADER)
+        );
+
+        // And an id that is not a session at all.
+        assert_eq!(
+            call(&mut d, "KillSession", &[b"nosuch", b"15"], Some(creds(0))),
+            Reply::Error(ERR_NO_SUCH_SESSION)
+        );
+    }
+
+    /// A stranger cannot signal your session, and learns nothing by trying.
+    #[test]
+    fn killing_someone_elses_session_is_refused() {
+        let (mut d, alice, _bob) = two_user_daemon();
+        d.sessions.get_mut(&alice).expect("alice").leader_pid = 4242;
+
+        // bob's uid, alice's session: `authorize` reports the session as
+        // ABSENT rather than forbidden, so bob cannot confirm it exists.
+        assert_eq!(
+            call(
+                &mut d,
+                "KillSession",
+                &[alice.as_bytes(), b"15"],
+                Some(creds(1001))
+            ),
+            Reply::Error(ERR_NO_SUCH_SESSION)
+        );
+        // An unidentified caller is refused outright.
+        assert_eq!(
+            call(&mut d, "KillSession", &[alice.as_bytes(), b"15"], None),
+            Reply::Error(ERR_UNKNOWN_CALLER)
+        );
+        // The owner gets past authorisation and reaches the signal, which this
+        // host cannot send -- the control proving the two refusals above are
+        // about authority and not about the arguments.
+        assert_eq!(
+            call(
+                &mut d,
+                "KillSession",
+                &[alice.as_bytes(), b"15"],
+                Some(creds(1000))
+            ),
+            Reply::Error(ERR_CANNOT_SIGNAL)
+        );
+    }
+
+    /// A signal that is not a number is an argument error, not a kill.
+    #[test]
+    fn killing_with_a_bad_signal_is_an_argument_error() {
+        let (mut d, alice, _bob) = two_user_daemon();
+        for bad in [
+            vec![alice.as_bytes(), b"TERM".as_slice()],
+            vec![alice.as_bytes(), b"".as_slice()],
+            vec![alice.as_bytes()],
+        ] {
+            assert_eq!(
+                call(&mut d, "KillSession", &bad, Some(creds(0))),
+                Reply::Error(ERR_INVALID_ARGUMENTS),
+                "args {bad:?} should not have been accepted"
+            );
+        }
     }
 
     // -- CreateSession ----------------------------------------------------

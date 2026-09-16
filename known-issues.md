@@ -152828,7 +152828,7 @@ these specifically. What is wrong is that a person can set a value, check it,
 and be told yes.
 
 
-## TD-C-SYSINFO-FILED-A-NEGATIVE-IT-NEVER-CHECKED -- OPEN 2026-09-15
+## TD-C-SYSINFO-FILED-A-NEGATIVE-IT-NEVER-CHECKED -- PARTLY FIXED 2026-09-15
 
 **In short:** the System Information window has nine categories -- PCI, USB,
 sound, I/O ports, DMA, the firmware memory map, drivers, services and startup
@@ -152839,6 +152839,14 @@ the window shows, and several others have a partial one.
 
 **Date:** 2026-09-15. **Lane:** C. **Decided by:** Claude (autonomous) -- the
 error is mine and this entry is the correction.
+
+**Status 2026-09-15, later the same day.** Lane B built the three parsers, and
+I/O Ports, Drivers and Startup Items now read `/proc/ioport`, `/proc/kmod` and
+`/proc/autostart`. `DriverInfo::path` is left empty and `StartupEntry::source`
+was renamed to `phase` rather than filled with one. **Still open:** PCI, USB
+and DMA stay unwired for the reasons below -- one field of eight is not a
+category -- and the memory map and Services wait on lane A, who has been asked
+for per-row output from `memlayout` and `servicemgr`.
 
 **How the wrong claim was made.** The nine categories read
 `/sys/hardware/{pci,usb,sound,ioports,memmap,dma}`, `/sys/services`,

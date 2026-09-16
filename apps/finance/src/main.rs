@@ -238,7 +238,6 @@ enum AccountType {
     /// happens to cover the other four. Deleting it would encode "the sample
     /// data has no brokerage account" as "SlateOS has no such account type".
     /// See known-issues.md -> TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA.
-    #[allow(dead_code, reason = "a model variant awaiting the creation UI")]
     Investment,
 }
 
@@ -302,9 +301,7 @@ struct FinanceApp {
     // Allocated by `add_transaction` and `add_account`, neither of which has
     // a caller: nothing in this program creates a transaction or an account.
     // See `NO_DATA_LINES`.
-    #[allow(dead_code, reason = "id allocator for a door with no caller")]
     next_tx_id: u32,
-    #[allow(dead_code, reason = "id allocator for a door with no caller")]
     next_account_id: u32,
     current_date: SimpleDate,
     view_month: SimpleDate, // first day of the month being viewed

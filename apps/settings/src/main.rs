@@ -6,6 +6,7 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha) by default.
 
+mod defaultapps;
 mod dyndns;
 mod remote;
 mod snapshots;
@@ -590,6 +591,15 @@ pub struct SettingsState {
     /// from the page on every move, so the value follows the same track the
     /// user can see.
     dragging: Option<SliderId>,
+    /// The file associations the Default Apps page reports.
+    ///
+    /// Held rather than read while drawing because `build_page` runs on every
+    /// repaint *and* again for every hit test, and reading a file twice a
+    /// frame to paint six rows is not a cost worth paying. Refreshed by
+    /// [`SettingsState::refresh_default_apps`] when the page is entered, which
+    /// is the same moment `apps/explorer` re-reads it: neither program caches
+    /// an association across the action that uses it.
+    default_apps: Vec<defaultapps::Association>,
 }
 
 /// Where an open dropdown's popup is, and which of its items are on screen.
@@ -757,6 +767,29 @@ impl SettingsState {
     /// the machine running it.
     pub fn load_appearance(&mut self) {
         self.appearance = AppearanceFile::load();
+    }
+
+    /// Re-read the file associations the File Associations program writes.
+    ///
+    /// I/O, and so out of [`new`](Self::new) for the reason given above.
+    pub fn refresh_default_apps(&mut self) {
+        let doc = settingsfile::load(defaultapps::ASSOC_CONFIG_NAME);
+        self.default_apps = defaultapps::associations_from(&doc);
+    }
+
+    /// Move to `page`, doing whatever entering a page requires.
+    ///
+    /// Every navigation goes through here rather than assigning
+    /// `current_page` directly, because entering a page stopped being a plain
+    /// field change when Default Apps arrived: that page shows a file another
+    /// program owns, so it is re-read on entry and shows what is set now
+    /// rather than what was set when Settings started. Four call sites
+    /// assigning the field themselves would be four chances to forget.
+    fn go_to_page(&mut self, page: SettingsPage) {
+        self.current_page = page;
+        if page == SettingsPage::DefaultApps {
+            self.refresh_default_apps();
+        }
     }
 
     /// Write the appearance settings back to `appearance.yaml`.
@@ -1066,6 +1099,11 @@ impl SettingsState {
             dropdown_scroll: 0,
             dropdown_wheel: wheel::Accumulator::default(),
             dragging: None,
+            // Empty, not loaded: this constructor is deliberately free of
+            // I/O, as the note on `load_appearance` explains. The list is
+            // filled by `refresh_default_apps`, from `main` and on entry to
+            // the page.
+            default_apps: Vec::new(),
         }
     }
 }
@@ -2702,6 +2740,7 @@ impl SettingsState {
             SettingsPage::NetworkStatus => self.build_network_page(sink),
             SettingsPage::Proxy => self.build_proxy_page(sink),
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
+            SettingsPage::DefaultApps => self.build_default_apps_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
                 self.build_accounts_page(sink);
             }
@@ -2731,6 +2770,22 @@ impl SettingsState {
             // in the same words, and `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-
             // NOTHING` is what it was filed about. This page gets its controls
             // when the list gets a consumer, and not before.
+            //
+            // AND NOT A READ-ONLY LIST EITHER -- the tempting halfway house,
+            // which this comment previously left open by arguing only against
+            // *controls*, and which was half-written on 2026-09-16 before the
+            // rest of this note stopped it. `procinfo` parses `/proc/autostart`,
+            // so a page could list the entries and offer no control at all.
+            // Rechecked that day: every consumer of the table still only
+            // *reads* it -- `apps/sysinfo` displays it, `procfs.rs` publishes
+            // it, `startupopt.rs` counts it against a cap -- so a row reading
+            // "Enabled - Session" tells the user the program runs at session
+            // start, and nothing runs it. That is the same fabrication as a
+            // dead toggle, moved from the control to the label, and a list
+            // under the heading "Startup Apps" implies it whether or not a
+            // note underneath denies it. `apps/sysinfo` already carries the
+            // honest version, because a system-information app reports the
+            // table as data rather than as behaviour.
             //
             // See `TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`.
             _ => self.build_placeholder_page(sink),
@@ -3873,6 +3928,45 @@ impl SettingsState {
     /// Read-only. Adding and removing entries needs a syscall the kernel does
     /// not expose to userspace yet; `known-issues.md` carries that as
     /// `TD-C-DYNDNS-PAGE-IS-READ-ONLY`.
+    /// Which program opens which kind of file.
+    ///
+    /// Every row here is a real setting with a real effect: `apps/explorer`
+    /// reads this same file on every open and spawns what it names. That is
+    /// precisely what the `StartupApps` placebo above lacks, and the reason
+    /// one of the two pages exists and the other deliberately does not.
+    ///
+    /// Read-only, because `apps/fileassoc` owns the file. The page says so
+    /// rather than offering a control that would have to reimplement another
+    /// program's editor.
+    fn build_default_apps_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        s.section("File Associations");
+        if self.default_apps.is_empty() {
+            s.note(
+                "No file associations are set, so opening a file in the file manager has no program to run.",
+                28.0,
+            );
+        } else {
+            for assoc in &self.default_apps {
+                if assoc.is_runnable() {
+                    s.value_row(&assoc.label(), &assoc.program, pal.text);
+                } else {
+                    // A key present with no program is a *broken* entry, not
+                    // an absent one -- the file manager reaches
+                    // `Command::new("")` on it and fails. Drawn in the warning
+                    // colour because the same words in the ordinary text
+                    // colour would read as a deliberate blank.
+                    s.value_row(&assoc.label(), "No program set", pal.peach);
+                }
+            }
+        }
+        s.gap();
+        s.note(
+            "These are the programs the file manager runs when you open a file of each kind. They are set in the File Associations application; this page reports what is set now.",
+            44.0,
+        );
+    }
+
     fn build_dyndns_page<S: PageSink>(s: &mut S, pal: &Palette) {
         let (summary, rows) = dyndns::system_dyndns();
 
@@ -4501,8 +4595,8 @@ impl SettingsState {
                 // every category has pages today, and an empty one would make
                 // the remainder a division by zero rather than a no-op.
                 let next = current_idx.saturating_add(1);
-                if let Some(page) = pages.get(next).or_else(|| pages.first()) {
-                    self.current_page = *page;
+                if let Some(page) = pages.get(next).or_else(|| pages.first()).copied() {
+                    self.go_to_page(page);
                 }
                 EventResult::Consumed
             }
@@ -4531,7 +4625,7 @@ impl SettingsState {
         };
         if let Some(&new_cat) = visible.get(next) {
             self.current_category = new_cat;
-            self.current_page = new_cat.default_page();
+            self.go_to_page(new_cat.default_page());
         }
     }
 
@@ -4581,7 +4675,7 @@ impl SettingsState {
             if let Some(idx) = self.category_at(mx, my) {
                 if let Some(&new_cat) = self.filtered_categories().get(idx) {
                     self.current_category = new_cat;
-                    self.current_page = new_cat.default_page();
+                    self.go_to_page(new_cat.default_page());
                     return EventResult::Consumed;
                 }
             }
@@ -4602,7 +4696,7 @@ impl SettingsState {
                 let label = page.label();
                 let tab_width = page_tab_width(label);
                 if mx >= tab_x && mx < tab_x + tab_width + 8.0 {
-                    self.current_page = *page;
+                    self.go_to_page(*page);
                     return EventResult::Consumed;
                 }
                 tab_x += tab_width + 8.0;
@@ -5156,6 +5250,11 @@ fn main() -> ExitCode {
     // the Accounts page says rather than drawing a blank panel.
     state.load_user_accounts();
 
+    // The file associations, so the Default Apps page is right even if it is
+    // the first page shown. Entering the page re-reads them; this is only the
+    // case that entry never happens because the page is already open.
+    state.refresh_default_apps();
+
     // `launch` rather than `launch_with`: Settings takes no file and no page
     // name, so it wants exactly the shared command line and nothing more —
     // including the rejection of an unrecognised argument, which was previously
@@ -5292,7 +5391,7 @@ mod tests {
 
     /// The Notifications page is a page, not a roadworks sign.
     ///
-    /// Eleven of the twenty-nine pages fall through `build_page`'s `_ =>` arm
+    /// Eight of the twenty-nine pages fall through `build_page`'s `_ =>` arm
     /// to `build_placeholder_page`, which draws "This page is under
     /// construction". Asserted by the text on screen rather than by the
     /// dispatch arm, because an arm that rendered nothing would satisfy the
@@ -5306,6 +5405,42 @@ mod tests {
             !text.contains("under construction"),
             "the Notifications page still draws the placeholder"
         );
+    }
+
+    /// The Default Apps page shows the association the file manager obeys.
+    ///
+    /// Written end to end through the real file rather than against
+    /// `associations_from`, which the unit tests in that module already cover.
+    /// What this one is for is the *wiring*: that the page reads the same
+    /// settings group and the same key `apps/explorer` reads before it spawns
+    /// anything. A test against the parser would pass just as happily with
+    /// this page pointed at a file nothing obeys, which is the only way this
+    /// page can fail while still looking finished.
+    #[test]
+    fn the_default_apps_page_shows_a_real_association() {
+        settingsfile::testing::with_scratch_config("settings-default-apps", |_root| {
+            let mut doc = settingsfile::load(defaultapps::ASSOC_CONFIG_NAME);
+            doc.set_str(&["associations", "txt"], "/usr/bin/chosen-editor");
+            settingsfile::store(defaultapps::ASSOC_CONFIG_NAME, &doc)
+                .expect("the scratch configuration should be writable");
+
+            let mut app = SettingsState::new();
+            // Through `go_to_page`, because that is what the user's click
+            // does: navigating is what re-reads the file, and a test that set
+            // `current_page` directly would prove the page can draw a list it
+            // was handed rather than that opening it produces one.
+            app.go_to_page(SettingsPage::DefaultApps);
+            let text = format!("{:?}", app.render_tree());
+            assert!(
+                !text.contains("under construction"),
+                "the Default Apps page still draws the placeholder"
+            );
+            assert!(text.contains(".txt"), "the extension was not drawn: {text}");
+            assert!(
+                text.contains("/usr/bin/chosen-editor"),
+                "the program the file manager would run was not drawn"
+            );
+        });
     }
 
     /// With rules present, each program is listed with what it may do.

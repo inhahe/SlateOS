@@ -582,7 +582,6 @@ struct Folder {
 }
 
 impl Folder {
-    #[allow(dead_code, reason = "no control creates a folder yet -- see todo.txt")]
     fn new(id: u64, name: &str) -> Self {
         Self {
             id,
@@ -804,7 +803,6 @@ impl Vault {
 
     /// An entry that can be changed. No caller yet, for the same reason as
     /// `remove_entry`: the detail view shows a credential and cannot edit one.
-    #[allow(dead_code, reason = "no edit control yet -- see todo.txt")]
     fn get_entry_mut(&mut self, entry_id: u64) -> Option<&mut Entry> {
         self.entries.iter_mut().find(|e| e.id == entry_id)
     }

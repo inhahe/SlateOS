@@ -394,6 +394,18 @@ struct Options {
     line_messages: Vec<String>,
 }
 
+/// The line util-linux prints after an OPTION error, and only after one.
+///
+/// Measured rather than assumed, in both directions: `logger -Q` and
+/// `logger --zzq` each print it, while `logger -p nosuch.zz` and
+/// `logger -u /nonexistent/sock` print their diagnostic and stop. It belongs
+/// to getopt's failure path, not to every failure -- so a caller cannot read
+/// "there is a --help" as advice about a bad priority, which is what printing
+/// it everywhere would imply.
+fn usage_hint() {
+    eprintln!("Try 'logger --help' for more information.");
+}
+
 fn print_help() {
     println!("Usage: logger [OPTIONS] [MESSAGE...]");
     println!();
@@ -637,7 +649,8 @@ fn parse_args(args: &[OsString]) -> Options {
                             process::exit(0);
                         }
                         _ => {
-                            eprintln!("logger: unknown option '-{}'", chars[j]);
+                            eprintln!("logger: invalid option -- '{}'", chars[j]);
+                            usage_hint();
                             process::exit(1);
                         }
                     }
@@ -659,7 +672,8 @@ fn parse_args(args: &[OsString]) -> Options {
             // holds a line nobody meant to write, attributed to the user who
             // mistyped.
             _ if s.starts_with("--") => {
-                eprintln!("logger: unknown option: {}", quoting::quoteaf_os(arg));
+                eprintln!("logger: unrecognized option {}", quoting::quoteaf_os(arg));
+                usage_hint();
                 process::exit(1);
             }
             _ => {

@@ -31,6 +31,10 @@ name = "desktop-demo"
 path = "src/bin/demo.rs"
 
 [dependencies]
+# The session group, for the screen-lock delay. One integer with two
+# readers -- `apps/settings` writes it -- which is the `fileassoc` shape
+# rather than a typed crate like `appearance`. See src/idle_lock.rs.
+settingsfile = { path = "../settingsfile" }
 guitk = { path = "../toolkit" }
 # `/proc` is read through the one parser, not a second copy. The same
 # crate serves apps/sysinfo, apps/procexplorer and apps/sysmonitor; two

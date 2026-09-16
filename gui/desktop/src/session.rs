@@ -506,6 +506,16 @@ impl<T: Transport> ShellSession<T> {
             events.grab_modifier_chord(panel.window, *chord)?;
         }
 
+        // And the idle watch, on the same window and for the same reason the
+        // claims above are made here: a notification the shell does not hold
+        // is one that never arrives. Only if a delay is configured -- an
+        // unclaimed watch costs the compositor nothing, and claiming one with
+        // no delay to act on would be asking to be told something we would
+        // then ignore.
+        if let Some(after) = crate::idle_lock::lock_after() {
+            events.watch_idle(panel.window, after)?;
+        }
+
         let mut session = Self {
             events,
             global_held,
@@ -1766,6 +1776,16 @@ impl<T: Transport> ShellSession<T> {
             // gesture has no key, and manufacturing one would be the same
             // confusion the separate event type exists to prevent. What the
             // chord *means* is the shell's to say, not this loop's.
+            // The session has been quiet for the configured delay, so run the
+            // lock screen -- the same ask as the lock hotkey, and queued
+            // through the same function so it is indistinguishable to whoever
+            // drains it. That also means `design-decisions.md` 818 applies
+            // without being restated: `queue_launches` drops the lock for an
+            // account with no password, so an idle session that cannot be
+            // locked simply is not.
+            Event::SessionIdle => {
+                self.queue_launches(vec![std::path::PathBuf::from(crate::hotkeys::LOCK_COMMAND)]);
+            }
             Event::ModifierChord { modifiers } => {
                 let outcome = self.shell.handle_modifier_chord(modifiers);
                 if outcome.consumed {
@@ -1803,6 +1823,20 @@ impl<T: Transport> ShellSession<T> {
             // announcement to each window and the shell has four. The second
             // and later ones are free: `poll_appearance` re-reads, finds the
             // settings identical to what it just applied, and answers `false`.
+            // The lock delay changed. Re-claim rather than adjust: the
+            // compositor's watch holds a delay, so the honest way to change it
+            // is to say what it is now. Nought withdraws, which is what a user
+            // choosing "Never" means and why the withdrawal is the same call.
+            //
+            // Arrives once per surface like the arm below, and re-claiming is
+            // idempotent, so the repeats cost a request each and change
+            // nothing.
+            Event::SettingsChanged {
+                group: SettingsGroup::Session,
+            } => {
+                let after = crate::idle_lock::lock_after().unwrap_or_default();
+                self.events.watch_idle(self.panel.window, after)?;
+            }
             Event::SettingsChanged {
                 group: SettingsGroup::Notifications,
             } => {

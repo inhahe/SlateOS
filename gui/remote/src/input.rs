@@ -164,11 +164,13 @@ enum EventTag {
     SettingsChanged = 0x0A,
     ModifierChord = 0x0B,
     TrayIconClicked = 0x0C,
+    SessionIdle = 0x0D,
 }
 
 impl EventTag {
     fn from_byte(b: u8) -> Option<Self> {
         match b {
+            0x0D => Some(Self::SessionIdle),
             0x01 => Some(Self::Mouse),
             0x02 => Some(Self::Key),
             0x03 => Some(Self::Resize),
@@ -194,6 +196,7 @@ impl EventTag {
 const GROUP_APPEARANCE: u8 = 0x01;
 const GROUP_INPUT: u8 = 0x02;
 const GROUP_NOTIFICATIONS: u8 = 0x03;
+const GROUP_SESSION: u8 = 0x04;
 
 const MOUSE_PRESS: u8 = 0x01;
 const MOUSE_RELEASE: u8 = 0x02;
@@ -376,6 +379,8 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
         Event::FocusIn => out.push(EventTag::FocusIn as u8),
         Event::FocusOut => out.push(EventTag::FocusOut as u8),
         Event::CloseRequested => out.push(EventTag::CloseRequested as u8),
+        // No payload: the claimant asked for the delay and knows it.
+        Event::SessionIdle => out.push(EventTag::SessionIdle as u8),
         Event::Tick { elapsed_ms } => {
             out.push(EventTag::Tick as u8);
             write_u64(out, *elapsed_ms);
@@ -390,6 +395,7 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
                 SettingsGroup::Appearance => GROUP_APPEARANCE,
                 SettingsGroup::Input => GROUP_INPUT,
                 SettingsGroup::Notifications => GROUP_NOTIFICATIONS,
+                SettingsGroup::Session => GROUP_SESSION,
             });
         }
         Event::ModifierChord { modifiers } => {
@@ -597,6 +603,7 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
         EventTag::FocusIn => (Event::FocusIn, None),
         EventTag::FocusOut => (Event::FocusOut, None),
         EventTag::CloseRequested => (Event::CloseRequested, None),
+        EventTag::SessionIdle => (Event::SessionIdle, None),
         EventTag::Tick => (
             Event::Tick {
                 elapsed_ms: r.read_u64()?,
@@ -615,6 +622,7 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
                 GROUP_APPEARANCE => SettingsGroup::Appearance,
                 GROUP_INPUT => SettingsGroup::Input,
                 GROUP_NOTIFICATIONS => SettingsGroup::Notifications,
+                GROUP_SESSION => SettingsGroup::Session,
                 other => return Err(DecodeError::BadSettingsGroup(other)),
             };
             (Event::SettingsChanged { group }, None)
@@ -801,12 +809,25 @@ mod tests {
             Event::SettingsChanged {
                 group: SettingsGroup::Input,
             },
+            Event::SettingsChanged {
+                group: SettingsGroup::Session,
+            },
             Event::ModifierChord {
                 modifiers: Modifiers {
                     alt: true,
                     shift: true,
                     ..Modifiers::default()
                 },
+            },
+            Event::SessionIdle,
+            // Absent until 2026-09-16, while this test was called
+            // `every_non_input_event_variant`. A list written by hand drifts
+            // from the enum it claims to cover, and the name is what stops
+            // anybody checking -- so adding a variant is the moment to count
+            // them.
+            Event::TrayIconClicked {
+                id: 7,
+                button: MouseButton::Right,
             },
         ]
         .into_iter()

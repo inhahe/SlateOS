@@ -3505,6 +3505,10 @@ impl StickyNotesApp {
             // would also silently swallow the next event added to the
             // vocabulary, which may well be one a note should act on.
             Event::ModifierChord { .. } => Action::None,
+            // Never sent here: this program claims no idle watch. Named
+            // rather than swept into the wildcard below so that the day
+            // it does want one, the compiler asks what it should do.
+            Event::SessionIdle => Action::None,
             // Cannot arrive here either, and for a sharper reason than the
             // others: a tray click is addressed to the *connection*, not to a
             // window, and `oswindow` hands it to `App::tray_icon_clicked`

@@ -3856,6 +3856,8 @@ impl ExplorerState {
             | Event::FocusOut
             | Event::ScaleChanged { .. }
             | Event::ModifierChord { .. }
+            // Never arrives: this program claims no idle watch.
+            | Event::SessionIdle
             // Cannot arrive here: a tray click is addressed to the connection
             // and `oswindow` hands it to `App::tray_icon_clicked` before the
             // window dispatch. Listed because this match is exhaustive on

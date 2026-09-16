@@ -65,10 +65,12 @@ cargo's target layout, and the cost of the guard is a mutex nobody contends.
 WHAT IT DOES NOT CATCH
 ----------------------
 
-A reader that reaches the event loop by some route other than
-`testing::desktop()`. The call is the only handle this has on "this test drives
-a loop"; a future harness with a different name is invisible to it and would
-need adding to `HARNESS_CALLS`.
+A reader that reaches the event loop by a route named in neither entry of
+`HARNESS_CALLS`. Calls are followed *within a file*, so a helper defined in one
+module and used in another is still invisible; a cross-file call graph is the
+honest fix and is not built here. A guard inherited from a helper assumes the
+caller keeps the returned turn alive -- binding it to `_` rather than `_name`
+drops it at once and this cannot see the difference.
 """
 
 from __future__ import annotations
@@ -77,8 +79,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-# The call that means "this function drives an application event loop".
-HARNESS_CALLS = ("testing::desktop()",)
+# The calls that mean "this function drives an application event loop".
+#
+# `ShellSession::start` earns its place the hard way: on 2026-09-16 this gate
+# reported a clean sweep while two tests in `gui/desktop` read the config
+# directory unguarded, because their helper reached the loop through
+# `start_with_stores` and never named `testing::desktop()`. One entry in this
+# tuple was not a rule, it was a single example of one.
+HARNESS_CALLS = ("testing::desktop()", "ShellSession::start")
 
 # The call that puts a process-global environment variable in play.
 WRITER_CALL = "with_scratch_config"
@@ -118,15 +126,15 @@ def crate_of(path: Path, root: Path) -> Path | None:
     return None
 
 
-def function_bodies(text: str) -> list[tuple[int, str]]:
-    """Every `fn` body in `text`, as `(line_number, body)`.
+def function_bodies(text: str) -> list[tuple[int, str, str]]:
+    """Every `fn` body in `text`, as `(line_number, name, body)`.
 
     Brace-matched rather than regex'd, because a body contains braces and the
     interesting functions are the long ones. String and comment contents are
     skipped so that a `{` inside either cannot unbalance the count -- an
     assertion message with a brace in it is ordinary in this tree.
     """
-    bodies: list[tuple[int, str]] = []
+    bodies: list[tuple[int, str, str]] = []
     i = 0
     n = len(text)
     while True:
@@ -162,10 +170,30 @@ def function_bodies(text: str) -> list[tuple[int, str]]:
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    bodies.append((text.count("\n", 0, at) + 1, text[open_at : j + 1]))
+                    name = text[at + 3 : open_at].split("(")[0].split("<")[0].strip()
+                    bodies.append((text.count("\n", 0, at) + 1, name, text[open_at : j + 1]))
                     break
             j += 1
         i = j + 1 if j > at else at + 3
+
+
+def test_region(path: Path, text: str) -> int:
+    """The offset after which a `fn` in `text` is test code, or -1 for none.
+
+    Widening HARNESS_CALLS to a production API made scope matter. The original
+    key, `testing::desktop()`, existed only in test harnesses, so the rule
+    could not reach production code by construction; `ShellSession::start` is
+    what the real binary calls, and on the first run of the wider rule the
+    shell's own `fn main` was reported as an unguarded test. A gate that tells
+    you to put a test-only mutex in `main` has stopped describing the bug.
+    """
+    name = path.name
+    if name == "tests.rs" or "tests" in path.parts:
+        # A file that is nothing but tests -- the `#[cfg(test)]` that gates it
+        # is on the `mod` line in the parent, not in here.
+        return 0
+    at = text.find("#[cfg(test)]")
+    return at if at != -1 else -1
 
 
 def scan(root: Path) -> tuple[list[tuple[Path, int]], int, int]:
@@ -201,12 +229,36 @@ def scan(root: Path) -> tuple[list[tuple[Path, int]], int, int]:
             # No writer in this binary: nothing to race against today. The
             # known-issues entry calls these latent, and they are not findings.
             continue
-        for line, body in function_bodies(texts[path]):
-            if not any(call in body for call in HARNESS_CALLS):
-                continue
-            if GUARD_CALL in body:
-                continue
-            offenders.append((path.relative_to(root), line))
+        region = test_region(path, texts[path])
+        if region < 0:
+            continue
+        funcs = [f for f in function_bodies(texts[path]) if f[0] >= 0]
+        start_line = texts[path].count(chr(10), 0, region) + 1
+        funcs = [f for f in funcs if f[0] >= start_line]
+        readers = {n for _, n, b in funcs if any(c in b for c in HARNESS_CALLS)}
+        guarded = {n for _, n, b in funcs if GUARD_CALL in b}
+        # Both properties travel up the call graph, for opposite reasons: a
+        # function that calls a reader reads too, and a function that calls a
+        # helper which *takes* the turn inherits it through the returned value.
+        # Without this, a one-line wrapper around the harness hid the whole
+        # rule -- which is exactly how the gate came to pass a tree that had
+        # two unguarded readers in it.
+        changed = True
+        while changed:
+            changed = False
+            for _, name, body in funcs:
+                if not name:
+                    continue
+                called = {n for n in readers | guarded if n and n != name and (n + "(") in body}
+                if name not in readers and (called & readers):
+                    readers.add(name)
+                    changed = True
+                if name not in guarded and (called & guarded):
+                    guarded.add(name)
+                    changed = True
+        for line, name, _body in funcs:
+            if name in readers and name not in guarded:
+                offenders.append((path.relative_to(root), line))
     return offenders, len(harness_files), len(writer_crates)
 
 
@@ -241,20 +293,20 @@ def selftest() -> int:
 
     bodies = function_bodies(GUARDED)
     case("a function body is found", len(bodies) == 1)
-    case("...and the guard in it is seen", bodies and GUARD_CALL in bodies[0][1])
+    case("...and the guard in it is seen", bodies and GUARD_CALL in bodies[0][2])
     case(
         "a brace inside a string does not end the body early",
-        bodies and bodies[0][1].rstrip().endswith("}") and "brace in it" in bodies[0][1],
+        bodies and bodies[0][2].rstrip().endswith("}") and "brace in it" in bodies[0][2],
     )
 
     bodies = function_bodies(UNGUARDED)
     case("an unguarded body is found", len(bodies) == 1)
-    case("...and no guard is seen in it", bodies and GUARD_CALL not in bodies[0][1])
+    case("...and no guard is seen in it", bodies and GUARD_CALL not in bodies[0][2])
 
     case(
         "a declaration with no body is not read as one",
         function_bodies("fn no_body(&self) -> bool;\nfn real() { let x = 1; }")
-        == [(2, "{ let x = 1; }")],
+        == [(2, "real", "{ let x = 1; }")],
     )
     case(
         "a line comment containing a brace does not unbalance",
@@ -262,8 +314,25 @@ def selftest() -> int:
     )
     case(
         "an identifier ending in fn is not an item",
-        function_bodies("let myfn = 1; fn real() { }") == [(1, "{ }")],
+        function_bodies("let myfn = 1; fn real() { }") == [(1, "real", "{ }")],
     )
+
+    # The bug this gate had on 2026-09-16: the reader was a helper, and the
+    # test called the helper. Neither body on its own looks unguarded to a
+    # per-function rule -- the test names no harness, and the helper is not a
+    # test -- so the file passed while the race was live.
+    wrapper_src = chr(10).join([
+        "fn helper() -> Thing {",
+        "    let (events, desktop) = wired();",
+        "    ShellSession::start_with_stores(events, &path).unwrap()",
+        "}",
+        "#[test]",
+        "fn a_test_using_the_helper() {",
+        "    let thing = helper();",
+        "}",
+    ])
+    names = {n for _, n, _b in function_bodies(wrapper_src)}
+    case("a helper and its caller are both seen", names == {"helper", "a_test_using_the_helper"})
 
     failed = sum(1 for _, ok in cases if not ok)
     print(f"\nselftest: {len(cases) - failed}/{len(cases)} cases pass")

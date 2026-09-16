@@ -8,6 +8,7 @@
 
 mod defaultapps;
 mod dyndns;
+mod lockscreen;
 mod remote;
 mod snapshots;
 
@@ -613,6 +614,16 @@ pub struct SettingsState {
     /// offering the unfiltered list under "Terminal Font" is what breaks a
     /// terminal's grid.
     mono_families: Vec<String>,
+    /// Minutes before the session locks itself; nought is never.
+    ///
+    /// Held rather than re-read while drawing, like the two lists above:
+    /// `build_page` runs on every repaint and again for every hit test.
+    lock_after_minutes: u32,
+    /// `session.yaml` was rewritten and the shell has not been told.
+    ///
+    /// Without the telling, a delay the user just chose takes effect at the
+    /// next sign-in -- the shell claims its idle watch once, at startup.
+    session_dirty: bool,
 }
 
 /// Where an open dropdown's popup is, and which of its items are on screen.
@@ -716,6 +727,8 @@ pub enum DropdownId {
     WallpaperFit,
     /// The family all interface text is drawn in.
     UiFont,
+    /// How long the session waits before locking itself.
+    LockAfter,
     /// The family fixed-pitch text is drawn in.
     ///
     /// Offered only because `guitk::text::available_mono_families` can now
@@ -792,6 +805,13 @@ impl SettingsState {
     /// the machine running it.
     pub fn load_appearance(&mut self) {
         self.appearance = AppearanceFile::load();
+    }
+
+    /// Read the stored screen-lock delay.
+    ///
+    /// I/O, and so out of [`new`](Self::new) with the rest of it.
+    pub fn load_lock_delay(&mut self) {
+        self.lock_after_minutes = lockscreen::stored_minutes();
     }
 
     /// Enumerate the font families installed on this machine.
@@ -1141,6 +1161,8 @@ impl SettingsState {
             // installed fonts is I/O, and this constructor does none.
             font_families: Vec::new(),
             mono_families: Vec::new(),
+            lock_after_minutes: 0,
+            session_dirty: false,
         }
     }
 }
@@ -2779,6 +2801,7 @@ impl SettingsState {
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
             SettingsPage::Fonts => self.build_fonts_page(sink),
+            SettingsPage::LockScreen => self.build_lockscreen_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
                 self.build_accounts_page(sink);
             }
@@ -2827,62 +2850,6 @@ impl SettingsState {
             //
             // See `TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`.
             //
-            // WHY `LockScreen` IS STILL A PLACEHOLDER, checked 2026-09-16.
-            //
-            // Its obvious control is "lock the screen after N minutes of
-            // inactivity", and **nothing in this tree knows how long the user
-            // has been inactive.** Grep for `last_input`, `last_activity`,
-            // `idle_since`, `idle_ms` across `gui/compositor` and
-            // `gui/desktop`: nothing. The auto-lock timers that do exist
-            // (`gui/credentials`, `apps/credmanager`) lock a *password store*
-            // and never the session.
-            //
-            // So the setting would be the echoed-setting defect again, and
-            // design-decisions 856 is the reason it is not being written. The
-            // feature it is waiting for is real and belongs to this lane: the
-            // compositor already sees every input event, so it can record when
-            // the last one arrived and schedule *one* wake-up at the deadline.
-            // That is specifically not the timer design-decisions 812 refuses
-            // -- 812 rejects waking once a second to poll a file that is
-            // almost never different, which is a poll; a single wake at a
-            // known deadline is not.
-            //
-            // This page gets its controls when that lands, and the mechanism
-            // is settled -- checked 2026-09-16, so the next reader does not
-            // re-derive it.
-            //
-            // The compositor must own idleness: it is the only component that
-            // sees every input event. A shell-side timer cannot work, because
-            // the shell never sees input routed to other windows and would
-            // lock the screen while the user typed in a terminal.
-            //
-            // The shell is a separate process and `guiremote` is asymmetric --
-            // client-to-compositor is `RequestBody`/`ResponseBody`, and
-            // compositor-to-client is only `InputEvent`, every one of which
-            // carries a `window`. So there is no server-push path for a
-            // session-level fact, which made this look like a choice between
-            // putting a session concern in a per-window enum that 150 files
-            // match on, adding a new wire message kind, or having the
-            // compositor draw a lock screen it does not own.
-            //
-            // It is not a choice, because the pattern already exists.
-            // `Event` already carries a *claim-based* variant: a modifier-only
-            // chord "was performed, and this window claimed it with
-            // `grab_modifier_chord`". A client asks through the request
-            // channel and thereafter receives events it otherwise would not,
-            // delivered to it alone. An idle watch is that shape applied to
-            // time rather than to keys -- a `RequestBody` subscription and a
-            // variant only the subscriber is sent. No broadcast, and no arm
-            // for a message an application never receives.
-            //
-            // There is also no privileged shell to address: what looks like
-            // shell privilege in the compositor is per-grab and first-come.
-            // A claim is the only way to say "this window, not the others",
-            // which is the same reason the chord grab works that way.
-            //
-            // What is genuinely open is smaller than it looked: where the
-            // timeout setting lives and who owns it.
-            //
             // `InstalledApps`, same date, shorter answer: there is no package
             // database to read. No `installed_packages`, no `package_db`, no
             // `/var/lib/pkg` anywhere under `apps/installer`, `userspace/` or
@@ -2909,12 +2876,17 @@ impl SettingsState {
             // written the day another lane answers, rather than the day this
             // lane builds something.
             //
-            // That accounts for all seven that still fall through here: two
-            // waiting on a consumer (StartupApps, LockScreen), one on a source
+            // That accounts for all six that still fall through here: one
+            // waiting on a consumer (StartupApps), one on a source
             // (InstalledApps), three on a write path the dedicated app has
             // already declared missing (WiFi, Ethernet, VPN), and one on lane A
-            // (Power). Fonts was the eighth this morning and is a page now,
-            // because its consumer landed.
+            // (Power).
+            //
+            // Two left on 2026-09-16 by the same route, which is the only route
+            // out of this arm: Fonts when `set_font_family` got a caller, and
+            // LockScreen when the compositor learned to report an idle session
+            // and the shell learned to lock on it. Neither was unblocked by
+            // deciding to build the page.
             //
             // The set is asserted by `the_placeholder_pages_are_exactly_these`
             // rather than counted in prose here, the count having drifted three
@@ -4059,6 +4031,53 @@ impl SettingsState {
     /// Read-only. Adding and removing entries needs a syscall the kernel does
     /// not expose to userspace yet; `known-issues.md` carries that as
     /// `TD-C-DYNDNS-PAGE-IS-READ-ONLY`.
+    /// When the screen locks itself.
+    ///
+    /// A page rather than a placeholder since 2026-09-16, because the setting
+    /// finally has a consumer: the desktop shell claims an idle watch for this
+    /// delay, the compositor reports when the session has been that quiet, and
+    /// the shell runs the lock screen. Before that chain existed, a control
+    /// here would have been the echoed-setting defect -- which is what the
+    /// note on `build_page`'s `_ =>` arm said while this page was blank.
+    fn build_lockscreen_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        s.section("Screen Lock");
+        s.dropdown_row(
+            "Lock the screen",
+            DropdownId::LockAfter,
+            &lockscreen::label(self.lock_after_minutes),
+        );
+
+        if self.lock_after_minutes == 0 {
+            s.note(
+                "The screen will not lock on its own. It can still be locked at any time from the start menu or with the lock shortcut.",
+                40.0,
+            );
+        } else {
+            s.value_row(
+                "Locks after",
+                &format!("{} of no keyboard or mouse activity", {
+                    let m = self.lock_after_minutes;
+                    if m == 1 {
+                        "1 minute".to_string()
+                    } else {
+                        format!("{m} minutes")
+                    }
+                }),
+                pal.text,
+            );
+        }
+
+        s.gap();
+        // Said here because the alternative is a user setting a delay, walking
+        // away, and finding the screen open. `design-decisions.md` 818 is the
+        // rule; this is the one place a person can be told about it.
+        s.note(
+            "An account with no password is never locked, so this has no effect on one. Give the account a password on the Accounts page first.",
+            44.0,
+        );
+    }
+
     /// The font the interface is drawn in.
     ///
     /// Two rows that look redundant and are not: what the user has *chosen*
@@ -4454,6 +4473,17 @@ impl SettingsState {
                 let current = appearance::ImageFit::ALL
                     .iter()
                     .position(|f| *f == self.appearance.settings.wallpaper_fit)
+                    .unwrap_or(0);
+                (items, current)
+            }
+            DropdownId::LockAfter => {
+                let items: Vec<String> = lockscreen::CHOICES
+                    .iter()
+                    .map(|m| lockscreen::label(*m))
+                    .collect();
+                let current = lockscreen::CHOICES
+                    .iter()
+                    .position(|m| *m == self.lock_after_minutes)
                     .unwrap_or(0);
                 (items, current)
             }
@@ -5290,6 +5320,20 @@ impl SettingsState {
                     self.appearance.settings.wallpaper_fit = *fit;
                 }
             }
+            DropdownId::LockAfter => {
+                if let Some(minutes) = lockscreen::CHOICES.get(index).copied() {
+                    self.lock_after_minutes = minutes;
+                    if let Err(err) = lockscreen::store_minutes(minutes) {
+                        eprintln!("settings: could not save session.yaml: {err}");
+                    }
+                    // Flagged even when the write failed, for the reason
+                    // `save_appearance` gives: the shell answers by re-reading
+                    // the file, and after a failed write the honest answer is
+                    // still "look again" -- it will find what is actually
+                    // stored, which is the state the user now has.
+                    self.session_dirty = true;
+                }
+            }
             DropdownId::UiFont => {
                 if let Some(family) = self.font_families.get(index) {
                     self.appearance.settings.fonts.ui_font = family.clone();
@@ -5461,6 +5505,7 @@ impl oswindow::app::App for SettingsState {
             appearance: self.take_appearance_change(),
             input: self.take_input_change(),
             notifications: self.take_notifications_change(),
+            session: core::mem::take(&mut self.session_dirty),
         }
     }
 
@@ -5504,6 +5549,9 @@ fn main() -> ExitCode {
     // The installed font families, for the Fonts page's picker. Once: a font
     // appears by a file being put somewhere, which nothing here is told about.
     state.load_font_families();
+
+    // The screen-lock delay, for the Lock Screen page.
+    state.load_lock_delay();
 
     // `launch` rather than `launch_with`: Settings takes no file and no page
     // name, so it wants exactly the shared command line and nothing more —
@@ -5762,7 +5810,6 @@ mod tests {
         const EXPECTED: &[SettingsPage] = &[
             SettingsPage::Ethernet,
             SettingsPage::InstalledApps,
-            SettingsPage::LockScreen,
             SettingsPage::Power,
             SettingsPage::StartupApps,
             SettingsPage::VPN,

@@ -1547,27 +1547,33 @@ impl OperationExecutor {
     }
 
     /// The temporary name a copy to `dest` writes through.
-    fn temp_name(dest: &Path) -> String {
-        format!(
-            ".{}.fileop-tmp",
-            dest.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "file".to_string())
-        )
+    /// The scratch name a copy writes to before renaming it into place.
+    ///
+    /// Built from the destination's name as **bytes**. It went through
+    /// `to_string_lossy` until 2026-09-16, which meant two files whose names
+    /// differ only in bytes that are not valid UTF-8 produced the *same*
+    /// scratch name -- both collapsing to U+FFFD -- so two copies into one
+    /// directory could write over each other's temporary file and one would
+    /// land holding the other's contents. That is the failure
+    /// `TD-C-A-SCRATCH-BACKUP-KEYED-BY-BASENAME-OVERWROTE-THE-FILE-IT-WAS-PROTECTING`
+    /// records, reached by a different road.
+    ///
+    /// An `OsString` keeps every byte, so distinct names stay distinct.
+    fn temp_name(dest: &Path) -> std::ffi::OsString {
+        let mut name = std::ffi::OsString::from(".");
+        name.push(dest.file_name().unwrap_or_else(|| "file".as_ref()));
+        name.push(".fileop-tmp");
+        name
     }
 
     fn atomic_copy_file(&self, src: &Path, dest: &Path) -> io::Result<()> {
         let parent = dest.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
 
-        // Temporary name: <dest>.fileop-tmp
-        let tmp_name = format!(
-            ".{}.fileop-tmp",
-            dest.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "file".to_string())
-        );
-        let tmp_path = parent.join(tmp_name);
+        // The same scratch name the other copy path uses. This was a second
+        // copy of the format string, which is how one of them could have been
+        // fixed without the other.
+        let tmp_path = parent.join(Self::temp_name(dest));
 
         // A copy that fails part-way still leaves a partial temporary behind,
         // so it is cleaned up on the error path too.

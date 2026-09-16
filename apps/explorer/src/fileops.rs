@@ -1547,27 +1547,33 @@ impl OperationExecutor {
     }
 
     /// The temporary name a copy to `dest` writes through.
-    fn temp_name(dest: &Path) -> String {
-        format!(
-            ".{}.fileop-tmp",
-            dest.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "file".to_string())
-        )
+    /// The scratch name a copy writes to before renaming it into place.
+    ///
+    /// Built from the destination's name as **bytes**. It went through
+    /// `to_string_lossy` until 2026-09-16, which meant two files whose names
+    /// differ only in bytes that are not valid UTF-8 produced the *same*
+    /// scratch name -- both collapsing to U+FFFD -- so two copies into one
+    /// directory could write over each other's temporary file and one would
+    /// land holding the other's contents. That is the failure
+    /// `TD-C-A-SCRATCH-BACKUP-KEYED-BY-BASENAME-OVERWROTE-THE-FILE-IT-WAS-PROTECTING`
+    /// records, reached by a different road.
+    ///
+    /// An `OsString` keeps every byte, so distinct names stay distinct.
+    fn temp_name(dest: &Path) -> std::ffi::OsString {
+        let mut name = std::ffi::OsString::from(".");
+        name.push(dest.file_name().unwrap_or_else(|| "file".as_ref()));
+        name.push(".fileop-tmp");
+        name
     }
 
     fn atomic_copy_file(&self, src: &Path, dest: &Path) -> io::Result<()> {
         let parent = dest.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
 
-        // Temporary name: <dest>.fileop-tmp
-        let tmp_name = format!(
-            ".{}.fileop-tmp",
-            dest.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "file".to_string())
-        );
-        let tmp_path = parent.join(tmp_name);
+        // The same scratch name the other copy path uses. This was a second
+        // copy of the format string, which is how one of them could have been
+        // fixed without the other.
+        let tmp_path = parent.join(Self::temp_name(dest));
 
         // A copy that fails part-way still leaves a partial temporary behind,
         // so it is cleaned up on the error path too.
@@ -1913,10 +1919,24 @@ impl RecycleBin {
 
     /// Create a `RecycleBin` at the default location (`~/.recycle/`)
     /// with 30-day auto-purge.
+    ///
+    /// `var_os`, not `var`. This read `HOME` as UTF-8 and fell back to `/tmp`
+    /// when it was not, which put the recycle bin of anyone with a home
+    /// directory holding undecodable bytes in a directory that is cleared on
+    /// restart -- so "move to recycle bin" became "delete on next boot",
+    /// silently, for exactly the users this module is otherwise careful about.
+    /// [`Self::send_to_bin`] below goes to real trouble to record an original
+    /// path losslessly so a non-UTF-8 name can be restored; that care was
+    /// undone one function earlier by the location itself.
+    ///
+    /// The `/tmp` fallback now applies only when `HOME` is genuinely unset,
+    /// which is its own hazard and is left alone here: it is the pre-existing
+    /// behaviour for a case this change does not touch, and conflating the two
+    /// would hide which one was the bug.
     pub fn default_location() -> Self {
-        let home = std::env::var("HOME")
+        let home = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"));
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
         Self::new(home.join(".recycle"), DEFAULT_RECYCLE_MAX_AGE)
     }
 
@@ -4379,5 +4399,34 @@ mod tests {
         let meta = fs::symlink_metadata(&made).expect("the link exists");
         assert!(meta.file_type().is_symlink());
         assert_eq!(fs::read_to_string(&made).expect("resolves"), "hello");
+    }
+
+    /// Two names that differ only in undecodable bytes get different scratch
+    /// names.
+    ///
+    /// The collision this guards is silent and destructive: with a lossy
+    /// scratch name both files copy through `.<U+FFFD>.fileop-tmp`, so two
+    /// copies into one directory can overwrite each other's temporary and one
+    /// arrives holding the other's contents. Windows-only because that is
+    /// where such a name can be built in a test; the defect is not.
+    #[cfg(windows)]
+    #[test]
+    fn scratch_names_keep_bytes_that_are_not_utf8_apart() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let a = PathBuf::from(OsString::from_wide(&[0x0041_u16, 0xD800]));
+        let b = PathBuf::from(OsString::from_wide(&[0x0041_u16, 0xD801]));
+        assert_ne!(a, b, "the fixture is not two different names");
+        assert!(
+            a.to_str().is_none() && b.to_str().is_none(),
+            "fixture is UTF-8"
+        );
+
+        assert_ne!(
+            OperationExecutor::temp_name(&a),
+            OperationExecutor::temp_name(&b),
+            "two distinct names share one scratch name, so a copy can land holding the wrong file"
+        );
     }
 }

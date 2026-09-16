@@ -155452,3 +155452,218 @@ fewer filters, a treemap with grey where teal used to be, a policy quietly
 adopted. `TD-C-A-CORRECT-TOOL-ANSWERING-A-NARROWER-QUESTION` records the same
 shape one level down — a true answer to a slightly narrower question — and this
 is that at the scale of a refactor.
+
+## TD-C-THE-SIZE-CELL-AGREES-WITH-CONVENTION-AND-NOT-WITH-THE-SPEC
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** `apps/explorer/src/main.rs` — `a_folder_row_leaves_the_size_cell_blank`;
+`roadmap-detailed.md` §4.1 → "Directories have a size column too".
+
+**In short:** in the file list, a folder's Size column is empty. The design says
+it should show how much the folder contains, added up — and says so having
+considered the reason every other file manager leaves it blank, and rejected
+it. The code does the conventional thing and its comment cites the convention
+as justification, so anyone reading the code believes it is finished and anyone
+reading the design believes it is unstarted. Neither can see that they
+disagree.
+
+**The two texts, side by side:**
+
+| | says |
+|---|---|
+| the test | "A directory has no meaningful byte count, so its Size cell stays blank — which is what the hand-written view did, and what every file manager does." |
+| `roadmap-detailed.md` §4.1 | "**Directories have a size column too** — recursive total of contents. Most file managers leave this blank because computing it on every directory listing is expensive; **we cache instead**." |
+
+**Why this is not simply a bug to fix.** The spec's answer is a cache, and the
+cache is not buildable in this lane today: its invalidation rides on the
+filesystem change-notification stream (roadmap-detailed line ~1242,
+unstarted, lane A) and its pressure-shrinking on the kernel shrinker
+subsystem, also lane A. A recursive walk with no invalidation would be worse
+than blank -- a number that is confidently wrong the moment anything inside the
+folder changes, which is the shape design-decisions 856 is about.
+
+**What was changed now:** the test's comment, which no longer argues from
+convention. The behaviour is unchanged and still pinned; what it says about
+itself is different, because "this is what everyone does" reads as a decision
+that has been made, and this one has been made the other way.
+
+**The general point.** A comment justifying behaviour by appeal to what is
+normal is worth checking against the spec, because a project that wrote its own
+spec usually did so to depart from normal somewhere -- and those are exactly
+the places where an implementer's instinct and the design disagree without
+either noticing.
+
+## TD-C-THE-COLUMN-VIEW-DOES-THE-ONE-THING-THE-SPEC-FORBIDS -- FIXED 2026-09-16
+
+**Fixed the same day, in the order this entry set out.** The picker was built
+first (`apps/explorer` column menu on the Details header, with per-folder and
+global saves through `columnprefs`), and `auto_detect_columns` was deleted in
+the change that made it unnecessary -- not before, because until the picker
+existed the guess was the only way any column beyond the default set appeared.
+
+The removal reached further than the function: **six tests pinned the forbidden
+behaviour**, all passing, and `FileInfo` existed only to be passed to it. A
+test can be a careful, green assertion that the wrong thing happens, and
+nothing about it looks wrong from inside the file -- the compiler found four of
+the six after the first two were deleted by hand.
+
+One difference from the spec is left and is smaller: the out-of-the-box set is
+name, size, date-modified **and type**, where §4.1 says "fixed and minimal --
+name, size, datetime modified". Not folded into this change because it is a
+different bullet, and because the reason §4.1 gives for minimal ("the user
+expands from there") only became true when the picker landed.
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** `apps/explorer/src/columns.rs` — `auto_detect_columns` (~587);
+`apps/explorer/src/main.rs` — `load_directory` (~929), `detect_columns`
+(~3525); `roadmap-detailed.md` §4.1 → "No content-based column
+auto-selection".
+
+**In short:** the file list looks at what is inside a folder and adds columns
+to match — walk into a folder of photos and a Dimensions column appears. The
+design says, in bold, that this must never happen, and gives four reasons for
+it. This is not a missing feature; it is a built one that the design
+prohibits, and it runs on every directory listing.
+
+**The two texts:**
+
+| | says |
+|---|---|
+| `roadmap-detailed.md` §4.1 | "**No content-based column auto-selection.** The OS never inspects a directory's contents to decide which columns to show. A folder containing only audio files does *not* automatically gain bitrate/length/sample-rate columns; a folder of photos does *not* automatically gain width/height/camera columns." |
+| `columns.rs:587` | `pub fn auto_detect_columns(&mut self, files: &[FileInfo<'_>])` — scans the entries, sets `has_image`/`has_audio`/`has_code`/`has_archive`, and pushes `ColumnId::DIMENSIONS` and friends accordingly. |
+
+`load_directory` calls it after every listing, so the behaviour is live and the
+spec's four objections all apply as written: the column set jitters as the user
+navigates, one off-type file changes the shape of the view, "why did my columns
+change?" has no answer a user could reach, and every listing pays for a type
+scan.
+
+**Do not simply delete it, and this is the important half.** The spec's
+replacement is a user-driven column picker — show/hide from the header row,
+saved per folder or globally. **That picker does not exist**: there is no
+`ColumnChooser`, no target for one, and no rect for one anywhere in
+`apps/explorer`. Auto-detection is currently the *only* way any column beyond
+the default set ever appears. Removing it to comply with the spec would leave
+the user with name/size/date and no way to ask for anything else — strictly
+worse than today, and delivered as a correctness fix.
+
+**One thing the picker will need that does not exist yet, found while sizing
+it.** Its "save as default for this folder" has to write down *which* columns,
+and neither field of `ColumnDef` can carry that:
+
+* `id: ColumnId(u32)` is a position in a hand-numbered list. Saving integers
+  means a renumbering silently repoints every saved preference at a different
+  column -- the `FileTypeInfo::default_app` failure exactly, where stored data
+  looked authoritative and resolved to the wrong thing.
+* `label: String` is display text, and the const table sets it to
+  `String::new()` with the comment "replaced at runtime", so it is not even
+  populated at rest.
+
+So the persistence format needs a stable third identifier -- a `key:
+&'static str` per column, never shown and never renumbered -- set at the 21
+`ColumnDef` construction sites, with a test that the keys are unique and that
+an unknown key in a saved file is skipped rather than guessed at. That field
+should land *with* the persistence that reads it and not before: a key nothing
+consults is the unused-field shape this entry's neighbours are about.
+
+**So the order is fixed:** build the column picker and its persistence first,
+then remove `auto_detect_columns` in the same change that makes it
+unnecessary. Both halves are lane C and neither is blocked on another lane.
+
+**How this survived.** Someone improved this function recently -- its comment
+records replacing a fourth hand-written extension list with the shared registry,
+and notes that the old list disagreed about `.webp`. The change was a real
+improvement to a function that should not exist. **A thing can be carefully
+maintained for a long time without anyone asking whether the spec wanted it**,
+because maintenance asks "is this correct?" and only a reader of the design
+asks "should this be here?"
+
+## TD-C-THE-STRING-SHAPED-API-FOR-BYTES-SHAPED-DATA -- METHOD 2026-09-16
+
+**In short:** five times in one day, in five unrelated programs, a path or an
+environment variable was read through the part of the standard library that
+only handles text. Each time the code compiled, passed its tests and looked
+ordinary. The results ranged from a completion that offers a folder and then
+cannot open it, to a recycle bin that empties itself on restart.
+
+**Date:** 2026-09-16. **Lane:** C.
+
+**The five:**
+
+| where | the call | what it did |
+|---|---|---|
+| `apps/backup` `cmd_schedule` | `dest.to_string_lossy()` | stored a schedule naming a directory the user never gave |
+| `apps/fileassoc` / `gui/associations` | group name as text | (fixed as part of the shared-crate work) |
+| `apps/explorer` `completions_for` | `file_name().to_string_lossy()` | offered a completion for a folder that does not exist under that name |
+| `apps/explorer` `DiskCache::default_location` | `env::var("HOME")` | disabled the thumbnail cache entirely, silently, for the life of the install |
+| `apps/explorer` `RecycleBin::default_location` | `env::var("HOME")` | **put the recycle bin in `/tmp`, so deleting a file lost it at the next restart** |
+
+**Why it keeps happening, which is the point of writing it down.** Nobody was
+careless. `std` offers a `String`-shaped API for a bytes-shaped thing at every
+one of these boundaries, and the `String` one is shorter, needs no `?`, and
+reads better at the call site. `to_string_lossy` over `to_str`, `var` over
+`var_os` -- the wrong choice is the convenient one every time, which is why it
+recurs in crates written months apart by whoever was there.
+
+**The sharpest example of how local the knowledge is.** `RecycleBin` is
+*meticulous* about this exact hazard: `send_to_bin` encodes the original path
+losslessly, with a comment explaining that `Display` would write U+FFFD and
+restore would then recreate the wrong name. That care was undone one function
+earlier, by the location of the bin itself. **Understanding a trap does not
+generalise across a function boundary unless somebody goes looking.**
+
+**Two shapes, and they fail differently.** The lossy conversions produce a
+*wrong value* that looks right -- a name, a path, a key. The UTF-8-only reads
+produce *absence*: a feature that silently does not exist, with no bad data to
+notice. The second is harder to find, because there is nothing to see.
+
+**Do not sweep this blindly.** Two `env::var` calls in this lane are correct
+and must stay: `gui/compositor`'s `SLATE_DRM_CARD` parses to a `u32`, so a
+non-UTF-8 value is invalid input and is already refused with a message, and
+`gui/font`'s is a Windows-only test reading `WINDIR`. **The discriminator is
+not the API, it is whether the value is a path or a number.** A sweep that
+replaced every `var` with `var_os` would be churn in both places and would
+teach the next reader that the rule is mechanical.
+
+## TD-C-THE-THUMBNAIL-CACHE-HAS-NO-CEILING
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** `apps/explorer/src/thumbs.rs` — `DiskCache`.
+
+**In short:** every thumbnail the file manager makes is kept on disk forever.
+Nothing deletes old ones and nothing limits how much room they take, so the
+folder grows for as long as the machine is used. Browsing a large photo
+collection once leaves its thumbnails behind permanently.
+
+**What is right, and was checked rather than assumed.** The cache is wired in
+production, not only in tests; it lives under the per-user path and never
+beside the source files, which is what §4.1 requires; and invalidation is
+sound, because `cache_filename` keys on the path, the source mtime *and* the
+size cap, so a changed file or a changed cap simply misses and regenerates.
+
+**What is missing** is the whole of §4.1's "size cap" bullet: no byte budget,
+no eviction, no notion of cold entries. `DiskCache` has no `prune`, no
+`max_bytes`, and the `evicted` field nearby belongs to the *in-memory* LRU,
+which bounds a `HashMap` and not the directory.
+
+**Why this is not simply "add a cap".** The spec asks for two things, and only
+one is ours:
+
+* An install-time byte budget "based on total disk size at install (default
+  ~0.5% of the system drive)". Sizing it needs the capacity of the drive, which
+  this tree can read for a block device but not for the filesystem a home
+  directory is on -- the same gap that leaves `disk_fraction` at `None` in the
+  shell's widget.
+* Pressure-aware shrinking "via the kernel shrinker subsystem", which is lane
+  A's and does not exist.
+
+**A fixed default cap with LRU eviction is buildable here today** and would
+turn unbounded growth into bounded growth, which is most of the value. It
+should be written so the budget is a parameter rather than a constant, so that
+the install-time sizing can supply it later without touching the eviction
+logic -- the shape `save_within` uses in `apps/archivemanager`, where the
+constant is the shipped value and a test reaches the branch honestly.
+
+**Worth stating plainly:** the project's own operating instructions single out
+disk space as a real, finite constraint that build output has already filled
+once. A cache with no ceiling is the same failure with a slower fuse.

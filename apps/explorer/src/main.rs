@@ -24,6 +24,7 @@
 // out the arithmetic that names the unit.
 #![allow(clippy::duration_suboptimal_units)]
 
+mod columnprefs;
 mod columns;
 mod drives;
 mod dropzone;
@@ -40,7 +41,7 @@ use guitk::scrollbar;
 use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 
-use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
+use columns::{ColumnId, ColumnManager, ColumnValue, SortOrder};
 use drives::DriveSet;
 use guitk::disabled::DisabledState;
 use guitk::filetypes::{self, FileCategory};
@@ -671,6 +672,13 @@ pub struct ExplorerState {
     /// images grows a Dimensions column and a folder of source grows Language
     /// and Lines without the user asking.
     pub columns: ColumnManager,
+    /// The saved column preferences, read once rather than per listing.
+    ///
+    /// Held rather than re-read on every navigation: `load_directory` runs on
+    /// every step through the tree, and a settings file opened that often is a
+    /// cost the user pays for a value that changes only when they change it.
+    /// Re-read when the picker writes, which is the only thing that alters it.
+    pub column_prefs: yamldoc::Document,
     /// Generated thumbnails, keyed by path + mtime + size.
     ///
     /// Read from [`Self::render`] through [`ThumbnailCache::peek`], never
@@ -750,6 +758,7 @@ impl ExplorerState {
             recycle: RecycleBin::default_location(),
             modal: None,
             columns: ColumnManager::with_defaults(),
+            column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
             thumb_config: ThumbConfig::default(),
@@ -926,7 +935,15 @@ impl ExplorerState {
 
         self.sort_entries();
         self.update_status();
-        detect_columns(&mut self.columns, &self.entries);
+        // A folder shows what the user saved for it, the default they saved,
+        // or the fixed out-of-the-box set -- and nothing derived from what is
+        // inside it. `roadmap-detailed.md` §4.1 forbids content-based column
+        // selection outright: it makes the view change shape as you navigate,
+        // lets one odd file alter the columns, and leaves "why did my columns
+        // change?" with no answer a user can reach. Until the picker landed,
+        // the guess was the only way any extra column ever appeared, which is
+        // why it outlived the rule.
+        self.apply_saved_columns();
         self.queue_thumbnails();
     }
 
@@ -1750,6 +1767,110 @@ impl ExplorerState {
         self.menu = Some(menu);
     }
 
+    /// Whether `(x, y)` is over the detail view's header row.
+    ///
+    /// Only in Details: the other views draw no header, and a menu offering to
+    /// choose columns from a view that has none would be a control that cannot
+    /// act.
+    fn over_column_header(&self, x: f32, y: f32) -> bool {
+        if self.view_mode != ViewMode::Details {
+            return false;
+        }
+        let pane = self.pane_rect();
+        x >= pane.x && x < pane.x + pane.width && y >= pane.y && y < pane.y + HEADER_H
+    }
+
+    /// The column picker: every column, ticked when shown, and the two saves.
+    fn open_column_menu(&mut self, x: f32, y: f32) {
+        let mut items = self.column_menu_items();
+        items.push(MenuItem::Separator);
+        items.push(Self::menu_action(
+            MENU_COLUMNS_SAVE_FOLDER,
+            "Save as default for this folder",
+            true,
+        ));
+        items.push(Self::menu_action(
+            MENU_COLUMNS_SAVE_GLOBAL,
+            "Save as default for all folders",
+            true,
+        ));
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
+        self.menu = Some(menu);
+    }
+
+    /// One row per column, ticked when it is currently shown.
+    ///
+    /// Every column the manager knows, not only the ones on screen -- a picker
+    /// that listed only what is already visible could never add anything.
+    fn column_menu_items(&self) -> Vec<MenuItem> {
+        self.columns
+            .all_column_defs()
+            .iter()
+            .map(|def| MenuItem::Action {
+                id: MENU_COLUMN_BASE.saturating_add(u64::from(def.id.0)),
+                label: def.label.clone(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: Some(self.columns.is_visible(def.id)),
+            })
+            .collect()
+    }
+
+    /// Toggle a column, or save the current set. Answers whether it was ours.
+    fn column_menu_action(&mut self, id: u64) -> bool {
+        match id {
+            MENU_COLUMNS_SAVE_FOLDER => {
+                let keys = self.columns.visible_keys();
+                let saved =
+                    columnprefs::set_for_folder(&mut self.column_prefs, &self.current_path, &keys);
+                self.status_message = if saved {
+                    match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                        Ok(()) => format!("{} columns saved for this folder", keys.len()),
+                        Err(e) => format!("Could not save the columns: {e}"),
+                    }
+                } else {
+                    // The path has no text form, so there is no key to save it
+                    // under. Said plainly rather than failing silently.
+                    String::from(
+                        "This folder's name cannot be written to the settings file, so its columns cannot be saved",
+                    )
+                };
+                true
+            }
+            MENU_COLUMNS_SAVE_GLOBAL => {
+                let keys = self.columns.visible_keys();
+                columnprefs::set_global(&mut self.column_prefs, &keys);
+                self.status_message =
+                    match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                        Ok(()) => format!("{} columns saved as the default", keys.len()),
+                        Err(e) => format!("Could not save the columns: {e}"),
+                    };
+                true
+            }
+            _ if id >= MENU_COLUMN_BASE => {
+                let Ok(raw) = u32::try_from(id.saturating_sub(MENU_COLUMN_BASE)) else {
+                    return false;
+                };
+                let column = ColumnId(raw);
+                if self.columns.is_visible(column) {
+                    // The last column is not removable: a header row with
+                    // nothing in it shows a list the user cannot read.
+                    if self.columns.active_columns().len() > 1 {
+                        self.columns.remove_column(column);
+                    } else {
+                        self.status_message = String::from("At least one column has to stay");
+                    }
+                } else {
+                    self.columns.add_column(column);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// What can be done to the file under the pointer.
     fn file_menu_items(&self) -> Vec<MenuItem> {
         vec![
@@ -1807,6 +1928,12 @@ impl ExplorerState {
 
     /// Carry out a menu row.
     fn activate_menu_item(&mut self, id: u64) {
+        // The column picker first: its per-column ids are allocated above
+        // every action below, so asking it first costs one comparison and
+        // keeps the two id spaces from having to be interleaved here.
+        if self.column_menu_action(id) {
+            return;
+        }
         match id {
             MENU_OPEN => {
                 if let Some(&index) = self.selected_indices.first() {
@@ -2752,6 +2879,30 @@ impl ExplorerState {
         tree.untranslate();
     }
 
+    /// Show the columns saved for this folder, or the saved default.
+    ///
+    /// Answers whether either existed. The folder's own preference wins; a
+    /// folder with none falls back to the default the user saved for
+    /// everything; with neither, the caller decides what to show.
+    fn apply_saved_columns(&mut self) -> bool {
+        let saved = columnprefs::for_folder(&self.column_prefs, &self.current_path)
+            .or_else(|| columnprefs::global(&self.column_prefs));
+        let Some(keys) = saved else {
+            return false;
+        };
+        let unknown = self.columns.apply_keys(&keys);
+        if !unknown.is_empty() {
+            // Named rather than silently dropped: a column that vanishes from
+            // a saved view with no explanation reads as a bug in the view.
+            self.status_message = format!(
+                "{} saved column(s) are not available here: {}",
+                unknown.len(),
+                unknown.join(", ")
+            );
+        }
+        true
+    }
+
     /// Hand an event to the address bar and act on what it says.
     ///
     /// Answers whether the widget took it.
@@ -2798,7 +2949,16 @@ impl ExplorerState {
         let mut items: Vec<CompletionItem> = entries
             .filter_map(Result::ok)
             .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
+                // `to_str`, not `to_string_lossy`. A name that is not UTF-8
+                // would come back with U+FFFD substituted for the bytes that
+                // are not, and completing to it would produce a path that does
+                // not exist -- the bar would offer a folder and then report
+                // "No such folder" when it was chosen. Our filenames may hold
+                // any byte but `/` and NUL, and this widget is a text field
+                // that cannot represent them, so such an entry is skipped
+                // rather than mangled. Skipping loses a completion; mangling
+                // loses the user's trust in the ones that are offered.
+                let name = entry.file_name().to_str()?.to_owned();
                 if !name.starts_with(partial) {
                     return None;
                 }
@@ -3505,25 +3665,6 @@ const fn entry_category(entry: &FileEntry) -> ThumbCategory {
 
 /// Re-derive the active column set from what the directory actually holds.
 ///
-/// A free function rather than a method because it borrows two fields of
-/// [`ExplorerState`] at once — the entries immutably and the manager mutably —
-/// which the borrow checker allows at a call site but not through `&mut self`.
-///
-/// Paths are converted with [`Path::to_str`], not `to_string_lossy`: a name
-/// that is not valid UTF-8 simply does not vote on which columns appear, which
-/// is right, since every extension auto-detection looks for is ASCII. Making
-/// one up with replacement characters could only produce a wrong answer.
-fn detect_columns(columns: &mut ColumnManager, entries: &[FileEntry]) {
-    let infos: Vec<FileInfo<'_>> = entries
-        .iter()
-        .map(|e| FileInfo {
-            path: e.path.to_str().unwrap_or(""),
-            extension: e.path.extension().and_then(|x| x.to_str()).unwrap_or(""),
-        })
-        .collect();
-    columns.auto_detect_columns(&infos);
-}
-
 /// Check that `name` is usable as a single entry name in a directory.
 ///
 /// The rule the OS itself enforces is "all bytes except `/` and NUL" — see
@@ -3608,6 +3749,13 @@ const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16)
 // Context menu row ids. Numbered rather than positional, so inserting a row
 // cannot silently reassign what the ones below it do.
 const MENU_OPEN: u64 = 1;
+/// Save the visible columns for the folder being shown.
+const MENU_COLUMNS_SAVE_FOLDER: u64 = 100;
+/// Save them as the default for folders with no preference of their own.
+const MENU_COLUMNS_SAVE_GLOBAL: u64 = 101;
+/// One id per column, offset so it cannot collide with an action above.
+/// `ColumnId` is a small integer, and 1000 is far above every action here.
+const MENU_COLUMN_BASE: u64 = 1000;
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -3876,7 +4024,11 @@ impl ExplorerState {
                 self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
             }
             MouseEventKind::Press(MouseButton::Right) => {
-                self.open_context_menu(m.x, m.y);
+                if self.over_column_header(m.x, m.y) {
+                    self.open_column_menu(m.x, m.y);
+                } else {
+                    self.open_context_menu(m.x, m.y);
+                }
                 true
             }
             MouseEventKind::Release(MouseButton::Left) => {
@@ -5197,6 +5349,178 @@ mod tests {
             "the address bar still shows the old folder: {:?}",
             state.pathbar.current_path()
         );
+    }
+
+    /// Ticking a column in the picker shows it; ticking it again hides it.
+    #[test]
+    fn the_picker_toggles_a_column() {
+        let scratch = temp_dir("picker_toggle");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+
+        let target = ColumnId::DATE_CREATED;
+        let id = MENU_COLUMN_BASE + u64::from(target.0);
+        let before = state.columns.is_visible(target);
+
+        state.activate_menu_item(id);
+        assert_ne!(
+            state.columns.is_visible(target),
+            before,
+            "the picker did not change the column"
+        );
+        state.activate_menu_item(id);
+        assert_eq!(
+            state.columns.is_visible(target),
+            before,
+            "ticking twice did not return to where it started"
+        );
+    }
+
+    /// The last column cannot be turned off.
+    ///
+    /// A header row with nothing in it leaves a list nobody can read, and the
+    /// picker is the only way to reach that state.
+    #[test]
+    fn the_picker_will_not_empty_the_header_row() {
+        let scratch = temp_dir("picker_last");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+
+        state.columns.set_columns(vec![ColumnId::NAME]);
+        state.activate_menu_item(MENU_COLUMN_BASE + u64::from(ColumnId::NAME.0));
+        assert_eq!(
+            state.columns.visible_keys(),
+            vec!["name"],
+            "the last column was removed"
+        );
+        assert!(
+            state.status_message.contains("at least one")
+                || state.status_message.contains("At least one"),
+            "no reason was given: {}",
+            state.status_message
+        );
+    }
+
+    /// Choose columns, save them for the folder, come back: they are there.
+    ///
+    /// The loop the feature exists for. Each half is tested on its own above,
+    /// and neither proves the picker's save is the thing the next visit reads.
+    #[test]
+    fn columns_saved_from_the_picker_come_back_on_the_next_visit() {
+        settingsfile::testing::with_scratch_config("explorer-picker-save", |_root| {
+            let scratch = temp_dir("picker_save");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            let mut state = state_at(&root);
+            state
+                .columns
+                .set_columns(vec![ColumnId::NAME, ColumnId::SIZE]);
+            state.activate_menu_item(MENU_COLUMNS_SAVE_FOLDER);
+            assert!(
+                state.status_message.contains("saved"),
+                "the save said nothing: {}",
+                state.status_message
+            );
+
+            // A fresh window, which re-reads the settings file.
+            let again = state_at(&root);
+            assert_eq!(
+                again.columns.visible_keys(),
+                vec!["name", "size"],
+                "the saved columns did not come back"
+            );
+        });
+    }
+
+    /// A column set saved for a folder is what that folder shows.
+    ///
+    /// The whole point of the preference, and the thing a wiring change can
+    /// break without any unit test noticing: the module round-trips its keys,
+    /// the manager applies them, and neither proves the explorer ever asks.
+    #[test]
+    fn a_folder_shows_the_columns_saved_for_it() {
+        settingsfile::testing::with_scratch_config("explorer-saved-columns", |_root| {
+            let scratch = temp_dir("saved_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            // Saved before the state exists, because the preferences are read
+            // once when it is built rather than on every listing.
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(columnprefs::set_for_folder(
+                &mut doc,
+                &root,
+                &["size", "name"]
+            ));
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let state = state_at(&root);
+            assert_eq!(
+                state.columns.visible_keys(),
+                vec!["size", "name"],
+                "the folder's saved columns were not applied, or not in order"
+            );
+        });
+    }
+
+    /// With nothing saved for the folder, the saved default is used.
+    #[test]
+    fn a_folder_with_no_preference_falls_back_to_the_default() {
+        settingsfile::testing::with_scratch_config("explorer-default-columns", |_root| {
+            let scratch = temp_dir("default_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            columnprefs::set_global(&mut doc, &["name", "date_modified"]);
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let state = state_at(&root);
+            assert_eq!(state.columns.visible_keys(), vec!["name", "date_modified"]);
+        });
+    }
+
+    /// A name the address bar cannot represent is skipped, not mangled.
+    ///
+    /// Windows-only because that is where a non-UTF-8 filename is
+    /// constructible in a test. The defect is not platform-specific:
+    /// `to_string_lossy` would offer a completion with U+FFFD where the real
+    /// bytes are, and choosing it would report "No such folder" for a folder
+    /// the user can see in the listing.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_not_offered_as_a_completion() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let scratch = temp_dir("completion_nonutf8");
+        let root = scratch.dir().to_path_buf();
+        // An unpaired surrogate: a legal Windows filename with no UTF-8 form.
+        let bad = root.join(OsString::from_wide(&[0x0041_u16, 0xD800]));
+        std::fs::create_dir(&bad).expect("the scratch directory is writable");
+        std::fs::create_dir(root.join("Alpha")).expect("writable");
+
+        let prefix = format!("{}/A", root.to_str().expect("scratch path is UTF-8"));
+        let names: Vec<String> = ExplorerState::completions_for(&prefix)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+
+        assert!(
+            names.contains(&String::from("Alpha")),
+            "the representable sibling was not offered: {names:?}"
+        );
+        for name in &names {
+            assert!(
+                !name.contains(char::REPLACEMENT_CHARACTER),
+                "offered a mangled name: {name:?}"
+            );
+        }
     }
 
     /// Completions are read off the disk, sorted, and filtered by the prefix.
@@ -7068,9 +7392,19 @@ mod tests {
         let state = state_at(&root);
         let drawn = texts(&details_tree(&state));
 
-        for label in ["Name", "Size", "Date Modified", "Type"] {
+        // Asked of the manager rather than listed here: this test is about the
+        // header drawing what is active, and a hand-written list makes it a
+        // test of which columns ship visible as well -- which is how it failed
+        // when the default set was trimmed to the three the spec names.
+        for id in state.columns.active_columns() {
+            let label = state
+                .columns
+                .column_def(*id)
+                .expect("an active column with no definition")
+                .label
+                .clone();
             assert!(
-                drawn.iter().any(|t| t == label),
+                drawn.contains(&label),
                 "the header should name every active column; {label:?} missing from {drawn:?}"
             );
         }
@@ -7099,9 +7433,23 @@ mod tests {
         );
     }
 
-    /// A directory has no meaningful byte count, so its Size cell stays blank
-    /// — which is what the hand-written view did, and what every file manager
-    /// does.
+    /// A directory's Size cell is blank today, and the spec says it should not
+    /// be.
+    ///
+    /// This said "what every file manager does", which is true and is the
+    /// reasoning `roadmap-detailed.md` §4.1 explicitly considered and
+    /// rejected: *"Most file managers leave this blank because computing it on
+    /// every directory listing is expensive; we cache instead."* The intended
+    /// behaviour is a recursive total of the contents, served from the
+    /// directory-size cache.
+    ///
+    /// The cache is not buildable yet -- its invalidation rides on the
+    /// filesystem change-notification stream, which does not exist, and its
+    /// shrinking on the kernel shrinker. Both are lane A's. So the blank cell
+    /// stays, and this test pins it; what changed is that the reason is now
+    /// "the cache it needs is not built" rather than "this is what everyone
+    /// does", because the second reads as a decision that has been made.
+    /// See known-issues TD-C-THE-SIZE-CELL-AGREES-WITH-CONVENTION-AND-NOT-WITH-THE-SPEC.
     #[test]
     fn a_folder_row_leaves_the_size_cell_blank() {
         let root_scratch = temp_dir("cols_dir_size");
@@ -7146,21 +7494,6 @@ mod tests {
                 // knows it is Rust -- went unread.
                 ColumnValue::Text("Rust Source File".to_string()),
             ]
-        );
-    }
-
-    /// A directory of source gains the code columns without the user asking.
-    #[test]
-    fn a_folder_of_source_grows_the_code_columns() {
-        let root_scratch = temp_dir("cols_detect");
-        let root = root_scratch.dir().to_path_buf();
-        write(&root.join("main.rs"), "fn main() {}");
-
-        let state = state_at(&root);
-        assert!(
-            state.columns.is_visible(ColumnId::LANGUAGE),
-            "a .rs file should switch on the Language column: {:?}",
-            state.columns.active_columns()
         );
     }
 

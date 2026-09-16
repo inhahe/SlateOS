@@ -580,8 +580,22 @@ pub struct SoundInfo {
 #[derive(Clone, Debug)]
 pub struct StartupEntry {
     pub name: String,
+    /// The command line the item runs. `/proc/autostart`'s COMMAND column.
     pub path: String,
-    pub source: String,
+    /// **When** it runs -- boot, login, session -- not where it came from.
+    ///
+    /// This field was `source`, and `source` in a startup manager means the
+    /// place the entry was registered: a folder, a registry key, a unit file.
+    /// `/proc/autostart` publishes no such thing. It publishes a PHASE, and
+    /// putting a phase in a column meaning origin is the same defect as
+    /// putting a bus *type* in a column meaning bus *number* -- which is why
+    /// `/proc/devicemgr` was left unwired. Renamed rather than repurposed.
+    pub phase: String,
+    /// Whether the item is set to run at all.
+    ///
+    /// A disabled entry listed like an enabled one is a claim that it runs.
+    /// The file says which, so the window can too.
+    pub enabled: bool,
 }
 
 // ============================================================================
@@ -1235,9 +1249,14 @@ impl SysInfoState {
     fn props_startup(&self) -> Vec<Property> {
         let mut props = Vec::new();
         for entry in &self.startup_programs {
+            let state = if entry.enabled {
+                String::new()
+            } else {
+                String::from("  [disabled]")
+            };
             props.push(Property::new(
                 &entry.name,
-                &format!("{} ({})", entry.path, entry.source),
+                &format!("{} ({}){state}", entry.path, entry.phase),
             ));
         }
         props
@@ -3334,6 +3353,176 @@ mod tests {
         assert!(
             provider.query_display().is_err(),
             "an unreadable file reported as a machine with no outputs"
+        );
+    }
+
+    /// The port ranges come from `/proc/ioport`.
+    ///
+    /// `query_io_ports` read `/sys/hardware/ioports`, which this kernel has
+    /// never served. All three of `IoPortInfo`'s fields have a source in the
+    /// real file, which is why this category is wired and PCI is not.
+    ///
+    /// **The summary lines are the hazard.** `Untracked R: 7` is a word then a
+    /// number in exactly the places a region name and a counter occupy, so a
+    /// position-based reader reports a region called `Untracked`. They are in
+    /// this fixture for that reason -- a fixture holding only the rows the
+    /// parser wants tests a file nobody serves.
+    #[test]
+    fn the_port_ranges_are_read_and_the_summary_is_not_a_region() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-port-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc")).expect("fixture");
+        std::fs::write(
+            root.join("proc/ioport"),
+            b"=== I/O Port Stats ===\n\
+              Regions: 2  Reads: 12  Writes: 48  Untracked R: 7  Untracked W: 3  Ops: 70\n\
+              \n\
+              Per-region:\n\
+                COM1   0x03f8-0x03ff  reads=12  writes=48  rbytes=12  wbytes=48\n\
+                PIT    0x0040-0x0043  reads=0  writes=9  rbytes=0  wbytes=9\n",
+        )
+        .unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let ports = provider.query_io_ports().expect("the fixture is readable");
+
+        assert_eq!(ports.len(), 2, "a summary line was read as a region");
+        assert_eq!(ports[0].device, "COM1");
+        assert_eq!(ports[0].start, 0x03f8);
+        assert_eq!(ports[0].end, 0x03ff);
+        assert_eq!(ports[1].device, "PIT");
+        assert!(
+            !ports.iter().any(|p| p.device == "Untracked"),
+            "the untracked-counter line was read as a port range"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The drivers come from `/proc/kmod`, and none of them gains a path.
+    ///
+    /// `DriverInfo::path` has no source: `/proc/kmod` publishes a name, a
+    /// version, a state, a kind, a size and a refcount, and on a machine with
+    /// no module files there is no path for it to publish. Two of three fields
+    /// are real and the third is empty, rather than filled with something that
+    /// would read as a location on disk.
+    #[test]
+    fn the_modules_are_read_and_none_of_them_gains_a_path() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-kmod-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc")).expect("fixture");
+        std::fs::write(
+            root.join("proc/kmod"),
+            b"=== Kernel Modules ===\n\
+              live_modules: 2\n\
+              total_loads: 5\n\
+              total_unloads: 3\n\
+              total_errors: 0\n\
+              ops: 8\n\
+                ext4 1.0.0 [live] filesystem 262144B refs=3\n\
+                nvme 2.1.0 [live] driver 131072B refs=1\n",
+        )
+        .unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let drivers = provider.query_drivers().expect("the fixture is readable");
+
+        assert_eq!(drivers.len(), 2, "a counter line was read as a module");
+        assert_eq!(drivers[0].name, "ext4");
+        assert_eq!(drivers[0].status, "live");
+        for d in &drivers {
+            assert!(
+                d.path.is_empty(),
+                "invented a path for a module the kernel gives none for: {:?}",
+                d.path
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The startup items come from `/proc/autostart`, header and all.
+    ///
+    /// **The header row is the control.** `ID NAME PHASE CONDITION ENABLED
+    /// ORDER COMMAND` has seven tokens in exactly the places an item's seven
+    /// fields occupy, so nothing about its *shape* excludes it -- a reader
+    /// that checked shape alone would add a phantom item named `NAME` to
+    /// every listing, and `Total items` above would agree with the extra row.
+    ///
+    /// `phase` is not `source`. A startup manager's "source" means where the
+    /// entry was registered; `/proc/autostart` publishes when it runs. The
+    /// field was renamed rather than repurposed, for the same reason
+    /// `/proc/devicemgr`'s bus *type* was not wired into a bus *number*.
+    #[test]
+    fn the_startup_items_are_read_and_the_header_is_not_one() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-auto-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc")).expect("fixture");
+        std::fs::write(
+            root.join("proc/autostart"),
+            b"Autostart Items\n\
+              ===============\n\
+              \n\
+              Total items:   2\n\
+              Enabled:       1\n\
+              System:        1\n\
+              Operations:    4\n\
+              \n\
+              ID   NAME                 PHASE            CONDITION  ENABLED  ORDER  COMMAND\n\
+              1    NetworkManager       Boot             Always     true     10     /usr/bin/nm\n\
+              2    Backup               Login            OnAC       false    20     /usr/bin/backup --daily\n",
+        )
+        .unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let items = provider.query_startup().expect("the fixture is readable");
+
+        assert_eq!(items.len(), 2, "the header row was read as an item");
+        assert!(
+            !items.iter().any(|i| i.name == "NAME"),
+            "the header row became a startup item"
+        );
+        assert_eq!(items[0].name, "NetworkManager");
+        assert_eq!(items[0].path, "/usr/bin/nm");
+        assert_eq!(items[0].phase, "Boot");
+        assert!(items[0].enabled);
+        assert!(
+            !items[1].enabled,
+            "a disabled item was listed as one that runs"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Each of the three says so when its file is absent.
+    #[test]
+    fn an_absent_file_is_an_error_not_an_empty_list() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-absent3-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        assert!(
+            provider.query_io_ports().is_err(),
+            "an unreadable file reported as a machine with no port ranges"
+        );
+        assert!(
+            provider.query_drivers().is_err(),
+            "an unreadable file reported as a machine with no drivers"
+        );
+        assert!(
+            provider.query_startup().is_err(),
+            "an unreadable file reported as a machine with nothing starting up"
         );
     }
 

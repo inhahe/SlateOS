@@ -168,6 +168,20 @@ impl Category {
 /// could only impose a wrong association. 857 has the evidence for each, and
 /// `guitk::filetypes`' own tests check the `Document` half of it against the
 /// table rather than trusting this comment.
+/// # Why there is no `set_category`
+///
+/// Writing one would be a trap. `apps/fileassoc` is the sole writer of this
+/// file *by design*: its `write_into` removes every entry its own registry no
+/// longer holds, which is correct -- a cleared association must not reappear
+/// at the next start -- and which means anything else that writes an
+/// association directly into the document has it deleted at the next save,
+/// silently and with no error anywhere.
+///
+/// So a category-wide write belongs inside that program, in terms of its
+/// registry, and what it needs from here is [`Category::extensions`]. A
+/// `set_category` taking a `Document` would compile, pass a test against that
+/// document, and lose the user's choice the first time the File Associations
+/// window saved.
 pub const CATEGORIES: &[Category] = &[
     Category {
         name: "Music",
@@ -229,17 +243,6 @@ pub fn category_default(doc: &Document, category: &Category) -> CategoryDefault 
         None => CategoryDefault::Unset,
         Some(_) if any_unset => CategoryDefault::Mixed,
         Some(program) => CategoryDefault::Agreed(program.to_string()),
-    }
-}
-
-/// Point every extension in `category` at `program`.
-///
-/// Writes each extension rather than a category key, which is the whole of
-/// 857: the file manager resolves an extension, so an extension is the only
-/// thing worth writing.
-pub fn set_category(doc: &mut Document, category: &Category, program: &str) {
-    for extension in category.extensions() {
-        doc.set_str(&[ASSOCIATIONS, extension], program);
     }
 }
 
@@ -393,26 +396,24 @@ mod tests {
         }
     }
 
-    /// Choosing a program for a group writes every extension in it.
+    /// A group whose members all name one program reads back as that program.
     ///
-    /// This is the whole of 857: the file manager resolves an extension, so a
-    /// category that wrote a category key would change nothing at all.
+    /// Written extension by extension, because that is how the only writer
+    /// works: `apps/fileassoc` holds a registry keyed by extension and folds
+    /// it into the document on save. There is deliberately no `set_category`
+    /// here -- see the note on [`CATEGORIES`].
     #[test]
-    fn setting_a_category_writes_every_extension_in_it() {
+    fn a_group_all_pointing_one_way_reads_back_as_agreed() {
         for category in CATEGORIES {
             let mut d = Document::parse("");
-            set_category(&mut d, category, "/usr/bin/chosen");
             for extension in category.extensions() {
-                assert_eq!(
-                    d.get_str(&[ASSOCIATIONS, extension]).as_deref(),
-                    Some("/usr/bin/chosen"),
-                    "{} left .{extension} unwritten",
-                    category.name
-                );
+                d.set_str(&[ASSOCIATIONS, extension], "/usr/bin/chosen");
             }
             assert_eq!(
                 category_default(&d, category),
-                CategoryDefault::Agreed("/usr/bin/chosen".to_string())
+                CategoryDefault::Agreed("/usr/bin/chosen".to_string()),
+                "{} did not read back",
+                category.name
             );
         }
     }
@@ -422,7 +423,9 @@ mod tests {
     fn members_that_disagree_are_mixed() {
         let category = &CATEGORIES[0];
         let mut d = Document::parse("");
-        set_category(&mut d, category, "/usr/bin/one");
+        for extension in category.extensions() {
+            d.set_str(&[ASSOCIATIONS, extension], "/usr/bin/one");
+        }
         let second = category.extensions().nth(1).expect("the group has two");
         d.set_str(&[ASSOCIATIONS, second], "/usr/bin/two");
         assert_eq!(category_default(&d, category), CategoryDefault::Mixed);

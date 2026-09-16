@@ -600,6 +600,11 @@ pub struct SettingsState {
     /// is the same moment `apps/explorer` re-reads it: neither program caches
     /// an association across the action that uses it.
     default_apps: Vec<associations::Association>,
+    /// What each offered category resolves to, alongside the raw list.
+    ///
+    /// Computed when the associations are, from the same document, so the two
+    /// halves of the page cannot disagree about what is on disk.
+    default_app_categories: Vec<(&'static str, associations::CategoryDefault)>,
     /// Every font family installed here, for the Fonts page's picker.
     ///
     /// Held rather than asked for while drawing: `available_families` walks
@@ -827,6 +832,10 @@ impl SettingsState {
     pub fn refresh_default_apps(&mut self) {
         let doc = settingsfile::load(associations::CONFIG_NAME);
         self.default_apps = associations::associations_from(&doc);
+        self.default_app_categories = associations::CATEGORIES
+            .iter()
+            .map(|c| (c.name, associations::category_default(&doc, c)))
+            .collect();
     }
 
     /// Move to `page`, doing whatever entering a page requires.
@@ -1156,6 +1165,7 @@ impl SettingsState {
             // filled by `refresh_default_apps`, from `main` and on entry to
             // the page.
             default_apps: Vec::new(),
+            default_app_categories: Vec::new(),
             // Empty for the same reason as `default_apps`: enumerating
             // installed fonts is I/O, and this constructor does none.
             font_families: Vec::new(),
@@ -4174,6 +4184,27 @@ impl SettingsState {
     /// program's editor.
     fn build_default_apps_page<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
+
+        s.section("By kind");
+        for (name, state) in &self.default_app_categories {
+            match state {
+                associations::CategoryDefault::Agreed(program) => {
+                    s.value_row(name, program, pal.text);
+                }
+                // "Mixed" covers both disagreement and a group only partly
+                // set, and is drawn as a warning for the second case: some
+                // file of this kind on the machine opens with nothing, and
+                // naming the majority program would hide exactly that.
+                associations::CategoryDefault::Mixed => {
+                    s.value_row(name, "Mixed", pal.peach);
+                }
+                associations::CategoryDefault::Unset => {
+                    s.value_row(name, "Not set", pal.subtext0);
+                }
+            }
+        }
+        s.gap();
+
         s.section("File Associations");
         if self.default_apps.is_empty() {
             s.note(
@@ -5751,6 +5782,52 @@ mod tests {
     /// losing every glyph to a bad setting is worse -- so the setting alone
     /// cannot tell the user why choosing a font changed nothing. Asserting
     /// only that a picker exists would pass on a page that promised a font
+    /// The page summarises each kind, and tells the three states apart.
+    ///
+    /// The Mixed case is the one worth a test: a group with one of its
+    /// extensions set must not read as settled, because the page would then be
+    /// claiming every video on the machine opens with something when most of
+    /// them open with nothing.
+    #[test]
+    fn the_default_apps_page_summarises_each_kind() {
+        settingsfile::testing::with_scratch_config("settings-default-kinds", |_root| {
+            let mut doc = yamldoc::Document::new();
+            let music = &associations::CATEGORIES[0];
+            for extension in music.extensions() {
+                doc.set_str(
+                    &[associations::ASSOCIATIONS, extension],
+                    "/usr/bin/musicplayer",
+                );
+            }
+            let video = &associations::CATEGORIES[1];
+            let one = video
+                .extensions()
+                .next()
+                .expect("the video group is not empty");
+            doc.set_str(&[associations::ASSOCIATIONS, one], "/usr/bin/videoplayer");
+            settingsfile::store(associations::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let mut app = SettingsState::new();
+            app.refresh_default_apps();
+            app.go_to_page(SettingsPage::DefaultApps);
+            let text = format!("{:?}", app.render_tree());
+
+            assert!(
+                text.contains("/usr/bin/musicplayer"),
+                "Music does not name the program every audio type points at"
+            );
+            assert!(
+                text.contains("Mixed"),
+                "a video group with one of its types set is not reported as mixed"
+            );
+            assert!(
+                text.contains("Not set"),
+                "Images is set nowhere, and the page does not say so"
+            );
+        });
+    }
+
     /// nothing could load.
     #[test]
     fn the_fonts_page_reports_the_font_actually_in_use() {

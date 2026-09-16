@@ -75514,6 +75514,24 @@ extensions. The category is then real in the only sense 856 accepts: the thing
 that obeys it is `apps/explorer`, which was already obeying it under a
 different name.
 
+**Where that write may happen, which is narrower than it looks.**
+`apps/fileassoc` is the sole writer of this file *by design*. Its `write_into`
+removes every entry its own registry no longer holds -- correct, because a
+cleared association must otherwise reappear at the next start -- and the
+consequence is that anything else writing an association directly into the
+document has it deleted at the next save, with no error raised anywhere. So a
+category-wide write lives inside that program, expressed over its registry.
+
+This was very nearly got wrong here. The shared crate was written with a
+`set_category(&mut Document, ...)`, which compiled, had a passing test against
+a document, and would have lost the user's choice the first time the File
+Associations window saved. It is deleted, and the reason is recorded on
+`CATEGORIES` where the next person will look for the missing function. What
+the crate offers a writer instead is `Category::extensions()`; the writing is
+the owner's business. The general rule: **a second writer of a file with a
+pruning owner is not a feature with a bug in it, it is a feature that cannot
+work.**
+
 **Why not the other way round** -- store categories and teach explorer to
 resolve an extension through them? It adds a lookup hop and a second file to
 keep in step, and it makes the association list, which is the thing that

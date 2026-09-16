@@ -1,19 +1,30 @@
 # A -> C: `ziparchive` ranged-reader + streaming-writer design
 
-**Status:** PARTIAL as of 2026-09-16, checked by lane C. The design landed in the
+**Status:** LANDED 2026-09-16 by lane C. (Was PARTIAL earlier the same day,
+when the crate had the API and nothing called it.) The design landed in the
 crate and has no caller, which is the half that does not save any memory.
 
 `ziparchive` has `ReadAt` (lib.rs:649), `WriteStream` (1219) and the ranged
 entry points, spelled `_at` rather than the `_from` sketched here: `parse_at`,
 `extract_entry_at`, `extract_entry_at_limited`, `entry_data_at`.
 
-`apps/archivemanager` uses none of them. `backend::parse_zip` still takes
-`bytes: Vec<u8>` and calls `ziparchive::parse(&bytes)`, so the application holds
-the whole archive in memory -- the exact cost the original request measured and
-this design exists to remove. The remaining work is on this lane: give the app a
-`ReadAt` over its file handle and move `parse_zip` and the extraction path onto
-`parse_at` / `entry_data_at`, so it keeps a handle and a `Vec<ZipEntry>` instead
-of the file.
+`apps/archivemanager` now uses them. `ArchiveSource` holds an `ArchiveBytes` --
+a file handle and its length -- and reads each member at its offset, so opening
+an archive to look at its listing costs a handle and a `Vec<ZipEntry>` rather
+than the file's size.
+
+Two things the design did not anticipate, both worth having:
+
+* `ReadAt` takes `&mut self`, correct for a source consumed as it is read. An
+  archive is not, so a `RefCell` keeps a positional read an immutable operation;
+  otherwise that mutability spreads through every `&ArchiveSource` caller to
+  express a detail of how reading is done.
+* `RangedError`'s Zip/Read split gave the application information it did not
+  have. Every extraction failure used to become "Corrupted"; there are now
+  `SkipReason::Unreadable` and `TestResult::Unreadable`, so testing an intact
+  archive on a failing disk no longer tells the user to find another copy. The
+  note on `SkipReason::Encrypted` had already made that argument for a different
+  pair of facts.
 
 Marked PARTIAL rather than LANDED deliberately: an API with no caller is the
 defect this lane spent 2026-09-16 removing elsewhere, and calling it done because

@@ -1080,8 +1080,22 @@ Roadmap:
   `/usr/lib/sftp-server` is absent from this tree and `userspace/sftp` is a
   client speaking its own protocol over raw TCP.
   What remains, and who owns it: **interactive CPython** (lane B) and
-  **`apps/terminal` driving a real shell** (lane C). Neither is blocked on
-  anyone else.
+  **`apps/terminal` driving a real shell** (lane C). The CPython half is not
+  blocked on anyone else. **The terminal half is** — corrected 2026-09-15 by
+  lane C, which read this line, picked the task up on the strength of it, and
+  found otherwise.
+  `apps/terminal/src/pty.rs` is 2 230 lines of working PTY and the emulator
+  opens a pair on startup, but nothing runs on the slave end. The call that
+  would put something there is `posix::pty::forkpty`, which is `extern "C"`
+  and therefore reachable from `apps/` only through `libcall`, per
+  design-decisions.md §768 — the same door `libcall::kill` came through for
+  `apps/procexplorer`. Asked for in
+  `requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`.
+  The missing half was not obvious from here because it was *simulated*: a
+  `ChildProcess` type whose `spawn` took a PID from a counter and whose `wait`
+  returned success, with no caller outside its own tests. It is deleted, and
+  the comment standing where it was explains why an absent function is safer
+  than a convincing one.
   Why it had to be a kernel object, kept for the record: a pty's `termios` is
   shared by two *processes*, and `^C` has to reach the foreground group when it
   is typed rather than when somebody next calls `read`. Neither is expressible

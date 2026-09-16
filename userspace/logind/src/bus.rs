@@ -96,6 +96,9 @@ pub const ERR_NO_SUCH_PROCESS: &str = "system.logind.Error.NoSuchProcess";
 /// back -- the same reasoning `authorize` uses for sessions.
 pub const ERR_NO_SUCH_USER: &str = "system.logind.Error.NoSuchUser";
 
+/// The user has no sessions to act on.
+pub const ERR_NO_SESSIONS: &str = "system.logind.Error.NoSessions";
+
 /// No seat with that id.
 pub const ERR_NO_SUCH_SEAT: &str = "system.logind.Error.NoSuchSeat";
 

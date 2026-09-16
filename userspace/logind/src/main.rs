@@ -698,6 +698,13 @@ enum KillError {
     Unsupported,
     /// Any other errno.
     Failed,
+    /// The user exists, or does not, and has no sessions to signal.
+    ///
+    /// Not `NoSuchSession`: that names one session a caller asked for, and
+    /// this is a user with none. Told the first, an operator checks the id
+    /// they typed; told the second, they check whether the user is logged in,
+    /// which is the question they actually have.
+    NoSessions,
 }
 
 impl KillError {
@@ -713,6 +720,7 @@ impl KillError {
     fn bus_name(self) -> &'static str {
         match self {
             Self::NoSuchSession => crate::bus::ERR_NO_SUCH_SESSION,
+            Self::NoSessions => crate::bus::ERR_NO_SESSIONS,
             Self::NoLeaderPid => crate::bus::ERR_NO_SESSION_LEADER,
             Self::NotPermitted => crate::bus::ERR_ACCESS_DENIED,
             Self::LeaderGone => crate::bus::ERR_NO_SUCH_PROCESS,
@@ -728,6 +736,7 @@ impl KillError {
     fn from_bus_name(name: &str) -> Option<Self> {
         [
             Self::NoSuchSession,
+            Self::NoSessions,
             Self::NoLeaderPid,
             Self::NotPermitted,
             Self::LeaderGone,
@@ -741,6 +750,7 @@ impl KillError {
     fn message(self) -> &'static str {
         match self {
             Self::NoSuchSession => "no such session",
+            Self::NoSessions => "that user has no sessions",
             Self::NoLeaderPid => "session has no leader pid",
             Self::NotPermitted => "not permitted to signal the session leader",
             Self::LeaderGone => "the session leader is gone",
@@ -1476,17 +1486,60 @@ impl Daemon {
     }
 
     /// Send a signal to all processes belonging to a user.
-    fn kill_user(&self, uid: u32, _signal: i32) -> Result<Vec<u32>, &'static str> {
-        let pids: Vec<u32> = self
+    /// Signal every session leader belonging to `uid`.
+    ///
+    /// Returns the pids actually signalled and how many leaders there were,
+    /// so a partial failure is visible: "2 of 3" is a different fact from
+    /// "2", and the difference is the thing an operator needs.
+    ///
+    /// It used to take `_signal`, collect the pids and return them WITHOUT
+    /// signalling, while `loginctl` printed "Sent signal 15 to user 1000 (2
+    /// session leaders)." -- the same defect `kill_session` carried, in the
+    /// same file, found the same way: by the underscore in the signature.
+    ///
+    /// # Best effort, and the worst error if none succeeded
+    ///
+    /// One leader that cannot be signalled must not stop the others -- a user
+    /// with a stuck process would then be unkillable. But an operation where
+    /// EVERY attempt failed is a failure, not a success with an empty list,
+    /// so that case returns the worst error rather than `Ok(vec![])`.
+    ///
+    /// # Errors
+    ///
+    /// [`KillError::NoSessions`] when the user has none, or the first failure
+    /// when no leader could be signalled.
+    fn kill_user(&self, uid: u32, signal: i32) -> Result<(Vec<u32>, usize), KillError> {
+        let leaders: Vec<u32> = self
             .sessions
             .values()
             .filter(|s| s.uid == uid)
             .map(|s| s.leader_pid)
             .collect();
-        if pids.is_empty() {
-            return Err("user has no sessions");
+        if leaders.is_empty() {
+            return Err(KillError::NoSessions);
         }
-        Ok(pids)
+        let total = leaders.len();
+        let mut signalled = Vec::new();
+        let mut worst = None;
+        for pid in leaders {
+            match i32::try_from(pid)
+                .map_err(|_| KillError::NoLeaderPid)
+                .and_then(|p| match libcall::kill(p, signal) {
+                    Ok(()) => Ok(()),
+                    Err(libcall::EINVAL) => Err(KillError::NoLeaderPid),
+                    Err(libcall::EPERM) => Err(KillError::NotPermitted),
+                    Err(libcall::ESRCH) => Err(KillError::LeaderGone),
+                    Err(libcall::ENOSYS) => Err(KillError::Unsupported),
+                    Err(_) => Err(KillError::Failed),
+                }) {
+                Ok(()) => signalled.push(pid),
+                Err(e) => worst = worst.or(Some(e)),
+            }
+        }
+        match worst {
+            Some(e) if signalled.is_empty() => Err(e),
+            _ => Ok((signalled, total)),
+        }
     }
 }
 
@@ -2534,16 +2587,24 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
                 }
             };
             match daemon.kill_user(uid, *sig) {
-                Ok(pids) => {
+                Ok((pids, total)) => {
+                    // "2 of 3" rather than "2": a leader that could not be
+                    // signalled is the thing an operator needs to see, and a
+                    // bare count hides it behind a number that looks like a
+                    // result.
                     let _ = writeln!(
                         out,
-                        "Sent signal {sig} to user {uid} ({} session leaders).",
+                        "Sent signal {sig} to {} of {total} session leaders for user {uid}.",
                         pids.len()
                     );
                     0
                 }
                 Err(e) => {
-                    let _ = writeln!(io::stderr(), "loginctl: failed to kill user: {e}");
+                    let _ = writeln!(
+                        io::stderr(),
+                        "loginctl: cannot kill user {uid}: {}",
+                        e.message()
+                    );
                     1
                 }
             }
@@ -4017,20 +4078,37 @@ mod tests {
         assert!(d.kill_session("999", 15).is_err());
     }
 
+    /// "no sessions" and "cannot signal" are different answers.
+    ///
+    /// This test used to read `let pids = d.kill_user(1000, 9).unwrap();
+    /// assert_eq!(pids.len(), 2)` and passed -- because returning the leader
+    /// pids without signalling them is exactly what it asserted. The second
+    /// test in this file to have certified the defect it was named for; the
+    /// first was `test_kill_session`, and both were written against the
+    /// behaviour rather than the intent.
+    ///
+    /// Alice HAS two sessions, so reaching `Unsupported` means the leaders
+    /// were found and the signal was attempted. A uid with none stops before
+    /// that and says so. If the two collapsed, an operator could not tell a
+    /// machine that cannot signal from a user who is not logged in -- and
+    /// would go looking for the wrong one.
     #[test]
-    fn test_kill_user() {
+    fn killing_a_user_separates_no_sessions_from_cannot_signal() {
         let d = test_daemon();
-        let pids = d.kill_user(1000, 9).unwrap();
-        // Alice has sessions "1" (pid 100) and "3" (pid 300).
-        assert_eq!(pids.len(), 2);
-        assert!(pids.contains(&100));
-        assert!(pids.contains(&300));
-    }
-
-    #[test]
-    fn test_kill_user_not_found() {
-        let d = Daemon::new(DaemonConfig::default(), test_verifier());
-        assert!(d.kill_user(9999, 15).is_err());
+        assert_eq!(
+            d.kill_user(1000, 9),
+            Err(KillError::Unsupported),
+            "alice has two leaders, so this reached the signal and the host refused it"
+        );
+        assert_eq!(
+            d.kill_user(9999, 15),
+            Err(KillError::NoSessions),
+            "a uid with no sessions never reaches the signal"
+        );
+        // And on a daemon with nothing at all, still NoSessions rather than
+        // whatever the host would have said about signalling.
+        let empty = Daemon::new(DaemonConfig::default(), test_verifier());
+        assert_eq!(empty.kill_user(1000, 15), Err(KillError::NoSessions));
     }
 
     // --- Configuration parsing ---

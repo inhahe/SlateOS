@@ -85,6 +85,28 @@
  * spin built only on `poll(..., 0)` can starve the writer it is waiting for. */
 extern int sched_yield(void);
 
+/* Where the staged binaries actually are AT RUNTIME.
+ *
+ * `create-ext4-rootfs.sh` stages into `$STAGE/bin`, and its log says "into
+ * /bin" -- both true OF THE IMAGE. The kernel mounts that image at `/mnt`
+ * (`[vfs] Mounted ext4 filesystem at '/mnt'`), so the path a running process
+ * must exec is `/mnt/bin/true`. `load_test_elf` reads these fixtures from
+ * `/mnt/tests/<name>.elf` for the same reason.
+ *
+ * This fixture execed `/bin/true` and got ENOENT. `/bin` MEANS TWO DIFFERENT
+ * THINGS depending on which side of the mount you are on, and every layer --
+ * the manifest called `rootfs-bin-manifest`, the staging log, this file --
+ * was honest about the one it was given.
+ *
+ * It cost a boot, and exit 11 is what ended it in four minutes: the code says
+ * "not on the image, or not executable", which is a CHECKABLE claim.
+ * `debugfs -R "stat /bin/true" rootfs.ext4` showed the file present, 0755 and
+ * the right size, so the claim was false -- and its being false is what
+ * pointed at the path. A wrong-but-checkable diagnosis beat the vague one it
+ * replaced.
+ */
+#define BIN "/mnt/bin/"
+
 #define SPIN 4000000L
 #define CAP 512
 
@@ -227,7 +249,7 @@ int main(void)
 
     /* 1. Does anything run at all? */
     emit("[cu] true (exec, run, exit 0 -- nothing below this is readable if it fails)\n");
-    rc = run_one("/bin/true", (const char *)0, out, CAP, &plumbing);
+    rc = run_one(BIN "true", (const char *)0, out, CAP, &plumbing);
     if (plumbing != 0) {
         return plumbing;
     }
@@ -237,7 +259,7 @@ int main(void)
 
     /* 2. Is the exit status carried, or is every child reported as 0? */
     emit("[cu] false (a wait that always says 0 would have passed step 1)\n");
-    rc = run_one("/bin/false", (const char *)0, out, CAP, &plumbing);
+    rc = run_one(BIN "false", (const char *)0, out, CAP, &plumbing);
     if (plumbing != 0) {
         return plumbing;
     }
@@ -247,7 +269,7 @@ int main(void)
 
     /* 3. argv in, stdout out. */
     emit("[cu] echo (argv reaches it, and its output reaches a pipe)\n");
-    rc = run_one("/bin/echo", "hi", out, CAP, &plumbing);
+    rc = run_one(BIN "echo", "hi", out, CAP, &plumbing);
     if (plumbing != 0) {
         return plumbing;
     }
@@ -260,7 +282,7 @@ int main(void)
 
     /* 4. The first one that computes an answer. */
     emit("[cu] basename (the first that computes rather than echoes)\n");
-    rc = run_one("/bin/basename", "/usr/lib/x.so", out, CAP, &plumbing);
+    rc = run_one(BIN "basename", "/usr/lib/x.so", out, CAP, &plumbing);
     if (plumbing != 0) {
         return plumbing;
     }

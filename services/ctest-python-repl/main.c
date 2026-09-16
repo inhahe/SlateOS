@@ -204,6 +204,22 @@ int main(void)
      * removes a round trip and, with it, a reason to guess at how long a
      * prompt takes to appear. */
     emit("[py] type (6*7, whose answer is not in the echo)\n");
+    /* DO NOT "simplify" this to print(1+1) or print(2+2).
+     *
+     * A pty echoes what is typed, so the master sees the expression before
+     * it sees any answer.  With print(1+1) the answer 2 is already present
+     * in the echoed text, so the scan below matches the ECHO and this
+     * fixture passes without the interpreter having evaluated anything --
+     * it would then pass equally against an interpreter that never started.
+     *
+     * 6*7 is chosen because "42" does not occur in "print(6*7)".  Any
+     * replacement must keep that property: the answer must not be a
+     * substring of the expression that produces it.
+     *
+     * The header says this too.  It is repeated here because this line is
+     * where someone tidying the file will be looking, and the header is
+     * not.
+     */
     if (write_all(master, "print(6*7)\n") != 0) {
         return 2;
     }

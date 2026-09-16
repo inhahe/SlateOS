@@ -1022,6 +1022,17 @@ Roadmap:
     * **Nobody has ever run it interactively.** That is the actual state, and
       no measurement here replaces doing so. Everything above says the path
       should work; none of it says it does.
+      **A fixture now exists and has NOT run** (2026-09-16):
+      `services/ctest-python-repl` forks a pty, execs `/bin/python3 -q -i -u`,
+      types an expression and scans the master for the answer. It builds and
+      links; it needs a ring-3 rung, which is lane A's tree, and it is queued
+      behind their current boot. So this bullet is still true as written --
+      building the instrument is not the measurement, and the line stays until
+      a run produces a number. That distinction is the whole reason this item
+      sat here for a week while everything around it argued the path was fine.
+      The expression is `6*7` rather than `1+1` because a pty echoes what is
+      typed: a scan for `2` would match the echo of `print(1+1)` and pass
+      without the interpreter evaluating anything.
     * ~~Two gaps found while checking, neither blocking a first run:
       `known-issues.md` -> `B-NO-ALTERNATE-SIGNAL-STACK-...` (CPython's
       `faulthandler` gets no alternate stack, so a Python stack overflow faults

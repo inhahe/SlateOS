@@ -360,7 +360,6 @@ fn detect_language(path: &str) -> Option<Language> {
 // ============================================================================
 
 /// Collect files to scan, applying recursion and exclusion rules.
-#[cfg(not(test))]
 /// Collect the files to tag, and report whether any named path was missing.
 ///
 /// The flag is an out-parameter rather than a richer return type because the
@@ -401,7 +400,6 @@ fn collect_files(config: &Config, missing: &mut bool) -> Vec<String> {
 }
 
 /// Recursively collect files from a directory.
-#[cfg(not(test))]
 fn collect_dir(dir: &Path, excludes: &[String], out: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -1670,7 +1668,6 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
 
 /// Extract all tags from one source file, dispatching to the language-specific
 /// extractor.
-#[cfg(not(test))]
 fn extract_tags_from_file(path: &str) -> Vec<Tag> {
     let language = match detect_language(path) {
         Some(l) => l,
@@ -2120,6 +2117,216 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    // -- the three functions `#[cfg(not(test))]` had made unreachable --------
+    //
+    // Not "untested" -- UNREACHABLE. The gate removed them from the test
+    // binary, so no test could call them and no coverage signal said anything
+    // either way. `TD-B-A-FUNCTION-THE-SUITE-CANNOT-REACH-IS-A-FUNCTION-
+    // NOTHING-CHECKS` swept seven crates for the shape; `ctags` came back
+    // CLEAN, meaning the gated code was honest, and left this entry open
+    // because clean is not the same as checked.
+    //
+    // The proof the gate was doing that is small and worth recording: the
+    // moment the three attributes came off, the test build began warning
+    // `function is never used` for all three. Nothing in 111 tests touched
+    // them.
+
+    /// One scratch directory per test, named for it, cleared first.
+    ///
+    /// Named rather than shared so two tests cannot race, and removed at the
+    /// START rather than the end: a test that fails leaves its tree behind for
+    /// inspection, and the next run still begins from nothing.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// A named path that does not exist sets `missing`, and the rest still tag.
+    ///
+    /// This is the function's whole reason for having an out-parameter, and
+    /// the defect it was written for is named in its own doc comment:
+    /// printing "cannot open" and returning only the successes is what made
+    /// `ctags /nonexistent` exit 0. Until now nothing could call it to check.
+    ///
+    /// Both halves in one test on purpose. "Missing was flagged" alone would
+    /// pass against a function that gave up on the first bad path, and
+    /// "the good file was tagged" alone would pass against one that never
+    /// noticed the bad one. The pair is the behaviour.
+    #[test]
+    fn collect_files_flags_a_missing_path_and_keeps_the_rest() {
+        let dir = scratch("ctags-collect-missing");
+        let good = dir.join("real.rs");
+        fs::write(&good, "fn real() {}\n").expect("real.rs");
+        let bad = dir.join("not-here.rs");
+
+        let mut config = Config::new();
+        config.files = vec![
+            bad.to_string_lossy().into_owned(),
+            good.to_string_lossy().into_owned(),
+        ];
+
+        let mut missing = false;
+        let files = collect_files(&config, &mut missing);
+
+        assert!(
+            missing,
+            "an absent named path did not reach the exit status"
+        );
+        assert_eq!(
+            files.len(),
+            1,
+            "the file that DOES exist must still be tagged: {files:?}"
+        );
+        assert!(files[0].ends_with("real.rs"), "{files:?}");
+
+        // Control: with only good paths, `missing` stays false. Without this,
+        // a function that set the flag unconditionally would pass above.
+        let mut only_good = Config::new();
+        only_good.files = vec![good.to_string_lossy().into_owned()];
+        let mut none_missing = false;
+        let files = collect_files(&only_good, &mut none_missing);
+        assert!(
+            !none_missing,
+            "a run with no absent paths reported one missing"
+        );
+        assert_eq!(files.len(), 1, "{files:?}");
+    }
+
+    /// `collect_dir` finds source files, sorts them, and recurses.
+    ///
+    /// The sort matters beyond tidiness: `ctags` output is compared between
+    /// runs, and `read_dir` order is filesystem order, which is not stable
+    /// across machines. An unsorted collector produces a tags file that
+    /// differs for no reason anyone can act on.
+    #[test]
+    fn collect_dir_gathers_sources_in_a_stable_order() {
+        let dir = scratch("ctags-collect-order");
+        fs::write(dir.join("b.rs"), "fn beta() {}\n").expect("b.rs");
+        fs::write(dir.join("a.rs"), "fn alpha() {}\n").expect("a.rs");
+        fs::create_dir_all(dir.join("sub")).expect("sub");
+        fs::write(dir.join("sub").join("c.rs"), "fn gamma() {}\n").expect("c.rs");
+        // Not a language it knows: must be skipped rather than tagged empty.
+        fs::write(dir.join("notes.txt"), "not source\n").expect("notes.txt");
+
+        let mut out = Vec::new();
+        collect_dir(&dir, &[], &mut out);
+
+        let names: Vec<String> = out
+            .iter()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(
+            names.contains(&"a.rs".to_string()) && names.contains(&"b.rs".to_string()),
+            "top-level sources missing: {names:?}"
+        );
+        assert!(
+            names.contains(&"c.rs".to_string()),
+            "did not recurse into a subdirectory: {names:?}"
+        );
+        assert!(
+            !names.contains(&"notes.txt".to_string()),
+            "a file of no known language was collected: {names:?}"
+        );
+        // a.rs before b.rs, whatever order the filesystem returned them in.
+        let ia = names.iter().position(|n| n == "a.rs").expect("a.rs");
+        let ib = names.iter().position(|n| n == "b.rs").expect("b.rs");
+        assert!(ia < ib, "entries are not sorted: {names:?}");
+    }
+
+    /// An excluded name is skipped, and a hidden directory is not descended.
+    ///
+    /// The control is the same tree collected with NO excludes: without it,
+    /// a test asserting "target/x.rs is absent" would pass against a collector
+    /// that found nothing at all.
+    #[test]
+    fn collect_dir_honours_excludes_and_skips_hidden_dirs() {
+        let dir = scratch("ctags-collect-exclude");
+        fs::write(dir.join("keep.rs"), "fn keep() {}\n").expect("keep.rs");
+        fs::create_dir_all(dir.join("target")).expect("target");
+        fs::write(dir.join("target").join("gen.rs"), "fn gen() {}\n").expect("gen.rs");
+        fs::create_dir_all(dir.join(".git")).expect(".git");
+        fs::write(dir.join(".git").join("hook.rs"), "fn hook() {}\n").expect("hook.rs");
+
+        // Control first: with no excludes, `target/gen.rs` IS collected, so
+        // the assertion below is about the exclude and not about an empty run.
+        let mut all = Vec::new();
+        collect_dir(&dir, &[], &mut all);
+        assert!(
+            all.iter().any(|p| p.ends_with("gen.rs")),
+            "control failed: gen.rs is not collected even without excludes, so \
+             the exclude assertion below would prove nothing: {all:?}"
+        );
+        assert!(
+            !all.iter().any(|p| p.ends_with("hook.rs")),
+            "descended into a hidden directory: {all:?}"
+        );
+
+        let mut out = Vec::new();
+        collect_dir(&dir, &["target".to_string()], &mut out);
+        assert!(
+            out.iter().any(|p| p.ends_with("keep.rs")),
+            "the exclude removed everything: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|p| p.ends_with("gen.rs")),
+            "an excluded directory was collected anyway: {out:?}"
+        );
+    }
+
+    /// `extract_tags_from_file` reads a real file and tags it by extension.
+    ///
+    /// This is the half `extract_tags_from_content` cannot cover: opening the
+    /// file, and choosing the language from the PATH rather than being handed
+    /// one. Both are where a caller's mistake shows up.
+    #[test]
+    fn extract_tags_from_file_reads_and_detects_by_extension() {
+        let dir = scratch("ctags-extract-file");
+        let rs = dir.join("thing.rs");
+        fs::write(&rs, "fn alpha() {}\nstruct Beta;\n").expect("thing.rs");
+
+        let tags = extract_tags_from_file(rs.to_str().expect("utf8 path"));
+        let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"alpha") && names.contains(&"Beta"),
+            "did not tag a readable Rust file: {names:?}"
+        );
+    }
+
+    /// An unknown extension yields nothing, and so does a path that is not there.
+    ///
+    /// Both return an empty vector, and that is deliberate rather than sloppy:
+    /// `ctags *` over a mixed tree hands this every file in it. What separates
+    /// them is the diagnostic -- the missing file prints "cannot read" and the
+    /// `.txt` does not -- and neither is an error the caller should stop on.
+    ///
+    /// Asserted together because the pair is the point: if a future change
+    /// made an unreadable file return tags from somewhere, or made a `.txt`
+    /// parse as C, this is what would catch it.
+    #[test]
+    fn extract_tags_from_file_is_empty_for_unknown_and_absent_paths() {
+        let dir = scratch("ctags-extract-empty");
+        let txt = dir.join("notes.txt");
+        fs::write(&txt, "fn alpha() {}\n").expect("notes.txt");
+        assert!(
+            extract_tags_from_file(txt.to_str().expect("utf8 path")).is_empty(),
+            "a .txt file was parsed as source -- its CONTENT is valid Rust, \
+             which is exactly how a language-by-extension bug hides"
+        );
+
+        let gone = dir.join("no-such-file.rs");
+        assert!(
+            extract_tags_from_file(gone.to_str().expect("utf8 path")).is_empty(),
+            "an absent file produced tags"
+        );
+    }
 
     /// `--append` must tell "no tags file yet" from "cannot read the one there".
     ///

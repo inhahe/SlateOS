@@ -151548,10 +151548,47 @@ on the written-never-read list. Both crates that had both were lying; none of
 the five with only the gate was. That pairing is worth more than either list
 alone, and it is cheap to compute.
 
-**Still open:** the five clean crates keep code the suite cannot reach.
+~~**Still open:** the five clean crates keep code the suite cannot reach.
 `ctags`'s `collect_dir`, `extract_tags_from_file` and `read_existing_ctags`
 are parsers with inputs and outputs and no tests, which is a real gap even
-though nothing is currently wrong behind it.
+though nothing is currently wrong behind it.~~
+
+**`ctags` CLOSED 2026-09-16.** `collect_files`, `collect_dir` and
+`extract_tags_from_file` are ungated and have five tests between them; 111 ->
+116, clippy clean. (`read_existing_ctags` was already ungated and tested --
+the row above was wrong about it, which is worth noting because the list was
+built by grepping for the attribute and that function does not carry one.)
+
+**The gate's effect, demonstrated rather than argued.** The moment the three
+attributes came off, the test build began warning `function is never used` for
+all three, with 111 tests passing. That is the entry's claim -- UNREACHABLE,
+not untested -- shown by the compiler instead of asserted. The warnings went
+away one at a time as each test landed, which is a coverage signal this crate
+did not previously have any form of.
+
+**What the tests are actually for**, since "add tests" is not a finding:
+
+* `collect_files` -- the `missing` out-parameter, which exists because
+  printing "cannot open" and returning only the successes is what made
+  `ctags /nonexistent` exit 0. Its own doc comment says so. Nothing could
+  call it to check until now. Tested with a present and an absent path in one
+  run, because "missing was flagged" alone passes against a function that
+  gives up on the first bad path, and "the good file was tagged" alone passes
+  against one that never noticed the bad one.
+* `collect_dir` -- sorting, which matters beyond tidiness: `read_dir` order
+  is filesystem order, so an unsorted collector produces a tags file that
+  differs between machines for no reason anyone can act on. Plus excludes and
+  hidden-directory skipping, with a control run collecting the same tree with
+  NO excludes -- without it, "target/gen.rs is absent" would pass against a
+  collector that found nothing at all.
+* `extract_tags_from_file` -- the half `extract_tags_from_content` cannot
+  cover: opening the file, and choosing the language from the PATH rather
+  than being handed one. The `.txt` case holds valid Rust in a file with the
+  wrong extension, which is exactly how a language-by-extension bug hides.
+
+**Still open:** `lex`, `yacc`, `chpasswd` and `mesg`. Those are
+`print_help`/`print_version`/`run` -- the cheap end of the list, where the
+gate costs a constant and an exit. Worth doing, worth doing last.
 
 **Why the gate is usually there at all.** These crates build `#![no_main]`
 for the real target and define a `main` the test harness must not duplicate.

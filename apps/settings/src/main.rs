@@ -600,6 +600,14 @@ pub struct SettingsState {
     /// is the same moment `apps/explorer` re-reads it: neither program caches
     /// an association across the action that uses it.
     default_apps: Vec<defaultapps::Association>,
+    /// Every font family installed here, for the Fonts page's picker.
+    ///
+    /// Held rather than asked for while drawing: `available_families` walks
+    /// the font database, and `build_page` runs on every repaint and again for
+    /// every hit test. Loaded once, because a font is installed by putting a
+    /// file somewhere, which is not something this application can be
+    /// notified about -- unlike the settings file, which has a watcher.
+    font_families: Vec<String>,
 }
 
 /// Where an open dropdown's popup is, and which of its items are on screen.
@@ -701,6 +709,16 @@ pub enum DropdownId {
     HighContrast,
     /// How the desktop picture is placed on the screen.
     WallpaperFit,
+    /// The family all interface text is drawn in.
+    ///
+    /// No `MonoFont` beside it yet, deliberately. The setting exists and is
+    /// applied, but nothing in this tree can tell a fixed-pitch family from a
+    /// proportional one -- `guitk::text::set_mono_family`'s own note says a
+    /// caller that points it at a proportional face "gets a terminal with a
+    /// broken grid". A picker listing every installed family under the words
+    /// "Terminal Font" would be an invitation to do exactly that, so it waits
+    /// on reading `post.isFixedPitch`.
+    UiFont,
 }
 
 impl DropdownId {
@@ -767,6 +785,13 @@ impl SettingsState {
     /// the machine running it.
     pub fn load_appearance(&mut self) {
         self.appearance = AppearanceFile::load();
+    }
+
+    /// Enumerate the font families installed on this machine.
+    ///
+    /// I/O, and so out of [`new`](Self::new) with the rest of it.
+    pub fn load_font_families(&mut self) {
+        self.font_families = guitk::text::available_families();
     }
 
     /// Re-read the file associations the File Associations program writes.
@@ -1104,6 +1129,9 @@ impl SettingsState {
             // filled by `refresh_default_apps`, from `main` and on entry to
             // the page.
             default_apps: Vec::new(),
+            // Empty for the same reason as `default_apps`: enumerating
+            // installed fonts is I/O, and this constructor does none.
+            font_families: Vec::new(),
         }
     }
 }
@@ -2741,6 +2769,7 @@ impl SettingsState {
             SettingsPage::Proxy => self.build_proxy_page(sink),
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
+            SettingsPage::Fonts => self.build_fonts_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
                 self.build_accounts_page(sink);
             }
@@ -3928,6 +3957,57 @@ impl SettingsState {
     /// Read-only. Adding and removing entries needs a syscall the kernel does
     /// not expose to userspace yet; `known-issues.md` carries that as
     /// `TD-C-DYNDNS-PAGE-IS-READ-ONLY`.
+    /// The font the interface is drawn in.
+    ///
+    /// Two rows that look redundant and are not: what the user has *chosen*
+    /// and what is actually *in use*. `guitk::text::set_font_family` keeps the
+    /// working font when the chosen family is not installed -- the right
+    /// behaviour, because losing every glyph on screen to a bad setting is
+    /// worse than ignoring the setting -- which means the two can disagree.
+    /// That disagreement is the one thing a user needs to see to understand
+    /// why picking a font changed nothing, and it is invisible from the
+    /// setting alone.
+    fn build_fonts_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        let chosen = self.appearance.settings.fonts.ui_font.clone();
+        let installed = self.font_families.contains(&chosen);
+
+        s.section("Interface Font");
+        if self.font_families.is_empty() {
+            s.note(
+                "No font families could be found on this system, so there is nothing to choose between. Text is drawn in the built-in face.",
+                40.0,
+            );
+        } else {
+            s.dropdown_row("Font", DropdownId::UiFont, &chosen);
+        }
+
+        // Asked of the toolkit rather than inferred from the setting above.
+        // The setting is a request; this is the answer.
+        match guitk::text::font_family() {
+            Some(family) if family == chosen => s.value_row("In use", &family, pal.text),
+            Some(family) => s.value_row("In use", &family, pal.peach),
+            // `None` is the toolkit's built-in bitmap face, which is what it
+            // falls back to when no installed font could be loaded at all.
+            None => s.value_row("In use", "Built-in face", pal.peach),
+        }
+
+        if !installed && !chosen.is_empty() {
+            s.note(
+                &format!(
+                    "\"{chosen}\" is not installed on this machine, so text is drawn in the font named above instead."
+                ),
+                40.0,
+            );
+        }
+
+        s.gap();
+        s.note(
+            "Terminal text has a separate font setting, which this page does not offer yet: nothing here can yet tell a fixed-pitch family from a proportional one, and choosing a proportional one would break the terminal's character grid.",
+            56.0,
+        );
+    }
+
     /// Which program opens which kind of file.
     ///
     /// Every row here is a real setting with a real effect: `apps/explorer`
@@ -4240,6 +4320,18 @@ impl SettingsState {
                     .position(|f| *f == self.appearance.settings.wallpaper_fit)
                     .unwrap_or(0);
                 (items, current)
+            }
+            DropdownId::UiFont => {
+                // A configured family that is not installed has no row to
+                // highlight, and falls back to the first. That is a highlight
+                // only: the row's own text says which family is configured and
+                // whether it is actually in use, because the list cannot.
+                let current = self
+                    .font_families
+                    .iter()
+                    .position(|f| *f == self.appearance.settings.fonts.ui_font)
+                    .unwrap_or(0);
+                (self.font_families.clone(), current)
             }
             DropdownId::ColorFilter => {
                 let items: Vec<String> = ColorFilter::ALL
@@ -5054,6 +5146,11 @@ impl SettingsState {
                     self.appearance.settings.wallpaper_fit = *fit;
                 }
             }
+            DropdownId::UiFont => {
+                if let Some(family) = self.font_families.get(index) {
+                    self.appearance.settings.fonts.ui_font = family.clone();
+                }
+            }
             DropdownId::ColorFilter => {
                 if let Some(filter) = ColorFilter::ALL.get(index) {
                     self.appearance.settings.color_filter = *filter;
@@ -5255,6 +5352,10 @@ fn main() -> ExitCode {
     // case that entry never happens because the page is already open.
     state.refresh_default_apps();
 
+    // The installed font families, for the Fonts page's picker. Once: a font
+    // appears by a file being put somewhere, which nothing here is told about.
+    state.load_font_families();
+
     // `launch` rather than `launch_with`: Settings takes no file and no page
     // name, so it wants exactly the shared command line and nothing more —
     // including the rejection of an unrecognised argument, which was previously
@@ -5441,6 +5542,36 @@ mod tests {
                 "the program the file manager would run was not drawn"
             );
         });
+    }
+
+    /// The Fonts page names the font actually being drawn with.
+    ///
+    /// The "in use" row is the whole point of the page rather than a
+    /// decoration beside the picker. A configured family that this machine
+    /// does not have is silently ignored by the toolkit -- correctly, since
+    /// losing every glyph to a bad setting is worse -- so the setting alone
+    /// cannot tell the user why choosing a font changed nothing. Asserting
+    /// only that a picker exists would pass on a page that promised a font
+    /// nothing could load.
+    #[test]
+    fn the_fonts_page_reports_the_font_actually_in_use() {
+        let mut app = SettingsState::new();
+        app.load_font_families();
+        app.go_to_page(SettingsPage::Fonts);
+        let text = format!("{:?}", app.render_tree());
+        assert!(
+            !text.contains("under construction"),
+            "the Fonts page still draws the placeholder"
+        );
+        // Asked of the toolkit, exactly as the page asks it. Hard-coding a
+        // family here would make the test a statement about the developer's
+        // machine rather than about the page.
+        let in_use =
+            guitk::text::font_family().unwrap_or_else(|| String::from("Built-in face"));
+        assert!(
+            text.contains(&in_use),
+            "the page does not name the font the toolkit is drawing with ({in_use})"
+        );
     }
 
     /// With rules present, each program is listed with what it may do.
@@ -8723,6 +8854,29 @@ mod tests {
 /// protocol, so they are about the strap: when a frame is drawn, which events
 /// are ours, when the loop stops, and — the reason this task existed — that a
 /// Personalization change is announced to the compositor.
+///
+/// # Why every test here opens with a `config_turn`
+///
+/// Each of these runs an event loop, and the loop polls the appearance file
+/// once per turn — so every test in this module is a *reader* of the
+/// configuration directory. This binary also contains a *writer*:
+/// `the_default_apps_page_shows_a_real_association` points
+/// `XDG_CONFIG_HOME` at a scratch copy through
+/// `settingsfile::testing::with_scratch_config`. `cargo test` runs a
+/// binary's tests as threads of one process, so the two share that variable.
+///
+/// `ENV_LOCK` inside `settingsfile` serialises writers against each other and
+/// not against readers — `known-issues.md`
+/// `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+/// An unguarded reader can therefore watch the directory change under it,
+/// decide the user's appearance settings were edited, and repaint: one frame
+/// more than the test counted, at a rate low enough (not once in ten runs of
+/// this binary alone) to look like noise rather than a race.
+///
+/// `gui/window`'s own `TestDesktop` holds this guard already, but only under
+/// *that* crate's `#[cfg(test)]` — the type is a dev-dependency there and
+/// cannot appear in the shipped library. A dependent's test binary gets no
+/// protection from it, which is why each test below takes the turn itself.
 #[cfg(test)]
 mod loop_tests {
     // A test that indexes out of range should fail loudly and point at the line
@@ -8824,6 +8978,7 @@ mod loop_tests {
 
     #[test]
     fn settings_draws_once_at_startup_and_then_only_when_something_changed() {
+        let _config_turn = settingsfile::testing::config_turn();
         let (mut events, desktop) = testing::desktop();
         let (mut state, at) = control_on(
             SettingsPage::UserAccounts,
@@ -8867,6 +9022,7 @@ mod loop_tests {
 
     #[test]
     fn events_for_another_window_are_ignored_rather_than_applied() {
+        let _config_turn = settingsfile::testing::config_turn();
         let (mut events, desktop) = testing::desktop();
         let mine = WindowBuilder::new("Settings", 1200, 800)
             .build(&mut events)
@@ -8901,6 +9057,7 @@ mod loop_tests {
 
     #[test]
     fn closing_the_window_stops_the_loop_rather_than_merely_being_ignored() {
+        let _config_turn = settingsfile::testing::config_turn();
         let (mut events, desktop) = testing::desktop();
         let window = WindowBuilder::new("Settings", 1200, 800)
             .build(&mut events)
@@ -8934,6 +9091,7 @@ mod loop_tests {
 
     #[test]
     fn a_resize_is_applied_before_the_frame_that_answers_it() {
+        let _config_turn = settingsfile::testing::config_turn();
         let (mut events, desktop) = testing::desktop();
         let window = WindowBuilder::new("Settings", 1200, 800)
             .resizable(true)
@@ -8970,6 +9128,7 @@ mod loop_tests {
     #[test]
     fn changing_an_appearance_setting_asks_the_compositor_to_reload() {
         with_scratch_config("settings_loop_reload", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)
@@ -9008,6 +9167,7 @@ mod loop_tests {
     #[test]
     fn an_event_that_changes_no_appearance_setting_asks_for_no_reload() {
         with_scratch_config("settings_loop_no_reload", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)
@@ -9045,6 +9205,7 @@ mod loop_tests {
     #[test]
     fn one_change_produces_one_notification_and_not_one_per_later_event() {
         with_scratch_config("settings_loop_once", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)
@@ -9138,6 +9299,7 @@ mod loop_tests {
     #[test]
     fn a_double_click_change_asks_the_compositor_to_re_read_the_input_file() {
         with_scratch_config("settings_loop_input_reload", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)
@@ -9179,6 +9341,7 @@ mod loop_tests {
     #[test]
     fn an_appearance_change_asks_for_no_input_reload() {
         with_scratch_config("settings_loop_no_input_reload", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)

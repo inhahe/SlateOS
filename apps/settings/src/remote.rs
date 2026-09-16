@@ -642,6 +642,23 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
     });
 }
 
+/// What the Remote Desktop and Dynamic DNS pages say about themselves.
+///
+/// **Neither `RemoteDesktopConfig` nor `DynDnsConfig` is named by any file
+/// outside this one.** Nothing serves a remote desktop, nothing updates a DNS
+/// record, and `idle_timeout_minutes` and `update_interval_minutes` are read
+/// in exactly one place each: the `format!` that draws them as "N min".
+///
+/// This page mattered more than the others of its kind, which is why it has a
+/// notice rather than a mention in a tracking file. The other eight were app
+/// windows; this is **Settings**, the surface an operator goes to precisely
+/// when they want to know what the machine is configured to do. A page here
+/// that answers confidently is the most convincing wrong answer the system can
+/// give.
+const NOTHING_APPLIES: &str = "Not applied: nothing on this system serves a \
+remote desktop or updates a DNS record. These values are stored and read back \
+here, and nowhere else.";
+
 /// Draw a section header with underline.
 fn render_section_header(pal: &Palette, tree: &mut RenderTree, x: f32, y: f32, title: &str) -> f32 {
     text_bold(tree, x, y, title, pal.text, 16.0);
@@ -941,6 +958,11 @@ fn render_dyndns_section(
     // Update interval
     let interval_str = format!("{} min", cfg.update_interval_minutes);
     y = render_dropdown_row(pal, tree, x, y, "Update Interval", &interval_str);
+    // `tree.text`, not `text_bold`: this is a subdued note, and `text_bold`
+    // fakes weight by drawing the same string twice at a half-pixel offset --
+    // which also made the test count four notices on two sections.
+    tree.text(x, y, NOTHING_APPLIES, pal.subtext0, 11.0);
+    y += 18.0;
 
     y += 8.0;
 
@@ -1082,6 +1104,11 @@ fn render_remote_desktop_section(
     // Idle timeout
     let timeout_str = format!("{} min", config.idle_timeout_minutes);
     y = render_dropdown_row(pal, tree, x, y, "Idle Timeout", &timeout_str);
+    // `tree.text`, not `text_bold`: this is a subdued note, and `text_bold`
+    // fakes weight by drawing the same string twice at a half-pixel offset --
+    // which also made the test count four notices on two sections.
+    tree.text(x, y, NOTHING_APPLIES, pal.subtext0, 11.0);
+    y += 18.0;
 
     y += 8.0;
 
@@ -1238,6 +1265,59 @@ mod tests {
     use super::*;
 
     // ---- DynDnsConfig defaults ----
+
+    /// Remote Desktop and Dynamic DNS say that nothing applies them.
+    ///
+    /// Neither `RemoteDesktopConfig` nor `DynDnsConfig` is named by any file
+    /// outside `remote.rs`. Nothing serves a remote desktop, nothing updates a
+    /// DNS record, and `idle_timeout_minutes` and `update_interval_minutes`
+    /// are read in exactly one place each: the `format!` that draws them.
+    ///
+    /// **This page mattered more than the eight like it.** The others were app
+    /// windows; this is Settings, the surface an operator goes to precisely
+    /// when they want to know what the machine is configured to do. A page
+    /// here that answers confidently is the most convincing wrong answer the
+    /// system can give.
+    ///
+    /// Found by `scripts/find-echoed-settings.py`.
+    #[test]
+    fn the_remote_pages_say_nothing_applies_them() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut settings = RemoteAccessSettings::new();
+        settings.dns.config_mut().enabled = true;
+        settings.remote_desktop.enabled = true;
+        let mut tree = RenderTree::new();
+        render_remote_access_page(&pal, &mut tree, 0.0, 0.0, &settings);
+        let texts: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for control in ["Idle Timeout", "Update Interval"] {
+            assert!(
+                texts.iter().any(|t| t == control),
+                "control: the page must be drawing {control:?} for this test \
+to be about anything -- it drew {} text command(s)",
+                texts.len()
+            );
+        }
+        // Two, not "at least one". One notice covering two sections is a
+        // notice on the section the reader is not looking at -- which is the
+        // mistake `gui/desktop`'s power page made this evening, where a single
+        // constant was drawn on Advanced and the Battery tab went without.
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|t| t.contains("Not applied") && t.contains("nowhere else"))
+                .count(),
+            2,
+            "both sections must say it"
+        );
+    }
 
     #[test]
     fn config_defaults_no_ip() {

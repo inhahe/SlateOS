@@ -43,7 +43,7 @@
 //! process control IPC messages (not Unix signals).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 // ---------------------------------------------------------------------------
@@ -1066,147 +1066,32 @@ impl core::fmt::Display for ExitStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Child process
+// Child process -- deleted 2026-09-15, deliberately left absent
 // ---------------------------------------------------------------------------
-
-/// A child process running inside a PTY.
-///
-/// In the real OS, this would hold a kernel process handle obtained
-/// via the `spawn` syscall with the slave PTY's channel handles wired
-/// to the child's stdin/stdout/stderr. For now, we model the interface
-/// with simulated state.
-pub struct ChildProcess {
-    /// Process ID.
-    pid_val: u64,
-    /// Program name.
-    program: String,
-    /// Whether the process has exited.
-    exited: AtomicBool,
-    /// Exit status (set when the process terminates).
-    exit_status: Mutex<Option<ExitStatus>>,
-    /// Whether the process has been killed.
-    killed: AtomicBool,
-}
-
-/// Atomic counter for simulated PIDs.
-static NEXT_PID: AtomicU64 = AtomicU64::new(1000);
-
-impl ChildProcess {
-    /// Spawn a child process with its stdin/stdout/stderr connected to
-    /// the given PTY slave.
-    ///
-    /// In the real OS, this would:
-    /// 1. Create a new process via the kernel `spawn` syscall.
-    /// 2. Wire the slave's channel handles as the child's fd 0/1/2.
-    /// 3. Set the child's controlling terminal to this PTY.
-    /// 4. Execute the program.
-    ///
-    /// For now, we create a simulated process handle.
-    pub fn spawn(program: &str, _args: &[&str], _pty: &PtySlave) -> PtyResult<Self> {
-        if program.is_empty() {
-            return Err(PtyError::SpawnFailed("empty program name".into()));
-        }
-
-        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
-
-        Ok(Self {
-            pid_val: pid,
-            program: program.to_string(),
-            exited: AtomicBool::new(false),
-            exit_status: Mutex::new(None),
-            killed: AtomicBool::new(false),
-        })
-    }
-
-    /// Get the process ID.
-    pub fn pid(&self) -> u64 {
-        self.pid_val
-    }
-
-    /// Get the program name.
-    pub fn program(&self) -> &str {
-        &self.program
-    }
-
-    /// Wait for the process to exit, returning its exit status.
-    ///
-    /// In the real OS, this would block on the kernel's process-exit
-    /// notification channel. Here we return immediately with the
-    /// current status.
-    pub fn wait(&self) -> PtyResult<ExitStatus> {
-        // If already exited, return the stored status.
-        if self.exited.load(Ordering::Acquire) {
-            let status = self
-                .exit_status
-                .lock()
-                .map_err(|_| PtyError::LockPoisoned)?;
-            return Ok(status.unwrap_or(ExitStatus::Success));
-        }
-
-        // If killed, mark as exited with signal.
-        if self.killed.load(Ordering::Acquire) {
-            self.mark_exited(ExitStatus::Signal(PtySignal::Interrupt));
-            return Ok(ExitStatus::Signal(PtySignal::Interrupt));
-        }
-
-        // Simulated: return success since we do not have a real process.
-        self.mark_exited(ExitStatus::Success);
-        Ok(ExitStatus::Success)
-    }
-
-    /// Non-blocking check for process exit.
-    ///
-    /// Returns `Ok(None)` if the process is still running.
-    pub fn try_wait(&self) -> PtyResult<Option<ExitStatus>> {
-        if self.exited.load(Ordering::Acquire) {
-            let status = self
-                .exit_status
-                .lock()
-                .map_err(|_| PtyError::LockPoisoned)?;
-            Ok(Some(status.unwrap_or(ExitStatus::Success)))
-        } else if self.killed.load(Ordering::Acquire) {
-            let status = ExitStatus::Signal(PtySignal::Interrupt);
-            self.mark_exited(status);
-            Ok(Some(status))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Kill the child process.
-    ///
-    /// In the real OS, this would send a termination IPC message to
-    /// the child process.
-    pub fn kill(&self) -> PtyResult<()> {
-        if self.exited.load(Ordering::Acquire) {
-            return Ok(()); // already dead, idempotent
-        }
-        self.killed.store(true, Ordering::Release);
-        self.mark_exited(ExitStatus::Signal(PtySignal::Interrupt));
-        Ok(())
-    }
-
-    /// Check whether the process has exited.
-    pub fn has_exited(&self) -> bool {
-        self.exited.load(Ordering::Acquire)
-    }
-
-    /// Internal: mark the process as exited with the given status.
-    fn mark_exited(&self, status: ExitStatus) {
-        if let Ok(mut guard) = self.exit_status.lock()
-            && guard.is_none()
-        {
-            *guard = Some(status);
-        }
-        self.exited.store(true, Ordering::Release);
-    }
-
-    /// Simulate the process exiting with a given status (for testing).
-    #[cfg(test)]
-    fn simulate_exit(&self, status: ExitStatus) {
-        self.mark_exited(status);
-    }
-}
+//
+// There was a `ChildProcess` here: 130 lines that SIMULATED a process.
+// `spawn` checked the program name was non-empty, took a PID from a counter
+// and returned a handle; `pid()` answered with the counter's value,
+// `program()` echoed the string it was handed, and `wait()` returned
+// `ExitStatus::Success`. Its own doc said "For now, we model the interface
+// with simulated state."
+//
+// It had no caller outside its own three tests, which asserted that the
+// simulation behaved as designed and would have passed forever.
+//
+// **Deleted rather than kept as the seam to fill**, which is the decision
+// worth explaining. A handle answering `pid() == 1002` for a process that
+// does not exist is dangerous in a specific way: the next person to wire a
+// terminal up would find a `spawn` returning `Ok`, a `pid` that looks like a
+// pid, and a `wait` saying the shell succeeded. Everything would appear to
+// work, and the window would draw an empty screen while reporting a healthy
+// child. An absent function fails at the compiler; a simulated one fails at
+// the user.
+//
+// The real route is `posix::pty::forkpty`, which is `extern "C"` and
+// therefore this lane's to reach through `libcall` per design-decisions 768 --
+// the same door `libcall::kill` came through. Asked for in
+// `requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`.
 
 // ===========================================================================
 // Tests
@@ -1688,80 +1573,6 @@ mod tests {
         assert!(!pair.slave.is_closed());
         pair.slave.close();
         assert!(pair.slave.is_closed());
-    }
-
-    // -- ChildProcess --
-
-    #[test]
-    fn test_child_spawn() {
-        let pair = PtyPair::open().unwrap();
-        let child = ChildProcess::spawn("/bin/sh", &["-l"], &pair.slave).unwrap();
-        assert!(child.pid() >= 1000);
-        assert_eq!(child.program(), "/bin/sh");
-        assert!(!child.has_exited());
-    }
-
-    #[test]
-    fn test_child_spawn_empty_program() {
-        let pair = PtyPair::open().unwrap();
-        let result = ChildProcess::spawn("", &[], &pair.slave);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_child_wait() {
-        let pair = PtyPair::open().unwrap();
-        let child = ChildProcess::spawn("/bin/echo", &["hello"], &pair.slave).unwrap();
-
-        let status = child.wait().unwrap();
-        assert!(status.success());
-        assert_eq!(status.code(), Some(0));
-        assert!(child.has_exited());
-    }
-
-    #[test]
-    fn test_child_try_wait_not_exited() {
-        let pair = PtyPair::open().unwrap();
-        let child = ChildProcess::spawn("/bin/sleep", &["10"], &pair.slave).unwrap();
-
-        let result = child.try_wait().unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_child_kill() {
-        let pair = PtyPair::open().unwrap();
-        let child = ChildProcess::spawn("/bin/sleep", &["10"], &pair.slave).unwrap();
-
-        child.kill().unwrap();
-        assert!(child.has_exited());
-
-        let status = child.wait().unwrap();
-        assert!(!status.success());
-        assert_eq!(status, ExitStatus::Signal(PtySignal::Interrupt));
-    }
-
-    #[test]
-    fn test_child_kill_idempotent() {
-        let pair = PtyPair::open().unwrap();
-        let child = ChildProcess::spawn("/bin/test", &[], &pair.slave).unwrap();
-
-        child.kill().unwrap();
-        child.kill().unwrap(); // should not panic or error
-        assert!(child.has_exited());
-    }
-
-    #[test]
-    fn test_child_simulate_exit() {
-        let pair = PtyPair::open().unwrap();
-        let child = ChildProcess::spawn("/bin/app", &[], &pair.slave).unwrap();
-
-        child.simulate_exit(ExitStatus::Code(42));
-        assert!(child.has_exited());
-
-        let status = child.wait().unwrap();
-        assert_eq!(status, ExitStatus::Code(42));
-        assert_eq!(status.code(), Some(42));
     }
 
     // -- Multiple concurrent PTYs --

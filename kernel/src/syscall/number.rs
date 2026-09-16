@@ -5374,6 +5374,27 @@ pub const SYS_HOSTNAME_SET: u64 = 1072;
 /// Chosen number 1073, next free slot after 1072.
 pub const SYS_DOMAINNAME_SET: u64 = 1073;
 
+/// Set the console keyboard layout: `keylayout_set(ptr, len) -> 0`.
+///
+/// `ptr`/`len` name a layout already known to `fs::keylayout`; length 0
+/// clears the mapping and restores the identity layout. Requires
+/// `(Process, SET_KEYLAYOUT)`. `NotFound` if no such layout is registered.
+///
+/// **No getter, for the same reason [`SYS_HOSTNAME_SET`] has none.**
+/// `/proc/keylayout` already publishes the active layout, generated from
+/// `fs::keylayout` on every read. A second read path would give one value
+/// two sources that can disagree.
+///
+/// **Why it exists.** `keylayout::set_active` worked and was reachable only
+/// from `kshell` -- no syscall, no write path -- so `localectl set-keymap`
+/// wrote `/etc/vconsole.conf`, which nothing in the tree reads except
+/// `localectl` itself. Its `status` then read that file back and agreed
+/// with `set` because it was made of it: a round trip that cannot fail
+/// however wrong the real layout is. Found by lane B.
+///
+/// Chosen number 1074, next free slot after 1073.
+pub const SYS_KEYLAYOUT_SET: u64 = 1074;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

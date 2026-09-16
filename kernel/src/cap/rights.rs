@@ -175,13 +175,34 @@ impl Rights {
     /// caller learns it is unprivileged rather than that the call is missing.
     pub const SET_HOSTNAME: Self = Self(1 << 20);
 
+    /// May change the console keyboard layout.
+    ///
+    /// Required by `SYS_KEYLAYOUT_SET`, the kernel primitive behind
+    /// `localectl set-keymap`.
+    ///
+    /// Its own bit, for the reason every bit above has its own: a bit that
+    /// means two things is a bit that gets granted for one of them. The
+    /// nearest candidate was [`SET_HOSTNAME`](Self::SET_HOSTNAME), and
+    /// folding it in would mean that granting "may rename the machine"
+    /// silently also granted "may decide what every key on it types".
+    /// Those are not the same authority and are not wanted by the same
+    /// callers: a container that sets its own hostname has no business
+    /// remapping the host console.
+    ///
+    /// **Why this is a real privilege and not cosmetic.** A layout decides
+    /// what character each scancode produces for *every* reader of the
+    /// console, including a password prompt. Remapping it is close to a
+    /// keylogger's inverse -- it does not observe what is typed, it
+    /// decides it.
+    pub const SET_KEYLAYOUT: Self = Self(1 << 21);
+
     /// Every distinct right, in declaration order.
     ///
     /// Exists so that [`the aliasing assertion below`](self) can be stated
     /// once over the whole set rather than pairwise by hand. Convenience
     /// *combinations* (`ALL`, `READ_ONLY`, …) are deliberately absent — they
     /// are unions of these and would defeat the check.
-    const DISTINCT: [Self; 15] = [
+    const DISTINCT: [Self; 16] = [
         Self::READ,
         Self::WRITE,
         Self::EXECUTE,
@@ -197,6 +218,7 @@ impl Rights {
         Self::SET_CREDENTIALS,
         Self::MEMORY_LOCK,
         Self::SET_HOSTNAME,
+        Self::SET_KEYLAYOUT,
     ];
 
     // --- Convenience combinations ---
@@ -251,7 +273,20 @@ impl Rights {
             | Self::DEBUG.0
             | Self::SET_CREDENTIALS.0
             | Self::MEMORY_LOCK.0
-            | Self::SET_HOSTNAME.0,
+            | Self::SET_HOSTNAME.0
+            // Added deliberately, which is the whole point of this list
+            // being enumerated rather than `ALL`. init holds
+            // `SET_KEYLAYOUT`, and so does every descendant nothing has
+            // narrowed, because `fork` clones the table and the grant is
+            // class-wide (`resource_id == 0`). Said plainly here rather
+            // than left to be discovered: 927 was written the other way
+            // round, recording that nothing held a right PID 1 held the
+            // instant the bit existed.
+            //
+            // Granted rather than withheld because the alternative is a
+            // syscall nobody can invoke -- which is the same defect
+            // `SYS_KEYLAYOUT_SET` was added to fix, one layer further in.
+            | Self::SET_KEYLAYOUT.0,
     );
 
     /// What the init process is granted on [`ResourceType::File`].
@@ -286,7 +321,12 @@ impl Rights {
             | Self::DEBUG.0
             | Self::SET_CREDENTIALS.0
             | Self::MEMORY_LOCK.0
-            | Self::SET_HOSTNAME.0,
+            | Self::SET_HOSTNAME.0
+            // Per 930: these lists enumerate every right that exists, as
+            // bookkeeping and not as a tightening. Omitting the bit here
+            // would be a narrowing smuggled in under an unrelated feature,
+            // and 930 rejected narrowing as a separate, larger change.
+            | Self::SET_KEYLAYOUT.0,
     );
 
     /// What the init process is granted on [`ResourceType::Socket`].
@@ -308,7 +348,9 @@ impl Rights {
             | Self::DEBUG.0
             | Self::SET_CREDENTIALS.0
             | Self::MEMORY_LOCK.0
-            | Self::SET_HOSTNAME.0,
+            | Self::SET_HOSTNAME.0
+            // Per 930, as for `INIT_FILE` above.
+            | Self::SET_KEYLAYOUT.0,
     );
 
     /// No rights.
@@ -434,7 +476,7 @@ const _: () = {
 /// mechanism. `design-decisions.md` §928.
 const _: () = {
     assert!(
-        Rights::DISTINCT.len() == 15,
+        Rights::DISTINCT.len() == 16,
         "a right was added or removed. Decide, SEPARATELY FOR EACH OF THE THREE \
          CLASSES init is granted, whether it should hold the new right: add it \
          to Rights::INIT_PROCESS, Rights::INIT_FILE and Rights::INIT_SOCKET as \

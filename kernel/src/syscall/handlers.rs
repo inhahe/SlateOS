@@ -6996,18 +6996,33 @@ pub fn sys_signal_altstack(args: &SyscallArgs) -> SyscallResult {
 /// value. That is the class of defect this syscall pair was added to end.
 use crate::uname::NODENAME_MAX as UTS_NAME_MAX;
 
-/// Read a UTS name out of user memory and hand it to `apply`.
+/// Read a short name out of user memory, behind `right`, and hand it to
+/// `apply`.
 ///
-/// Shared by both setters rather than written twice. The two differ only in
-/// which field they write, and a capability check, a length bound, a null test,
-/// a user copy and a UTF-8 validation copied into two functions is five chances
-/// for the pair to drift apart -- which for a permission check means one of them
-/// silently stops having one.
-fn uts_name_set(
+/// Shared by all three setters rather than written three times. They differ
+/// only in which field they write and which right gates them, and a
+/// capability check, a length bound, a null test, a user copy and a UTF-8
+/// validation copied into three functions is five chances for them to drift
+/// apart -- which for a permission check means one of them silently stops
+/// having one.
+///
+/// The right is a **parameter**, not a constant, because the third caller
+/// sets the keyboard layout and must not be gated on permission to rename
+/// the machine. Hard-coding it is what made this worth generalising rather
+/// than copying.
+///
+/// The 64-byte bound is `NODENAME_MAX`, shared by all three. It is a UTS
+/// limit and a keyboard layout is not a UTS name; it is reused because a
+/// layout name is a short identifier (`us`, `dvorak`, `de`) for which 64 is
+/// not a constraint anyone will meet, and a second bound would be a second
+/// thing to keep in step for no gain. If a layout name ever needs to be
+/// longer, that is the moment to split them, not before.
+fn name_set_gated(
     args: &SyscallArgs,
+    right: crate::cap::Rights,
     apply: fn(&str) -> crate::error::KernelResult<()>,
 ) -> SyscallResult {
-    use crate::cap::{ResourceType, Rights};
+    use crate::cap::ResourceType;
     use crate::proc::thread;
 
     let task_id = sched::current_task_id();
@@ -7019,7 +7034,7 @@ fn uts_name_set(
     // about argument validity it was not entitled to ask. Same ordering as the
     // Linux-ABI handler and as Linux itself, where CAP_SYS_ADMIN precedes the
     // length check.
-    if !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_HOSTNAME) {
+    if !pcb::has_capability_type(pid, ResourceType::Process, right) {
         return SyscallResult::err(KernelError::PermissionDenied);
     }
 
@@ -7074,7 +7089,11 @@ fn uts_name_set(
 /// for why this exists and why no getter is paired with it.
 pub fn sys_hostname_set(args: &SyscallArgs) -> SyscallResult {
     crate::fs::nameservice::init_defaults();
-    uts_name_set(args, crate::fs::nameservice::set_hostname)
+    name_set_gated(
+        args,
+        crate::cap::Rights::SET_HOSTNAME,
+        crate::fs::nameservice::set_hostname,
+    )
 }
 
 /// `SYS_DOMAINNAME_SET` — set the system NIS/YP domain name.
@@ -7082,7 +7101,42 @@ pub fn sys_hostname_set(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: pointer to UTF-8 bytes. `arg1`: length, 0..=64; 0 clears the name.
 pub fn sys_domainname_set(args: &SyscallArgs) -> SyscallResult {
     crate::fs::nameservice::init_defaults();
-    uts_name_set(args, crate::fs::nameservice::set_domain)
+    name_set_gated(
+        args,
+        crate::cap::Rights::SET_HOSTNAME,
+        crate::fs::nameservice::set_domain,
+    )
+}
+
+/// `SYS_KEYLAYOUT_SET` — set the console keyboard layout.
+///
+/// `arg0`: pointer to UTF-8 bytes naming a registered layout. `arg1`:
+/// length, 0..=64; 0 clears the mapping and restores the identity layout.
+///
+/// Gated on `(Process, SET_KEYLAYOUT)` rather than `SET_HOSTNAME`: a layout
+/// decides what character every scancode produces for every reader of the
+/// console, including a password prompt, which is not the same authority as
+/// renaming the machine.
+///
+/// `NotFound` when no such layout is registered -- `keylayout::set_active`
+/// validates that, so an unknown name is refused rather than stored and
+/// silently ignored.
+///
+/// See `number.rs`'s
+/// [`SYS_KEYLAYOUT_SET`](crate::syscall::number::SYS_KEYLAYOUT_SET) for why
+/// this exists and why no getter is paired with it.
+pub fn sys_keylayout_set(args: &SyscallArgs) -> SyscallResult {
+    // The layout table has to exist before a name can be looked up in it. A
+    // failure here is a kernel-side problem rather than anything the caller
+    // did, so it is surfaced rather than swallowed.
+    if let Err(e) = crate::fs::keylayout::init_defaults() {
+        return SyscallResult::err(e);
+    }
+    name_set_gated(
+        args,
+        crate::cap::Rights::SET_KEYLAYOUT,
+        crate::fs::keylayout::set_active,
+    )
 }
 
 /// `SYS_SIGNAL_SEND` — post a signal to a target process.

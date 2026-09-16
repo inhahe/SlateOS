@@ -66,6 +66,23 @@ const CANNOT_CONVERT_LINES: [&str; 3] = [
     "Nothing will ever reach Completed here -- do not delete an original on the strength of this queue.",
 ];
 
+/// What the settings panel says above the controls it draws.
+///
+/// `CANNOT_CONVERT_LINES` covers the queue. This covers the panel, which was
+/// the half those three lines did not reach: a person who reads "nothing will
+/// ever reach Completed" has been told the QUEUE does not run, and may still
+/// reasonably believe the quality and codec they picked are what would be used
+/// if it did.
+///
+/// **They are not used by anything at all.** `find-echoed-settings.py` found
+/// six fields here whose only readers are the labels below -- `quality`,
+/// `strip_metadata`, `preserve_aspect`, `video_codec`, `audio_codec`,
+/// `two_pass`. The panel reads the value in order to draw the value. So the
+/// one thing setting it does is confirm itself, which is the most persuasive
+/// form of a false claim a program can make, because the evidence is the
+/// program's own output at the moment the operator is checking.
+const SETTINGS_NOT_APPLIED: &str = "Not applied: nothing reads these except this panel.";
+
 const SIDEBAR_WIDTH: f32 = 300.0;
 const SETTINGS_PANEL_WIDTH: f32 = 280.0;
 const TOOLBAR_HEIGHT: f32 = 40.0;
@@ -2193,6 +2210,21 @@ impl MediaConvertApp {
         let max_w = width - 24.0;
         let mut cy = y + 12.0;
 
+        // Above every control, not beside one of them: the claim is about all
+        // of them, and a note attached to the first would read as being about
+        // the first.
+        cmds.push(RenderCommand::Text {
+            x: lx,
+            y: cy,
+            text: SETTINGS_NOT_APPLIED.to_owned(),
+            color: self.palette.subtext0,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cy += 22.0;
+
         // Output format
         cmds.push(RenderCommand::Text {
             x: lx,
@@ -2684,11 +2716,15 @@ mod tests {
                 "the window never said {line:?}"
             );
         }
+        // This used to assert over `CANNOT_CONVERT_LINES` itself, which is a
+        // test of a const array wearing the clothes of a test of the window:
+        // it passes with the renderer drawing nothing at all. The subject has
+        // to be what was drawn.
         assert!(
-            CANNOT_CONVERT_LINES
+            texts
                 .iter()
-                .any(|l| l.contains("do not delete an original")),
-            "nothing warns against acting on a queue that cannot run",
+                .any(|t| t.contains("do not delete an original")),
+            "the window never warned against acting on a queue that cannot run",
         );
     }
 
@@ -3472,6 +3508,51 @@ mod tests {
         assert_eq!(stats.total, 1);
         assert_eq!(stats.successful, 1);
         assert_eq!(stats.total_space_saved, 500);
+    }
+
+    /// The settings panel says the settings are not applied.
+    ///
+    /// `CANNOT_CONVERT_LINES` tells the reader the QUEUE will not run. That
+    /// leaves the panel, and a person who has read those three lines may still
+    /// reasonably believe the quality and codec they picked are the ones that
+    /// would be used if it did. They are not used by anything: the six fields
+    /// behind these labels are read by the labels and by nothing else, so the
+    /// one thing setting them does is confirm itself.
+    ///
+    /// Found by `scripts/find-echoed-settings.py`. The control below is what
+    /// keeps this from passing against a panel that draws nothing at all --
+    /// which is how the sibling assertion in
+    /// `the_window_says_it_cannot_convert_anything` used to pass, by testing
+    /// the const array rather than the window.
+    #[test]
+    fn the_settings_panel_says_the_settings_are_not_applied() {
+        let mut app = MediaConvertApp::new();
+        app.add_source("/a", "clip.mkv", 5000, MediaCategory::Video);
+        let texts: Vec<String> = app
+            .render_commands(1280.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t.contains("Video:")),
+            "control: the panel must be drawing a setting for this to be about \
+anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        // Against the WORDS, not against the constant. `t == SETTINGS_NOT_APPLIED`
+        // passes with the constant rewritten to "Settings", which is the same
+        // shape as asserting over the const array two tests up: the subject
+        // has to be what a reader would see.
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("nothing reads these")),
+            "the panel drew settings and did not say they are not applied"
+        );
     }
 
     #[test]

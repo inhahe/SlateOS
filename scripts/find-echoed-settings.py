@@ -153,6 +153,71 @@ def in_any_span(pos: int, spans: list[tuple[int, int]]) -> bool:
     return any(a <= pos < b for a, b in spans)
 
 
+def top_level_args(code: str, span: tuple[int, int]) -> list[tuple[int, int]]:
+    """Spans of the macro's own comma-separated arguments, nesting excluded."""
+    a, b = span
+    out, start, depth = [], a, 0
+    for i in range(a, b):
+        c = code[i]
+        if c in OPEN_TO_CLOSE:
+            depth += 1
+        elif c in (")", "]", "}"):
+            depth -= 1
+        elif c == "," and depth == 0:
+            out.append((start, i))
+            start = i + 1
+    out.append((start, b))
+    return out
+
+
+_PASSED_ON = re.compile(r"\([^)]")
+
+
+def directly_interpolated(code: str, pos: int, spans: list[tuple[int, int]]) -> bool:
+    """Does the value at `pos` reach the reader verbatim, bound to a `{}`?
+
+    **The distinction, in two lines that look identical to a span check:**
+
+        format!("idle_timeout={}s", cfg.idle_timeout)   // 600 reaches the
+                                                        // operator -- ECHO
+        format_temp(t, cfg.fahrenheit)                  // nothing prints
+                                                        // "true" -- it picks
+                                                        // a rendering
+
+    Both are reads inside a print. Only the first is the setting confirming
+    itself. The second is what a *correct* display flag looks like: its whole
+    job is to change output, so "read only into output" is not evidence
+    against it. Lane B triaged twelve of this checker's hits and four were
+    this shape -- `acpi`'s `fahrenheit`, `arp`'s `numeric`, both of
+    `objdump`'s `radix` -- the largest single class of false positive.
+
+    The test is whether the field sits in a top-level macro argument that
+    hands nothing to a function: no `(` followed by anything but `)`. So
+    `cfg.idle_timeout` qualifies, `cfg.path.display()` qualifies (empty parens
+    -- still shown verbatim), and `format_nm_value(sym.st_value, opts.radix)`
+    does not.
+
+    Per-use, and it composes with the per-struct rule rather than replacing
+    it: a struct still has to have an acting sibling before any of this is
+    consulted.
+    """
+    # **Every containing span, not the first.** Macros nest -- a GUI app
+    # writes `println!("{}", format!("q={}", cfg.quality))` and a toolkit
+    # label is `push_str(&format!(...))`. The outer macro's top-level argument
+    # is the whole inner call, which hands something to a function, so judging
+    # by the first span found would call a plain interpolation a rendering
+    # selector. Any span in which the value is bound directly makes it an echo.
+    for span in spans:
+        if not (span[0] <= pos < span[1]):
+            continue
+        for a, b in top_level_args(code, span):
+            if a <= pos < b:
+                arg = code[a:b].strip().lstrip("&*").strip()
+                if not _PASSED_ON.search(arg):
+                    return True
+    return False
+
+
 def struct_fields(code: str) -> dict[str, list[str]]:
     """Field names per struct, from a brace-matched body."""
     out: dict[str, list[str]] = {}
@@ -265,6 +330,13 @@ def analyse(
                     # may well be data. The second is ranked below, not
                     # dropped: `mediaconvert`'s settings panel builds its
                     # labels with `format!` and is a true positive.
+                    # A field every one of whose reads is handed to some
+                    # other function is selecting a rendering, not being
+                    # shown. Cleared, not ranked: unlike the format!/println!
+                    # split this is not a confidence question, it is a
+                    # different thing entirely.
+                    if not any(directly_interpolated(code, p, spans) for p in reads):
+                        continue
                     shown = any(in_any_span(p, shown_spans) for p in reads)
                     echoed.append((f, shown))
                 elif stranded is not None:
@@ -432,6 +504,59 @@ impl ImageSettings {
            analyse(called, all_structs=False, stranded=bucket2),
            [("ImageSettings", "quality", False)])
     expect("...with nothing left in the stranded bucket", bucket2, [])
+
+    # --- bound to a {} vs handed to a function -------------------------------
+    # `userspace/acpi`'s `fahrenheit`, `arp`'s `numeric`, `objdump`'s two
+    # `radix` fields: a display flag's whole job is to change output, so "read
+    # only into output" is what a CORRECT one looks like. Nothing ever prints
+    # the word "true". Four of lane B's twelve triaged hits were this shape --
+    # the largest single class of false positive this checker had.
+    selects_rendering = """
+struct Config {
+    pub fahrenheit: bool,
+    pub verbose: bool,
+}
+fn main() { report(&cfg()); }
+fn report(cfg: &Config) {
+    println!("{}", format_temp(read_temp(), cfg.fahrenheit));
+    if cfg.verbose { trace(); }
+}
+"""
+    expect("a flag handed to a formatter is not an echo",
+           analyse(selects_rendering, all_structs=False), [])
+
+    # The same struct, the same macro, the value bound to the placeholder.
+    echoes = selects_rendering.replace(
+        'println!("{}", format_temp(read_temp(), cfg.fahrenheit));',
+        'println!("fahrenheit={}", cfg.fahrenheit);',
+    )
+    expect("...and the same field bound to a {} is",
+           analyse(echoes, all_structs=False), [("Config", "fahrenheit", True)])
+
+    # Macros nest. Judging by the first containing span would read the outer
+    # macro's argument -- the whole inner call -- and call this a rendering
+    # selector. A GUI app writes exactly this shape.
+    nested = selects_rendering.replace(
+        'println!("{}", format_temp(read_temp(), cfg.fahrenheit));',
+        'println!("{}", format!("fahrenheit={}", cfg.fahrenheit));',
+    )
+    expect("a value interpolated inside a nested format! is still an echo",
+           analyse(nested, all_structs=False), [("Config", "fahrenheit", True)])
+
+    # An empty-paren method chain is still the value reaching the reader.
+    displayed = """
+struct Options {
+    pub path: PathBuf,
+    pub verbose: bool,
+}
+fn main() { show(&opts()); }
+fn show(o: &Options) {
+    println!("path={}", o.path.display());
+    if o.verbose { trace(); }
+}
+"""
+    expect("a display()/to_string() chain is still verbatim",
+           analyse(displayed, all_structs=False), [("Options", "path", True)])
 
     # --- shown vs merely formatted ------------------------------------------
     # `userspace/curl`'s `user_agent` goes into a request header built with

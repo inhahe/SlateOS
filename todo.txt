@@ -57349,6 +57349,29 @@ They now check the subject exists (which is real work, and most of the value:
 not implemented, exiting non-zero. A script that checks the exit status is no
 longer told it worked.
 
+**Correction, 2026-09-15: that was true of the session, user and seat
+commands and NOT of the five power ones**, which went on printing
+"Requesting poweroff..." and exiting 0 until today. The paragraph above said
+"and the five power ones" in its list and then described a fix that had not
+reached them.
+
+The reason the two halves diverged is worth keeping, because it is why
+reading the file did not show it. `run_loginctl` builds a fresh local
+`Daemon` and runs the command against that. An empty table makes every
+LOOKUP fail -- so `terminate-session` really does exit non-zero, and looks
+fixed -- and makes every POLICY QUESTION pass, because nothing inhibits and
+the default config allows. `request_power_action` therefore returned
+`Allowed` every time, and the `Allowed` arm was the one that claimed
+success. The same emptiness that made one half safe made the other half
+lie.
+
+Fixed now: the `Allowed` arm says the action is permitted and that this
+build cannot perform it, and exits non-zero. Both halves are stated because
+both are true and they have different remedies -- policy allows it, and
+there is no transport. A regression test asserts the exit status for all
+four actions and for `--force`, which was the likelier spelling to be
+trusted.
+
 **What each would need.**
 
 *The session, user and seat commands* need something to act on. `logind` keeps
@@ -58279,3 +58302,54 @@ reversible, none of them putting a new question to the operator.
 Blocked only on the running boot: all of this is in `kernel/src`, and
 `boot-test.sh` digests `kernel/src/**/*.rs` mid-run to set BT_SRC_CHANGED, so
 editing now would invalidate a 20-minute run's verdict about the committed tree.
+
+## find-echoed-settings: twelve of userspace's 35 triaged, none a defect (lane B, 2026-09-15)
+
+Lane C's `scripts/find-echoed-settings.py --roots=userspace` reports **35
+settings read only into output**, 24 reaching a `println!`/`write!` and 11
+built only with `format!`, across 19 files. I read twelve of them. None is the
+defect the tool is named for. Recorded here so the next tick does not re-derive
+it.
+
+The tool is worth having -- it found `logind`'s `DaemonConfig.idle_timeout`,
+which is the case logind's own docstring describes: "the one thing the setting
+does is CONFIRM ITSELF". That one is real and already documented in
+`INERT_CONFIG_KEYS`.
+
+**What the other eleven are, by shape.**
+
+*The value SELECTS a rendering rather than appearing in one.* `acpi`'s
+`fahrenheit` reaches `format_temp(t, cfg.fahrenheit)`, which branches on it;
+`arp`'s `numeric` branches inside `display()`; `objdump`'s two `radix` fields
+reach `format_nm_value(sym.st_value, opts.radix)`, which picks the base. A
+display flag's entire job is to change output, so "read only into output" is
+what a correct one looks like.
+
+*The format! builds DATA that is then written.* `losetup`'s five setup options
+(`offset`, `sizelimit`, `read_only`, `partscan`, `direct_io`) are formatted
+into a `setup … offset=… sizelimit=…` command string and handed to
+`fs::write(LOOP_CONTROL, …)`. Lane C found this shape for `curl`'s
+`user_agent` becoming a request header; `fs::write` is a function rather than
+a macro, so it does not look like output to a scanner keyed on `println!`.
+
+*The program refuses, and the echo names what it refused.* `lp`'s `printer` is
+parsed and unread because `lp` exits non-zero saying "cannot queue a print job:
+nothing on this system prints", with a test called
+`lp_refuses_rather_than_reporting_a_queued_job`. Same shape as `unshare`: the
+parsed value is a record of what was asked for, which the refusal can name.
+
+*Already recorded.* `firejail`'s `shell` is read only by a whole-config debug
+dump, in a program whose own comment at main.rs:1080 is "6. exec() the target
+program" -- it does not sandbox, which known-issues.md:355 already says.
+
+**The discriminator that separates these from the real thing** is whether the
+field is interpolated DIRECTLY into a format string, or passed onward as a
+parameter. `format!("idle_timeout={}s", cfg.idle_timeout)` puts 600 in front of
+the operator verbatim -- that is an echo. `format_temp(t, cfg.fahrenheit)` does
+not put `true` anywhere; it changes how something else is rendered. Sent to
+lane C; theirs to act on or not.
+
+**Not a criticism of the tool.** A scanner that reports 35 where 1 is real is
+still the reason the 1 was found, and every false positive here took under a
+minute to clear by reading. The cost is that a future reader will re-clear them
+unless the triage is written down, which is what this entry is for.

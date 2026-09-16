@@ -667,6 +667,53 @@ impl Inhibitor {
     }
 }
 
+/// Why a [`Daemon::kill_session`] did not happen.
+///
+/// An enum rather than a message string, because two callers need these and
+/// they need them differently: `bus::dispatch` turns each into its own
+/// `system.logind.Error.*` name, and `loginctl` turns each into a sentence.
+/// A `&'static str` would have made one of those two match on the other's
+/// wording -- and `terminate_session` beside it already shows the other
+/// failure, collapsing every cause into `NoSuchSession` so that a caller
+/// denied permission is told the session does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillError {
+    /// No session with that id.
+    NoSuchSession,
+    /// The session has no leader pid, or one that is not a pid.
+    ///
+    /// Distinct from the rest because `libcall::kill` refuses a non-positive
+    /// pid: `kill(2)` reads it as a process GROUP, and 0 is the caller's own.
+    /// `Session::new` defaults `leader_pid` to 0, so this is the ordinary
+    /// state of a session registered without one, not a corruption.
+    NoLeaderPid,
+    /// EPERM. Worth its own case: a manager that hides the session instead
+    /// cannot explain why it is gone.
+    NotPermitted,
+    /// ESRCH -- the leader exited already. Ordinary rather than exceptional:
+    /// a process list is a photograph of something moving.
+    LeaderGone,
+    /// ENOSYS. A fact about the build, not about the session, which is why it
+    /// must not be reported as either of the two above.
+    Unsupported,
+    /// Any other errno.
+    Failed,
+}
+
+impl KillError {
+    /// A sentence for a person.
+    fn message(self) -> &'static str {
+        match self {
+            Self::NoSuchSession => "no such session",
+            Self::NoLeaderPid => "session has no leader pid",
+            Self::NotPermitted => "not permitted to signal the session leader",
+            Self::LeaderGone => "the session leader is gone",
+            Self::Unsupported => "this build cannot signal a process",
+            Self::Failed => "failed to signal the session leader",
+        }
+    }
+}
+
 /// Power action request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PowerAction {
@@ -1347,12 +1394,49 @@ impl Daemon {
     }
 
     /// Send a signal to all processes in a session.
-    fn kill_session(&self, session_id: &str, _signal: i32) -> Result<u32, &'static str> {
-        let session = self.sessions.get(session_id).ok_or("session not found")?;
-        // In a real implementation this would walk the session's cgroup and
-        // send the signal to every process. We return the leader PID to
-        // indicate the target.
-        Ok(session.leader_pid)
+    /// Send `signal` to the session's leader, and report which pid it went to.
+    ///
+    /// See [`KillError`] for the failure cases and why they are distinct.
+    ///
+    /// It used to look the session up, return `leader_pid`, and send nothing,
+    /// while `loginctl` printed "Sent signal 15 to session 3 (leader PID
+    /// 412)." -- a present-tense claim about a signal that did not exist. The
+    /// `_signal` parameter's underscore was the whole defect, visible in the
+    /// signature.
+    ///
+    /// # The leader only, not the session's processes
+    ///
+    /// systemd signals every process in the session's cgroup. There are no
+    /// cgroups here, and walking `/proc` for children would be a different
+    /// and much larger piece of work with its own races. Signalling the
+    /// leader is what this does and what it says: the caller is told the pid,
+    /// so a caller that wanted the whole tree can see it did not get one.
+    ///
+    /// # Errors
+    ///
+    /// * `session not found`.
+    /// * `session has no leader pid` -- a session registered with 0, which
+    ///   `libcall::kill` refuses because a non-positive pid means a process
+    ///   GROUP and would signal the caller's own.
+    /// * `not permitted to signal the session leader` -- EPERM.
+    /// * `the session leader is gone` -- ESRCH, which is ordinary rather than
+    ///   exceptional: a leader can exit between a listing and a keypress.
+    /// * `this build cannot signal a process` -- ENOSYS, which is every
+    ///   non-SlateOS target, including the one the tests run on.
+    fn kill_session(&self, session_id: &str, signal: i32) -> Result<u32, KillError> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .ok_or(KillError::NoSuchSession)?;
+        let pid = i32::try_from(session.leader_pid).map_err(|_| KillError::NoLeaderPid)?;
+        match libcall::kill(pid, signal) {
+            Ok(()) => Ok(session.leader_pid),
+            Err(libcall::EINVAL) => Err(KillError::NoLeaderPid),
+            Err(libcall::EPERM) => Err(KillError::NotPermitted),
+            Err(libcall::ESRCH) => Err(KillError::LeaderGone),
+            Err(libcall::ENOSYS) => Err(KillError::Unsupported),
+            Err(_) => Err(KillError::Failed),
+        }
     }
 
     /// Send a signal to all processes belonging to a user.
@@ -1935,28 +2019,123 @@ fn parse_loginctl_args(args: &[String]) -> LoginctlCommand {
     }
 }
 
+/// Print a session listing from lines the daemon produced.
+///
+/// Takes the lines rather than the sessions so that the same printing serves
+/// the bus client, which never has a `Session` -- `ListSessions` returns
+/// `Session::format_list_line`'s output already rendered, and re-parsing it
+/// into a struct here so it could be re-rendered would be two formats to keep
+/// in step for no gain.
+fn print_session_list(out: &mut impl Write, lines: &[String]) {
+    let _ = writeln!(
+        out,
+        "{:<8} {:<6} {:<16} {:<12} TTY",
+        "SESSION", "UID", "USER", "SEAT"
+    );
+    for line in lines {
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = writeln!(out, "\n{} sessions listed.", lines.len());
+}
+
+/// `loginctl list-sessions`, asking the daemon.
+///
+/// # Why this does not go through `run_loginctl_command`
+///
+/// That function takes a `Daemon`, and the one `run_loginctl` builds is local
+/// and empty. Listing it printed a header, no rows, "0 sessions listed." and
+/// exited 0 -- an assertion that the machine has no sessions, made without
+/// asking the machine. `login` registers real ones over this same bus.
+///
+/// # A failure to reach the daemon is a failure
+///
+/// Not an empty list. The two are indistinguishable on the terminal and
+/// opposite in meaning, and the previous behaviour picked the wrong one
+/// silently. Exiting non-zero is what lets a script tell them apart.
+fn list_sessions_via_bus() -> i32 {
+    // `bus::SERVICE_NAME`, not a second copy of the string. `userspace/login`
+    // keeps its own `LOGIND_SERVICE` because `bus` is a module of this binary
+    // and not a crate it can import; the two agree today, and todo.txt already
+    // records this pair drifting apart once -- `loginctl`'s `SESSION_DIR` was
+    // `/run/sessions` while `logind`'s was `/run/systemd/sessions`. Inside this
+    // binary there is no excuse for a second copy.
+    let mut conn = match libservicebus::Connection::connect(bus::SERVICE_NAME) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(
+                io::stderr(),
+                "loginctl: cannot reach {}: {e:?}",
+                bus::SERVICE_NAME
+            );
+            return 1;
+        }
+    };
+    let reply = match conn.call("ListSessions", &libservicebus::fields::encode(&[])) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "loginctl: ListSessions failed: {e:?}");
+            return 1;
+        }
+    };
+    let Some(fields) = libservicebus::fields::decode(&reply.payload) else {
+        let _ = writeln!(
+            io::stderr(),
+            "loginctl: ListSessions returned a reply this build cannot decode"
+        );
+        return 1;
+    };
+    // Lossy is wrong for a path and right for a listing that is about to be
+    // printed: these lines are logind's own rendering of its own ids, uids and
+    // user names, so a byte that is not text means the daemon is not the one
+    // this build expects -- and showing the replacement character says so
+    // where discarding the line would not.
+    let lines: Vec<String> = fields
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .collect();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    print_session_list(&mut out, &lines);
+    0
+}
+
 /// Execute a loginctl command.
 ///
-/// In a real implementation, these would communicate with the logind daemon
-/// via D-Bus. Here we operate on a local `Daemon` instance to demonstrate
-/// the logic and enable thorough testing.
+/// # This operates on a LOCAL `Daemon`, not the running one
+///
+/// `run_loginctl` constructs a fresh `Daemon` and passes it here, so every
+/// answer below is about an object created microseconds earlier and not about
+/// the daemon holding the machine's sessions. `login` registers real sessions
+/// over the bus (`CreateSession`, src/bus.rs), and none of them are visible
+/// here.
+///
+/// That has opposite effects on the two kinds of subcommand, which is why the
+/// state of this file is easy to misread:
+///
+/// * Anything that LOOKS SOMETHING UP fails, because the local table is
+///   empty. `terminate-session 5` reports "no such session" and exits
+///   non-zero. Safe, and safe by accident rather than by design.
+/// * Anything that asks a POLICY QUESTION passes, because an empty table
+///   inhibits nothing and the default config allows everything. That is what
+///   let the power commands report success for an action nobody attempted.
+///
+/// See known-issues.md -> "loginctl is nominally logind's client and never
+/// speaks to it", and todo.txt -> "loginctl can inspect sessions and cannot
+/// change them".
 fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
     match cmd {
         LoginctlCommand::ListSessions => {
-            let _ = writeln!(
-                out,
-                "{:<8} {:<6} {:<16} {:<12} TTY",
-                "SESSION", "UID", "USER", "SEAT"
-            );
+            // Reached only by the tests, which use it to check the FORMATTING
+            // against a daemon they populated themselves. The real command
+            // goes through `list_sessions_via_bus` in `run_loginctl`, because
+            // the `daemon` here is a local object with nothing in it.
             let mut sessions: Vec<&Session> = daemon.sessions.values().collect();
             sessions.sort_by(|a, b| a.id.cmp(&b.id));
-            for session in &sessions {
-                let _ = writeln!(out, "{}", session.format_list_line());
-            }
-            let _ = writeln!(out, "\n{} sessions listed.", sessions.len());
+            let lines: Vec<String> = sessions.iter().map(|s| s.format_list_line()).collect();
+            print_session_list(&mut out, &lines);
             0
         }
         LoginctlCommand::ListUsers => {
@@ -2134,7 +2313,11 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
                     0
                 }
                 Err(e) => {
-                    let _ = writeln!(io::stderr(), "loginctl: failed to kill session: {e}");
+                    let _ = writeln!(
+                        io::stderr(),
+                        "loginctl: cannot kill session {id}: {}",
+                        e.message()
+                    );
                     1
                 }
             }
@@ -2167,16 +2350,14 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
             }
         }
         LoginctlCommand::PowerOff(force) => {
-            handle_power_command(&mut out, daemon, PowerAction::PowerOff, *force)
+            handle_power_command(daemon, PowerAction::PowerOff, *force)
         }
-        LoginctlCommand::Reboot(force) => {
-            handle_power_command(&mut out, daemon, PowerAction::Reboot, *force)
-        }
+        LoginctlCommand::Reboot(force) => handle_power_command(daemon, PowerAction::Reboot, *force),
         LoginctlCommand::Suspend(force) => {
-            handle_power_command(&mut out, daemon, PowerAction::Suspend, *force)
+            handle_power_command(daemon, PowerAction::Suspend, *force)
         }
         LoginctlCommand::Hibernate(force) => {
-            handle_power_command(&mut out, daemon, PowerAction::Hibernate, *force)
+            handle_power_command(daemon, PowerAction::Hibernate, *force)
         }
         LoginctlCommand::Help => {
             let _ = writeln!(
@@ -2214,18 +2395,30 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
 }
 
 /// Handle power action commands (poweroff/reboot/suspend/hibernate).
-fn handle_power_command(
-    out: &mut io::StdoutLock<'_>,
-    daemon: &Daemon,
-    action: PowerAction,
-    force: bool,
-) -> i32 {
+fn handle_power_command(daemon: &Daemon, action: PowerAction, force: bool) -> i32 {
     match daemon.request_power_action(action, force) {
         PowerActionResult::Allowed => {
-            let _ = writeln!(out, "Requesting {}...", action.as_str());
-            // In a real system, this would issue the syscall or send a D-Bus
-            // message to the daemon.
-            0
+            // Permitted, and not performed. It used to print "Requesting
+            // poweroff..." and exit 0, which is indistinguishable to a script
+            // or a person from a machine that is going down -- and nothing
+            // was sent anywhere. The comment where this stood said "in a real
+            // system, this would issue the syscall or send a D-Bus message to
+            // the daemon", which is an accurate description of what was
+            // missing sitting directly above a line that claimed it was not.
+            //
+            // Both halves are said because both are true and they have
+            // different remedies: policy allows it, and there is no transport.
+            // `userspace/powerctl` already reaches the service manager over
+            // IPC and is the destination to wire this to; todo.txt's
+            // "loginctl can inspect sessions and cannot change them" has the
+            // detail.
+            let _ = writeln!(
+                io::stderr(),
+                "loginctl: {} is permitted, but this build cannot perform it: \
+                 loginctl is not connected to the service manager",
+                action.as_str()
+            );
+            1
         }
         PowerActionResult::Inhibited => {
             let _ = writeln!(
@@ -2249,6 +2442,12 @@ fn handle_power_command(
 /// Run the loginctl personality.
 fn run_loginctl(args: &[String]) -> i32 {
     let cmd = parse_loginctl_args(args);
+    // The commands that have a bus method go to the daemon. The rest still run
+    // against a local `Daemon` -- see `run_loginctl_command`'s doc comment for
+    // what that costs and why the two halves behave differently.
+    if matches!(cmd, LoginctlCommand::ListSessions) {
+        return list_sessions_via_bus();
+    }
     let config = DaemonConfig::default();
     let mut daemon = Daemon::new(config, authlib::Authenticator::new());
     run_loginctl_command(&mut daemon, &cmd)
@@ -3202,6 +3401,36 @@ mod tests {
 
     // --- Power action requests ---
 
+    /// `loginctl poweroff` must not report a shutdown it did not request.
+    ///
+    /// It printed "Requesting poweroff..." and exited 0 while sending nothing
+    /// anywhere -- the exact shape lane C filed 2,288 of, in logind's own
+    /// client. A script testing the exit status was told the machine was
+    /// going down.
+    ///
+    /// The exit status is what this asserts, not the wording: a caller that
+    /// reads stdout is unusual, and a caller that reads `$?` is every shell
+    /// script ever written.
+    #[test]
+    fn a_power_command_does_not_report_success_for_an_action_it_cannot_perform() {
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
+        for cmd in [
+            LoginctlCommand::PowerOff(false),
+            LoginctlCommand::Reboot(false),
+            LoginctlCommand::Suspend(false),
+            LoginctlCommand::Hibernate(false),
+            // --force too: overriding an inhibitor does not conjure a
+            // transport, and this was the likelier spelling to be trusted.
+            LoginctlCommand::PowerOff(true),
+        ] {
+            assert_ne!(
+                run_loginctl_command(&mut d, &cmd),
+                0,
+                "{cmd:?} reported success for an action nothing performed"
+            );
+        }
+    }
+
     #[test]
     fn test_power_action_allowed() {
         let d = Daemon::new(DaemonConfig::default(), test_verifier());
@@ -3357,11 +3586,56 @@ mod tests {
 
     // --- Kill session/user ---
 
+    /// The host cannot signal, and says so rather than reporting a send.
+    ///
+    /// This test used to be `let pid = d.kill_session("1", 15).unwrap();
+    /// assert_eq!(pid, 100)` -- which passed because `kill_session` looked the
+    /// session up, returned `leader_pid` and sent nothing. The `_signal`
+    /// parameter's underscore was the defect written into the signature, and
+    /// the test certified it.
+    ///
+    /// On any target that is not SlateOS, `libcall::kill` answers ENOSYS. So
+    /// this pins the FAILURE path, which is the only one this host can reach,
+    /// and a green run means "logind says so when it cannot signal" rather
+    /// than "killing works". The other half needs a boot test.
     #[test]
-    fn test_kill_session() {
+    fn killing_a_session_says_it_cannot_rather_than_reporting_a_signal() {
         let d = test_daemon();
-        let pid = d.kill_session("1", 15).unwrap();
-        assert_eq!(pid, 100); // leader PID from test_daemon.
+        assert_eq!(d.kill_session("1", 15), Err(KillError::Unsupported));
+    }
+
+    /// A session whose leader pid is 0 is refused, and for the right reason.
+    ///
+    /// This is where two pieces of today's work meet. `libcall::kill` refuses
+    /// a non-positive pid because `kill(2)` reads it as a process GROUP -- pid
+    /// 0 being the CALLER's own group, so `loginctl kill-session` on a session
+    /// registered without a leader would have signalled logind and everything
+    /// beside it, in response to a request to signal one session.
+    ///
+    /// `Session::new` defaults `leader_pid` to 0, so this is not a contrived
+    /// input: any session created without one has it.
+    ///
+    /// The distinct message matters. Reporting ENOSYS here would say "this
+    /// build cannot signal", which is true of the build and not of this
+    /// session -- and would be wrong on the target, where signalling works and
+    /// this call must still be refused.
+    #[test]
+    fn a_session_with_no_leader_pid_is_refused_before_any_signal() {
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
+        let id = d
+            .create_session(CreateSessionParams {
+                uid: 1000,
+                user: "alice",
+                seat_id: "seat0",
+                ..Default::default()
+            })
+            .expect("session");
+        assert_eq!(d.sessions[&id].leader_pid, 0, "the default really is 0");
+        assert_eq!(
+            d.kill_session(&id, 15),
+            Err(KillError::NoLeaderPid),
+            "pid 0 means the caller's own process group, not this session"
+        );
     }
 
     #[test]
@@ -3619,6 +3893,56 @@ HandleSuspendKey=ignore
     }
 
     // --- loginctl command execution ---
+
+    /// An unreachable daemon is reported, not rendered as an empty machine.
+    ///
+    /// `loginctl list-sessions` used to print a header, no rows, "0 sessions
+    /// listed." and exit 0 -- against a `Daemon` built locally one line
+    /// earlier. That is an assertion the machine has nobody logged in, made
+    /// without asking the machine, while `login` was registering real sessions
+    /// over the bus.
+    ///
+    /// On any target that is not `slateos` the bus syscalls answer ENOSYS, so
+    /// `connect` fails here and this pins the FAILURE path -- the same half
+    /// `userspace/login`'s session tests can reach, and for the same reason.
+    /// A green run means "loginctl says so when it cannot ask", not "listing
+    /// works"; confirming the success path needs a boot test.
+    ///
+    /// The exit status is the assertion. "Cannot reach the daemon" and "no
+    /// sessions" look nearly identical on a terminal and mean opposite things,
+    /// and a script can only tell them apart by `$?`.
+    #[test]
+    fn list_sessions_reports_an_unreachable_daemon_rather_than_an_empty_list() {
+        assert_ne!(
+            list_sessions_via_bus(),
+            0,
+            "an unreachable daemon must not read as a machine with no sessions"
+        );
+    }
+
+    /// The count in the footer is the number of lines printed.
+    ///
+    /// Trivial, and it is the line that would go wrong silently: the footer
+    /// used to count a `Vec<&Session>` while the rows came from the same Vec,
+    /// so they could not disagree. Now the rows arrive from the daemon and the
+    /// count is taken from what arrived, which is a different thing that has
+    /// to stay equal to it.
+    #[test]
+    fn the_session_footer_counts_the_lines_it_printed() {
+        let mut buf = Vec::new();
+        print_session_list(&mut buf, &["a".to_string(), "b".to_string()]);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("2 sessions listed."), "{s}");
+        assert!(s.contains("SESSION"), "header missing: {s}");
+
+        let mut empty = Vec::new();
+        print_session_list(&mut empty, &[]);
+        assert!(
+            String::from_utf8(empty)
+                .unwrap()
+                .contains("0 sessions listed.")
+        );
+    }
 
     #[test]
     fn test_loginctl_list_sessions_empty() {

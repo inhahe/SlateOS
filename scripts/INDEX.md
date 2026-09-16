@@ -287,6 +287,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/rustlex.py` | One Rust lexer for the checkers that need to ignore comments and strings. |
 | `scripts/rustrungs.py` | Read what a Rust rung asserts, so an oracle can check the assertion itself. |
 | `scripts/rustscan.py` | Read Rust source the way a *gate* has to read it: production code only. |
+| `scripts/sabotage.py` | Break the code on purpose and report which tests noticed. |
 | `scripts/scan-orphan-modules.py` | Find library modules whose entire public surface is named by no other file. |
 | `scripts/scan-unwired.py` | Find work that no path from an entry point reaches, but a test does. |
 | `scripts/scan-unwrap.py` | Find `.unwrap()` / `.expect(...)` in *production* kernel code. |
@@ -382,4 +383,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_372 scripts._
+_373 scripts._

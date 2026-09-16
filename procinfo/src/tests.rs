@@ -1687,3 +1687,252 @@ fn both_files_read_through_procfs_and_absent_is_not_an_error() {
     assert!(none.interrupts().unwrap().is_none());
     assert!(none.monitors().unwrap().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// /proc/ioport
+// ---------------------------------------------------------------------------
+
+/// Exactly what `gen_ioport` writes, padding included.
+const IOPORT: &[u8] = b"=== I/O Port Stats ===
+Regions: 3  Reads: 12  Writes: 48  Untracked R: 7  Untracked W: 2  Ops: 69
+
+Per-region:
+  COM1   0x03f8-0x03ff  reads=12  writes=48  rbytes=12  wbytes=48
+  PIC1   0x0020-0x0021  reads=0  writes=9  rbytes=0  wbytes=9
+  CMOS   0x0070-0x0070  reads=4  writes=4  rbytes=4  wbytes=4
+";
+
+#[test]
+fn ioport_reads_the_packed_summary_line() {
+    // Six `Key: value` pairs on ONE line, separated by two spaces. `key_value`
+    // takes everything after the first colon to end of line, so it reads
+    // `Regions` as `3  Reads: 12  Writes: ...`; that is why `packed_pairs`
+    // exists. And the separator cannot be a single space, because two of the
+    // keys contain one.
+    let p = IoPorts::parse(IOPORT);
+    assert_eq!(p.regions_total, Some(3));
+    assert_eq!(p.reads, Some(12));
+    assert_eq!(p.writes, Some(48));
+    assert_eq!(p.untracked_reads, Some(7));
+    assert_eq!(p.untracked_writes, Some(2));
+    assert_eq!(p.ops, Some(69));
+}
+
+#[test]
+fn ioport_reads_every_region_and_its_range() {
+    let p = IoPorts::parse(IOPORT);
+    assert_eq!(p.regions.len(), 3);
+    let com1 = &p.regions[0];
+    assert_eq!(com1.name, b"COM1");
+    assert_eq!((com1.start, com1.end), (0x03f8, 0x03ff));
+    assert_eq!((com1.reads, com1.writes), (12, 48));
+    assert_eq!((com1.read_bytes, com1.write_bytes), (12, 48));
+    // The kernel prints `base + length - 1`, so a one-port region has
+    // start == end rather than end == start + 1.
+    let cmos = &p.regions[2];
+    assert_eq!((cmos.start, cmos.end), (0x0070, 0x0070));
+}
+
+#[test]
+fn a_summary_line_is_not_a_region() {
+    // The control, and the reason the row is anchored on its `0x…-0x…` token
+    // rather than on a field index. `Untracked R: 7` has a word then a number
+    // in the places a name and a count would be; a position-based parser
+    // reports a region called `Untracked`.
+    assert_eq!(
+        IoPortRegion::parse_line(b"Regions: 3  Reads: 12  Untracked R: 7"),
+        None
+    );
+    assert_eq!(IoPortRegion::parse_line(b"Per-region:"), None);
+    assert_eq!(IoPortRegion::parse_line(b"=== I/O Port Stats ==="), None);
+    assert_eq!(IoPortRegion::parse_line(b""), None);
+}
+
+#[test]
+fn a_region_row_missing_a_counter_is_not_half_parsed() {
+    // Every counter is required. A row with `reads=` absent would otherwise
+    // report zero reads, which is a measurement rather than a gap.
+    assert_eq!(
+        IoPortRegion::parse_line(b"  COM1   0x03f8-0x03ff  writes=48  rbytes=12  wbytes=48"),
+        None
+    );
+}
+
+#[test]
+fn region_for_finds_the_port_and_respects_the_ends() {
+    let p = IoPorts::parse(IOPORT);
+    assert_eq!(
+        p.region_for(0x03f8).map(|r| r.name.clone()),
+        Some(b"COM1".to_vec())
+    );
+    assert_eq!(
+        p.region_for(0x03ff).map(|r| r.name.clone()),
+        Some(b"COM1".to_vec())
+    );
+    // Inclusive at both ends, exclusive outside them.
+    assert!(p.region_for(0x0400).is_none());
+    assert!(p.region_for(0x03f7).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// /proc/kmod
+// ---------------------------------------------------------------------------
+
+/// Exactly what `gen_kmod` writes.
+const KMOD: &[u8] = b"=== Kernel Modules ===
+live_modules: 3
+total_loads: 5
+total_unloads: 2
+total_errors: 1
+ops: 8
+  ext4 1.0.0 [live] filesystem 262144B refs=3
+  ahci 2.1.0 [live] block 131072B refs=0
+  e1000 0.9.1 [loading] net 98304B refs=0
+";
+
+#[test]
+fn kmod_reads_the_counters_and_every_module() {
+    let m = Modules::parse(KMOD);
+    assert_eq!(m.live, Some(3));
+    assert_eq!(m.total_loads, Some(5));
+    assert_eq!(m.total_unloads, Some(2));
+    assert_eq!(m.total_errors, Some(1));
+    assert_eq!(m.ops, Some(8));
+    assert_eq!(m.modules.len(), 3);
+
+    let ext4 = m.get(b"ext4").expect("ext4 is listed");
+    assert_eq!(ext4.version, b"1.0.0");
+    assert_eq!(ext4.state, b"live");
+    assert_eq!(ext4.kind, b"filesystem");
+    assert_eq!(ext4.size_bytes, 262_144);
+    assert_eq!(ext4.ref_count, 3);
+
+    // A module still loading is reported with its real state rather than
+    // filtered out: "why is my filesystem missing" is answered by seeing it
+    // listed as `loading`, not by its absence.
+    assert_eq!(
+        m.get(b"e1000").map(|x| x.state.clone()),
+        Some(b"loading".to_vec())
+    );
+    assert!(m.get(b"nosuch").is_none());
+}
+
+#[test]
+fn a_counter_line_is_not_a_module() {
+    // The control for the bracket anchor. `total_errors: 1` is a word and a
+    // number, and `live_modules: 3` even contains the word `live`.
+    assert_eq!(Module::parse_line(b"live_modules: 3"), None);
+    assert_eq!(Module::parse_line(b"total_errors: 1"), None);
+    assert_eq!(Module::parse_line(b"=== Kernel Modules ==="), None);
+    // Right shape, wrong position: the state must be the THIRD token, or a
+    // row whose name happened to be bracketed would parse.
+    assert_eq!(
+        Module::parse_line(b"  [live] ext4 1.0.0 filesystem 1B refs=0"),
+        None
+    );
+}
+
+#[test]
+fn a_module_row_without_its_size_suffix_is_refused() {
+    // `262144B` not `262144`. Dropping the requirement would let a row from a
+    // future format, where the column means something else, parse as a size.
+    assert_eq!(
+        Module::parse_line(b"  ext4 1.0.0 [live] filesystem 262144 refs=3"),
+        None
+    );
+    assert_eq!(
+        Module::parse_line(b"  ext4 1.0.0 [live] filesystem 262144B refs=x"),
+        None
+    );
+}
+
+// ---------------------------------------------------------------------------
+// /proc/autostart
+// ---------------------------------------------------------------------------
+
+/// Exactly what `gen_autostart` writes, header row included.
+const AUTOSTART: &[u8] = b"Autostart Items
+===============
+
+Total items:   3
+Enabled:       2
+System:        1
+Operations:    9
+
+ID   NAME                 PHASE            CONDITION  ENABLED  ORDER  COMMAND
+1    compositor           Session          Always     true     10     /bin/compositor --vt 7
+2    indexer              Late             OnBattery  false    50     /usr/bin/indexer --idle
+3    netmon               Early            Always     true     5      /sbin/netmon
+";
+
+#[test]
+fn autostart_reads_the_counts_and_every_item() {
+    let a = Autostart::parse(AUTOSTART);
+    assert_eq!(a.total, Some(3));
+    assert_eq!(a.enabled, Some(2));
+    assert_eq!(a.system, Some(1));
+    assert_eq!(a.ops, Some(9));
+    assert_eq!(a.items.len(), 3);
+
+    let first = &a.items[0];
+    assert_eq!(first.id, 1);
+    assert_eq!(first.name, b"compositor");
+    assert_eq!(first.phase, b"Session");
+    assert_eq!(first.condition, b"Always");
+    assert!(first.enabled);
+    assert_eq!(first.order, 10);
+    // The command is the rest of the line and keeps its spaces.
+    assert_eq!(first.command, b"/bin/compositor --vt 7");
+
+    assert!(!a.items[1].enabled);
+    assert_eq!(a.items[2].command, b"/sbin/netmon");
+}
+
+#[test]
+fn the_autostart_header_row_is_not_an_item() {
+    // The control that matters here. `ID NAME PHASE CONDITION ENABLED ORDER
+    // COMMAND` has seven tokens in exactly the places an item's seven fields
+    // occupy, so nothing about its SHAPE excludes it -- it is excluded
+    // because `ID` is not a number and `ENABLED` is not `true`/`false`.
+    assert_eq!(
+        AutostartItem::parse_line(
+            b"ID   NAME                 PHASE            CONDITION  ENABLED  ORDER  COMMAND"
+        ),
+        None
+    );
+    assert_eq!(AutostartItem::parse_line(b"Total items:   3"), None);
+    assert_eq!(AutostartItem::parse_line(b"==============="), None);
+}
+
+#[test]
+fn an_enabled_column_that_is_not_a_bool_refuses_the_row() {
+    // `enabled` is a bool, so an unrecognised word has to become one of two
+    // values or stop the row. Defaulting it to `false` would render every
+    // item of a changed format as disabled -- a startup list that is
+    // complete, plausible, and says nothing runs.
+    assert_eq!(
+        AutostartItem::parse_line(b"1    compositor  Session  Always  yes  10  /bin/x"),
+        None
+    );
+    assert_eq!(
+        AutostartItem::parse_line(b"1    compositor  Session  Always  TRUE  10  /bin/x"),
+        None
+    );
+}
+
+#[test]
+fn all_three_read_through_procfs_and_absent_is_not_an_error() {
+    let fixture = Fixture::new("three-proc");
+    fixture.write("ioport", IOPORT);
+    fixture.write("kmod", KMOD);
+    fixture.write("autostart", AUTOSTART);
+    let proc = fixture.procfs();
+    assert_eq!(proc.io_ports().unwrap().unwrap().regions.len(), 3);
+    assert_eq!(proc.modules().unwrap().unwrap().modules.len(), 3);
+    assert_eq!(proc.autostart().unwrap().unwrap().items.len(), 3);
+
+    let absent = Fixture::new("three-proc-absent").procfs();
+    assert!(absent.io_ports().unwrap().is_none());
+    assert!(absent.modules().unwrap().is_none());
+    assert!(absent.autostart().unwrap().is_none());
+}

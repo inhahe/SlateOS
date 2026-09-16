@@ -154372,3 +154372,132 @@ That is the same defect as the corpus line in `find-overstated-records`
 repaired this morning, and the same one lane B caught in
 `check-collapsed-messages` before that: **a count without the thing that would
 let someone check it is read as coverage.** Three tools, one shape, one day.
+
+### TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-LOGGER
+
+**Status: OPEN**, found 2026-09-16. A gate now refuses any *new* instance
+(`scripts/check-bin-collisions.py`); these two are baselined in its
+`KNOWN_COLLISIONS` because resolving one means deleting a program.
+
+**In short:** there are two different programs in this tree called `logger`,
+and they both compile to the same file. Every crate links into one shared
+directory, so `userspace/logger` and `userspace/coreutils/src/bin/logger.rs`
+both write `target/<triple>/<profile>/logger`, and the one that survives is
+whichever the compiler happened to link last. `scripts/create-ext4-rootfs.sh`
+then copies that single file onto the disk image as `/bin/logger`. **Which
+`logger` SlateOS ships is therefore decided by build order, not by anyone's
+decision.** The two are not near-identical: one accepts thirteen options and
+the other accepts two, so a script that works today can stop working after an
+unrelated rebuild, with no source change to blame.
+
+### How it was proved
+
+The same path was run twice, half an hour apart, with no edit in between:
+
+```
+before a rebuild:  logger -i   ->  logger: invalid option -- 'i'
+after  a rebuild:  logger -i   ->  (accepted; -h prints a usage block)
+```
+
+Cargo says so too, and has all along — it is a warning in a build that prints
+thousands of lines, which is why nobody read it:
+
+```
+warning: output filename collision at target/x86_64-pc-windows-gnu/debug/logger.exe
+  = note: the bin target `logger` in package `logger` has the same output
+          filename as the bin target `logger` in package `coreutils`
+  = note: this may become a hard error in the future
+```
+
+### Where it lives
+
+- `userspace/logger/` — package `logger`, ~1183 lines. A syslog client:
+  `-p/--priority`, `-t/--tag`, `-i/--id`, `-f/--file`, `-s/--stderr`,
+  `-u/--socket`, `-n/--server`, `-P/--port`, `--json`, `--size`, `--pid`,
+  `-h/--help`, `--version`. Facility/severity parsing, RFC3339, JSON output.
+- `userspace/coreutils/src/bin/logger.rs` — bin `logger` of package
+  `coreutils`, 654 lines of which most are tests. Accepts `-t` and `-p` and
+  `--`, and rejects everything else with `logger: invalid option -- 'X'`.
+
+`scripts/create-ext4-rootfs.sh` builds `-p coreutils -p ar -p kill -p logger
+-p logrotate` — that is, it builds *both* of these on purpose, having been
+written as though they were different programs, which they are.
+
+### What it cost besides the shipped file
+
+Both copies were maintained, in ignorance of each other:
+
+- `e12942c8d logger: carry the message as bytes, from argv and from stdin`
+  (the coreutils applet)
+- `60468ac46 logger: read argv as bytes, and refuse a message rather than
+  corrupt it` (the standalone crate)
+
+That is the same fix, made twice, to two files, each time by someone who had
+one of them open and no reason to suspect the other. Effort spent on whichever
+copy loses the link race is invisible: it compiles, its tests pass, and it is
+not the program that runs.
+
+It also corrupts `scripts/option-gap-baseline.txt`, which lists twelve
+`logger` gaps (`-P -S -T -V -d -e -f -h -i -n -s -u`). Those twelve were
+measured against whichever `logger` won on the day the baseline was taken.
+They are not stale — they are **measurements of a subject that changes between
+builds**, which is worse, because re-running the harness can flip them without
+anyone touching `logger` at all.
+
+### The proper fix
+
+Keep one program and delete the other. The evidence points at keeping
+`userspace/logger`:
+
+- the rootfs script names `-p logger` explicitly, which is what someone
+  intended to ship;
+- its option surface is a strict superset of the applet's `-t`/`-p`, so
+  deleting the applet loses no capability, while deleting the crate loses
+  eleven options.
+
+Before deleting, confirm the superset claim behaviourally rather than by
+reading the option lists — in particular the applet's `--` handling, its
+stdin path, and its exact diagnostic wording, since a differential harness may
+later be written against GNU's.
+
+### TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL
+
+**Status: OPEN**, found 2026-09-16, same cause as
+TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-LOGGER and found by the same sweep.
+Baselined in `scripts/check-bin-collisions.py`.
+
+**In short:** as with `logger`, two packages build a binary called `kill` into
+the same directory, so `/bin/kill` is whichever linked last. Unlike `logger`,
+the two are not a rich version and a poor version of one program — they are
+two different *designs*, and choosing between them is a real decision rather
+than a cleanup.
+
+### The two programs
+
+- `userspace/kill` (package `kill`) — SlateOS-native. Its help begins
+  `Slate OS kill v0.1.0 -- Send termination messages to processes`, and it
+  works by sending **IPC messages**, with `-KILL/-9` documented as
+  "Force kill (no IPC attempt)". It also has `--name`. This is what
+  `design.txt` requires: *"No Unix signals for process control. Use IPC
+  messages for shutdown, etc."*
+- `userspace/coreutils/src/bin/kill.rs` (bin `kill` of package `coreutils`) —
+  the POSIX surface: `kill [-s SIGNAL | -SIGNAL] PID...` and
+  `kill -l [EXIT_STATUS...]`. This is what every shell script expects, and
+  what a differential harness against GNU would compare.
+
+### Why this one is not a simple deletion
+
+The architectural rule and the compatibility remit point opposite ways, and
+lane B's job is both of them. Deleting the coreutils applet loses `-s` and
+`-l` and the POSIX spelling; deleting the standalone crate loses the IPC
+mechanism the design spec mandates and the `--name` lookup.
+
+The likely right answer is neither deletion but a **merge**: one `kill` whose
+command-line surface is POSIX (`-s SIGNAL`, `-SIGNAL`, `-l`, numeric signal
+names) and whose implementation is the IPC path, since a signal number on a
+system with no signals is simply a name for "which termination message".
+That is a larger change than either deletion and wants its own task.
+
+Until then the gate keeps this from getting worse, and nothing else does: the
+collision is silent at build time apart from one cargo warning, and silent at
+runtime because both programs answer `kill -9 <pid>` plausibly.

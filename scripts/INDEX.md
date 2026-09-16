@@ -43,11 +43,13 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-accidental-headings.py` | Refuse to build when a `---` separator has silently become an `<h2>`. |
 | `scripts/check-ansic-quoting-vs-bash.py` | Pin bash's `$'...'` (ANSI-C quoting) rules, for TD-SHELLQUOTE-NO-ANSI-C-QUOTING. |
 | `scripts/check-argv-ignored.py` | Refuse a coreutils bin that never reads `argv`. |
+| `scripts/check-bin-collisions.py` | Refuse two packages that build a binary of the SAME NAME. |
 | `scripts/check-boot-skips.py` | Fail when a self-test skip has fired on *every* recorded boot. |
 | `scripts/check-boot-test-reexec.sh` | Prove the boot-test re-exec actually makes a run immune to a mid-run edit. |
 | `scripts/check-cfg-unix.py` | Compile the `#[cfg(unix)]` code that `cargo test` never looks at. |
 | `scripts/check-collapsed-messages.py` | Refuse an assertion message whose line continuation rustfmt collapsed. |
 | `scripts/check-control-bytes.py` | Refuse a raw control byte in a tracked text file. |
+| `scripts/check-cp-diff-sees-nul.py` | Prove `cp-diff.sh`'s `contents()` can still see a NUL-only difference. |
 | `scripts/check-crate-names.py` | Refuse a crate whose directory name is a *different* crate's package name. |
 | `scripts/check-dead-code-allows.py` | Refuse a NEW crate-level ``#![allow(..., dead_code, ...)]`` in lane B's tree. |
 | `scripts/check-design-decisions-bands.py` | Gate: enforce ``design-decisions.md``'s per-lane numbering bands. |
@@ -79,6 +81,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-libc-shape.py` | Assert that `libc.a` has the *object granularity* a libc archive must have. |
 | `scripts/check-linux-only-capabilities.py` | A kernel capability reachable from the Linux ABI table and from no native one. |
 | `scripts/check-live-counter-reads.py` | Guard the rule that a self-test may not compare two readings of one counter. |
+| `scripts/check-manifest-producers.py` | Refuse a manifest entry that nothing in the tree can produce. |
 | `scripts/check-mutation-needles.py` | Fail if a gate's mutation table has rotted into a table of dead needles. |
 | `scripts/check-one-libc-per-process.py` | Refuse a Rust dependency on any part of `posix` that keeps state. |
 | `scripts/check-open-questions.py` | Refuse to build when `open-questions.md` has stopped being a queue. |
@@ -172,6 +175,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/find-reachable-fixtures.py` | Which invented-data builders can a *shipping* build reach? |
 | `scripts/find-silent-incapacity.py` | Which programs cannot do the thing they are for, and do not say so? |
 | `scripts/find-stale-admissions.py` | Which programs still deny a capability they have since acquired? |
+| `scripts/find-stale-dead-code-allows.py` | Which `#[allow(dead_code)]` attributes are suppressing nothing? |
 | `scripts/find-stranded-serialisers.py` | Which finished serialisers can nobody reach? |
 | `scripts/find-swallowed-ticks.py` | Which event dispatchers can return before reaching their own Tick arm? |
 | `scripts/find-unpinned-picker-routing.py` | Whose tests would notice if the file picker stopped receiving events? |
@@ -219,6 +223,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/nohup-diff.sh` | Differential test: our `nohup` against GNU coreutils'. |
 | `scripts/od-diff.sh` | Differential test: our od against GNU od. |
 | `scripts/open-requests.py` | List the `requests/` entries addressed to a lane that are still open. |
+| `scripts/option-gap-ref.sh` | The reference half of `scripts/option-gap.sh`, run where the reference lives |
+| `scripts/option-gap.sh` | Options the reference implementation has that OURS REJECTS AS UNKNOWN. |
 | `scripts/osh-bash-diff.py` | Differential tester: run a corpus of shell snippets through `osh` and a |
 | `scripts/osh-diff.sh` | osh-diff.sh — run the shell corpus against *glibc* bash, inside WSL. |
 | `scripts/p37-check.sh` | _(no summary line)_ |
@@ -383,4 +389,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_373 scripts._
+_379 scripts._

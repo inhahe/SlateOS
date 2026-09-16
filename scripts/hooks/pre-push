@@ -3759,6 +3759,89 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 45: two packages must not build a binary of the same name.
+#
+# Gate 18 above asks whether a *directory* name is another crate's *package*
+# name, because `cargo test -p <name>` then tests the wrong thing. This asks
+# the neighbouring question it does not: whether two packages write the same
+# FILE. Every crate links into one `target/<triple>/<profile>/`, so two bin
+# targets sharing a name are one file, and the winner is whichever linked
+# last.
+#
+# WHY IT IS NOT ACADEMIC. On 2026-09-16 the same
+# `target/x86_64-pc-windows-gnu/debug/logger.exe` was run twice, half an hour
+# apart, with no source change in between: first it answered `logger -i` with
+# `invalid option -- 'i'`, then it accepted it. `userspace/logger` has thirteen
+# options and `userspace/coreutils/src/bin/logger.rs` has two, and
+# `create-ext4-rootfs.sh` stages whichever one is sitting there as
+# `/bin/logger`. `kill` is the same, and worse: those two do not differ in
+# options but in DESIGN -- one sends IPC as design.txt requires, the other
+# implements the POSIX signal surface.
+#
+# Cargo has been warning about both all along. A warning inside a build that
+# prints thousands of lines is not a gate, which is the whole reason this is
+# one.
+#
+# COST. `cargo metadata --no-deps` — cargo's own target list, no compilation:
+# about 0.7s. Deliberately not a hand-parse of Cargo.toml, because a bin
+# target's name comes from four different places and `autobins` can switch the
+# implicit ones off; a gate that exists because a near-miss question was asked
+# should not ask a near-miss question.
+#
+# The two collisions that already existed are baselined in the checker, for
+# gate 18's reason: resolving one means DELETING a program, and for `kill` that
+# is an open design question. The baseline may only shrink — an entry that no
+# longer collides fails too.
+# ---------------------------------------------------------------------------
+bincoll="${repo_root:-.}/scripts/check-bin-collisions.py"
+skip_bincoll=0
+if [ "${ALLOW_BIN_NAME_COLLISION:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_BIN_NAME_COLLISION=1 set — skipping the binary-name gate." >&2
+    skip_bincoll=1
+fi
+[ -n "$py" ] || skip_bincoll=1
+[ -f "$bincoll" ] || skip_bincoll=1
+note_gate bin-collisions "$skip_bincoll"
+
+if [ "$skip_bincoll" != "1" ]; then
+    if ! run_checker bin-collisions-selftest "$py" "$bincoll" --selftest; then
+        echo "pre-push: check-bin-collisions.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        skip_bincoll=refused
+    fi
+fi
+
+if [ "$skip_bincoll" = "refused" ] || { [ "$skip_bincoll" != "1" ] && ! run_checker bin-collisions "$py" "$bincoll"; }; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — two packages build a binary with the same name.
+
+They share one output path under target/<triple>/<profile>/, so the binary
+that survives is whichever cargo linked last, and that is the one the rootfs
+stages. The same command can ship a different program tomorrow with no source
+change to blame.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-bin-collisions.py
+    python scripts/check-bin-collisions.py --list   # every bin target
+
+Fix it by renaming one of the bin targets (a `[[bin]] name = "..."` in the
+owning Cargo.toml), or by deleting whichever of the two programs should not
+exist. If the collision is genuinely intended, add it to KNOWN_COLLISIONS in
+that script with a comment saying which program is meant to win and why —
+but note that cargo cannot be made to honour such an intent, so "intended"
+here can only ever mean "tracked".
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_BIN_NAME_COLLISION=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 19: every gate call site must speak the interface its script has now.
 #
 # A gate lives in two files -- the checker, and the `run_checker` line that

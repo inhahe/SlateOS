@@ -171,6 +171,21 @@ impl core::fmt::Display for FontError {
 // FontInfo — describes a single installed font
 // ============================================================================
 
+/// What the render-settings panel says under the values it offers.
+///
+/// `default_size_pt` is read in exactly one place -- the `format!` that draws
+/// "11.0 pt" beside the label "Default Size". The preview below renders at
+/// `PREVIEW_SIZE_LABELS`, a fixed list, and never at this number.
+///
+/// **It is a system setting with no route out of this window.** A default UI
+/// font size belongs to the toolkit, and `gui/toolkit` picks its faces from
+/// hardcoded candidate lists; the kernel's `/proc/fontsettings` publishes a
+/// `default_size_dp` that nothing here reads and nothing here could write.
+/// Both ends of that loop are open, which is why the notice says "nothing
+/// carries" rather than "not implemented" -- the work is not in this file.
+const SETTINGS_NOT_CARRIED: &str = "Not applied: nothing carries these to the \
+toolkit, and the preview below renders at its own fixed sizes.";
+
 /// Metadata for a single installed font face.
 #[derive(Clone, Debug)]
 pub struct FontInfo {
@@ -1531,7 +1546,17 @@ impl FontManagerState {
         tree.text(label_x, y, "Default Size", self.palette.text, 13.0);
         let size_str = format!("{:.1} pt", self.render_settings.default_size_pt);
         tree.text(value_x, y, &size_str, self.palette.blue, 13.0);
-        y += 32.0;
+        y += 18.0;
+        // Directly under the first value rather than at the foot of the panel:
+        // the numbers above are what read as confirmation.
+        tree.text(
+            label_x,
+            y,
+            SETTINGS_NOT_CARRIED,
+            self.palette.subtext0,
+            11.0,
+        );
+        y += 22.0;
 
         // Hinting
         tree.text(label_x, y, "Hinting", self.palette.text, 13.0);
@@ -1739,6 +1764,51 @@ mod tests {
     // ====================================================================
     // Measured widths
     // ====================================================================
+
+    /// The render settings are drawn with the fact that nothing carries them.
+    ///
+    /// `default_size_pt` is read in exactly one place -- the `format!` that
+    /// draws "11.0 pt" beside the label "Default Size" -- and the preview
+    /// below renders at `PREVIEW_SIZE_LABELS`, a fixed list, never at this
+    /// number.
+    ///
+    /// **Both ends of the loop are open**, which is why the notice says
+    /// "nothing carries" rather than "not implemented": a default UI font size
+    /// belongs to the toolkit, `gui/toolkit` picks its faces from hardcoded
+    /// candidate lists, and the kernel's `/proc/fontsettings` publishes a
+    /// `default_size_dp` that nothing here reads and nothing here could write.
+    /// The work is not in this file, and "not implemented" would suggest it
+    /// was.
+    ///
+    /// Found by `scripts/find-echoed-settings.py`.
+    #[test]
+    fn the_render_settings_say_nothing_carries_them() {
+        let mut app = FontManagerState::new();
+        // The panel is not open by default, and the settings only exist on it.
+        app.show_settings = true;
+        let tree = app.render_tree();
+        let texts: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t == "Default Size"),
+            "control: the panel must be drawing the render settings for this \
+test to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("nothing carries")),
+            "the panel drew render settings and did not say nothing carries them"
+        );
+    }
 
     #[test]
     fn a_toolbar_button_reports_the_width_it_drew() {

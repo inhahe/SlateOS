@@ -5238,8 +5238,16 @@ mod tests {
     fn opening_a_file_starts_what_the_user_chose_for_it() {
         settingsfile::testing::with_scratch_config("explorer-open-assoc", |_root| {
             let mut doc = yamldoc::Document::new();
-            doc.set_str(&["associations", "txt"], "/nowhere/chosen-editor");
-            settingsfile::store("fileassoc", &doc).expect("scratch config is writable");
+            // Through the shared constants, because what this test is about is
+            // that the file manager obeys the association -- not what the file
+            // is called. Spelled out here, a rename would leave this writing one
+            // file while the code read another.
+            doc.set_str(
+                &[associations::ASSOCIATIONS, "txt"],
+                "/nowhere/chosen-editor",
+            );
+            settingsfile::store(associations::CONFIG_NAME, &doc)
+                .expect("scratch config is writable");
 
             let scratch = temp_dir("open_assoc");
             let root = scratch.dir().to_path_buf();

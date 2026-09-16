@@ -338,11 +338,19 @@ impl core::fmt::Display for AssocError {
 
 /// The central registry managing file types, applications, and their associations.
 /// The configuration file associations live in, under the user's config
-/// directory. Named without an extension because `settingsfile` adds one.
-pub const CONFIG_NAME: &str = "fileassoc";
+/// directory.
+///
+/// Re-exported from `gui/associations` rather than declared, so that this
+/// program and the two that read what it writes cannot disagree about the
+/// name. It used to be a string here, with a comment hoping it matched.
+pub use associations::CONFIG_NAME;
 
-/// The mapping inside that file: extension -> application id.
-const ASSOCIATIONS_KEY: &str = "associations";
+/// The mapping inside that file: extension -> **executable path**.
+///
+/// Not an application id: an id is a name only this program could resolve, and
+/// `apps/explorer` has no catalogue to resolve one in. The comment here said
+/// "id" for as long as the code wrote a path.
+use associations::ASSOCIATIONS as ASSOCIATIONS_KEY;
 
 /// What a freshly written associations file says about itself.
 ///

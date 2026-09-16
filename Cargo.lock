@@ -818,6 +818,7 @@ name = "fileassoc"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "guitk",
  "oswindow",
  "safeio",

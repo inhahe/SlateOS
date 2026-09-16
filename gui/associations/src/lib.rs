@@ -43,7 +43,13 @@ use yamldoc::Document;
 pub const CONFIG_NAME: &str = "fileassoc";
 
 /// The mapping key under which associations live, inside that group.
-const ASSOCIATIONS: &str = "associations";
+///
+/// Public because `apps/fileassoc`, which *edits* the file, needs to enumerate
+/// and remove entries as well as read them, and the helpers here cover only
+/// the two operations its readers share. The key path is part of the file
+/// format, and the format is what this crate owns -- an editor spelling it
+/// again would be the fourth copy of the string this crate exists to delete.
+pub const ASSOCIATIONS: &str = "associations";
 
 /// One "files of this kind open with this program" entry.
 #[derive(Clone, Debug, PartialEq, Eq)]

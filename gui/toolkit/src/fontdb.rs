@@ -68,6 +68,14 @@ pub struct FaceInfo {
     pub families: Vec<String>,
     /// Weight, slant and width, from the face's own `OS/2` table.
     pub style: Style,
+    /// Whether every glyph advances by the same width.
+    ///
+    /// Recorded here rather than asked for later because the scan already
+    /// parses each face to read the two fields above -- it discards the
+    /// *bytes*, not the parse -- so this costs one bool per face. Asking
+    /// afterwards would mean opening every font on the system a second time,
+    /// which is the expense this struct's own doc comment exists to avoid.
+    pub monospaced: bool,
 }
 
 impl FaceInfo {
@@ -172,6 +180,7 @@ impl FontDb {
             path: path.to_path_buf(),
             families: families.into_iter().collect(),
             style: face.style(),
+            monospaced: face.is_monospaced(),
         });
     }
 
@@ -198,6 +207,33 @@ impl FontDb {
     pub fn families(&self) -> Vec<String> {
         let mut names: BTreeSet<&str> = BTreeSet::new();
         for face in &self.faces {
+            for f in &face.families {
+                names.insert(f.as_str());
+            }
+        }
+        names.into_iter().map(str::to_string).collect()
+    }
+
+    /// The families with at least one fixed-pitch face.
+    ///
+    /// What a "Terminal Font" picker lists, as distinct from [`families`] for
+    /// the interface one. Before this existed nothing could make the
+    /// distinction, and `guitk::text::set_mono_family`'s own note records the
+    /// consequence: it installs whatever it is handed, so a caller pointing it
+    /// at a proportional face "gets a terminal with a broken grid, and that is
+    /// the caller's decision to have made". This is how a caller stops making
+    /// that decision by accident.
+    ///
+    /// *At least one* face rather than all of them: a family's bold or italic
+    /// member sometimes omits the declaration its regular member makes, and
+    /// dropping the whole family over one under-described face would hide
+    /// fonts a terminal can use perfectly well.
+    ///
+    /// [`families`]: Self::families
+    #[must_use]
+    pub fn monospaced_families(&self) -> Vec<String> {
+        let mut names: BTreeSet<&str> = BTreeSet::new();
+        for face in self.faces.iter().filter(|f| f.monospaced) {
             for f in &face.families {
                 names.insert(f.as_str());
             }
@@ -344,7 +380,25 @@ mod tests {
                     italic: *italic,
                     width: *width,
                 },
+                // Proportional unless a test says otherwise, so the existing
+                // entries keep their shape. `db_mono` is how a test says
+                // otherwise.
+                monospaced: false,
             });
+        }
+        db.finish();
+        db
+    }
+
+    /// An index whose every face is fixed-pitch.
+    ///
+    /// Separate from [`db`] rather than a sixth tuple field, so that the
+    /// twenty-odd existing fixtures do not all have to grow a `false` to say
+    /// something they were never about.
+    fn db_mono(entries: &[(&str, &[&str], u16, bool, u8)]) -> FontDb {
+        let mut db = db(entries);
+        for face in &mut db.faces {
+            face.monospaced = true;
         }
         db.finish();
         db
@@ -459,6 +513,28 @@ mod tests {
         let db = arial();
         assert_eq!(db.families(), vec!["arial", "arial narrow"]);
         assert!(FontDb::new().families().is_empty());
+    }
+
+    /// A terminal picker is offered fixed-pitch families and nothing else.
+    ///
+    /// The same entries twice, differing only in the flag, so what is asserted
+    /// is the flag rather than the fixture: a `monospaced_families` that
+    /// forgot to filter would return `consolas` from both halves and pass a
+    /// test that only checked the first.
+    #[test]
+    fn only_fixed_pitch_families_are_offered_to_a_terminal() {
+        let entries: &[(&str, &[&str], u16, bool, u8)] = &[("c.ttf", &["consolas"], 400, false, 5)];
+
+        assert_eq!(db_mono(entries).monospaced_families(), vec!["consolas"]);
+        assert!(
+            db(entries).monospaced_families().is_empty(),
+            "a proportional face was offered as a terminal font"
+        );
+
+        // The ordinary list is the same either way: this filters a picker, it
+        // does not remove a family from the system.
+        assert_eq!(db(entries).families(), vec!["consolas"]);
+        assert_eq!(db_mono(entries).families(), vec!["consolas"]);
     }
 
     #[test]

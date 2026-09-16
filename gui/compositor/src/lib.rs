@@ -633,6 +633,20 @@ const fn mouse_key_button(action: a11ykeys::MouseKeyAction) -> Option<MouseButto
     }
 }
 
+/// One window's claim on the session going idle.
+#[derive(Clone, Copy, Debug)]
+struct IdleWatch {
+    /// How long without input before this watcher is told.
+    after: Duration,
+    /// Whether it has been told since the last input.
+    ///
+    /// Without this the watcher is told on every frame once the deadline
+    /// passes -- sixty times a second for as long as the user stays away --
+    /// which is a notification that the session *is* idle rather than that it
+    /// *went* idle. The lock screen wants the second one.
+    fired: bool,
+}
+
 /// Input event received from the input subsystem.
 #[derive(Clone, Debug)]
 pub enum InputEvent {
@@ -5175,6 +5189,19 @@ pub struct Compositor {
     /// claims and the side does not matter: the user who holds the right-hand
     /// Alt means the same thing as the user who holds the left.
     modifier_chord_grabs: HashMap<Modifiers, WindowId>,
+    /// Windows that asked to be told when the session goes idle.
+    ///
+    /// A claim, exactly as a modifier chord is: a client asks through the
+    /// request channel and thereafter receives an event it otherwise would
+    /// not, delivered to it alone. There is no privileged shell to address --
+    /// what looks like shell privilege here is per-grab and first-come -- so a
+    /// claim is the only way to say "this window, not the others".
+    ///
+    /// A map rather than one slot, unlike a chord grab. Two clients cannot
+    /// both meaningfully receive one keystroke, but several can want to know
+    /// the session went quiet: a lock screen, a display that dims, a daemon
+    /// that suspends. Each carries its own delay and fires on its own.
+    idle_watches: HashMap<WindowId, IdleWatch>,
     /// The stretch of time with at least one modifier held, and whether
     /// anything has happened during it that rules out a chord.
     ///
@@ -5282,6 +5309,7 @@ impl Compositor {
             full_recomposite: true,
             occlusion_cull: true,
             scanout: Scanout::Composited,
+            idle_watches: HashMap::new(),
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
             current_workspace: 0,
@@ -7070,12 +7098,85 @@ impl Compositor {
         self.last_input
     }
 
+    /// Ask to be told when the session has been idle for `after`.
+    ///
+    /// The same shape as [`grab_modifier_chord`](Self::grab_modifier_chord):
+    /// the window claims something and thereafter receives an event it would
+    /// not otherwise get. Unlike a chord, the claim is not exclusive -- see
+    /// [`IdleWatch`].
+    ///
+    /// Calling again for the same window replaces the delay, and arms it
+    /// afresh: a caller that has just been told "five minutes" should not have
+    /// its next notification suppressed because the old claim had already
+    /// fired.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist.
+    pub fn watch_idle(&mut self, window_id: WindowId, after: Duration) -> CompositorResult<()> {
+        if self.window_index(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        self.idle_watches.insert(
+            window_id,
+            IdleWatch {
+                after,
+                fired: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// Stop telling this window about idleness.
+    ///
+    /// Silent when the window holds no claim, for `ungrab_modifier_chord`'s
+    /// reason: releasing something nobody holds is a caller tidying up, not an
+    /// error worth reporting.
+    pub fn unwatch_idle(&mut self, window_id: WindowId) {
+        self.idle_watches.remove(&window_id);
+    }
+
+    /// The windows whose idle deadline has just passed, each reported once.
+    ///
+    /// Takes `now` rather than reading the clock, so a test can drive it
+    /// across a deadline without sleeping -- design-decisions 855 again: count
+    /// the thing when you can.
+    ///
+    /// Marks each as told before returning it. A watcher is armed again by the
+    /// next input, which is what makes this "the session went idle" rather
+    /// than "the session is idle".
+    pub fn idle_deadlines_passed(&mut self, now: Instant) -> Vec<WindowId> {
+        let since = now.saturating_duration_since(self.last_input);
+        let mut due: Vec<WindowId> = self
+            .idle_watches
+            .iter_mut()
+            .filter(|(_, watch)| !watch.fired && since >= watch.after)
+            .map(|(window, watch)| {
+                watch.fired = true;
+                *window
+            })
+            .collect();
+        // Sorted, because a `HashMap` does not promise an order and two
+        // watchers due in the same pass should be told in the same order every
+        // run. An arbitrary order here is the kind of thing that makes a test
+        // pass on one machine and fail on another.
+        // By the inner id: `WindowId` is deliberately not `Ord` -- window
+        // ids have no meaningful order -- but a stable report does need one.
+        due.sort_unstable_by_key(|w| w.raw());
+        due
+    }
+
     /// Process an input event and route it to the appropriate window.
     pub fn handle_input(&mut self, event: InputEvent) {
         // Every input event passes through here, which is why the reading is
         // taken here rather than in each of the handlers below: a new event
         // kind cannot forget to be counted as activity.
         self.last_input = Instant::now();
+        // Re-arm every watcher: the session is active again, so the next quiet
+        // stretch is a fresh one to be told about.
+        for watch in self.idle_watches.values_mut() {
+            watch.fired = false;
+        }
 
         // Hit testing derives from `frame_insets`, which is scaled, so input
         // needs the same refresh compositing does — and needs it more often.
@@ -21952,6 +22053,119 @@ mod tests {
             "the edge behind a blurring surface is as sharp as it was \
              ({before} distinct colours before, {after} after) -- the pass did \
              not reach the framebuffer"
+        );
+    }
+
+    /// A watcher is told once when the session goes quiet, and again only
+    /// after the user comes back.
+    ///
+    /// The "once" is the point. Without the fired flag the watcher is told on
+    /// every frame past the deadline -- sixty times a second while the user is
+    /// away -- which reports that the session *is* idle rather than that it
+    /// *went* idle, and a lock screen driven by that would re-lock itself over
+    /// whatever the user was doing on their return.
+    #[test]
+    fn an_idle_watcher_is_told_once_per_quiet_stretch() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+        let w = c.create_window("watcher".to_string(), 100, 100, 1);
+        c.watch_idle(w, Duration::from_mins(1))
+            .expect("a real window");
+
+        let start = c.last_input();
+        // Before the deadline: nothing.
+        assert!(
+            c.idle_deadlines_passed(start + Duration::from_secs(59))
+                .is_empty(),
+            "told before the delay had elapsed"
+        );
+        // After it: once.
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_mins(1)),
+            vec![w],
+            "not told when the delay elapsed"
+        );
+        // And not again, however long it stays quiet.
+        assert!(
+            c.idle_deadlines_passed(start + Duration::from_mins(10))
+                .is_empty(),
+            "told twice for one quiet stretch"
+        );
+
+        // The user comes back, and the next quiet stretch is a new one.
+        c.handle_input(InputEvent::MouseMove { x: 1, y: 1 });
+        let resumed = c.last_input();
+        assert_eq!(
+            c.idle_deadlines_passed(resumed + Duration::from_mins(1)),
+            vec![w],
+            "input did not re-arm the watcher"
+        );
+    }
+
+    /// Each watcher keeps its own delay, and the report is ordered.
+    #[test]
+    fn watchers_fire_on_their_own_delays_in_a_stable_order() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+        let soon = c.create_window("soon".to_string(), 10, 10, 1);
+        let later = c.create_window("later".to_string(), 10, 10, 2);
+        c.watch_idle(soon, Duration::from_secs(30))
+            .expect("a real window");
+        c.watch_idle(later, Duration::from_secs(90))
+            .expect("a real window");
+
+        let start = c.last_input();
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_secs(30)),
+            vec![soon],
+            "the shorter delay did not fire alone"
+        );
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_secs(90)),
+            vec![later],
+            "the longer delay did not fire on its own schedule"
+        );
+    }
+
+    /// A claim on a window that does not exist is refused, not recorded.
+    #[test]
+    fn an_idle_watch_needs_a_real_window() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+        let w = c.create_window("gone".to_string(), 10, 10, 1);
+        c.destroy_window(w)
+            .expect("the window exists until it does not");
+        assert!(
+            c.watch_idle(w, Duration::from_secs(1)).is_err(),
+            "a closed window was allowed to claim the idle watch"
+        );
+        let start = c.last_input();
+        assert!(
+            c.idle_deadlines_passed(start + Duration::from_mins(10))
+                .is_empty(),
+            "a refused claim was recorded anyway"
+        );
+    }
+
+    /// Re-claiming replaces the delay and arms it again.
+    #[test]
+    fn claiming_again_rearms_the_watcher() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+        let w = c.create_window("again".to_string(), 10, 10, 1);
+        c.watch_idle(w, Duration::from_secs(10))
+            .expect("a real window");
+
+        let start = c.last_input();
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_secs(10)),
+            vec![w]
+        );
+        // Already fired. A caller that asks again has just said what it wants
+        // to be told, and suppressing that would make the second request do
+        // nothing visible.
+        c.watch_idle(w, Duration::from_secs(5))
+            .expect("a real window");
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_secs(11)),
+            vec![w],
+            "re-claiming did not arm the watcher again"
         );
     }
 

@@ -1935,6 +1935,86 @@ fn parse_loginctl_args(args: &[String]) -> LoginctlCommand {
     }
 }
 
+/// Print a session listing from lines the daemon produced.
+///
+/// Takes the lines rather than the sessions so that the same printing serves
+/// the bus client, which never has a `Session` -- `ListSessions` returns
+/// `Session::format_list_line`'s output already rendered, and re-parsing it
+/// into a struct here so it could be re-rendered would be two formats to keep
+/// in step for no gain.
+fn print_session_list(out: &mut impl Write, lines: &[String]) {
+    let _ = writeln!(
+        out,
+        "{:<8} {:<6} {:<16} {:<12} TTY",
+        "SESSION", "UID", "USER", "SEAT"
+    );
+    for line in lines {
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = writeln!(out, "\n{} sessions listed.", lines.len());
+}
+
+/// `loginctl list-sessions`, asking the daemon.
+///
+/// # Why this does not go through `run_loginctl_command`
+///
+/// That function takes a `Daemon`, and the one `run_loginctl` builds is local
+/// and empty. Listing it printed a header, no rows, "0 sessions listed." and
+/// exited 0 -- an assertion that the machine has no sessions, made without
+/// asking the machine. `login` registers real ones over this same bus.
+///
+/// # A failure to reach the daemon is a failure
+///
+/// Not an empty list. The two are indistinguishable on the terminal and
+/// opposite in meaning, and the previous behaviour picked the wrong one
+/// silently. Exiting non-zero is what lets a script tell them apart.
+fn list_sessions_via_bus() -> i32 {
+    // `bus::SERVICE_NAME`, not a second copy of the string. `userspace/login`
+    // keeps its own `LOGIND_SERVICE` because `bus` is a module of this binary
+    // and not a crate it can import; the two agree today, and todo.txt already
+    // records this pair drifting apart once -- `loginctl`'s `SESSION_DIR` was
+    // `/run/sessions` while `logind`'s was `/run/systemd/sessions`. Inside this
+    // binary there is no excuse for a second copy.
+    let mut conn = match libservicebus::Connection::connect(bus::SERVICE_NAME) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(
+                io::stderr(),
+                "loginctl: cannot reach {}: {e:?}",
+                bus::SERVICE_NAME
+            );
+            return 1;
+        }
+    };
+    let reply = match conn.call("ListSessions", &libservicebus::fields::encode(&[])) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "loginctl: ListSessions failed: {e:?}");
+            return 1;
+        }
+    };
+    let Some(fields) = libservicebus::fields::decode(&reply.payload) else {
+        let _ = writeln!(
+            io::stderr(),
+            "loginctl: ListSessions returned a reply this build cannot decode"
+        );
+        return 1;
+    };
+    // Lossy is wrong for a path and right for a listing that is about to be
+    // printed: these lines are logind's own rendering of its own ids, uids and
+    // user names, so a byte that is not text means the daemon is not the one
+    // this build expects -- and showing the replacement character says so
+    // where discarding the line would not.
+    let lines: Vec<String> = fields
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .collect();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    print_session_list(&mut out, &lines);
+    0
+}
+
 /// Execute a loginctl command.
 ///
 /// # This operates on a LOCAL `Daemon`, not the running one
@@ -1964,17 +2044,14 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
 
     match cmd {
         LoginctlCommand::ListSessions => {
-            let _ = writeln!(
-                out,
-                "{:<8} {:<6} {:<16} {:<12} TTY",
-                "SESSION", "UID", "USER", "SEAT"
-            );
+            // Reached only by the tests, which use it to check the FORMATTING
+            // against a daemon they populated themselves. The real command
+            // goes through `list_sessions_via_bus` in `run_loginctl`, because
+            // the `daemon` here is a local object with nothing in it.
             let mut sessions: Vec<&Session> = daemon.sessions.values().collect();
             sessions.sort_by(|a, b| a.id.cmp(&b.id));
-            for session in &sessions {
-                let _ = writeln!(out, "{}", session.format_list_line());
-            }
-            let _ = writeln!(out, "\n{} sessions listed.", sessions.len());
+            let lines: Vec<String> = sessions.iter().map(|s| s.format_list_line()).collect();
+            print_session_list(&mut out, &lines);
             0
         }
         LoginctlCommand::ListUsers => {
@@ -2277,6 +2354,12 @@ fn handle_power_command(daemon: &Daemon, action: PowerAction, force: bool) -> i3
 /// Run the loginctl personality.
 fn run_loginctl(args: &[String]) -> i32 {
     let cmd = parse_loginctl_args(args);
+    // The commands that have a bus method go to the daemon. The rest still run
+    // against a local `Daemon` -- see `run_loginctl_command`'s doc comment for
+    // what that costs and why the two halves behave differently.
+    if matches!(cmd, LoginctlCommand::ListSessions) {
+        return list_sessions_via_bus();
+    }
     let config = DaemonConfig::default();
     let mut daemon = Daemon::new(config, authlib::Authenticator::new());
     run_loginctl_command(&mut daemon, &cmd)
@@ -3677,6 +3760,56 @@ HandleSuspendKey=ignore
     }
 
     // --- loginctl command execution ---
+
+    /// An unreachable daemon is reported, not rendered as an empty machine.
+    ///
+    /// `loginctl list-sessions` used to print a header, no rows, "0 sessions
+    /// listed." and exit 0 -- against a `Daemon` built locally one line
+    /// earlier. That is an assertion the machine has nobody logged in, made
+    /// without asking the machine, while `login` was registering real sessions
+    /// over the bus.
+    ///
+    /// On any target that is not `slateos` the bus syscalls answer ENOSYS, so
+    /// `connect` fails here and this pins the FAILURE path -- the same half
+    /// `userspace/login`'s session tests can reach, and for the same reason.
+    /// A green run means "loginctl says so when it cannot ask", not "listing
+    /// works"; confirming the success path needs a boot test.
+    ///
+    /// The exit status is the assertion. "Cannot reach the daemon" and "no
+    /// sessions" look nearly identical on a terminal and mean opposite things,
+    /// and a script can only tell them apart by `$?`.
+    #[test]
+    fn list_sessions_reports_an_unreachable_daemon_rather_than_an_empty_list() {
+        assert_ne!(
+            list_sessions_via_bus(),
+            0,
+            "an unreachable daemon must not read as a machine with no sessions"
+        );
+    }
+
+    /// The count in the footer is the number of lines printed.
+    ///
+    /// Trivial, and it is the line that would go wrong silently: the footer
+    /// used to count a `Vec<&Session>` while the rows came from the same Vec,
+    /// so they could not disagree. Now the rows arrive from the daemon and the
+    /// count is taken from what arrived, which is a different thing that has
+    /// to stay equal to it.
+    #[test]
+    fn the_session_footer_counts_the_lines_it_printed() {
+        let mut buf = Vec::new();
+        print_session_list(&mut buf, &["a".to_string(), "b".to_string()]);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("2 sessions listed."), "{s}");
+        assert!(s.contains("SESSION"), "header missing: {s}");
+
+        let mut empty = Vec::new();
+        print_session_list(&mut empty, &[]);
+        assert!(
+            String::from_utf8(empty)
+                .unwrap()
+                .contains("0 sessions listed.")
+        );
+    }
 
     #[test]
     fn test_loginctl_list_sessions_empty() {

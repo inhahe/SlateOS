@@ -444,8 +444,14 @@ prog 'if-block then statement'       'if (1) { print "a" } 2\n'
 prog 'separators that are accepted'  '1; 2\n{ print "a" }\nif (1) print "b" else print "c"\n'
 prog 'define then call, no separator' 'define f() { return (1) } f()\n'
 
-known_bug TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE
 prog_file 'a file that is not there' '' nosuch.bc
+# A name that needs quoting still gets them, and there we differ from GNU on
+# purpose: GNU prints it bare, so a file called
+# `x<newline>bc: /etc/shadow: Permission denied` forges a diagnostic bc never
+# wrote. The row is here rather than merely asserted in the entry, because a
+# deviation nothing exercises is a deviation nobody will notice losing.
+differs_by_design 'a name needing quotes is quoted, so it cannot forge a diagnostic line'
+prog_file 'an unavailable name with a space' '' 'no such.bc'
 
 # ==============================================================================
 # Differences on purpose

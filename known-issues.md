@@ -85385,7 +85385,7 @@ arithmetic nobody had performed.
 
 ---
 
-## TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE (lane B, 2026-08-24) — **open; a decision more than a bug**
+## TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE (lane B, 2026-08-24) -- **Status: FIXED** 2026-09-16
 
 **In short:** ask `bc` to run a file that does not exist and both programs
 complain and exit 1. GNU writes `File nosuch.bc is unavailable.`; we write
@@ -85427,6 +85427,35 @@ harness row stays yellow. Recommendation: **(c)** — it makes the common case
 match GNU exactly and keeps the protection for the case that motivated the
 policy. It is a user-visible message, so it is written down here rather than
 quietly changed.
+
+### Fixed 2026-09-16 — option (c)
+
+Taken, and recorded as `design-decisions.md` §1027.
+
+**What decided it was not in the options above.** Since the syntax-error prefix
+started naming its source file, `bc` printed the same name two ways in one
+program — `File 'prog.bc' is unavailable.` beside `prog.bc 1: syntax error`.
+That inconsistency post-dates this entry and is what turned a matter of taste
+into an obvious call: of the two spellings, the eliding one also matches
+upstream.
+
+**The forgery protection is intact**, which matters because it is the only
+reason the quoting existed. `quotef_os` quotes a name containing a newline,
+space or control character and leaves an ordinary one bare, so
+`x⏎b c: /etc/shadow: Permission denied` still cannot forge a line. Verified
+rather than asserted: `nosuch.bc` prints bare and matches GNU byte for byte,
+and a newline-bearing name prints as `'a'$'
+''bc: forged'`. Both are harness
+rows, the second `differs_by_design`.
+
+**Not put to the operator**, though the entry said it was written down rather
+than quietly changed. The reasoning is in §1027: the new inconsistency makes
+one option strictly better rather than leaving a fork, and the operator's queue
+already holds nine unanswered lane-B questions. One function call to reverse.
+
+**Evidence.** `bc-diff.sh` now reports **0 known bugs** — 159 -> 160 passed,
+15 differ on purpose. This was the last tracked differential difference in the
+shipped surface.
 
 ---
 

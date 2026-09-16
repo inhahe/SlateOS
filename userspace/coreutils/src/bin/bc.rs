@@ -10,7 +10,7 @@
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
-use coreutils::quote::{quoteaf_os, quotef_os};
+use coreutils::quote::quotef_os;
 use coreutils::stdfd;
 use std::collections::HashMap;
 use std::env;
@@ -3000,10 +3000,20 @@ fn run_text(interp: &mut Interpreter, text: &str, source: &str) -> Session {
 //     open, and is reported exactly like any other. The comment that used to
 //     sit on the operand arm claiming otherwise was wrong.
 //
-// The one deliberate deviation is quoting: GNU prints the name bare, so a
-// file called `x⏎bc: /etc/shadow: Permission denied` forges a line bc never
-// wrote. Names go through `quoteaf_os` for the reason set out in
-// `coreutils::quote` -- the same deviation every other utility here makes.
+// The one deliberate deviation is quoting, and it is narrower than it used to
+// be. GNU prints the name bare, so a file called
+// `x⏎bc: /etc/shadow: Permission denied` forges a line bc never wrote. Names
+// go through `quotef_os` -- the ELIDING form -- which keeps that protection
+// exactly where it is needed and drops it where it is not: a name containing a
+// newline, a space or a control character is still quoted and cannot forge
+// anything, while an ordinary `nosuch.bc` prints bare and matches GNU byte for
+// byte.
+//
+// It was `quoteaf_os`, the always-quote form, until 2026-09-16. The forgery
+// argument was never an argument for quoting CLEAN names, only for quoting
+// dangerous ones, and the always-quote form was additionally inconsistent with
+// the syntax-error prefix, which names the same file without quotes. See
+// `design-decisions.md` §1027.
 
 /// Exits 1 on a bad command line, measured with `bc --zzz-bogus; echo $?`.
 const BC: Program = Program::new("bc", 1);
@@ -3161,9 +3171,20 @@ enum Trouble {
 impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
-            // Mid-sentence, so the quotes are never elided: a bare name would
-            // blur into the words either side of it.
-            Self::Unavailable(name) => diag!("File {} is unavailable.", quoteaf_os(name)),
+            // `quotef_os`, the eliding form: a name that needs no quotes gets
+            // none, and `File nosuch.bc is unavailable.` then matches GNU bc
+            // byte for byte, while a name containing a space or a newline is
+            // still quoted rather than dissolving into the sentence.
+            //
+            // This used to be `quoteaf_os`, the always-quote form, on the
+            // grounds that a mid-sentence name needs the quotes to stand out.
+            // What settled it was not that argument but an inconsistency:
+            // since the syntax-error prefix started naming the source file,
+            // `bc` printed the SAME name two different ways -- `File 'prog.bc'
+            // is unavailable.` beside `prog.bc 1: syntax error`. One program
+            // spelling one file two ways is worse than either convention, and
+            // the eliding form is the one that also matches upstream.
+            Self::Unavailable(name) => diag!("File {} is unavailable.", quotef_os(name)),
             // Ends the clause, so it takes the bare form when it can, exactly
             // as `wc: missing.txt: No such file or directory` does.
             Self::FileNotUtf8(name) => diag!("bc: {}: not valid UTF-8", quotef_os(name)),

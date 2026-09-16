@@ -110,12 +110,117 @@ impl fmt::Display for ArchiveError {
 /// different member after the first click — and the member is what decides
 /// where the bytes are, so the mistake would extract one file's contents under
 /// another's name rather than merely showing the wrong row.
-#[derive(Clone)]
+// Not `Clone`, since 2026-09-16: this holds an open file, and a derived clone
+// of one is either a second handle with its own cursor or a panic, neither of
+// which is what a caller writing `.clone()` expects. Nothing cloned it -- the
+// derive predates the file and outlived the bytes it was cheap for.
 pub struct ArchiveSource {
-    /// The whole archive file.
-    bytes: Vec<u8>,
+    /// Where the archive's bytes are, and how to reach them.
+    bytes: ArchiveBytes,
     /// The parsed central directory, by the id the model gave each entry.
     members: HashMap<u64, ziparchive::ZipEntry>,
+}
+
+/// Where an archive's bytes live.
+///
+/// The application holds a *file*, not its contents. `ziparchive`'s ranged
+/// entry points (`parse_at`, `entry_data_at`) read the central directory from
+/// the tail and then one member at a time, so opening a 900 MB archive to look
+/// at its listing costs a handle and a `Vec<ZipEntry>` rather than 900 MB --
+/// which is the measurement that
+/// `requests/c-a-ziparchive-wants-a-ranged-reader-and-a-streaming-writer.md`
+/// was filed on.
+///
+/// `Memory` is not a second code path for the application: nothing in `open`
+/// can produce one. It exists because the tests build fixtures with
+/// `ziparchive::create` and read them straight back, and making each of them
+/// write a temporary file would test the filesystem rather than the parser.
+pub enum ArchiveBytes {
+    /// A file on disk, read at offsets.
+    ///
+    /// `RefCell` because a positional read is logically not a mutation -- it
+    /// answers "what is at this offset" without changing what the archive is
+    /// -- while the portable way to perform one moves a cursor. Without it,
+    /// `&ArchiveSource` would have to become `&mut ArchiveSource` through
+    /// every caller in `main.rs`, which would spread a detail of how reading
+    /// is implemented across code that only wants to look at an entry.
+    File {
+        /// The open archive.
+        file: std::cell::RefCell<fs::File>,
+        /// Its length, asked once at open time.
+        len: u64,
+    },
+    /// Bytes already in hand. The tests' fixture source.
+    Memory(Vec<u8>),
+}
+
+impl ArchiveBytes {
+    /// Read at `offset`, without needing a mutable borrow of the archive.
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::File { file, .. } => {
+                use io::{Read as _, Seek as _};
+                let mut file = file.borrow_mut();
+                file.seek(io::SeekFrom::Start(offset))?;
+                // `read` may return short for reasons that are not EOF, and
+                // `ReadAt`'s contract says short means end of source. Looping
+                // here keeps that promise rather than reporting a truncated
+                // archive because a read was split.
+                let mut done = 0;
+                while done < buf.len() {
+                    let Some(rest) = buf.get_mut(done..) else {
+                        break;
+                    };
+                    match file.read(rest) {
+                        Ok(0) => break,
+                        Ok(n) => done = done.saturating_add(n),
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(done)
+            }
+            Self::Memory(bytes) => {
+                let start = usize::try_from(offset).unwrap_or(usize::MAX);
+                let Some(rest) = bytes.get(start..) else {
+                    return Ok(0);
+                };
+                let n = rest.len().min(buf.len());
+                let (Some(dst), Some(src)) = (buf.get_mut(..n), rest.get(..n)) else {
+                    return Ok(0);
+                };
+                dst.copy_from_slice(src);
+                Ok(n)
+            }
+        }
+    }
+
+    /// The archive's length in bytes.
+    const fn len(&self) -> u64 {
+        match self {
+            Self::File { len, .. } => *len,
+            Self::Memory(bytes) => bytes.len() as u64,
+        }
+    }
+}
+
+/// A borrowing view of [`ArchiveBytes`] that satisfies `ziparchive::ReadAt`.
+///
+/// The trait takes `&mut self`, which is right for a source that really is
+/// consumed as it is read. This one is not, so the mutability stops here
+/// rather than being pushed out to every caller.
+struct Reader<'a>(&'a ArchiveBytes);
+
+impl ziparchive::ReadAt for Reader<'_> {
+    type Error = io::Error;
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read_at(offset, buf)
+    }
+
+    fn len(&mut self) -> io::Result<u64> {
+        Ok(self.0.len())
+    }
 }
 
 impl fmt::Debug for ArchiveSource {
@@ -131,10 +236,20 @@ impl fmt::Debug for ArchiveSource {
 }
 
 impl ArchiveSource {
-    /// The archive file, whole.
+    /// A reader over the archive, for `ziparchive`'s ranged entry points.
+    ///
+    /// Replaces a `bytes() -> &[u8]` that handed out the whole file. Every
+    /// caller of that took the slice only to pass it straight to
+    /// `ziparchive`, so nothing lost a capability -- what went is the
+    /// requirement that the file be in memory to have one.
+    fn reader(&self) -> Reader<'_> {
+        Reader(&self.bytes)
+    }
+
+    /// The archive's size in bytes.
     #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    pub const fn size(&self) -> u64 {
+        self.bytes.len()
     }
 
     /// The central-directory record the entry with this id came from.
@@ -180,11 +295,21 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
     if size > MAX_ARCHIVE_BYTES {
         return Err(ArchiveError::TooLarge { bytes: size });
     }
-    let bytes = fs::read(path).map_err(|source| ArchiveError::Io {
+    // The handle, not the contents. `parse_zip` reads the central directory
+    // through it and each member is read when it is actually extracted, so
+    // opening a large archive to look at its listing no longer costs its size
+    // in memory.
+    let file = fs::File::open(path).map_err(|source| ArchiveError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    parse_zip(path, bytes)
+    parse_zip(
+        path,
+        ArchiveBytes::File {
+            file: std::cell::RefCell::new(file),
+            len: size,
+        },
+    )
 }
 
 /// Parse bytes already in hand as a ZIP, under the name `path`.
@@ -197,8 +322,17 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
 /// # Errors
 ///
 /// [`ArchiveError::Zip`] if the bytes are not a well-formed archive.
-pub fn parse_zip(path: &Path, bytes: Vec<u8>) -> Result<ArchiveModel, ArchiveError> {
-    let members = ziparchive::parse(&bytes).map_err(ArchiveError::Zip)?;
+pub fn parse_zip(path: &Path, bytes: ArchiveBytes) -> Result<ArchiveModel, ArchiveError> {
+    // `RangedError` keeps "the archive is malformed" and "the source could not
+    // be read" apart, and this is where that distinction earns its keep: a
+    // disk that stops answering must not be reported as a damaged archive.
+    let members = ziparchive::parse_at(&mut Reader(&bytes)).map_err(|e| match e {
+        ziparchive::RangedError::Zip(e) => ArchiveError::Zip(e),
+        ziparchive::RangedError::Read(source) => ArchiveError::Io {
+            path: path.to_path_buf(),
+            source,
+        },
+    })?;
     let mut model = ArchiveModel::new(path, ArchiveFormat::Zip);
     let mut by_id = HashMap::with_capacity(members.len());
     for member in members {
@@ -356,6 +490,29 @@ pub enum SkipReason {
     Zip(ziparchive::Error),
     /// The file or its directory could not be written.
     Io(io::Error),
+    /// The archive itself could not be read at that member's offset.
+    ///
+    /// Separate from [`Self::Io`], which is the *output* failing, and from
+    /// [`Self::Zip`], which is the archive being malformed -- for the reason
+    /// [`Self::Encrypted`] is separate from `Zip`. All three would otherwise
+    /// print something false: "could not be written" about a file nothing
+    /// tried to write, or a damaged archive about an intact one on a disk that
+    /// stopped answering. `ziparchive::RangedError` keeps the last two apart
+    /// at the source; this is where that distinction survives into what the
+    /// user is told.
+    Unreadable(io::Error),
+}
+
+impl From<ziparchive::RangedError<io::Error>> for SkipReason {
+    /// Keeps the crate's distinction instead of flattening it: a malformed
+    /// archive stays `Zip`, a source that would not answer becomes
+    /// `Unreadable`.
+    fn from(e: ziparchive::RangedError<io::Error>) -> Self {
+        match e {
+            ziparchive::RangedError::Zip(e) => Self::Zip(e),
+            ziparchive::RangedError::Read(e) => Self::Unreadable(e),
+        }
+    }
 }
 
 impl fmt::Display for SkipReason {
@@ -367,6 +524,7 @@ impl fmt::Display for SkipReason {
             Self::Encrypted => f.write_str("it is encrypted and this build cannot decrypt"),
             Self::Zip(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
+            Self::Unreadable(e) => write!(f, "the archive could not be read: {e}"),
         }
     }
 }
@@ -507,12 +665,12 @@ pub fn extract(source: &ArchiveSource, members: &[&ArchiveEntry], dest: &Path) -
                 .push((entry.path.clone(), SkipReason::Encrypted));
             continue;
         }
-        let data = match ziparchive::extract_entry(source.bytes(), member) {
+        let data = match ziparchive::extract_entry_at(&mut source.reader(), member) {
             Ok(d) => d,
             Err(e) => {
                 report
                     .skipped
-                    .push((entry.path.clone(), SkipReason::Zip(e)));
+                    .push((entry.path.clone(), SkipReason::from(e)));
                 continue;
             }
         };
@@ -563,19 +721,23 @@ pub fn verify(model: &ArchiveModel) -> ArchiveTestResults {
             // actually help, whereas "Corrupted" sends them to look for another
             // copy of an archive that is not damaged.
             Some(member) if member.is_encrypted() => TestResult::DecryptionFailed,
-            Some(member) => match ziparchive::extract_entry(source.bytes(), member) {
+            Some(member) => match ziparchive::extract_entry_at(&mut source.reader(), member) {
                 Ok(_) => TestResult::Ok,
                 // The parser checks the declared size first and the CRC second
                 // but reports one error for both, so this message names both
                 // rather than picking one and being wrong half the time. Asked
                 // for a finer error in
                 // `requests/c-a-ziparchive-drops-the-one-field-a-date-column-needs.md`.
-                Err(ziparchive::Error::CorruptedData) => TestResult::Corrupted(String::from(
-                    "its contents do not match the size or checksum the archive declared",
-                )),
-                Err(ziparchive::Error::UnsupportedMethod) => {
+                Err(ziparchive::RangedError::Zip(ziparchive::Error::CorruptedData)) => {
+                    TestResult::Corrupted(String::from(
+                        "its contents do not match the size or checksum the archive declared",
+                    ))
+                }
+                Err(ziparchive::RangedError::Zip(ziparchive::Error::UnsupportedMethod)) => {
                     TestResult::Corrupted(format!("{} is not a codec this build has", entry.method))
                 }
+                // Says nothing about the archive -- see `TestResult::Unreadable`.
+                Err(ziparchive::RangedError::Read(e)) => TestResult::Unreadable(format!("{e}")),
             },
         };
         results.record(&entry.path, result);
@@ -586,6 +748,26 @@ pub fn verify(model: &ArchiveModel) -> ArchiveTestResults {
 // ---------------------------------------------------------------------------
 // Writing
 // ---------------------------------------------------------------------------
+
+/// A `fs::File` as a `ziparchive` sink.
+///
+/// The writer hands this one member at a time, so the new archive is never
+/// held whole. Before this, `save` built every member's plaintext into a
+/// `Vec<ZipWriteEntry>` and then asked `ziparchive::create` for the finished
+/// bytes, so a rewrite held the old archive, every member's plaintext and the
+/// entire new archive at once -- "old + plaintext + new", which
+/// `requests/c-a-ziparchive-wants-a-ranged-reader-and-a-streaming-writer.md`
+/// called the part nobody anticipated.
+struct FileSink<'a>(&'a mut fs::File);
+
+impl ziparchive::WriteStream for FileSink<'_> {
+    type Error = io::Error;
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        use io::Write as _;
+        self.0.write_all(buf)
+    }
+}
 
 /// A file the user has asked to put into the archive, already read.
 ///
@@ -795,15 +977,20 @@ fn dos_datetime_of(meta: &fs::Metadata) -> u32 {
 ///
 /// | term | why it is held |
 /// |---|---|
-/// | the archive | `ArchiveSource::bytes`, read whole at open and kept |
-/// | plaintext of every reproduced member | `ZipWriteEntry::data`, all built before any is written |
 /// | the bytes of every added file | already in `PendingAdd::data` by the time we are called |
-/// | the archive being built | the writer's output buffer |
+/// | one reproduced member | the buffer `entry_data_at` fills, dropped before the next |
 ///
-/// The last is estimated as the *compressed* size of what is reproduced plus
-/// the full size of what is added, which is what a deflate writer will produce
-/// give or take per-member headers. Added files are counted twice on purpose:
-/// once as the input we are holding and once as the output they become.
+/// **Three of the four costs this used to sum are gone**, and the table above
+/// is what is left rather than a tightened estimate of the same thing. The
+/// archive is no longer read whole at open (a handle, since `ArchiveBytes`);
+/// the plaintext of every reproduced member is no longer built, because a
+/// member is copied across compressed and never inflated; and the new archive
+/// is no longer assembled in a buffer, because it is written to the file as it
+/// is produced. What remains is what the caller already holds plus the largest
+/// single member -- see `TD-C-ARCHIVEMANAGER-HOLDS-THE-WHOLE-ARCHIVE-IN-MEMORY`.
+///
+/// The largest member rather than their sum, because the buffers do not
+/// coexist: each is dropped at the end of its iteration.
 ///
 /// Directory members contribute nothing: they have no data, which is why they
 /// are skipped in the rewrite loop too.
@@ -812,7 +999,17 @@ fn projected_save_bytes(
     model: &ArchiveModel,
     adding: &[PendingAdd],
 ) -> u64 {
-    let mut total = source.bytes().len() as u64;
+    // Everything the caller is already holding. `read_for_add` reads each file
+    // whole before `save` is called, so this is spent whatever happens here.
+    let mut total: u64 = 0;
+    for add in adding {
+        total = total.saturating_add(add.data.len() as u64);
+    }
+
+    // Plus the largest single member, which is all the rewrite adds: members
+    // are copied one at a time and each buffer is dropped before the next is
+    // read. The *compressed* size, because a copied member is never inflated.
+    let mut largest = 0_u64;
     for entry in &model.entries {
         let Some(member) = source.member(entry.id) else {
             continue;
@@ -820,16 +1017,9 @@ fn projected_save_bytes(
         if member.is_dir || adding.iter().any(|add| add.name == member.name) {
             continue;
         }
-        total = total
-            .saturating_add(member.uncompressed_size)
-            .saturating_add(member.compressed_size);
+        largest = largest.max(member.compressed_size);
     }
-    for add in adding {
-        // Twice: held as input, and written as output.
-        let len = add.data.len() as u64;
-        total = total.saturating_add(len).saturating_add(len);
-    }
-    total
+    total.saturating_add(largest)
 }
 
 pub fn save(model: &ArchiveModel, adding: Vec<PendingAdd>) -> Result<SaveReport, SaveError> {
@@ -864,73 +1054,87 @@ fn save_within(
     // dropped rather than written twice. A ZIP with two members of one name is
     // legal to write and ambiguous to read: which one a tool extracts is its
     // own business, so writing one is a way of not deciding.
-    let mut replaced = 0_usize;
-    let mut members: Vec<ziparchive::ZipWriteEntry> = Vec::with_capacity(model.entries.len());
-    for entry in &model.entries {
-        let Some(member) = source.member(entry.id) else {
-            return Err(SaveError::UnknownMember {
-                name: entry.path.clone(),
-            });
-        };
-        if adding.iter().any(|add| add.name == member.name) {
-            replaced = replaced.saturating_add(1);
-            continue;
-        }
-        // A directory member has no data, so nothing has to be reproduced and
-        // an encrypted-bit check would be asking about bytes that do not exist.
-        if member.is_dir {
-            members.push(ziparchive::ZipWriteEntry {
-                name: member.name.clone(),
-                data: Vec::new(),
-                store_only: true,
-                dos_datetime: member.dos_datetime,
-            });
-            continue;
-        }
-        if member.is_encrypted() {
-            return Err(SaveError::CannotReproduce {
-                name: entry.path.clone(),
-                why: SkipReason::Encrypted,
-            });
-        }
-        let data = ziparchive::extract_entry(source.bytes(), member).map_err(|e| {
-            SaveError::CannotReproduce {
-                name: entry.path.clone(),
-                why: SkipReason::Zip(e),
-            }
-        })?;
-        members.push(ziparchive::ZipWriteEntry {
-            // The *raw* name, not `entry.path`. The model's path is a lossy
-            // rendering built for a column, and writing it back would replace
-            // every byte with no UTF-8 reading by a replacement character —
-            // renaming the member, and collapsing two members onto one name if
-            // they differed only in those bytes.
-            name: member.name.clone(),
-            data,
-            // Method 8 unless it does not shrink, rather than preserving the
-            // method the member arrived with. The crate re-compresses from the
-            // plaintext either way, so "keep the old method" would mean storing
-            // uncompressed data that used to be deflated.
-            store_only: false,
-            dos_datetime: member.dos_datetime,
-        });
-    }
-
     let added = adding.len();
-    for add in adding {
-        members.push(ziparchive::ZipWriteEntry {
-            name: add.name,
-            data: add.data,
-            store_only: false,
-            dos_datetime: add.dos_datetime,
-        });
-    }
 
-    let bytes = ziparchive::create(&members);
-    let total = bytes.len() as u64;
-    replace_file(&model.path, &bytes)?;
+    // Streamed, not assembled. Each member is written as it is read, so what
+    // is held at once is one member rather than the whole new archive plus
+    // every member's plaintext.
+    let ((written, replaced), total) = replace_file_with(&model.path, move |file| {
+        let mut zip = ziparchive::ZipWriter::new(FileSink(file));
+        let mut written = 0_usize;
+        let mut replaced = 0_usize;
+        // Writing to the temporary failed. The path named is the archive the
+        // user asked to save, not the temporary, which is this module's
+        // business and not theirs.
+        let failed = |source: io::Error| SaveError::Io {
+            path: model.path.clone(),
+            source,
+        };
+
+        for entry in &model.entries {
+            let Some(member) = source.member(entry.id) else {
+                return Err(SaveError::UnknownMember {
+                    name: entry.path.clone(),
+                });
+            };
+            // A member being replaced is simply not written; the new one
+            // arrives in the loop below. A ZIP with two members of one name is
+            // legal to write and ambiguous to read, so writing one is a way of
+            // not deciding.
+            if adding.iter().any(|add| add.name == member.name) {
+                replaced = replaced.saturating_add(1);
+                continue;
+            }
+            if member.is_dir {
+                zip.add_entry(&ziparchive::ZipWriteEntry {
+                    name: member.name.clone(),
+                    data: Vec::new(),
+                    store_only: true,
+                    dos_datetime: member.dos_datetime,
+                })
+                .map_err(failed)?;
+                written = written.saturating_add(1);
+                continue;
+            }
+            if member.is_encrypted() {
+                return Err(SaveError::CannotReproduce {
+                    name: entry.path.clone(),
+                    why: SkipReason::Encrypted,
+                });
+            }
+            // The member's *stored* bytes, handed straight to `copy_entry`:
+            // the member crosses into the new archive without being inflated
+            // and without being deflated again. It therefore keeps the method,
+            // CRC and sizes it arrived with, which the previous version could
+            // not -- rebuilding from plaintext meant re-compressing everything
+            // and storing uncompressed whatever failed to shrink.
+            let raw = ziparchive::entry_data_at(&mut source.reader(), member).map_err(|e| {
+                SaveError::CannotReproduce {
+                    name: entry.path.clone(),
+                    why: SkipReason::from(e),
+                }
+            })?;
+            zip.copy_entry(member, &raw).map_err(failed)?;
+            written = written.saturating_add(1);
+        }
+
+        for add in adding {
+            zip.add_entry(&ziparchive::ZipWriteEntry {
+                name: add.name,
+                data: add.data,
+                store_only: false,
+                dos_datetime: add.dos_datetime,
+            })
+            .map_err(failed)?;
+            written = written.saturating_add(1);
+        }
+
+        zip.finish().map_err(failed)?;
+        Ok((written, replaced))
+    })?;
+
     Ok(SaveReport {
-        members: members.len(),
+        members: written,
         added,
         replaced,
         bytes: total,
@@ -953,6 +1157,59 @@ pub fn create_empty(path: &Path) -> Result<(), SaveError> {
 /// a process that dies during the write destroys the original and leaves a
 /// fragment wearing its name. Rename is the only step that touches the target,
 /// and on both Windows and Unix it replaces atomically.
+fn replace_file_with<T>(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> Result<T, SaveError>,
+) -> Result<(T, u64), SaveError> {
+    // The same temporary-then-rename dance as `replace_file`, and for the same
+    // reasons -- beside the target so the rename stays within one filesystem,
+    // and the temporary removed on every failing path. What differs is that
+    // the caller writes *into* the file rather than handing over finished
+    // bytes, which is what lets an archive be rewritten without existing in
+    // memory first.
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.part", std::process::id()));
+    let temp = path.with_file_name(name);
+
+    let outcome = (|| {
+        let mut file = fs::File::create(&temp).map_err(|source| SaveError::Io {
+            path: temp.clone(),
+            source,
+        })?;
+        let value = write(&mut file)?;
+        // Asked of the file rather than counted while writing: the number
+        // reported is then the size of the thing on disk, not a tally that
+        // could disagree with it.
+        let len = file
+            .metadata()
+            .map_err(|source| SaveError::Io {
+                path: temp.clone(),
+                source,
+            })?
+            .len();
+        Ok((value, len))
+    })();
+
+    let (value, len) = match outcome {
+        Ok(v) => v,
+        Err(e) => {
+            // A half-written archive beside the user's real one is litter that
+            // looks like a backup.
+            let _ = fs::remove_file(&temp);
+            return Err(e);
+        }
+    };
+
+    if let Err(source) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(SaveError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok((value, len))
+}
+
 fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
     // Beside the target, so the rename stays within one filesystem — across a
     // mount boundary it would degrade into copy-then-delete and lose the
@@ -1227,7 +1484,8 @@ mod tests {
         // The end-to-end shape of the two rules above: our own writer records no
         // time, the parser hands the zero through, and the model says so.
         let bytes = ziparchive::create(&[member("a.txt", b"a")]);
-        let model = parse_zip(Path::new("/tmp/dates.zip"), bytes).expect("a well-formed archive");
+        let model = parse_zip(Path::new("/tmp/dates.zip"), ArchiveBytes::Memory(bytes))
+            .expect("a well-formed archive");
         let entry = &model.entries[0];
         assert_eq!(entry.modified, 0);
         assert_eq!(ArchiveEntry::format_date(entry.modified), "-");
@@ -1242,7 +1500,8 @@ mod tests {
             member("src/main.rs", b"fn main() {}\n"),
             member("README.md", &b"read me, and me, and me, and me\n".repeat(8)),
         ]);
-        let model = parse_zip(Path::new("/tmp/fixture.zip"), bytes).expect("a well-formed archive");
+        let model = parse_zip(Path::new("/tmp/fixture.zip"), ArchiveBytes::Memory(bytes))
+            .expect("a well-formed archive");
 
         assert_eq!(model.format, ArchiveFormat::Zip);
         assert_eq!(model.file_count, 2);
@@ -1280,7 +1539,8 @@ mod tests {
         // another member's name.
         let bytes =
             ziparchive::create(&[member("z.txt", b"this is z"), member("a.txt", b"this is a")]);
-        let mut model = parse_zip(Path::new("/tmp/order.zip"), bytes).expect("well-formed");
+        let mut model = parse_zip(Path::new("/tmp/order.zip"), ArchiveBytes::Memory(bytes))
+            .expect("well-formed");
         model.sort_entries(&crate::SortState {
             column: crate::Column::Name,
             direction: crate::SortDirection::Ascending,
@@ -1293,7 +1553,8 @@ mod tests {
             .expect("parsed archives have a source");
         for entry in &model.entries {
             let m = source.member(entry.id).expect("every entry has its member");
-            let data = ziparchive::extract_entry(source.bytes(), m).expect("it decompresses");
+            let data =
+                ziparchive::extract_entry_at(&mut source.reader(), m).expect("it decompresses");
             assert_eq!(
                 String::from_utf8_lossy(&data),
                 format!("this is {}", entry.path.trim_end_matches(".txt")),
@@ -1315,7 +1576,8 @@ mod tests {
             member("docs/guide.md", b"# Guide\n"),
             member("LICENSE", b"do what you like\n"),
         ]);
-        let model = parse_zip(Path::new("/tmp/good.zip"), bytes).expect("well-formed");
+        let model = parse_zip(Path::new("/tmp/good.zip"), ArchiveBytes::Memory(bytes))
+            .expect("well-formed");
         let results = verify(&model);
         assert_eq!(
             results.total_entries, 2,
@@ -1335,7 +1597,8 @@ mod tests {
             member("intact.txt", b"this member is fine and stays fine"),
             member("broken.txt", b"this member is about to be damaged"),
         ]);
-        let model = parse_zip(Path::new("/tmp/x.zip"), good.clone()).expect("well-formed");
+        let model = parse_zip(Path::new("/tmp/x.zip"), ArchiveBytes::Memory(good.clone()))
+            .expect("well-formed");
         let broken_entry = model
             .entries
             .iter()
@@ -1360,7 +1623,8 @@ mod tests {
             "the fixture member must have data"
         );
 
-        let model = parse_zip(Path::new("/tmp/x.zip"), damaged).expect("the directory is intact");
+        let model = parse_zip(Path::new("/tmp/x.zip"), ArchiveBytes::Memory(damaged))
+            .expect("the directory is intact");
         let results = verify(&model);
         assert_eq!(results.tested, 2);
         assert_eq!(results.failed, 1, "{:?}", results.results);
@@ -1387,7 +1651,8 @@ mod tests {
             member("deep/down/here.txt", b"found me"),
             member("top.txt", b"at the top"),
         ]);
-        let model = parse_zip(Path::new("/tmp/e.zip"), bytes).expect("well-formed");
+        let model =
+            parse_zip(Path::new("/tmp/e.zip"), ArchiveBytes::Memory(bytes)).expect("well-formed");
         let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
         let report = extract(model.source.as_ref().expect("a source"), &all, &dir);
 
@@ -1416,7 +1681,10 @@ mod tests {
     fn an_encrypted_member_is_shown_as_encrypted() {
         let model = parse_zip(
             Path::new("/tmp/locked.zip"),
-            encrypted_archive("secret.txt", b"pretend this is ciphertext"),
+            ArchiveBytes::Memory(encrypted_archive(
+                "secret.txt",
+                b"pretend this is ciphertext",
+            )),
         )
         .expect("well-formed");
         assert!(
@@ -1428,7 +1696,10 @@ mod tests {
         // from the hardcoded answer it used to be.
         let plain = parse_zip(
             Path::new("/tmp/plain.zip"),
-            ziparchive::create(&[member("open.txt", b"no password needed")]),
+            ArchiveBytes::Memory(ziparchive::create(&[member(
+                "open.txt",
+                b"no password needed",
+            )])),
         )
         .expect("well-formed");
         assert!(!plain.entries[0].encrypted);
@@ -1443,7 +1714,10 @@ mod tests {
         let dir = scratch("encrypted-extract");
         let model = parse_zip(
             Path::new("/tmp/locked.zip"),
-            encrypted_archive("secret.txt", b"pretend this is ciphertext"),
+            ArchiveBytes::Memory(encrypted_archive(
+                "secret.txt",
+                b"pretend this is ciphertext",
+            )),
         )
         .expect("well-formed");
         let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
@@ -1476,7 +1750,10 @@ mod tests {
         // "Corrupted" are two different explanations of one fact.
         let model = parse_zip(
             Path::new("/tmp/locked.zip"),
-            encrypted_archive("secret.txt", b"pretend this is ciphertext"),
+            ArchiveBytes::Memory(encrypted_archive(
+                "secret.txt",
+                b"pretend this is ciphertext",
+            )),
         )
         .expect("well-formed");
         let results = verify(&model);
@@ -1505,7 +1782,8 @@ mod tests {
             member("..\\also-escaped.txt", b"nor this"),
             member("keeps.txt", b"but this one is fine"),
         ]);
-        let model = parse_zip(Path::new("/tmp/slip.zip"), bytes).expect("well-formed");
+        let model = parse_zip(Path::new("/tmp/slip.zip"), ArchiveBytes::Memory(bytes))
+            .expect("well-formed");
         let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
         let report = extract(model.source.as_ref().expect("a source"), &all, &inside);
 
@@ -1639,7 +1917,8 @@ mod tests {
     #[test]
     fn a_source_prints_its_size_rather_than_its_contents() {
         let bytes = ziparchive::create(&[member("a.txt", b"x")]);
-        let model = parse_zip(Path::new("/tmp/d.zip"), bytes).expect("well-formed");
+        let model =
+            parse_zip(Path::new("/tmp/d.zip"), ArchiveBytes::Memory(bytes)).expect("well-formed");
         let text = format!("{:?}", model.source.as_ref().expect("a source"));
         assert!(text.contains("members: 1"), "{text}");
         assert!(
@@ -1701,17 +1980,31 @@ mod tests {
             &[member("zeroes.bin", &b"\0".repeat(64 * 1024))],
         );
         let on_disk_len = fs::metadata(&model.path).expect("the archive exists").len();
-        let before = fs::read(&model.path).expect("readable");
 
         let projected = {
             let source = model.source.as_ref().expect("a source");
             projected_save_bytes(source, &model, &[])
         };
+        // This used to assert the opposite -- that the projection *exceeds*
+        // the file on disk, "or it is measuring the wrong thing". That was
+        // right while a save held the archive, every member's plaintext and
+        // the whole new archive at once: a ZIP of zeroes expands about a
+        // thousandfold, so the on-disk check could pass and the save still
+        // exhaust memory. Copying members across compressed removed that, so
+        // the projection is now below the file on disk -- and the old
+        // assertion would fail because the defect it guarded is gone.
         assert!(
-            projected > on_disk_len,
-            "the projection ({projected}) must exceed the file on disk \
-             ({on_disk_len}) or it is measuring the wrong thing"
+            projected < on_disk_len,
+            "a compressible archive still costs more to rewrite ({projected}) than it occupies ({on_disk_len}); members are not being copied"
         );
+        // And the archive that used to be refused now saves.
+        save(&model, Vec::new()).expect("a compressible archive rewrites within budget");
+        let model = open(&model.path).expect("and reopens");
+        let before = fs::read(&model.path).expect("readable");
+        let projected = {
+            let source = model.source.as_ref().expect("a source");
+            projected_save_bytes(source, &model, &[])
+        };
 
         // A budget under the projection: the case the constant is meant to
         // catch, reached without allocating a gigabyte to do it.
@@ -1794,13 +2087,17 @@ mod tests {
         let source = with_dir.source.as_ref().expect("a source");
         let projected = projected_save_bytes(source, &with_dir, &[]);
 
-        // The only data in the archive is "hello", counted twice (plaintext and
-        // output) on top of the archive itself. A directory adding its name's
-        // worth would show up as a larger number.
-        let archive_len = source.bytes().len() as u64;
+        // Asserted as a property rather than as arithmetic: the same archive
+        // without the directory member must project the same number. The
+        // previous version spelled out a formula, which made it a test of the
+        // projection's implementation rather than of the claim in its name --
+        // it failed when the formula changed, though directories still cost
+        // nothing.
+        let without = on_disk(&dir, "nodir.zip", &[member("keep/f.txt", b"hello")]);
+        let plain = without.source.as_ref().expect("a source");
         assert_eq!(
             projected,
-            archive_len + 5 + 5,
+            projected_save_bytes(plain, &without, &[]),
             "a directory member was charged for data it does not have"
         );
 
@@ -1835,9 +2132,11 @@ mod tests {
             .find(|e| e.path == "src/main.rs")
             .expect("the member survived the rewrite");
         let source = after.source.as_ref().expect("a source");
-        let data =
-            ziparchive::extract_entry(source.bytes(), source.member(main.id).expect("its member"))
-                .expect("its bytes come back");
+        let data = ziparchive::extract_entry_at(
+            &mut source.reader(),
+            source.member(main.id).expect("its member"),
+        )
+        .expect("its bytes come back");
         assert_eq!(data, b"fn main() {}\n", "a rewrite must not alter contents");
 
         fs::remove_dir_all(&dir).ok();
@@ -1898,9 +2197,11 @@ mod tests {
             .find(|e| e.path == "new.txt")
             .expect("the added member is in the archive");
         let source = after.source.as_ref().expect("a source");
-        let data =
-            ziparchive::extract_entry(source.bytes(), source.member(new.id).expect("its member"))
-                .expect("its bytes come back");
+        let data = ziparchive::extract_entry_at(
+            &mut source.reader(),
+            source.member(new.id).expect("its member"),
+        )
+        .expect("its bytes come back");
         assert_eq!(data, b"brand new");
         assert_ne!(
             ArchiveEntry::format_date(new.modified),
@@ -1950,9 +2251,11 @@ mod tests {
             .find(|e| e.path == "dup.txt")
             .expect("the member is there");
         let source = after.source.as_ref().expect("a source");
-        let data =
-            ziparchive::extract_entry(source.bytes(), source.member(dup.id).expect("its member"))
-                .expect("its bytes come back");
+        let data = ziparchive::extract_entry_at(
+            &mut source.reader(),
+            source.member(dup.id).expect("its member"),
+        )
+        .expect("its bytes come back");
         assert_eq!(data, b"the new one", "the added file's bytes must win");
 
         fs::remove_dir_all(&dir).ok();

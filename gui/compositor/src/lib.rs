@@ -5302,6 +5302,32 @@ impl Compositor {
             return;
         }
         self.appearance = settings;
+        // The user's chosen families, installed into *this* cache.
+        //
+        // Not `FontSettings::apply`, which is what every other process calls:
+        // that sets the toolkit's process-global choice, and this process does
+        // not draw from it. The render engine's `fonts` is this process's own
+        // `FontCache`, kept because it draws every process's text and
+        // measures none of it, and
+        // installing into the wrong one of the two is precisely how a system
+        // comes to measure in one face and draw in another -- the failure
+        // `install_ui_faces`' own documentation exists to prevent.
+        //
+        // A family this machine does not have leaves the previous, working
+        // face in place, which is the right answer and not something a
+        // compositor can improve on; hence the discarded results.
+        let ui = self.appearance.fonts.ui_font.clone();
+        if !ui.is_empty() {
+            let _ = guitk::text::install_family(&mut self.render_engine.fonts, &ui);
+        }
+        let mono = self.appearance.fonts.mono_font.clone();
+        if !mono.is_empty() {
+            let _ = guitk::text::install_family_as(
+                &mut self.render_engine.fonts,
+                FontFamily::Mono,
+                &mono,
+            );
+        }
         // Resolved once here rather than per frame: the packing is arithmetic
         // on eleven colours, and they change only when this is called.
         // One resolve, then everything derived from it. Two lines that each

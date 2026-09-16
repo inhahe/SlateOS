@@ -139,6 +139,13 @@
 #      this repository executed before 2026-09-15. Its subject list is read
 #      from the exclude list rather than written down, so the next crate
 #      anyone excludes is covered without anybody remembering to add it.
+#  47. Refuse a test that drives an event loop without pinning the
+#      configuration directory, in a crate that also repoints it. The other
+#      half of gate 35: that one covers the tests that *write* settings, this
+#      one the tests that read them a hundred times a second. The race it
+#      catches has been diagnosed from scratch twice, eight days apart,
+#      because the first cure sits behind `gui/window`'s own `#[cfg(test)]`
+#      and cannot reach a dependent's test binary.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -5282,6 +5289,84 @@ a pass -- check \`[workspace] exclude\` in Cargo.toml and the paths under it.
 
 To push anyway:
     ALLOW_EXCLUDED_CRATE_TESTS=1 git push origin ...
+EOF
+    exit 1
+fi
+
+
+# ---------------------------------------------------------------------------
+# Gate 47 -- config-turn guards.  The other half of gate 35.
+#
+# Gate 35 (scratch-config) makes every test that *writes* a settings file do so
+# inside a scratch directory.  This one covers the readers.  A test that drives
+# an application event loop re-reads the configuration directory every turn, so
+# when a writer elsewhere in the same binary swaps `XDG_CONFIG_HOME`, the
+# reader sees the swap, concludes the user edited their settings, and repaints
+# -- one frame more than it counted.
+#
+# Why a gate and not a note: this has been diagnosed from scratch twice, eight
+# days apart, and the second time was in a crate the first fix could not reach.
+# `TestDesktop` holds the guard behind `gui/window`'s own `#[cfg(test)]`,
+# because the type comes from a dev-dependency and cannot appear in the shipped
+# library -- so every dependent's test binary is unguarded.  See known-issues
+# TD-C-THE-CONFIG-DIRECTORY-RACE-WAS-CURED-IN-ONE-BINARY-AND-RECURS-IN-EVERY-OTHER.
+#
+# The rate is the argument.  It did not reproduce once in ten consecutive runs
+# of the affected binary; it appeared under the load of four crates at once.
+# At that rate the reasonable human response to a red run is to run it again,
+# and running it again is what hides it.
+# ---------------------------------------------------------------------------
+cfgturn="${repo_root:-.}/scripts/check-config-turn-guards.py"
+skip_cfgturn=0
+# Bypass: ALLOW_CONFIG_TURN_DRIFT=1 git push origin <branch>
+if [ "${ALLOW_CONFIG_TURN_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_CONFIG_TURN_DRIFT=1 set - skipping the config-turn gate." >&2
+    skip_cfgturn=1
+fi
+[ -n "$py" ] || skip_cfgturn=1
+[ -f "$cfgturn" ] || skip_cfgturn=1
+touches gui/ apps/ scripts/check-config-turn-guards.py || skip_cfgturn=1
+# No `[ -n "${pushed_shas# }" ]` guard, for gate 35's reason: that guard is for
+# gates that loop over `$pushed_shas`, and this one runs once over the
+# worktree.  A redundant guard would make `test-pre-push-gates.py`'s
+# guards-match-loops count disagree, which is the count that catches the real
+# omission.
+note_gate config-turn "$skip_cfgturn"
+
+cfgturn_failed=0
+if [ "$skip_cfgturn" != "1" ]; then
+    # The checker before its verdict, as gates 3-5 and 35 do.  This one's
+    # silent failure is the bad shape: a body-parser that found no function
+    # bodies would report a clean sweep over nothing, so the floor and the
+    # brace matching are both self-test cases.
+    if ! run_checker config-turn-selftest "$py" "$cfgturn" --selftest; then
+        echo "pre-push: check-config-turn-guards.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        cfgturn_failed=1
+    elif ! run_checker config-turn "$py" "$cfgturn"; then
+        cfgturn_failed=1
+    fi
+fi
+if [ "$cfgturn_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a test drives an event loop without pinning the
+configuration directory, in a crate that also repoints it.
+
+The loop re-reads that directory every turn.  When the neighbouring test
+swaps it, this one decides the user changed their settings and redraws, and
+an assertion about how many frames were drawn fails.  It reproduces at well
+under one run in ten, so a red build looks like noise and a re-run looks
+like a fix.
+
+One line at the top of the test:
+
+    let _config_turn = settingsfile::testing::config_turn();
+
+It takes the same lock \`with_scratch_config\` holds, so the two take turns
+instead of overlapping.
+
+To push anyway:
+    ALLOW_CONFIG_TURN_DRIFT=1 git push $remote_name ...
+
 EOF
     exit 1
 fi

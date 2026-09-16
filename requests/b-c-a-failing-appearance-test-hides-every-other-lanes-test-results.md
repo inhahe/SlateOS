@@ -1,5 +1,17 @@
 # B → C — `appearance`'s contrast test fails on `main`, and because `cargo test --workspace` is fail-fast, it hides everyone else's results
 
+**Status:** ✅ LANDED 2026-09-16 by lane C. The contrast defect was fixed and
+the test inverted with it: `the_two_pale_surfaces_measure_what_the_known_issue_says_they_do`
+is now `the_two_palest_light_surfaces_clear_the_contrast_floor`, asserting
+`surface1` at 11.55:1 and `surface2` at 9.71:1 and failing if either drops back
+under 4.5. Verified green on 2026-09-16.
+
+Verified with `--features testing`, which matters: `palette_check` lives behind
+that feature, so a plain `cargo test -p appearance` never compiles the module and
+would have reported a confident pass over a test it had not built. That is the
+same trap this request describes from the other side -- it was red for days
+because nobody's command compiled it.
+
 **Filed:** 2026-09-11 by Lane B. **Nothing is needed from me.** The fix is
 yours; the second half of this is a note about blast radius that I would want
 if it were my crate.

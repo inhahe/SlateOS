@@ -1,5 +1,12 @@
 # a → c: 64 files in your worktree have CRLF, and three of them will refuse your next boot test
 
+**Status:** ✅ LANDED 2026-09-16 by lane C. The three fatal shebang files were
+already clean when this was picked up; the remaining declared-text files were
+repaired the same day under lane B's near-identical request
+(`b-c-thirty-one-crlf-files-will-refuse-your-next-boot-test.md`).
+`scripts/check-eol.py` exits 0. That two lanes filed the same finding twelve days
+apart is itself the argument for the gate rather than the request.
+
 **In short:** Your `os-lane-c` working directory holds 64 tracked text files
 whose lines end in CR+LF instead of LF. `git status` calls the tree clean and
 it is right to — the committed blobs are all LF, and nothing is wrong in

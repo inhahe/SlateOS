@@ -1201,9 +1201,10 @@ pub struct DesktopShell {
     /// The icons on the desktop, and where the user left them.
     ///
     /// `design-decisions.md` 933 (open-questions A-Q8) makes this layer the
-    /// layout authority: icon positions are not a kernel concern, and
-    /// `fs::deskicons` / `/proc/deskicons` are deleted once this reads and
-    /// writes them. It is populated and its saved positions applied in
+    /// layout authority: icon positions are not a kernel concern. Lane A
+    /// deleted `fs::deskicons` and `/proc/deskicons` once this read and wrote
+    /// them, which it has -- checked 2026-09-16, neither exists. It is
+    /// populated and its saved positions applied in
     /// [`new`](Self::new), so the first frame draws them where they were left
     /// rather than where the defaults put them and then jumping.
     pub icons: icons::DesktopIconLayer,

@@ -803,6 +803,15 @@ pub enum TestResult {
     DecryptionFailed,
     /// Entry not tested yet.
     Pending,
+    /// The archive could not be read at this entry.
+    ///
+    /// Not a verdict on the archive. "Test" answers "is this file intact?",
+    /// and a disk that stopped answering leaves that question unanswered
+    /// rather than answering it badly -- reporting `Corrupted` here would send
+    /// someone to find another copy of an archive that may be perfectly fine.
+    /// Same distinction `ziparchive::RangedError` draws at the source and
+    /// `SkipReason::Unreadable` carries through extraction.
+    Unreadable(String),
 }
 
 impl TestResult {
@@ -813,6 +822,7 @@ impl TestResult {
             Self::Corrupted(_) => "Corrupted",
             Self::DecryptionFailed => "Decrypt Failed",
             Self::Pending => "Pending",
+            Self::Unreadable(_) => "Unreadable",
         }
     }
 
@@ -922,7 +932,9 @@ impl ArchiveTestResults {
 // ============================================================================
 
 /// Represents a currently open archive.
-#[derive(Clone, Debug)]
+// `Debug` but not `Clone`: the model owns an `ArchiveSource`, which owns an
+// open file. See the note there.
+#[derive(Debug)]
 pub struct ArchiveModel {
     /// Path to the archive file on disk.
     pub path: PathBuf,
@@ -1281,7 +1293,8 @@ pub struct PendingChoice {
 }
 
 /// The full application state.
-#[derive(Clone, Debug)]
+// `Debug` but not `Clone`, since the archive it holds owns an open file.
+#[derive(Debug)]
 pub struct AppState {
     /// Currently open archive, if any.
     pub archive: Option<ArchiveModel>,
@@ -3569,7 +3582,7 @@ fn sample_archive_bytes() -> Vec<u8> {
 pub fn create_sample_archive() -> ArchiveModel {
     let path = PathBuf::from("/home/user/project.zip");
     #[allow(clippy::expect_used)]
-    backend::parse_zip(&path, sample_archive_bytes())
+    backend::parse_zip(&path, backend::ArchiveBytes::Memory(sample_archive_bytes()))
         .expect("the ZIP writer must produce something the ZIP reader accepts")
 }
 
@@ -5126,11 +5139,16 @@ mod tests {
     fn a_click_on_empty_background_does_nothing() {
         let mut state = loaded();
         // The far bottom-left of the status bar is not a control.
-        let before = state.clone();
+        //
+        // The two fields this compares, rather than a clone of the whole
+        // state: the state owns the open archive now, and copying a file
+        // handle to compare two strings is a cost with no reader.
+        let before_status = state.status_message.clone();
+        let before_dir = state.current_dir.clone();
         let action = click(&mut state, (5.0, SIZE.1 - 2.0));
         assert_eq!(action, Action::None);
-        assert_eq!(state.status_message, before.status_message);
-        assert_eq!(state.current_dir, before.current_dir);
+        assert_eq!(state.status_message, before_status);
+        assert_eq!(state.current_dir, before_dir);
     }
 
     #[test]

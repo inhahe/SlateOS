@@ -126,6 +126,13 @@ struct Config {
     context_lines: usize,
     width: usize,
     brief: bool,
+    /// `-I RE`: a change whose lines ALL match one of these is not a change.
+    ///
+    /// Compiled once at parse time rather than per line, and held as BREs
+    /// because that is the dialect GNU uses here -- measured: `-I 'o\|O'`
+    /// ignores a hunk and `-I 'o|O'` does not, which is BRE alternation
+    /// working and ERE alternation not.
+    ignore_matching: Vec<ere::Regex>,
     report_identical: bool,
     ignore_case: bool,
     ignore_space_change: bool,
@@ -264,6 +271,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
     let mut context_lines: Option<usize> = None;
     let mut width: usize = 130;
     let mut brief = false;
+    let mut ignore_matching: Vec<ere::Regex> = Vec::new();
     let mut report_identical = false;
     let mut ignore_case = false;
     let mut ignore_space_change = false;
@@ -524,6 +532,28 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                     continue;
                 }
                 'y' => format = Format::SideBySide,
+                // `-I RE`: a change whose lines all match RE is not a change.
+                'I' => {
+                    let rest: String = chars
+                        .get(j.saturating_add(1)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
+                    let value = if rest.is_empty() {
+                        i = i.saturating_add(1);
+                        let Some(v) = args.get(i) else {
+                            eprintln!("diff: option requires an argument -- 'I'");
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        };
+                        v.clone()
+                    } else {
+                        OsString::from(rest)
+                    };
+                    ignore_matching.push(compile_ignore_pattern(&value));
+                    j = chars.len();
+                    continue;
+                }
                 'e' => format = Format::Ed,
                 'n' => format = Format::Rcs,
                 // GNU's `-v` is `--version`, and it was the only one of this
@@ -634,6 +664,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         context_lines: ctx,
         width,
         brief,
+        ignore_matching,
         report_identical,
         ignore_case,
         ignore_space_change,
@@ -1498,6 +1529,78 @@ fn range_str(start: usize, count: usize) -> String {
     } else {
         format!("{},{}", start + 1, start + count)
     }
+}
+
+/// Compile one `-I` pattern, or exit 2 the way GNU does.
+///
+/// A **basic** regular expression, which was measured rather than assumed:
+/// `diff -I 'o\|O'` ignores a hunk and `diff -I 'o|O'` does not, so the
+/// alternation that works is BRE's escaped one. Compiling it as an ERE would
+/// make `\|` a literal bar and quietly ignore nothing.
+///
+/// GNU's refusal is `diff: [: Invalid regular expression` with exit 2, the
+/// pattern named bare rather than quoted -- measured, since this file quotes
+/// file names and does not quote this.
+fn compile_ignore_pattern(pattern: &OsString) -> ere::Regex {
+    let bytes = quoting::os_bytes(pattern.as_os_str());
+    match ere::bre::compile(&bytes, false) {
+        Ok(re) => re,
+        Err(_) => {
+            eprintln!(
+                "diff: {}: Invalid regular expression",
+                String::from_utf8_lossy(&bytes)
+            );
+            process::exit(2);
+        }
+    }
+}
+
+/// Drop the hunks `-I` says are not changes.
+///
+/// Applied in every renderer arm rather than once over `ops`, because removing
+/// operations would renumber every hunk after the one removed -- the line
+/// numbers in the output are the whole point of a diff, and a hunk that is
+/// ignored must not shift the ones that are printed.
+fn unignored(hunks: Vec<Hunk>, config: &Config) -> Vec<Hunk> {
+    if config.ignore_matching.is_empty() {
+        return hunks;
+    }
+    hunks
+        .into_iter()
+        .filter(|h| !hunk_is_ignorable(h, config))
+        .collect()
+}
+
+/// Does every CHANGED line in this hunk match one of the `-I` patterns?
+///
+/// "Every" spans both sides, which is the part the manual's phrasing hides and
+/// the measurement settles: a hunk holding one matching and one non-matching
+/// changed line is printed in full. Context lines are not consulted at all --
+/// they did not change, so they are not part of the change being judged.
+///
+/// An empty pattern list answers `false`, so a hunk is never ignored when `-I`
+/// was not given; a hunk with no changed lines answers `false` too, because
+/// "all of nothing matches" would silently drop a hunk that has no business
+/// being dropped.
+fn hunk_is_ignorable(hunk: &Hunk, config: &Config) -> bool {
+    if config.ignore_matching.is_empty() {
+        return false;
+    }
+    let mut saw_change = false;
+    for Edit { op, text, .. } in &hunk.lines {
+        if *op == Op::Equal {
+            continue;
+        }
+        saw_change = true;
+        let matched = config
+            .ignore_matching
+            .iter()
+            .any(|re| re.is_match(text).unwrap_or(false));
+        if !matched {
+            return false;
+        }
+    }
+    saw_change
 }
 
 /// Where a hunk's change begins in each file, and how many lines it touches.
@@ -2404,7 +2507,15 @@ fn diff_files(p1: &Path, p2: &Path, config: &Config, in_dir_walk: bool) -> i32 {
     }
 
     // Check if there are any differences.
-    let has_diff = ops.iter().any(|e| e.op != Op::Equal);
+    //
+    // `-I` is applied HERE, above the `-q` branch, because it changes what
+    // counts as a difference rather than what is printed about one: measured,
+    // `diff -q -I '^#'` on files differing only in a `#` line prints nothing
+    // and exits 0. Filtering later would have left `-q` saying they differ.
+    let has_diff = ops.iter().any(|e| e.op != Op::Equal)
+        && !build_hunks(&ops, 0)
+            .iter()
+            .all(|h| hunk_is_ignorable(h, config));
 
     if !has_diff {
         if config.report_identical {
@@ -2447,26 +2558,26 @@ fn diff_files(p1: &Path, p2: &Path, config: &Config, in_dir_walk: bool) -> i32 {
             print_side_by_side(&ops, config);
         }
         Format::Normal => {
-            let hunks = build_hunks(&ops, 0);
+            let hunks = unignored(build_hunks(&ops, 0), config);
             print_normal(&hunks, config);
         }
         // Both take zero context: an `ed` script and an RCS delta are
         // instructions, not a readable rendering, so a surrounding line would
         // be applied as though it were a change.
         Format::Ed => {
-            let hunks = build_hunks(&ops, 0);
+            let hunks = unignored(build_hunks(&ops, 0), config);
             print_ed(&hunks, config);
         }
         Format::Rcs => {
-            let hunks = build_hunks(&ops, 0);
+            let hunks = unignored(build_hunks(&ops, 0), config);
             print_rcs(&hunks, config);
         }
         Format::Unified => {
-            let hunks = build_hunks(&ops, config.context_lines);
+            let hunks = unignored(build_hunks(&ops, config.context_lines), config);
             print_unified(&hunks, p1, p2, config);
         }
         Format::Context => {
-            let hunks = build_hunks(&ops, config.context_lines);
+            let hunks = unignored(build_hunks(&ops, config.context_lines), config);
             print_context(&hunks, p1, p2, config);
         }
     }
@@ -2933,6 +3044,7 @@ mod tests {
             context_lines: 3,
             width: 130,
             brief: false,
+            ignore_matching: Vec::new(),
             report_identical: false,
             ignore_case: false,
             ignore_space_change: false,

@@ -1,7 +1,6 @@
 diff -D
 diff -E
 diff -F
-diff -I
 diff -S
 diff -X
 diff -d

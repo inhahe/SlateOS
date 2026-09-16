@@ -336,7 +336,7 @@ def main():
             docs = [d for d in arg.split("=", 1)[1].split(",") if d]
         elif arg.startswith("--roots="):
             roots = [r for r in arg.split("=", 1)[1].split(",") if r]
-        elif arg == "--self-test":
+        elif arg in ("--self-test", "--selftest"):
             return self_test()
         else:
             print(f"unknown argument: {arg}", file=sys.stderr)

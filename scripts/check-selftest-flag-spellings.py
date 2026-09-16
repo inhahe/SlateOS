@@ -72,6 +72,71 @@ _MEMBERSHIP = re.compile(r'"(--self[-_]?test)"\s+in\s')
 # the checker reported itself as declaring one spelling. A real declaration
 # quotes the flag and a regex source does not, which is the whole difference.
 _ADD_ARG = re.compile(r'add_argument\(([^)]*"--self[-_]?test"[^)]*)\)', re.S)
+# An equality test in a hand-rolled argv loop:
+#
+#     elif arg == "--self-test":
+#         return self_test()
+#
+# The third construct, and the one this checker could not see until
+# 2026-09-15. `find-claimed-acts.py` and `find-overstated-records.py` both
+# reach their self-test this way and both were reported as having none, so
+# neither was ever asked whether it accepts the other spelling. They do not.
+_EQUALITY = re.compile(r'==\s*"(--self[-_]?test)"|"(--self[-_]?test)"\s*==')
+# Membership in a tuple or list of spellings:
+#
+#     if any(a in ("--selftest", "--self-test", "--self_test") for a in argv):
+#
+# The fourth construct, and correct -- it names every spelling in one place,
+# which is the thing this gate is asking for. Matched as "an `in` followed by a
+# bracket containing at least one spelling", then every spelling inside that
+# bracket is reachable.
+_TUPLE_MEMBERSHIP = re.compile(r'\bin\s*[\(\[]([^)\]]*"--self[-_]?test"[^)\]]*)[\)\]]')
+# The shared splat: `add_argument(*selftestflag.SPELLINGS, ...)`. Reaching for
+# the shared constant is the best answer available, so recognising it is not a
+# courtesy -- a gate that reports the recommended fix as a finding teaches
+# people to stop using it.
+_SPELLINGS_SPLAT = re.compile(r"selftestflag\.SPELLINGS")
+# A bracketed literal naming EVERY required spelling, wherever it sits:
+#
+#     selftest_spellings = ("--self-test", "--selftest", "--self_test")
+#     if arg in selftest_spellings: ...
+#
+# The fifth construct. `_TUPLE_MEMBERSHIP` above wanted the bracket to follow
+# `in` directly, so a tuple given a NAME first was invisible --
+# `check-recursive-locks.py` and `rustscan.py` both do that and both are
+# correct, confirmed by running each with both spellings.
+#
+# Requires all of REQUIRED inside one bracket, deliberately. A bracket holding
+# just one spelling is usually an argv being BUILT rather than matched --
+# `[sys.executable, checker, "--selftest"]` in
+# `test-selftests-are-repo-safe.py` is that, and reading it as a declaration
+# would report the file as accepting only the spelling it hands to somebody
+# else.
+_SPELLING_GROUP = re.compile(r"[\(\[]([^)\]]*)[\)\]]", re.S)
+
+# Files whose self-test wiring this checker cannot read, each with the reason
+# and the evidence. Same principle as the IGNORE table in
+# `scripts/raced-globals.py`: a line here says *why* and can be argued with,
+# where widening a pattern to silence one file quietly widens it for every
+# file.
+BLIND_SPOT_OK: dict[str, str] = {
+    # Takes no flags at all: two `if __name__ == "__main__"` blocks, because
+    # the file EMBEDS a sample checker as a string to test the safety of
+    # self-tests that build throwaway repositories. The `def self_test` the
+    # detector sees is inside that fixture, not a function this file runs, and
+    # the `"--selftest"` it contains is the argument it passes to the checkers
+    # it exercises. Verified 2026-09-15 by reading both __main__ blocks.
+    "test-selftests-are-repo-safe.py": "no flags of its own; the self-test it appears to define is inside an embedded fixture string",
+}
+
+# Evidence that a file HAS a self-test, independent of how its flag is wired.
+# This is the control, and it is the point of the change rather than a detail:
+# without it, "this script has no self-test" and "I could not see this
+# script's self-test" are the same observation, and the second is silent.
+# That is the exact failure this file's own header forbids -- success and
+# not-running must not be indistinguishable -- reproduced one level up, in the
+# checker instead of in the checked.
+_DEFINES_SELFTEST = re.compile(r"^def _?self_?test\b", re.M)
 
 
 def verdict(src: str) -> str:
@@ -93,13 +158,42 @@ def verdict(src: str) -> str:
         return "ok"
 
     # Every spelling the file makes reachable, by whichever construct.
+    if _SPELLINGS_SPLAT.search(src):
+        return "ok"
+
     reachable = {m.group(1) for m in _MEMBERSHIP.finditer(src)}
+    reachable |= {g for m in _EQUALITY.finditer(src) for g in m.groups() if g}
+    for group in _TUPLE_MEMBERSHIP.findall(src):
+        reachable |= {s for s in REQUIRED if f'"{s}"' in group}
+    for group in _SPELLING_GROUP.findall(src):
+        if all(f'"{s}"' in group for s in REQUIRED):
+            reachable |= set(REQUIRED)
     declared = set()
     for call in _ADD_ARG.findall(src):
         declared |= {s for s in REQUIRED if f'"{s}"' in call}
     reachable |= declared
 
     if not reachable:
+        # Nothing reachable AND a self-test function present means this
+        # checker failed to parse how the flag gets there -- a fourth
+        # construct, or a refactor of one of the three. Reported rather than
+        # skipped: a script dropped here is a script never asked the question,
+        # and it would be dropped SILENTLY, which is how the two scripts that
+        # prompted this went eleven days unexamined.
+        # A file with no flag at all cannot spell one wrongly. `rustlex.py`
+        # and `rustrungs.py` run their self-test unconditionally from
+        # `__main__`, so every spelling reaches it, including none. Checked
+        # before the blind-spot report below, or the absence of a flag would
+        # be reported as an unreadable flag.
+        if '"--self' not in src:
+            return "no-selftest"
+        if _DEFINES_SELFTEST.search(src):
+            return (
+                "defines a self-test function but this checker cannot see how "
+                "any flag reaches it -- a construct it does not know. Teach it "
+                "the construct, or switch the script to "
+                "`selftestflag.wants_selftest(argv)`"
+            )
         return "no-selftest"
 
     missing = [s for s in REQUIRED if s not in reachable]
@@ -107,8 +201,12 @@ def verdict(src: str) -> str:
         return "ok"
     return (
         f"reaches its self-test only via {', '.join(sorted(reachable))}; "
-        f"{', '.join(missing)} falls through to the default action and exits 0 "
-        f"without testing anything"
+        f"{', '.join(missing)} falls through to the default action instead. "
+        f"Where that action exits 0 -- a real scan, a usage notice -- the "
+        f"mistyped command reports success having tested nothing; where it "
+        f"errors, the self-test simply cannot be invoked by the name somebody "
+        f"remembers. This checker cannot tell which from the source, so it "
+        f"names the reachable spellings and not the consequence"
     )
 
 
@@ -118,6 +216,8 @@ def scan() -> int:
     for path in sorted(SCRIPTS.glob("*.py")):
         src = path.read_text(encoding="utf-8", errors="surrogateescape")
         v = verdict(src)
+        if path.name in BLIND_SPOT_OK and v.startswith("defines a self-test"):
+            continue
         if v == "no-selftest":
             continue
         checked += 1
@@ -169,6 +269,53 @@ def _self_test() -> int:
             failures += 1
         else:
             print(f"  ok    {what}")
+
+    # --- the constructs added 2026-09-15 ----------------------------------
+    #
+    # Each was found by RUNNING a script with both spellings and comparing,
+    # after this checker had reported 93 scripts clean while skipping seven it
+    # could not parse. A static detector that disagrees with the behaviour is
+    # wrong by definition, so each case below pins a shape the behaviour
+    # showed was already correct -- or, for the first pair, one it showed was
+    # not.
+    case(
+        'elif arg == "--self-test":\n    return self_test()\n',
+        "bad",
+        "an equality test naming ONE spelling is a finding",
+    )
+    case(
+        'elif arg in ("--self-test", "--selftest"):\n    return self_test()\n',
+        "ok",
+        "...and naming both in the same test is not",
+    )
+    case(
+        'SPELLINGS = ("--self-test", "--selftest", "--self_test")\n'
+        'if arg in SPELLINGS:\n    return self_test()\n',
+        "ok",
+        "a spelling tuple given a NAME first is still a declaration",
+    )
+    case(
+        'ap.add_argument(*selftestflag.SPELLINGS, dest="selftest")\n',
+        "ok",
+        "the shared splat is the recommended fix and must not be a finding",
+    )
+    # The blind spot, and its control. These two differ only in whether a
+    # flag exists at all, and they must not produce the same verdict: one is
+    # "I cannot read this file's wiring" and the other is "there is no wiring
+    # to read". Collapsing them is what let seven scripts be skipped in
+    # silence, which is this file's own header applied to itself.
+    case(
+        'def self_test():\n    pass\n'
+        'if SOME_CONSTANT == "--self-test-ish":\n    self_test()\n',
+        "bad",
+        "a self-test whose wiring cannot be parsed is reported, not skipped",
+    )
+    case(
+        'def self_test():\n    pass\n'
+        'if __name__ == "__main__":\n    sys.exit(self_test())\n',
+        "no-selftest",
+        "...while a file with no flag at all cannot spell one wrongly",
+    )
 
     case(
         'if "--self-test" in argv:\n',

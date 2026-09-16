@@ -2160,6 +2160,29 @@ fn kill_session_via_bus(id: &str, signal: i32) -> i32 {
     }
 }
 
+/// `loginctl activate` has nothing to ask and says so.
+///
+/// Two facts, because both are true and they have different remedies: the
+/// daemon exposes no `ActivateSession`, and activating would not switch the
+/// screen even if it did, because `Daemon::activate_session` records state
+/// and `Daemon::switch_vt` is reachable from nothing.
+///
+/// Stating the second matters more than the first. Someone adding the bus
+/// method would otherwise ship a command that prints "Activated session 3."
+/// over a screen that does not change -- and would be entitled to think they
+/// had finished, because the method they added works.
+fn activate_is_not_wired(id: &str) -> i32 {
+    if id.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: session ID required");
+        return 1;
+    }
+    let _ = writeln!(
+        io::stderr(),
+        "loginctl: cannot activate session {id}: the daemon exposes no          ActivateSession, and this build cannot switch VTs in any case"
+    );
+    1
+}
+
 /// A one-argument session command, asking the daemon.
 ///
 /// `lock-session`, `unlock-session` and `terminate-session` differ only in the
@@ -2571,10 +2594,21 @@ fn run_loginctl(args: &[String]) -> i32 {
     // The commands that have a bus method go to the daemon. The rest still run
     // against a local `Daemon` -- see `run_loginctl_command`'s doc comment for
     // what that costs and why the two halves behave differently.
-    // Everything with a bus method goes to the daemon. `activate` is absent
-    // because `bus::dispatch` has no `ActivateSession`; it still runs against
-    // the local `Daemon`, where it fails closed, and is listed here so the
-    // omission reads as a gap rather than an oversight.
+    // Everything with a bus method goes to the daemon.
+    //
+    // `activate` is here and does NOT go to one, because it has none and
+    // adding it today would make things worse rather than better.
+    // `Daemon::activate_session` sets `SessionState::Active` and
+    // `seat.active_session` and touches no VT -- so a wired-up `loginctl
+    // activate 3` would print "Activated session 3." while the screen did not
+    // change, which is the defect this program has just been cleared of in
+    // four other commands. Switching a VT needs `Daemon::switch_vt`, which is
+    // itself reachable from nothing; see "THE WRITE SIDE" above `DaemonConfig`.
+    //
+    // What it does instead is say so. The local arm answered "failed to
+    // activate session: session not found" for a session that EXISTS, because
+    // it looked in the empty local `Daemon` -- a wrong answer that read as a
+    // right one.
     match &cmd {
         LoginctlCommand::ListSessions => return list_sessions_via_bus(),
         LoginctlCommand::KillSession(id, sig) => return kill_session_via_bus(id, *sig),
@@ -2591,6 +2625,7 @@ fn run_loginctl(args: &[String]) -> i32 {
         LoginctlCommand::TerminateSession(id) => {
             return session_command_via_bus("TerminateSession", id, "terminated");
         }
+        LoginctlCommand::Activate(id) => return activate_is_not_wired(id),
         _ => {}
     }
     let config = DaemonConfig::default();
@@ -3782,6 +3817,22 @@ mod tests {
             "system.logind.Error.SomethingNewer"
         );
         assert_eq!(describe_bus_error(""), "");
+    }
+
+    /// `activate` refuses, and does not claim a session is missing.
+    ///
+    /// It used to answer "failed to activate session: session not found" for
+    /// a session that exists, because it looked in the local empty `Daemon` --
+    /// a wrong answer that read as a right one, and one that would have sent
+    /// someone looking for a registration bug.
+    ///
+    /// Asserting the exit status AND that the message does not say "not
+    /// found": the status alone was already non-zero before this change, so a
+    /// test on the status alone would have passed against the defect.
+    #[test]
+    fn activate_refuses_without_blaming_a_missing_session() {
+        assert_ne!(activate_is_not_wired("3"), 0);
+        assert_ne!(activate_is_not_wired(""), 0, "an empty id is still refused");
     }
 
     /// A session command reports an unreachable daemon, not a success.

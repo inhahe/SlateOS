@@ -70,6 +70,22 @@ constant. That is the same shape as `save_within`'s budget parameter in
 `apps/archivemanager`: the constant stays the shipped value and a test reaches
 the branch honestly.
 
+## Measured, so the diagnosis is falsifiable
+
+At the moment of the failing run this host had been up **2,336 seconds**
+against a threshold of **3,600**:
+
+```
+uptime: 39 minutes (2,336 seconds)
+test needs > 3600s: False
+```
+
+Which yields a prediction you can check rather than take on trust: this test
+starts passing on this machine, with no change to any code, once uptime passes
+an hour -- about twenty minutes after the run that produced the failure. That
+is the whole argument for fixing it rather than re-running it. A defect that
+cures itself on a timer trains everyone who meets it to stop looking.
+
 ## How to reproduce without rebooting
 
 ```rust

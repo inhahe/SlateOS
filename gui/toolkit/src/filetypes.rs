@@ -170,6 +170,47 @@ pub struct FileTypeInfo {
 /// correctness.
 const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
     // -- Added 2026-09-16 ---------------------------------------------------
+    // Second batch, same day. Two archives missed on the first pass, and two
+    // formats this system genuinely runs: it has a POSIX layer, so an ELF
+    // binary and a shared object are ours rather than foreign. `.so` is
+    // `Library` and not `Executable` because it is loaded, not started --
+    // `is_executable: false` is the same distinction.
+    FileTypeInfo {
+        extension: ".cab",
+        description: "Cabinet Archive",
+        mime_type: "application/vnd.ms-cab-compressed",
+        category: FileCategory::Archive,
+        icon_glyph: '\u{1F4E6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".lz4",
+        description: "LZ4 Compressed File",
+        mime_type: "application/x-lz4",
+        category: FileCategory::Archive,
+        icon_glyph: '\u{1F4E6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".elf",
+        description: "ELF Executable",
+        mime_type: "application/x-executable",
+        category: FileCategory::Executable,
+        icon_glyph: '\u{2699}',
+        is_text: false,
+        is_executable: true,
+    },
+    FileTypeInfo {
+        extension: ".so",
+        description: "Shared Object",
+        mime_type: "application/x-sharedlib",
+        category: FileCategory::Library,
+        icon_glyph: '\u{2699}',
+        is_text: false,
+        is_executable: false,
+    },
     //
     // Twelve formats `apps/filesearch` classified and this table did not, found
     // by diffing the two lists (known-issues
@@ -2327,6 +2368,10 @@ mod tests {
             ("fish", FileCategory::Code),
             ("ps1", FileCategory::Code),
             ("properties", FileCategory::Config),
+            ("cab", FileCategory::Archive),
+            ("lz4", FileCategory::Archive),
+            ("elf", FileCategory::Executable),
+            ("so", FileCategory::Library),
         ] {
             assert_eq!(
                 category_from_extension(ext),

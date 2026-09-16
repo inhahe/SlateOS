@@ -154750,6 +154750,33 @@ rest.
 the shape is not the same: it wants "video is blue", which is a colour policy,
 not a fact about files. Its extension lists are what duplicate the table.
 
+**Closed the no-decision half the same day.** Sixteen of the thirty were added
+to `gui/toolkit/src/filetypes.rs`: the twelve media and text formats, then
+`cab` and `lz4` (archives missed on the first pass) and `elf` and `so` -- this
+system has a POSIX layer, so an ELF binary and a shared object are ours rather
+than foreign. `.so` is filed `Library` rather than `Executable` because it is
+loaded, not started. The table now holds 110 extensions, up from 94.
+
+**Fourteen remain, and every one of them is waiting on a decision rather than
+on effort:**
+
+```
+accdb app bin db dll dylib eot exe mdb msi raw sqlite sqlite3 wasm
+```
+
+* `exe dll msi app dylib` -- foreign executables. Pinned absent by
+  `foreign_executables_are_absent_on_purpose`, which says in its own doc to
+  delete it in the change that decides they belong.
+* `db sqlite sqlite3 mdb accdb eot` -- need `Database` and `Font` kinds the
+  enum does not have.
+* `raw bin wasm` -- ambiguous. `raw` names camera images and raw byte dumps
+  equally; `bin` is any binary blob; `wasm` is a module format with no runtime
+  here. A single description for any of them would be a guess.
+
+So the step that needed no judgement is done, and what is left is exactly the
+part that needs somebody to choose. Deriving `filesearch` from the table is
+still blocked on the middle group.
+
 **Measured 2026-09-16, so step 1 is a lookup rather than an investigation.**
 `filesearch` names 107 extensions; the toolkit's table holds 94; **30 are known
 to `filesearch` and not to the table**:

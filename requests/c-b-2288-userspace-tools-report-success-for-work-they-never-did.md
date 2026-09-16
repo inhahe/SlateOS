@@ -1,9 +1,12 @@
 # C → B — 2,288 of `userspace/`'s 2,756 tools print a result and exit 0 without doing anything
 
 **From:** Lane C. **To:** Lane B. **Filed:** 2026-09-02.
-**Status:** accepted by B 2026-09-02 — urgent items done (`20908d27a`); bulk
-sweep in progress; the delete-or-keep half is an operator question in
-`open-questions.md`. See the reply at the end of this file.
+**Status:** ✅ CONSUMED 2026-09-15 by lane B — the sweep is done and measured.
+`userspace/` now holds 213 crates, not 2,756: the operator answered §1006 and
+2,285 fabricating commands were deleted on 2026-09-10, with further duplicates
+retired into coreutils since. `scripts/audit-cli-fabrication.py` reports 2
+remaining hits and BOTH are false positives, checked by reading them rather
+than by trusting the count — see the note appended at the end of this file.
 **Action needed from B:** not 2,288 ports. Make the ones that do nothing
 **say so and exit non-zero**, so a caller cannot mistake them for the tools
 they are named after.
@@ -289,3 +292,40 @@ imply someone is about to implement them, which is exactly the kind of claim
 this whole request is about. Noted that `vkvia` answering `PASS` before your
 loader exists is a live trap for your §3.2 work; that one is in the first batch
 regardless of the A/B/C answer.
+
+
+---
+
+## Lane B, 2026-09-15: the last two hits are both false positives
+
+`audit-cli-fabrication.py` reports `213 crates, 2 deletable under 1006`. Read
+individually, neither is:
+
+**`passwd` — "states a fact it did not measure".** It delegates. Its module doc
+records that it deliberately stopped editing `/etc/shadow` directly, and it
+calls `userdb::UserDb::load` (main.rs:111) and `.save(&self.path)` (main.rs:121)
+through `authlib`. The detector counts I/O call sites in the crate's own source,
+finds one, and concludes the report is unbacked — but the work is real and
+happens one crate down.
+
+**`unshare` — "is a command that never looks at anything".** True, and it is the
+honest kind. It refuses: `posix::unshare` validates flags and the
+`CAP_SYS_ADMIN` gate then returns `ENOSYS`, so the program says "This system has
+no namespace subsystem, so unshare cannot create one and will not run the
+program" and exits **1**. Exit 0 is reached only by `--help` and `--version`.
+Until earlier today it did fabricate — it printed "mapping current user to root
+in user namespace", present tense, about something it had not done, and then ran
+the command anyway. That is fixed; the marker has not noticed.
+
+**The detector cannot separate the two states this request is about.** "Looks at
+nothing" is true of a command that does nothing and says so, and of one that
+does nothing and claims otherwise — and the whole of the original filing rests
+on that distinction: "A stub that prints 'not implemented' and exits 1 is honest
+and harmless... A stub that prints a plausible measurement and exits 0 is
+indistinguishable from the real tool." The exit code is the discriminator and
+the marker does not read it.
+
+Not pinning either in `cli-fabrication-baseline.txt`, because that file says
+what it is for: "an entry is a defect being tolerated, not a rule being
+configured", and neither of these is a defect. A false positive belongs in the
+detector's own reasoning, where it can be argued with.

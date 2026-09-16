@@ -124,7 +124,7 @@ def main():
     for arg in sys.argv[1:]:
         if arg.startswith("--apps="):
             wanted = {a for a in arg.split("=", 1)[1].split(",") if a}
-        elif arg == "--self-test":
+        elif arg in ("--self-test", "--selftest"):
             return self_test()
         else:
             print(f"unknown argument: {arg}", file=sys.stderr)

@@ -1,7 +1,10 @@
 # A process manager needs a way to send a signal, and §768 says it is yours
 
 **From:** lane C — **To:** lane B — **Date:** 2026-09-15
-**Status:** open — a small addition to `libcall`, if you agree it belongs there
+**Status:** ✅ CONSUMED 2026-09-15 by lane B — `libcall::kill(pid, sig)` landed, plus
+`SIGTERM`/`SIGKILL`/`SIGSTOP`/`SIGCONT` and `ESRCH`. It belongs there, for the
+reason you quoted. One decision taken on your behalf and flagged below: `pid <= 0`
+is refused with `EINVAL` rather than passed through as a broadcast.
 
 ## What I need
 

@@ -252,6 +252,14 @@ run_case -d '2021-06-15 12:00:00 +0100' +%s
 run_case -d '2021-06-15 +1 day' +%s
 # Words that look relative and are not.
 run_case -d '2021-06-15 1 banana' +%s
+# A weekday beside an absolute date is IGNORED by GNU -- not checked against
+# the date, not moved to. These are the only weekday forms that can live here:
+# `date -d Monday` reads the clock, so it is pinned in date.rs instead, against
+# a fixed `now` that falls on a Tuesday.
+run_case -d '2021-06-15 12:00:00 Monday' +%s
+run_case -d '2021-06-15 12:00:00 next Friday' +%s
+run_case -d '2021-06-15 Sunday' +%s
+run_case -d '2021-06-15 12:00:00 Blursday' +%s
 
 run_case -d '@0 + 1 day'
 run_case -d 'not a date at all'

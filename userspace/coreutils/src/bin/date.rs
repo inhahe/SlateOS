@@ -70,10 +70,24 @@
 //!   is **March 3rd**, because February 31st carries — not February 28th,
 //!   which is what a library that clamps would answer.
 //!
-//! Still outside: weekday names (`next Friday`, `Monday`), `yesterday 09:00`,
-//! and `12 am`. And a signed relative straight after a bare time is refused
-//! rather than approximated, because there GNU reads the sign as a time-zone
-//! offset — `TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU`.
+//! **Weekday names followed**, and they have three rules of their own, all
+//! measured on a Wednesday — the one weekday that can tell them apart:
+//!
+//! * a **bare** weekday includes *today*: `Wednesday`, on a Wednesday, is
+//!   today. On any other day `Wednesday` and `next Wednesday` agree, so a
+//!   wrong rule here looks right six days in seven.
+//! * `next` forces strictly forward (+7 when it is today) and `last` strictly
+//!   backward (−7).
+//! * the result is at **midnight**, where `next week` keeps the current time
+//!   of day. Two rules that look like one.
+//!
+//! And beside an absolute date a weekday is **ignored** rather than checked or
+//! applied — `2021-06-15 12:00:00 Monday` is Tuesday June 15th, unchanged.
+//!
+//! Still outside: `yesterday 09:00` and `12 am`. And a signed relative
+//! straight after a bare time is refused rather than approximated, because
+//! there GNU reads the sign as a time-zone offset —
+//! `TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU`.
 //!
 //! Out-of-range components are *refused*, not normalised: `date -d 2021-03-32`
 //! is an error even though the `mktime` underneath would carry it into April.
@@ -605,6 +619,86 @@ fn keyword_instant(tok: &str, zone: &Zone, now: i64) -> Option<i64> {
     )
 }
 
+/// `[next|last] WEEKDAY`: which day, and whether the word forced a direction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct WeekdayTerm {
+    /// Days since Sunday, matching [`Tm::wday`].
+    target: i64,
+    /// `0` bare, `1` for `next`, `-1` for `last`.
+    force: i64,
+}
+
+/// A weekday name to its [`Tm::wday`] number, or `None`.
+///
+/// The three-letter abbreviations plus `tues`, `thur` and `thurs`, which GNU
+/// accepts and a table built from the full names alone would refuse.
+fn weekday_from_name(word: &str) -> Option<i64> {
+    Some(match word.to_ascii_lowercase().as_str() {
+        "sunday" | "sun" => 0,
+        "monday" | "mon" => 1,
+        "tuesday" | "tue" | "tues" => 2,
+        "wednesday" | "wed" => 3,
+        "thursday" | "thu" | "thur" | "thurs" => 4,
+        "friday" | "fri" => 5,
+        "saturday" | "sat" => 6,
+        _ => return None,
+    })
+}
+
+/// Remove a weekday term from `toks`, if one is there.
+///
+/// Only the FIRST is taken; `date -d 'Monday Tuesday'` is not a form worth
+/// inventing a meaning for, and leaving the second token in place means the
+/// operand is refused rather than silently half-read.
+fn take_weekday_term(toks: &mut Vec<&str>) -> Option<WeekdayTerm> {
+    for i in 0..toks.len() {
+        let Some(target) = weekday_from_name(toks[i]) else {
+            continue;
+        };
+        // A preceding `next`/`last` belongs to this term.
+        let force = match i.checked_sub(1).map(|p| toks[p]) {
+            Some(p) if p.eq_ignore_ascii_case("next") => 1,
+            Some(p) if p.eq_ignore_ascii_case("last") => -1,
+            _ => 0,
+        };
+        let from = if force == 0 { i } else { i.saturating_sub(1) };
+        toks.drain(from..=i);
+        return Some(WeekdayTerm { target, force });
+    }
+    None
+}
+
+/// The day-of-month `now` must move to for a weekday term, at MIDNIGHT.
+///
+/// Measured against GNU 9.4 on a Wednesday, which is the only day that can
+/// distinguish the three rules:
+///
+/// | operand | result | rule |
+/// |---|---|---|
+/// | `Wednesday` | **today** | a bare weekday INCLUDES today |
+/// | `next Wednesday` | +7 | `next` forces strictly forward |
+/// | `last Wednesday` | −7 | `last` forces strictly backward |
+/// | `Tuesday` | +6 | forward, never backward |
+/// | `last Tuesday` | −1 | backward |
+///
+/// The bare case is the one worth measuring on the right day: on any other
+/// weekday `Wednesday` and `next Wednesday` agree, so a rule that is wrong
+/// about "today" looks right six days in seven.
+///
+/// The time is set to midnight, which is NOT what the other relative forms do
+/// — `next week` keeps the current time of day and `next Monday` does not.
+fn weekday_offset(term: WeekdayTerm, today: i64) -> i64 {
+    let forward = (term.target.saturating_sub(today)).rem_euclid(7);
+    match term.force {
+        1 if forward == 0 => 7,
+        -1 => {
+            let back = (today.saturating_sub(term.target)).rem_euclid(7);
+            if back == 0 { -7 } else { -back }
+        }
+        _ => forward,
+    }
+}
+
 /// Apply a [`Shift`]'s months and days to a civil date, leaving the result
 /// possibly out of range for its month.
 ///
@@ -836,6 +930,36 @@ fn parse_date_spec(raw: &[u8], zone: &Zone, now: i64) -> Option<i64> {
     // first would have made it work here and diverge there.
     let mut toks = toks;
     let shift = take_relative_terms(&mut toks);
+
+    // A weekday name is taken out here and applied only if nothing else
+    // remains. When an absolute date IS given, GNU ignores the weekday
+    // entirely rather than checking it or moving to it -- measured,
+    // `2021-06-15 12:00:00 Monday` answers Tuesday June 15th, unchanged. So
+    // removing it and not looking at it again is exactly right, and the
+    // branch below simply never fires for that operand.
+    let weekday = take_weekday_term(&mut toks);
+
+    if toks.is_empty()
+        && let Some(term) = weekday
+    {
+        let tm = zone.local(now, 0);
+        let day = i64::from(tm.day).saturating_add(weekday_offset(term, i64::from(tm.wday)));
+        let (y, m, d) = shift_civil(tm.year, i64::from(tm.month), day, shift);
+        return Some(
+            zone.epoch(&Civil {
+                year: y,
+                month: m,
+                day: d,
+                // Midnight, not the current time of day. `next week` keeps the
+                // clock and `next Monday` does not; the two look like one rule
+                // and are two.
+                hour: 0,
+                minute: 0,
+                second: shift.seconds,
+            })
+            .0,
+        );
+    }
 
     // Relatives with nothing else: displace the current instant. Note `now`
     // and not midnight -- `date -d '1 day'` is measured to keep the current
@@ -1392,6 +1516,56 @@ mod tests {
         // refused, so extraction cannot quietly swallow a bad operand.
         assert_eq!(spec("1 banana"), None);
         assert_eq!(spec("next banana"), None);
+    }
+
+    /// `TEST_NOW` is **Tuesday** 2021-06-15 12:00:00 UTC.
+    ///
+    /// The target dates and their weekdays were read off GNU
+    /// (`date -u -d 2021-06-22 +%A +%s`), and the RULE the offsets implement
+    /// was measured live against GNU on a Wednesday — the one weekday on
+    /// which `Wednesday` and `next Wednesday` disagree. Neither number here is
+    /// computed by the arithmetic under test.
+    #[test]
+    fn d_accepts_the_measured_weekday_forms() {
+        // A bare weekday INCLUDES today: Tuesday, on a Tuesday, is today —
+        // at MIDNIGHT, not at `TEST_NOW`'s noon.
+        assert_eq!(spec("Tuesday"), Some(1_623_715_200));
+        // `next` forces strictly forward, so on a Tuesday it is +7.
+        assert_eq!(spec("next Tuesday"), Some(1_624_320_000));
+        // `last` forces strictly backward: -7, not 0.
+        assert_eq!(spec("last Tuesday"), Some(1_623_110_400));
+
+        // A different weekday goes forward, never backward.
+        assert_eq!(spec("Wednesday"), Some(1_623_801_600));
+        assert_eq!(spec("Monday"), Some(1_624_233_600));
+        assert_eq!(spec("last Monday"), Some(1_623_628_800));
+        assert_eq!(spec("Friday"), Some(1_623_974_400));
+        assert_eq!(spec("last Friday"), Some(1_623_369_600));
+
+        // `next X` and bare `X` agree when X is not today, which is why the
+        // Tuesday rows above are the ones that actually pin the rule.
+        assert_eq!(spec("next Wednesday"), spec("Wednesday"));
+
+        // Abbreviations and case, all of which GNU takes.
+        assert_eq!(spec("tue"), spec("Tuesday"));
+        assert_eq!(spec("TUESDAY"), spec("Tuesday"));
+        assert_eq!(spec("tues"), spec("Tuesday"));
+        assert_eq!(spec("thurs"), spec("Thursday"));
+        assert_eq!(spec("thur"), spec("Thursday"));
+        assert_eq!(spec("mon"), spec("Monday"));
+
+        // With an absolute date present GNU IGNORES the weekday rather than
+        // moving to it or checking it — measured, and the reason the branch
+        // that applies one only fires when nothing else is left.
+        assert_eq!(
+            spec("2021-06-15 12:00:00 Monday"),
+            spec("2021-06-15 12:00:00")
+        );
+
+        // Controls: a non-weekday word is still refused, and a weekday twice
+        // is refused rather than half-read.
+        assert_eq!(spec("Blursday"), None);
+        assert_eq!(spec("Monday Tuesday"), None);
 
         // A bare time means TODAY at that time; an empty operand means today
         // at MIDNIGHT. Both measured, and they are different rules.

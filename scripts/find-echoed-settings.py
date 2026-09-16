@@ -93,28 +93,45 @@ FIELD_DECL = re.compile(
     re.M,
 )
 
-# `format_args!` is included because `write!` expands through it and some
-# callers use it directly; `assert!`/`panic!` are NOT -- a field read in an
-# assertion is being checked, which is acting on it.
-PRINT_MACROS = (
-    "println", "print", "eprintln", "eprint",
-    "writeln", "write", "format", "format_args",
-)
-PRINT_CALL = re.compile(
-    r"(?<![A-Za-z0-9_])(?:" + "|".join(PRINT_MACROS) + r")\s*!\s*[(\[{]"
-)
+# Two sets, because they mean different things and lumping them cost this
+# checker most of its precision on the first run.
+#
+# `println!` and friends put text somewhere a person reads. A field read only
+# into one of those is the `IdleActionSec` case.
+#
+# `format!` builds a String, and a String is as often DATA as it is display:
+# `userspace/curl`'s `Options.user_agent` goes into a request header, and
+# `userspace/objdump`'s `NmOpts.radix` picks a number base. Neither is being
+# shown back to the operator, and both looked identical to the banner case
+# until these were split.
+#
+# `assert!`/`panic!` are in neither: a field read in an assertion is being
+# checked, which is acting on it.
+SHOWN_MACROS = ("println", "print", "eprintln", "eprint", "writeln", "write")
+BUILT_MACROS = ("format", "format_args")
+PRINT_MACROS = SHOWN_MACROS + BUILT_MACROS
+
+
+def _macro_re(names):
+    return re.compile(
+        r"(?<![A-Za-z0-9_])(?:" + "|".join(names) + r")\s*!\s*[(\[{]"
+    )
+
+
+PRINT_CALL = _macro_re(PRINT_MACROS)
+SHOWN_CALL = _macro_re(SHOWN_MACROS)
 
 OPEN_TO_CLOSE = {"(": ")", "[": "]", "{": "}"}
 
 
-def print_spans(code: str) -> list[tuple[int, int]]:
+def print_spans(code: str, rx: re.Pattern | None = None) -> list[tuple[int, int]]:
     """Half-open [start, end) spans covering each print macro's arguments.
 
     Nested calls are not merged: a span inside a span is still inside a print,
     which is the only question asked of it.
     """
     spans = []
-    for m in PRINT_CALL.finditer(code):
+    for m in (rx or PRINT_CALL).finditer(code):
         opener = code[m.end() - 1]
         closer = OPEN_TO_CLOSE[opener]
         depth = 0
@@ -226,6 +243,7 @@ def analyse(
     `find-stranded-serialisers.py` already reports.
     """
     spans = print_spans(code)
+    shown_spans = print_spans(code, SHOWN_CALL)
     found = []
     for struct, fields in struct_fields(code).items():
         if not all_structs and not CONFIG_STRUCT.search(struct):
@@ -243,13 +261,18 @@ def analyse(
             if all(in_any_span(p, spans) for p in reads):
                 fns = {enclosing_fn(code, p) for p in reads}
                 if any(fn and is_called(code, fn) for fn in fns):
-                    echoed.append(f)
+                    # Shown to a person, or only formatted into a String that
+                    # may well be data. The second is ranked below, not
+                    # dropped: `mediaconvert`'s settings panel builds its
+                    # labels with `format!` and is a true positive.
+                    shown = any(in_any_span(p, shown_spans) for p in reads)
+                    echoed.append((f, shown))
                 elif stranded is not None:
                     stranded.append((struct, f))
             else:
                 acting = True
         if acting:
-            found.extend((struct, f) for f in echoed)
+            found.extend((struct, f, shown) for f, shown in echoed)
     return found
 
 
@@ -280,7 +303,7 @@ fn run(cfg: &DaemonConfig) {
 """
     expect("a setting read only by the banner is reported",
            analyse(echoed_src, all_structs=False),
-           [("DaemonConfig", "idle_timeout")])
+           [("DaemonConfig", "idle_timeout", True)])
 
     # The `--show-config` dump: every field printed, none acting. Must be
     # silent -- this is the shape that makes the naive rule unusable.
@@ -308,8 +331,8 @@ fn show(cfg: &DaemonConfig) {
     )
     expect("...but a straggler inside one still is",
            sorted(analyse(straggler, all_structs=False)),
-           [("DaemonConfig", "idle_timeout"),
-            ("DaemonConfig", "kill_user_processes")])
+           [("DaemonConfig", "idle_timeout", True),
+            ("DaemonConfig", "kill_user_processes", True)])
 
     # A field nothing reads at all is a different finding and not this one.
     dead = """
@@ -336,7 +359,7 @@ fn run(cfg: &AppConfig, out: &mut String) {
 }
 """
     expect("writeln! to a buffer is a print", analyse(writes, all_structs=False),
-           [("AppConfig", "retries")])
+           [("AppConfig", "retries", True)])
 
     # An assertion is ACTING on a value, not echoing it.
     asserted = """
@@ -368,14 +391,14 @@ fn load(cfg: &mut AppConfig) {
 }
 """
     expect("an assignment is not a read", analyse(assigned, all_structs=False),
-           [("AppConfig", "retries")])
+           [("AppConfig", "retries", True)])
 
     # Scope: a non-config struct is skipped by default and found with --all.
     plain = echoed_src.replace("DaemonConfig", "Daemon")
     expect("a non-config struct is out of scope by default",
            analyse(plain, all_structs=False), [])
     expect("...and in scope with --all-structs",
-           analyse(plain, all_structs=True), [("Daemon", "idle_timeout")])
+           analyse(plain, all_structs=True), [("Daemon", "idle_timeout", True)])
 
     # --- stranded, not echoed ----------------------------------------------
     # `apps/mediaconvert`'s `ImageSettings::summary` in miniature: the fields
@@ -405,10 +428,31 @@ impl ImageSettings {
     # The same source with a live caller IS an echo: now it reaches someone.
     called = stranded_src + "\nfn main() { println!(\"{}\", cfg.summary()); }\n"
     bucket2: list = []
-    expect("...and the same formatter with a caller is an echo",
+    expect("...and the same formatter with a caller is an echo (formatted)",
            analyse(called, all_structs=False, stranded=bucket2),
-           [("ImageSettings", "quality")])
+           [("ImageSettings", "quality", False)])
     expect("...with nothing left in the stranded bucket", bucket2, [])
+
+    # --- shown vs merely formatted ------------------------------------------
+    # `userspace/curl`'s `user_agent` goes into a request header built with
+    # `format!`. Nothing shows it to the operator, so it must rank below a
+    # field that reaches a `println!` -- otherwise the loudest rows in the
+    # report are the ones least likely to be real.
+    into_data = """
+struct Options {
+    pub user_agent: String,
+    pub verbose: bool,
+}
+fn main() { send(&opts()); }
+fn send(o: &Options) {
+    let header = format!("User-Agent: {}", o.user_agent);
+    socket.write_all(header.as_bytes());
+    if o.verbose { trace(); }
+}
+"""
+    expect("a field formatted into data ranks as not-shown",
+           analyse(into_data, all_structs=False),
+           [("Options", "user_agent", False)])
 
     # A one-field struct cannot tell a dump from a straggler.
     lone = """
@@ -474,8 +518,20 @@ def main() -> int:
                 per_crate.setdefault(str(path.relative_to(ROOT)), []).extend(hits)
 
     total = sum(len(v) for v in per_crate.values())
+    shown_n = sum(1 for v in per_crate.values() for h in v if h[2])
     print(f"files scanned                  : {files}")
-    print(f"settings read only to be shown : {total}")
+    print(f"settings read only into output : {total}")
+    print(f"  ...reach a println!/write!   : {shown_n}")
+    print(f"  ...only built with format!   : {total - shown_n}")
+    # Said here rather than left for the reader to infer, because the obvious
+    # inference is wrong in half the tree. `format!` is ambiguous ONLY for a
+    # command-line program, where a String may be a request header
+    # (`curl`'s `user_agent`) or a number base (`objdump`'s `radix`) rather
+    # than something a person reads. A GUI app has no stdout to print to: every
+    # label it shows is `format!`-built and handed to the toolkit, so [format]
+    # under `apps/` and `gui/` means *shown*, not *maybe data*.
+    print("  ([format] is ambiguous only under userspace/ -- a GUI app builds "
+          "every label it\n   shows with format!, so there it means shown.)")
     print(f"in files                       : {len(per_crate)}")
     if not total:
         # A zero here is a real answer only because the self-test above proves
@@ -488,8 +544,9 @@ def main() -> int:
     for path in sorted(per_crate, key=lambda p: -len(per_crate[p])):
         hits = per_crate[path]
         print(f"{path}  ({len(hits)})")
-        for struct, field in sorted(hits):
-            print(f"    {struct}.{field}")
+        for struct, field, shown in sorted(hits):
+            mark = "shown " if shown else "format"
+            print(f"    [{mark}] {struct}.{field}")
     print("\nEach is read, and read only into output. Check whether the "
           "program ACTS on it; if it does not, the print is telling the "
           "operator their setting took effect.")

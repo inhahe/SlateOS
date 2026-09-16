@@ -101224,7 +101224,13 @@ recorded as "re-run with `--timeout-scale 5`", which could never have worked: a
 deadlock does not finish at any multiple of the budget, it just fails more
 slowly. The probe is now removed and the reasoning left in its place, which
 makes the case measurable again.
-### TD-C-ARCHIVEMANAGER-HOLDS-THE-WHOLE-ARCHIVE-IN-MEMORY — 2026-08-26 — LANE C, OPEN
+### TD-C-ARCHIVEMANAGER-HOLDS-THE-WHOLE-ARCHIVE-IN-MEMORY — 2026-08-26 — LANE C — FIXED 2026-09-16
+
+**FIXED 2026-09-16.** Both halves. Opening no longer reads the file: `ArchiveSource` holds a handle and reads members at their offsets through `ziparchive::parse_at` / `extract_entry_at`. Saving no longer assembles one: members are copied across compressed with `entry_data_at` into `ZipWriter::copy_entry`, written to the replacement file as they are produced.
+
+What a rewrite held was the archive, every member's plaintext and the whole new archive at once. It now holds what the caller already had plus the largest single member, and `projected_save_bytes` was rewritten to measure that rather than keeping a formula for costs that no longer exist.
+
+Two tests changed with it, and the way they changed is the point. `a_rewrite_too_big_to_hold_is_refused` asserted that the projection *exceeds* the file on disk, "or it is measuring the wrong thing" — true while a ZIP of zeroes could pass the on-disk check and still exhaust memory, and false now, so it asserts the opposite and then saves the archive that used to be refused. `a_directory_member_costs_nothing` spelled out the old arithmetic, which made it a test of the formula rather than of its own claim; it now compares the same archive with and without a directory member.
 
 **In short:** Opening a ZIP in the archive manager reads the entire file into
 memory and keeps it there for as long as the window is open. A 400 MB archive

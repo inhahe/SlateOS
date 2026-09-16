@@ -268,7 +268,15 @@ fn run_daemon(config: &EarlyOomConfig) -> i32 {
         100.0
     };
 
-    println!("earlyoom: started");
+    // NOT "started", which is what a daemon says and this is not one.
+    //
+    // `run_daemon` reads /proc/meminfo once, decides once, and returns. There
+    // is no loop and no sleep anywhere in it -- the only `while` in this file
+    // parses argv. An operator who starts an out-of-memory killer and reads
+    // "started" believes something is now watching their memory, and nothing
+    // is. The correct response to "started" is to stop worrying about OOM,
+    // and that is precisely the response that leaves them unprotected.
+    println!("earlyoom: one-shot check (this build does not run as a daemon)");
     println!(
         "  Memory threshold: {:.0}% of {} = {}",
         config.mem_threshold_percent,
@@ -369,8 +377,14 @@ fn run_daemon(config: &EarlyOomConfig) -> i32 {
             }
         }
     } else {
+        // "checked once", not "monitoring". The interval is reported as what
+        // it is -- a configured value with nothing to apply it to -- rather
+        // than being quietly dropped, because an operator who set it deserves
+        // to know it was read and why it changed nothing.
+        println!("earlyoom: memory OK at this instant -- checked once, not monitoring");
         println!(
-            "earlyoom: memory OK, monitoring (every {}s)",
+            "earlyoom: --report-interval {}s is not used: this build has no \
+             polling loop, so run it from a timer if you want repetition",
             config.report_interval
         );
     }

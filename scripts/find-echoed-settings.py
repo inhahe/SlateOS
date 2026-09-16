@@ -36,6 +36,26 @@ That exonerates a `--show-config` dump wholesale without exonerating a
 straggler hiding inside one. It is the reason this is worth running at all
 rather than being the obvious idea everyone rejects.
 
+## This checker cannot see its own fix, and that is on purpose
+
+The repair for an echoed setting is not to delete the field. It is for the
+program to say, beside the value, that nothing applies it -- `gui/desktop`'s
+seven settings pages now do. **The field is still read only into output
+afterwards, so it still reports here, forever.**
+
+That is the right behaviour and not a wart. The finding is "this value reaches
+the operator and nothing acts on it", which remains true of a disclaimed
+setting; what changed is that the program stopped implying otherwise. A
+checker that went quiet when a disclaimer appeared would be measuring the
+disclaimer rather than the defect, and the day someone wires the setting up for
+real it would have nothing to say.
+
+The cost is re-triage: the next person runs this and re-reads rows already
+dealt with. **That is paid with a note, not with a looser rule.** The entry
+`TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES` in `known-issues.md` lists which
+have been answered and how, so the second reading is a lookup rather than an
+investigation.
+
 ## Why this reports and does not gate
 
 The rule above is a good discriminator, not a proof. Three shapes defeat it
@@ -363,7 +383,11 @@ def is_called(code: str, fn: str) -> bool:
 
 
 def analyse(
-    code: str, *, all_structs: bool, stranded: list | None = None
+    code: str,
+    *,
+    all_structs: bool,
+    stranded: list | None = None,
+    scope: list | None = None,
 ) -> list[tuple[str, str]]:
     """(struct, field) pairs read only inside prints, with an acting sibling.
 
@@ -383,10 +407,15 @@ def analyse(
         if not all_structs and not CONFIG_STRUCT.search(struct):
             continue
         if len(fields) < 2:
+            # Counted before the `continue` below so the tally is "structs
+            # this could have judged", which is the number a zero needs
+            # beside it.
             # "All siblings" needs siblings. A one-field struct cannot
             # distinguish a dump from a straggler, and guessing would make the
             # report's least reliable rows its most numerous.
             continue
+        if scope is not None:
+            scope.append(struct)
         echoed, acting = [], False
         for f in fields:
             reads = field_reads(code, f)
@@ -724,6 +753,7 @@ def main() -> int:
         return 2
 
     per_crate: dict[str, list[tuple[str, str]]] = {}
+    scope: list[str] = []
     files = 0
     for root in roots:
         for path in sorted(root.rglob("*.rs")):
@@ -736,13 +766,19 @@ def main() -> int:
             files += 1
             code, _ = rustlex.live_code(src)
             code = rustlex.strip_noise(code)
-            hits = analyse(code, all_structs=args.all_structs)
+            hits = analyse(code, all_structs=args.all_structs, scope=scope)
             if hits:
                 per_crate.setdefault(str(path.relative_to(ROOT)), []).extend(hits)
 
     total = sum(len(v) for v in per_crate.values())
     shown_n = sum(1 for v in per_crate.values() for h in v if h[2])
     print(f"files scanned                  : {files}")
+    # **A zero needs this line beside it.** Without it, "0 settings" reads the
+    # same whether the tree is clean or whether `CONFIG_STRUCT` matched no
+    # struct at all -- and the second is a fact about the filter, not about the
+    # code. `net*/` scans 32 files and judges very few structs; knowing which
+    # is the difference between a clean result and an inert one.
+    print(f"config-like structs judged     : {len(scope)}")
     print(f"settings read only into output : {total}")
     print(f"  ...reach a println!/write!   : {shown_n}")
     print(f"  ...only built with format!   : {total - shown_n}")
@@ -760,8 +796,15 @@ def main() -> int:
         # A zero here is a real answer only because the self-test above proves
         # the pattern still matches the shapes it was built for. Say so, so a
         # silently-broken pattern is not read as a clean tree.
-        print("\nnone -- and --self-test passes, so the pattern still matches "
-              "the shapes it was built for")
+        if scope:
+            print(f"\nnone -- across {len(scope)} struct(s) that were judged, "
+                  "and --self-test passes, so the pattern still matches the "
+                  "shapes it was built for")
+        else:
+            print("\nnone -- AND NOTHING WAS JUDGED. No struct here is named "
+                  "Config/Settings/Options/Opts/Prefs/Params with two or more "
+                  "fields, so this is a fact about the filter rather than "
+                  "about the code. Re-run with --all-structs to widen it.")
         return 0
     print()
     for path in sorted(per_crate, key=lambda p: -len(per_crate[p])):

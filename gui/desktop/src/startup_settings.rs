@@ -151,6 +151,19 @@ impl StartupType {
 // Startup entry
 // ============================================================================
 
+/// What the page says beside the startup delay it reads back to you.
+///
+/// `max_startup_delay_ms` is read in exactly one place: the `format!` that
+/// draws it as seconds. Found by `scripts/find-echoed-settings.py`.
+///
+/// **This window is not in the boot path and cannot be.** It is a settings
+/// page in the desktop shell, which starts after boot is over; the thing that
+/// would honour a startup delay is `/proc/autostart`'s orchestrator, which
+/// publishes its own phase, dependency levels and retry backoff and has never
+/// heard of this number.
+const STARTUP_DELAY_NOT_APPLIED: &str = "Not applied: startup order is \
+decided before this window exists, and nothing carries this delay to it.";
+
 /// A single startup/autorun entry.
 #[derive(Clone, Debug)]
 pub struct StartupEntry {
@@ -970,6 +983,17 @@ impl StartupSettingsUI {
             &format!("{:.0}s", cfg.max_startup_delay_ms as f64 / 1000.0),
         );
         cy += 28.0;
+        cmds.push(RenderCommand::Text {
+            x,
+            y: cy,
+            text: STARTUP_DELAY_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: p.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cy += 28.0;
 
         self.render_label_value(
             p,
@@ -1079,6 +1103,43 @@ mod tests {
     use appearance::palette_check::assert_drawn_from;
 
     // ---- StartupImpact ----
+
+    /// The startup delay is drawn with the fact that nothing honours it.
+    ///
+    /// This window is a settings page in the desktop shell, which starts
+    /// after boot is over. The thing that would honour a startup delay is
+    /// `/proc/autostart`'s orchestrator, which publishes its own phase,
+    /// dependency levels and retry backoff and has never heard of this
+    /// number.
+    ///
+    /// Found by `scripts/find-echoed-settings.py`.
+    #[test]
+    fn the_startup_delay_is_drawn_with_the_fact_that_nothing_honours_it() {
+        let ui = wound(StartupTab::Boot, true);
+        let cmds = ui.render(&Palette::for_mode(false), 600.0, 800.0);
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control. Without it this passes against a page that draws no
+        // such row at all, which is not what is being pinned.
+        assert!(
+            texts.iter().any(|t| t == "Max Startup Delay"),
+            "control: the page must be drawing a startup delay for this test to be \
+about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("decided before this window")),
+            "the page drew a startup delay and did not say nothing applies it"
+        );
+    }
 
     #[test]
     fn test_impact_from_millis() {

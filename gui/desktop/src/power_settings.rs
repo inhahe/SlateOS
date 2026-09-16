@@ -174,6 +174,43 @@ impl BatteryHealth {
     }
 }
 
+/// What the Advanced tab says beside the brightness pair it reads back.
+///
+/// `brightness_battery` and `brightness_ac` are set by setters, clamped
+/// sensibly, and read in exactly one place each: the `format!` that draws
+/// them. `scripts/find-echoed-settings.py` found both.
+///
+/// **They are unreachable rather than unimplemented, and that is a different
+/// thing to say.** `kernel/src/fs/brightness.rs` has `set_brightness(display,
+/// level)`, `brightness_up`, `brightness_down` and `get_brightness`, all
+/// working, and the only callers of any of them in the whole kernel are its
+/// own tests. `/proc/brightness` publishes `display_count`,
+/// `total_adjustments`, `total_auto` and `ops` -- counters, no per-display
+/// level -- and there is no syscall and no `/sys/params` node reaching the
+/// setters. The loop is open at both ends.
+///
+/// The distinction matters to whoever reads this next. "Not implemented"
+/// invites someone to implement it here, where it cannot be done. "The kernel
+/// has it and does not expose it" names the one change that would make this
+/// page work.
+const BRIGHTNESS_NOT_APPLIED: &str = "Not applied: nothing on this system \
+changes screen brightness. The kernel can set it and does not expose it to \
+programs.";
+
+/// What the Battery tab says beside the threshold it reads back.
+///
+/// Separate from the brightness notice because they are on different tabs,
+/// and a correction on a page the reader is not looking at is a correction
+/// that was not written. The first version of this had one constant covering
+/// both, drawn only on Advanced -- so the Battery tab went on reading its
+/// threshold back with nothing beside it.
+///
+/// `critical_battery_pct` is clamped against `low_battery_pct` on the way in,
+/// which reads as a system that takes it seriously, and then read once: by
+/// the line that draws it. Nothing watches the battery against it.
+const THRESHOLD_NOT_APPLIED: &str = "Not applied: nothing watches the battery \
+against this threshold.";
+
 /// Current battery information.
 #[derive(Clone, Debug)]
 pub struct BatteryInfo {
@@ -939,6 +976,18 @@ impl PowerSettingsUI {
             "Off"
         };
         Self::render_kv(p, cmds, x, y, width, "Auto battery saver", saver_label);
+        y += 28.0;
+
+        cmds.push(RenderCommand::Text {
+            x,
+            y,
+            text: THRESHOLD_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: p.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
 
         // Charge history mini-graph
         if !self.charge_history.is_empty() {
@@ -987,6 +1036,21 @@ impl PowerSettingsUI {
             "Brightness (AC)",
             &format!("{}%", self.config.brightness_ac),
         );
+        y += 28.0;
+
+        // Under the values, not at the top of the page. The percentages above
+        // are what read as confirmation, and a correction somewhere else is
+        // one the reader has already passed.
+        cmds.push(RenderCommand::Text {
+            x,
+            y,
+            text: BRIGHTNESS_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: p.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
     }
 
     // ------------------------------------------------------------------
@@ -1095,6 +1159,102 @@ mod tests {
 
     fn test_palette() -> Palette {
         Palette::for_mode(false)
+    }
+
+    /// The battery threshold is drawn with the fact that nothing watches it.
+    ///
+    /// `critical_battery_pct` is clamped against `low_battery_pct` on the way
+    /// in, which reads as a system taking it seriously, and then read once: by
+    /// the line that draws it. Nothing watches the battery against it.
+    ///
+    /// This is a separate test because it is a separate tab, and the first
+    /// version of this work had one notice covering both -- drawn only on
+    /// Advanced, so the Battery tab went on reading its threshold back with
+    /// nothing beside it. A correction on a page the reader is not looking at
+    /// is a correction that was not written.
+    #[test]
+    fn the_battery_threshold_is_drawn_with_the_fact_that_nothing_watches_it() {
+        let mut ui = PowerSettingsUI::with_battery(wound_battery(
+            80,
+            BatteryHealth::Good,
+            ChargeState::Discharging,
+        ));
+        // "Battery".
+        ui.set_active_tab(2);
+
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 500.0);
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t == "Critical battery"),
+            "control: the tab must be drawing the threshold for this test to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("watches the battery")),
+            "the page drew a battery threshold and did not say nothing watches it"
+        );
+    }
+
+    /// The brightness values are drawn with the fact that nothing applies them.
+    ///
+    /// `brightness_battery`, `brightness_ac` and `critical_battery_pct` are
+    /// set by setters, clamped sensibly, and read in exactly one place each --
+    /// the `format!` that draws them. Nothing in this tree applies any of
+    /// them, so the percentage on the page is the setting confirming itself.
+    ///
+    /// **The brightness pair is unreachable rather than unimplemented.**
+    /// `kernel/src/fs/brightness.rs` has `set_brightness`, `brightness_up`,
+    /// `brightness_down` and `get_brightness`, and the only callers of any of
+    /// them in the whole kernel are its own tests. `/proc/brightness`
+    /// publishes counters and no per-display level. There is no syscall and
+    /// no `/sys/params` node. The loop is open at both ends.
+    ///
+    /// Found by `scripts/find-echoed-settings.py`.
+    #[test]
+    fn the_brightness_values_are_drawn_with_the_fact_that_nothing_applies_them() {
+        let mut ui = PowerSettingsUI::with_battery(wound_battery(
+            80,
+            BatteryHealth::Good,
+            ChargeState::Charging,
+        ));
+        // "Advanced" -- the tab that draws the brightness pair. The first
+        // version of this test used 2, "Battery", where the threshold lives;
+        // the control caught it rather than the assertion, which is what a
+        // control is for.
+        ui.set_active_tab(3);
+
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 500.0);
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control. Without it this passes against a tab that draws no
+        // brightness at all, which is not what is being pinned.
+        assert!(
+            texts.iter().any(|t| t == "Brightness (AC)"),
+            "control: the tab must be drawing the brightness rows for this \
+test to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("brightness")),
+            "the page drew brightness percentages and did not say nothing applies them"
+        );
     }
 
     #[test]

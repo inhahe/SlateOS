@@ -152737,7 +152737,7 @@ today.
 this sweep and wants its own commits. Everything needed to start is above, and
 nothing about it is blocked.
 
-## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- OPEN 2026-09-15
+## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- PARTLY FIXED 2026-09-15
 
 **In short:** across this tree there are 78 settings that a program reads for
 exactly one purpose: to show the value back to the person who set it. Nothing
@@ -152747,6 +152747,87 @@ and it passes. 43 of the 78 are in this lane.
 
 **Date:** 2026-09-15. **Lane:** C (35 of the 78 are lane B's).
 **Decided by:** Claude (autonomous) -- filed, not yet fixed.
+
+**Status 2026-09-15, later the same day: all of `gui/` is answered, and
+`apps/mediaconvert`.** Eight pages now name what they do not apply:
+
+| page | what it was confirming | what it says now |
+|---|---|---|
+| `backup_settings` | a weekly backup schedule | nothing runs backups automatically, and these are not saved; run `backup` |
+| `power_settings` (Advanced) | screen brightness for AC and battery | the kernel can set brightness and does not expose it -- request filed with lane A |
+| `power_settings` (Battery) | a critical-battery threshold | nothing watches the battery against it |
+| `sound_settings` (Input) | microphone gain and monitor volume | this system has no audio at all |
+| `update_settings` | active hours for restarts | nothing installs updates |
+| `datetime_settings` | an NTP sync interval | the time client chooses its own, as the protocol requires |
+| `startup_settings` | a maximum startup delay | startup order is decided before this window exists |
+| `storage_settings` | a disk-cleanup threshold | nothing watches free space or deletes anything |
+| `apps/mediaconvert` | quality, codecs, metadata stripping | nothing reads these except this panel |
+
+**The scanner still reports every one of them, and will forever.** The repair
+is not to delete the field; it is for the program to stop implying the value
+took effect. The field is still read only into output afterwards, so the
+finding stands -- correctly, because "this value reaches the operator and
+nothing acts on it" is still true. A checker that went quiet when a disclaimer
+appeared would be measuring the disclaimer rather than the defect. This table
+is what makes the second reading a lookup instead of an investigation.
+
+**Two of the nine said something more specific than "not implemented", because
+that phrase would have sent the reader the wrong way.** Brightness is
+*unreachable*: `kernel/src/fs/brightness.rs` has working setters whose only
+callers are its own tests, and no syscall or `/sys/params` node reaches them --
+so "not implemented" would invite someone to implement it in `gui/`, where it
+cannot be done. The NTP interval is inert *twice*: nothing carries it to
+`ntpd`, and `ntpd`'s poll interval is the protocol's own and would not honour
+an arbitrary number if something did -- so a reader told only the first half
+would file a request whose answer is no.
+
+**`apps/` triaged in full, 2026-09-15.** Twenty-four fields across ten apps.
+Reading them one at a time turned up three shapes the scanner cannot
+distinguish, and two finds bigger than the rows that pointed at them.
+
+| app | verdict |
+|---|---|
+| `mediaconvert` (6) | **fixed** -- panel says the settings are not applied |
+| `diskimager` (4) | `block_size` x2 **fixed** (the label was *wrong*, not inert); `output_path` a false positive; `format` latent, see below |
+| `netmanager` (3) | **already covered** -- banner drawn unconditionally every frame |
+| `ircclient` (2) | **fixed**, and the rows were a pointer to something worse |
+| `remotedesktop` (2) | **already covered** -- banner drawn after the background, unconditionally |
+| `videoplayer` (2) | **real, open** -- screenshot settings for a capability already removed |
+| `settings/remote.rs` (2) | **real, open** -- no disclaimer of any kind |
+| `fontmanager` (1) | **real, open** -- a default font size nothing carries anywhere |
+| `netscan` (1) | **already covered** -- "no network access at all" |
+| `weather` (1) | **already covered** -- `CANNOT_FETCH_LINES` |
+
+**The three shapes worth naming, because the scanner reports all three
+identically:**
+
+1. **Already covered by a program-level disclaimer whose scope reaches the
+   value.** `netmanager`, `remotedesktop`, `netscan`, `weather`. The test is
+   not "is there a disclaimer somewhere" -- `mediaconvert` had one and still
+   needed a second. It is whether the existing disclaimer covers *what the
+   value would need in order to be true*. A VPN server address needs a
+   network, and the banner says there is none. A quality setting needs a
+   conversion, and "the queue will not run" does not say there is none.
+2. **A record kept so a later message can name it.** `diskimager`'s
+   `output_path` is stored by `start_create` alongside being passed to the
+   writer, purely so "Image created: {}" can name the file that really was
+   written. Deleting it would make the message worse. Same shape as lane B's
+   `lp`, which parses a printer name it never uses so its refusal can say
+   which printer it refused.
+3. **Not inert but WRONG.** `diskimager`'s `block_size` said 4096 while every
+   copy used a 1 MiB constant. That is a different defect with a different
+   fix: an inert setting gets a notice, a false statement gets corrected.
+
+**A latent trap left by the same pattern, recorded so it is not re-derived:**
+`diskimager`'s `CreateOptions::format` offers Raw / ISO / **GzipCompressed**
+and is read only to draw a label. Nothing branches on it and nothing can set
+it, so today it says Raw and the copy produces raw -- correct by coincidence.
+The day anyone adds a picker, choosing GzipCompressed would produce a raw
+image named `.img.gz`, and the failure would surface much later as a corrupt
+archive. It should go the way of `block_size`: the label drawn from what the
+copy actually does.
+
+**Still open:** `userspace/`'s 28, which are lane B's.
 
 **Why this is worse than a setting nothing reads at all.** A dead setting is
 silent, and silence at least does not argue. An echoed setting produces

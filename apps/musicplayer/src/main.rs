@@ -17,6 +17,7 @@
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
@@ -663,12 +664,46 @@ const VISUALIZER_TAU_SECS: f32 = 0.0646;
 /// decide this.
 const PLAYING_TICK_MS: u64 = 33;
 
+/// Said whenever the user asks for playback.
+///
+/// Not "not implemented": there is no audio subsystem to implement against,
+/// and a message that reads as "not yet" invites the user to wait for
+/// something nobody is building.
+const NO_AUDIO: &str =
+    "No audio output on this system -- this window edits playlists, it does not play them";
+
 pub struct PlayerState {
     /// The user's colours, handed over by the framework (§822).
     pub palette: Palette,
     // Playback
     pub current_track_index: Option<usize>,
     pub position_secs: f32,
+    /// Whether a track is being played.
+    ///
+    /// **Never true in a shipping build**, because nothing in this operating
+    /// system can produce sound: the string `audio` appears in exactly one
+    /// `Cargo.toml` in the tree, which is this crate's own description. No
+    /// driver, no service, no codec, no PCM path.
+    ///
+    /// The machinery below it is real and is kept -- `tick` advances the
+    /// position, rolls over to the next track, honours repeat-one, and stops
+    /// at the end of a shuffle pass. All of that is needed the day there is
+    /// audio, and its tests set this field by hand, which is the only way it
+    /// can be set. See `toggle_play`.
+    /// What the last transport action said.
+    pub status_message: String,
+    /// The playlist picker.
+    ///
+    /// `load_m3u` and `export_m3u` were both written, both tested, and
+    /// neither had a caller outside the tests: a playlist editor that could
+    /// not open or save a playlist. `export_m3u` in particular handles a real
+    /// hazard -- an ID3 title containing a newline emits an extra line that
+    /// `load_m3u` reads back as a *file path*, so a downloaded file could
+    /// inject entries into the user's playlist -- and none of that care could
+    /// be reached.
+    pub picker: FilePicker,
+    /// Whether the open picker is saving rather than opening.
+    pub picker_saves: bool,
     pub playing: bool,
     pub volume: f32,
     pub muted: bool,
@@ -741,6 +776,9 @@ impl PlayerState {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             shuffle_played: Vec::new(),
+            status_message: String::from(NO_AUDIO),
+            picker: FilePicker::default(),
+            picker_saves: false,
             visualizer_bars: vec![0.0; VISUALIZATION_BARS],
             rng,
             current_track_index: None,
@@ -777,15 +815,32 @@ impl PlayerState {
         self.current_track().map(|t| t.duration_secs).unwrap_or(0.0)
     }
 
-    /// Toggle play/pause.
+    /// Select a track, and say that it cannot be played.
+    ///
+    /// This set `self.playing = !self.playing`, and everything downstream
+    /// followed: the elapsed time counted up, the progress bar filled, and the
+    /// Now Playing panel animated a bar visualiser. **None of it was a
+    /// measurement of anything** -- there is no audio output in this system at
+    /// all, so a user watching 1:04 of 3:47 tick past a moving waveform
+    /// concludes their speakers are muted.
+    ///
+    /// The other claims repaired in this sweep were completed acts -- "Renamed
+    /// 6 files", "Connected successfully". This one was a **continuous
+    /// present**: it is playing, right now, and here is how far through. That
+    /// is the harder one to disbelieve, because a static claim can be checked
+    /// and a running clock looks like evidence of itself.
+    ///
+    /// Selecting the track still happens, because choosing what would play is
+    /// a real thing a playlist editor does.
     pub fn toggle_play(&mut self) {
         if self.playlist.is_empty() {
+            self.status_message = String::from("The playlist is empty -- Ctrl+O opens an .m3u");
             return;
         }
         if self.current_track_index.is_none() {
             self.current_track_index = Some(0);
         }
-        self.playing = !self.playing;
+        self.status_message = String::from(NO_AUDIO);
     }
 
     /// Stop playback and reset position.
@@ -977,7 +1032,11 @@ impl PlayerState {
         self.muted = !self.muted;
     }
 
-    /// Advance playback by elapsed seconds (simulated tick).
+    /// Advance playback by `elapsed_secs`.
+    ///
+    /// Said "(simulated tick)" until 2026-09-15, which was true and was in a
+    /// comment while the window drew the result. Reachable only from a test
+    /// now, because `playing` is the gate and nothing sets it.
     pub fn tick(&mut self, elapsed_secs: f32) {
         if !self.playing {
             return;
@@ -1304,6 +1363,13 @@ pub fn render(state: &PlayerState) -> RenderTree {
     // Playback controls at bottom
     render_controls(state, &mut tree);
 
+    // The picker last, so it draws over the playlist rather than under it.
+    tree.extend(
+        state
+            .picker
+            .render(&state.palette, state.width, state.height),
+    );
+
     tree
 }
 
@@ -1464,13 +1530,16 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
         let max_bar_height = 40.0;
 
         for i in 0..VISUALIZATION_BARS {
+            // Flat, always, in a shipping build: `playing` is never true.
+            // **The bars are random numbers eased over time** -- see
+            // `advance_visualizer`, whose own comment records that they
+            // replaced an arithmetic ramp that drew a sliding staircase. That
+            // repair made the fabrication look more like audio rather than
+            // less, which is why the panel now says what it is instead.
             let amplitude = if state.playing {
-                // Read, not computed: the heights are advanced by `tick`. See
-                // `PlayerState::advance_visualizer` for what the arithmetic
-                // that used to live here actually drew.
                 state.visualizer_bars().get(i).copied().unwrap_or(0.0) * max_bar_height
             } else {
-                2.0 // Flat line when paused
+                2.0
             };
 
             let bar_x = viz_x + i as f32 * bar_width + 1.0;
@@ -2194,7 +2263,75 @@ fn render_button(
 // ============================================================================
 
 /// Handle an input event, returning true if the event was consumed.
+/// The most of an `.m3u` this will read.
+///
+/// A playlist is a list of paths; a hundred thousand of them is 10 MiB and a
+/// library nobody has. A file past this is cut and the cut is reported, rather
+/// than read whole into a window.
+const MAX_M3U_BYTES: usize = 4 * 1024 * 1024;
+
+/// Read a playlist from `path` into `state`, and say what happened.
+pub fn open_playlist(state: &mut PlayerState, path: &std::path::Path) -> String {
+    match safeio::read_to_string_capped(path, MAX_M3U_BYTES) {
+        Ok(read) => {
+            // The note first: a playlist cut in half is a shorter playlist,
+            // and saying "loaded 40 tracks" about a file holding 900 is
+            // telling the user something false.
+            let note = read.note(MAX_M3U_BYTES);
+            state.load_m3u(&read.text);
+            format!(
+                "{note}Opened {} track(s) from {}",
+                state.playlist.len(),
+                path.display()
+            )
+        }
+        Err(err) => format!("Could not read {}: {err}", path.display()),
+    }
+}
+
+/// Write the playlist to `path`, and say what happened.
+pub fn save_playlist(state: &PlayerState, path: &std::path::Path) -> String {
+    let export = state.export_m3u();
+    match safeio::write_str_atomically(path, &export.text) {
+        Ok(()) => {
+            let saved = state.playlist.len().saturating_sub(export.skipped.len());
+            if export.skipped.is_empty() {
+                format!("Saved {saved} track(s) to {}", path.display())
+            } else {
+                // Named, not counted: the user needs to know WHICH tracks are
+                // missing from the file they just wrote, and a count tells
+                // them only that something is.
+                format!(
+                    "Saved {saved} track(s) to {}; left out {} whose path contains a line break: {}",
+                    path.display(),
+                    export.skipped.len(),
+                    export
+                        .skipped
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
+        Err(err) => format!("Could not write {}: {err}", path.display()),
+    }
+}
+
 pub fn handle_event(state: &mut PlayerState, event: &Event) -> bool {
+    // The picker takes input first while it is up.
+    match state.picker.handle(event, state.width, state.height) {
+        Picked::Chose(path) => {
+            state.status_message = if state.picker_saves {
+                save_playlist(state, &path)
+            } else {
+                open_playlist(state, &path)
+            };
+            return true;
+        }
+        Picked::Handled | Picked::Cancelled => return true,
+        Picked::Ignored => {}
+    }
     let consumed = match event {
         Event::Key(key_event) => handle_key(state, key_event),
         Event::Mouse(mouse_event) => handle_mouse(state, mouse_event),
@@ -2265,6 +2402,18 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
 
     // Global keyboard shortcuts
     match key_event.key {
+        // The two keys that make this a playlist editor rather than a
+        // viewer of whatever was compiled into it.
+        Key::O if key_event.modifiers.ctrl => {
+            state.picker_saves = false;
+            state.picker.open_to_read();
+            true
+        }
+        Key::S if key_event.modifiers.ctrl => {
+            state.picker_saves = true;
+            state.picker.open_to_write("playlist.m3u");
+            true
+        }
         Key::Space => {
             state.toggle_play();
             true
@@ -3724,6 +3873,181 @@ mod tests {
         assert_eq!(format_time(-5.0), "00:00");
     }
 
+    // ---- The door ----
+
+    fn mp_scratch(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("musicplayer-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn ctrl_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The other door test pins that the key *opens* the picker -- but the key
+    /// handler is what opens it, so cutting the picker's event routing
+    /// entirely leaves that assertion true. This is the half routing actually
+    /// decides: with a dialog up, a keystroke belongs to the dialog, and a
+    /// window that scrolls underneath one is a modal that is not modal.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_playlist() {
+        let mut state = PlayerState::new();
+        state.add_track(Track::from_path(PathBuf::from("/music/one.mp3")));
+        state.add_track(Track::from_path(PathBuf::from("/music/two.mp3")));
+        state.current_track_index = Some(0);
+
+        handle_event(&mut state, &ctrl_key(Key::O));
+        assert!(state.picker.is_open(), "control: the picker must be up");
+
+        // `n` is the next-track shortcut, and a letter somebody might type
+        // into a filename.
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::N,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::from("n"),
+            }),
+        );
+        assert_eq!(
+            state.current_track_index,
+            Some(0),
+            "a letter typed at the open dialog changed the track behind it"
+        );
+    }
+
+    /// A playlist survives a save and an open.
+    ///
+    /// `load_m3u` and `export_m3u` were both written, both tested, and neither
+    /// had a caller outside the tests: **a playlist editor that could not open
+    /// or save a playlist.**
+    #[test]
+    fn a_playlist_survives_a_save_and_an_open() {
+        let dir = mp_scratch("roundtrip");
+        let path = dir.join("list.m3u");
+
+        let mut state = PlayerState::new();
+        state.add_track(Track::from_path(PathBuf::from("/music/one.mp3")));
+        state.add_track(Track::from_path(PathBuf::from("/music/two.mp3")));
+        let said = save_playlist(&state, &path);
+        assert!(said.starts_with("Saved 2 track(s)"), "said: {said}");
+
+        let mut back = PlayerState::new();
+        let said = open_playlist(&mut back, &path);
+        assert!(said.contains("2 track(s)"), "said: {said}");
+        let paths: Vec<String> = back
+            .playlist
+            .iter()
+            .map(|t| t.path.display().to_string())
+            .collect();
+        assert_eq!(paths, vec!["/music/one.mp3", "/music/two.mp3"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A track that has no M3U representation is named, not just counted.
+    ///
+    /// M3U has no quoting of any kind, so a path containing a line break
+    /// cannot be written -- `export_m3u` omits it rather than emitting a line
+    /// that `load_m3u` would read back as a *different file*. The user needs
+    /// to know WHICH track is missing from the file they just wrote; a count
+    /// tells them only that something is.
+    #[test]
+    fn a_track_that_cannot_be_written_is_named() {
+        let dir = mp_scratch("skipped");
+        let path = dir.join("list.m3u");
+
+        let mut state = PlayerState::new();
+        state.add_track(Track::from_path(PathBuf::from("/music/fine.mp3")));
+        state.add_track(Track::from_path(PathBuf::from("/music/bad\nname.mp3")));
+        let said = save_playlist(&state, &path);
+
+        assert!(said.contains("Saved 1 track(s)"), "said: {said}");
+        assert!(said.contains("line break"), "said: {said}");
+        assert!(
+            said.contains("bad"),
+            "the skipped track is not named: {said}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A playlist past the cap is cut, and the cut is reported first.
+    #[test]
+    fn a_playlist_past_the_cap_says_so_first() {
+        let dir = mp_scratch("cap");
+        let path = dir.join("big.m3u");
+        let line = "/music/track.mp3\n";
+        std::fs::write(
+            &path,
+            line.repeat(MAX_M3U_BYTES / line.len() + 16).as_bytes(),
+        )
+        .unwrap();
+
+        let mut state = PlayerState::new();
+        let said = open_playlist(&mut state, &path);
+        assert!(
+            said.starts_with("INCOMPLETE ("),
+            "a shorter playlist reported as the whole one: {said}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable playlist is reported, not read as empty.
+    #[test]
+    fn an_unreadable_playlist_is_reported() {
+        let dir = mp_scratch("missing");
+        let mut state = PlayerState::new();
+        let said = open_playlist(&mut state, &dir.join("nope.m3u"));
+        assert!(said.starts_with("Could not read "), "said: {said}");
+    }
+
+    /// Ctrl+O opens and Ctrl+S saves, and the picker is drawn.
+    #[test]
+    fn the_playlist_keys_ask_and_the_picker_is_drawn() {
+        let mut state = PlayerState::new();
+        let closed = render(&state).commands.len();
+
+        assert!(handle_event(&mut state, &ctrl_key(Key::O)));
+        assert!(state.picker.is_open(), "Ctrl+O did not ask for a playlist");
+        assert!(!state.picker_saves);
+        let own = render(&state).commands.len().saturating_sub(closed);
+        assert!(own > 0, "the open picker is not being drawn");
+
+        state.picker.close();
+        assert!(handle_event(&mut state, &ctrl_key(Key::S)));
+        assert!(state.picker.is_open());
+        assert!(state.picker_saves, "Ctrl+S must aim at a save, not an open");
+    }
+
+    /// Play selects a track and says it cannot play it.
+    ///
+    /// This asserted `state.playing` after a `toggle_play`, which is what the
+    /// window then acted on: the elapsed time counted, the progress bar
+    /// filled, the visualiser animated. **There is no audio output in this
+    /// system** -- `audio` appears in exactly one `Cargo.toml` in the tree,
+    /// which is this crate's own description.
     #[test]
     fn test_player_state_play_pause() {
         let mut state = PlayerState::new();
@@ -3732,10 +4056,57 @@ mod tests {
 
         assert!(!state.playing);
         state.toggle_play();
-        assert!(state.playing);
-        assert_eq!(state.current_track_index, Some(0));
+        assert!(
+            !state.playing,
+            "entered a playing state with nothing to play it"
+        );
+        assert_eq!(
+            state.current_track_index,
+            Some(0),
+            "choosing what would play is a real thing a playlist editor does"
+        );
+        assert!(
+            state.status_message.contains("No audio output"),
+            "said: {}",
+            state.status_message
+        );
+    }
+
+    /// Nothing advances, because nothing is playing.
+    ///
+    /// A running clock is the harder claim to disbelieve: a static one can be
+    /// checked, and a moving one looks like evidence of itself.
+    #[test]
+    fn a_tick_advances_nothing_after_pressing_play() {
+        let mut state = PlayerState::new();
+        state.add_track(Track::from_path(PathBuf::from("/test.mp3")));
         state.toggle_play();
-        assert!(!state.playing);
+
+        let before = state.visualizer_bars().to_vec();
+        state.tick(1.0);
+
+        assert_eq!(
+            state.position_secs, 0.0,
+            "the position advanced over silence"
+        );
+        assert_eq!(
+            state.visualizer_bars(),
+            before.as_slice(),
+            "the visualiser animated levels nothing measured"
+        );
+    }
+
+    /// An empty playlist says what to do rather than going quiet.
+    #[test]
+    fn play_with_an_empty_playlist_names_the_way_out() {
+        let mut state = PlayerState::new();
+        assert!(state.playlist.is_empty());
+        state.toggle_play();
+        assert!(
+            state.status_message.contains("Ctrl+O"),
+            "said: {}",
+            state.status_message
+        );
     }
 
     #[test]

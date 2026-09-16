@@ -3715,6 +3715,40 @@ mod tests {
         app
     }
 
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event -- and in
+    /// this crate that test called `handle_key` directly, one layer below the
+    /// routing. This is the half routing decides: with a dialog up, a
+    /// keystroke belongs to the dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_list() {
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        let before = app.sort_mode;
+
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::S,
+            pressed: true,
+            modifiers: ctrl,
+            text: String::new(),
+        }));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        // Plain `s` sorts the list, and is a letter somebody types into a
+        // filename.
+        app.handle_event(&press(Key::S));
+        assert_eq!(
+            app.sort_mode, before,
+            "`s` at the open dialog reordered the list behind it"
+        );
+    }
+
     #[test]
     fn the_number_row_reaches_every_standard_view() {
         let mut app = populated();

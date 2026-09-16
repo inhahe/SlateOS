@@ -1,5 +1,10 @@
 //! Dictionary and thesaurus — look a word up, read it, keep it.
 //!
+//! "Keep it" was the one word in that line with nothing behind it until
+//! 2026-09-15: favourites and history were `Vec<String>` and this crate had no
+//! `std::fs`, so a list somebody built over an afternoon went away with the
+//! window. Ctrl+S writes both lists and Ctrl+O reads them back.
+//!
 //! Five screens (search, entry, history, favourites, featured word) over a
 //! built-in word list, in a real window: every tab, result row, list row and
 //! button is clickable, and the keyboard reaches all of it.
@@ -88,6 +93,7 @@
 
 use appearance::Palette;
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::probe::Probe;
@@ -1280,6 +1286,18 @@ pub struct Dictionary {
     /// Words, most recent first.
     history: Vec<String>,
     favorites: Vec<String>,
+    /// The save/open picker.
+    ///
+    /// The header of this file says "look a word up, read it, **keep it**".
+    /// Everything was kept exactly as long as the window was open: this crate
+    /// had no `std::fs` and no dialog, so a favourites list somebody built
+    /// over an afternoon went away when they closed it.
+    picker: FilePicker,
+    /// Whether the open picker is saving rather than opening.
+    picker_saves: bool,
+    /// What the last save or open did. Distinct from `status`, which is
+    /// the search hint and belongs to a different part of the window.
+    file_status: Option<String>,
     featured: usize,
     screen: Screen,
     /// Pixels the open entry is scrolled down by. A pixel offset rather than a
@@ -1316,6 +1334,9 @@ impl Dictionary {
             came_from: Screen::Search,
             history: Vec::new(),
             favorites: Vec::new(),
+            picker: FilePicker::default(),
+            picker_saves: false,
+            file_status: None,
             featured: 0,
             screen: Screen::Search,
             entry_scroll: 0.0,
@@ -1323,6 +1344,18 @@ impl Dictionary {
             status: "Type a word, or part of one".to_string(),
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
         }
+    }
+
+    /// Replace both word lists with the ones read from a file.
+    ///
+    /// The screen is left where it is: somebody who opens a file from the
+    /// favourites screen wants to see the favourites they just loaded, and
+    /// jumping them elsewhere would hide the thing they asked for.
+    pub fn replace_lists(&mut self, favorites: Vec<String>, history: Vec<String>) {
+        self.favorites = favorites;
+        self.history = history;
+        // The list screens have no scroll offset of their own -- only the
+        // entry view does -- so there is nothing else to reset here.
     }
 
     /// Remember the size the window is being drawn at, so the next click is
@@ -2716,6 +2749,17 @@ impl Dictionary {
                 Key::D => Some(Action::ToggleFavorite),
                 Key::L | Key::K | Key::F => Some(Action::Go(Screen::Search)),
                 Key::Backspace => Some(Action::ClearQuery),
+                // The two keys that let a word list outlive the window.
+                Key::S => {
+                    self.picker_saves = true;
+                    self.picker.open_to_write("words.txt");
+                    return EventResult::Consumed;
+                }
+                Key::O => {
+                    self.picker_saves = false;
+                    self.picker.open_to_read();
+                    return EventResult::Consumed;
+                }
                 _ => None,
             };
             return match action {
@@ -2863,7 +2907,107 @@ impl Dictionary {
 
 /// The one body both the window and the test probe drive, so what a click does
 /// in a test is what it does on a screen.
+/// The most of a saved word list this will read back.
+///
+/// A word list is words; a megabyte of them is a hundred thousand entries and
+/// a library nobody has. Past this it is cut and the cut is reported.
+const MAX_LIST_BYTES: usize = 1024 * 1024;
+
+/// One word per line, favourites first, with a marker between the two lists.
+///
+/// A line-oriented format because the content is a list of single words with
+/// no internal structure -- there is nothing here that needs quoting, and a
+/// format a user can read and edit in any text editor is worth more than one
+/// that round-trips a field they do not have.
+const HISTORY_MARKER: &str = "# history";
+
+pub fn export_lists(app: &Dictionary) -> String {
+    let mut out = String::from("# favourites\n");
+    for w in app.favorites() {
+        out.push_str(w);
+        out.push('\n');
+    }
+    out.push_str(HISTORY_MARKER);
+    out.push('\n');
+    for w in app.history() {
+        out.push_str(w);
+        out.push('\n');
+    }
+    out
+}
+
+/// Write the lists to `path`, and say what happened.
+pub fn save_lists(app: &Dictionary, path: &std::path::Path) -> String {
+    let text = export_lists(app);
+    match safeio::write_str_atomically(path, &text) {
+        Ok(()) => format!(
+            "Saved {} favourite(s) and {} looked-up word(s) to {}",
+            app.favorites().len(),
+            app.history().len(),
+            path.display()
+        ),
+        Err(err) => format!("Could not write {}: {err}", path.display()),
+    }
+}
+
+/// Read lists from `path` into `app`, and say what happened.
+///
+/// A word that is not in the built-in dictionary is kept anyway. The list is
+/// the user's record of what they looked up and chose to keep, and silently
+/// dropping entries because this build's word list is smaller than the one
+/// that wrote the file would lose exactly the words they cared enough about
+/// to save.
+pub fn load_lists(app: &mut Dictionary, path: &std::path::Path) -> String {
+    match safeio::read_to_string_capped(path, MAX_LIST_BYTES) {
+        Ok(read) => {
+            // The note first: a list cut in half is a shorter list, and
+            // "read 40 words" about a file holding 900 is untrue.
+            let note = read.note(MAX_LIST_BYTES);
+            let (mut favs, mut hist) = (Vec::new(), Vec::new());
+            let mut in_history = false;
+            for line in read.text.lines() {
+                let line = line.trim();
+                if line == HISTORY_MARKER {
+                    in_history = true;
+                    continue;
+                }
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if in_history {
+                    hist.push(line.to_string());
+                } else {
+                    favs.push(line.to_string());
+                }
+            }
+            let said = format!(
+                "{note}Read {} favourite(s) and {} looked-up word(s) from {}",
+                favs.len(),
+                hist.len(),
+                path.display()
+            );
+            app.replace_lists(favs, hist);
+            said
+        }
+        Err(err) => format!("Could not read {}: {err}", path.display()),
+    }
+}
+
 pub fn handle_event(app: &mut Dictionary, event: &Event) -> EventResult {
+    // The picker takes input first while it is up, or a filename is typed
+    // into the search box behind it.
+    match app.picker.handle(event, app.size.0, app.size.1) {
+        Picked::Chose(path) => {
+            app.file_status = Some(if app.picker_saves {
+                save_lists(app, &path)
+            } else {
+                load_lists(app, &path)
+            });
+            return EventResult::Consumed;
+        }
+        Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+        Picked::Ignored => {}
+    }
     match event {
         Event::Key(ev) => app.handle_key(ev),
         Event::Mouse(ev) => app.handle_mouse(ev),
@@ -2906,7 +3050,10 @@ impl App for Dictionary {
         // The size the frame is drawn at is the size the next click is read
         // against — that is the whole point of storing it here.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let mut tree = self.frame(width, height).into_tree();
+        // The picker last, so it draws over the word list rather than under it.
+        tree.extend(self.picker.render(&self.palette, width, height));
+        tree
     }
 }
 
@@ -2954,6 +3101,155 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    // ---- The door ----
+
+    fn dict_scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("dictionary-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn dict_key(k: Key, ctrl: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// The word lists survive a save and an open.
+    ///
+    /// The header of this file says "look a word up, read it, **keep it**".
+    /// Everything was kept exactly as long as the window was open: no
+    /// `std::fs`, no dialog, so a favourites list built over an afternoon went
+    /// away when it closed.
+    #[test]
+    fn the_word_lists_survive_a_save_and_an_open() {
+        let dir = dict_scratch("roundtrip");
+        let path = dir.join("words.txt");
+
+        let mut app = Dictionary::new();
+        app.replace_lists(
+            vec![String::from("azure"), String::from("brine")],
+            vec![String::from("cobble")],
+        );
+        let said = save_lists(&app, &path);
+        assert!(said.starts_with("Saved 2 favourite(s)"), "said: {said}");
+
+        let mut back = Dictionary::new();
+        let said = load_lists(&mut back, &path);
+        assert!(said.contains("2 favourite(s)"), "said: {said}");
+        assert_eq!(back.favorites(), ["azure", "brine"]);
+        assert_eq!(back.history(), ["cobble"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A saved word the built-in list does not have is kept, not dropped.
+    ///
+    /// The list is the user's record of what they looked up and chose to keep.
+    /// Dropping entries because this build's dictionary is smaller than the
+    /// one that wrote the file would lose exactly the words they cared enough
+    /// about to save.
+    #[test]
+    fn a_word_not_in_the_dictionary_survives_the_round_trip() {
+        let dir = dict_scratch("unknown");
+        let path = dir.join("words.txt");
+
+        let mut app = Dictionary::new();
+        app.replace_lists(vec![String::from("zzyzx")], Vec::new());
+        // The control matters: if the word were in the built-in list, a
+        // loader that silently dropped unknown words would still pass.
+        let mut probe = Dictionary::new();
+        search_for(&mut probe, "zzyzx");
+        assert!(
+            probe.results.is_empty(),
+            "control: the fixture word must be absent from the built-in list"
+        );
+        save_lists(&app, &path);
+
+        let mut back = Dictionary::new();
+        load_lists(&mut back, &path);
+        assert_eq!(back.favorites(), ["zzyzx"], "an unknown word was dropped");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable file is reported, not read as two empty lists.
+    #[test]
+    fn an_unreadable_word_list_is_reported() {
+        let dir = dict_scratch("missing");
+        let mut app = Dictionary::new();
+        app.replace_lists(vec![String::from("kept")], Vec::new());
+
+        let said = load_lists(&mut app, &dir.join("nope.txt"));
+        assert!(said.starts_with("Could not read "), "said: {said}");
+        assert_eq!(
+            app.favorites(),
+            ["kept"],
+            "a failed read emptied the lists that were already there"
+        );
+    }
+
+    /// Ctrl+S saves, Ctrl+O opens, and the picker is drawn.
+    #[test]
+    fn the_file_keys_ask_and_the_picker_is_drawn() {
+        let mut app = Dictionary::new();
+        let closed = app
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .into_tree()
+            .commands
+            .len();
+
+        handle_event(&mut app, &dict_key(Key::S, true));
+        assert!(app.picker.is_open(), "Ctrl+S did not ask for a destination");
+        assert!(app.picker_saves);
+        assert!(
+            !app.picker
+                .render(&app.palette, WINDOW_WIDTH, WINDOW_HEIGHT)
+                .is_empty(),
+            "the open picker is not being drawn"
+        );
+        assert!(closed > 0);
+
+        app.picker.close();
+        handle_event(&mut app, &dict_key(Key::O, true));
+        assert!(app.picker.is_open());
+        assert!(!app.picker_saves, "Ctrl+O must aim at a read, not a write");
+    }
+
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// Written with the door rather than after it, because
+    /// `scripts/find-unpinned-picker-routing.py` found sixteen of twenty apps
+    /// where this was missing: the open test passes because the KEY HANDLER
+    /// opens the dialog, whether or not the picker is ever handed another
+    /// event.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_screens() {
+        let mut app = Dictionary::new();
+        app.apply(Action::Go(Screen::Search));
+        let before = app.screen;
+
+        handle_event(&mut app, &dict_key(Key::S, true));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        // Ctrl+4 switches to the favourites screen; at the dialog it is part
+        // of a filename.
+        handle_event(&mut app, &dict_key(Key::Num4, true));
+        assert_eq!(
+            app.screen, before,
+            "a shortcut at the open dialog changed the screen behind it"
+        );
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
 

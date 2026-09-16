@@ -4286,6 +4286,50 @@ mod tests {
     /// painted nothing. Deleting the `picker.render` line in the renderer
     /// leaves `is_open()` true and every other test green; this is the one
     /// that notices.
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event. This is
+    /// the half routing decides: with a dialog up, a keystroke belongs to the
+    /// dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_form() {
+        let mut app = ContactsApp::new();
+        let size = (1000.0, 700.0);
+        app.focus = Focus::Field(FormField::FirstName);
+        let before = app.focus;
+
+        let mut ctrl = guitk::event::Modifiers::NONE;
+        ctrl.ctrl = true;
+        app.handle_event(
+            &Event::Key(KeyEvent {
+                key: Key::O,
+                pressed: true,
+                modifiers: ctrl,
+                text: String::new(),
+            }),
+            size,
+        );
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(
+            &Event::Key(KeyEvent {
+                key: Key::Tab,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            }),
+            size,
+        );
+        assert_eq!(
+            app.focus, before,
+            "Tab at the open dialog moved the focus in the form behind it"
+        );
+    }
+
     #[test]
     fn the_picker_is_drawn_when_it_is_open() {
         let mut app = ContactsApp::new();

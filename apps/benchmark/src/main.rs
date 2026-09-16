@@ -3409,6 +3409,33 @@ mod tests {
     /// four times lower under `cargo test` than the fabricated constants
     /// claimed -- and a benchmark that fails on a slow machine is a benchmark
     /// that gets deleted.
+    /// An open picker takes the keyboard, and the window behind it does not.
+    ///
+    /// The open test asserts that the KEY HANDLER opened the dialog, which
+    /// holds whether or not the picker is ever handed another event. This is
+    /// the half routing decides: with a dialog up, a keystroke belongs to the
+    /// dialog.
+    ///
+    /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
+    /// routing and reports whose tests notice. Sixteen of twenty did not.
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_tabs() {
+        let mut app = app_with_history();
+        app.active_tab = Tab::Overview;
+
+        app.handle_event(&ctrl(Key::E));
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        // `2` switches to the CPU tab, and is a character somebody types into
+        // a filename.
+        app.handle_event(&press(Key::Num2));
+        assert_eq!(
+            app.active_tab,
+            Tab::Overview,
+            "a digit at the save dialog switched the tab behind it"
+        );
+    }
+
     #[test]
     fn the_cpu_scores_are_measured_rather_than_returned() {
         let cat = run_cpu_benchmark();

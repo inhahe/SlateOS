@@ -11,5 +11,9 @@ guitk = { path = "../../gui/toolkit" }
 # no definition ever reached a screen, and no key or click ever arrived.
 oswindow = { path = "../../gui/window" }
 
+# A saved word list replaces a file the user chose, and `fs::write`
+# truncates the target before writing it.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

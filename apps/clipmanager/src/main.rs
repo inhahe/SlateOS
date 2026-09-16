@@ -1,8 +1,22 @@
-//! Slate OS Clipboard Manager — a full-featured clipboard history and snippet manager.
+//! Slate OS Snippet Manager — a searchable store of text, with templates.
 //!
-//! Provides clipboard history tracking (up to 500 entries), search, filtering by
-//! content type, tagging, pinning, template management with placeholder substitution,
-//! batch operations, statistics, and export/import. Inspired by CopyQ and Ditto.
+//! Search, filtering by content type, tagging, pinning, template management
+//! with placeholder substitution, batch operations, statistics, and a history
+//! that can be saved to a file and read back.
+//!
+//! # What it does not do, and the header used to say it did
+//!
+//! This said "clipboard history tracking (up to 500 entries)". **It tracks no
+//! clipboard.** The system clipboard lives in `gui/clipboard`, which is a
+//! *service* reached over IPC, and this program has no IPC client; nothing
+//! here can see what the user copies anywhere else. Everything in the store
+//! was typed or pasted into this window.
+//!
+//! So this OS has two clipboard histories that do not know about each other:
+//! the service keeps fifty entries and this keeps five hundred, and a copy in
+//! one is invisible to the other. That is recorded in `known-issues.md` under
+//! `TD-C-TWO-CLIPBOARD-HISTORIES-THAT-CANNOT-SEE-EACH-OTHER`; connecting them
+//! needs an IPC client this crate does not have.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -12,6 +26,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::probe::Probe;
@@ -724,7 +739,17 @@ enum TemplateSaved {
 }
 
 /// Application-level GUI state.
+/// The most of a saved history this will read back.
+///
+/// Five hundred entries of arbitrary user text; a file past this is cut and
+/// the cut is reported rather than read whole into a window.
+const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
+
 struct AppState {
+    /// The save/open picker.
+    picker: FilePicker,
+    /// Whether the open picker is saving rather than opening.
+    picker_saves: bool,
     store: ClipboardStore,
     search_query: String,
     type_filter: Option<ClipType>,
@@ -780,6 +805,8 @@ struct AppState {
 impl AppState {
     fn new() -> Self {
         Self {
+            picker: FilePicker::default(),
+            picker_saves: false,
             store: ClipboardStore::new(),
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             search_query: String::new(),
@@ -2624,12 +2651,65 @@ impl AppState {
     }
 
     /// Route a keystroke.
+    /// Write the history to `path`, and say what happened.
+    fn write_history(&mut self, path: &std::path::Path) -> String {
+        let text = self.store.export_text();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => format!(
+                "Saved {} entries to {}",
+                self.store.total_entries(),
+                path.display()
+            ),
+            Err(err) => format!("Could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Read a history from `path` into the store, and say what happened.
+    fn read_history(&mut self, path: &std::path::Path) -> String {
+        match safeio::read_to_string_capped(path, MAX_HISTORY_BYTES) {
+            Ok(read) => {
+                // The note first: a history cut in half is a shorter history,
+                // and "imported 40 entries" about a file holding 900 is
+                // telling the user something false.
+                let note = read.note(MAX_HISTORY_BYTES);
+                let now = self.now;
+                let count = self.store.import_text(&read.text, now);
+                self.refresh_filter();
+                if count == 0 {
+                    format!("{note}{} holds no entries this can read", path.display())
+                } else {
+                    format!("{note}Read {count} entries from {}", path.display())
+                }
+            }
+            Err(err) => format!("Could not read {}: {err}", path.display()),
+        }
+    }
+
     fn handle_key(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
         if !key.pressed {
             return Action::None;
         }
         if let Some(field) = self.focus {
             return self.handle_key_in_field(key, field);
+        }
+        if key.modifiers.ctrl {
+            match key.key {
+                // The two keys that let a snippet outlive the window. The
+                // existing Export and Import controls move the history in and
+                // out of an *entry*, which is a coherent thing to do with no
+                // filesystem and is not a substitute for one.
+                Key::S => {
+                    self.picker_saves = true;
+                    self.picker.open_to_write("clipboard-history.txt");
+                    return Action::Redraw;
+                }
+                Key::O => {
+                    self.picker_saves = false;
+                    self.picker.open_to_read();
+                    return Action::Redraw;
+                }
+                _ => {}
+            }
         }
         let page = rows_that_fit(size.1).max(1);
         match key.key {
@@ -2741,6 +2821,20 @@ impl AppState {
 
     /// Route a whole event.
     fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
+        // The picker takes input first while it is up, or a filename is typed
+        // into the search box behind it.
+        match self.picker.handle(event, size.0, size.1) {
+            Picked::Chose(path) => {
+                self.status = if self.picker_saves {
+                    self.write_history(&path)
+                } else {
+                    self.read_history(&path)
+                };
+                return Action::Redraw;
+            }
+            Picked::Handled | Picked::Cancelled => return Action::Redraw,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
@@ -2845,7 +2939,10 @@ impl App for AppState {
         // Believe the size we are handed: the first frame goes out before any
         // `Event::Resize`, so the stored size is only a starting guess.
         self.window_size = (width, height);
-        build_frame(self, width, height).into_tree()
+        let mut tree = build_frame(self, width, height).into_tree();
+        // The picker last, so it draws over the list rather than under it.
+        tree.extend(self.picker.render(&self.palette, width, height));
+        tree
     }
 }
 
@@ -2893,6 +2990,158 @@ mod tests {
     )]
 
     use super::*;
+
+    // ---- The door ----
+
+    fn cm_scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SCRATCH_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("clipmanager-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn cm_ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// An open picker takes the keys, and the list behind it does not move.
+    ///
+    /// The other test pins that Ctrl+S *opens* the picker -- but the key
+    /// handler is what opens it, so cutting the picker's event routing
+    /// entirely leaves that test green. This is the half that routing
+    /// actually decides: with a dialog up, Down belongs to the dialog, and a
+    /// list that scrolls underneath it is the shape of a modal that is not
+    /// modal.
+    #[test]
+    fn an_open_picker_takes_the_keys() {
+        let mut app = AppState::new();
+        let size = (1000.0, 700.0);
+        for i in 0..3u64 {
+            app.store.add(
+                format!("entry {i}"),
+                ClipType::PlainText,
+                10 + i,
+                String::from("t"),
+            );
+        }
+        app.refresh_filter();
+        app.selected_id = app.filtered_ids.first().copied();
+        let before = app.selected_id;
+        assert!(before.is_some(), "control: something must be selected");
+
+        app.handle_event(&cm_ctrl(Key::S), size);
+        assert!(app.picker.is_open(), "control: the picker must be up");
+
+        app.handle_event(
+            &Event::Key(KeyEvent {
+                key: Key::Down,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            }),
+            size,
+        );
+        assert_eq!(
+            app.selected_id, before,
+            "the list moved under an open dialog"
+        );
+    }
+
+    /// The history survives a save and a read.
+    ///
+    /// The existing Export and Import controls move the history in and out of
+    /// an *entry*, which is a coherent thing to do with no filesystem and is
+    /// not a substitute for one: **everything still died with the window.**
+    #[test]
+    fn the_history_survives_a_save_and_a_read() {
+        let dir = cm_scratch("roundtrip");
+        let path = dir.join("history.txt");
+
+        let mut app = AppState::new();
+        app.store.add(
+            String::from("first"),
+            ClipType::PlainText,
+            10,
+            String::from("t"),
+        );
+        app.store.add(
+            String::from("second"),
+            ClipType::PlainText,
+            20,
+            String::from("t"),
+        );
+        let said = app.write_history(&path);
+        assert!(said.starts_with("Saved 2 entries"), "said: {said}");
+
+        let mut back = AppState::new();
+        let said = back.read_history(&path);
+        assert!(said.starts_with("Read 2 entries"), "said: {said}");
+
+        // Oldest first on the way out, so a read of your own save does not
+        // reverse your history -- `export_text` says why.
+        let contents: Vec<String> = back
+            .store
+            .entries
+            .iter()
+            .map(|e| e.content.clone())
+            .collect();
+        assert_eq!(contents, vec!["second", "first"], "the order was reversed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that is not an export says so rather than reporting zero.
+    #[test]
+    fn a_file_that_is_not_an_export_says_so() {
+        let dir = cm_scratch("garbage");
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, b"just some text a user had lying around").unwrap();
+
+        let mut app = AppState::new();
+        let said = app.read_history(&path);
+        assert!(said.contains("holds no entries"), "said: {said}");
+        assert_eq!(app.store.total_entries(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable file is reported, not read as empty.
+    #[test]
+    fn an_unreadable_history_is_reported() {
+        let dir = cm_scratch("missing");
+        let mut app = AppState::new();
+        let said = app.read_history(&dir.join("nope.txt"));
+        assert!(said.starts_with("Could not read "), "said: {said}");
+    }
+
+    /// Ctrl+S saves and Ctrl+O opens, and the picker is drawn.
+    #[test]
+    fn the_file_keys_ask_and_the_picker_is_drawn() {
+        let mut app = AppState::new();
+        let size = (1000.0, 700.0);
+
+        app.handle_event(&cm_ctrl(Key::S), size);
+        assert!(app.picker.is_open(), "Ctrl+S did not ask for a destination");
+        assert!(app.picker_saves);
+        assert!(
+            !app.picker.render(&app.palette, size.0, size.1).is_empty(),
+            "the open picker is not being drawn"
+        );
+
+        app.picker.close();
+        app.handle_event(&cm_ctrl(Key::O), size);
+        assert!(app.picker.is_open());
+        assert!(!app.picker_saves, "Ctrl+O must aim at a read, not a write");
+    }
 
     /// The empty history says nothing is being captured.
     ///

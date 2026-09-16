@@ -154438,7 +154438,15 @@ these three, and at least one clearly holds something:
   "0 = never". Nothing persists them and nothing honours them, so they are an
   echoed setting in waiting; but the *shape* is the one a lock delay wants,
   and the compositor now has the idle watch that could act on it.
-* `backup_settings.rs` is unexamined.
+* `backup_settings.rs` holds a retention *policy* vocabulary -- `KeepAll`,
+  `KeepCount(n)`, `KeepDays(n)`, `Tiered` -- where `apps/backup` takes concrete
+  counts (`PruneOptions::keep_daily`, `keep_weekly`) and computes from them. The
+  translation between the two exists in exactly one place, and it is a doc
+  comment: "Tiered: keep daily for 7 days, weekly for 4 weeks, monthly for 12
+  months". That is a decision about what the word means, recorded in prose on a
+  module nothing opens, and `apps/backup` has no monthly tier to honour the
+  third clause of it. Deleting the module deletes the decision; porting it means
+  choosing whether the app grows a monthly tier or the policy loses one.
 
 **Why it matters beyond the line count.** A settings screen nobody can open is
 not merely dead code: it is a design that looks decided. Somebody adding a

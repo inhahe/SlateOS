@@ -171,12 +171,24 @@ pub fn init_defaults() {
     });
 }
 
-/// Register a firmware device.
+/// Register a firmware device. **Private on purpose.**
 ///
-/// Nothing calls this yet, because the kernel enumerates no firmware. It
-/// exists because the list it appends to previously had no way to be
-/// filled except a seeded constant, and a registry whose only contents are
+/// Nothing outside this module calls it, because the kernel enumerates no
+/// firmware, so nothing outside has anything to register. It exists
+/// because the list it appends to previously had no way to be filled
+/// except a seeded constant, and a registry whose only contents are
 /// invented is worse than an empty one: `/proc` cannot tell them apart.
+///
+/// It is `fn` and not `pub fn` because
+/// `scripts/check-unreachable-mutators.py` is right to refuse a public
+/// mutator with no caller -- "a counter that cannot fall does not look
+/// like a gap, it looks like data". Deliberately *not* wired to a shell
+/// command to make it reachable: a `fwupdate register` subcommand would be
+/// a way to invent firmware entries by hand, which is what the seeded
+/// devices did and what removing them was for.
+///
+/// When real firmware enumeration exists, make this `pub` and wire the
+/// caller in the same commit.
 ///
 /// `available` is the version an update would move this device to, or
 /// `None` when none is offered.
@@ -185,7 +197,7 @@ pub fn init_defaults() {
 ///
 /// `ResourceExhausted` past `MAX_DEVICES`; `NotSupported` before
 /// `init_defaults`.
-pub fn register_device(
+fn register_device(
     name: &str,
     fw_type: FirmwareType,
     current_version: &str,
@@ -216,13 +228,14 @@ pub fn register_device(
     })
 }
 
-/// Remove a firmware device from the registry.
+/// Remove a firmware device from the registry. Private, as
+/// [`register_device`] is and for the same reason.
 ///
 /// # Errors
 ///
 /// `NotFound` if no device carries `id`; `NotSupported` before
 /// `init_defaults`.
-pub fn unregister_device(id: u32) -> KernelResult<()> {
+fn unregister_device(id: u32) -> KernelResult<()> {
     with_state(|state| {
         let before = state.devices.len();
         state.devices.retain(|d| d.id != id);

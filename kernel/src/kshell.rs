@@ -75851,6 +75851,35 @@ fn cmd_driverupdate(args: &str) {
                 }
             }
         }
+        // The registry could be grown from here and never shrunk, which is
+        // the one-way counter `check-unreachable-mutators` exists to catch:
+        // a count that can only rise stops looking like a gap and starts
+        // looking like data. `dupdate register` has been here for a while;
+        // this is its other half.
+        "unregister" | "remove" => {
+            let Some(id) = required_num::<u32>(&parts, 1, "dupdate", sub, "driver id") else {
+                return;
+            };
+            // Read the name before removing it: afterwards there is nothing
+            // to look it up in, and "Removed driver 3" tells the operator
+            // less than the name they typed the id for.
+            let name = driverupdate::get_driver(id)
+                .map(|d| d.name)
+                .unwrap_or_default();
+            match driverupdate::unregister_driver(id) {
+                Ok(()) => {
+                    if name.is_empty() {
+                        shell_println!("Unregistered driver {}", id);
+                    } else {
+                        shell_println!("Unregistered driver '{}' (id={})", name, id);
+                    }
+                }
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
         "update" | "install" => {
             if let Some(id_str) = parts.get(1) {
                 if let Ok(id) = id_str.parse::<u32>() {

@@ -150,10 +150,18 @@ apps/remotedesktop/src/main.rs:content_size_bytes
 # twice; carrying its bug across is work done wrong. Each of these is a
 # value the panel computes and never shows or acts on:
 #
-#   backup_settings:last_backup_timestamp -- when the last backup ran is
-#     recorded from the history entry and never displayed, so the one
-#     question a backup screen exists to answer ("am I backed up?") is the
-#     one it does not answer.
+#   backup_settings:last_backup_timestamp -- FIXED 2026-09-16 by deletion:
+#     gui/desktop/src/backup_settings.rs no longer exists and the field
+#     appears nowhere in gui/. Kept for the reasoning, as the shortcut_message
+#     entry below is: when the last backup ran was recorded from the history
+#     entry and never displayed, so the one question a backup screen exists to
+#     answer ("am I backed up?") was the one it did not answer.
+#
+#     The BASELINE LINE had to go with it, and that is the part worth noting.
+#     A waiver that outlives its subject does not merely sit there -- it
+#     suppresses. While the line was present the gate could never report that
+#     field again, so the entry was silently guarding nothing and disarming
+#     something. The gate says so itself when it refuses.
 #   bluetooth:discoverable -- `set_discoverable` returns true and sets the
 #     field, and NOTHING reads it. The toggle does not make the adapter
 #     discoverable and the UI does not show that it is. A switch that does
@@ -169,7 +177,6 @@ apps/remotedesktop/src/main.rs:content_size_bytes
 #     whether it worked or not -- including the case where it worked and could
 #     not be saved.
 #
-gui/desktop/src/backup_settings.rs:last_backup_timestamp
 gui/desktop/src/bluetooth.rs:discoverable
 # FIXED 2026-09-14 by deletion, as was the contacts one. Kept for the
 # reasoning, which is the pattern:

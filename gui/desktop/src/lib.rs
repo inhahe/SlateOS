@@ -6871,6 +6871,13 @@ impl DesktopShell {
             // `procinfo` has no `statfs`. The meter says so rather than
             // showing a plausible fraction of a number we do have.
             disk_fraction: None,
+            // `Default`, which is `present: false, state: NoBattery` -- and
+            // that is the true answer, not a placeholder. `/proc/battery`
+            // reports zero sources because `kernel/src/fs/battery.rs` starts
+            // with none and no ACPI driver ever calls `register_source`. When
+            // one does, this is the line that changes, and everything
+            // downstream of it already works.
+            battery: crate::power::BatteryInfo::default(),
         }
     }
 

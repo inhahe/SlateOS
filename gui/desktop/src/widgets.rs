@@ -589,6 +589,13 @@ impl SystemSample {
     }
 }
 
+/// What the battery widget says when there is no battery.
+///
+/// Distinct from a charge of 0%, which is a battery that is flat. A desktop
+/// reader acts differently on the two, and the widget has no business
+/// collapsing them.
+const NO_BATTERY: &str = "No battery";
+
 /// What a meter's label says when nothing has measured it.
 ///
 /// **Per meter, not per widget, and that distinction is the whole of this
@@ -643,6 +650,19 @@ pub struct LiveReadings {
     pub memory_fraction: Option<f32>,
     /// Disk in use, 0.0 to 1.0. `None` when nothing has measured it.
     pub disk_fraction: Option<f32>,
+    /// The battery, as the shell knows it.
+    ///
+    /// **The widget used to draw the strings `"85%"` and `"3h 42m
+    /// remaining"`.** Not constants computed from something -- those two
+    /// literals, on every desktop, on machines with no battery at all. The
+    /// second is worse than the first: a percentage is a claim about now, and
+    /// "3h 42m remaining" is a *prediction* somebody plans around.
+    ///
+    /// `crate::power::BatteryInfo` was in the same crate the whole time, and
+    /// its `Default` is `present: false, state: NoBattery` -- already correct,
+    /// already honest, and already what production code constructs. The widget
+    /// reached past it to invent numbers.
+    pub battery: crate::power::BatteryInfo,
 }
 
 /// Manages all desktop widgets.
@@ -1274,37 +1294,61 @@ impl DesktopWidgetManager {
                 });
             }
             WidgetKind::BatteryStatus => {
-                // Battery bar placeholder.
+                let b = &live.battery;
                 commands.push(RenderCommand::Text {
                     x,
-                    y: y + 10.0,
+                    y,
                     text: "\u{1F50B}".to_string(),
                     font_size: 28.0,
-                    color: Color::rgba(p.ink(p.green).r, p.ink(p.green).g, p.ink(p.green).b, alpha),
+                    // Green when there is a battery, neutral when there is
+                    // not. A green battery glyph over "No battery" is a
+                    // small claim of its own -- green is the colour of a
+                    // healthy thing, and there is no thing.
+                    color: if b.present {
+                        let g = p.ink(p.green);
+                        Color::rgba(g.r, g.g, g.b, alpha)
+                    } else {
+                        Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha)
+                    },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
                 });
+                // `present`, not a charge of zero: "no battery" and "a flat
+                // battery" are different facts and a desktop reader acts on
+                // them differently.
+                let headline = if b.present {
+                    format!("{}%", b.charge_pct)
+                } else {
+                    String::from(NO_BATTERY)
+                };
                 commands.push(RenderCommand::Text {
-                    x: x + 40.0,
-                    y: y + 16.0,
-                    text: "85%".to_string(),
+                    x,
+                    y: y + 34.0,
+                    text: headline,
                     font_size: 20.0,
                     color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),
                     font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                commands.push(RenderCommand::Text {
-                    x,
-                    y: y + 55.0,
-                    text: "3h 42m remaining".to_string(),
-                    font_size: 11.0,
-                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
-                    font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
                 });
+                // The estimate is drawn only when there is one. Nothing in
+                // this tree computes a time remaining -- `/proc/battery`
+                // publishes a charge percentage and a state and no estimate --
+                // so this stays absent rather than becoming a second
+                // invented line.
+                if let Some(secs) = b.time_remaining_secs {
+                    commands.push(RenderCommand::Text {
+                        x,
+                        y: y + 56.0,
+                        text: format!("{}h {:02}m remaining", secs / 3600, (secs % 3600) / 60),
+                        font_size: 11.0,
+                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(width),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
             }
             _ => {
                 // Generic placeholder for other widget types.
@@ -1455,6 +1499,16 @@ mod tests {
             cpu_fraction: Some(0.11),
             memory_fraction: Some(0.73),
             disk_fraction: Some(0.24),
+            // A present battery, so the sweeps below still walk the charge
+            // branch -- and 37%, not 85%, because 85 was the literal the
+            // widget used to draw and a fixture matching it could not tell a
+            // reading from the fabrication it replaced.
+            battery: crate::power::BatteryInfo {
+                present: true,
+                charge_pct: 37,
+                time_remaining_secs: Some(9_000),
+                ..crate::power::BatteryInfo::default()
+            },
         }
     }
     use appearance::palette_check::assert_drawn_from;
@@ -2182,8 +2236,8 @@ mod tests {
             (EMPTY_NOTE, 12.0, "the placeholder an empty note draws"),
             (WRITTEN_NOTE, 12.0, "a written note"),
             (WidgetKind::BatteryStatus.icon(), 28.0, "the battery glyph"),
-            ("85%", 20.0, "the battery's reading"),
-            ("3h 42m remaining", 11.0, "the battery's estimate"),
+            ("37%", 20.0, "the battery's reading"),
+            ("2h 30m remaining", 11.0, "the battery's estimate"),
             (
                 WidgetKind::Weather.icon(),
                 32.0,
@@ -2445,6 +2499,84 @@ mod tests {
         assert_eq!(SystemSample::memory_used_fraction(m), None);
     }
 
+    /// With no battery, the widget says so and predicts nothing.
+    ///
+    /// **It used to draw the strings `"85%"` and `"3h 42m remaining"`.** Not
+    /// numbers computed from something -- those two literals, on every
+    /// desktop, including machines with no battery. The second is the worse
+    /// of the pair: a percentage is a claim about now, and a time remaining is
+    /// a *prediction* somebody plans around.
+    ///
+    /// `crate::power::BatteryInfo` was in the same crate the whole time, and
+    /// its `Default` is `present: false, state: NoBattery` -- already correct,
+    /// and already what production code constructs. The widget reached past a
+    /// correct model to invent two strings.
+    ///
+    /// Keyed on `present` rather than on a charge of zero: "there is no
+    /// battery" and "the battery is flat" are different facts, and a desktop
+    /// reader acts on them differently.
+    #[test]
+    fn with_no_battery_the_widget_says_so_and_predicts_nothing() {
+        let p = Palette::for_mode(false);
+        let mut readings = sample_readings();
+        readings.battery = crate::power::BatteryInfo::default();
+
+        let texts: Vec<String> = full_mgr()
+            .render(&p, &readings)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control: with a battery present the fixture draws a charge, so
+        // this is the same widget minus the battery rather than a widget that
+        // has stopped drawing.
+        let with_battery: Vec<String> = full_mgr()
+            .render(&p, &sample_readings())
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            with_battery.iter().any(|t| t == "37%"),
+            "control: the battery widget should draw a charge when there is one"
+        );
+
+        assert!(
+            texts.iter().any(|t| t == NO_BATTERY),
+            "the widget drew no charge and did not say there is no battery"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("remaining")),
+            "a time remaining was predicted for a battery that is not there"
+        );
+        assert!(
+            !texts.iter().any(|t| t.ends_with('%') && t != "37%"),
+            "a charge was drawn for a battery that is not there"
+        );
+
+        // **The colour too, and this was a real hole.** The role sweep next
+        // door renders `sample_readings()`, which has a battery, so it only
+        // ever walks the green branch -- sabotaging the glyph to stay green
+        // unconditionally left every test passing. Green is the colour of a
+        // healthy thing, and over "No battery" there is no thing.
+        let glyph = texts_saying(
+            &full_mgr().render(&p, &readings),
+            WidgetKind::BatteryStatus.icon(),
+            28.0,
+        );
+        assert_eq!(glyph.len(), 1, "control: the glyph should be drawn once");
+        assert_ne!(
+            rgb(glyph[0]),
+            rgb(p.ink(p.green)),
+            "the battery glyph stayed green with no battery to be healthy"
+        );
+    }
+
     /// With no readings, the meters are empty and the widget says why.
     ///
     /// **The three bars were constants**: CPU at `width * 0.45`, memory at
@@ -2467,6 +2599,7 @@ mod tests {
             cpu_fraction: None,
             memory_fraction: None,
             disk_fraction: None,
+            battery: crate::power::BatteryInfo::default(),
         };
         let cmds = full_mgr().render(&p, &blank);
         let bars = meter_rects(&cmds);
@@ -2525,6 +2658,7 @@ mod tests {
             cpu_fraction: Some(0.11),
             memory_fraction: Some(0.73),
             disk_fraction: None,
+            battery: crate::power::BatteryInfo::default(),
         };
         let cmds = full_mgr().render(&p, &mixed);
         let texts: Vec<String> = cmds
@@ -2685,8 +2819,8 @@ mod tests {
                 (WRITTEN_NOTE, 12.0, p.text),
                 (EMPTY_NOTE, 12.0, p.subtext0),
                 (WidgetKind::BatteryStatus.icon(), 28.0, p.ink(p.green)),
-                ("85%", 20.0, p.text),
-                ("3h 42m remaining", 11.0, p.subtext0),
+                ("37%", 20.0, p.text),
+                ("2h 30m remaining", 11.0, p.subtext0),
                 (WidgetKind::Weather.icon(), 32.0, p.surface2),
                 (WidgetKind::Weather.label(), 13.0, p.subtext0),
             ] {

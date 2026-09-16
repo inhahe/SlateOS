@@ -36,6 +36,24 @@ pub enum Event {
     Tick { elapsed_ms: u64 },
     /// DPI/scale factor changed.
     ScaleChanged { scale: f32 },
+    /// The session has been quiet for as long as this window asked.
+    ///
+    /// Sent only to a window that claimed it with
+    /// `guiremote::control::RequestBody::WatchIdle`, the way
+    /// [`Self::ModifierChord`] is sent only to the window that grabbed the
+    /// chord. A program that did not ask never receives one.
+    ///
+    /// Pushed rather than polled, which is the whole reason it exists as an
+    /// event. [`Self::Tick`] is already available and a client could ask for a
+    /// clock and check the time itself -- but then the desktop wakes forever
+    /// in order to discover that nothing is happening, which is the case a
+    /// lock timeout is entirely about and the thing design-decisions 812
+    /// refuses. A claimant can stay parked until there is something to say.
+    ///
+    /// Carries no deadline: the client asked for the delay and knows it. Like
+    /// [`Self::SettingsChanged`], the event is a notification and not a
+    /// second copy of state somebody else owns.
+    SessionIdle,
     /// A settings group the user can change has been rewritten, and whatever
     /// this program read out of it is now stale.
     ///

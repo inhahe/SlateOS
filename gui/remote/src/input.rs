@@ -164,11 +164,13 @@ enum EventTag {
     SettingsChanged = 0x0A,
     ModifierChord = 0x0B,
     TrayIconClicked = 0x0C,
+    SessionIdle = 0x0D,
 }
 
 impl EventTag {
     fn from_byte(b: u8) -> Option<Self> {
         match b {
+            0x0D => Some(Self::SessionIdle),
             0x01 => Some(Self::Mouse),
             0x02 => Some(Self::Key),
             0x03 => Some(Self::Resize),
@@ -376,6 +378,8 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
         Event::FocusIn => out.push(EventTag::FocusIn as u8),
         Event::FocusOut => out.push(EventTag::FocusOut as u8),
         Event::CloseRequested => out.push(EventTag::CloseRequested as u8),
+        // No payload: the claimant asked for the delay and knows it.
+        Event::SessionIdle => out.push(EventTag::SessionIdle as u8),
         Event::Tick { elapsed_ms } => {
             out.push(EventTag::Tick as u8);
             write_u64(out, *elapsed_ms);
@@ -597,6 +601,7 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
         EventTag::FocusIn => (Event::FocusIn, None),
         EventTag::FocusOut => (Event::FocusOut, None),
         EventTag::CloseRequested => (Event::CloseRequested, None),
+        EventTag::SessionIdle => (Event::SessionIdle, None),
         EventTag::Tick => (
             Event::Tick {
                 elapsed_ms: r.read_u64()?,
@@ -807,6 +812,16 @@ mod tests {
                     shift: true,
                     ..Modifiers::default()
                 },
+            },
+            Event::SessionIdle,
+            // Absent until 2026-09-16, while this test was called
+            // `every_non_input_event_variant`. A list written by hand drifts
+            // from the enum it claims to cover, and the name is what stops
+            // anybody checking -- so adding a variant is the moment to count
+            // them.
+            Event::TrayIconClicked {
+                id: 7,
+                button: MouseButton::Right,
             },
         ]
         .into_iter()

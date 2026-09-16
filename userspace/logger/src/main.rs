@@ -1438,7 +1438,7 @@ three
         assert_eq!(
             opts.line_messages,
             vec!["one", "", "two", "", "", "three"],
-            "a file's lines are separate messages, and an empty line is an              empty message rather than no message"
+            "a file's lines are separate messages; a blank line is an empty one"
         );
         // `message_parts` must stay empty: anything in it would be joined
         // into the argv message and logged a second time.

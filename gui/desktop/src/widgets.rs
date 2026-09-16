@@ -516,12 +516,25 @@ impl Default for WidgetGridConfig {
     }
 }
 
-/// What the system-monitor widget says when it has no readings.
+/// What a meter's label says when nothing has measured it.
 ///
-/// Three empty troughs with no explanation would read as "everything is at
-/// zero", which is a measurement. This says which it is.
-const NOT_MEASURED: &str = "Not measured: nothing on this system reports \
-processor, memory or disk use to the desktop.";
+/// **Per meter, not per widget, and that distinction is the whole of this
+/// change.** The first version set one flag if *any* reading was present and
+/// drew a single line underneath. That is correct while all three are absent
+/// and wrong the moment one arrives: with CPU and memory measured and disk
+/// not, the line disappears and the disk trough sits empty with no
+/// explanation -- which reads as *disk at 0%*.
+///
+/// That is the same argument that made these `Option` rather than `0.0`,
+/// resurfacing for the mixed case. A bar at zero is a reading; so is an empty
+/// trough with nothing said about it. The label is the one place a reader
+/// cannot miss it and cannot attach it to the wrong meter.
+///
+/// It was found by working out what the *next* change makes true -- wiring
+/// `procinfo` gives CPU and memory and cannot give disk, because nothing in
+/// this tree reports free space. No test could reach the mixed state before
+/// that, so nothing was going to catch it.
+const NOT_MEASURED_SUFFIX: &str = " (not measured)";
 
 /// The readings a widget shows that the widget layer cannot derive.
 ///
@@ -1109,7 +1122,6 @@ impl DesktopWidgetManager {
             WidgetKind::SystemMonitor => {
                 let bar_h = 8.0;
                 let mut row = y;
-                let mut measured = false;
                 // Each meter keeps its own role colour. Collapsing the three
                 // into one blue was caught by `the_three_meters_never_look_alike`
                 // and `nothing_that_reports_a_measurement_follows_the_accent`,
@@ -1121,10 +1133,15 @@ impl DesktopWidgetManager {
                     ("Memory", live.memory_fraction, p.green),
                     ("Disk", live.disk_fraction, p.peach),
                 ] {
+                    let heading = if reading.is_some() {
+                        label.to_string()
+                    } else {
+                        format!("{label}{NOT_MEASURED_SUFFIX}")
+                    };
                     commands.push(RenderCommand::Text {
                         x,
                         y: row,
-                        text: label.to_string(),
+                        text: heading,
                         font_size: 10.0,
                         color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                         font_weight: FontWeightHint::Bold,
@@ -1142,7 +1159,6 @@ impl DesktopWidgetManager {
                         corner_radii: CornerRadii::all(4.0),
                     });
                     if let Some(f) = reading {
-                        measured = true;
                         commands.push(RenderCommand::FillRect {
                             x,
                             y: row + 14.0,
@@ -1153,18 +1169,6 @@ impl DesktopWidgetManager {
                         });
                     }
                     row += 32.0;
-                }
-                if !measured {
-                    commands.push(RenderCommand::Text {
-                        x,
-                        y: row,
-                        text: String::from(NOT_MEASURED),
-                        font_size: 9.0,
-                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(width),
-                        overflow: TextOverflow::Ellipsis,
-                    });
                 }
             }
             WidgetKind::Notes => {
@@ -2300,10 +2304,65 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            texts.iter().any(|t| t.contains("Not measured")),
-            "three empty troughs and no explanation read as everything at zero"
+        // Each meter says it for itself. A single line under the widget would
+        // pass this too, and would then vanish the moment one reading arrived.
+        for label in ["CPU", "Memory", "Disk"] {
+            assert!(
+                texts
+                    .iter()
+                    .any(|t| t == &format!("{label} (not measured)")),
+                "the {label} meter drew an empty trough and did not say why"
+            );
+        }
+    }
+
+    /// With some readings and not others, the unmeasured meter still says so.
+    ///
+    /// **This is the state the per-meter notice exists for, and it is the one
+    /// no test could reach before.** A single flag set by *any* reading, with
+    /// one line underneath, is correct while all three are absent and wrong the
+    /// moment one arrives: the line goes away and the remaining empty trough
+    /// reads as a measurement of zero.
+    ///
+    /// It is also the state the tree is about to be in. `procinfo` can supply
+    /// processor and memory; nothing anywhere reports free disk space, so the
+    /// disk meter is going to be `None` while its neighbours are not.
+    #[test]
+    fn a_measured_meter_beside_an_unmeasured_one_does_not_hide_it() {
+        let p = Palette::for_mode(false);
+        let mixed = LiveReadings {
+            clock_time: "07:05".to_string(),
+            clock_date: "Tuesday, 3 June".to_string(),
+            cpu_fraction: Some(0.11),
+            memory_fraction: Some(0.73),
+            disk_fraction: None,
+        };
+        let cmds = full_mgr().render(&p, &mixed);
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control: the two measured meters must be drawing fills, or this
+        // is the all-absent case wearing a different fixture.
+        assert_eq!(
+            meter_rects(&cmds).len(),
+            5,
+            "control: two measured meters and one not should draw three troughs and two fills"
         );
+        assert!(
+            texts.iter().any(|t| t == "Disk (not measured)"),
+            "the unmeasured meter went quiet once its neighbours had readings"
+        );
+        for measured in ["CPU", "Memory"] {
+            assert!(
+                texts.iter().any(|t| t == measured),
+                "a measured meter was labelled as unmeasured"
+            );
+        }
     }
 
     /// The three meters never look alike.

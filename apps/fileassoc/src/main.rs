@@ -4740,7 +4740,7 @@ mod tests {
             probe::click(&mut ui, Target::DialogUseForGroup);
             assert!(
                 ui.dialog_always_use,
-                "choosing the group must imply making it the default, or the                  combination does nothing"
+                "choosing the group must also make it the default, or the pair does nothing"
             );
             probe::click(&mut ui, Target::DialogOk);
 

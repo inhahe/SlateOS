@@ -3975,7 +3975,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real GNU make",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_make(),
+                proc::spawn::self_test_linux_slateos_make(),
             );
 
             // Path Z Part 35: run an unmodified prebuilt C compiler (TinyCC) that
@@ -4026,7 +4026,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z make-drives-tcc build",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_make_cc(),
+                proc::spawn::self_test_linux_slateos_make_cc(),
             );
 
             // Path Z Part 40: a multi-TU C project that #includes its own project header

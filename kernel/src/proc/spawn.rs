@@ -29737,8 +29737,25 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     }
 }
 
-/// Path Z Part 34: run an **unmodified, prebuilt GNU `make`** that builds a
-/// trivial target whose recipe forks a real glibc child.
+/// Path Z Part 34: run **our own cross-compiled GNU `make`** on target,
+/// building a trivial target whose recipe forks a child.
+///
+/// **Renamed 2026-09-16.** It was `self_test_linux_real_glibc_make` and it
+/// has never run a glibc binary. `create-ext4-rootfs.sh` stages our
+/// `make-slateos.elf` at `/bin/make` and skips the host copy, which its log
+/// now says in as many words: *"using our own build (staged below); host
+/// make not copied"* and *"staged GNU make 4.4.1 (linked against our
+/// libc.a)"*. Found by lane B, confirmed here by reading that log rather
+/// than by trusting the name.
+///
+/// The corroboration was in this rung's own failure the whole time: it once
+/// died inside `posix_spawn_file_actions_init`, which is in **our** posix
+/// crate. A real glibc `make` calls glibc's `posix_spawn` and could never
+/// have reached it.
+///
+/// Kept rather than repointed at a real glibc make, on lane B's reasoning:
+/// this is the only thing that executes our cross-compiled `make` on target,
+/// which makes it more valuable than its old name claimed, not less.
 ///
 /// This is the first rung of the operator-decided "GCC/CMake/Make toolchain"
 /// initiative (design-decisions §9 / §12, Path Z).  Every prior Path-Z test
@@ -29758,7 +29775,16 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
 /// # Which `make` this actually runs, and why the capability grant matters
 ///
 /// This test was written against the Debian glibc `make` that
-/// `create-ext4-rootfs.sh` stages first, and its name still says so.  The
+/// `create-ext4-rootfs.sh` used to stage first. Its name said so until
+/// 2026-09-16 and no longer does.
+///
+/// **Open, and deliberately not settled by the rename:** this rung still
+/// stages `/mnt/lib64/ld-linux-x86-64.so.2` and
+/// `/mnt/lib/x86_64-linux-gnu/libc.so.6` beside the binary. A static,
+/// `libc.a`-linked make needs neither, and their presence is part of what
+/// made the old name believable -- everything about the rung said
+/// "unmodified glibc PIE". Removing them changes behaviour where a rename
+/// does not, so it wants its own commit and its own boot.  The
 /// script then **overwrites** `/bin//make` with `build/spike/make-slateos.elf`
 /// — GNU make 4.4.1 linked against our own `libc.a` — so the binary that runs
 /// here is static, non-PIE, and speaks the **native** syscall ABI, not the
@@ -29787,7 +29813,7 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
 /// Returns [`KernelError::InternalError`] if make fails to reach `Zombie`,
 /// exits non-zero, or the recipe's output file does not match; propagates
 /// spawn failure.
-pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
+pub fn self_test_linux_slateos_make() -> KernelResult<()> {
     const EXPECT_EXIT: i32 = 0;
     // /bin/emit writes exactly this 16-byte payload (incl. trailing newline).
     const EXPECT_OUT: &[u8] = b"SLATE_PIPE_BODY\n";
@@ -31321,7 +31347,7 @@ fn assert_relocatable_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<(
 /// Returns [`KernelError::InternalError`] if make does not reach `Zombie`, exits
 /// non-zero, fails to produce a dynamic ELF at `/cap-prog`, or the built program
 /// does not print the expected line.
-pub fn self_test_linux_real_glibc_make_cc() -> KernelResult<()> {
+pub fn self_test_linux_slateos_make_cc() -> KernelResult<()> {
     const EXPECT_EXIT: i32 = 0;
     // make + tcc×3 is the heaviest multi-process glibc chain in the suite, so it
     // gets a budget well above the single-tcc compile budget (4_194_304).
@@ -31426,7 +31452,7 @@ int main(void){\n\
     // --- run make: it builds /cap-prog by invoking tcc per the Makefile ----
     let argv: &[&[u8]] = &[b"make", b"-f", b"/cap.mk", b"all"];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"SHELL=/bin/sh"];
-    // METADATA, for the same reason as `self_test_linux_real_glibc_make` — see
+    // METADATA, for the same reason as `self_test_linux_slateos_make` — see
     // the ABI note in that function's doc comment.  `/bin/make` is not the
     // Debian glibc binary this test's name implies: `create-ext4-rootfs.sh`
     // overwrites it with `build/spike/make-slateos.elf`, which speaks the

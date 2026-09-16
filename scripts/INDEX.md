@@ -222,6 +222,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/nohup-diff.sh` | Differential test: our `nohup` against GNU coreutils'. |
 | `scripts/od-diff.sh` | Differential test: our od against GNU od. |
 | `scripts/open-requests.py` | List the `requests/` entries addressed to a lane that are still open. |
+| `scripts/option-gap-ref.sh` | The reference half of `scripts/option-gap.sh`, run where the reference lives |
+| `scripts/option-gap.sh` | Options the reference implementation has that OURS REJECTS AS UNKNOWN. |
 | `scripts/osh-bash-diff.py` | Differential tester: run a corpus of shell snippets through `osh` and a |
 | `scripts/osh-diff.sh` | osh-diff.sh — run the shell corpus against *glibc* bash, inside WSL. |
 | `scripts/p37-check.sh` | _(no summary line)_ |
@@ -386,4 +388,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_376 scripts._
+_378 scripts._

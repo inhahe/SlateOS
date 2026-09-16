@@ -42,6 +42,9 @@ caller that is itself dead, hiding the warning).
   * **An allow on a whole `impl` block or module.** The warning names the
     item; matching it to a block-level allow is guesswork, so those are
     reported as `unmatched` rather than guessed at either way.
+  * **A name guarded twice** -- two types with an allowed `fn all`, say. An
+    absent warning could mean either is live, so those are reported and not
+    judged.
   * **Items dead only under a different `--cfg`.** This builds one
     configuration. An allow covering a `cfg(unix)`-only item will look stale
     on a Windows host and is not.
@@ -194,7 +197,16 @@ def check_crate(crate: Path) -> int:
                 f"RESTORE FAILED for {f}"
             )
 
-    stale = sorted(k for k in guarded if k not in dead)
+    # **A name guarded twice cannot be judged from the warning.** The
+    # compiler names the item, not which of two `fn all` it meant, so an
+    # absent warning could mean either one is live. Rare -- one crate in
+    # `apps/` -- and reported rather than guessed, because a wrong "delete
+    # this" is exactly the damage this checker exists to prevent elsewhere.
+    ambiguous = sorted(k for k, v in guarded.items() if len(v) > 1)
+    stale = sorted(k for k in guarded if k not in dead and k not in ambiguous)
+    if ambiguous:
+        print(f"??   {name}: {len(ambiguous)} name(s) guarded more than once, "
+              f"not judged: {', '.join(ambiguous)}")
     if stale:
         print(f"!!   {name}: {len(stale)} allow(s) suppressing nothing")
         for item in stale:

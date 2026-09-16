@@ -154652,6 +154652,17 @@ instruction *"Make a solution that will not result in 'never' in practice."*
 That answer was about benchmark profiles, so the remark was incidental there —
 but it describes this precisely.
 
+**One observation rescued from the deleted shell panel, because it is about
+this.** `gui/desktop/src/backup_settings.rs` recorded `last_backup_timestamp`
+from its history and never displayed it. The note in
+`scripts/fields-written-never-read-baseline.txt` put the point better than the
+code did: *"the one question a backup screen exists to answer -- am I backed
+up? -- is the one it does not answer."* The panel is gone and the baseline
+entry with it, but the requirement outlives both: whatever eventually shows
+backup state must lead with when the last one actually ran, not with what is
+scheduled. A schedule is a promise and a timestamp is evidence, and this bug is
+what happens when a program offers the first in place of the second.
+
 **What the fix needs, and why it is not a one-liner.** Something has to run
 when the machine is idle or at start-up, notice a schedule is due, and run the
 backup. There is no cron, no timer service and no user-level scheduler in the

@@ -150,10 +150,6 @@ apps/remotedesktop/src/main.rs:content_size_bytes
 # twice; carrying its bug across is work done wrong. Each of these is a
 # value the panel computes and never shows or acts on:
 #
-#   backup_settings:last_backup_timestamp -- when the last backup ran is
-#     recorded from the history entry and never displayed, so the one
-#     question a backup screen exists to answer ("am I backed up?") is the
-#     one it does not answer.
 #   bluetooth:discoverable -- `set_discoverable` returns true and sets the
 #     field, and NOTHING reads it. The toggle does not make the adapter
 #     discoverable and the UI does not show that it is. A switch that does
@@ -169,7 +165,6 @@ apps/remotedesktop/src/main.rs:content_size_bytes
 #     whether it worked or not -- including the case where it worked and could
 #     not be saved.
 #
-gui/desktop/src/backup_settings.rs:last_backup_timestamp
 gui/desktop/src/bluetooth.rs:discoverable
 # FIXED 2026-09-14 by deletion, as was the contacts one. Kept for the
 # reasoning, which is the pattern:

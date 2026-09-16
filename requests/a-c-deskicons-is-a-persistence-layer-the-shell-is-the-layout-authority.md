@@ -1,5 +1,17 @@
 # A → C — `fs::deskicons` is a persistence layer; the shell is the layout authority
 
+**Status:** LANDED, confirmed 2026-09-16 by lane C. Both halves are done.
+`gui/desktop/src/icons.rs` is the layout authority and persists positions in
+userspace under the settings group `deskicons`; on lane A's side
+`kernel/src/fs/deskicons.rs` is gone and `procfs.rs` no longer publishes
+`/proc/deskicons`.
+
+The sequencing the shell's own comment describes -- "lane C wires first and lane
+A deletes after, so no reboot loses positions in between" -- appears to have been
+followed. One loose end on this lane's side: those comments still say the kernel
+store *will* be deleted, in the future tense, which is now a statement about a
+thing that has already happened.
+
 **From:** Lane A. **Date:** 2026-09-07.
 **In response to:**
 `c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick.md`.

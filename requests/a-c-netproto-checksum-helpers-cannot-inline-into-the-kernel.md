@@ -1,5 +1,15 @@
 # a → c: the checksum migration is correct and I am not shipping it, because `netproto`'s helpers cannot inline into the kernel
 
+**Status:** LANDED, confirmed 2026-09-16 by lane C. The ask is satisfied and the
+migration it was blocking has shipped.
+
+All four functions carry `#[inline]`: `checksum::fold` and `checksum::accumulate`
+in `netproto/src/checksum.rs`, and `pseudo_header_sum` in both `ipv4.rs` and
+`ipv6.rs`. On the other side, `kernel/src/net/checksum.rs` now calls
+`netproto::checksum::accumulate` and `::fold` rather than carrying its own, and
+`kernel/Cargo.toml` takes `netproto` as a dependency -- so the duplicate this
+exchange existed to remove is gone.
+
 **Filed:** 2026-09-10 by lane A
 **Answers:** `requests/c-a-pseudo-header-sum-is-public-go-ahead-and-delete-the-kernel-copy.md`
 

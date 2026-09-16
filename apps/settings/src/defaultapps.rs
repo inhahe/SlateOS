@@ -115,6 +115,96 @@ pub fn associations_from(doc: &Document) -> Vec<Association> {
     out
 }
 
+/// A named group of file kinds that share one program.
+///
+/// See design-decisions 857. A category is *defined* as its extension set
+/// rather than stored as a name: the file the file manager obeys has no idea
+/// what "Music" is, so a category that were stored separately would be a claim
+/// with nothing behind it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Category {
+    /// How the group is written on the row.
+    pub name: &'static str,
+    /// The extensions it covers, without dots, lower-cased.
+    ///
+    /// Lower-cased because `apps/explorer` lower-cases before it looks up, so
+    /// an upper-case entry here would write a key it can never match.
+    pub extensions: &'static [&'static str],
+}
+
+/// The groups offered, in the order they are shown.
+///
+/// Three, not the six the shell's dead panel drew. "Web browser" and "email"
+/// are protocol categories with no consumer anywhere in the tree, and
+/// "documents" is not one kind of file -- a text file and a PDF do not share a
+/// program, so the row could only impose a wrong association. 857 has the
+/// evidence for each.
+pub const CATEGORIES: &[Category] = &[
+    Category { name: "Music", extensions: &["aac", "flac", "m4a", "mp3", "ogg", "wav"] },
+    Category { name: "Video", extensions: &["avi", "mkv", "mov", "mp4", "webm"] },
+    Category { name: "Images", extensions: &["bmp", "gif", "jpeg", "jpg", "png", "webp"] },
+];
+
+/// What a category currently resolves to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CategoryDefault {
+    /// No extension in the group names a runnable program.
+    Unset,
+    /// Every extension in the group names the same program.
+    Agreed(String),
+    /// They do not agree, or only some of them are set.
+    ///
+    /// Partly-set counts as disagreement on purpose. Reporting the majority
+    /// program would say "Music opens with this" while some music file on the
+    /// machine opened with nothing -- the page would be making a claim that is
+    /// false for part of what it names, which is the whole failure 856 is
+    /// about. Choosing a program from the row repairs it, because setting a
+    /// category writes every extension in it.
+    Mixed,
+}
+
+/// What `category` resolves to in `doc`.
+///
+/// Pure, for `associations_from`'s reasons: testable without a filesystem, and
+/// the caller already holds the document.
+#[must_use]
+pub fn category_default(doc: &Document, category: &Category) -> CategoryDefault {
+    let mut agreed: Option<&str> = None;
+    let mut any_unset = false;
+    let mut programs: Vec<String> = Vec::new();
+    for extension in category.extensions {
+        let program = doc.get_str(&[ASSOCIATIONS, extension]).unwrap_or_default();
+        if program.trim().is_empty() {
+            any_unset = true;
+        } else {
+            programs.push(program);
+        }
+    }
+    for program in &programs {
+        match agreed {
+            None => agreed = Some(program.as_str()),
+            Some(first) if first == program.as_str() => {}
+            Some(_) => return CategoryDefault::Mixed,
+        }
+    }
+    match agreed {
+        None => CategoryDefault::Unset,
+        Some(_) if any_unset => CategoryDefault::Mixed,
+        Some(program) => CategoryDefault::Agreed(program.to_string()),
+    }
+}
+
+/// Point every extension in `category` at `program`.
+///
+/// Writes each extension rather than a category key, which is the whole of
+/// 857: the file manager resolves an extension, so an extension is the only
+/// thing worth writing.
+pub fn set_category(doc: &mut Document, category: &Category, program: &str) {
+    for extension in category.extensions {
+        doc.set_str(&[ASSOCIATIONS, extension], program);
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -221,5 +311,124 @@ mod tests {
             got[0].extension, "TXT",
             "the stored spelling was normalised away"
         );
+    }
+
+    /// A machine nobody has configured has no default for a group.
+    #[test]
+    fn an_unconfigured_category_is_unset() {
+        let d = Document::parse("");
+        for category in CATEGORIES {
+            assert_eq!(
+                category_default(&d, category),
+                CategoryDefault::Unset,
+                "{} on an empty document",
+                category.name
+            );
+        }
+    }
+
+    /// Choosing a program for a group writes every extension in it.
+    ///
+    /// This is the whole of 857: the file manager resolves an extension, so a
+    /// category that wrote a category key would change nothing at all.
+    #[test]
+    fn setting_a_category_writes_every_extension_in_it() {
+        for category in CATEGORIES {
+            let mut d = Document::parse("");
+            set_category(&mut d, category, "/usr/bin/chosen");
+            for extension in category.extensions {
+                assert_eq!(
+                    d.get_str(&[ASSOCIATIONS, extension]).as_deref(),
+                    Some("/usr/bin/chosen"),
+                    "{} left .{extension} unwritten",
+                    category.name
+                );
+            }
+            assert_eq!(
+                category_default(&d, category),
+                CategoryDefault::Agreed("/usr/bin/chosen".to_string())
+            );
+        }
+    }
+
+    /// Members pointing at different programs have no single answer.
+    #[test]
+    fn members_that_disagree_are_mixed() {
+        let category = &CATEGORIES[0];
+        let mut d = Document::parse("");
+        set_category(&mut d, category, "/usr/bin/one");
+        d.set_str(&[ASSOCIATIONS, category.extensions[1]], "/usr/bin/two");
+        assert_eq!(category_default(&d, category), CategoryDefault::Mixed);
+    }
+
+    /// And so does a group only half of which is set.
+    ///
+    /// The tempting answer is Agreed: every extension that *names* a program
+    /// names the same one. It is also a false claim -- the row would read
+    /// "Music opens with this" while some music file on the machine opened
+    /// with nothing. Pinned because it is the one a future simplification
+    /// would quietly get wrong.
+    #[test]
+    fn a_partly_set_category_is_mixed_not_agreed() {
+        let category = &CATEGORIES[0];
+        let mut d = Document::parse("");
+        d.set_str(&[ASSOCIATIONS, category.extensions[0]], "/usr/bin/one");
+        assert_eq!(
+            category_default(&d, category),
+            CategoryDefault::Mixed,
+            "a category with one of {} extensions set claimed to be settled",
+            category.extensions.len()
+        );
+    }
+
+    /// Every listed extension is lower-case, because the lookup is.
+    ///
+    /// `apps/explorer` lower-cases an extension before it queries, so an
+    /// upper-case entry here would write a key nothing can ever match -- a
+    /// setting that silently does nothing, which is the shape this page exists
+    /// to stop shipping.
+    #[test]
+    fn every_listed_extension_is_lower_case() {
+        for category in CATEGORIES {
+            for extension in category.extensions {
+                assert_eq!(
+                    *extension,
+                    extension.to_lowercase(),
+                    "{} lists .{extension} in mixed case",
+                    category.name
+                );
+            }
+        }
+    }
+
+    /// No extension belongs to two groups.
+    ///
+    /// A hand-written table drifts: an overlap would mean choosing a video
+    /// player silently changed the music default, and the page would show one
+    /// group reverting for no reason the user could see.
+    #[test]
+    fn no_extension_is_claimed_by_two_categories() {
+        let mut seen: Vec<(&str, &str)> = Vec::new();
+        for category in CATEGORIES {
+            for extension in category.extensions {
+                if let Some((other, _)) = seen.iter().find(|(_, e)| e == extension) {
+                    panic!(".{extension} is in both {other} and {}", category.name);
+                }
+                seen.push((category.name, extension));
+            }
+        }
+    }
+
+    /// A group is a group: one extension would add nothing over its own row.
+    #[test]
+    fn every_category_groups_more_than_one_extension() {
+        for category in CATEGORIES {
+            assert!(
+                category.extensions.len() > 1,
+                "{} covers {} extension(s)",
+                category.name,
+                category.extensions.len()
+            );
+        }
     }
 }

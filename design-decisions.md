@@ -67968,6 +67968,7 @@ not better checks -- it is making every check say what it looked at.
 | **missing instrument** | I probed an ELF with `strings`, `nm` and `readelf`; none is installed here, and I had silenced their stderr | three `0`s, indistinguishable from "the symbol is absent" |
 | **vacuous comparison** | lane C's damage-tracking test compared a partial frame against a full one; a broken fixture rendered nothing in either | `0 <= 0` holds, so the assertion passed on a fixture that drew nothing |
 | **tautological check** | lane B's `for cmd in MUTATING { assert!(armed(cmd)) }` asserted that every member of a list is in that list | deleting an entry left all 195 tests green, because the corpus shrank instead of the assertion failing |
+| **degenerate oracle** | lane B measured GNU `date -d` to learn the weekday rule; GNU reads the host clock, and on six days in seven `Wednesday` and `next Wednesday` agree | the wrong rule gets encoded in a correctly-anchored test that then discriminates perfectly, in its favour, forever |
 
 **The sixth is lane C's and is the worst of the set, because it is downstream
 of the others.** Their harness asked "did test X go red?", the name did not
@@ -68048,7 +68049,44 @@ B restated the expected set independently as `EXPECTED_MUTATING` and loops
 over that, so the same sabotage now fails. Found by sabotage rather than by
 reading -- their words: they would have shipped it.
 
-Generalised, the nine rows share one instruction. **Print, or assert, the
+**The tenth is lane B's and is the only row where the verdict is
+confidently WRONG rather than empty.** Every other row describes a check
+that proved nothing; this one describes a check that proves something false.
+The defect is not in the check at all -- it is upstream, in how the check's
+*expectation* was derived.
+
+They were implementing `date -d`'s relative weekday forms, using GNU as the
+oracle. GNU reads the host clock. A bare `Wednesday` means today and `next
+Wednesday` means +7 -- but those two agree on **six days in seven**, so a
+measurement taken on any other day teaches that they are synonyms. Encode
+that, write a test, anchor the test properly to a fixed reference date, and
+it will discriminate cleanly and pass forever in favour of the wrong rule.
+It happened to be a Wednesday.
+
+**Anchoring the test does not help, and that is the whole point.** Their
+committed tests *are* anchored -- `TEST_NOW` is a fixed Tuesday, and the
+pinning assertions use three distinct Tuesday values so the discriminating
+pair is exercised on every run. The non-discriminating `next Wednesday ==
+Wednesday` case is present deliberately and labelled as such. None of that
+would have rescued a rule learned on a Thursday: anchoring the test cannot
+fix an expectation the oracle got wrong.
+
+Lane B's statement of the general form is the one to keep: **when an oracle
+reads the environment, the environment is part of the experiment.** So the
+thing to anchor is the *oracle*, not the test -- which here means either
+waiting for a day on which the distinction is observable, or finding an
+operand that forces it. They got the first by luck and said so.
+
+**Why it is worse than a day-dependent test**, which is where I first filed
+it and was corrected. A test that only discriminates one run in seven has an
+uncovered branch, and an uncovered branch is a gap somebody eventually
+notices -- it is at least *consistently* weak. A day-dependent measurement
+leaves no gap at all: the resulting test is well-formed, fully covered, and
+wrong, and nothing downstream can tell. It is the same family as `6*7` and as
+`capabilities: &[]` -- a value silently supplied by the surroundings -- except
+that here the surroundings supply the *answer*.
+
+Generalised, the ten rows share one instruction. **Print, or assert, the
 thing the verdict was computed from** -- the corpus size, the tree that was
 read, the set that matched, the instrument that ran, the magnitude of each
 side. Every shape here is a verdict that survived the disappearance of its

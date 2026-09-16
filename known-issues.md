@@ -152360,7 +152360,36 @@ So the question is whether the line discipline SEES the byte, and with `ISIG` on
 | `saw VINTR ... isig=false` | the slave's termios has `ISIG` off |
 | nothing | the byte never reached the discipline; the fault is the master-to-slave input path |
 
-A fourth outcome is possible and worth naming: the line appearing under `raw_read` rather than `raw_try_read` would mean the fixture is not reading the way its own header says it does.
+A fourth outcome is possible and worth naming: the line appearing under
+`raw_read` rather than `raw_try_read` would mean the fixture is not
+reading the way its own header says it does.
+
+### 2026-09-16 round 2: ZERO HITS, AND THE ZERO PROVED NOTHING
+
+The probes reported **no VINTR sightings**, and by the table above that
+reads as *the byte never reached the discipline*. **It does not, and the
+table was wrong to offer it.** Verified the instrument first -- the probe
+string is present twice in the staged kernel `build/esp/boot/kernel`,
+matching the built binary, with a positive control -- so the probes did
+run. The problem is that they do not cover the subject.
+
+`ConsoleRead::Signal` is returned from **four** sites. `sig_for`, which
+round 2 instrumented, serves `raw_try_read` and `raw_read` only. The other
+two come via `LineStep::Signal`, produced by `step()` -- a separate
+classifier with its own `ISIG`/`vintr` logic. **A pty slave in canonical
+mode (the `sane_default`) reads through `step()` and never touches
+`sig_for` at all**, so silence from the raw probes is exactly what a
+correctly working canonical path looks like.
+
+Round 3 instruments `step()` as well, labelled `canonical`. With all three
+sites covered, silence from all three finally means what round 2's table
+claimed silence from two meant.
+
+**Third instance in one investigation of reading a subset's silence as
+absence** -- after `nm` returning 0 from a binary that was never opened,
+and five true procfs checks about the wrong subject. The common step is
+not carelessness about the result; it is not asking what the instrument's
+coverage was before interpreting its quiet.
 
 ## A-CTEST-COREUTILS-RUNS-EXIT-3-WAS-A-MISSING-BINARY-NOT-A-BROKEN-ONE (lane A, 2026-09-16) — **Status: NOT A KERNEL DEFECT**
 
@@ -152383,11 +152412,42 @@ I ran the rebuild, checked `ROOTFS_RC=0` and that the *fixtures* staged, then bo
 
 **To actually run it:** build `userspace/coreutils` for the slateos target (`CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release`), rebuild the rootfs, re-boot.
 
-## A-PROC-KEYLAYOUT-CANNOT-BE-OPENED-FROM-RING-3 (lane A, 2026-09-16) — **Status: OPEN**, one observation
+## A-PROC-KEYLAYOUT-CANNOT-BE-OPENED-FROM-RING-3 (lane A, 2026-09-16) — **Status: WITHDRAWN**, the fault was in my rung
 
 `ctest-keylayout` exited **1**: cannot open `/proc/keylayout`. Checked rather than assumed -- `keylayout` IS in `procfs::ROOT_FILES` (top-level `/proc`), `generate()` serves it, `/proc` is mounted rw, and kernel-side self-tests read `/proc/version` and `/proc/sys/kernel/*` successfully in the same boot. So the failure is specific to a **ring-3 open**, not to the node's existence or the mount.
 
-Not yet diagnosed. Worth noting it is the same shape as the pty finding one layer up: a read path that works from inside the kernel and not from outside it.
+**WITHDRAWN. `/proc/keylayout` is fine; my rung spawned the fixture
+holding nothing.** `self_test_ctest_keylayout` passed
+`capabilities: &[]` with `parent: 0`, so the process is not a fork of
+init and holds no capability at all. Without `(File, READ)` it cannot
+open anything, which is precisely exit 1. Fixed by granting
+`(File, 0, READ)` and `(Process, 0, SET_KEYLAYOUT)`, modelled on
+`self_test_ctest_hostname` -- a rung three hundred lines away whose
+docstring says it exists to make a grant exist, for the identical reason.
+
+**Why this entry is corrected rather than deleted.** The paragraph above
+listed five verifications and described them as "checked rather than
+assumed". All five were true: `keylayout` is in `ROOT_FILES`, the parser
+maps it to `RootFile`, `generate()` serves it, `/proc` is mounted rw, and
+kernel-side self-tests read `/proc/version` and `/proc/sys/kernel/*` in
+the same boot. **None of them was about the thing that failed.** Every one
+was about procfs; the failure was about the caller.
+
+Lane B's framing of the distinction is the part worth keeping, because it
+says what to do: their `awk` near-miss was four confirmations sharing one
+blind *spot*, and a blind spot is a gap you can go looking for -- the
+defence is more checks. This was five confirmations sharing one *subject*,
+and **there is no number of procfs checks that finds a capability bug**. A
+wrong subject does not look like a gap; it looks like thoroughness. So the
+question when several checks agree is not "is there another one" but **are
+they all about the same subject, and is that the subject that failed.**
+
+It also refutes a guess of lane B's that I declined to act on -- that this
+shared a cause with `ctest-pty`'s 45, a path working inside the kernel and
+not outside. The resemblance was genuine and described both symptoms
+exactly. The cause was unrelated. That is a better argument for waiting on
+a measurement than any case where the resemblance was weak, because a weak
+resemblance is easy to resist.
 
 ## A-WRITING-TO-A-PTY-MASTER-FAILS-FOR-THE-PYTHON-REPL-FIXTURE (lane A, 2026-09-16) — **Status: OPEN**, one observation
 

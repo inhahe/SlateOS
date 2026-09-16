@@ -821,6 +821,24 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
             (LineStep::Signal(sig), render(ch))
         };
         if ch == vintr {
+            // ROUND-3 DISCRIMINATOR for ctest-pty exit 45. The round-2 probes
+            // went into `sig_for`, which serves the RAW paths only; this is
+            // the canonical classifier and is a separate implementation of
+            // the same decision. A pty slave in canonical mode -- the
+            // `sane_default` -- arrives here and never touches `sig_for`, so
+            // the raw probes' silence was consistent with a perfectly
+            // working canonical path and proved nothing.
+            //
+            // With all three labelled, silence from all three is the real
+            // negative: the byte never reached the discipline at all.
+            crate::serial_println!(
+                concat!(
+                    "[tty] canonical: line discipline saw VINTR (0x{:02x}) ",
+                    "isig=true -- known-issues ",
+                    "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
+                ),
+                ch
+            );
             return signal(2); // SIGINT
         }
         if ch == vquit {

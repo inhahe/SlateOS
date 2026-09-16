@@ -8499,13 +8499,30 @@ pub fn self_test_ctest_keylayout() -> KernelResult<()> {
     /// Every check passed.
     const EXPECTED: i32 = 42;
 
+    // The fixture was previously spawned with `capabilities: &[]`, which made
+    // its exit 1 ("cannot open /proc/keylayout") a fact about this rung rather
+    // than about procfs: with no `(File, READ)` it cannot open anything.
+    //
+    // Modelled on `self_test_ctest_hostname`, whose docstring says it exists to
+    // make a grant exist -- the same reason as here. Until something is spawned
+    // holding the right, "the gate refuses everyone" and "the gate works" are
+    // indistinguishable, and the kernel-side dispatch probe only ever gets
+    // refused.
+    //
+    // `resource_id` 0 is class-wide, which is what the check reads:
+    // `has_capability_type` takes no id at all.
+    let caps = [
+        (ResourceType::File, 0u64, Rights::READ),
+        (ResourceType::Process, 0u64, Rights::SET_KEYLAYOUT),
+    ];
+
     let argv: &[&[u8]] = &[b"ctest-keylayout"];
     let envp: &[&[u8]] = &[];
     let options = SpawnOptions {
         name: "ctest-keylayout",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &caps,
         fd_map: &[],
         argv,
         envp,

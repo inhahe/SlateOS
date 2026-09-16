@@ -47,6 +47,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-boot-test-reexec.sh` | Prove the boot-test re-exec actually makes a run immune to a mid-run edit. |
 | `scripts/check-cfg-unix.py` | Compile the `#[cfg(unix)]` code that `cargo test` never looks at. |
 | `scripts/check-collapsed-messages.py` | Refuse an assertion message whose line continuation rustfmt collapsed. |
+| `scripts/check-config-turn-guards.py` | Refuse a test that drives an event loop without pinning the config directory. |
 | `scripts/check-control-bytes.py` | Refuse a raw control byte in a tracked text file. |
 | `scripts/check-cp-diff-sees-nul.py` | Prove `cp-diff.sh`'s `contents()` can still see a NUL-only difference. |
 | `scripts/check-crate-names.py` | Refuse a crate whose directory name is a *different* crate's package name. |
@@ -118,6 +119,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-tick-wiring.py` | Find apps that keep time but never receive the clock. |
 | `scripts/check-unreachable-mutators.py` | Find accounting-module mutators that nothing outside their own module calls. |
 | `scripts/check-untested-crates.py` | Refuse a NEW crate that ships with no tests at all. |
+| `scripts/check-unused-exports.py` | Report library exports that no other crate names. |
 | `scripts/check-usage-names-reach-the-command.py` | Refuse a kshell usage line that names a word running a different command. |
 | `scripts/check-usage-status.py` | Guard the rule that printing a diagnostic is *reporting a failure*. |
 | `scripts/check-user-access-sites.py` | Keep kernel writes to user memory confined to the validated primitives. |
@@ -388,4 +390,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_378 scripts._
+_380 scripts._

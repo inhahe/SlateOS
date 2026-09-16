@@ -197,6 +197,21 @@ pub const CATEGORIES: &[Category] = &[
     },
 ];
 
+/// The offered group `extension` belongs to, if any.
+///
+/// `None` for most extensions: only three groups are offered, so a `.txt` or a
+/// `.zip` belongs to none of them. A caller offering "use this for the whole
+/// group" must not draw that control when this answers `None` -- there is no
+/// group to apply, and a control that cannot act is the fabrication
+/// design-decisions 856 is about.
+#[must_use]
+pub fn category_of(extension: &str) -> Option<&'static Category> {
+    let extension = extension.to_lowercase();
+    CATEGORIES
+        .iter()
+        .find(|c| c.extensions().any(|e| e == extension))
+}
+
 /// What a category currently resolves to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CategoryDefault {
@@ -380,6 +395,36 @@ mod tests {
         let mut d = Document::parse("");
         d.set_str(&[ASSOCIATIONS, "txt"], "   ");
         assert_eq!(program_for(&d, "txt"), None);
+    }
+
+    /// An extension in a group is found; one outside every group is not.
+    #[test]
+    fn a_group_is_found_only_for_extensions_it_covers() {
+        let music = category_of("mp3").expect("mp3 is audio");
+        assert_eq!(music.name, "Music");
+        assert_eq!(category_of("MP3").map(|c| c.name), Some("Music"));
+        // A document and an archive are deliberately in no offered group.
+        assert!(category_of("txt").is_none(), "txt should be in no group");
+        assert!(category_of("zip").is_none(), "zip should be in no group");
+    }
+
+    /// Every extension of every offered group resolves back to that group.
+    ///
+    /// The round trip that makes the lookup safe to draw a control from: if
+    /// one resolved elsewhere, the button would say "use for all Music" and
+    /// write something else.
+    #[test]
+    fn every_grouped_extension_resolves_to_its_own_group() {
+        for category in CATEGORIES {
+            for extension in category.extensions() {
+                assert_eq!(
+                    category_of(extension).map(|c| c.name),
+                    Some(category.name),
+                    ".{extension} does not resolve back to {}",
+                    category.name
+                );
+            }
+        }
     }
 
     /// A machine nobody has configured has no default for a group.

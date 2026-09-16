@@ -67965,6 +67965,7 @@ not better checks -- it is making every check say what it looked at.
 | unreachable arm | `boot-test.sh` mounts no FAT root, so `openat2`'s mode stamp could not fail | the case passed, honestly, on `memfs` |
 | predicate miss | lane C's `find-stale-admissions` matched `cannot save`, not `cannot be saved` | named the right crate, for the wrong reason |
 | **result lookup** | lane C's sabotage harness searched for a named test result; the name was mistyped | `STAYED GREEN` -- absence rendered as clean |
+| **missing instrument** | I probed an ELF with `strings`, `nm` and `readelf`; none is installed here, and I had silenced their stderr | three `0`s, indistinguishable from "the symbol is absent" |
 
 **The sixth is lane C's and is the worst of the set, because it is downstream
 of the others.** Their harness asked "did test X go red?", the name did not
@@ -67992,6 +67993,23 @@ this entry, I ran `grep -c` for its phrases over the whole file, got 17, and
 labelled that as proof it was present. The 17 were elsewhere; inside 942 the
 count was 0. A count is not coverage -- established in this entry, and
 re-learned inside the check for whether this entry existed.
+
+**A seventh entry, same shape, added an hour later.** Asked to confirm that a
+fixture binary contained a symbol, I ran five instruments over it and printed
+a labelled table. Four of the five -- `strings`, `nm`, `readelf`, `objdump` --
+are not installed in this environment, and I had written `2>/dev/null` on
+three of them myself. They printed `0`. A `0` under the label "nm" is a claim
+that the symbol table was read and the symbol was not in it; what actually
+happened is that nothing was read at all. The one instrument that exists
+(`grep -abo` over the raw bytes) found it twice.
+
+So the sixth shape is wider than a mistyped name. **Any lookup whose failure
+mode is empty output can report the absence of its own instrument as the
+absence of the thing.** Silencing stderr destroys the one signal that would
+have told them apart. The rule that follows is narrow and worth obeying:
+*never send stderr to /dev/null on a command whose output you are about to
+interpret as evidence* -- the discarded line is usually the one saying the
+measurement never happened.
 
 **The retroactive consequence, which is the part that changes behaviour.** Lane
 B kept the `__file__`-derived `ROOT` fix over their own on this ground: a gate
@@ -68078,6 +68096,90 @@ stronger reason to keep them than any individual bug they have caught.
 here the corpus is *time*), and the `image-check`/`sysroot-check` pair, which
 are the two halves -- one compares the image to the tree, the other compares
 the libc to its sources, and neither alone would have seen this.
+
+## 944. A disable reason is a control, not a description, so it has to be executable
+
+**Date:** 2026-09-15 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; **Found by lane B**, whose `check-stale-blockers.py` pass
+put the population in front of a reader for the first time
+
+**In short:** several self-tests in this kernel are switched off, and each one
+has a comment saying why. That comment is the only thing keeping it off. One
+of mine had been wrong for six days -- it named a change another lane had
+already landed, while the real reason had moved on three times and was written
+down 7000 lines away in a different file. A teammate read the wrong copy,
+believed it, and almost sent me a confidently incorrect request. Nothing
+catches this, because a comment is never run.
+
+### Why this is not just another 938
+
+938 and 943 are about stale **descriptions**: a reader forms a wrong belief,
+and the artifact itself is inert. This is a stale **control**. The sentence is
+not describing why the rung is off -- it *is* why the rung is off. Three
+things follow that the description cases do not have:
+
+1. **The cost is a test that does not run**, and it accrues daily rather than
+   at the moment somebody misreads it.
+2. **It is self-sealing.** The rung is off, so the subsystem it covers
+   accumulates no evidence, so nothing ever contradicts the sentence. A stale
+   description can at least be caught by the thing it describes misbehaving.
+3. **It resists the usual remedy.** `known-issues.md` entries get stamped
+   `FIXED` on the day they are fixed, and ours are. A comment cannot be
+   stamped, because nothing indexes it.
+
+### The evidence, all measured today
+
+| Site | Says | Actually |
+|---|---|---|
+| `spawn.rs:9683` | ctest-pty is off while lane B routes PtySlave reads through 872/873 | that landed 2026-09-09 in `f83bcb2ed`; four disable cycles ago |
+| `main.rs:2710` | the live reason, accurate and current | correct -- and 7000 lines away from the other copy |
+| `spawn.rs:9682` | the fixture avoids `alarm`/`setitimer`, known-broken | first half true; `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING` is stamped **FIXED 2026-09-12** |
+
+The sharp observation is lane B's. Five copies of the timer fact exist outside
+`known-issues.md`, and **only the copies rotted**. The entry itself was
+stamped correctly and on time. Discipline worked exactly where there was an
+index and failed everywhere there was not. So the remedy is not more diligence
+about updating copies; it is not having copies. A load-bearing fact gets one
+home, and every other site points at it rather than restating it.
+
+### A date is not a content check
+
+My own re-enable condition read: *re-enable when `sysroot-check` passes AND
+`services/ctest-pty/ctest-pty.elf` is newer than `6e19f88a1`*. Lane B declined
+to settle it that way, and was right twice over. The ELF is gitignored, so it
+is a per-worktree build artifact with no canonical instance -- there is no
+"the" ELF, and their timestamp said nothing about mine. And a rebuild
+refreshes a timestamp whether or not the source changed, which is precisely
+how the stale binary came to look staged in the first place. They grepped both
+binaries for the `child_verdict` symbol instead. **A condition phrased over
+provenance can pass for the wrong reason; phrase it over content.**
+
+They also declined to claim more than the instrument supports: the two builds
+are not byte-identical despite identical size and identical source, so the
+fixture is not reproducible and "same size, same symbol" is the strongest
+available claim. That is the right shape for a verdict -- say what you
+measured, not what you would like it to mean.
+
+### What this changes
+
+- Re-enable conditions stop being prose. Where one can be expressed as a
+  command, it is written as a command a check can run.
+- A disable reason lives at the call site, because the call site is what
+  stopped running. The definition gets a pointer, not a second copy of the
+  reason. (Lane B's own gate caught them collapsing those two into one
+  finding; they are two, and that pairing is what made this findable at all.)
+- The population of switched-off tests is printed on every push by lane B's
+  pass, which deliberately does **not** judge whether a reason still holds --
+  that needs prose understanding. Putting the list in front of a human each
+  time is the whole mechanism, and it was enough: it found this in one run.
+
+### Rejected: expire the comments automatically
+
+Tempting to make every disable reason carry a date and go red after N days. It
+would have caught all three of these. Rejected because it converts a correct
+long-lived reason into recurring noise, and the failure mode of noise on this
+project is documented one section up: lane B's first version of the same pass
+printed 41 unchanging lines, which is how the five real findings underneath
+get skipped.
 
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 

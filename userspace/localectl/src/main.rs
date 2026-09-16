@@ -472,56 +472,83 @@ fn active_kernel_layout() -> Option<Vec<u8>> {
     }
 }
 
-fn cmd_set_keymap(keymap: &str, toggle: Option<&str>) -> i32 {
-    let mut map = read_key_value_file(VCONSOLE_CONF);
-    map.insert("KEYMAP".to_string(), keymap.to_string());
-    if let Some(t) = toggle {
-        map.insert("KEYMAP_TOGGLE".to_string(), t.to_string());
+/// Why a failed `set-keymap` says what it says.
+///
+/// Each errno is a different thing to do next, which is the whole reason they
+/// are not collapsed into "cannot set keymap". `ENOENT` in particular is the
+/// useful one: the layout list is published, so the answer to "no such layout"
+/// is a command the reader can run.
+fn describe_keylayout_error(e: i32) -> String {
+    match e {
+        libcall::EPERM => "not permitted -- setting the console layout needs the SET_KEYLAYOUT \
+             right, which this process does not hold"
+            .to_string(),
+        libcall::ENOENT => "no such layout is registered -- run `localectl list-keymaps`, or read \
+             /proc/keylayout, for the ones this kernel knows"
+            .to_string(),
+        libcall::EINVAL => {
+            "the name is not a usable layout name (over 64 bytes, or not UTF-8)".to_string()
+        }
+        libcall::ENOSYS => "this build has no keylayout syscall, so the console layout cannot be \
+             changed from userspace"
+            .to_string(),
+        other => format!("the kernel refused it (errno {other})"),
     }
+}
 
-    match write_key_value_file(VCONSOLE_CONF, &map) {
-        Ok(()) => {
-            // "recorded", not "set". The write succeeded and the running
-            // layout did not change: nothing reads this file, and the kernel's
-            // `keylayout::set_active` has no syscall and no writable /proc
-            // node -- it is reachable only from the kernel shell.
-            //
-            // The distinction is what routes the next person correctly. "Not
-            // implemented" would invite them to implement it HERE, in
-            // userspace, where it cannot be done; the gap is a missing kernel
-            // write path, and saying so is what prevents the wasted afternoon.
-            //
-            // WHEN THAT WRITE PATH LANDS (lane A is building a capability-gated
-            // set/get pair against `keylayout` as the single publisher), this
-            // function must CALL it, and this file must stop being written
-            // independently -- generated from `/proc/keylayout` if anything
-            // still needs it. Two places recording the same setting is the
-            // four-hostname defect
-            // (`A-SYSFS-KEEPS-A-THIRD-HOSTNAME-THAT-NOTHING-ELSE-READS`) in a
-            // new subsystem, and the fix for this line must not create it.
-            println!(
-                "localectl: VC keymap recorded as {} in {VCONSOLE_CONF}",
-                quoteaf_os(keymap)
-            );
-            match active_kernel_layout() {
-                Some(active) => println!(
-                    "localectl: the console is still using {}; this build cannot \
-                     change the active layout (the kernel exposes /proc/keylayout \
-                     read-only, with no write path)",
-                    quoting::quotef(&active)
-                ),
-                None => println!(
-                    "localectl: this build cannot change the active layout (the \
-                     kernel exposes /proc/keylayout read-only, with no write path)"
-                ),
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("localectl: {e}");
-            1
-        }
+/// `localectl set-keymap <name>` — set the console layout in the kernel.
+///
+/// # This used to write a file instead
+///
+/// It wrote `KEYMAP=` into `/etc/vconsole.conf` and printed "VC keymap set".
+/// Nothing in the tree reads that file except `localectl` itself, so the
+/// setting took effect nowhere and `localectl status` read it back and agreed
+/// -- two witnesses that were one witness, agreeing because the second was
+/// made of the first.
+///
+/// The write is **gone**, not kept alongside the syscall. Lane A's
+/// `SYS_KEYLAYOUT_SET` makes `keylayout` the single publisher, and a file
+/// recording the same setting independently would be the four-hostname defect
+/// (`A-SYSFS-KEEPS-A-THIRD-HOSTNAME-THAT-NOTHING-ELSE-READS`) rebuilt in a new
+/// subsystem, in the same commit that fixes its cousin. If persistence across
+/// boot is wanted later, it belongs in something that READS the file at boot
+/// and calls this syscall -- generated from the kernel's state, not written
+/// beside it.
+fn cmd_set_keymap(keymap: &str, toggle: Option<&str>) -> i32 {
+    // BEFORE the syscall, not after. Refusing an unsupported option only
+    // once the supported half has taken effect leaves the system in a state
+    // the caller did not ask for and was told was an error -- a command that
+    // both fails and changes something is the worst of the two outcomes.
+    if toggle.is_some() {
+        // Refused rather than silently dropped: a toggle key the kernel has no
+        // concept of would otherwise be accepted and forgotten, which is the
+        // shape being removed here.
+        eprintln!(
+            "localectl: --toggle is not supported: this kernel's keylayout has one \
+             active layout and no toggle key"
+        );
+        return 1;
     }
+    if let Err(e) = libcall::set_keylayout(keymap.as_bytes()) {
+        eprintln!(
+            "localectl: cannot set VC keymap to {}: {}",
+            quoteaf_os(keymap),
+            describe_keylayout_error(e)
+        );
+        return 1;
+    }
+    println!("localectl: VC keymap set to {}", quoteaf_os(keymap));
+
+    // Said every time, not only on failure. The layout IS set -- the call
+    // succeeded -- and it will be gone after a reboot, because nothing applies
+    // a stored layout at boot. An operator who is not told that will set it
+    // once and be puzzled tomorrow, which is a smaller version of the defect
+    // this command just stopped committing.
+    println!(
+        "localectl: this does not persist across a reboot -- nothing applies a stored layout at boot"
+    );
+
+    0
 }
 
 fn cmd_set_x11_keymap(

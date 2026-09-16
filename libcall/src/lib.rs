@@ -151,6 +151,73 @@ mod sys {
     }
 }
 
+/// The SlateOS-only half of libc, which no other system exports.
+///
+/// # Why `target_vendor` and not `unix`
+///
+/// A SlateOS application target is indistinguishable from `linux-musl` by the
+/// usual cfgs: `toolchain/x86_64-slateos.json` declares `"os": "linux"`,
+/// `"env": "musl"` and `"target-family": ["unix"]`, which is deliberate --
+/// it is what lets ordinary C and Rust cross-compile unmodified. So `cfg(unix)`
+/// is true here AND on the development host AND on the
+/// `x86_64-unknown-linux-gnu` triple that `check-cfg-unix` lints 64 crates
+/// against.
+///
+/// Declaring `setkeylayout` in the block above would therefore compile
+/// everywhere and fail to LINK on linux-gnu, where no such symbol exists --
+/// and only for `--all-targets`, because a library alone never links. That is
+/// a gate failure arriving at push time from a crate the author never
+/// suspected, which is exactly the shape that cost this lane a rejected push
+/// today.
+///
+/// `target_vendor = "slateos"` is the one cfg the JSON sets that nothing else
+/// does. `userspace/sshd` already uses it to gate its raw syscalls.
+#[cfg(target_vendor = "slateos")]
+mod slateos_sys {
+    unsafe extern "C" {
+        pub fn setkeylayout(name: *const u8, len: usize) -> i32;
+    }
+}
+
+/// Make a registered keyboard layout the active one.
+///
+/// `name` is bytes, not `&str`: a layout name crosses the OS boundary, and the
+/// kernel validates its own UTF-8 rule. Empty clears the mapping back to the
+/// identity layout.
+///
+/// # Errors
+///
+/// The `errno` set by `setkeylayout`: `EPERM` without `Rights::SET_KEYLAYOUT`,
+/// `EINVAL` for a name over 64 bytes or not UTF-8, `EFAULT` for a bad pointer,
+/// `ENOENT` when no such layout is registered, and `ENOSYS` anywhere that is
+/// not SlateOS.
+///
+/// The capability is checked by the kernel **before** the name is looked at,
+/// so a caller without the right cannot enumerate which layouts exist. Nothing
+/// here re-checks anything, for the same reason.
+pub fn set_keylayout(name: &[u8]) -> Result<(), i32> {
+    set_keylayout_one(name)
+}
+
+#[cfg(target_vendor = "slateos")]
+fn set_keylayout_one(name: &[u8]) -> Result<(), i32> {
+    // SAFETY: `name.as_ptr()` is valid for `name.len()` bytes for the duration
+    // of the call, which is all `setkeylayout` reads. The kernel copies the
+    // name before returning, so nothing outlives the borrow.
+    let rc = unsafe { slateos_sys::setkeylayout(name.as_ptr(), name.len()) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+/// Everywhere that is not SlateOS: there is no kernel holding a layout.
+///
+/// `ENOSYS` rather than `Ok(())`. A caller told success would report the
+/// keyboard layout changed on a machine where it did not, which is the whole
+/// family of defect this call was added to remove.
+#[cfg(not(target_vendor = "slateos"))]
+fn set_keylayout_one(_name: &[u8]) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
 /// This thread's `errno`, read from the library that just failed.
 #[cfg(unix)]
 fn last_errno() -> i32 {

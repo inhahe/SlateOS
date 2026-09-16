@@ -1418,10 +1418,13 @@ impl DiskCache {
 
     /// Create a disk cache using the default location (`~/.cache/thumbs/`).
     pub fn default_location() -> Option<Self> {
-        // Use HOME on Unix-like systems, USERPROFILE on Windows.
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .ok()?;
+        // `var_os`, not `var`. An environment variable is bytes, and a home
+        // directory holding any byte but `/` and NUL is legal here -- `var`
+        // answers `None` for one that is not UTF-8, which would disable the
+        // thumbnail cache entirely for that user and do it silently, with
+        // thumbnails regenerating on every listing and nothing to explain why.
+        // `PathBuf` takes the `OsString` unchanged, so nothing is lost.
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
         let dir = PathBuf::from(home).join(DISK_CACHE_DIR);
         Some(Self::new(dir))
     }

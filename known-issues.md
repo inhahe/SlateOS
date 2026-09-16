@@ -152714,6 +152714,97 @@ today.
 this sweep and wants its own commits. Everything needed to start is above, and
 nothing about it is blocked.
 
+## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- OPEN 2026-09-15
+
+**In short:** across this tree there are 78 settings that a program reads for
+exactly one purpose: to show the value back to the person who set it. Nothing
+else ever looks at them. Change the setting, restart, read it in the window or
+the banner, and it will agree with you -- which is the only check available,
+and it passes. 43 of the 78 are in this lane.
+
+**Date:** 2026-09-15. **Lane:** C (35 of the 78 are lane B's).
+**Decided by:** Claude (autonomous) -- filed, not yet fixed.
+
+**Why this is worse than a setting nothing reads at all.** A dead setting is
+silent, and silence at least does not argue. An echoed setting produces
+positive evidence that it took effect, in the program's own voice, at the exact
+moment the operator is checking. It is the same shape as every fabrication
+cleared out of this tree this week -- **the observation that would falsify the
+claim is the same observation that confirms it** -- and this is the most
+persuasive form of it, because the confirming observation is the program's own
+output rather than a number it made up.
+
+Lane B named the case first, in `userspace/logind`:
+
+> `IdleActionSec` is in this list even though a field-level scan calls it READ,
+> and that difference is the point. Its only reader is the startup banner,
+> which prints `idle_timeout=600s` back at the operator -- so the one thing the
+> setting does is CONFIRM ITSELF. A scanner asking "is this field ever read?"
+> cannot see that, because printing is a read; the question that finds it is
+> "does anything ACT on it?".
+
+**How they are found:** `scripts/find-echoed-settings.py`. Reports, does not
+gate. The rule is per-**struct**, not per-field, which is what makes it usable
+at all: a `--show-config` dump reads *every* field into a print and is honest,
+so the finding is a field read only into output **while its siblings are read
+by code that acts**. That exonerates a dump wholesale without exonerating a
+straggler inside one.
+
+**The count is split three ways and the splits matter more than the total:**
+
+| | count | meaning |
+|---|---|---|
+| reaches a `println!`/`write!` | 24 | shown to a person for certain |
+| built with `format!` only | 54 | shown *if* it reaches a screen |
+| stranded (reported separately) | 23 | the formatter has no caller -- a different defect |
+
+That last row is why this is not simply 101. A field read only into a print
+has two explanations wanting opposite fixes: the print runs and misleads, or
+the print sits in a formatter nothing calls. The second is
+`find-stranded-serialisers`' finding and counting it here would be two tools
+reporting one defect.
+
+**And `[format]` means different things in different halves of the tree.** For
+a command-line program it is genuinely ambiguous -- `userspace/curl`'s
+`user_agent` is formatted into a request header, `userspace/objdump`'s `radix`
+picks a number base, and neither is shown to anybody. A GUI app has no stdout:
+every label it draws is `format!`-built and handed to the toolkit. So under
+`apps/` and `gui/`, `[format]` means **shown**.
+
+**This lane's 43, by file:**
+
+| file | n |
+|---|---|
+| `apps/mediaconvert` | 6 |
+| `gui/desktop/network_settings.rs` | 5 |
+| `gui/desktop/power.rs` | 5 |
+| `apps/remotedesktop`, `apps/settings/remote.rs`, `apps/videoplayer`, `gui/desktop/sound_settings.rs`, `gui/desktop/update_settings.rs` | 2 each |
+| `apps/fontmanager`, `apps/netscan`, `apps/paint`, `apps/weather`, `gui/desktop/datetime_settings.rs`, `gui/desktop/startup_settings.rs`, `gui/desktop/storage_settings.rs` | 1 each |
+
+**One verified by hand, because a count nobody checked is the thing this lane
+has spent the week finding.** `apps/mediaconvert`'s settings panel offers
+Quality, Strip metadata, Preserve aspect, and video and audio codec. It draws
+all five. Nothing acts on any of them, because that program cannot convert
+anything -- which it already says, in three lines, one of which warns against
+deleting an original on the strength of its queue. The settings panel is the
+half that was not covered by those three lines.
+
+**The fix, per program, is the one lane B already applied to `logind` and
+`tuned`:** keep the field, and have the program name the settings the operator
+actually set that it does not honour. Not a blanket "this is a mock" banner --
+a specific list, built from what was parsed, silent when nothing inert was set.
+That distinction is what makes it useful rather than noise.
+
+**Order of work:** `apps/mediaconvert` first, as the verified one and the
+largest single cluster in this lane. `gui/desktop`'s four settings pages next,
+since they are the operator's actual settings surface and the place where the
+confirmation is most convincing.
+
+**Until then:** nothing degrades, and nothing is at risk of data loss from
+these specifically. What is wrong is that a person can set a value, check it,
+and be told yes.
+
+
 ## TD-C-SYSINFO-FILED-A-NEGATIVE-IT-NEVER-CHECKED -- OPEN 2026-09-15
 
 **In short:** the System Information window has nine categories -- PCI, USB,

@@ -2074,6 +2074,31 @@ fn print_session_list(out: &mut impl Write, lines: &[String]) {
     let _ = writeln!(out, "\n{} sessions listed.", lines.len());
 }
 
+/// Render a `system.logind.Error.*` name as a sentence.
+///
+/// `KillError` first, because it owns the failures it models and the mapping
+/// lives with it. The rest are the ones ANY method can return, and they are
+/// here rather than in `KillError` because that enum is about killing a
+/// session -- putting `UnknownCaller` in it would make its name a lie and
+/// invite the next method to add its own case to somebody else's type.
+///
+/// An unrecognised name is returned verbatim. That is the honest answer for a
+/// daemon speaking a dialect this build does not know, and it is better than
+/// a friendly sentence that guesses: the raw name is greppable and a guess is
+/// not.
+fn describe_bus_error(name: &str) -> String {
+    if let Some(e) = KillError::from_bus_name(name) {
+        return e.message().to_string();
+    }
+    match name {
+        bus::ERR_UNKNOWN_CALLER => "the daemon could not identify this caller".to_string(),
+        bus::ERR_NOT_AUTHENTICATED => "not authenticated".to_string(),
+        bus::ERR_INVALID_ARGUMENTS => "the daemon rejected the arguments".to_string(),
+        bus::ERR_UNKNOWN_METHOD => "this daemon does not implement that method".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// One call to the daemon, or a sentence saying why not.
 ///
 /// Connect, call, check for an error reply, decode. Shared because three
@@ -2099,8 +2124,7 @@ fn call_logind(member: &str, args: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
         .map_err(|e| format!("{member} failed: {e:?}"))?;
     if reply.is_error() {
         // `Message::error` puts the `system.logind.Error.*` name in `member`.
-        return Err(KillError::from_bus_name(&reply.member)
-            .map_or_else(|| reply.member.clone(), |e| e.message().to_string()));
+        return Err(describe_bus_error(&reply.member));
     }
     libservicebus::fields::decode(&reply.payload)
         .map(|fields| fields.iter().map(|b| b.to_vec()).collect())
@@ -2131,6 +2155,34 @@ fn kill_session_via_bus(id: &str, signal: i32) -> i32 {
         }
         Err(why) => {
             let _ = writeln!(io::stderr(), "loginctl: cannot kill session {id}: {why}");
+            1
+        }
+    }
+}
+
+/// A one-argument session command, asking the daemon.
+///
+/// `lock-session`, `unlock-session` and `terminate-session` differ only in the
+/// method they call and the word they print. They used to differ in three
+/// copies of the same twelve lines, each running against the local empty
+/// `Daemon` -- where every lookup failed, so each reported "no such session"
+/// for sessions that existed in the daemon holding them.
+///
+/// `past_tense` is the verb, so the sentence reads "Session 3 locked." A
+/// caller that reaches this has had its id checked for emptiness; the daemon
+/// checks everything else, which is the point of asking it.
+fn session_command_via_bus(member: &str, id: &str, past_tense: &str) -> i32 {
+    if id.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: session ID required");
+        return 1;
+    }
+    match call_logind(member, &[id.as_bytes()]) {
+        Ok(_) => {
+            println!("Session {id} {past_tense}.");
+            0
+        }
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: cannot {member} {id}: {why}");
             1
         }
     }
@@ -2519,9 +2571,26 @@ fn run_loginctl(args: &[String]) -> i32 {
     // The commands that have a bus method go to the daemon. The rest still run
     // against a local `Daemon` -- see `run_loginctl_command`'s doc comment for
     // what that costs and why the two halves behave differently.
+    // Everything with a bus method goes to the daemon. `activate` is absent
+    // because `bus::dispatch` has no `ActivateSession`; it still runs against
+    // the local `Daemon`, where it fails closed, and is listed here so the
+    // omission reads as a gap rather than an oversight.
     match &cmd {
         LoginctlCommand::ListSessions => return list_sessions_via_bus(),
         LoginctlCommand::KillSession(id, sig) => return kill_session_via_bus(id, *sig),
+        LoginctlCommand::LockSession(id) => {
+            return session_command_via_bus("LockSession", id, "locked");
+        }
+        LoginctlCommand::UnlockSession(id) => {
+            // ForceUnlockSession, not UnlockSession: this personality has no
+            // password to offer and no screen to lock, so it is the
+            // administrator's override rather than the desktop's unlock. The
+            // local arm said the same in a comment; now it is the method name.
+            return session_command_via_bus("ForceUnlockSession", id, "unlocked");
+        }
+        LoginctlCommand::TerminateSession(id) => {
+            return session_command_via_bus("TerminateSession", id, "terminated");
+        }
         _ => {}
     }
     let config = DaemonConfig::default();
@@ -3678,6 +3747,70 @@ mod tests {
     fn killing_a_session_says_it_cannot_rather_than_reporting_a_signal() {
         let d = test_daemon();
         assert_eq!(d.kill_session("1", 15), Err(KillError::Unsupported));
+    }
+
+    /// Every error name a method can return renders as a sentence.
+    ///
+    /// The control is the last pair. An unrecognised name must come back
+    /// VERBATIM rather than be rounded to the nearest sentence this build
+    /// knows -- a daemon speaking a dialect we do not is a fact worth
+    /// printing, and the raw name is greppable where a friendly guess is
+    /// both wrong and unsearchable.
+    #[test]
+    fn a_bus_error_name_renders_as_a_sentence_or_as_itself() {
+        // Kill's own failures come from `KillError`, which owns them.
+        assert_eq!(
+            describe_bus_error(bus::ERR_NO_SESSION_LEADER),
+            "session has no leader pid"
+        );
+        assert_eq!(
+            describe_bus_error(bus::ERR_NO_SUCH_PROCESS),
+            "the session leader is gone"
+        );
+        // The ones any method can return.
+        assert_eq!(
+            describe_bus_error(bus::ERR_UNKNOWN_CALLER),
+            "the daemon could not identify this caller"
+        );
+        assert_eq!(
+            describe_bus_error(bus::ERR_UNKNOWN_METHOD),
+            "this daemon does not implement that method"
+        );
+        // And the control.
+        assert_eq!(
+            describe_bus_error("system.logind.Error.SomethingNewer"),
+            "system.logind.Error.SomethingNewer"
+        );
+        assert_eq!(describe_bus_error(""), "");
+    }
+
+    /// A session command reports an unreachable daemon, not a success.
+    ///
+    /// These three used to run against the local empty `Daemon`, where every
+    /// lookup failed -- so they exited non-zero for the wrong reason and
+    /// looked correct. Now they exit non-zero because the daemon cannot be
+    /// reached, which on this host is the truth: the bus syscalls answer
+    /// ENOSYS on any target that is not SlateOS.
+    ///
+    /// The exit status is the assertion. "Session 3 locked." on stdout and a
+    /// zero status is what a script believes; nothing else about the output
+    /// matters to one.
+    #[test]
+    fn a_session_command_reports_an_unreachable_daemon() {
+        for (member, verb) in [
+            ("LockSession", "locked"),
+            ("ForceUnlockSession", "unlocked"),
+            ("TerminateSession", "terminated"),
+        ] {
+            assert_ne!(
+                session_command_via_bus(member, "3", verb),
+                0,
+                "{member} must not report success when the daemon is unreachable"
+            );
+        }
+        // An empty id is refused before the daemon is troubled, which is the
+        // one check that belongs on this side.
+        assert_ne!(session_command_via_bus("LockSession", "", "locked"), 0);
     }
 
     /// Every wire name maps back to the failure it came from.

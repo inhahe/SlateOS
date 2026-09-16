@@ -2847,7 +2847,41 @@ impl SettingsState {
             // almost never different, which is a poll; a single wake at a
             // known deadline is not.
             //
-            // This page gets its controls when that lands.
+            // This page gets its controls when that lands, and the mechanism
+            // is settled -- checked 2026-09-16, so the next reader does not
+            // re-derive it.
+            //
+            // The compositor must own idleness: it is the only component that
+            // sees every input event. A shell-side timer cannot work, because
+            // the shell never sees input routed to other windows and would
+            // lock the screen while the user typed in a terminal.
+            //
+            // The shell is a separate process and `guiremote` is asymmetric --
+            // client-to-compositor is `RequestBody`/`ResponseBody`, and
+            // compositor-to-client is only `InputEvent`, every one of which
+            // carries a `window`. So there is no server-push path for a
+            // session-level fact, which made this look like a choice between
+            // putting a session concern in a per-window enum that 150 files
+            // match on, adding a new wire message kind, or having the
+            // compositor draw a lock screen it does not own.
+            //
+            // It is not a choice, because the pattern already exists.
+            // `Event` already carries a *claim-based* variant: a modifier-only
+            // chord "was performed, and this window claimed it with
+            // `grab_modifier_chord`". A client asks through the request
+            // channel and thereafter receives events it otherwise would not,
+            // delivered to it alone. An idle watch is that shape applied to
+            // time rather than to keys -- a `RequestBody` subscription and a
+            // variant only the subscriber is sent. No broadcast, and no arm
+            // for a message an application never receives.
+            //
+            // There is also no privileged shell to address: what looks like
+            // shell privilege in the compositor is per-grab and first-come.
+            // A claim is the only way to say "this window, not the others",
+            // which is the same reason the chord grab works that way.
+            //
+            // What is genuinely open is smaller than it looked: where the
+            // timeout setting lives and who owns it.
             //
             // `InstalledApps`, same date, shorter answer: there is no package
             // database to read. No `installed_packages`, no `package_db`, no

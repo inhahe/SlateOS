@@ -334,6 +334,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                 i = i.saturating_add(1);
                 let Some(value) = args.get(i) else {
                     eprintln!("diff: option '--width' requires an argument");
+                    eprintln!("diff: Try 'diff --help' for more information.");
                     process::exit(2);
                 };
                 match value.to_str().unwrap_or("").parse::<usize>() {
@@ -442,6 +443,46 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                 // answers `diff -U -1` with `invalid context length '-1'`, so
                 // it consumed the `-1` as the value rather than treating it as
                 // a flag.
+                // `-C N` -- context format with N lines, the exact twin of
+                // `-U N` below and measured to behave identically: GNU answers
+                // `-C notanumber` with `invalid context length 'notanumber'`,
+                // the same sentence, and `-C` with no argument with
+                // `option requires an argument -- 'C'`.
+                //
+                // It was missing entirely, so `diff -C 1` exited 2 with
+                // `invalid option -- 'C'` -- a flag refused outright rather
+                // than a difference in what it printed. `-c` was there and
+                // `-U` was there; only the capital of the pair that takes a
+                // count was not.
+                'C' => {
+                    format = Format::Context;
+                    let rest: String = chars
+                        .get(j.saturating_add(1)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
+                    let value = if rest.is_empty() {
+                        i = i.saturating_add(1);
+                        let Some(value) = args.get(i) else {
+                            eprintln!("diff: option requires an argument -- 'C'");
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        };
+                        value.to_str().unwrap_or("").to_string()
+                    } else {
+                        rest
+                    };
+                    match value.parse::<usize>() {
+                        Ok(n) => context_lines = Some(n),
+                        Err(_) => {
+                            eprintln!("diff: invalid context length {}", quoteaf_os(&value));
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        }
+                    }
+                    j = chars.len();
+                    continue;
+                }
                 'U' => {
                     format = Format::Unified;
                     let rest: String = chars
@@ -452,7 +493,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                     let value = if rest.is_empty() {
                         i = i.saturating_add(1);
                         let Some(value) = args.get(i) else {
-                            eprintln!("diff: option '-U' requires an argument");
+                            eprintln!("diff: option requires an argument -- 'U'");
                             eprintln!("diff: Try 'diff --help' for more information.");
                             process::exit(2);
                         };
@@ -497,7 +538,8 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                     } else {
                         i = i.saturating_add(1);
                         let Some(value) = args.get(i) else {
-                            eprintln!("diff: option '-W' requires an argument");
+                            eprintln!("diff: option requires an argument -- 'W'");
+                            eprintln!("diff: Try 'diff --help' for more information.");
                             process::exit(2);
                         };
                         match value.to_str().unwrap_or("").parse::<usize>() {

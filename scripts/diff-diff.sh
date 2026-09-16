@@ -416,6 +416,20 @@ run_case -Q base.txt same.txt
 run_case --nosuchoption base.txt same.txt
 run_case -U notanumber long.txt long2.txt
 run_case -U -1 long.txt long2.txt
+# `-C` is `-U`'s twin and was missing entirely until 2026-09-16, so its error
+# paths had never been compared either. Both spellings of "no argument" are
+# here because GNU words them DIFFERENTLY by option length, which is the part
+# that was wrong on our side: a SHORT option is
+# `option requires an argument -- 'C'` and a LONG one is
+# `option '--width' requires an argument`. We had the long form's phrasing on
+# both, so every short option that takes a value printed a sentence GNU does
+# not.
+run_case -C notanumber long.txt long2.txt
+run_case -C -1 long.txt long2.txt
+run_case -C
+run_case -U
+run_case -W
+run_case --width
 run_case . base.txt
 run_case base.txt .
 

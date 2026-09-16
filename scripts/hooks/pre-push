@@ -139,16 +139,38 @@
 #      this repository executed before 2026-09-15. Its subject list is read
 #      from the exclude list rather than written down, so the next crate
 #      anyone excludes is covered without anybody remembering to add it.
+#  47. Refuse two packages that build a binary of the same name. They share
+#      one path under `target/<triple>/<profile>/`, so the survivor is
+#      whichever cargo linked last and that is the file the rootfs stages.
+#      Proved by running one `logger.exe` twice half an hour apart with no
+#      source change: it rejected `-i` as an invalid option, then accepted
+#      it. Cargo has always warned; a warning inside a build that prints
+#      thousands of lines is not a gate.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
-# wrong again at 19 and at 22, and at 35. FIVE OUT OF FIVE RECENT ADDITIONS --
-# lane A counted the first four and it is worth having, because a note that
-# stops at the second instance reads as though the problem was dealt with. The
-# fifth was written by someone who had just read this paragraph: gate 35's
-# section and bypass landed, this list did not, and `test-pre-push-gates.py`
-# refused the push. The note is not the mechanism; the test is.
+# wrong again at 19 and at 22, and at 35, and at 47. SIX OUT OF SIX RECENT
+# ADDITIONS -- lane A counted the first four and it is worth having, because a
+# note that stops at the second instance reads as though the problem was dealt
+# with. The fifth was written by someone who had just read this paragraph:
+# gate 35's section and bypass landed, this list did not, and
+# `test-pre-push-gates.py` refused the push. The note is not the mechanism;
+# the test is.
+#
+# The sixth, gate 47, added a SECOND way to get this wrong that the first five
+# did not show. Its author looked for the highest number in use with
+#
+#     grep -o "^# Gate [0-9]*:" scripts/hooks/pre-push | sort -n | tail
+#
+# got 44, and numbered the new gate 45 -- but gates 45 and 46 do not write
+# their headers in that form, so the pattern could not see them and the answer
+# was confidently wrong. Two sections then claimed 45. The lesson is not "use a
+# better regex": it is that `n+1` was derived from a SEARCH that could silently
+# match a subset, when the authoritative list is right here in this header and
+# says plainly where it ends. The test caught both faults -- the duplicate and
+# the missing line -- and named them separately, which is why the fix took one
+# minute rather than a bisect.
 #
 # Adding a gate is THREE edits: this list, the `# Gate N` section, and the
 # bypass variable. scripts/test-pre-push-gates.py checks all three against each
@@ -3759,7 +3781,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 45: two packages must not build a binary of the same name.
+# Gate 47: two packages must not build a binary of the same name.
 #
 # Gate 18 above asks whether a *directory* name is another crate's *package*
 # name, because `cargo test -p <name>` then tests the wrong thing. This asks

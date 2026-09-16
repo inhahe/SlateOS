@@ -96,6 +96,16 @@ printf 'alpha\nbravo\ncharlie\ndelta\n'          > base.txt
 printf 'alpha\nbravo\ncharlie\ndelta\n'          > same.txt
 # One line changed in the middle.
 printf 'alpha\nbravo\nCHANGED\ndelta\n'          > mid.txt
+# Fixtures for `-I`. `iga`/`igb` differ ONLY in a line matching `^#`, so the
+# whole difference is ignorable; `igc`/`ige` differ in that line AND another,
+# so it is not. `igf`/`igg` differ in case only, which is what the BRE-versus-
+# ERE alternation rows compare.
+printf 'keep1\n# version 1\nkeep2\n'             > iga.txt
+printf 'keep1\n# version 2\nkeep2\n'             > igb.txt
+printf 'keep1\n# version 1\nreal\nkeep2\n'       > igc.txt
+printf 'keep1\n# version 2\nCHANGED\nkeep2\n'    > ige.txt
+printf 'one\ntwo\n'                              > igf.txt
+printf 'ONE\ntwo\n'                              > igg.txt
 # One line changed at the very top and at the very bottom, which is where an
 # off-by-one in the context window shows.
 printf 'CHANGED\nbravo\ncharlie\ndelta\n'        > first.txt
@@ -416,6 +426,66 @@ run_case -Q base.txt same.txt
 run_case --nosuchoption base.txt same.txt
 run_case -U notanumber long.txt long2.txt
 run_case -U -1 long.txt long2.txt
+# `-C` is `-U`'s twin and was missing entirely until 2026-09-16, so its error
+# paths had never been compared either. Both spellings of "no argument" are
+# here because GNU words them DIFFERENTLY by option length, which is the part
+# that was wrong on our side: a SHORT option is
+# `option requires an argument -- 'C'` and a LONG one is
+# `option '--width' requires an argument`. We had the long form's phrasing on
+# both, so every short option that takes a value printed a sentence GNU does
+# not.
+# --- -I: a change whose lines all match is not a change -------------------------
+#
+# `ALL` is the word doing the work, and it spans BOTH sides: a hunk holding one
+# matching and one non-matching changed line is printed in full. The `ignored`
+# and `mixed` rows are that pair, and a suite with only the first would pass on
+# an implementation that ignores any hunk containing a match.
+#
+# The dialect is BRE, measured: `-I 'o\|O'` ignores and `-I 'o|O'` does not.
+# Both are rows because an implementation compiling ERE passes the second and
+# fails the first, and one compiling BRE does the reverse -- neither row alone
+# says which dialect is in use.
+run_case -I '^#' iga.txt igb.txt
+run_case -I '^#' igc.txt ige.txt
+run_case -I 'o\|O' igf.txt igg.txt
+run_case -I 'o|O' igf.txt igg.txt
+run_case -I '^[oO]NE$' igf.txt igg.txt
+run_case -I '^#' -I '^real$' igc.txt ige.txt
+# `-I` decides what IS a difference, not what is printed about one, so `-q` and
+# the other formats have to honour it too.
+run_case -q -I '^#' iga.txt igb.txt
+run_case -u -I '^#' iga.txt igb.txt
+run_case -e -I '^#' iga.txt igb.txt
+run_case -I '[' iga.txt igb.txt
+run_case -I
+
+# --- the two remaining classic output formats ----------------------------------
+#
+# `-e` writes an ed script and `-n` writes an RCS delta. Both were absent until
+# 2026-09-16 -- `diff -e` exited 2 with `invalid option`, so a script using it
+# stopped rather than getting different output.
+#
+# The reversal is why `-e` gets more than one row. An ed script is APPLIED in
+# order and each command renumbers the lines after it, so the hunks come out
+# back to front; a single-hunk case cannot tell a correct implementation from
+# one that forgot. `long.txt`/`long3.txt` has several.
+run_case -e base.txt mid.txt
+run_case -e base.txt added.txt
+run_case -e long.txt long3.txt
+run_case -e base.txt base.txt
+run_case -n base.txt mid.txt
+run_case -n base.txt added.txt
+run_case -n long.txt long3.txt
+run_case -n base.txt base.txt
+# A change is a delete AND an append in RCS, and the append is positioned past
+# the deleted lines -- `d2 1` then `a2 1`, not `a1 1`.
+run_case -n mid.txt base.txt
+run_case -C notanumber long.txt long2.txt
+run_case -C -1 long.txt long2.txt
+run_case -C
+run_case -U
+run_case -W
+run_case --width
 run_case . base.txt
 run_case base.txt .
 

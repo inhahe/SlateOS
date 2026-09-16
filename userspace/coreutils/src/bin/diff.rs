@@ -108,6 +108,10 @@ enum Format {
     Context,
     /// Side-by-side (`-y`).
     SideBySide,
+    /// An `ed` script (`-e`, `--ed`): commands that turn file 1 into file 2.
+    Ed,
+    /// RCS's own diff format (`-n`, `--rcs`).
+    Rcs,
 }
 
 // ============================================================================
@@ -122,6 +126,13 @@ struct Config {
     context_lines: usize,
     width: usize,
     brief: bool,
+    /// `-I RE`: a change whose lines ALL match one of these is not a change.
+    ///
+    /// Compiled once at parse time rather than per line, and held as BREs
+    /// because that is the dialect GNU uses here -- measured: `-I 'o\|O'`
+    /// ignores a hunk and `-I 'o|O'` does not, which is BRE alternation
+    /// working and ERE alternation not.
+    ignore_matching: Vec<ere::Regex>,
     report_identical: bool,
     ignore_case: bool,
     ignore_space_change: bool,
@@ -260,6 +271,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
     let mut context_lines: Option<usize> = None;
     let mut width: usize = 130;
     let mut brief = false;
+    let mut ignore_matching: Vec<ere::Regex> = Vec::new();
     let mut report_identical = false;
     let mut ignore_case = false;
     let mut ignore_space_change = false;
@@ -334,6 +346,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                 i = i.saturating_add(1);
                 let Some(value) = args.get(i) else {
                     eprintln!("diff: option '--width' requires an argument");
+                    eprintln!("diff: Try 'diff --help' for more information.");
                     process::exit(2);
                 };
                 match value.to_str().unwrap_or("").parse::<usize>() {
@@ -442,6 +455,46 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                 // answers `diff -U -1` with `invalid context length '-1'`, so
                 // it consumed the `-1` as the value rather than treating it as
                 // a flag.
+                // `-C N` -- context format with N lines, the exact twin of
+                // `-U N` below and measured to behave identically: GNU answers
+                // `-C notanumber` with `invalid context length 'notanumber'`,
+                // the same sentence, and `-C` with no argument with
+                // `option requires an argument -- 'C'`.
+                //
+                // It was missing entirely, so `diff -C 1` exited 2 with
+                // `invalid option -- 'C'` -- a flag refused outright rather
+                // than a difference in what it printed. `-c` was there and
+                // `-U` was there; only the capital of the pair that takes a
+                // count was not.
+                'C' => {
+                    format = Format::Context;
+                    let rest: String = chars
+                        .get(j.saturating_add(1)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
+                    let value = if rest.is_empty() {
+                        i = i.saturating_add(1);
+                        let Some(value) = args.get(i) else {
+                            eprintln!("diff: option requires an argument -- 'C'");
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        };
+                        value.to_str().unwrap_or("").to_string()
+                    } else {
+                        rest
+                    };
+                    match value.parse::<usize>() {
+                        Ok(n) => context_lines = Some(n),
+                        Err(_) => {
+                            eprintln!("diff: invalid context length {}", quoteaf_os(&value));
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        }
+                    }
+                    j = chars.len();
+                    continue;
+                }
                 'U' => {
                     format = Format::Unified;
                     let rest: String = chars
@@ -452,7 +505,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                     let value = if rest.is_empty() {
                         i = i.saturating_add(1);
                         let Some(value) = args.get(i) else {
-                            eprintln!("diff: option '-U' requires an argument");
+                            eprintln!("diff: option requires an argument -- 'U'");
                             eprintln!("diff: Try 'diff --help' for more information.");
                             process::exit(2);
                         };
@@ -479,6 +532,34 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                     continue;
                 }
                 'y' => format = Format::SideBySide,
+                // `-I RE`: a change whose lines all match RE is not a change.
+                'I' => {
+                    let rest: String = chars
+                        .get(j.saturating_add(1)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
+                    let value = if rest.is_empty() {
+                        i = i.saturating_add(1);
+                        let Some(v) = args.get(i) else {
+                            eprintln!("diff: option requires an argument -- 'I'");
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        };
+                        v.clone()
+                    } else {
+                        OsString::from(rest)
+                    };
+                    ignore_matching.push(compile_ignore_pattern(&value));
+                    j = chars.len();
+                    continue;
+                }
+                'e' => format = Format::Ed,
+                'n' => format = Format::Rcs,
+                // GNU's `-v` is `--version`, and it was the only one of this
+                // program's thirteen missing short options that was purely an
+                // alias: the other twelve were features that did not exist.
+                'v' => return ParseResult::Version,
                 'W' => {
                     // -W may have value glued on or as next arg.
                     let rest: String = chars
@@ -497,7 +578,8 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                     } else {
                         i = i.saturating_add(1);
                         let Some(value) = args.get(i) else {
-                            eprintln!("diff: option '-W' requires an argument");
+                            eprintln!("diff: option requires an argument -- 'W'");
+                            eprintln!("diff: Try 'diff --help' for more information.");
                             process::exit(2);
                         };
                         match value.to_str().unwrap_or("").parse::<usize>() {
@@ -582,6 +664,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         context_lines: ctx,
         width,
         brief,
+        ignore_matching,
         report_identical,
         ignore_case,
         ignore_space_change,
@@ -1448,6 +1531,169 @@ fn range_str(start: usize, count: usize) -> String {
     }
 }
 
+/// Compile one `-I` pattern, or exit 2 the way GNU does.
+///
+/// A **basic** regular expression, which was measured rather than assumed:
+/// `diff -I 'o\|O'` ignores a hunk and `diff -I 'o|O'` does not, so the
+/// alternation that works is BRE's escaped one. Compiling it as an ERE would
+/// make `\|` a literal bar and quietly ignore nothing.
+///
+/// GNU's refusal is `diff: [: Invalid regular expression` with exit 2, the
+/// pattern named bare rather than quoted -- measured, since this file quotes
+/// file names and does not quote this.
+fn compile_ignore_pattern(pattern: &OsString) -> ere::Regex {
+    let bytes = quoting::os_bytes(pattern.as_os_str());
+    match ere::bre::compile(&bytes, false) {
+        Ok(re) => re,
+        Err(_) => {
+            eprintln!(
+                "diff: {}: Invalid regular expression",
+                String::from_utf8_lossy(&bytes)
+            );
+            process::exit(2);
+        }
+    }
+}
+
+/// Drop the hunks `-I` says are not changes.
+///
+/// Applied in every renderer arm rather than once over `ops`, because removing
+/// operations would renumber every hunk after the one removed -- the line
+/// numbers in the output are the whole point of a diff, and a hunk that is
+/// ignored must not shift the ones that are printed.
+fn unignored(hunks: Vec<Hunk>, config: &Config) -> Vec<Hunk> {
+    if config.ignore_matching.is_empty() {
+        return hunks;
+    }
+    hunks
+        .into_iter()
+        .filter(|h| !hunk_is_ignorable(h, config))
+        .collect()
+}
+
+/// Does every CHANGED line in this hunk match one of the `-I` patterns?
+///
+/// "Every" spans both sides, which is the part the manual's phrasing hides and
+/// the measurement settles: a hunk holding one matching and one non-matching
+/// changed line is printed in full. Context lines are not consulted at all --
+/// they did not change, so they are not part of the change being judged.
+///
+/// An empty pattern list answers `false`, so a hunk is never ignored when `-I`
+/// was not given; a hunk with no changed lines answers `false` too, because
+/// "all of nothing matches" would silently drop a hunk that has no business
+/// being dropped.
+fn hunk_is_ignorable(hunk: &Hunk, config: &Config) -> bool {
+    if config.ignore_matching.is_empty() {
+        return false;
+    }
+    let mut saw_change = false;
+    for Edit { op, text, .. } in &hunk.lines {
+        if *op == Op::Equal {
+            continue;
+        }
+        saw_change = true;
+        let matched = config
+            .ignore_matching
+            .iter()
+            .any(|re| re.is_match(text).unwrap_or(false));
+        if !matched {
+            return false;
+        }
+    }
+    saw_change
+}
+
+/// Where a hunk's change begins in each file, and how many lines it touches.
+///
+/// The leading context is skipped first, which is why this is shared rather
+/// than repeated: every renderer needs the position of the first CHANGED line,
+/// and computing it from `start1` alone is wrong for any hunk with context.
+fn hunk_change_span(hunk: &Hunk) -> (usize, usize, usize, usize) {
+    let del_count = hunk.lines.iter().filter(|e| e.op == Op::Delete).count();
+    let ins_count = hunk.lines.iter().filter(|e| e.op == Op::Insert).count();
+    let mut line1_pos = hunk.start1;
+    let mut line2_pos = hunk.start2;
+    for Edit { op, .. } in &hunk.lines {
+        if *op == Op::Equal {
+            line1_pos += 1;
+            line2_pos += 1;
+        } else {
+            break;
+        }
+    }
+    (line1_pos, line2_pos, del_count, ins_count)
+}
+
+/// `-e`: an `ed` script that turns file 1 into file 2.
+///
+/// **Emitted in REVERSE order**, which is the whole subtlety. `ed` applies the
+/// commands in the order given and each one renumbers the lines after it, so a
+/// script written front-to-back would have every command after the first
+/// aiming at the wrong line. Measured: GNU prints `4a` before `2c` for a file
+/// whose change is at line 2 and whose append is at line 4.
+///
+/// A delete has no body and no terminator; an append and a change carry their
+/// lines followed by a lone `.`.
+fn print_ed(hunks: &[Hunk], config: &Config) {
+    let out = io::stdout();
+    let mut w = out.lock();
+
+    for hunk in hunks.iter().rev() {
+        let (line1_pos, _, del_count, ins_count) = hunk_change_span(hunk);
+        let (has_del, has_ins) = (del_count > 0, ins_count > 0);
+        let op_char = match (has_del, has_ins) {
+            (true, true) => 'c',
+            (true, false) => 'd',
+            (false, true) => 'a',
+            (false, false) => continue,
+        };
+        let _ = writeln!(w, "{}{}", range_str(line1_pos, del_count), op_char);
+        if !has_ins {
+            continue;
+        }
+        for Edit { op, text, .. } in &hunk.lines {
+            if *op == Op::Insert {
+                write_text_line(&mut w, config, b"", text, None);
+            }
+        }
+        // `ed` ends an insert with a line holding a single dot. A body line
+        // that is itself a dot would end the insert early; GNU has the same
+        // hole, and a diff that cannot be applied is upstream's behaviour
+        // rather than something invented here.
+        let _ = writeln!(w, ".");
+    }
+}
+
+/// `-n`: RCS's diff format.
+///
+/// Forward order, unlike `-e`, because the commands carry explicit counts and
+/// are defined against the ORIGINAL line numbering rather than being applied
+/// to a file that shifts under them.
+///
+/// A change is a delete AND an append, and the append's position is measured
+/// past the deleted lines: GNU answers a one-line change at line 2 with
+/// `d2 1` then `a2 1`, not `a1 1`. That `+ del_count` is the one piece of this
+/// that reasoning gets wrong.
+fn print_rcs(hunks: &[Hunk], config: &Config) {
+    let out = io::stdout();
+    let mut w = out.lock();
+
+    for hunk in hunks {
+        let (line1_pos, _, del_count, ins_count) = hunk_change_span(hunk);
+        if del_count > 0 {
+            let _ = writeln!(w, "d{} {}", line1_pos.saturating_add(1), del_count);
+        }
+        if ins_count > 0 {
+            let _ = writeln!(w, "a{} {}", line1_pos.saturating_add(del_count), ins_count);
+            for Edit { op, text, .. } in &hunk.lines {
+                if *op == Op::Insert {
+                    write_text_line(&mut w, config, b"", text, None);
+                }
+            }
+        }
+    }
+}
+
 fn print_normal(hunks: &[Hunk], config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
@@ -2261,7 +2507,15 @@ fn diff_files(p1: &Path, p2: &Path, config: &Config, in_dir_walk: bool) -> i32 {
     }
 
     // Check if there are any differences.
-    let has_diff = ops.iter().any(|e| e.op != Op::Equal);
+    //
+    // `-I` is applied HERE, above the `-q` branch, because it changes what
+    // counts as a difference rather than what is printed about one: measured,
+    // `diff -q -I '^#'` on files differing only in a `#` line prints nothing
+    // and exits 0. Filtering later would have left `-q` saying they differ.
+    let has_diff = ops.iter().any(|e| e.op != Op::Equal)
+        && !build_hunks(&ops, 0)
+            .iter()
+            .all(|h| hunk_is_ignorable(h, config));
 
     if !has_diff {
         if config.report_identical {
@@ -2304,15 +2558,26 @@ fn diff_files(p1: &Path, p2: &Path, config: &Config, in_dir_walk: bool) -> i32 {
             print_side_by_side(&ops, config);
         }
         Format::Normal => {
-            let hunks = build_hunks(&ops, 0);
+            let hunks = unignored(build_hunks(&ops, 0), config);
             print_normal(&hunks, config);
         }
+        // Both take zero context: an `ed` script and an RCS delta are
+        // instructions, not a readable rendering, so a surrounding line would
+        // be applied as though it were a change.
+        Format::Ed => {
+            let hunks = unignored(build_hunks(&ops, 0), config);
+            print_ed(&hunks, config);
+        }
+        Format::Rcs => {
+            let hunks = unignored(build_hunks(&ops, 0), config);
+            print_rcs(&hunks, config);
+        }
         Format::Unified => {
-            let hunks = build_hunks(&ops, config.context_lines);
+            let hunks = unignored(build_hunks(&ops, config.context_lines), config);
             print_unified(&hunks, p1, p2, config);
         }
         Format::Context => {
-            let hunks = build_hunks(&ops, config.context_lines);
+            let hunks = unignored(build_hunks(&ops, config.context_lines), config);
             print_context(&hunks, p1, p2, config);
         }
     }
@@ -2779,6 +3044,7 @@ mod tests {
             context_lines: 3,
             width: 130,
             brief: false,
+            ignore_matching: Vec::new(),
             report_identical: false,
             ignore_case: false,
             ignore_space_change: false,

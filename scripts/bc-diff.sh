@@ -378,10 +378,30 @@ prog 'bare expression prints'  '1+1\n"literal"\n'
 prog 'mathlib scale default'   'scale\n' -l
 prog 'mathlib s and c'         'scale=10\nprint s(0), "\\n", c(0), "\\n"\n' -l
 prog 'mathlib e and l'         'scale=10\nprint e(1), "\\n", l(1), "\\n"\n' -l
-known_bug TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE
 prog 'mathlib a and j'         'scale=10\nprint a(1), "\\n", j(0,1), "\\n"\n' -l
-known_bug TD-B-BC-MATHLIB-LOG-ERRORS-WHERE-GNU-SATURATES
+# Arctangent across its range, not just at 1.
+#
+# `TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE` asked for these when it was closed,
+# and gave the reason: a series with a term cap "can be right at one argument
+# and wrong at the next". The `a(1)` row above is what FOUND that bug, so one
+# sample was enough to find it -- but one sample is not enough to confirm a
+# FIX, and those are different jobs. The new implementation reduces by halving
+# the argument, which gives it a threshold (1/16) and an inversion branch
+# (|x| > 1) that the single row samples neither of.
+#
+# `a(1.0001)` is the interesting one: the |x|>1 inversion maps it to `a(.9999)`,
+# which is just as slow to sum as the argument it came from, so an
+# implementation that inverts but does not reduce passes `a(2)` and fails here.
+prog 'mathlib a across its range' 'scale=10\nprint a(0), "\\n", a(0.5), "\\n", a(2), "\\n", a(-1), "\\n"\n' -l
+prog 'mathlib a near the reduction boundary' 'scale=10\nprint a(0.06), "\\n", a(0.07), "\\n", a(1.0001), "\\n", a(100), "\\n"\n' -l
 prog 'log of zero'             'scale=10\nprint l(0), "\\n"\n' -l
+# The saturation value is `-(10^scale - 1)`, so a row at ONE scale cannot tell
+# a correct implementation from a hard-coded constant -- which is precisely the
+# trap the tracker entry warned about. Two more scales, either side, and a
+# negative argument, since GNU saturates for every non-positive input and not
+# only for zero.
+prog 'log of zero at other scales' 'scale=1\nprint l(0), "\\n"\nscale=20\nprint l(0), "\\n"\n' -l
+prog 'log of a negative'       'scale=10\nprint l(-1), "\\n", l(-0.5), "\\n"\n' -l
 
 # --- comments and whitespace --------------------------------------------------
 prog 'block comment'           '/* a comment */ 1+1\n'
@@ -405,12 +425,33 @@ prog 'unterminated string'     'print "abc\n'
 # Measured both ways round before claiming it; see the entry.
 differs_by_design 'GNU misnames the source and line for an at-EOF error; ours are right'
 prog 'unbalanced brace'        'if (1) {\nprint "A"\n'
-known_bug TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR
 prog 'bad character'           '1 $ 2\n'
 prog 'error then more input'   'print )\nprint "after\\n"\n'
 
-known_bug TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE
+# Statements need a separator, and the interesting part is which tokens count
+# as one. Both halves are here on purpose: the refusals are the bug that was
+# fixed, and the acceptances are the control, because the failure mode of an
+# over-strict rule is REFUSING VALID PROGRAMS -- worse than the over-acceptance
+# it replaces, and invisible to a suite that only tests malformed input.
+#
+# `{ 1 } 2` being refused is the row that is not obvious: a closing brace ends
+# a statement but does not license the next one. `define f() { … } f()` being
+# accepted is the other: a definition is its own input item in GNU's grammar,
+# which is why the separator rule is not applied after one.
+prog 'two statements, no separator'  '1 2\n'
+prog 'block then statement'          '{ 1 } 2\n'
+prog 'if-block then statement'       'if (1) { print "a" } 2\n'
+prog 'separators that are accepted'  '1; 2\n{ print "a" }\nif (1) print "b" else print "c"\n'
+prog 'define then call, no separator' 'define f() { return (1) } f()\n'
+
 prog_file 'a file that is not there' '' nosuch.bc
+# A name that needs quoting still gets them, and there we differ from GNU on
+# purpose: GNU prints it bare, so a file called
+# `x<newline>bc: /etc/shadow: Permission denied` forges a diagnostic bc never
+# wrote. The row is here rather than merely asserted in the entry, because a
+# deviation nothing exercises is a deviation nobody will notice losing.
+differs_by_design 'a name needing quotes is quoted, so it cannot forge a diagnostic line'
+prog_file 'an unavailable name with a space' '' 'no such.bc'
 
 # ==============================================================================
 # Differences on purpose

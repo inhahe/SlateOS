@@ -464,10 +464,29 @@ impl Decimal {
         // of them afterwards the input needs twice as many beforehand — plus a
         // couple so the truncation at the end cannot eat a digit we promised.
         let extra = result_scale.saturating_mul(2).saturating_add(2);
-        let scaled = self.rescale(self.scale.saturating_add(extra));
+        let mut target = self.scale.saturating_add(extra);
+        // The working scale MUST be even, and that is arithmetic rather than
+        // neatness. A `Decimal` is `digits / 10^scale`, so its root is
+        // `sqrt(digits) / 10^(scale/2)` — and `scale/2` is only a whole number
+        // of decimal places when `scale` is even. With an odd one the old code
+        // took `div_ceil(2)`, shifting the point half a place too far and
+        // returning an answer exactly `sqrt(10)` too small.
+        //
+        // `extra` is always even, so the parity was the INPUT's, which made the
+        // defect depend on how the number happened to be written rather than on
+        // what it was: `sqrt(2)` was right and `sqrt(2.0)` was `.4472…`, and
+        // `sqrt(4)` was `2` while `sqrt(4.0)` was `.6324…`. Trailing zeros are
+        // not supposed to be load-bearing.
+        if !target.is_multiple_of(2) {
+            target = target.saturating_add(1);
+        }
+        let scaled = self.rescale(target);
         let root = Self {
             digits: scaled.digits.isqrt(),
-            scale: scaled.scale.div_ceil(2),
+            // `target`, not `scaled.scale`: identical by construction, but
+            // reading it from the value `rescale` returned invites someone to
+            // "simplify" the parity fix away without the halving noticing.
+            scale: target / 2,
         };
         Ok(root.rescale(result_scale))
     }
@@ -834,6 +853,271 @@ mod tests {
     /// `a op b` at `scale`, rendered — the shape most of these tests want.
     fn div(a: &str, b: &str, scale: usize) -> String {
         d(a).div(&d(b), scale).unwrap().format_base10()
+    }
+
+    fn sq(a: &str, scale: usize) -> String {
+        d(a).sqrt(scale).unwrap().format_base10()
+    }
+
+    /// A deterministic 64-bit xorshift, so these cases are the same on every
+    /// run and a failure can be pinned rather than retold.
+    ///
+    /// Hand-rolled rather than pulled in: `bignum` has no dependencies and is
+    /// not going to acquire one for a test fixture. The quality bar is "spreads
+    /// digits around", not cryptographic.
+    struct Xs(u64);
+
+    impl Xs {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// An `n`-digit decimal string with no leading zero.
+        fn digits(&mut self, n: usize) -> String {
+            let mut s = String::with_capacity(n);
+            s.push(char::from(b'1' + (self.next() % 9) as u8));
+            for _ in 1..n {
+                s.push(char::from(b'0' + (self.next() % 10) as u8));
+            }
+            s
+        }
+    }
+
+    /// Every operator, checked against its own definition at operand sizes
+    /// that straddle the limb boundary.
+    ///
+    /// # Why identities rather than expected values
+    ///
+    /// There is nothing to look up and nothing to keep in step.
+    /// `a == (a/b)*b + (a%b)` is what division MEANS, so no wrong quotient can
+    /// satisfy it, and the test needs no reference, no WSL and no network.
+    /// The alternative -- a table of expected digits -- has to be produced by
+    /// something, and whatever produces it becomes a second thing that can be
+    /// wrong.
+    ///
+    /// # Why these sizes
+    ///
+    /// `TD-B-BIGNUM-LONG-DIVISION-DROPS-A-BORROW-BIGGER-THAN-ONE-LIMB` was a
+    /// wrong *quotient* that survived in a shipped calculator, and the reason
+    /// it survived is stated in its own entry: **nothing in the suite divided
+    /// by a number that big.** Every operand here is generated at a size on or
+    /// either side of a multiple of the limb width (9), because that bug
+    /// needed a multi-limb divisor and limb values that collided -- invisible
+    /// below the boundary, erratic above it.
+    ///
+    /// This is the check that was missing. Run against the commit before the
+    /// fix it does fail — at `36-digit / 8-digit: sqrt too small`, which is
+    /// the *root* assertion rather than the division one, because `isqrt`'s
+    /// correction loops were reverted along with it and `sqrt` is the first
+    /// thing to notice a division that lies.
+    ///
+    /// Recorded that way round on purpose: the obvious thing to write here was
+    /// "the division identity fails", and it does not. The division identity
+    /// specifically is pinned by
+    /// [`long_division_survives_a_borrow_bigger_than_one_limb`] below, which
+    /// was checked the same way and fails with `27-digit divisor: quotient too
+    /// large`. Two tests, two probes, and neither claim borrowed from the
+    /// other.
+    #[test]
+    fn large_operand_arithmetic_obeys_its_own_definitions() {
+        let sizes = [
+            1usize, 8, 9, 10, 17, 18, 19, 26, 27, 28, 36, 37, 45, 54, 71, 90,
+        ];
+        let mut rng = Xs(0x2026_0916_1234_5678);
+        let zero = Decimal::from_i64(0);
+
+        for &a_len in &sizes {
+            for &b_len in &sizes {
+                if b_len > a_len {
+                    continue;
+                }
+                let a = d(&rng.digits(a_len));
+                let b = d(&rng.digits(b_len));
+                let where_ = format!("{a_len}-digit / {b_len}-digit");
+
+                // Division: a == (a/b)*b + (a%b). The identity the borrow bug
+                // broke.
+                let q = a.div(&b, 0).expect("b is non-zero");
+                let r = a.modulo(&b, 0).expect("b is non-zero");
+                let back = q.mul(&b, 0).add(&r);
+                assert_eq!(back.format_base10(), a.format_base10(), "{where_}: q*b+r");
+                // ...and the remainder is a remainder: 0 <= r < b.
+                assert!(r >= zero, "{where_}: negative remainder");
+                assert!(r < b, "{where_}: remainder not less than divisor");
+
+                // Multiplication undone by division, which exercises the same
+                // limb carries in the opposite direction.
+                let prod = a.mul(&b, 0);
+                assert_eq!(
+                    prod.div(&b, 0).expect("b is non-zero").format_base10(),
+                    a.format_base10(),
+                    "{where_}: (a*b)/b"
+                );
+                // Commutative, which a carry that leaks between limbs is not.
+                assert_eq!(
+                    prod.format_base10(),
+                    b.mul(&a, 0).format_base10(),
+                    "{where_}: a*b == b*a"
+                );
+
+                // Addition and subtraction, same shape.
+                assert_eq!(
+                    a.add(&b).sub(&b).format_base10(),
+                    a.format_base10(),
+                    "{where_}: (a+b)-b"
+                );
+                assert_eq!(
+                    a.sub(&b).add(&b).format_base10(),
+                    a.format_base10(),
+                    "{where_}: (a-b)+b"
+                );
+
+                // Square root by its definition: g^2 <= a < (g+1)^2. This is
+                // what `isqrt`'s correction loops establish, asserted here so
+                // the two cannot drift apart.
+                let g = a.sqrt(0).expect("a is positive");
+                let one = Decimal::from_i64(1);
+                assert!(g.mul(&g, 0) <= a, "{where_}: sqrt too large");
+                let up = g.add(&one);
+                assert!(up.mul(&up, 0) > a, "{where_}: sqrt too small");
+            }
+        }
+    }
+
+    /// Long division with a divisor of several limbs.
+    ///
+    /// `BigInt::divmod`'s multiply-subtract step used to take the borrow out
+    /// of the next limb instead of folding it into the next product. Both
+    /// quantities can approach the base, so the intermediate could reach about
+    /// `-2*LIMB_BASE`; the code added one base back and cast to `u32`, and
+    /// whenever they were both large that cast wrapped a negative number and
+    /// the limb became garbage.
+    ///
+    /// It needed a multi-limb divisor AND limb values that collide that way,
+    /// so it was invisible for small divisors and erratic for large ones --
+    /// which is why every case here is a specific measured size rather than a
+    /// round number. `(10^90)/d` was wrong for `d` of 27, 36, 40, 42, 45 and
+    /// 54 digits and right for 9, 18, 28 and 37, all checked against GNU bc
+    /// 1.07.1. The pass/fail split is kept intact below: a fix that repaired
+    /// only the sizes that used to fail, while breaking one that used to work,
+    /// would look like progress without it.
+    #[test]
+    fn long_division_survives_a_borrow_bigger_than_one_limb() {
+        // `1` followed by n-1 `4`s, the family the failures were found with.
+        let d = |n: usize| -> String {
+            let mut s = String::from("1");
+            for _ in 1..n {
+                s.push('4');
+            }
+            s
+        };
+        let big = format!("1{}", "0".repeat(90));
+        // Quotient * divisor + remainder == dividend, checked by construction
+        // rather than against a table of expected digits: the identity cannot
+        // be satisfied by a wrong quotient, and it needs no oracle.
+        for n in [9, 18, 27, 28, 36, 37, 40, 42, 45, 54, 63, 71] {
+            let divisor = d(n);
+            let q = div(&big, &divisor, 0);
+            // q * divisor <= big < (q+1) * divisor
+            let prod = d_mul(&q, &divisor);
+            let next = d_mul(&add_one(&q), &divisor);
+            assert!(
+                cmp_str(&prod, &big) <= 0,
+                "{n}-digit divisor: quotient too large ({q})"
+            );
+            assert!(
+                cmp_str(&next, &big) > 0,
+                "{n}-digit divisor: quotient too small ({q})"
+            );
+        }
+    }
+
+    fn d_mul(a: &str, b: &str) -> String {
+        d(a).mul(&d(b), 0).format_base10()
+    }
+
+    fn add_one(a: &str) -> String {
+        d(a).add(&Decimal::from_i64(1)).format_base10()
+    }
+
+    /// Compare two non-negative integer strings by value.
+    fn cmp_str(a: &str, b: &str) -> i32 {
+        let (a, b) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
+        match a.len().cmp(&b.len()) {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Greater => 1,
+            core::cmp::Ordering::Equal => match a.cmp(b) {
+                core::cmp::Ordering::Less => -1,
+                core::cmp::Ordering::Greater => 1,
+                core::cmp::Ordering::Equal => 0,
+            },
+        }
+    }
+
+    /// The root must not depend on how many zeros the argument was written
+    /// with.
+    ///
+    /// A `Decimal` is `digits / 10^scale`, so its root is
+    /// `sqrt(digits) / 10^(scale/2)` — which is only a whole number of decimal
+    /// places when `scale` is even. With an odd one the halving rounded up and
+    /// the answer came back exactly `sqrt(10)` too small, so `sqrt(2)` was
+    /// right and `sqrt(2.0)` was `.4472…`. The parity was the *input's*, which
+    /// is why this is not a rounding bug: trailing zeros changed the answer.
+    #[test]
+    fn a_trailing_zero_does_not_change_a_square_root() {
+        for (bare, padded) in [
+            ("2", "2.0"),
+            ("4", "4.0"),
+            ("9", "9.000"),
+            ("0.25", "0.250"),
+            ("1.0049", "1.00490"),
+            ("100", "100.0"),
+        ] {
+            // Past 30 as well, which it could not be when this was written:
+            // the long-division borrow bug capped every root at about thirty
+            // places, and until that was fixed this invariant failed above it
+            // for a reason that had nothing to do with parity.
+            for scale in [0, 1, 5, 10, 20, 30, 45, 70] {
+                assert_eq!(
+                    sq(bare, scale),
+                    sq(padded, scale),
+                    "sqrt({bare}) vs sqrt({padded}) at scale {scale}"
+                );
+            }
+        }
+    }
+
+    /// Known digits, so the test above cannot pass by both sides being wrong
+    /// in the same way — which is exactly what it would do if the parity fix
+    /// were applied to the input rather than to the halving.
+    #[test]
+    fn square_roots_match_their_known_digits() {
+        // sqrt(2) = 1.41421356237309504880168872420969807856967187537694…
+        assert_eq!(sq("2", 10), "1.4142135623");
+        assert_eq!(sq("2.0", 10), "1.4142135623");
+        assert_eq!(sq("2", 30), "1.414213562373095048801688724209");
+        assert_eq!(sq("2.0", 30), "1.414213562373095048801688724209");
+        // Past thirty places, where this used to go wrong: `sqrt(2)` at 40 was
+        // `…242097601756851` against the true `…2096980785696`. The cause was
+        // not `sqrt` at all but the long-division borrow in `BigInt::divmod`,
+        // which `isqrt`'s Newton iteration leans on entirely.
+        assert_eq!(sq("2", 40), "1.4142135623730950488016887242096980785696");
+        assert_eq!(
+            sq("2", 70),
+            "1.4142135623730950488016887242096980785696718753769480731766797379907324"
+        );
+        // An exact root at a scale well past the old ceiling stays exact
+        // rather than drifting into 1.9999…, which is the other direction the
+        // same defect could have shown up in.
+        assert_eq!(sq("4", 50), format!("2.{}", "0".repeat(50)));
+        // Exact roots stay exact rather than drifting into 1.99999….
+        assert_eq!(sq("4", 20), "2.00000000000000000000");
+        assert_eq!(sq("4.0", 20), "2.00000000000000000000");
+        assert_eq!(sq("0.25", 5), ".50000");
+        assert_eq!(sq("0.250", 5), ".50000");
     }
 
     /// `a * b` at the calculator's `scale`, by POSIX's rule for `*`.

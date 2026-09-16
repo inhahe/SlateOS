@@ -52,7 +52,7 @@ DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
-pass=0; fail=0; xfail=0; xpass=0
+pass=0; fail=0; xfail=0; xpass=0; kbug=0; kfixed=0
 
 fixtures=$DIFF_TMP/fixtures
 mkdir -p "$fixtures"
@@ -105,6 +105,28 @@ report() {
 }
 
 run_case() { compare "$@"; report "date $*"; }
+
+# `known_bug_case KEY -- ARGS...` — a difference nobody wants, written up in
+# `known-issues.md` under KEY and not yet fixed.
+#
+# Distinct from `xfail_case`, which claims a difference is INTENDED. Filing
+# debt as an xfail records it as a decision and leaves the next reader no way
+# to tell the two apart. A known bug is printed on every run with its tracker
+# key and does not fail the run; it fails the run the moment it starts
+# PASSING, because a marker that outlives its bug is a false statement about
+# the tree.
+known_bug_case() {
+  local key=$1; shift
+  compare "$@"
+  if [ "$AGREED" = yes ]; then
+    kfixed=$((kfixed+1))
+    printf 'KFIXED date %s  (%s no longer reproduces -- close it and drop the marker)\n' "$*" "$key"
+  else
+    kbug=$((kbug+1))
+    printf 'KBUG date %s  (%s)\n%s\n' "$*" "$key" "$REPORT"
+  fi
+  return 0
+}
 
 xfail_case() {
   local why=$1; shift
@@ -195,6 +217,61 @@ run_case -d 'epoch'
 # "now" to a constant and asserts the exact instant each keyword produces,
 # which is something no differential harness can do, because it cannot make
 # two processes agree about what time it is.
+# --- relative forms, ANCHORED so they are a function of their arguments -------
+#
+# `date -d '2 days ago'` cannot go here for the reason at the top of this file:
+# it reads the clock, and two processes cannot be made to agree about what time
+# it is. Anchoring each one to an absolute date makes the same grammar
+# deterministic, so the displacement arithmetic IS comparable even though the
+# clock-relative spelling is not. The clock-relative spellings are pinned in
+# `d_accepts_the_measured_relative_forms` in date.rs, against a fixed `now`.
+run_case -d '2021-06-15 12:00:00 1 day' +%s
+run_case -d '2021-06-15 12:00:00 2 days ago' +%s
+run_case -d '2021-06-15 3 weeks ago' +%s
+run_case -d '2021-06-15 1 month ago' +%s
+run_case -d '2021-06-15 2 years ago' +%s
+run_case -d '2021-06-15 next month' +%s
+run_case -d '2021-06-15 last year' +%s
+run_case -d '2021-06-15 1 fortnight' +%s
+run_case -d '2021-06-15 12:00:00 1 day 2 hours ago' +%s
+run_case -d '2021-06-15 12:00:00 1 day ago 2 hours' +%s
+# Month-end carries rather than clamping: Jan 31 + 1 month is March 3rd.
+run_case -d '2021-01-31 1 month' +%s
+run_case -d '2021-03-31 1 month ago' +%s
+# A signed relative after a BARE time is a zone offset to GNU, not a
+# displacement: `12:00:00 +1 day` is one day later at UTC+1, and
+# `12:00:00 -1 day` is also one day LATER, at UTC-1. We refuse both rather
+# than answer a different number, so this row is a known bug and not an xfail
+# -- we intend to close it, which is what makes it debt.
+known_bug_case TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU \
+  -d '2021-06-15 12:00:00 +1 day' +%s
+# The neighbours that must NOT move: `-90 seconds` there is refused by GNU too,
+# a real zone offset still parses, and without a time the relative works.
+run_case -d '2021-06-15 12:00:00 -90 seconds' +%s
+run_case -d '2021-06-15 12:00:00 +0100' +%s
+run_case -d '2021-06-15 +1 day' +%s
+# Words that look relative and are not.
+run_case -d '2021-06-15 1 banana' +%s
+# A weekday beside an absolute date is IGNORED by GNU -- not checked against
+# the date, not moved to. These are the only weekday forms that can live here:
+# `date -d Monday` reads the clock, so it is pinned in date.rs instead, against
+# a fixed `now` that falls on a Tuesday.
+run_case -d '2021-06-15 12:00:00 Monday' +%s
+run_case -d '2021-06-15 12:00:00 next Friday' +%s
+run_case -d '2021-06-15 Sunday' +%s
+run_case -d '2021-06-15 12:00:00 Blursday' +%s
+# Twelve-hour clock. `12 am` is midnight and `12 pm` is noon, so the rule is
+# not "add twelve for pm" -- a version that just adds twelve is right for ten
+# hours in twelve, which is why both twelves are rows and not just one.
+run_case -d '2021-06-15 12 am' +%s
+run_case -d '2021-06-15 12 pm' +%s
+run_case -d '2021-06-15 1 pm' +%s
+run_case -d '2021-06-15 11 am' +%s
+run_case -d '2021-06-15 12:30 pm' +%s
+run_case -d '2021-06-15 13 pm' +%s
+run_case -d '2021-06-15 0 am' +%s
+run_case -d 'noon' +%s
+
 run_case -d '@0 + 1 day'
 run_case -d 'not a date at all'
 run_case -d ''
@@ -233,10 +310,14 @@ run_case --u
 xfail_case "our help text, not the GNU project's" --help
 xfail_case "our version string, not the GNU project's" --version
 
-printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
+printf '\n%d passed, %d differed, %d known bugs, %d differ on purpose' \
+  "$pass" "$fail" "$kbug" "$xfail"
 if [ "$xpass" -gt 0 ]; then
   printf ', %d NO LONGER differ (update the harness)' "$xpass"
 fi
+if [ "$kfixed" -gt 0 ]; then
+  printf ', %d known bugs are FIXED (close them)' "$kfixed"
+fi
 printf '\n'
 [ -n "${DIFF_SKIPPED:-}" ] && printf 'skipped:%s\n' "$DIFF_SKIPPED"
-[ "$fail" = 0 ] && [ "$xpass" = 0 ]
+[ "$fail" = 0 ] && [ "$xpass" = 0 ] && [ "$kfixed" = 0 ]

@@ -54,9 +54,52 @@
 //! `YYYY-MM-DD` with an optional `T`/space time and an optional `UTC`/`±HHMM`
 //! zone; spelled-out months in GNU's three orders; slashed dates, including the
 //! US `MM/DD/YYYY` reading of a bare one; bare times; and `now`, `today`,
-//! `tomorrow`, `yesterday`. **Anything else is still refused rather than
-//! approximated** — GNU's full language also has `2 weeks ago`, `next Friday`
-//! and much more, and those remain outside rather than being guessed at.
+//! `tomorrow`, `yesterday`.
+//!
+//! **Relative displacements were added on 2026-09-16**, the same way: measured
+//! first. `3 days`, `+3 days`, `3 days ago`, `next week`, `last year`, the
+//! `sec`/`min` abbreviations and `fortnight`, alone or applied to an absolute
+//! date. Two of the rules are not what reasoning produces, and both are pinned
+//! by tests:
+//!
+//! * **`ago` negates only the term immediately before it.** `1 day 2 hours
+//!   ago` is *plus* one day and *minus* two hours; `1 day ago 2 hours` is the
+//!   other way round. Treating it as flipping everything seen so far puts both
+//!   a day out.
+//! * **Month arithmetic carries rather than clamping.** `2021-01-31 1 month`
+//!   is **March 3rd**, because February 31st carries — not February 28th,
+//!   which is what a library that clamps would answer.
+//!
+//! **Weekday names followed**, and they have three rules of their own, all
+//! measured on a Wednesday — the one weekday that can tell them apart:
+//!
+//! * a **bare** weekday includes *today*: `Wednesday`, on a Wednesday, is
+//!   today. On any other day `Wednesday` and `next Wednesday` agree, so a
+//!   wrong rule here looks right six days in seven.
+//! * `next` forces strictly forward (+7 when it is today) and `last` strictly
+//!   backward (−7).
+//! * the result is at **midnight**, where `next week` keeps the current time
+//!   of day. Two rules that look like one.
+//!
+//! And beside an absolute date a weekday is **ignored** rather than checked or
+//! applied — `2021-06-15 12:00:00 Monday` is Tuesday June 15th, unchanged.
+//!
+//! **A day keyword with a time** (`yesterday 09:00`) and the **twelve-hour
+//! clock** (`12 am`, `1 pm`, `12:30 pm`) followed. The twelves are the only
+//! hard part: 12 am is midnight and 12 pm is noon, so the rule is not "add
+//! twelve for pm" — a version that simply adds twelve is right for ten hours
+//! in twelve and wrong at both ends of the day. `noon` and `midnight` are not
+//! keywords, which was measured rather than assumed: GNU refuses both.
+//!
+//! With that, every one of the 38 forms in the grammar probe is accepted —
+//! ours took 13 of them before 2026-09-16.
+//!
+//! The one form still refused is a signed relative straight after a bare time,
+//! because there GNU reads the sign as a time-zone offset and not as a
+//! displacement —
+//! `TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU`. It is
+//! refused rather than approximated, which is the same choice as everywhere
+//! else in this file: a visible refusal beats a plausible wrong instant.
 //!
 //! Out-of-range components are *refused*, not normalised: `date -d 2021-03-32`
 //! is an error even though the `mktime` underneath would carry it into April.
@@ -588,6 +631,337 @@ fn keyword_instant(tok: &str, zone: &Zone, now: i64) -> Option<i64> {
     )
 }
 
+/// Remove a `... am` / `... pm` time from `toks`, returning it as 24-hour.
+///
+/// Both shapes GNU takes: a bare hour (`1 pm`) and a full clock time
+/// (`12:30 pm`). Measured:
+///
+/// | operand | GNU |
+/// |---|---|
+/// | `12 am` | 00:00 |
+/// | `12 pm` | 12:00 |
+/// | `1 pm` | 13:00 |
+/// | `11 am` | 11:00 |
+/// | `12:30 pm` | 12:30 |
+///
+/// The twelves are the whole reason this is a function and not an `if`: 12 am
+/// is midnight and 12 pm is noon, so the conversion is not "add twelve for pm"
+/// — it is "12 becomes 0, then add twelve for pm". Getting that backwards
+/// gives a result that is right for ten hours in twelve.
+///
+/// `noon` and `midnight` are NOT keywords here, which was also measured:
+/// `date -d noon` is an error in GNU, so they are not accepted.
+fn take_meridiem_time(toks: &mut Vec<&str>) -> Option<(i64, i64, i64)> {
+    for i in 0..toks.len() {
+        let suffix = toks[i].to_ascii_lowercase();
+        let pm = match suffix.as_str() {
+            "am" => false,
+            "pm" => true,
+            _ => continue,
+        };
+        let prev = i.checked_sub(1).map(|p| toks[p])?;
+        // Either `H:M[:S]` or a bare hour.
+        let (h, m, s) = parse_hms(prev).or_else(|| prev.parse::<i64>().ok().map(|h| (h, 0, 0)))?;
+        if !(1..=12).contains(&h) {
+            return None;
+        }
+        let hour = match (h, pm) {
+            (12, false) => 0,
+            (12, true) => 12,
+            (_, true) => h.saturating_add(12),
+            (_, false) => h,
+        };
+        toks.drain(i.saturating_sub(1)..=i);
+        return Some((hour, m, s));
+    }
+    None
+}
+
+/// `[next|last] WEEKDAY`: which day, and whether the word forced a direction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct WeekdayTerm {
+    /// Days since Sunday, matching [`Tm::wday`].
+    target: i64,
+    /// `0` bare, `1` for `next`, `-1` for `last`.
+    force: i64,
+}
+
+/// A weekday name to its [`Tm::wday`] number, or `None`.
+///
+/// The three-letter abbreviations plus `tues`, `thur` and `thurs`, which GNU
+/// accepts and a table built from the full names alone would refuse.
+fn weekday_from_name(word: &str) -> Option<i64> {
+    Some(match word.to_ascii_lowercase().as_str() {
+        "sunday" | "sun" => 0,
+        "monday" | "mon" => 1,
+        "tuesday" | "tue" | "tues" => 2,
+        "wednesday" | "wed" => 3,
+        "thursday" | "thu" | "thur" | "thurs" => 4,
+        "friday" | "fri" => 5,
+        "saturday" | "sat" => 6,
+        _ => return None,
+    })
+}
+
+/// Remove a weekday term from `toks`, if one is there.
+///
+/// Only the FIRST is taken; `date -d 'Monday Tuesday'` is not a form worth
+/// inventing a meaning for, and leaving the second token in place means the
+/// operand is refused rather than silently half-read.
+fn take_weekday_term(toks: &mut Vec<&str>) -> Option<WeekdayTerm> {
+    for i in 0..toks.len() {
+        let Some(target) = weekday_from_name(toks[i]) else {
+            continue;
+        };
+        // A preceding `next`/`last` belongs to this term.
+        let force = match i.checked_sub(1).map(|p| toks[p]) {
+            Some(p) if p.eq_ignore_ascii_case("next") => 1,
+            Some(p) if p.eq_ignore_ascii_case("last") => -1,
+            _ => 0,
+        };
+        let from = if force == 0 { i } else { i.saturating_sub(1) };
+        toks.drain(from..=i);
+        return Some(WeekdayTerm { target, force });
+    }
+    None
+}
+
+/// The day-of-month `now` must move to for a weekday term, at MIDNIGHT.
+///
+/// Measured against GNU 9.4 on a Wednesday, which is the only day that can
+/// distinguish the three rules:
+///
+/// | operand | result | rule |
+/// |---|---|---|
+/// | `Wednesday` | **today** | a bare weekday INCLUDES today |
+/// | `next Wednesday` | +7 | `next` forces strictly forward |
+/// | `last Wednesday` | −7 | `last` forces strictly backward |
+/// | `Tuesday` | +6 | forward, never backward |
+/// | `last Tuesday` | −1 | backward |
+///
+/// The bare case is the one worth measuring on the right day: on any other
+/// weekday `Wednesday` and `next Wednesday` agree, so a rule that is wrong
+/// about "today" looks right six days in seven.
+///
+/// The time is set to midnight, which is NOT what the other relative forms do
+/// — `next week` keeps the current time of day and `next Monday` does not.
+fn weekday_offset(term: WeekdayTerm, today: i64) -> i64 {
+    let forward = (term.target.saturating_sub(today)).rem_euclid(7);
+    match term.force {
+        1 if forward == 0 => 7,
+        -1 => {
+            let back = (today.saturating_sub(term.target)).rem_euclid(7);
+            if back == 0 { -7 } else { -back }
+        }
+        _ => forward,
+    }
+}
+
+/// Apply a [`Shift`]'s months and days to a civil date, leaving the result
+/// possibly out of range for its month.
+///
+/// Out of range ON PURPOSE. GNU does not clamp a month-end: measured,
+/// `date -d '2026-01-31 1 month'` is **March 3rd**, not February 28th, because
+/// it adds one to the month field and lets `mktime` carry February 31st
+/// forward. `date -d '2026-03-31 1 month ago'` is March 3rd for the same
+/// reason. Clamping — the behaviour most date libraries choose, and the one
+/// that looks more correct — would disagree with GNU on every month-end.
+fn shift_civil(year: i64, month: i64, day: i64, sh: Shift) -> (i64, i64, i64) {
+    // Months are exact arithmetic, so they are normalised here; the day is
+    // left alone for `Zone::epoch`/`days_from_civil` to carry.
+    let total = year
+        .saturating_mul(12)
+        .saturating_add(month.saturating_sub(1))
+        .saturating_add(sh.months);
+    (
+        total.div_euclid(12),
+        total.rem_euclid(12).saturating_add(1),
+        day.saturating_add(sh.days),
+    )
+}
+
+/// A relative displacement, kept in CALENDAR fields rather than seconds.
+///
+/// Months cannot be seconds and days cannot be either, once a time zone is in
+/// play: "1 month" from January 31st is not 2 678 400 seconds later, and "1
+/// day" across a daylight-saving change is not 86 400. Carrying the three
+/// separately and letting [`Zone::epoch`] normalise the result is what makes
+/// both come out where GNU puts them.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+struct Shift {
+    months: i64,
+    days: i64,
+    seconds: i64,
+}
+
+/// One unit word to its field, e.g. `weeks` -> 7 days.
+///
+/// The abbreviations are the ones GNU accepts, measured rather than assumed:
+/// `sec`, `secs`, `min`, `mins` and the singular of every plural all work, and
+/// `fortnight` is a real unit in this grammar.
+fn unit_shift(word: &str, n: i64) -> Option<Shift> {
+    let w = word.to_ascii_lowercase();
+    let w = w.as_str();
+    let s = |seconds: i64| Shift {
+        seconds,
+        ..Shift::default()
+    };
+    let d = |days: i64| Shift {
+        days,
+        ..Shift::default()
+    };
+    let m = |months: i64| Shift {
+        months,
+        ..Shift::default()
+    };
+    Some(match w {
+        "sec" | "secs" | "second" | "seconds" => s(n),
+        "min" | "mins" | "minute" | "minutes" => s(n.saturating_mul(60)),
+        "hour" | "hours" => s(n.saturating_mul(3_600)),
+        "day" | "days" => d(n),
+        "week" | "weeks" => d(n.saturating_mul(7)),
+        "fortnight" | "fortnights" => d(n.saturating_mul(14)),
+        "month" | "months" => m(n),
+        "year" | "years" => m(n.saturating_mul(12)),
+        _ => return None,
+    })
+}
+
+impl Shift {
+    fn add(self, other: Self) -> Self {
+        Self {
+            months: self.months.saturating_add(other.months),
+            days: self.days.saturating_add(other.days),
+            seconds: self.seconds.saturating_add(other.seconds),
+        }
+    }
+
+    fn negate(self) -> Self {
+        Self {
+            months: self.months.saturating_neg(),
+            days: self.days.saturating_neg(),
+            seconds: self.seconds.saturating_neg(),
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        self == Self::default()
+    }
+}
+
+/// Remove every relative term from `toks`, returning their sum.
+///
+/// Recognised, all measured against GNU date 9.x:
+///
+/// | form | meaning |
+/// |---|---|
+/// | `3 days`, `+3 days`, `-3 days` | the sign belongs to that term alone |
+/// | `3 days ago` | the term is negated |
+/// | `next week`, `last year` | ±1 of that unit |
+///
+/// **`ago` negates only the term immediately before it**, which is the rule
+/// reasoning gets wrong. Measured: `1 day 2 hours ago` is +1 day and MINUS 2
+/// hours, and `1 day ago 2 hours` is minus 1 day and PLUS 2 hours. Treating
+/// `ago` as negating the whole accumulated relative set — the obvious
+/// reading, and what this was first written as — puts both of those a day out.
+fn take_relative_terms(toks: &mut Vec<&str>) -> Shift {
+    // Terms are collected rather than summed as they are found, because `ago`
+    // has to reach back and flip the one before it. Summing eagerly would mean
+    // undoing a term already folded into the total, which is arithmetic that
+    // works and does not read like the rule it implements.
+    let mut terms: Vec<Shift> = Vec::new();
+    let mut kept: Vec<&str> = Vec::with_capacity(toks.len());
+    let mut i = 0usize;
+
+    while i < toks.len() {
+        let tok = toks[i];
+        // `ago` negates the previous term, and only that one.
+        if tok.eq_ignore_ascii_case("ago")
+            && let Some(prev) = terms.pop()
+        {
+            terms.push(prev.negate());
+            i = i.saturating_add(1);
+            continue;
+        }
+        // `today` / `tomorrow` / `yesterday` as a DAY term, which is what
+        // makes `yesterday 09:00` work: the keyword moves the calendar day and
+        // the time token that follows replaces the time of day.
+        //
+        // Single-token operands never reach here -- `keyword_instant` above
+        // answers them and returns -- so this changes nothing about bare
+        // `yesterday`, which keeps the current time of day rather than going
+        // to midnight. Two spellings, two rules, and the early return is what
+        // keeps them apart.
+        if let Some(days) = match tok.to_ascii_lowercase().as_str() {
+            "today" => Some(0),
+            "tomorrow" => Some(1),
+            "yesterday" => Some(-1),
+            _ => None,
+        } {
+            terms.push(Shift {
+                days,
+                ..Shift::default()
+            });
+            i = i.saturating_add(1);
+            continue;
+        }
+        // `next UNIT` / `last UNIT`.
+        if (tok.eq_ignore_ascii_case("next") || tok.eq_ignore_ascii_case("last"))
+            && let Some(next_tok) = toks.get(i.saturating_add(1))
+        {
+            let n = if tok.eq_ignore_ascii_case("next") {
+                1
+            } else {
+                -1
+            };
+            if let Some(sh) = unit_shift(next_tok, n) {
+                terms.push(sh);
+                i = i.saturating_add(2);
+                continue;
+            }
+        }
+        // `[+-]?N UNIT`.
+        //
+        // A SIGNED number directly after a bare time is left alone, because
+        // there it is not a relative at all. Measured:
+        //
+        //     2021-06-15 12:00:00 +1 day  ->  Jun 16 11:00 UTC
+        //     2021-06-15 12:00:00 -1 day  ->  Jun 16 13:00 UTC
+        //
+        // Both are one day LATER, an hour either side. GNU reads the `+1` as a
+        // zone offset in hours and the bare `day` as one day, so the sign
+        // belongs to the zone and never to the displacement. With a zone
+        // already present -- `12:00:00 UTC +1 day` -- it is an ordinary
+        // relative again and lands on Jun 16 12:00.
+        //
+        // Reproducing that needs zone and relative parsing interleaved, which
+        // this two-pass shape cannot express. So the form is REFUSED here
+        // rather than answered differently: before this function existed it
+        // was refused too, and a refusal a caller can see beats a number that
+        // is a day and an hour from the one GNU gives. Tracked as
+        // `TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU`.
+        let signed = tok.starts_with('+') || tok.starts_with('-');
+        if signed && kept.last().is_some_and(|p| parse_hms(p).is_some()) {
+            kept.push(tok);
+            i = i.saturating_add(1);
+            continue;
+        }
+        if let Ok(n) = tok.parse::<i64>()
+            && let Some(next_tok) = toks.get(i.saturating_add(1))
+            && let Some(sh) = unit_shift(next_tok, n)
+        {
+            terms.push(sh);
+            i = i.saturating_add(2);
+            continue;
+        }
+        kept.push(tok);
+        i = i.saturating_add(1);
+    }
+
+    *toks = kept;
+    terms.into_iter().fold(Shift::default(), Shift::add)
+}
+
 /// Resolve a `-d` operand to an instant, or `None` if it is not a date.
 ///
 /// `now` is passed in rather than read here so the clock-relative forms are
@@ -626,8 +1000,73 @@ fn parse_date_spec(raw: &[u8], zone: &Zone, now: i64) -> Option<i64> {
         }
     }
 
+    // Relative terms come out BEFORE the rest is parsed, so `2026-01-02 +1 day`
+    // reaches the date parser as `2026-01-02` and the displacement is applied
+    // to whatever it resolves to.
+    //
+    // Deliberately AFTER the `@SECONDS` branch above, and that ordering is
+    // measured rather than tidy: `date -d '@0 + 1 day'` is an ERROR in GNU, so
+    // `@` must not survive into a form that accepts relatives. Extracting
+    // first would have made it work here and diverge there.
+    let mut toks = toks;
+    let shift = take_relative_terms(&mut toks);
+
+    // A weekday name is taken out here and applied only if nothing else
+    // remains. When an absolute date IS given, GNU ignores the weekday
+    // entirely rather than checking it or moving to it -- measured,
+    // `2021-06-15 12:00:00 Monday` answers Tuesday June 15th, unchanged. So
+    // removing it and not looking at it again is exactly right, and the
+    // branch below simply never fires for that operand.
+    let weekday = take_weekday_term(&mut toks);
+
+    if toks.is_empty()
+        && let Some(term) = weekday
+    {
+        let tm = zone.local(now, 0);
+        let day = i64::from(tm.day).saturating_add(weekday_offset(term, i64::from(tm.wday)));
+        let (y, m, d) = shift_civil(tm.year, i64::from(tm.month), day, shift);
+        return Some(
+            zone.epoch(&Civil {
+                year: y,
+                month: m,
+                day: d,
+                // Midnight, not the current time of day. `next week` keeps the
+                // clock and `next Monday` does not; the two look like one rule
+                // and are two.
+                hour: 0,
+                minute: 0,
+                second: shift.seconds,
+            })
+            .0,
+        );
+    }
+
+    // Relatives with nothing else: displace the current instant. Note `now`
+    // and not midnight -- `date -d '1 day'` is measured to keep the current
+    // time of day, where `date -d ''` is midnight. The two look like one rule
+    // and are two.
+    if toks.is_empty() && !shift.is_zero() {
+        let tm = zone.local(now, 0);
+        let (y, m, d) = shift_civil(tm.year, i64::from(tm.month), i64::from(tm.day), shift);
+        return Some(
+            zone.epoch(&Civil {
+                year: y,
+                month: m,
+                day: d,
+                hour: i64::from(tm.hour),
+                minute: i64::from(tm.minute),
+                second: i64::from(tm.second).saturating_add(shift.seconds),
+            })
+            .0,
+        );
+    }
+
+    // `1 pm` is taken out before the loop below, which would otherwise read
+    // the `1` as a bare number and refuse the `pm` outright.
+    let meridiem = take_meridiem_time(&mut toks);
+
     let mut ymd: Option<(i64, i64, i64)> = None;
-    let mut hms: Option<(i64, i64, i64)> = None;
+    let mut hms: Option<(i64, i64, i64)> = meridiem;
     let mut named_month: Option<i64> = None;
     let mut offset: Option<i64> = None;
     let mut bare: Vec<i64> = Vec::new();
@@ -696,6 +1135,13 @@ fn parse_date_spec(raw: &[u8], zone: &Zone, now: i64) -> Option<i64> {
         return None;
     }
     let (hour, minute, second) = hms.unwrap_or((0, 0, 0));
+
+    // The literal date was validated above against its own month; the shift is
+    // applied afterwards and is allowed to carry out of range, which is what
+    // GNU does. `2021-03-32` is still refused and `2021-03-31 1 day` is still
+    // April 1st — a bad date and a displaced good one are different things.
+    let (year, month, day) = shift_civil(year, month, day, shift);
+    let second = second.saturating_add(shift.seconds);
 
     match offset {
         // An explicit offset makes the wall clock absolute, so the local zone
@@ -1091,6 +1537,153 @@ mod tests {
         assert_eq!(spec("tomorrow"), Some(TEST_NOW + 86_400));
         assert_eq!(spec("yesterday"), Some(TEST_NOW - 86_400));
         assert_eq!(spec("TOMORROW"), Some(TEST_NOW + 86_400));
+    }
+
+    /// `TEST_NOW` is 2021-06-15 12:00:00 UTC, so every expected value below
+    /// was read off GNU 9.4 as `date -u -d '2021-06-15 12:00:00 <form>' +%s`
+    /// rather than computed here with the same arithmetic as the code.
+    #[test]
+    fn d_accepts_the_measured_relative_forms() {
+        // Plain displacement, both directions, in each unit family.
+        assert_eq!(spec("1 day"), Some(1_623_844_800));
+        assert_eq!(spec("2 days ago"), Some(1_623_585_600));
+        assert_eq!(spec("3 weeks ago"), Some(1_621_944_000));
+        assert_eq!(spec("1 month ago"), Some(1_621_080_000));
+        assert_eq!(spec("2 years ago"), Some(1_560_600_000));
+        assert_eq!(spec("2 hours"), Some(1_623_765_600));
+        assert_eq!(spec("30 minutes"), Some(1_623_760_200));
+        assert_eq!(spec("1 fortnight"), Some(1_624_968_000));
+
+        // `next`/`last` are ±1 of a unit.
+        assert_eq!(spec("next day"), Some(1_623_844_800));
+        assert_eq!(spec("last week"), Some(1_623_153_600));
+        assert_eq!(spec("next month"), Some(1_626_350_400));
+        assert_eq!(spec("last year"), Some(1_592_222_400));
+
+        // The abbreviations GNU takes.
+        assert_eq!(spec("1 sec"), spec("1 second"));
+        assert_eq!(spec("2 mins"), spec("2 minutes"));
+
+        // `ago` negates ONLY the term before it. Both of these are wrong by a
+        // day under the obvious reading, where `ago` flips everything seen so
+        // far -- which is what this was first written as.
+        assert_eq!(spec("1 day 2 hours ago"), Some(1_623_837_600));
+        assert_eq!(spec("1 day ago 2 hours"), Some(1_623_679_200));
+
+        // Anchored to an absolute date rather than to the clock.
+        assert_eq!(spec("2021-06-15 12:00:00 1 day"), Some(1_623_844_800));
+
+        // Month arithmetic OVERFLOWS, it does not clamp: January 31st plus a
+        // month is March 3rd, because February 31st carries. Both spellings
+        // land on the same instant, which is the check that the carry is real
+        // and not a special case.
+        assert_eq!(spec("2021-01-31 1 month"), Some(1_614_729_600));
+        assert_eq!(spec("2021-03-31 1 month ago"), Some(1_614_729_600));
+
+        // A signed relative straight after a bare time is GNU's ZONE OFFSET,
+        // not a displacement, so it is refused rather than answered
+        // differently. `-90 seconds` there is refused by GNU too, so that one
+        // matches exactly.
+        assert_eq!(spec("2021-06-15 12:00:00 +1 day"), None);
+        assert_eq!(spec("2021-06-15 12:00:00 -90 seconds"), None);
+        // ...and the forms it must not disturb: a real zone offset, and an
+        // unsigned relative in the same position.
+        assert_eq!(spec("2021-06-15 12:00:00 +0100"), Some(1_623_754_800));
+        assert_eq!(spec("2021-06-15 +1 day"), Some(1_623_801_600));
+
+        // `@SECONDS` still does not combine with relatives -- measured, GNU
+        // errors on `@0 + 1 day`, and the extraction is placed after the `@`
+        // branch so it cannot start working here.
+        assert_eq!(spec("@0 1 day"), None);
+
+        // The control: a word that looks relative but is not a unit stays
+        // refused, so extraction cannot quietly swallow a bad operand.
+        assert_eq!(spec("1 banana"), None);
+        assert_eq!(spec("next banana"), None);
+    }
+
+    /// `TEST_NOW` is **Tuesday** 2021-06-15 12:00:00 UTC.
+    ///
+    /// The target dates and their weekdays were read off GNU
+    /// (`date -u -d 2021-06-22 +%A +%s`), and the RULE the offsets implement
+    /// was measured live against GNU on a Wednesday — the one weekday on
+    /// which `Wednesday` and `next Wednesday` disagree. Neither number here is
+    /// computed by the arithmetic under test.
+    #[test]
+    fn d_accepts_the_measured_weekday_forms() {
+        // A bare weekday INCLUDES today: Tuesday, on a Tuesday, is today —
+        // at MIDNIGHT, not at `TEST_NOW`'s noon.
+        assert_eq!(spec("Tuesday"), Some(1_623_715_200));
+        // `next` forces strictly forward, so on a Tuesday it is +7.
+        assert_eq!(spec("next Tuesday"), Some(1_624_320_000));
+        // `last` forces strictly backward: -7, not 0.
+        assert_eq!(spec("last Tuesday"), Some(1_623_110_400));
+
+        // A different weekday goes forward, never backward.
+        assert_eq!(spec("Wednesday"), Some(1_623_801_600));
+        assert_eq!(spec("Monday"), Some(1_624_233_600));
+        assert_eq!(spec("last Monday"), Some(1_623_628_800));
+        assert_eq!(spec("Friday"), Some(1_623_974_400));
+        assert_eq!(spec("last Friday"), Some(1_623_369_600));
+
+        // `next X` and bare `X` agree when X is not today, which is why the
+        // Tuesday rows above are the ones that actually pin the rule.
+        assert_eq!(spec("next Wednesday"), spec("Wednesday"));
+
+        // Abbreviations and case, all of which GNU takes.
+        assert_eq!(spec("tue"), spec("Tuesday"));
+        assert_eq!(spec("TUESDAY"), spec("Tuesday"));
+        assert_eq!(spec("tues"), spec("Tuesday"));
+        assert_eq!(spec("thurs"), spec("Thursday"));
+        assert_eq!(spec("thur"), spec("Thursday"));
+        assert_eq!(spec("mon"), spec("Monday"));
+
+        // With an absolute date present GNU IGNORES the weekday rather than
+        // moving to it or checking it — measured, and the reason the branch
+        // that applies one only fires when nothing else is left.
+        assert_eq!(
+            spec("2021-06-15 12:00:00 Monday"),
+            spec("2021-06-15 12:00:00")
+        );
+
+        // Controls: a non-weekday word is still refused, and a weekday twice
+        // is refused rather than half-read.
+        assert_eq!(spec("Blursday"), None);
+        assert_eq!(spec("Monday Tuesday"), None);
+    }
+
+    /// `TEST_NOW` is 2021-06-15 12:00:00 UTC; every expected instant below was
+    /// converted by GNU (`date -u -d '2021-06-14 09:00:00' +%s`).
+    #[test]
+    fn d_accepts_a_day_keyword_with_a_time_and_a_twelve_hour_clock() {
+        // A day keyword moves the calendar day and the time REPLACES the time
+        // of day. Bare `yesterday` keeps the clock instead, and still does --
+        // `keyword_instant` answers the single-token spelling before the
+        // relative extraction is ever reached.
+        assert_eq!(spec("yesterday 09:00"), Some(1_623_661_200));
+        assert_eq!(spec("tomorrow 17:30"), Some(1_623_864_600));
+        assert_eq!(spec("today 09:00"), Some(1_623_747_600));
+        assert_eq!(spec("yesterday"), Some(TEST_NOW - 86_400));
+
+        // The twelves are the whole difficulty: 12 am is MIDNIGHT and 12 pm is
+        // NOON, so the rule is not "add twelve for pm". A version that just
+        // added twelve is right for ten hours in twelve and wrong at both ends
+        // of the day.
+        assert_eq!(spec("12 am"), Some(1_623_715_200));
+        assert_eq!(spec("12 pm"), Some(1_623_758_400));
+        assert_eq!(spec("1 pm"), Some(1_623_762_000));
+        assert_eq!(spec("11 am"), Some(1_623_754_800));
+        assert_eq!(spec("12:30 pm"), Some(1_623_760_200));
+
+        // Beside a date, and the date wins for the day.
+        assert_eq!(spec("2021-06-15 3 pm"), Some(1_623_769_200));
+
+        // Controls, all refused by GNU too: an hour outside 1-12, and the
+        // words that look like they should be keywords and are not.
+        assert_eq!(spec("13 pm"), None);
+        assert_eq!(spec("0 am"), None);
+        assert_eq!(spec("noon"), None);
+        assert_eq!(spec("midnight"), None);
 
         // A bare time means TODAY at that time; an empty operand means today
         // at MIDNIGHT. Both measured, and they are different rules.

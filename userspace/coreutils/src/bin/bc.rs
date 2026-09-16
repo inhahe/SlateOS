@@ -10,7 +10,7 @@
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program};
-use coreutils::quote::{quoteaf_os, quotef_os};
+use coreutils::quote::quotef_os;
 use coreutils::stdfd;
 use std::collections::HashMap;
 use std::env;
@@ -912,13 +912,13 @@ impl Parser {
             // error would be a wrong answer with a diagnostic attached.
             Token::Quit | Token::Halt => {
                 self.advance();
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Halt)
             }
             Token::Print => {
                 self.advance();
                 let items = self.parse_print_list();
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Print(items))
             }
             Token::If => Some(self.parse_if()),
@@ -932,29 +932,30 @@ impl Parser {
                 } else {
                     None
                 };
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Return(expr))
             }
             Token::Break => {
                 self.advance();
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Break)
             }
             Token::Continue => {
                 self.advance();
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Continue)
             }
             Token::LBrace => {
                 self.advance();
                 let body = self.parse_stmt_list();
                 self.expect(&Token::RBrace);
+                self.require_terminator();
                 Some(Stmt::Block(body))
             }
             _ => {
                 if self.is_expr_start() {
                     let expr = self.parse_expr();
-                    self.skip_terminator();
+                    self.require_terminator();
                     Some(Stmt::Expr(expr))
                 } else {
                     // Skip unexpected token — but say so first. Skipping in
@@ -971,6 +972,48 @@ impl Parser {
     fn skip_terminator(&mut self) {
         if *self.peek() == Token::Newline || *self.peek() == Token::Semicolon {
             self.advance();
+        }
+    }
+
+    /// End a statement, refusing whatever cannot legally come next.
+    ///
+    /// bc separates statements with `;` or a newline, and until this existed
+    /// ours did not insist: `1 2` printed `1` and `2` where GNU calls it a
+    /// syntax error. That is mostly harmless on its own — nobody writes
+    /// `1 2` — but it is what stopped a *typo* from being reported, because a
+    /// stray character removed by the scanner turns `1 $ 2` into exactly that.
+    ///
+    /// # What may follow a statement, measured rather than reasoned
+    ///
+    /// The failure mode of getting this wrong is rejecting valid programs,
+    /// which is worse than the over-acceptance being fixed, so every row below
+    /// was run against GNU bc 1.07.1 before a line of this was written:
+    ///
+    /// | after a statement | GNU |
+    /// |---|---|
+    /// | `;` or newline | the separators themselves |
+    /// | `}` | accepted — `{ print "a" }` |
+    /// | `else` | accepted — `if (1) print "a" else print "b"` |
+    /// | end of input | accepted |
+    /// | anything else | `syntax error` |
+    ///
+    /// Two results are worth keeping because they are not what one would
+    /// guess. **A closing brace does not license a following statement**:
+    /// `{ 1 } 2` is refused, as are `if (1) { … } 2` and `while (0) { } 2`, so
+    /// a block ends a statement and still needs a separator after it. And a
+    /// **function definition is not a statement** in this sense — `define f()
+    /// { return (1) } f()` is accepted — because GNU's grammar makes a
+    /// definition its own input item. That is why [`Self::parse_define`] does
+    /// not call this.
+    fn require_terminator(&mut self) {
+        match *self.peek() {
+            Token::Newline | Token::Semicolon => {
+                self.advance();
+            }
+            // Legal followers that are NOT terminators, so they stay put for
+            // whoever is parsing the construct around this one.
+            Token::RBrace | Token::Else | Token::Eof => {}
+            _ => self.record_error(),
         }
     }
 
@@ -1113,6 +1156,18 @@ impl Parser {
             self.advance();
             let stmts = self.parse_stmt_list();
             self.expect(&Token::RBrace);
+            // The braced body ends the enclosing `if`/`while`/`for`, so the
+            // statement-separator rule applies here as much as after a bare
+            // one: measured, `if (1) { print "a" } 2` is a syntax error on
+            // GNU. `else` is among the legal followers, so the `else` half of
+            // an `if` still parses.
+            //
+            // The braceless branch below needs nothing: `parse_stmt` has
+            // already required a terminator for whatever statement it read,
+            // and that terminator is the enclosing construct's too. Requiring
+            // a second one there would reject `if (1) print "a"` followed by
+            // any next line at all.
+            self.require_terminator();
             stmts
         } else if let Some(stmt) = self.parse_stmt() {
             vec![stmt]
@@ -1455,8 +1510,6 @@ enum RuntimeError {
     Math(DecimalError),
     /// A call to a name that is neither a builtin nor a defined function.
     UndefinedFunction(String),
-    /// `l(x)` for `x <= 0`, where the logarithm is not defined over the reals.
-    LogOfNonPositive,
     /// Not an error: `halt` reached inside a called function.
     ///
     /// A `halt` in a statement position comes back as [`StmtResult::Halt`], but
@@ -1508,7 +1561,6 @@ impl std::fmt::Display for RuntimeError {
             // different case: GNU's is `Function f not defined.`, ending in a
             // full stop, where ours was `undefined function f`.
             Self::UndefinedFunction(name) => write!(f, "Function {name} not defined."),
-            Self::LogOfNonPositive => f.write_str("log of non-positive number"),
             Self::Halt => f.write_str("halt"),
         }
     }
@@ -2261,8 +2313,13 @@ impl Interpreter {
         Ok(result.rescale(self.scale))
     }
 
-    /// atan(x) using Taylor series (converges for |x| <= 1).
-    /// For |x| > 1, use identity: atan(x) = pi/2 - atan(1/x).
+    /// atan(x), to the working scale.
+    ///
+    /// For |x| > 1, `atan(x) = ±pi/2 - atan(1/x)` brings the argument inside
+    /// the unit interval; [`Self::atan_reduced`] then does the real work. That
+    /// inversion is NOT enough on its own, which is the whole of
+    /// `TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE`: it maps `x = 1.0001` to
+    /// `0.9999`, which is just as slow to sum as the argument it came from.
     fn builtin_atan(&self, x: Decimal) -> Eval {
         let scale = self.working_scale();
         let one = Decimal::from_i64(1);
@@ -2271,7 +2328,7 @@ impl Interpreter {
             let pi_half = self.compute_pi(scale)?.div(&Decimal::from_i64(2), scale)?;
             // |x| > 1 is exactly the branch condition, so x is not zero.
             let inv = one.div(&x, scale)?;
-            let atan_inv = self.atan_series(&inv, scale)?;
+            let atan_inv = self.atan_reduced(&inv, scale)?;
             let result = if x.is_negative() {
                 pi_half.negate().sub(&atan_inv)
             } else {
@@ -2279,18 +2336,105 @@ impl Interpreter {
             };
             return Ok(result.rescale(self.scale));
         }
-        Ok(self.atan_series(&x, scale)?.rescale(self.scale))
+        Ok(self.atan_reduced(&x, scale)?.rescale(self.scale))
     }
 
+    /// atan(x) for |x| <= 1, by halving the argument until the series is
+    /// quick, then doubling the answer back.
+    ///
+    /// `atan(x) = 2 * atan( x / (1 + sqrt(1 + x^2)) )`, applied until |x| is
+    /// under [`Self::ATAN_REDUCE_TO`].
+    ///
+    /// # Why the plain series was wrong, and wrong in the third digit
+    ///
+    /// The Maclaurin series for arctangent is `x - x^3/3 + x^5/5 - …`, whose
+    /// terms fall off like `1/(2k+1)` when `x = 1` — it is the alternating
+    /// harmonic series there, and it converges so slowly that no practical
+    /// term count reaches even four correct digits. The old code summed a
+    /// **fixed 100 terms** and stopped, and its `is_negligible` guard could
+    /// never fire at `x = 1` because `x^2 = 1` leaves the numerator at ±1 for
+    /// ever.
+    ///
+    /// The arithmetic is exact enough to be worth stating, because it is what
+    /// identifies the cause rather than merely being consistent with it: an
+    /// alternating series truncated after N terms sits within half the first
+    /// omitted term, here `1/(2*100+1)/2 = 0.00248…`, and the measured error
+    /// was `.7853981633 - .7828982258 = .0024999`. That is the truncation, not
+    /// rounding drift and not a wrong formula.
+    ///
+    /// # Why reduction rather than more terms
+    ///
+    /// Raising the cap buys digits at a ruinous rate: the alternating harmonic
+    /// series needs about `10^d` terms for `d` digits, so even ten correct
+    /// digits is out of reach. Each halving instead costs one square root and
+    /// roughly halves the argument, so five of them take `x = 1` to about
+    /// `0.03`, where the series gains ~3 digits per term. Bounded work for
+    /// unbounded precision, which a term cap can never be.
+    fn atan_reduced(&self, x: &Decimal, outer_scale: usize) -> Eval {
+        // Guard digits of our own, on top of the caller's. Each halving is
+        // undone by a doubling at the end, so whatever error the series carries
+        // is multiplied by `2^halvings` -- about 16 -- and every reduction step
+        // truncates a division and a square root at the working scale. Ten
+        // spare digits cover both with room over; without them `a(0.6)` at
+        // `scale=30` agreed with GNU to only 17 places.
+        let scale = outer_scale.saturating_add(10);
+        let one = Decimal::from_i64(1);
+        let two = Decimal::from_i64(2);
+        let threshold = one.div(&Decimal::from_i64(Self::ATAN_REDUCE_TO), scale)?;
+
+        let mut v = x.clone();
+        let mut halvings = 0u32;
+        // The bound is a non-termination guard, not an accuracy parameter:
+        // each pass strictly shrinks |v|, and from |x| <= 1 the threshold is
+        // reached in five. A `while` with no bound would be a hang if some
+        // future `Decimal` rounding made the sequence stall.
+        while halvings < 64 && v.abs() > threshold {
+            // sqrt cannot fail here: 1 + v^2 >= 1 > 0.
+            // sqrt cannot fail here: 1 + v^2 >= 1 > 0.
+            let root = one.add(&v.mul(&v, scale)).sqrt(scale)?;
+            v = v.div(&one.add(&root), scale)?;
+            halvings = halvings.saturating_add(1);
+        }
+
+        let mut result = self.atan_series(&v, scale)?;
+        for _ in 0..halvings {
+            result = result.mul(&two, scale);
+        }
+        // Back to the caller's working scale; the extra digits were scaffolding.
+        Ok(result.rescale(outer_scale))
+    }
+
+    /// Reduce |x| below `1/ATAN_REDUCE_TO` before summing the series.
+    ///
+    /// 16 rather than something larger because the two costs pull opposite
+    /// ways: a smaller target means more square roots, a larger one means more
+    /// series terms. At 1/16 the series gains about 2.4 digits per term, which
+    /// puts even a 100-digit `scale` inside fifty terms, and `x = 1` needs
+    /// only five reductions to get there.
+    const ATAN_REDUCE_TO: i64 = 16;
+
+    /// The arctangent series itself, with no reduction: `x - x^3/3 + x^5/5 …`.
+    ///
+    /// Only correct to the working scale when |x| is comfortably below 1, so
+    /// it is private to [`Self::atan_reduced`], which is what guarantees that.
     fn atan_series(&self, x: &Decimal, scale: usize) -> Eval {
         let mut result = Decimal::zero();
         let mut term = x.clone();
         let x_sq = x.mul(x, scale);
         let neg_one = Decimal::from_i64(-1);
 
-        for i in 0..100i64 {
+        // Derived from the requested precision rather than fixed at 100. With
+        // |x| < 1/16 each term adds about 2.4 digits, so `scale` terms is
+        // ample; the `+ 64` covers small scales where the constant dominates.
+        // Accuracy comes from the `is_negligible` exit below -- this is only
+        // the guarantee that the loop ends. A FIXED cap was the bug: it made
+        // the answer depend on the argument rather than on the precision asked
+        // for, so `a(1)` was wrong in the third digit while `a(0.5)` was fine.
+        let max_terms = scale.saturating_mul(2).saturating_add(64);
+        for i in 0..max_terms {
             // 2i+1 is odd, so never zero.
-            let denom = Decimal::from_i64(i.saturating_mul(2).saturating_add(1));
+            let idx = i64::try_from(i).unwrap_or(i64::MAX);
+            let denom = Decimal::from_i64(idx.saturating_mul(2).saturating_add(1));
             let contrib = term.div(&denom, scale)?;
             result = result.add(&contrib);
             term = term.mul(&x_sq, scale).mul(&neg_one, scale);
@@ -2301,10 +2445,45 @@ impl Interpreter {
         Ok(result)
     }
 
+    /// What `l(x)` answers for `x <= 0`: GNU's saturating stand-in for minus
+    /// infinity, which is `-(10^scale - 1)` at the current scale.
+    ///
+    /// Measured at six scales rather than one, because the tracker entry
+    /// warned in as many words that a constant matching at `scale=10` "would
+    /// be a new bug wearing the old one's clothes" — and it would have been:
+    ///
+    /// | scale | GNU |
+    /// |---|---|
+    /// | 0 | `0` |
+    /// | 1 | `-9.0` |
+    /// | 5 | `-99999.00000` |
+    /// | 10 | `-9999999999.0000000000` |
+    /// | 20 | twenty nines |
+    /// | 50 | fifty nines |
+    ///
+    /// `scale=0` giving `0` rather than a minus sign is the formula agreeing
+    /// with itself: `10^0 - 1` is zero.
+    ///
+    /// The same sweep answered the entry's other open question. **Every**
+    /// non-positive argument saturates identically — `l(-1)`, `l(-100)` and
+    /// `l(-0.5)` all give the value `l(0)` does — so GNU has no error path
+    /// here at all, and neither do we now.
+    fn log_saturation(&self) -> Decimal {
+        // 10^scale - 1, negated. Built by arithmetic rather than by writing
+        // out nines, so it cannot drift from the formula it is documenting.
+        let ten = Decimal::from_i64(10);
+        let exp = Decimal::from_i64(i64::try_from(self.scale).unwrap_or(i64::MAX));
+        let magnitude = ten
+            .pow(&exp, self.scale)
+            .unwrap_or_else(|_| Decimal::zero())
+            .sub(&Decimal::from_i64(1));
+        magnitude.negate().rescale(self.scale)
+    }
+
     /// Natural logarithm using series: ln(x) = 2 * sum( ((x-1)/(x+1))^(2k+1) / (2k+1) ).
     fn builtin_ln(&self, x: &Decimal) -> Eval {
         if x.is_zero() || x.is_negative() {
-            return Err(RuntimeError::LogOfNonPositive);
+            return Ok(self.log_saturation());
         }
         let scale = self.working_scale();
         let one = Decimal::from_i64(1);
@@ -2821,10 +3000,20 @@ fn run_text(interp: &mut Interpreter, text: &str, source: &str) -> Session {
 //     open, and is reported exactly like any other. The comment that used to
 //     sit on the operand arm claiming otherwise was wrong.
 //
-// The one deliberate deviation is quoting: GNU prints the name bare, so a
-// file called `x⏎bc: /etc/shadow: Permission denied` forges a line bc never
-// wrote. Names go through `quoteaf_os` for the reason set out in
-// `coreutils::quote` -- the same deviation every other utility here makes.
+// The one deliberate deviation is quoting, and it is narrower than it used to
+// be. GNU prints the name bare, so a file called
+// `x⏎bc: /etc/shadow: Permission denied` forges a line bc never wrote. Names
+// go through `quotef_os` -- the ELIDING form -- which keeps that protection
+// exactly where it is needed and drops it where it is not: a name containing a
+// newline, a space or a control character is still quoted and cannot forge
+// anything, while an ordinary `nosuch.bc` prints bare and matches GNU byte for
+// byte.
+//
+// It was `quoteaf_os`, the always-quote form, until 2026-09-16. The forgery
+// argument was never an argument for quoting CLEAN names, only for quoting
+// dangerous ones, and the always-quote form was additionally inconsistent with
+// the syntax-error prefix, which names the same file without quotes. See
+// `design-decisions.md` §1027.
 
 /// Exits 1 on a bad command line, measured with `bc --zzz-bogus; echo $?`.
 const BC: Program = Program::new("bc", 1);
@@ -2982,9 +3171,20 @@ enum Trouble {
 impl Trouble {
     fn report(&self) -> ExitCode {
         match self {
-            // Mid-sentence, so the quotes are never elided: a bare name would
-            // blur into the words either side of it.
-            Self::Unavailable(name) => diag!("File {} is unavailable.", quoteaf_os(name)),
+            // `quotef_os`, the eliding form: a name that needs no quotes gets
+            // none, and `File nosuch.bc is unavailable.` then matches GNU bc
+            // byte for byte, while a name containing a space or a newline is
+            // still quoted rather than dissolving into the sentence.
+            //
+            // This used to be `quoteaf_os`, the always-quote form, on the
+            // grounds that a mid-sentence name needs the quotes to stand out.
+            // What settled it was not that argument but an inconsistency:
+            // since the syntax-error prefix started naming the source file,
+            // `bc` printed the SAME name two different ways -- `File 'prog.bc'
+            // is unavailable.` beside `prog.bc 1: syntax error`. One program
+            // spelling one file two ways is worse than either convention, and
+            // the eliding form is the one that also matches upstream.
+            Self::Unavailable(name) => diag!("File {} is unavailable.", quotef_os(name)),
             // Ends the clause, so it takes the bare form when it can, exactly
             // as `wc: missing.txt: No such file or directory` does.
             Self::FileNotUtf8(name) => diag!("bc: {}: not valid UTF-8", quotef_os(name)),
@@ -3615,20 +3815,91 @@ mod tests {
 
     #[test]
     fn an_illegal_character_is_named_and_then_dropped() {
-        // Dropped, not carried: with the `$` gone the parser sees `1 2`, and
-        // what it says about that is its own business. Both diagnostics appear
-        // for `1 $ 2` on GNU; ours currently reports only the first, because
-        // our grammar accepts two expressions with no separator between them.
-        // That gap is `TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR`, not this test's
-        // subject, and is asserted here as it actually behaves so the entry
-        // and the code cannot drift apart.
-        assert_eq!(diagnostics("1 $ 2\n"), ["1: illegal character: $"]);
+        // Dropped, not carried: with the `$` gone the parser sees `1 2`, which
+        // is itself a syntax error, so BOTH diagnostics appear -- exactly as
+        // GNU prints them. This is the pair that made the scanner/parser split
+        // worth building: the illegal character is the scanner's finding and
+        // the syntax error is the parser's, and neither can produce the other.
+        assert_eq!(
+            diagnostics("1 $ 2\n"),
+            ["1: illegal character: $", "1: syntax error"]
+        );
         // With a separator there is nothing for the parser to object to, and
         // GNU agrees: `1; $ 2` is `illegal character: $` and nothing else.
         assert_eq!(diagnostics("1; $ 2\n"), ["1: illegal character: $"]);
         // Still fatal to the unit, though -- measured, GNU prints neither the
         // `1` nor the `2`.
         assert_eq!(feed_lines("1; $ 2\n"), ["failed"]);
+    }
+
+    #[test]
+    fn two_statements_need_something_between_them() {
+        // GNU refuses all of these. Ours used to run them, printing answers to
+        // a program GNU calls malformed.
+        for bad in [
+            "1 2\n",
+            "print \"a\" print \"b\"\n",
+            "1 x=2\n",
+            // A closing brace ends a statement but does NOT license a
+            // following one -- measured, and the opposite of what one would
+            // guess from most languages.
+            "{ 1 } 2\n",
+            "if (1) { print \"a\" } 2\n",
+            "while (0) { } 2\n",
+            "for (i=0;i<1;i++) { } 2\n",
+            // A braceless body is a statement like any other.
+            "if (1) print \"a\" 2\n",
+            // And inside a block the rule is the same.
+            "{ 1 2 }\n",
+            "1 halt\n",
+        ] {
+            assert_eq!(
+                diagnostics(bad),
+                ["1: syntax error"],
+                "expected a syntax error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn requiring_a_separator_does_not_reject_valid_programs() {
+        // The control for the test above, and the reason the followers were
+        // MEASURED rather than reasoned about: the failure mode of getting
+        // this rule too strict is refusing programs people actually write,
+        // which is worse than the over-acceptance it fixes. Every line here is
+        // accepted by GNU.
+        for good in [
+            "1; 2\n",
+            "1\n2\n",
+            // `}` may follow a statement.
+            "{ print \"a\" }\n",
+            "if (1) { print \"a\" }\n",
+            "define f() {\n  return (1)\n}\n",
+            // `else` may follow one, braced or not.
+            "if (1) print \"a\" else print \"b\"\n",
+            "if (0) { print \"a\" } else { print \"b\" }\n",
+            // A function DEFINITION is its own input item in GNU's grammar,
+            // so something may follow it with no separator at all. This is the
+            // row that stops `require_terminator` being bolted onto
+            // `parse_define` as well.
+            "define f() { return (1) } f()\n",
+            // End of input is a legal follower, which is what lets a file
+            // without a trailing newline run.
+            "1",
+            "print \"a\"",
+            // Trailing separators, empty statements and blank lines.
+            "1;\n",
+            "1;;\n",
+            "\n\n1\n\n",
+            "for (i=0;i<2;i++) { print i }\n",
+            "while (0) { }\n",
+        ] {
+            assert_eq!(
+                diagnostics(good),
+                Vec::<String>::new(),
+                "valid program refused: {good:?}"
+            );
+        }
     }
 
     #[test]
@@ -3658,7 +3929,10 @@ mod tests {
         // mistake on line 40 is worse than no line number, since the reader
         // goes and stares at a line that is fine.
         assert_eq!(diagnostics("1\n2\nprint )\n"), ["3: syntax error"]);
-        assert_eq!(diagnostics("1\n2\n3 $ 4\n"), ["3: illegal character: $"]);
+        assert_eq!(
+            diagnostics("1\n2\n3 $ 4\n"),
+            ["3: illegal character: $", "3: syntax error"]
+        );
         assert_eq!(
             diagnostics("print )\n1\nprint )\n"),
             ["1: syntax error", "3: syntax error"]
@@ -3677,6 +3951,104 @@ mod tests {
             diagnostics("s = \"one\ntwo\"\nprint )\n"),
             ["3: syntax error"]
         );
+    }
+
+    #[test]
+    fn arctangent_is_right_where_its_series_converges_slowest() {
+        // `a(1)` is pi/4, and it is the hardest argument there is: the
+        // Maclaurin series becomes the alternating harmonic series at x = 1,
+        // and the old fixed 100-term sum stopped at `.7828982258` -- wrong in
+        // the THIRD digit, by 0.3%. Every value below was measured against GNU
+        // bc 1.07.1 and agrees with it exactly.
+        let atan = |expr: &str, scale: usize| -> String {
+            let src = format!("scale={scale}\n{expr}\n");
+            let mut interp = Interpreter::new(true);
+            let mut parser = Parser::new(&src);
+            let stmts = parser.parse_program();
+            interp.run(&stmts);
+            interp.output_buf.join("")
+        };
+
+        assert_eq!(atan("a(1)", 10), ".7853981633");
+        // Four times it is pi, which is the check a reader can do by eye.
+        assert_eq!(atan("4*a(1)", 10), "3.1415926532");
+        // Either side of 1, including the neighbourhood the |x|>1 inversion
+        // maps INTO the slow region: `a(1.0001)` becomes `a(.9999)`, which the
+        // inversion alone does not help at all.
+        assert_eq!(atan("a(0)", 10), "0");
+        assert_eq!(atan("a(0.5)", 10), ".4636476090");
+        assert_eq!(atan("a(2)", 10), "1.1071487177");
+        assert_eq!(atan("a(-1)", 10), "-.7853981633");
+        assert_eq!(atan("a(1.0001)", 10), ".7854481608");
+        assert_eq!(atan("a(100)", 10), "1.5607966601");
+        // Just over the reduction threshold of 1/16, where the argument is
+        // halved exactly once -- the boundary a fixed term count never had.
+        assert_eq!(atan("a(0.07)", 10), ".0698860016");
+        // At scale 30, where a term-capped sum could not get near. `a(0.6)`
+        // is exact to all thirty places.
+        assert_eq!(atan("a(0.6)", 30), ".540419500270584155443578364608");
+        // `a(1)` was exact to only 24 places when this was written, capped not
+        // by this function but by the long-division borrow in `BigInt::divmod`
+        // that every square root in the reduction leans on. With that fixed it
+        // is exact to all thirty, and to fifty.
+        assert_eq!(atan("a(1)", 30), ".785398163397448309615660845819");
+        assert_eq!(
+            atan("a(1)", 50),
+            ".78539816339744830961566084581987572104929234984377"
+        );
+        // The neighbours are untouched: `j` sits in the same harness row and
+        // was always right, so a change that broke it would be caught here
+        // rather than in a differential run hours later.
+        assert_eq!(atan("j(0,1)", 10), ".7651976865");
+        assert_eq!(atan("s(1)", 10), ".8414709848");
+        assert_eq!(atan("c(1)", 10), ".5403023058");
+        assert_eq!(atan("e(1)", 10), "2.7182818284");
+        assert_eq!(atan("l(2)", 10), ".6931471805");
+    }
+
+    #[test]
+    fn the_log_of_a_non_positive_number_saturates_as_gnu_does() {
+        let ml = |expr: &str, scale: usize| -> String {
+            let src = format!("scale={scale}\n{expr}\n");
+            let mut interp = Interpreter::new(true);
+            let mut parser = Parser::new(&src);
+            let stmts = parser.parse_program();
+            interp.run(&stmts);
+            interp.output_buf.join("")
+        };
+
+        // `-(10^scale - 1)`, rendered at the current scale. Measured against
+        // GNU bc 1.07.1 at every scale below -- and at six of them rather than
+        // one, because a constant that happened to match at `scale=10` would
+        // have looked exactly like a fix.
+        assert_eq!(ml("l(0)", 0), "0");
+        assert_eq!(ml("l(0)", 1), "-9.0");
+        assert_eq!(ml("l(0)", 5), "-99999.00000");
+        assert_eq!(ml("l(0)", 10), "-9999999999.0000000000");
+        assert_eq!(ml("l(0)", 20), "-99999999999999999999.00000000000000000000");
+        // `scale=0` answering `0` and not `-0` is the formula agreeing with
+        // itself: `10^0 - 1` is zero, and zero has no sign.
+        assert_eq!(ml("l(0)", 0), "0");
+
+        // EVERY non-positive argument, not just zero. GNU has no error path
+        // here, which the entry listed as unmeasured and this settles.
+        for arg in ["l(-1)", "l(-100)", "l(-0.5)", "l(0)"] {
+            assert_eq!(ml(arg, 10), "-9999999999.0000000000", "on {arg}");
+        }
+
+        // The control: a positive argument still computes a logarithm rather
+        // than saturating. Without this, an `l` that returned the sentinel for
+        // everything would pass every assertion above.
+        assert_eq!(ml("l(1)", 10), "0");
+        assert_eq!(ml("l(2)", 10), ".6931471805");
+        assert_eq!(ml("l(7)", 10), "1.9459101490");
+        assert_eq!(ml("l(0.5)", 10), "-.6931471805");
+        // `e(l(7))` is `6.9999999996`, NOT `7.0000000000` -- measured on GNU,
+        // which answers the same. Written down as the round trip really comes
+        // out rather than as the number it ought to be: the first draft of
+        // this line asserted the tidy value, which is a claim about arithmetic
+        // nobody performed.
+        assert_eq!(ml("e(l(7))", 10), "6.9999999996");
     }
 
     #[test]
@@ -3700,15 +4072,10 @@ mod tests {
             RuntimeError::UndefinedFunction("f".to_string()).to_string(),
             "Function f not defined."
         );
-        // The capitalisation is a transformation, not a lookup table, so it
-        // must not mangle a message that is already capitalised or empty.
-        // Nothing produces those today; the point is that the next variant
-        // added to `DecimalError` cannot quietly break this.
-        assert_eq!(
-            RuntimeError::LogOfNonPositive.to_string(),
-            "log of non-positive number",
-            "only the Math arm is capitalised -- the others are bc's own text"
-        );
+        // Only the `Math` arm is capitalised; `Halt` is bc's own text and is
+        // never printed at all. Asserted so that a future variant cannot be
+        // added to the capitalising arm by accident.
+        assert_eq!(RuntimeError::Halt.to_string(), "halt");
     }
 
     #[test]

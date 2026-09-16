@@ -73973,6 +73973,132 @@ its caller because the callee has no body to be inside of).
 
 ---
 
+## 1026. Reproduce a value upstream defines, even a strange one; invent none
+
+**Date:** 2026-09-16
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `l(0)` — the logarithm of zero — has no answer as a real number.
+GNU `bc` returns a very large negative number and says nothing; ours printed
+`Runtime error: log of non-positive number` and computed nothing. We now return
+GNU's number. This looks like the opposite of §1025, which refused to print a
+number we could not produce honestly, and the difference between the two cases
+is the point of this entry.
+
+**What GNU actually does**, measured at six scales because one would not have
+distinguished a formula from a constant: `-(10^scale - 1)`, rendered at the
+current scale. `scale=1` gives `-9.0`, `scale=20` gives twenty nines,
+`scale=0` gives `0` — which is the formula agreeing with itself, since
+`10^0 - 1` is zero. Every non-positive argument saturates the same way;
+`l(-1)`, `l(-100)` and `l(-0.5)` all answer what `l(0)` answers, so GNU has no
+error path here at all.
+
+**The tension with §1025, stated plainly.** There I refused to emit `adr=`
+because we compile to no dc program and there was no honest value for the
+field. Here I emit a number for an operation that has no answer. Both cannot be
+"never fabricate" — so what is the actual rule?
+
+The rule is about **who defines the value**:
+
+* `adr=` had no definition outside GNU's own implementation. Any number we put
+  there would have been ours, meaning nothing, and unfalsifiable by the reader.
+* `-(10^scale - 1)` has a precise, measured, reproducible definition, and
+  **scripts can already depend on it.** A `bc` script that tests
+  `if (l(x) < -1000000)` as an underflow guard works on GNU and would break on
+  a `bc` that errored instead. Refusing to produce it is not honesty; it is a
+  different behaviour wearing honesty's clothes.
+
+Put another way: §1025 declined to *invent* a fact. This declines to *withhold*
+one. The thing both protect is that what we print means what the reader thinks
+it means.
+
+**The alternatives:**
+
+* **(a) Keep erroring.** *What changes:* `l(0)` prints a diagnostic and the
+  statement produces nothing. Mathematically defensible, and arguably kinder —
+  a huge negative number flowing silently into a later calculation is a real
+  hazard. But it is a divergence from the program we are a clone of, in a
+  direction no script can detect except by failing.
+* **(b) Return GNU's value, silently, as GNU does.** *(chosen)*
+* **(c) Return GNU's value AND warn on stderr.** *What changes:* the best of
+  both, except that the warning is itself a divergence — the differential
+  harness compares stderr in full, so this trades a silent numeric difference
+  for a noisy textual one, and a script redirecting stderr still gets (b).
+
+**Why (b) over (c).** (c) is tempting and I nearly took it. It fails on the
+same ground that makes (b) right: the value is what callers consume, and adding
+output they do not expect breaks the compatibility we are adding the value to
+achieve. If the hazard of a silent sentinel is ever judged worse than the
+divergence, the place to fix it is a `bc` warning flag that GNU also has, not a
+message GNU never prints.
+
+**Consequence:** `RuntimeError::LogOfNonPositive` had exactly one raise site
+and is now unreachable, so it and its `Display` arm are deleted rather than
+left as a variant nothing constructs.
+
+**Reversing this** is restoring that variant and the one `return Err` in
+`builtin_ln`, plus moving three harness rows back to `known_bug`.
+
+---
+
+## 1027. Quote a file name in a diagnostic only when it needs it
+
+**Date:** 2026-09-16
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `bc` could not open a file and said `File 'nosuch.bc' is
+unavailable.` where GNU says `File nosuch.bc is unavailable.` — the same
+sentence with the name in quotes. It now prints the name bare when the name is
+ordinary, and still quotes it when the name contains a space, a newline or a
+control character.
+
+**Why quoting was there at all, and why that reason survives.** It is not
+tidiness: a file called `x⏎bc: /etc/shadow: Permission denied` prints, on a
+program that quotes nothing, as two lines, the second of which looks like a
+diagnostic `bc` never wrote. Quoting is what stops a file name forging output.
+The eliding form (`quotef_os`) keeps that exactly where it matters — a name
+with a newline is still quoted and escaped — and drops it only for names that
+cannot forge anything. So this is not a trade of safety for compatibility; the
+forgery argument was never an argument for quoting *clean* names.
+
+**What actually settled it** was neither compatibility nor safety but
+self-consistency. Since the syntax-error prefix started naming its source file
+(§1023's plumbing, added the same day), `bc` printed the same file name two
+different ways in the same program:
+
+    File 'prog.bc' is unavailable.
+    prog.bc 1: syntax error
+
+One program spelling one file two ways is worse than either convention
+consistently applied, and of the two, the eliding form is the one that also
+matches upstream.
+
+**The alternatives** were recorded in the tracker entry as (a) print bare
+always, (b) keep quoting always, (c) elide. (a) loses the forgery protection
+outright. (b) keeps the divergence and the inconsistency. (c) was the entry's
+own recommendation and is what dominates: the common case matches GNU byte for
+byte, the dangerous case stays protected, and `bc` agrees with itself.
+
+**Why this was decided here rather than asked.** The entry said it was
+"written down rather than quietly changed" because it is a user-visible
+message, and that caution was right when it was written. Two things changed:
+the inconsistency above is new information the entry did not have, and it makes
+one option strictly better rather than leaving a genuine fork; and the
+operator's queue already holds nine unanswered lane-B questions, where adding a
+tenth about message punctuation would push the ones that matter further down.
+It is one function call to reverse.
+
+**Verified both ways**, since a change justified by a safety property should
+demonstrate the property rather than assert it: `nosuch.bc` prints bare and
+matches GNU, and a name containing a newline prints as `'a'$'\n''bc: forged'`
+— quoted and escaped, forging nothing. Both are harness rows, the second
+marked `differs_by_design`, because a deviation nothing exercises is one nobody
+will notice losing.
+
+---
+
 ## 834. Selection is a change of colour, not of weight
 
 **Date:** 2026-09-12

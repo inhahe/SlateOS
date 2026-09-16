@@ -60,6 +60,18 @@
  *     8  /bin/basename did not exit 0
  *     9  a wait() failed or returned the wrong pid
  *    10  a read of a child's output failed or never finished
+ *    11  a program could not be EXEC'd at all -- missing from the image or not
+ *        executable. Plumbing, not a verdict: it is a fact about the image,
+ *        and the serial names which path it was.
+ *
+ * 11 exists because it did not, and that cost a boot. `execl` failing takes
+ * the child to `_exit(127)`, which arrived here as an ordinary exit status and
+ * fell through step 1's `if (rc != 0) return 3;`. Exit 3 reads as "the Rust
+ * userland does not run", so a rootfs that had staged NONE of the 72 manifest
+ * binaries was reported as a broken loader. A missing `/bin/true` looks
+ * exactly like a broken one unless the fixture is made to say which -- the
+ * same collapse `ctest-pty` carries a note about, in the same words:
+ * ONE CODE PER CHILD STATUS.
  */
 
 #include <errno.h>
@@ -176,7 +188,35 @@ static int run_one(const char *path, const char *arg, char *out, int cap, int *p
          * status comparison fails rather than accidentally matching. */
         return 128;
     }
-    return WEXITSTATUS(status);
+    int code = WEXITSTATUS(status);
+    if (code == 127) {
+        /* The child never ran: `execl` returned and it took the `_exit(127)`
+         * below the exec. Reported as PLUMBING, not as a verdict about the
+         * program, because it is not one -- it says the file is missing or is
+         * not executable, which is a fact about the IMAGE.
+         *
+         * This is the collapse `ctest-pty` already carries a note about --
+         * ONE CODE PER CHILD STATUS. Without it, 127 fell through to the
+         * caller's `if (rc != 0) return 3;` and *could not exec* became
+         * indistinguishable from *ran and exited non-zero*. It cost a whole
+         * boot: `create-ext4-rootfs.sh` had staged none of the 72 manifest
+         * binaries, and the fixture reported 3, which reads as "the Rust
+         * userland is broken" and sent the reader to the ELF loader. A
+         * missing `/bin/true` looks exactly like a broken one unless the
+         * fixture says which.
+         *
+         * The `_exit(127)` comment below is true of the CHILD's code and was
+         * never true of what this function returns; that is the whole of the
+         * mistake. */
+        emit("[cu] COULD NOT EXEC ");
+        emit(path);
+        emit(" -- it is not on the image, or is not executable.\n");
+        emit("[cu] This is NOT a finding about the Rust userland. Check that\n");
+        emit("[cu] create-ext4-rootfs.sh actually staged the manifest binaries.\n");
+        *plumbing = 11;
+        return -1;
+    }
+    return code;
 }
 
 int main(void)

@@ -63,6 +63,24 @@
  *     5  waitpid() failed or returned the wrong pid
  *     6  the interpreter exited non-zero after being asked to quit
  *     7  writing the quit command failed
+ *     8  /bin/python3 could not be EXEC'd -- missing from the image or not
+ *        executable. A fact about the image, not about the pty or the REPL.
+ *
+ * 8 exists because 2 was standing for it. The child execs `/bin/python3` and
+ * `_exit(127)`s if that fails; the parent then writes to the master WITHOUT
+ * having reaped it, the slave is already closed, the write gets EIO, and the
+ * fixture answered "writing the expression to the master failed". That sent a
+ * reader to the pty layer for what was a missing file.
+ *
+ * It was caught because two fixtures disagreed: this one reported the master
+ * write failing in the same boot that `ctest-pty` reported it working. The
+ * difference is that `ctest-pty`'s child execs nothing, so its slave stays
+ * open. Two fixtures disagreeing about one primitive is worth more than either
+ * result on its own -- neither was wrong, and the disagreement was the finding.
+ *
+ * `/bin/python3` is NOT in `scripts/rootfs-bin-manifest.txt`; it is staged by
+ * its own block in `create-ext4-rootfs.sh`, so its absence is a separate
+ * failure from an empty manifest staging and has to be reported separately.
  */
 
 #include <errno.h>
@@ -176,6 +194,35 @@ static int write_all(int fd, const char *s)
     return 0;
 }
 
+/* Did the child die without ever becoming the interpreter?
+ *
+ * Non-zero only when it is REAPED and its status is the `_exit(127)` that sits
+ * below the `execl`. A child that is still running, or that exited for any
+ * other reason, answers zero -- so this can only ever turn a pty verdict into
+ * an image verdict when the image really is the cause, and never the reverse.
+ *
+ * Bounded like every other wait here: a counted spin on `WNOHANG` with
+ * `sched_yield`, and no `alarm`, so the fixture's bounds do not depend on a
+ * subsystem other than the one under test. The budget is small because this is
+ * only reached after a write has already failed, by which point the child has
+ * either died or is not the reason.
+ */
+static int exec_failed(pid_t child)
+{
+    for (long i = 0; i < SPIN; i++) {
+        int status = 0;
+        pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child) {
+            return WIFEXITED(status) && WEXITSTATUS(status) == 127;
+        }
+        if (got < 0) {
+            return 0; /* cannot tell; do not invent a verdict */
+        }
+        sched_yield();
+    }
+    return 0;
+}
+
 int main(void)
 {
     int master = -1;
@@ -221,7 +268,13 @@ int main(void)
      * not.
      */
     if (write_all(master, "print(6*7)\n") != 0) {
-        return 2;
+        /* Ask the child what happened before blaming the pty. A write to a
+         * master whose slave has been closed gets EIO, and the commonest way
+         * for the slave to be closed this early is that the child never
+         * became an interpreter at all -- `execl` returned and it took the
+         * `_exit(127)` above. Reaping first is what separates "the pty cannot
+         * carry a write" from "there was nobody on the other end". */
+        return exec_failed(child) ? 8 : 2;
     }
 
     emit("[py] read (the answer must come from an evaluation)\n");

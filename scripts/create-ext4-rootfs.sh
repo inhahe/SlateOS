@@ -1990,16 +1990,41 @@ fi
 #
 # Build them with:
 #   cd userspace/coreutils
-#   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release
+#   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \
+#     -p coreutils -p ar -p kill -p logger -p logrotate
 #
-# ABSENCE IS A NOTE AND NOT AN ERROR -- deliberately, and only for now.  The
-# fastpy block above exits 1 on an empty scan, because a fixture that is not on
-# the image makes a ring-3 self-test SELF-SKIP and still report PASS.  Nothing
-# here self-skips yet: these binaries have never been on the image, so no test
-# asserts on any of them, and making their absence fatal would break the image
-# build in every tree that has not yet built the slateos target -- lane A's
-# included.  Turn this into an exit 1 in the same change that adds the first
-# boot test asserting one of these actually runs.
+# The `-p` list is NOT decoration. The manifest's names come from FIVE
+# crates, not one: coreutils produces 70 of them and `ar`, `kill`, `logger`
+# and `logrotate` produce one each. A plain `cargo build` in
+# `userspace/coreutils` builds only that crate, so following the old form of
+# this instruction left four binaries -- and the `ranlib`, `strip` and
+# `killall` aliases that need two of them -- off the image, reported as a
+# NOTE nobody reads. Measured with `scripts/check-manifest-producers.py`,
+# not guessed, and the command above was run before being printed here.
+#
+# ABSENCE IS AN ERROR AS OF 2026-09-16, which is what the paragraph that used
+# to sit here asked for:
+#
+#   "Turn this into an exit 1 in the same change that adds the first boot test
+#    asserting one of these actually runs."
+#
+# That test now exists -- `services/ctest-coreutils-runs` execs `/bin/true`,
+# `/bin/false`, `/bin/echo` and `/bin/basename` -- so the stated reason for
+# leniency, that "no test asserts on any of them", has expired.
+#
+# It expired the expensive way, which is why the message below is long. A boot
+# ran against an image whose `/bin` held none of these. The fixture answered
+# with a code that reads as "the Rust userland does not run", and the next two
+# to three hours went into the ELF loader. The rootfs run that produced that
+# image had said so plainly in a NOTE and exited 0, and an exit 0 is what gets
+# read. A missing `/bin/true` looks exactly like a broken one from every layer
+# above this script.
+#
+# The old worry -- that this "would break the image build in every tree that
+# has not yet built the slateos target" -- is now the point rather than an
+# objection: such a tree cannot run the ring-3 tests, and finding that out in
+# ten seconds is better than finding it out after a three-hour boot.
+# `ALLOW_EMPTY_SLATE_BIN=1` is there for a deliberately minimal image.
 SLATE_BIN_DIR="$ROOT_DIR/target/x86_64-slateos/release"
 SLATE_MANIFEST="$ROOT_DIR/scripts/rootfs-bin-manifest.txt"
 SLATE_COUNT=0
@@ -2106,8 +2131,8 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
         echo "[rootfs] They link a stale libc and prove nothing about the current one."
         echo "[rootfs] Rebuild them:"
         echo "[rootfs]   cd userspace/coreutils"
-        echo "[rootfs]   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
-        echo "[rootfs] and the same in userspace/ar and userspace/logrotate."
+        echo "[rootfs]   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \\"
+        echo "[rootfs]     -p coreutils -p ar -p kill -p logger -p logrotate"
         if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
             echo "[rootfs] NOTE: ALLOW_STALE_FIXTURES=1 — packing them anyway."
         else
@@ -2144,12 +2169,35 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
         echo "[rootfs]          through when it runs out, leaving no image. Either raise"
         echo "[rootfs]          IMG_SIZE or name fewer binaries in $SLATE_MANIFEST."
     fi
-else
+elif [ -n "${ALLOW_EMPTY_SLATE_BIN:-}" ]; then
     echo "[rootfs] NOTE: none of the binaries named in $SLATE_MANIFEST have been"
-    echo "[rootfs]       built, so /bin gets none of this project's own utilities. They"
-    echo "[rootfs]       build for the HOST by default; the slateos target is separate:"
-    echo "[rootfs]         cd userspace/coreutils"
-    echo "[rootfs]         CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
+    echo "[rootfs]       built, so /bin gets none of this project's own utilities."
+    echo "[rootfs]       ALLOW_EMPTY_SLATE_BIN is set, so this is not an error."
+else
+    echo "[rootfs] ERROR: none of the binaries named in $SLATE_MANIFEST have been"
+    echo "[rootfs]        built, so /bin would get none of this project's own utilities."
+    echo "[rootfs]        They build for the HOST by default; the slateos target is separate:"
+    echo "[rootfs]          cd userspace/coreutils"
+    echo "[rootfs]          CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \\"
+    echo "[rootfs]            -p coreutils -p ar -p kill -p logger -p logrotate"
+    echo "[rootfs]        then re-run this script."
+    echo "[rootfs]"
+    echo "[rootfs]        This was a NOTE until 2026-09-16, with the condition for"
+    echo "[rootfs]        promoting it written in the comment above: \"turn this into an"
+    echo "[rootfs]        exit 1 in the same change that adds the first boot test"
+    echo "[rootfs]        asserting one of these actually runs\". That test now exists --"
+    echo "[rootfs]        services/ctest-coreutils-runs execs /bin/true, /bin/false,"
+    echo "[rootfs]        /bin/echo and /bin/basename -- so the reason for leniency"
+    echo "[rootfs]        (\"no test asserts on any of them\") has expired."
+    echo "[rootfs]"
+    echo "[rootfs]        It expired the expensive way. A boot ran against an image"
+    echo "[rootfs]        whose /bin held none of these; the fixture reported a failure"
+    echo "[rootfs]        that reads as \"the Rust userland does not run\", and the"
+    echo "[rootfs]        two-to-three hours went into the ELF loader. This exit is"
+    echo "[rootfs]        what turns that into a ten-second message."
+    echo "[rootfs]"
+    echo "[rootfs]        Set ALLOW_EMPTY_SLATE_BIN=1 for a deliberately minimal image."
+    exit 1
 fi
 # --- multi-call aliases ------------------------------------------------------
 #

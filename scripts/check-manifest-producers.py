@@ -38,6 +38,29 @@ set: a scan that silently under-reports producers turns every manifest entry
 into a false positive, which is loud -- but one that over-reports turns a real
 defect into silence, which is not.
 
+READ THESE BEFORE WRITING ANOTHER SCANNER THAT ENUMERATES BINARIES
+==================================================================
+
+The blind spot was mine alone. Every other tool in this tree that enumerates
+binaries already handles both shapes, and three of them say so in as many
+words -- one using `awk` as its worked example, which is the file that tripped
+this gate:
+
+* `scripts/check-argv-ignored.py` -- "A bin is `src/bin/<name>.rs` or
+  `src/bin/<name>/main.rs`. Anything deeper is a module of a multi-file bin --
+  `src/bin/awk/ast.rs` is not a program."
+* `scripts/multicall-aliases.py` -- "'a coreutils bin' means two different
+  shapes here (a `<name>.rs` file and a `<name>/` directory) and no shared glob
+  could have meant both without an option nobody else would use."
+* `scripts/dup-bins-survey.py` -- "coreutils also has multi-file bins
+  (`src/bin/awk/main.rs`)".
+
+So the knowledge existed, written down, in files sitting beside this one. The
+failure was not that the shape is obscure; it is that a new scanner was written
+without reading the neighbouring scanners solving the same sub-problem. The
+cheapest check against the whole class is to grep `scripts/` for the thing you
+are about to enumerate and read what the existing answers already know.
+
 THE SHAPE, NAMED BY LANE A
 ==========================
 

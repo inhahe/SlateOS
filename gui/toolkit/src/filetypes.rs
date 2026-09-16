@@ -159,8 +159,6 @@ pub struct FileTypeInfo {
     pub is_text: bool,
     /// `true` if the OS can execute the file directly.
     pub is_executable: bool,
-    /// Optional name of the default handler application.
-    pub default_app: Option<&'static str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +169,167 @@ pub struct FileTypeInfo {
 /// use a linear scan with case-folding so order is not critical for
 /// correctness.
 const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
+    // -- Added 2026-09-16 ---------------------------------------------------
+    // Second batch, same day. Two archives missed on the first pass, and two
+    // formats this system genuinely runs: it has a POSIX layer, so an ELF
+    // binary and a shared object are ours rather than foreign. `.so` is
+    // `Library` and not `Executable` because it is loaded, not started --
+    // `is_executable: false` is the same distinction.
+    FileTypeInfo {
+        extension: ".cab",
+        description: "Cabinet Archive",
+        mime_type: "application/vnd.ms-cab-compressed",
+        category: FileCategory::Archive,
+        icon_glyph: '\u{1F4E6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".lz4",
+        description: "LZ4 Compressed File",
+        mime_type: "application/x-lz4",
+        category: FileCategory::Archive,
+        icon_glyph: '\u{1F4E6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".elf",
+        description: "ELF Executable",
+        mime_type: "application/x-executable",
+        category: FileCategory::Executable,
+        icon_glyph: '\u{2699}',
+        is_text: false,
+        is_executable: true,
+    },
+    FileTypeInfo {
+        extension: ".so",
+        description: "Shared Object",
+        mime_type: "application/x-sharedlib",
+        category: FileCategory::Library,
+        icon_glyph: '\u{2699}',
+        is_text: false,
+        is_executable: false,
+    },
+    //
+    // Twelve formats `apps/filesearch` classified and this table did not, found
+    // by diffing the two lists (known-issues
+    // TD-C-FOUR-PLACES-DECIDE-WHAT-KIND-OF-FILE-SOMETHING-IS). Only the group
+    // that needed no decision is here: media and text formats this system has
+    // every reason to recognise. Deliberately still absent are `exe`, `dll`,
+    // `msi`, `app` and `dylib` -- foreign executables this OS cannot run, where
+    // listing them would have the table claim a kind for something nothing can
+    // open, and whether that is wanted is a question nobody has answered.
+    // `raw` is absent too: it names camera images and raw byte dumps equally,
+    // so any single description would be a guess.
+    FileTypeInfo {
+        extension: ".mpg",
+        description: "MPEG Video",
+        mime_type: "video/mpeg",
+        category: FileCategory::Video,
+        icon_glyph: '\u{25B6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".mpeg",
+        description: "MPEG Video",
+        mime_type: "video/mpeg",
+        category: FileCategory::Video,
+        icon_glyph: '\u{25B6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".m4v",
+        description: "MPEG-4 Video",
+        mime_type: "video/x-m4v",
+        category: FileCategory::Video,
+        icon_glyph: '\u{25B6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".vob",
+        description: "DVD Video Object",
+        mime_type: "video/mpeg",
+        category: FileCategory::Video,
+        icon_glyph: '\u{25B6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".psd",
+        description: "Photoshop Document",
+        mime_type: "image/vnd.adobe.photoshop",
+        category: FileCategory::Image,
+        icon_glyph: '\u{1F5BC}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".yml",
+        description: "YAML Document",
+        mime_type: "application/x-yaml",
+        category: FileCategory::Config,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".tex",
+        description: "LaTeX Document",
+        mime_type: "text/x-tex",
+        category: FileCategory::Document,
+        icon_glyph: '\u{1F4C4}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".bash",
+        description: "Bash Script",
+        mime_type: "application/x-shellscript",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".zsh",
+        description: "Zsh Script",
+        mime_type: "application/x-shellscript",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".fish",
+        description: "Fish Script",
+        mime_type: "application/x-shellscript",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".ps1",
+        description: "PowerShell Script",
+        mime_type: "application/x-powershell",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".properties",
+        description: "Java Properties",
+        mime_type: "text/plain",
+        category: FileCategory::Config,
+        icon_glyph: '\u{2699}',
+        is_text: true,
+        is_executable: false,
+    },
     // -- OS-specific --------------------------------------------------------
     FileTypeInfo {
         extension: ".nx",
@@ -180,7 +339,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{2699}', // gear
         is_text: false,
         is_executable: true,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".dso",
@@ -190,7 +348,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}', // package
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".slib",
@@ -200,7 +357,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".pkg",
@@ -210,7 +366,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("pkg"),
     },
     // -- Documents ----------------------------------------------------------
     FileTypeInfo {
@@ -221,7 +376,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4C4}', // page facing up
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".md",
@@ -231,7 +385,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4C4}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".pdf",
@@ -241,7 +394,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4C4}',
         is_text: false,
         is_executable: false,
-        default_app: Some("pdfview"),
     },
     FileTypeInfo {
         extension: ".doc",
@@ -251,7 +403,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4C4}',
         is_text: false,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".docx",
@@ -261,7 +412,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4C4}',
         is_text: false,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".odt",
@@ -271,7 +421,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4C4}',
         is_text: false,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".rtf",
@@ -281,7 +430,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4C4}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".csv",
@@ -291,7 +439,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4CA}', // bar chart
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".tsv",
@@ -301,7 +448,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4CA}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".json",
@@ -311,7 +457,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}', // {
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".yaml",
@@ -321,7 +466,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".toml",
@@ -331,7 +475,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".xml",
@@ -341,7 +484,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".html",
@@ -351,7 +493,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F310}', // globe with meridians
         is_text: true,
         is_executable: false,
-        default_app: Some("browser"),
     },
     // -- Spreadsheet / Presentation ----------------------------------------
     FileTypeInfo {
@@ -362,7 +503,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4CA}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".xlsx",
@@ -372,7 +512,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4CA}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".ods",
@@ -382,7 +521,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4CA}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".ppt",
@@ -392,7 +530,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4CA}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".pptx",
@@ -402,7 +539,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4CA}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".odp",
@@ -412,7 +548,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4CA}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     // -- Images -------------------------------------------------------------
     FileTypeInfo {
@@ -423,7 +558,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}', // framed picture
         is_text: false,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     FileTypeInfo {
         extension: ".jpg",
@@ -433,7 +567,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}',
         is_text: false,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     FileTypeInfo {
         extension: ".jpeg",
@@ -443,7 +576,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}',
         is_text: false,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     FileTypeInfo {
         extension: ".gif",
@@ -453,7 +585,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}',
         is_text: false,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     FileTypeInfo {
         extension: ".bmp",
@@ -463,7 +594,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}',
         is_text: false,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     FileTypeInfo {
         extension: ".svg",
@@ -473,7 +603,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}',
         is_text: true,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     FileTypeInfo {
         extension: ".ico",
@@ -483,7 +612,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}',
         is_text: false,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     FileTypeInfo {
         extension: ".webp",
@@ -493,7 +621,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}',
         is_text: false,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     FileTypeInfo {
         extension: ".tiff",
@@ -503,7 +630,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}',
         is_text: false,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     FileTypeInfo {
         extension: ".tif",
@@ -513,7 +639,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F5BC}',
         is_text: false,
         is_executable: false,
-        default_app: Some("imageview"),
     },
     // -- Audio --------------------------------------------------------------
     FileTypeInfo {
@@ -524,7 +649,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}', // eighth note
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     FileTypeInfo {
         extension: ".wav",
@@ -534,7 +658,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}',
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     FileTypeInfo {
         extension: ".flac",
@@ -544,7 +667,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}',
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     FileTypeInfo {
         extension: ".ogg",
@@ -554,7 +676,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}',
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     FileTypeInfo {
         extension: ".aac",
@@ -564,7 +685,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}',
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     FileTypeInfo {
         extension: ".wma",
@@ -574,7 +694,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}',
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     FileTypeInfo {
         extension: ".m4a",
@@ -584,7 +703,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}',
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     FileTypeInfo {
         extension: ".opus",
@@ -594,7 +712,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}',
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     FileTypeInfo {
         extension: ".midi",
@@ -604,7 +721,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}',
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     FileTypeInfo {
         extension: ".mid",
@@ -614,7 +730,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{266A}',
         is_text: false,
         is_executable: false,
-        default_app: Some("audioplayer"),
     },
     // -- Video --------------------------------------------------------------
     FileTypeInfo {
@@ -625,7 +740,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{25B6}', // right-pointing triangle (play)
         is_text: false,
         is_executable: false,
-        default_app: Some("videoplayer"),
     },
     FileTypeInfo {
         extension: ".mkv",
@@ -635,7 +749,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{25B6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("videoplayer"),
     },
     FileTypeInfo {
         extension: ".avi",
@@ -645,7 +758,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{25B6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("videoplayer"),
     },
     FileTypeInfo {
         extension: ".mov",
@@ -655,7 +767,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{25B6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("videoplayer"),
     },
     FileTypeInfo {
         extension: ".wmv",
@@ -665,7 +776,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{25B6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("videoplayer"),
     },
     FileTypeInfo {
         extension: ".webm",
@@ -675,7 +785,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{25B6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("videoplayer"),
     },
     FileTypeInfo {
         extension: ".flv",
@@ -685,7 +794,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{25B6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("videoplayer"),
     },
     // -- Code ---------------------------------------------------------------
     FileTypeInfo {
@@ -696,7 +804,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}', // {
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".py",
@@ -706,7 +813,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".c",
@@ -716,7 +822,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".cpp",
@@ -726,7 +831,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".h",
@@ -736,7 +840,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".hpp",
@@ -746,7 +849,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".js",
@@ -756,7 +858,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".ts",
@@ -766,7 +867,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".java",
@@ -776,7 +876,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".go",
@@ -786,7 +885,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".rb",
@@ -796,7 +894,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".sh",
@@ -806,7 +903,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: true,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".sql",
@@ -816,7 +912,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".css",
@@ -826,7 +921,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".scss",
@@ -836,7 +930,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".lua",
@@ -846,7 +939,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".php",
@@ -856,7 +948,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".swift",
@@ -866,7 +957,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".kt",
@@ -876,7 +966,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".cs",
@@ -886,7 +975,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".r",
@@ -896,7 +984,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".zig",
@@ -906,7 +993,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".ada",
@@ -916,7 +1002,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{007B}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     // -- Archives -----------------------------------------------------------
     FileTypeInfo {
@@ -927,7 +1012,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".tar.gz",
@@ -937,7 +1021,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".tgz",
@@ -947,7 +1030,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".tar.bz2",
@@ -957,7 +1039,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".tar.xz",
@@ -967,7 +1048,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".7z",
@@ -977,7 +1057,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".rar",
@@ -987,7 +1066,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".tar",
@@ -997,7 +1075,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".gz",
@@ -1007,7 +1084,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".bz2",
@@ -1017,7 +1093,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".xz",
@@ -1027,7 +1102,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     FileTypeInfo {
         extension: ".zst",
@@ -1037,7 +1111,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4E6}',
         is_text: false,
         is_executable: false,
-        default_app: Some("archiver"),
     },
     // -- Config / Log -------------------------------------------------------
     FileTypeInfo {
@@ -1048,7 +1121,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{2699}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".conf",
@@ -1058,7 +1130,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{2699}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".cfg",
@@ -1068,7 +1139,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{2699}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".env",
@@ -1078,7 +1148,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{2699}',
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     FileTypeInfo {
         extension: ".log",
@@ -1088,7 +1157,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4C3}', // page with curl
         is_text: true,
         is_executable: false,
-        default_app: Some("textedit"),
     },
     // -- Disk images / System -----------------------------------------------
     FileTypeInfo {
@@ -1099,7 +1167,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4BF}', // optical disc
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".img",
@@ -1109,7 +1176,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{1F4BF}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     // -- Font ---------------------------------------------------------------
     FileTypeInfo {
@@ -1120,7 +1186,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{0041}', // A
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".otf",
@@ -1130,7 +1195,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{0041}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".woff",
@@ -1140,7 +1204,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{0041}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
     FileTypeInfo {
         extension: ".woff2",
@@ -1150,7 +1213,6 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         icon_glyph: '\u{0041}',
         is_text: false,
         is_executable: false,
-        default_app: None,
     },
 ];
 
@@ -1163,7 +1225,6 @@ const UNKNOWN_FILE_TYPE: FileTypeInfo = FileTypeInfo {
     icon_glyph: '\u{1F4C4}',
     is_text: false,
     is_executable: false,
-    default_app: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1626,6 +1687,18 @@ pub fn detect_from_magic(header: &[u8]) -> Option<&'static FileTypeInfo> {
 /// Return the [`FileCategory`] for a given extension string.
 pub fn category_from_extension(ext: &str) -> FileCategory {
     detect_from_extension(ext).category
+}
+
+/// Every file type this table knows.
+///
+/// The table itself stays private: a caller that could index it could also
+/// come to depend on its order, and the order here is grouping-by-hand rather
+/// than a guarantee. An iterator gives what a caller legitimately needs --
+/// `apps/fileassoc` builds its registry of known types from this, instead of
+/// the second hand-written table of extensions, MIME types and descriptions it
+/// used to carry.
+pub fn all() -> impl Iterator<Item = &'static FileTypeInfo> {
+    FILE_TYPE_TABLE.iter()
 }
 
 /// Every extension this table files under `category`, without leading dots.
@@ -2177,13 +2250,11 @@ mod tests {
     fn file_type_info_fields() {
         let info = detect_from_extension(".nx");
         assert_eq!(info.description, "Slate OS Native Executable");
-        assert_eq!(info.default_app, None);
         assert!(info.is_executable);
         assert!(!info.is_text);
 
         let info = detect_from_extension(".rs");
         assert_eq!(info.description, "Rust Source File");
-        assert_eq!(info.default_app, Some("textedit"));
         assert!(info.is_text);
     }
 
@@ -2275,5 +2346,74 @@ mod tests {
             documents.contains(&"txt") && documents.contains(&"pdf"),
             "Document holds {documents:?}"
         );
+    }
+
+    /// The formats added on 2026-09-16 classify as intended.
+    ///
+    /// Named one at a time rather than counted: a count would pass if an entry
+    /// were added under the wrong category, which is the mistake a bulk edit
+    /// actually makes.
+    #[test]
+    fn the_formats_added_from_filesearch_resolve() {
+        for (ext, want) in [
+            ("mpg", FileCategory::Video),
+            ("mpeg", FileCategory::Video),
+            ("m4v", FileCategory::Video),
+            ("vob", FileCategory::Video),
+            ("psd", FileCategory::Image),
+            ("yml", FileCategory::Config),
+            ("tex", FileCategory::Document),
+            ("bash", FileCategory::Code),
+            ("zsh", FileCategory::Code),
+            ("fish", FileCategory::Code),
+            ("ps1", FileCategory::Code),
+            ("properties", FileCategory::Config),
+            ("cab", FileCategory::Archive),
+            ("lz4", FileCategory::Archive),
+            ("elf", FileCategory::Executable),
+            ("so", FileCategory::Library),
+        ] {
+            assert_eq!(
+                category_from_extension(ext),
+                want,
+                ".{ext} does not classify as {want:?}"
+            );
+        }
+    }
+
+    /// Foreign executables stay out until somebody decides they belong.
+    ///
+    /// Pinned because the next person diffing this table against
+    /// `apps/filesearch` will find them missing and be tempted to "finish the
+    /// job". Listing them would have the table claim a kind for a file nothing
+    /// on this system can open, and that is a decision, not an omission. If it
+    /// is ever made, delete this test in the same change.
+    #[test]
+    fn foreign_executables_are_absent_on_purpose() {
+        for ext in ["exe", "dll", "msi", "app", "dylib"] {
+            assert_eq!(
+                category_from_extension(ext),
+                FileCategory::Unknown,
+                ".{ext} was added without the decision that gates it"
+            );
+        }
+    }
+
+    /// No two entries claim the same extension.
+    ///
+    /// `detect_from_extension` returns the first match, so a duplicate makes
+    /// the second entry unreachable and every count over the table wrong by
+    /// one, with nothing failing anywhere.
+    #[test]
+    fn no_extension_appears_twice_in_the_table() {
+        let mut seen: Vec<&str> = Vec::new();
+        for info in all() {
+            let ext = info.extension.strip_prefix('.').unwrap_or(info.extension);
+            assert!(
+                !seen.contains(&ext),
+                "the table lists .{ext} more than once"
+            );
+            seen.push(ext);
+        }
     }
 }

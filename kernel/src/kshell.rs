@@ -22055,6 +22055,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "a bare `hexdump -n' errors");
 
         // Firmware: the guess flashed device 0 and said "Reboot required".
+        //
+        // The sentinel below is RECORDED, not "Reboot required", and the
+        // change is the interesting part. `cmd_fwupdate`'s success message
+        // used to end "Reboot required." -- a claim that a flash had happened
+        // and the machine must be power-cycled -- and was rewritten when it
+        // turned out `apply_update` writes no firmware at all. That rewrite
+        // silently disarmed this guard: the text it watched for no longer
+        // existed anywhere, so the assertion could never fire and the
+        // regression it was written to catch stopped being guarded.
+        //
+        // `check-selftest-wording` caught it and refused the build, which is
+        // exactly its job. The coupling is real and one-directional: an
+        // assertion that quotes a message depends on that message, and the
+        // message does not know. If the success wording changes again, this
+        // sentinel moves with it.
         let out = capture_command("fwupdate apply 1O");
         assert_output_contains(
             "an unreadable device id does not flash device 0",
@@ -22062,7 +22077,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"`1O' is not a device id",
         );
         assert_eq!(last_exit(), 1, "`fwupdate apply 1O` errors");
-        assert_output_lacks("and nothing was applied", &out, b"Reboot required");
+        assert_output_lacks("and nothing was applied", &out, b"RECORDED");
 
         // A group is actuated as a unit later, so a member dropped here is a
         // device that never responds and never explains why.

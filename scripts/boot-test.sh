@@ -3796,6 +3796,54 @@ check_cp_diff_sees_nul() {
 
 check_cp_diff_sees_nul
 
+# Exports with no caller anywhere in the tree.
+#
+# Its own report is careful about what it means, and the care is the
+# point: an export with no caller YET is ordinary in a tree this size.
+# What it catches is the case where a doc comment names a caller that does
+# not exist -- a promise nothing keeps. That is design-decisions 946 seen
+# from the other end: 946 is a publisher whose subscriber is missing, and
+# this is a publisher whose documentation invented one.
+check_unused_exports() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== unused-exports check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the unused-exports gate against itself ==="
+    if ! run_checker check-unused-exports-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-unused-exports.py" --selftest; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The unused-exports gate fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing.  Its failure" >&2
+        echo "mode is an empty finding list, which reads exactly like a clean" >&2
+        echo "tree." >&2
+        exit 1
+    fi
+
+    echo "=== Checking for exports whose documented caller does not exist ==="
+    if run_checker check-unused-exports "$py" \
+            "$PROJECT_ROOT/scripts/check-unused-exports.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each export above is named as having a" >&2
+    echo "caller by its own documentation, and that caller does not exist." >&2
+    echo "" >&2
+    echo "An export with no caller yet is ordinary and is NOT what this" >&2
+    echo "reports.  A doc comment that names one is a promise nothing keeps," >&2
+    echo "and the next reader will believe it." >&2
+    exit 1
+}
+
+check_unused_exports
+
 # `check_eol` above catches the *consequence* -- a file declared `text eol=lf`
 # sitting CRLF on disk.  This one catches the cause, immediately after it, on
 # purpose: the 2026-09-03 incident was thirteen files corrupted by one writer,

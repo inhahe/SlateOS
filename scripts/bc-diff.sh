@@ -51,9 +51,25 @@
 # entry that describes the fix, and fails the run the moment it starts *passing*
 # — because a marker that outlives its bug is a false statement about the tree.
 #
-# Only the two universal xfails are here — `--help` omits the GNU project's
-# `Report bugs to:` block, and `--version` names SlateOS — plus the banner.
-# There is no numeric or semantic divergence claimed as intentional.
+# Three of the xfails are about identity rather than behaviour — `--help` omits
+# the GNU project's `Report bugs to:` block, `--version` names SlateOS, and the
+# banner does too. Two are behavioural, added 2026-09-16, and both are cases
+# where GNU is the one with the bug:
+#
+#   * a missing final newline. GNU calls `print "A"` with no trailing newline a
+#     syntax error and runs nothing. We run the line, because a file is far more
+#     often missing its last newline than genuinely half-written, and refusing
+#     would answer `printf '2+2' | bc` with silence.
+#   * the source and line named for an error detected at end of input. GNU says
+#     `(standard_in) 1:` even when the input is a file and the construct opens
+#     on line 4, because at EOF its reporter reads a file handle and a line
+#     counter it has already torn down. Ours names the real file and the real
+#     line.
+#
+# Neither is a number: `bc` computes the same answers either way. They are
+# claimed as intentional because they are, and because the alternative — filing
+# them as KBUGs — would put two entries in `known-issues.md` describing work
+# nobody intends to do, which is how a tracker stops being read.
 #
 # Run `OURS=/usr/bin/bc ./scripts/bc-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS, every KBUG as KFIXED,
@@ -70,6 +86,17 @@ pass=0; fail=0; xfail=0; xpass=0; kbug=0; kfixed=0
 # and consumed by `report`, so a marker can never be left dangling over the
 # case after the one it was written for.
 KBUG=
+
+# The reason the next comparison is *meant* to differ, if it is. Set by
+# `differs_by_design` and consumed by `report`, exactly as `KBUG` is.
+#
+# Separate from `KBUG` because the two make opposite claims, and when either
+# stops reproducing the harness must say a different thing: a bug that starts
+# passing has been fixed and its marker is now a false statement, while a
+# deliberate difference that starts passing means we have quietly adopted GNU's
+# behaviour and the *decision* wants rechecking. Both fail the run. They are
+# not the same finding and must not print the same word.
+XFAIL=
 
 fixtures=$DIFF_TMP/fixtures
 mkdir -p "$fixtures"
@@ -126,6 +153,7 @@ known_bug() { KBUG="$1"; }
 
 report() {
   local key=$KBUG; KBUG=
+  local why=$XFAIL; XFAIL=
   if [ "$AGREED" = yes ]; then
     if [ -n "$key" ]; then
       # Fails the run on purpose: someone fixed the bug and the marker is now
@@ -133,6 +161,14 @@ report() {
       kfixed=$((kfixed+1))
       printf 'KFIXED %s  (%s no longer reproduces -- close it and drop the marker)\n' \
         "$1" "$key"
+    elif [ -n "$why" ]; then
+      # Also fails, but it is not the same event and does not get the same
+      # word. We claimed this difference was wanted and it has gone away, so
+      # either someone changed our behaviour without revisiting the decision or
+      # the decision was never true. Either way a human has to look.
+      xpass=$((xpass+1))
+      printf 'XPASS %s  (claimed to differ on purpose: %s -- it no longer does)\n' \
+        "$1" "$why"
     else
       pass=$((pass+1))
       [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$1"
@@ -140,12 +176,23 @@ report() {
   elif [ -n "$key" ]; then
     kbug=$((kbug+1))
     printf 'KBUG %s  (%s)\n%s\n' "$1" "$key" "$REPORT"
+  elif [ -n "$why" ]; then
+    # Quiet unless asked. A difference we have decided to have is not news on
+    # every run, and printing it would train the reader to skim past the KBUGs
+    # sitting next to it.
+    xfail=$((xfail+1))
+    [ -n "${VERBOSE:-}" ] && printf 'xfail %s  (%s)\n' "$1" "$why"
   else
     fail=$((fail+1))
     printf 'DIFF %s\n%s\n' "$1" "$REPORT"
   fi
   return 0
 }
+
+# `differs_by_design WHY` — the next comparison is expected to differ because
+# this project chose to differ, not because it is broken. See the three-kinds
+# note at the top for why this is not the same as `known_bug`.
+differs_by_design() { XFAIL="$1"; }
 
 # `prog LABEL TEXT [ARGS…]` — the same program both ways round, which is the
 # only way to see a construct whose meaning depends on how the text arrives.
@@ -154,10 +201,10 @@ report() {
 # and both routes are the same bug.
 prog() {
   local label="$1" text="$2"; shift 2
-  local key=$KBUG
-  compare file  "$text" "$@"; KBUG=$key; report "[file]  $label"
-  compare stdin "$text" "$@"; KBUG=$key; report "[stdin] $label"
-  KBUG=
+  local key=$KBUG why=$XFAIL
+  compare file  "$text" "$@"; KBUG=$key; XFAIL=$why; report "[file]  $label"
+  compare stdin "$text" "$@"; KBUG=$key; XFAIL=$why; report "[stdin] $label"
+  KBUG=; XFAIL=
 }
 
 # One route only, for a case whose other route is not the same question.
@@ -334,21 +381,23 @@ prog 'hash comment'            '1+1 # trailing\n2+2\n'
 prog 'line continuation'       '1 + \\\n2\n'
 prog 'empty input'             ''
 prog 'only newlines'           '\n\n\n'
-known_bug TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED
+differs_by_design 'GNU calls a missing final newline a syntax error; we run the line'
 prog 'no trailing newline'     'print "A"'
 
 # --- errors -------------------------------------------------------------------
 # Wording is compared in full. A harness that only asked "did it complain?"
 # would pass on every wrong message.
-known_bug TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED
 prog 'syntax error'            'print )\n'
-known_bug TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED
 prog 'unterminated string'     'print "abc\n'
-known_bug TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED
+# GNU reports this one as `(standard_in) 1:` even when the input IS a file and
+# the construct opens on line 4 -- at end of input its error reporter reads a
+# file handle and a line counter that have both already been torn down, so it
+# names neither the right file nor the right line. Ours says `prog.bc 3:`.
+# Measured both ways round before claiming it; see the entry.
+differs_by_design 'GNU misnames the source and line for an at-EOF error; ours are right'
 prog 'unbalanced brace'        'if (1) {\nprint "A"\n'
-known_bug TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED
+known_bug TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR
 prog 'bad character'           '1 $ 2\n'
-known_bug TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED
 prog 'error then more input'   'print )\nprint "after\\n"\n'
 
 known_bug TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE

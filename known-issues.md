@@ -84721,7 +84721,7 @@ signature and splitting them would mean editing every call site twice:
 
 ---
 
-## TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED (lane B, 2026-08-24) — **open**
+## TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED (lane B, 2026-08-24) -- **Status: FIXED** 2026-09-16
 
 **In short:** feed our `bc` a program with a mistake in it — a stray `)`, a
 character that is not part of the language, a quote that is never closed — and
@@ -84785,6 +84785,119 @@ and is the one part of the current behaviour that is already right.
 fallback taken in a program that is actually valid — of which there should be
 none. So an implementation that is too eager shows up immediately as some
 other, currently-green harness row turning red.
+
+### Fixed 2026-09-16
+
+Done as prescribed above, with one structural difference and two corrections to
+the measurements in this entry.
+
+`Token::Illegal(u8)` now exists, the scanner counts lines in `Lexer::bump` —
+the one place the cursor ever moves, so the three separate branches that
+consume newlines cannot disagree — and `Parser` carries a `Vec<SyntaxError>`
+that `parse_primary`, `parse_stmt` and `expect` all write to. `Chunker` carries
+the running line base, so a diagnostic names its line in the *file* rather than
+in the unit.
+
+**The structural difference: a unit with an error in it does not run at all.**
+The entry proposed printing the errors and running the chunk anyway. That is
+not what GNU does, and the difference is the whole severity of this bug.
+Measured: `1; $ 2` prints *nothing* — not even the `1`, which is a finished
+statement sitting before the mistake — while `1\n$ 2\n` prints `1`, because
+there the good statement is on its own line. So the thing discarded is the
+whole unit. `Feed` grew a `Failed(Vec<SyntaxError>)` variant carrying no
+statements, which makes "a statement with a mistake in it does not run" a
+property of the type rather than a rule every caller has to remember.
+
+**Two corrections to the table above, both found by re-measuring rather than
+by reading it.** They are recorded because the table was written from a real
+run and was still wrong, which is the more useful lesson:
+
+1. `illegal character` **does** carry the `NAME LINE: ` prefix —
+   `prog.bc 1: illegal character: "`. The table shows it bare. Implementing
+   from the table would have produced a diagnostic missing its prefix on
+   exactly the two rows that have one.
+2. Rows 3 and 6 report `(standard_in) 1:` **even for a file operand**, and
+   even when the construct opens on line 4. That is not "the line the
+   construct started on" — it was checked with a 5-line file. At end of input
+   GNU's reporter reads a file handle and a line counter it has already torn
+   down, so it names neither the right file nor the right line.
+
+**Not copied, and now marked `differs_by_design` in the harness rather than
+`known_bug`:** that at-EOF misnaming, and GNU's treatment of a missing final
+newline as a syntax error. Both are GNU bugs. Filing them as known bugs would
+have put two entries in this file describing work nobody intends to do.
+
+**What is left is a different bug**, split out as
+`TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR`: `1 $ 2` gets `illegal character: $`
+but not the `syntax error` GNU also prints, because with the `$` dropped our
+grammar happily accepts `1 2` where GNU refuses it. That is a grammar gap, not
+a reporting gap, and it is the only row of the six still marked `known_bug`.
+
+**Evidence.** `scripts/bc-diff.sh` went from `129 passed, 17 known bugs` to
+`135 passed, 13 known bugs, 8 differ on purpose`, with the six rows for this
+key reported `KFIXED` in between — the harness fails on its own stale markers,
+which is how the closing of this entry was forced rather than remembered. The
+discrimination check the harness documents, `OURS=/usr/bin/bc`, turns all 13
+remaining known bugs into `KFIXED` and all 8 deliberate differences into
+`XPASS` and nothing else, so the suite can still tell agreement from
+disagreement. 91 unit tests in `bc.rs`, including a control asserting that nine
+*correct* programs produce no diagnostics at all — every other test here
+asserts that `bc` complains, and all of them would pass on a `bc` that
+complained about everything.
+
+---
+
+## TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR (lane B, 2026-09-16) — **open**
+
+**In short:** our `bc` accepts two statements written side by side with nothing
+between them. `1 2` on one line prints `1` and then `2`; GNU calls it
+`syntax error` and prints neither. Nobody writes `1 2` on purpose, so on its
+own this is harmless — it matters because it is what stops a *typo* from being
+reported. A stray character turns `1 $ 2` into `1 2` once the bad character is
+removed, and where GNU then says `syntax error`, we say nothing and compute.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, `Parser::parse_stmt` and
+`Parser::parse_program`. After a statement is parsed, `skip_terminator` is
+called but nothing *requires* that a terminator was actually there, so the
+next loop iteration simply starts a new statement wherever the last one
+stopped.
+
+**Measured**, GNU bc 1.07.1 under WSL:
+
+| Input | GNU | Ours |
+|---|---|---|
+| `1 2` | `syntax error`, no output | `1` and `2` |
+| `print 1 print 2` | `syntax error`, no output | prints both |
+| `1 $ 2` | `illegal character: $` **and** `syntax error` | `illegal character: $` only |
+| `1; 2` | prints both | prints both |
+| `1\n2` | prints both | prints both |
+
+**Why it is written up rather than fixed in the same change.** It is a
+different defect from the one that was being fixed
+(`TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED`, now closed): that one was *bc had
+nowhere to record that a mistake had happened*, this one is *bc's grammar is
+too permissive*. Fixing this needs its own measurement round, because the
+question "what may legally follow a statement with no separator" has a real
+answer that has to be established rather than guessed — `}` certainly may, and
+whether `else` and a function body's closing brace may is exactly the sort of
+thing that looks obvious and is not. Bolting a guess onto the end of the
+reporting change would have risked rejecting valid programs, which is worse
+than the bug: the current failure mode is over-acceptance of input nobody
+writes, and the failure mode of a wrong fix is refusing input people do write.
+
+**The proper fix.** Establish by measurement which tokens may follow a
+statement without a separator, then make `parse_stmt` require one and
+`record_error` otherwise. The single harness row
+`prog 'bad character' '1 $ 2\n'` turns green when it is right; the control
+`a_program_with_no_mistakes_in_it_says_nothing` in `bc.rs` is what catches a
+fix that is too eager, and should be extended with whatever the measurement
+turns up before the change is made, not after.
+
+**Severity: low.** It is a missing *second* diagnostic in a case that already
+gets a first one, and a wrong answer only for programs containing `1 2`, which
+no one writes deliberately. It is recorded because the reporting work above
+referred to it, and a reference to an entry that does not exist is how a known
+gap becomes an unknown one.
 
 ---
 

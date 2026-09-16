@@ -103,6 +103,16 @@ enum Token {
     /// `halt`, which ends the run when it is *executed*.
     Halt,
     Print,
+    /// A byte that starts no token at all — `$`, a backtick, an opening quote
+    /// with no closing one.
+    ///
+    /// It is a *token* rather than something the scanner swallows, because the
+    /// scanner and the parser report in reading order and only the parser knows
+    /// where the reading got to. GNU emits both diagnostics for `1 $ 2` —
+    /// `illegal character: $` and then `syntax error`, in that order, on the
+    /// same line — which a scanner that dropped the byte could not reproduce:
+    /// the parser would see `1 2` and have nothing to complain about.
+    Illegal(u8),
     // End of input
     Eof,
 }
@@ -123,6 +133,20 @@ struct Lexer<'a> {
     /// needs to be told, or `2 + /* one` and `two */ 2` are run as two separate
     /// programs and answer `2` where GNU answers `4`.
     unfinished: bool,
+    /// The line the scanner is currently on, counting from 1.
+    ///
+    /// Incremented wherever a newline byte is *consumed*, which is three
+    /// places, not one: the `Newline` token, the blanks skipped between
+    /// tokens, and the interior of a `/* */` comment. Missing any of them
+    /// makes every diagnostic after the first multi-line comment point at the
+    /// wrong line, which is worse than no line number at all — a reader sent
+    /// to a line that looks fine concludes the report is noise.
+    line: u32,
+    /// The line the token just returned by [`Self::next_token`] *started* on.
+    ///
+    /// Distinct from `line`, which by then has already moved past a token that
+    /// contained newlines. A diagnostic names where the offending thing begins.
+    token_line: u32,
 }
 
 impl<'a> Lexer<'a> {
@@ -131,8 +155,11 @@ impl<'a> Lexer<'a> {
             input: input.as_bytes(),
             pos: 0,
             unfinished: false,
+            line: 1,
+            token_line: 1,
         }
     }
+
 
     fn peek_byte(&self) -> Option<u8> {
         self.input.get(self.pos).copied()
@@ -152,7 +179,26 @@ impl<'a> Lexer<'a> {
 
     /// Move the cursor forward `n` bytes, stopping at the end of the input.
     fn bump(&mut self, n: usize) {
-        self.pos = self.pos.saturating_add(n).min(self.input.len());
+        let end = self.pos.saturating_add(n).min(self.input.len());
+        // Counted HERE, in the one place the cursor ever moves, rather than at
+        // the newline token. The scanner consumes newlines in three unrelated
+        // branches -- the `Newline` token, the blanks between tokens, and the
+        // interior of a `/* */` comment -- and a counter maintained at only
+        // some of them sends every later diagnostic to the wrong line. A reader
+        // pointed at a line that looks fine concludes the report is noise,
+        // which is worse than reporting no line at all.
+        // `naive_bytecount` wants the `bytecount` crate here. Declined: it is a
+        // SIMD dependency earning its keep on megabytes, and this counts the
+        // newlines in one `bc` statement — a few dozen bytes, once per token.
+        // A new dependency on the userland's critical path is a real cost; the
+        // loop is not.
+        #[allow(clippy::naive_bytecount)]
+        let crossed = self
+            .input
+            .get(self.pos..end)
+            .map_or(0, |seg| seg.iter().filter(|&&b| b == b'\n').count());
+        self.line = self.line.saturating_add(u32::try_from(crossed).unwrap_or(u32::MAX));
+        self.pos = end;
     }
 
     /// The bytes from `start` to the cursor, as text.
@@ -236,6 +282,9 @@ impl<'a> Lexer<'a> {
 
     fn next_token(&mut self) -> Token {
         self.skip_whitespace_and_comments();
+        // After the skip, not before: a diagnostic should name the line the
+        // token is on, not the line the previous one ended on.
+        self.token_line = self.line;
 
         let b = match self.peek_byte() {
             Some(b) => b,
@@ -377,8 +426,16 @@ impl<'a> Lexer<'a> {
             b';' => Token::Semicolon,
             b',' => Token::Comma,
             _ => {
-                // Unknown character, skip.
-                self.next_token()
+                // Consume the byte and hand it on as a token rather than
+                // recursing past it.
+                //
+                // Skipping silently is one of the four sites that made a typo
+                // produce a wrong *number* with no message: `1 $ 2` scanned as
+                // `1 2` and printed both, where GNU prints neither and says
+                // `illegal character: $` and then `syntax error`. The byte has
+                // to survive scanning for the parser to be able to refuse it.
+                self.bump(1);
+                Token::Illegal(b)
             }
         }
     }
@@ -411,6 +468,27 @@ impl<'a> Lexer<'a> {
     /// why `"a\nb"` on its own line writes four characters while
     /// `print "a\nb"` writes three.
     fn read_string(&mut self) -> Token {
+        // A string with no closing quote is NOT a string. Measured: GNU bc
+        // 1.07.1 answers `printf 'print "abc\n' | bc -q` with
+        // `(standard_in) 1: illegal character: "` — its scanner's rule needs
+        // the closing quote, so the opening one falls through to the
+        // illegal-character rule rather than matching a string that runs to
+        // end of input. Ours used to consume the rest of the file and print
+        // it, which is the shape of this whole entry: recover silently, emit
+        // a wrong answer, exit 0.
+        //
+        // But `unfinished` as well as the token, because bc strings genuinely
+        // DO span lines — measured, `print "ab\ncd"\n` prints `ab\ncd`. So an
+        // unterminated string mid-session means *the rest has not arrived*,
+        // and only at end of input is it an error. Setting both lets
+        // [`Chunker`] wait for the next line, and leaves the `Illegal` token
+        // in place to be reported if the input stops first. One flag, both
+        // behaviours, no second code path to keep in step.
+        if !self.rest_has_closing_quote() {
+            self.bump(1); // the quote itself, and nothing after it
+            self.unfinished = true;
+            return Token::Illegal(b'"');
+        }
         self.advance(); // skip opening "
         let mut s = String::new();
         while let Some(b) = self.peek_byte() {
@@ -421,6 +499,17 @@ impl<'a> Lexer<'a> {
             s.push(b as char);
         }
         Token::StringLit(s)
+    }
+
+    /// Whether a closing `"` exists anywhere after the cursor.
+    ///
+    /// bc has no escape for a quote inside a string — the scanner's rule is
+    /// `"[^"]*"` — so the first `"` found is the closing one, and a plain
+    /// search is exactly right rather than an approximation of one.
+    fn rest_has_closing_quote(&self) -> bool {
+        self.input
+            .get(self.pos.saturating_add(1)..)
+            .is_some_and(|rest| rest.contains(&b'"'))
     }
 
     fn read_ident(&mut self) -> Token {
@@ -533,8 +622,64 @@ enum PrintItem {
 // Parser
 // -------------------------------------------------------------------------
 
+/// One diagnostic, in GNU's two flavours, carrying the line it belongs to.
+///
+/// The line is relative to the chunk the parser was handed; [`Chunker`] adds
+/// the number of lines already consumed before anything is printed, because a
+/// parser that only ever sees one construct at a time cannot know it is on
+/// line 40 of the file.
+#[derive(Clone, Debug, PartialEq)]
+struct SyntaxError {
+    /// Index of the offending token in the *unfiltered* token stream.
+    ///
+    /// Carried only so the diagnostics can be put back into reading order
+    /// before printing. Measured, GNU orders them by position and not by which
+    /// stage produced them: `) $` prints `syntax error` then
+    /// `illegal character: $`, while `$ )` prints them the other way round. A
+    /// scanner-first rule gets the first of those backwards.
+    at: usize,
+    line: u32,
+    kind: ErrorKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ErrorKind {
+    /// A byte that starts no token: `illegal character: $`.
+    Illegal(u8),
+    /// Anything the grammar refuses: `syntax error`.
+    Syntax,
+}
+
+impl SyntaxError {
+    /// The message without the `NAME LINE: ` prefix, which only the caller
+    /// knows (it differs between a file operand and the stdin session).
+    fn message(&self) -> String {
+        match self.kind {
+            // `as char` is safe for the printable ASCII this fires on, and for
+            // a high byte it prints the Latin-1 character rather than refusing
+            // to report at all — GNU prints the raw byte, so neither of us is
+            // doing anything principled with a non-ASCII one.
+            ErrorKind::Illegal(b) => format!("illegal character: {}", b as char),
+            ErrorKind::Syntax => "syntax error".to_string(),
+        }
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
+    /// The line each token in `tokens` started on, same length and same order.
+    ///
+    /// Parallel to `tokens` rather than a field inside `Token` because `Token`
+    /// is compared with `==` throughout the parser — `self.peek() == expected`
+    /// — and a line number inside it would make two otherwise identical tokens
+    /// from different lines compare unequal, silently breaking every one of
+    /// those comparisons.
+    lines: Vec<u32>,
+    /// Each retained token's index in the *unfiltered* stream, so a parser
+    /// diagnostic can be ordered against a scanner one that was filtered out.
+    order: Vec<usize>,
+    /// Diagnostics, sorted into reading order by [`Self::take_errors`].
+    errors: Vec<SyntaxError>,
     pos: usize,
     /// Whether the parse ran off the end of the token stream while a construct
     /// was still open — `if (x)` with no body yet, a `define` whose `}` has not
@@ -566,19 +711,121 @@ impl Parser {
     fn new(input: &str) -> Self {
         let mut lexer = Lexer::new(input);
         let mut tokens = Vec::new();
+        let mut lines = Vec::new();
+        let mut order = Vec::new();
+        let mut errors = Vec::new();
+        let mut index = 0usize;
         loop {
             let tok = lexer.next_token();
             let is_eof = tok == Token::Eof;
-            tokens.push(tok);
+            // An illegal byte is reported and then DROPPED, which is GNU's own
+            // arrangement and is load-bearing rather than incidental. Measured:
+            // `1 $ 2` gives `illegal character: $` *and* `syntax error`,
+            // because with the `$` gone the parser sees `1 2` — two
+            // expressions with nothing between them — and refuses it. But
+            // `1; $ 2` gives only `illegal character: $`, because there the
+            // cleaned stream is `1 ; 2`, which is perfectly good bc. A parser
+            // that saw the illegal token itself would report a syntax error in
+            // both, and be wrong in the second.
+            if let Token::Illegal(b) = tok {
+                // Only the first is reported, and the rest are dropped in
+                // silence. Measured: `$ % &` answers `illegal character: $`
+                // and then `syntax error` — the `&`, equally illegal, is never
+                // mentioned. The byte is still removed from the stream either
+                // way, so what the parser goes on to see is unaffected.
+                if !errors
+                    .iter()
+                    .any(|e: &SyntaxError| matches!(e.kind, ErrorKind::Illegal(_)))
+                {
+                    errors.push(SyntaxError {
+                        at: index,
+                        line: lexer.token_line,
+                        kind: ErrorKind::Illegal(b),
+                    });
+                }
+            } else {
+                // A newline is blamed on the line it ENDS, not the one it
+                // begins — `lexer.line` has already moved past it, which is
+                // exactly the number GNU would report.
+                //
+                // Measured: `x = 1 +\n2\nx\n` is `h2.bc 2: syntax error` on
+                // GNU, not line 1, even though the incomplete expression is on
+                // line 1. Its `line_no` is incremented as the newline is
+                // scanned and the missing operand is only noticed afterwards,
+                // so the count has moved on by the time it reports. Ours said
+                // 1 until this line existed. Copied deliberately: the test
+                // `a_half_finished_expression_is_an_error_not_a_continuation`
+                // already carried GNU's `2:` as the measured truth, and a bc
+                // that numbers its errors differently from the bc every script
+                // was written against is a worse tool for being more logical.
+                let blamed = if tok == Token::Newline {
+                    lexer.line
+                } else {
+                    lexer.token_line
+                };
+                tokens.push(tok);
+                lines.push(blamed);
+                order.push(index);
+            }
+            index = index.saturating_add(1);
             if is_eof {
                 break;
             }
         }
         Self {
             tokens,
+            lines,
+            order,
+            errors,
             pos: 0,
             truncated: lexer.unfinished,
         }
+    }
+
+    /// The diagnostics, in reading order, leaving the parser empty.
+    ///
+    /// Sorted by token position: scanner and parser findings interleave by
+    /// where they are in the text, not by which stage found them. The sort is
+    /// stable, so two diagnostics blamed on the same token keep the order they
+    /// were recorded in.
+    fn take_errors(&mut self) -> Vec<SyntaxError> {
+        let mut out = std::mem::take(&mut self.errors);
+        out.sort_by_key(|e| e.at);
+        out
+    }
+
+    /// The line the token under the cursor starts on.
+    fn line_here(&self) -> u32 {
+        // The last entry is `Eof`'s line, which is the right answer for a
+        // cursor that has run off the end — that is where the input stopped.
+        self.lines
+            .get(self.pos)
+            .or_else(|| self.lines.last())
+            .copied()
+            .unwrap_or(1)
+    }
+
+    /// Record that the grammar refused the token under the cursor.
+    ///
+    /// At most one per unit, which is measured rather than assumed: GNU
+    /// answers `print ) ) )` and `) ) )` and `1 +++ 2` with a single
+    /// `syntax error` each. Its parser enters yacc's error-recovery state and
+    /// stays there until it has resynchronised, so one mistake yields one
+    /// message however much wreckage follows it.
+    ///
+    /// Worth keeping even aside from matching GNU: the alternative buries the
+    /// real mistake under a screenful of consequences of it, which is the
+    /// failure mode every compiler eventually grows a suppression rule for.
+    fn record_error(&mut self) {
+        if self.errors.iter().any(|e| e.kind == ErrorKind::Syntax) {
+            return;
+        }
+        let at = self.order.get(self.pos).copied().unwrap_or(usize::MAX);
+        self.errors.push(SyntaxError {
+            at,
+            line: self.line_here(),
+            kind: ErrorKind::Syntax,
+        });
     }
 
     fn peek(&self) -> &Token {
@@ -606,6 +853,13 @@ impl Parser {
             // an error. Only the first is recorded.
             if *self.peek() == Token::Eof {
                 self.truncated = true;
+            } else {
+                // Something else was written where this token was required —
+                // an error now, not a request for more input. `Chunker` turns
+                // a `truncated` that survives to end of input into one of
+                // these, so the Eof case is not being let off, only deferred
+                // until it is known that no further line is coming.
+                self.record_error();
             }
             false
         }
@@ -702,7 +956,10 @@ impl Parser {
                     self.skip_terminator();
                     Some(Stmt::Expr(expr))
                 } else {
-                    // Skip unexpected token.
+                    // Skip unexpected token — but say so first. Skipping in
+                    // silence is what let `print )` run to completion and
+                    // report nothing.
+                    self.record_error();
                     self.advance();
                     None
                 }
@@ -1118,6 +1375,12 @@ impl Parser {
                 // newline ended the statement, `2` was a fresh one, and `x` was
                 // never assigned. Waiting for more input here would have joined
                 // those two lines into `1 + 2` and printed `3`.
+                //
+                // The zero stays — the parser still has to return *an*
+                // expression — but it is no longer the whole of the response.
+                // The recorded error means the statement holding this zero is
+                // never executed, so the placeholder cannot reach a result.
+                self.record_error();
                 Expr::Number("0".to_string())
             }
         }
@@ -2222,6 +2485,20 @@ enum Feed {
     Incomplete,
     /// A complete unit of program, ready to execute.
     Ready(Vec<Stmt>),
+    /// A complete unit that will NOT be executed, and why.
+    ///
+    /// Measured against GNU bc 1.07.1: a unit containing any diagnostic
+    /// produces no output at all. `1; $ 2` prints nothing — not even the `1`,
+    /// which is a finished statement sitting before the mistake — while
+    /// `1\n$ 2\n` prints `1`, because there the good statement is on its own
+    /// line. So the thing discarded is the whole unit, and the unit is exactly
+    /// what this chunker already accumulates.
+    ///
+    /// Keeping it separate from `Ready` is what makes "a statement with a
+    /// mistake in it does not run" a property of the type rather than a rule
+    /// every caller has to remember: there is no way to receive these
+    /// statements, because they are not in here.
+    Failed(Vec<SyntaxError>),
     /// A `quit` was read. The run stops here and the pending text is discarded
     /// — including any statement written *before* the `quit` in the same unit.
     Quit,
@@ -2265,13 +2542,40 @@ enum Feed {
 struct Chunker {
     /// Lines read since the last unit was dispatched, each with its newline.
     buffer: String,
+    /// The input line number that `buffer`'s first line is, counting from 1.
+    ///
+    /// The parser sees one unit at a time and numbers its diagnostics from the
+    /// start of that unit, so without this every error in the file would be
+    /// reported as line 1 — which is indistinguishable from a correct report
+    /// about a genuine first-line error, and so worse than useless.
+    line_base: u32,
 }
 
 impl Chunker {
     fn new() -> Self {
         Self {
             buffer: String::new(),
+            line_base: 1,
         }
+    }
+
+    /// Move `line_base` past the buffer and empty it.
+    fn retire_buffer(&mut self) {
+        let lines = u32::try_from(self.buffer.lines().count()).unwrap_or(0);
+        self.line_base = self.line_base.saturating_add(lines);
+        self.buffer.clear();
+    }
+
+    /// Shift a unit's diagnostics onto absolute input lines.
+    fn absolute(&self, mut errors: Vec<SyntaxError>) -> Vec<SyntaxError> {
+        for e in &mut errors {
+            // `line` is 1-based within the unit and `line_base` is the unit's
+            // own line, so the two 1s are the same 1 and one of them comes off.
+            e.line = self
+                .line_base
+                .saturating_add(e.line.saturating_sub(1));
+        }
+        errors
     }
 
     /// Add one line, without its terminator, and say what to do next.
@@ -2285,15 +2589,23 @@ impl Chunker {
         // that wrong.
         let mut parser = Parser::new(&self.buffer);
         if parser.saw_quit() {
-            self.buffer.clear();
+            self.retire_buffer();
             return Feed::Quit;
         }
         let stmts = parser.parse_program();
         if parser.truncated {
-            Feed::Incomplete
-        } else {
-            self.buffer.clear();
+            // Still open: an `if` with no body yet, a string whose closing
+            // quote has not arrived. Any diagnostics found so far are
+            // discarded along with the parse, because the next line will be
+            // parsed from the top of the same buffer and find them again.
+            return Feed::Incomplete;
+        }
+        let errors = self.absolute(parser.take_errors());
+        self.retire_buffer();
+        if errors.is_empty() {
             Feed::Ready(stmts)
+        } else {
+            Feed::Failed(errors)
         }
     }
 
@@ -2302,14 +2614,45 @@ impl Chunker {
     /// It is run rather than discarded: a program is far more often missing its
     /// final newline than genuinely half-written, and dropping the last line
     /// would answer `printf '2+2' | bc` with silence.
-    fn finish(&mut self) -> Option<Vec<Stmt>> {
+    fn finish(&mut self) -> Option<Feed> {
         if self.buffer.is_empty() {
             return None;
         }
-        let text = std::mem::take(&mut self.buffer);
+        let text = self.buffer.clone();
         // No `saw_quit` check: every line in the buffer already went through
         // `feed`, which stops at the first `quit` token.
-        Some(Parser::new(&text).parse_program())
+        let mut parser = Parser::new(&text);
+        let stmts = parser.parse_program();
+        let mut errors = parser.take_errors();
+        // `errors.is_empty()` guards it: a truncation that ALREADY has a
+        // diagnostic does not get a second one. `print "abc` with no closing
+        // quote is truncated *because* of the illegal character just reported,
+        // so adding a syntax error on top says one mistake twice — and GNU,
+        // measured, prints only `illegal character: "` for it. The truncation
+        // that does need reporting is the one where nothing else went wrong:
+        // `if (1) {` with a body that never arrives.
+        if parser.truncated && errors.is_empty() {
+            // `truncated` means "a required token was missing because the
+            // input stopped" — which up to now has meant *wait for the next
+            // line*. Here there is no next line, so the same fact is a syntax
+            // error instead. This is the only place that knows the difference,
+            // and it is why `expect` does not report the Eof case itself.
+            //
+            // GNU agrees: `if (1) {\nprint "A"\n` with nothing after it is
+            // `syntax error` and prints nothing, where ours used to print `A`.
+            errors.push(SyntaxError {
+                at: usize::MAX,
+                line: parser.line_here(),
+                kind: ErrorKind::Syntax,
+            });
+        }
+        let errors = self.absolute(errors);
+        self.retire_buffer();
+        Some(if errors.is_empty() {
+            Feed::Ready(stmts)
+        } else {
+            Feed::Failed(errors)
+        })
     }
 }
 
@@ -2320,7 +2663,21 @@ impl Chunker {
 /// whole, because `quit` is defined by reading order and reading order is
 /// exactly what parsing-whole throws away. Before this, `printf 'print "A"\nquit\n' > f; bc f`
 /// printed nothing, since the single parse saw the `quit` before anything ran.
-fn run_text(interp: &mut Interpreter, text: &str) -> Session {
+/// GNU's name for the stdin session, used verbatim in its diagnostics.
+const STDIN_SOURCE: &str = "(standard_in)";
+
+/// Print a unit's diagnostics in GNU's format: `NAME LINE: message`.
+///
+/// No `bc: ` prefix — measured, GNU does not put one on these, the same as its
+/// `File %s is unavailable.`. A script that greps for `bc:` will not see these
+/// lines, and that is upstream's behaviour rather than an oversight here.
+fn report_syntax(source: &str, errors: &[SyntaxError]) {
+    for e in errors {
+        diag!("{} {}: {}", source, e.line, e.message());
+    }
+}
+
+fn run_text(interp: &mut Interpreter, text: &str, source: &str) -> Session {
     let mut chunker = Chunker::new();
     // `lines()` rather than `split('\n')`: it strips a trailing `\r` as well, so
     // a script saved with CRLF endings is read the same as one without, and it
@@ -2329,6 +2686,10 @@ fn run_text(interp: &mut Interpreter, text: &str) -> Session {
         match chunker.feed(line) {
             Feed::Incomplete => {}
             Feed::Quit => return Session::Stop,
+            // Reported and not run. The next unit is still read: measured,
+            // `print )\nprint "after\n"\n` prints `after` on GNU, so an error
+            // is "say so, then carry on", not "stop at the first problem".
+            Feed::Failed(errors) => report_syntax(source, &errors),
             Feed::Ready(stmts) => {
                 if interp.run(&stmts) == Session::Stop {
                     return Session::Stop;
@@ -2337,8 +2698,12 @@ fn run_text(interp: &mut Interpreter, text: &str) -> Session {
         }
     }
     match chunker.finish() {
-        Some(stmts) => interp.run(&stmts),
-        None => Session::Continue,
+        Some(Feed::Ready(stmts)) => interp.run(&stmts),
+        Some(Feed::Failed(errors)) => {
+            report_syntax(source, &errors);
+            Session::Continue
+        }
+        Some(Feed::Incomplete | Feed::Quit) | None => Session::Continue,
     }
 }
 
@@ -2644,7 +3009,24 @@ fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<Session, Troubl
         }
     };
     let text = String::from_utf8(text).map_err(|_| blame)?;
-    Ok(run_text(interp, &text))
+    // The name a diagnostic is blamed on. GNU uses the file operand exactly as
+    // it was written on the command line — measured, `bc -q prog.bc` says
+    // `prog.bc 1: syntax error`, not an absolutised or quoted form.
+    //
+    // `-e` has no GNU behaviour to match, because GNU bc has no `-e`: it
+    // answers `invalid option -- 'e'` and exits 1 (the flag is Gavin Howard's,
+    // and ours is a SlateOS extension). So it gets its own honest label rather
+    // than borrowing `(standard_in)`, which would blame the wrong input.
+    // `quotef_os`, not `to_string_lossy`: a path is bytes and may not be UTF-8,
+    // and lossy decoding would put U+FFFD in a diagnostic that is supposed to
+    // name a file the reader can go and open. It takes the bare form when the
+    // name has nothing needing quotes, so an ordinary `prog.bc` prints exactly
+    // as GNU prints it.
+    let source = match input {
+        Input::Expression(_) => "(command line)".to_string(),
+        Input::File(path) => quotef_os(path),
+    };
+    Ok(run_text(interp, &text, &source))
 }
 
 /// The interactive/pipe session: read until EOF, evaluating each construct as
@@ -2684,6 +3066,7 @@ fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<Session, Tr
             // is how the session ends, and in a pipe it is what stops a script
             // from being consumed after it asked to stop.
             Feed::Quit => return Ok(Session::Stop),
+            Feed::Failed(errors) => report_syntax(STDIN_SOURCE, &errors),
             Feed::Ready(stmts) => {
                 if interp.run(&stmts) == Session::Stop {
                     return Ok(Session::Stop);
@@ -2694,8 +3077,12 @@ fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<Session, Tr
 
     // Process any remaining buffer.
     match chunker.finish() {
-        Some(stmts) => Ok(interp.run(&stmts)),
-        None => Ok(Session::Continue),
+        Some(Feed::Ready(stmts)) => Ok(interp.run(&stmts)),
+        Some(Feed::Failed(errors)) => {
+            report_syntax(STDIN_SOURCE, &errors);
+            Ok(Session::Continue)
+        }
+        Some(Feed::Incomplete | Feed::Quit) | None => Ok(Session::Continue),
     }
 }
 
@@ -2952,11 +3339,44 @@ mod tests {
             match chunker.feed(line) {
                 Feed::Incomplete => seen.push("incomplete"),
                 Feed::Ready(_) => seen.push("ready"),
+                // A unit that parsed but will not run. Distinct from `ready`
+                // here rather than folded into it, so a test that expects a
+                // line to *execute* cannot be satisfied by one that merely
+                // finished parsing and was then thrown away.
+                Feed::Failed(_) => seen.push("failed"),
                 Feed::Quit => {
                     seen.push("quit");
                     break;
                 }
             }
+        }
+        seen
+    }
+
+    /// Every diagnostic a script produces, as `LINE: message`, in the order
+    /// they would be printed.
+    ///
+    /// The line number is included because it is the half most likely to be
+    /// quietly wrong: a checker that only asserted "it complained" would pass
+    /// on a `bc` that blamed every error in a 400-line script on line 1, which
+    /// is the state this whole change is fixing and is barely better than
+    /// silence. The source name is left off -- that is the caller's to supply
+    /// and is covered where the callers are.
+    fn diagnostics(script: &str) -> Vec<String> {
+        let mut chunker = Chunker::new();
+        let mut seen = Vec::new();
+        let mut collect = |feed: Feed| {
+            if let Feed::Failed(errors) = feed {
+                for e in errors {
+                    seen.push(format!("{}: {}", e.line, e.message()));
+                }
+            }
+        };
+        for line in script.lines() {
+            collect(chunker.feed(line));
+        }
+        if let Some(feed) = chunker.finish() {
+            collect(feed);
         }
         seen
     }
@@ -3016,7 +3436,18 @@ mod tests {
         // `(standard_in) 2: syntax error`, then `2`, then `0`. So the second
         // line is a unit of its own and `x` is never assigned -- a missing
         // *operand* ends the statement, where a missing *body* does not.
-        assert_eq!(feed_lines("x = 1 +\n2\n"), ["ready", "ready"]);
+        //
+        // `failed`, not `ready`: the first line is the syntax error GNU says
+        // it is, and a unit with an error in it does not run. That it used to
+        // read `ready` is why `x` was assigned nothing yet nothing was said --
+        // the parser had reached the right verdict and had nowhere to put it.
+        assert_eq!(feed_lines("x = 1 +\n2\n"), ["failed", "ready"]);
+        // ...and the diagnostic is GNU's, line number included.
+        assert_eq!(
+            diagnostics("x = 1 +\n2\n"),
+            ["2: syntax error"],
+            "a missing operand is blamed on the line the newline ENDS"
+        );
     }
 
     #[test]
@@ -3025,8 +3456,146 @@ mod tests {
         // spin, or the interactive loop hangs on a typo -- and `feed_lines`
         // returning at all is the assertion that it does.
         assert_eq!(feed_lines("1 /* never closed"), ["incomplete"]);
-        assert_eq!(feed_lines("\"never closed"), ["ready"]);
         assert_eq!(feed_lines("{ /* never closed"), ["incomplete"]);
+        // A string is `incomplete` rather than `ready` because bc strings
+        // genuinely span lines -- measured, `print "ab\ncd"` prints both --
+        // so an unclosed quote means the rest has not arrived yet. It used to
+        // read `ready`, which is why the closing line of a multi-line string
+        // was run as a program of its own.
+        assert_eq!(feed_lines("\"never closed"), ["incomplete"]);
+        // The waiting ends at end of input, and then it is GNU's wording: the
+        // quote that opened a string nothing closed is the illegal character,
+        // and there is exactly ONE diagnostic for it -- the truncation is
+        // explained by the illegal character and does not earn a second.
+        assert_eq!(
+            diagnostics("print \"abc\n"),
+            ["1: illegal character: \""]
+        );
+    }
+
+    // --- Saying so: the diagnostics themselves -------------------------------
+
+    #[test]
+    fn a_program_with_no_mistakes_in_it_says_nothing() {
+        // The control, and the reason it is first: every other test below
+        // asserts that bc COMPLAINS, and all of them would pass on a bc that
+        // complained about everything -- including one that reported a syntax
+        // error on every line of a correct script, which is a worse tool than
+        // the silent one this change replaced. Nothing else here can fail in
+        // that direction, so this has to.
+        for good in [
+            "2+2\n",
+            "x = 5\nx * 3\n",
+            "if (1) {\nprint \"A\"\n}\n",
+            "define f(x) {\nreturn (x * 2)\n}\nf(4)\n",
+            "while (0) {\n}\n",
+            "/* a comment\nspanning lines */ 1\n",
+            "1 + \\\n2\n",
+            "print \"ab\ncd\"\n",
+            "",
+        ] {
+            assert_eq!(diagnostics(good), Vec::<String>::new(), "on {good:?}");
+        }
+    }
+
+    #[test]
+    fn a_syntax_error_is_named_and_its_unit_does_not_run() {
+        // The headline case. `print )` used to print nothing, say nothing and
+        // exit 0, which is indistinguishable from an empty program.
+        assert_eq!(diagnostics("print )\n"), ["1: syntax error"]);
+        // ONE diagnostic, not one per token the confused parser then walks
+        // over. A parser that resynchronises noisily buries the real mistake.
+        assert_eq!(diagnostics("print ) ) )\n"), ["1: syntax error"]);
+        // The unit is discarded whole -- `Feed::Failed` carries no statements,
+        // so there is no way for the interpreter to run one. That is the
+        // "wrong number with no message" half of the bug, and it is now a
+        // property of the type rather than a rule someone has to follow.
+        assert_eq!(feed_lines("print )\n"), ["failed"]);
+    }
+
+    #[test]
+    fn an_error_does_not_stop_the_lines_after_it() {
+        // Measured: GNU prints `after`. So this is "say so, then carry on",
+        // not "stop at the first problem" -- a distinction that matters for a
+        // script whose first line has a typo and whose remaining forty do the
+        // work.
+        assert_eq!(
+            diagnostics("print )\nprint \"after\"\n"),
+            ["1: syntax error"]
+        );
+        assert_eq!(feed_lines("print )\nprint \"after\"\n"), ["failed", "ready"]);
+    }
+
+    #[test]
+    fn an_illegal_character_is_named_and_then_dropped() {
+        // Dropped, not carried: with the `$` gone the parser sees `1 2`, and
+        // what it says about that is its own business. Both diagnostics appear
+        // for `1 $ 2` on GNU; ours currently reports only the first, because
+        // our grammar accepts two expressions with no separator between them.
+        // That gap is `TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR`, not this test's
+        // subject, and is asserted here as it actually behaves so the entry
+        // and the code cannot drift apart.
+        assert_eq!(diagnostics("1 $ 2\n"), ["1: illegal character: $"]);
+        // With a separator there is nothing for the parser to object to, and
+        // GNU agrees: `1; $ 2` is `illegal character: $` and nothing else.
+        assert_eq!(diagnostics("1; $ 2\n"), ["1: illegal character: $"]);
+        // Still fatal to the unit, though -- measured, GNU prints neither the
+        // `1` nor the `2`.
+        assert_eq!(feed_lines("1; $ 2\n"), ["failed"]);
+    }
+
+    #[test]
+    fn diagnostics_come_out_in_reading_order_not_stage_order() {
+        // Measured both ways round, because this is exactly the kind of thing
+        // that looks obviously scanner-first until it is checked:
+        //     `) $` -> syntax error, then illegal character
+        //     `$ )` -> illegal character, then syntax error
+        // A rule of "scanner findings first" gets the first of these backwards,
+        // and nothing else in the suite would notice.
+        assert_eq!(
+            diagnostics(") $\n"),
+            ["1: syntax error", "1: illegal character: $"]
+        );
+        assert_eq!(
+            diagnostics("$ )\n"),
+            ["1: illegal character: $", "1: syntax error"]
+        );
+    }
+
+    #[test]
+    fn line_numbers_count_the_whole_input_not_the_unit() {
+        // The parser sees one unit at a time and numbers from the top of it,
+        // so without `Chunker::line_base` every one of these would read `1:`.
+        // That failure mode is worth a test of its own because it is invisible
+        // in any one-line example -- and a report that blames line 1 for a
+        // mistake on line 40 is worse than no line number, since the reader
+        // goes and stares at a line that is fine.
+        assert_eq!(diagnostics("1\n2\nprint )\n"), ["3: syntax error"]);
+        assert_eq!(diagnostics("1\n2\n3 $ 4\n"), ["3: illegal character: $"]);
+        assert_eq!(
+            diagnostics("print )\n1\nprint )\n"),
+            ["1: syntax error", "3: syntax error"]
+        );
+        // Newlines inside a block comment are counted too. They are consumed
+        // by a different branch of the scanner from the one that makes the
+        // `Newline` token, which is why the count lives in `bump` and not
+        // there: miss this and every diagnostic after the first long comment
+        // points somewhere plausible and wrong.
+        assert_eq!(diagnostics("/* one\ntwo\nthree */ print )\n"), ["3: syntax error"]);
+        // ...and so are the ones inside a multi-line string.
+        assert_eq!(diagnostics("s = \"one\ntwo\"\nprint )\n"), ["3: syntax error"]);
+    }
+
+    #[test]
+    fn a_construct_left_open_at_end_of_input_is_an_error() {
+        // While more input might still arrive this is `incomplete`, which is
+        // what lets an `if` body sit on the next line. When the input stops it
+        // becomes the syntax error GNU calls it -- ours used to run the body
+        // anyway and print `A`.
+        assert_eq!(feed_lines("if (1) {\nprint \"A\"\n"), ["incomplete", "incomplete"]);
+        assert_eq!(diagnostics("if (1) {\nprint \"A\"\n"), ["3: syntax error"]);
+        // The same fact one line earlier: still open, still nothing said yet.
+        assert_eq!(diagnostics("if (1) {\n"), ["2: syntax error"]);
     }
 
     #[test]

@@ -1,5 +1,11 @@
 # A → C: clipboard file list is now byte-safe
 
+**Status:** LANDED, confirmed 2026-09-16 by lane C. All three verified in
+`kernel/src/fs/clipboard.rs`: `set_files(paths: &[&[u8]], ..)` takes bytes,
+`get_files() -> Option<(Vec<Vec<u8>>, FileOp)>` returns them, and the encoding is
+NUL-separated with the reasoning in a comment beside it. No `from_utf8` on path
+data anywhere in the path, which is what the original request was about.
+
 **Filed:** 2026-09-07 by lane A, in response to
 `c-a-the-system-clipboards-file-list-cannot-carry-our-own-paths.md`.
 

@@ -1,5 +1,8 @@
 # `ziparchive` is a crate now — and both halves of your `extract_entry` suspicion were right
 
+**Status:** LANDED, confirmed 2026-09-16 by lane C. `ziparchive` is a root crate
+with its own manifest, and `extract_entry(data, entry)` is public at lib.rs:550.
+
 Reply to `requests/c-a-zip-is-trapped-in-the-kernel-binary.md`. Option 1, as you
 preferred. It is on `main`.
 

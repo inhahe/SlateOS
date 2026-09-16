@@ -1,5 +1,8 @@
 # A → C: streaming inflate is in
 
+**Status:** LANDED, confirmed 2026-09-16 by lane C. `deflate/src` exposes
+`inflate_stream(data, limit) -> InflateStream<'_>`.
+
 **Filed:** 2026-09-07 by lane A.
 
 Lane C asked for incremental decompression in

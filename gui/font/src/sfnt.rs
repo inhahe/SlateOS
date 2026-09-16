@@ -2920,7 +2920,10 @@ pub(crate) mod tests {
         let mut tables = build_test_tables(TRUE_LSB_3);
         tables.push((*b"post", post_table(1)));
         let face = Face::parse(assemble(&tables)).expect("synthetic font must parse");
-        assert!(face.is_monospaced(), "a fixed-pitch face was called proportional");
+        assert!(
+            face.is_monospaced(),
+            "a fixed-pitch face was called proportional"
+        );
     }
 
     /// ...and `isFixedPitch` of zero is a face that says it is *not* fixed.
@@ -2932,7 +2935,10 @@ pub(crate) mod tests {
         let mut tables = build_test_tables(TRUE_LSB_3);
         tables.push((*b"post", post_table(0)));
         let face = Face::parse(assemble(&tables)).expect("synthetic font must parse");
-        assert!(!face.is_monospaced(), "a proportional face was called monospaced");
+        assert!(
+            !face.is_monospaced(),
+            "a proportional face was called monospaced"
+        );
     }
 
     /// With no `post` table, PANOSE answers.
@@ -2941,7 +2947,10 @@ pub(crate) mod tests {
         let mut tables = build_test_tables(TRUE_LSB_3);
         tables.push((*b"OS/2", os2_with_panose(PANOSE_MONOSPACED)));
         let face = Face::parse(assemble(&tables)).expect("synthetic font must parse");
-        assert!(face.is_monospaced(), "PANOSE said monospaced and was not consulted");
+        assert!(
+            face.is_monospaced(),
+            "PANOSE said monospaced and was not consulted"
+        );
     }
 
     /// An unclassified PANOSE is not an answer.
@@ -2955,14 +2964,20 @@ pub(crate) mod tests {
         let mut tables = build_test_tables(TRUE_LSB_3);
         tables.push((*b"OS/2", os2_with_panose(0)));
         let face = Face::parse(assemble(&tables)).expect("synthetic font must parse");
-        assert!(!face.is_monospaced(), "an unclassified face was called monospaced");
+        assert!(
+            !face.is_monospaced(),
+            "an unclassified face was called monospaced"
+        );
     }
 
     /// A face with neither table is not monospaced.
     #[test]
     fn a_face_declaring_nothing_is_not_monospaced() {
         let face = Face::parse(build_test_font()).expect("synthetic font must parse");
-        assert!(!face.is_monospaced(), "a face that declared nothing was guessed at");
+        assert!(
+            !face.is_monospaced(),
+            "a face that declared nothing was guessed at"
+        );
     }
 
     /// The fixture's tables, before they are laid out.

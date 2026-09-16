@@ -772,17 +772,22 @@ impl FilterState {
 // =============================================================================
 
 /// Simple JSON serialization for boards (no external dependency).
-// The board serialiser. Complete, ten tests, and no caller: exporting needs
-// somewhere to put the result, and this program cannot write a file yet.
-// `KanbanApp::export_json` below is the one call that would use it.
-// See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-#[allow(dead_code, reason = "export has nowhere to write yet")]
+//
+// Reachable through `KanbanApp::write_board`, which the save picker calls and
+// which writes the result atomically through `safeio`. The comment here used
+// to say the serialiser had no caller and nowhere to put its output; both
+// stopped being true when the picker landed.
+//
+// `export_json` was deleted with this edit. It called `export_board` and
+// returned the string, under a comment saying "it has nowhere to put its
+// result: this program cannot write a file yet" -- superseded by `write_board`
+// and left behind. The compiler found it, after I wrote a comment here
+// claiming it was the live path: a claim about reachability is exactly the
+// kind a build already answers, and I asserted instead of asking.
 struct JsonExporter;
 
 impl JsonExporter {
     // The serialiser's body. Ten tests, no caller — see the struct above.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "export has nowhere to write yet")]
     fn escape_json(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for ch in s.chars() {
@@ -1052,12 +1057,15 @@ impl JsonValue {
     }
 }
 
-/// Minimal JSON parser for board import (handles the structure exported above).
-// The reader for what the exporter writes. Same position, plus a file
-// chooser it would also need. Kept with its ten tests so that wiring both
-// halves later is a small job rather than a rewrite.
-// See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-#[allow(dead_code, reason = "import needs a file chooser")]
+/// Reads back what [`JsonExporter`] writes: a value parser over the tokeniser
+/// below it, and [`Self::import_board`] over that.
+//
+// **Reachable since the file picker landed.** This comment used to say the
+// importer was a parser waiting on a chooser, and a `dead_code` allow beneath
+// it said the same. Both outlived the fix: `import_board` has a caller, the
+// picker exists, and removing the four allows leaves the crate compiling
+// without a warning -- which is the check that decided it, rather than
+// reading the comment.
 struct JsonImporter;
 
 impl JsonImporter {
@@ -1068,9 +1076,6 @@ impl JsonImporter {
     /// byte as the Unicode scalar of that value — a Latin-1 reading that turns
     /// every non-ASCII character into mojibake (`日` = E6 97 A5 becomes three
     /// chars `æ\u{97}¥`) and then persists the damage on the next save.
-    // The parser's body. Ten tests, no caller — see the struct above.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "import needs a file chooser")]
     fn parse_string(data: &str, start: usize) -> Option<(String, usize)> {
         let bytes = data.as_bytes();
         if bytes.get(start).copied() != Some(b'"') {
@@ -1168,10 +1173,6 @@ impl JsonImporter {
     }
 
     /// Parse a JSON number (integer), returning value and next offset.
-    // More of the parser's body: the same ten tests cover these, and the same
-    // missing file chooser keeps them unreachable.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "import needs a file chooser")]
     fn parse_number(data: &str, start: usize) -> Option<(i64, usize)> {
         let rest = data.get(start..)?;
         let end = rest
@@ -1182,10 +1183,6 @@ impl JsonImporter {
         Some((val, start.saturating_add(end)))
     }
 
-    /// Skip whitespace.
-    // Part of the importer, which has no file chooser to read from.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "import needs a file chooser")]
     /// Rebuild a board from what `JsonExporter::export_board` wrote.
     ///
     /// # What a failure means here
@@ -1370,6 +1367,13 @@ impl JsonImporter {
         }
     }
 
+    /// Skip whitespace.
+    ///
+    /// This doc comment lived three hundred lines up, above `import_board`,
+    /// where it became that function's first rustdoc line -- so the public
+    /// documentation for "rebuild a board from a file" opened with "Skip
+    /// whitespace." A doc comment attaches to the next *item*, and there were
+    /// two more doc blocks between this one and any function.
     fn skip_ws(data: &str, start: usize) -> usize {
         let bytes = data.as_bytes();
         let mut i = start;
@@ -1688,14 +1692,6 @@ impl KanbanApp {
         } else {
             Vec::new()
         }
-    }
-
-    // The one call that would use the serialiser above, and it has nowhere to
-    // put its result: this program cannot write a file yet.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "export has nowhere to write yet")]
-    fn export_json(&self) -> String {
-        JsonExporter::export_board(self.active_board())
     }
 }
 
@@ -5197,13 +5193,56 @@ mod tests {
         assert_eq!(ids.len(), 1);
     }
 
+    /// Exporting writes a file, and the file reads back as the same board.
+    ///
+    /// **This replaces `test_app_export_json`, and the replacement is the
+    /// point.** That test called `KanbanApp::export_json`, which returned the
+    /// serialiser's string and did nothing with it, and asserted the string
+    /// was non-empty and contained the board's name. Both assertions were
+    /// true, and neither could fail for any reason a user would notice --
+    /// `export_board` always writes at least a header.
+    ///
+    /// Worse, the test was the only thing keeping `export_json` alive.
+    /// `write_board` had superseded it -- that one takes a path, writes
+    /// atomically through `safeio`, and is what the save picker calls -- and
+    /// the leftover sat behind a comment saying "this program cannot write a
+    /// file yet", which had stopped being true. A test on the wrong function
+    /// is how a superseded function survives being superseded.
+    ///
+    /// So this asserts the whole door: bytes on disk, read back, parsed, and
+    /// the same board on the other side.
     #[test]
-    fn test_app_export_json() {
+    fn exporting_writes_a_file_that_reads_back_as_the_same_board() {
+        let dir =
+            std::env::temp_dir().join(format!("kanban-export-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).expect("fixture");
+        let path = dir.join("board.json");
+        let _ = std::fs::remove_file(&path);
+
         let mut app = KanbanApp::new();
         app.create_sample_data();
-        let json = app.export_json();
-        assert!(!json.is_empty());
-        assert!(json.contains("My Project"));
+        let wanted_cards = app.active_board().cards.len();
+        assert!(
+            wanted_cards > 0,
+            "control: the sample board must have cards, or writing is refused"
+        );
+
+        let said = app.write_board(&path);
+        assert!(
+            said.starts_with("Wrote"),
+            "the export did not report writing: {said}"
+        );
+
+        let text = std::fs::read_to_string(&path).expect("the file the export named");
+        let back = JsonImporter::import_board(&text).expect("our own export must import");
+        assert_eq!(back.name, "My Project");
+        assert_eq!(
+            back.cards.len(),
+            wanted_cards,
+            "the board that came back has a different number of cards"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

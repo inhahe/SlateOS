@@ -1508,6 +1508,7 @@ name = "logind"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "libcall",
  "libservicebus",
  "posix",
  "scratchdir",

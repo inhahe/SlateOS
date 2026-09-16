@@ -514,7 +514,22 @@ pub struct DriverInfo {
 pub struct IrqInfo {
     pub irq_number: u32,
     pub device: String,
+    /// Left empty when read from `/proc/interrupts`: the kernel publishes a
+    /// label and a flag, and nothing that is a *type*. It used to default to
+    /// `"Edge"`, which is a trigger mode nobody reported.
     pub irq_type: String,
+    /// Whether the IOAPIC showed the line asserted at the moment of the read.
+    ///
+    /// **A sample, not a total, and never to be drawn as activity.** Reading
+    /// `/proc/interrupts` twice can show `false` both times while thousands of
+    /// interrupts were serviced in between, so a count synthesised from this
+    /// would agree with itself forever *and* agree with the real one. That is
+    /// worse than a wrong constant, which at least fails on a second look:
+    /// **the observation that would falsify it is the observation that
+    /// confirms it.** Lane B declined to synthesise the count in `procinfo`
+    /// for this reason; the same answer applies one layer up. A rate needs the
+    /// counters to exist first.
+    pub asserted: bool,
 }
 
 /// I/O port range.
@@ -3167,6 +3182,158 @@ mod tests {
         assert!(
             provider.query_processes().is_err(),
             "an unreadable /proc reported as a machine running nothing"
+        );
+    }
+
+    /// The interrupt lines come from `/proc/interrupts`, and the flag is a flag.
+    ///
+    /// `query_irqs` read `/sys/hardware/irqs`, which this kernel has never
+    /// served and which lane A has recorded it will never serve. The category
+    /// has therefore said "cannot read" since it was written.
+    ///
+    /// **`irq_type` is empty, deliberately.** It used to default to `"Edge"` --
+    /// a trigger mode nobody published. The kernel serves a label and a
+    /// pending flag and nothing that is a type, and a plausible default in a
+    /// column headed Type is the same defect as a plausible default anywhere
+    /// else.
+    #[test]
+    fn the_interrupt_lines_are_read_and_the_flag_is_not_a_count() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-irq-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc")).expect("fixture");
+        std::fs::write(
+            root.join("proc/interrupts"),
+            b"APIC timer ticks: 4210\nISR latency:  (no measurements)\n\n\
+              IRQ  PENDING  DESCRIPTION\n\
+              0    no       PIT timer / HPET\n\
+              1    yes      Keyboard (PS/2)\n",
+        )
+        .unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let irqs = provider.query_irqs().expect("the fixture is readable");
+
+        assert_eq!(irqs.len(), 2);
+        assert_eq!(irqs[0].irq_number, 0);
+        assert_eq!(irqs[0].device, "PIT timer / HPET");
+        assert!(!irqs[0].asserted);
+        assert_eq!(irqs[1].irq_number, 1);
+        assert!(irqs[1].asserted, "the asserted line was read as idle");
+        for irq in &irqs {
+            assert!(
+                irq.irq_type.is_empty(),
+                "invented a trigger mode the kernel does not publish: {:?}",
+                irq.irq_type
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no `/proc/interrupts`, it says so rather than reporting no lines.
+    #[test]
+    fn an_absent_interrupts_file_is_an_error_not_an_empty_table() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-irq-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        assert!(
+            provider.query_irqs().is_err(),
+            "an unreadable file reported as a machine with no interrupt lines"
+        );
+    }
+
+    /// The outputs come from `/proc/monitors`, and the adapter stays empty.
+    ///
+    /// `/proc/monitors` describes *outputs*, not the card driving them, so the
+    /// GPU name, vendor, VRAM and driver version have no source. A plausible
+    /// "16384 MB" beside real resolutions would be the one figure on the page
+    /// nobody could check.
+    #[test]
+    fn the_outputs_are_read_and_the_adapter_is_not_invented() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-mon-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proc")).expect("fixture");
+        std::fs::write(
+            root.join("proc/monitors"),
+            // Copied from `procinfo`'s own fixture rather than guessed. My
+            // first version invented a plausible-looking layout -- `primary:`
+            // for `primary_id:`, `at 0,0` for `pos=(0,0)` -- and the parser
+            // read no primary from it, so the resolution came back empty. A
+            // fixture written from memory tests the memory.
+            //
+            // **The primary is the SECOND row, and the rows carry different
+            // modes.** procinfo's own fixture makes output 1 the primary,
+            // which is the one arrangement where reading `outputs.first()`
+            // and reading `primary()` cannot be told apart -- and that is
+            // exactly the mistake this test exists to catch. Copy a fixture
+            // for its format; choose its contents for what you are pinning.
+            b"monitors: 2
+              enabled: 1
+              layout_mode: extended
+              primary_id: 2
+              ops: 14
+              desktop: 3840x1200 at (-1920,0)
+              1: HP-Z24 1920x1080@75Hz pos=(-1920,0) scale=125% HDMI [disabled]
+              2: DELL U2412 1920x1200@60Hz pos=(0,0) scale=100% DisplayPort [primary]
+",
+        )
+        .unwrap();
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        let display = provider.query_display().expect("the fixture is readable");
+
+        assert_eq!(
+            display.resolution, "1920x1200",
+            "the resolution should be the PRIMARY output's mode"
+        );
+        assert_eq!(
+            display.refresh_rate_hz, 60,
+            "the refresh rate should be the PRIMARY output's, not the first row's 75"
+        );
+        assert_eq!(
+            display.outputs,
+            vec![
+                (String::from("HP-Z24"), false),
+                (String::from("DELL U2412"), true),
+            ],
+            "a disabled output is still listed, and its state is read not assumed"
+        );
+        assert!(display.gpu_name.is_empty(), "invented an adapter name");
+        assert!(display.vendor.is_empty(), "invented a vendor");
+        assert_eq!(display.vram_mb, 0, "invented a VRAM size");
+        assert!(
+            display.driver_version.is_empty(),
+            "invented a driver version"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no `/proc/monitors`, it says so rather than reporting no screens.
+    #[test]
+    fn an_absent_monitors_file_is_an_error_not_an_empty_list() {
+        let root = std::env::temp_dir().join(format!(
+            "sysinfo-mon-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let provider = hwquery::SyscallProvider::at(&root.to_string_lossy());
+        use hwquery::HardwareProvider;
+        assert!(
+            provider.query_display().is_err(),
+            "an unreadable file reported as a machine with no outputs"
         );
     }
 

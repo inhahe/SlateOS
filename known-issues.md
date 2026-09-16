@@ -152650,7 +152650,7 @@ time, the system figures not read, the kernel release taken as the whole
 `/proc/version` line, and an unreadable `/proc` passed over in silence. All
 five went red.
 
-## TD-C-APPS-SYSINFO-WAITS-ON-A-FILESYSTEM-TREE-THAT-DOES-NOT-EXIST -- OPEN 2026-09-15
+## TD-C-APPS-SYSINFO-WAITS-ON-A-FILESYSTEM-TREE-THAT-DOES-NOT-EXIST -- FIXED 2026-09-15
 
 **In short:** the graphical System Information window reads ten of its twelve
 categories from `/sys/hardware/...`. The kernel serves no `/sys/hardware` at
@@ -152660,7 +152660,14 @@ report "cannot read" forever, while the data sits in `/proc` — and the crate
 built specifically to read it for this app is not among the app's
 dependencies.
 
-**Date:** 2026-09-15. **Lane:** C. Not yet fixed; the work is scoped below.
+**Date:** 2026-09-15. **Lane:** C. **Fixed 2026-09-15** -- all three steps
+below are done. Six categories now read real data: CPU, memory and storage
+from `/sys/devices`, network and processes from `/proc` via `procinfo`, and
+IRQs and Display from `/proc/interrupts` and `/proc/monitors` once lane B's
+parsers landed.
+
+**But the last row of the table below is wrong, and I wrote it.** See
+`TD-C-SYSINFO-FILED-A-NEGATIVE-IT-NEVER-CHECKED`, which supersedes it.
 
 **How it got here, in three correct steps.**
 
@@ -152710,7 +152717,7 @@ today.
 | Processes | `/proc/<pid>/{stat,statm,cmdline}` | yes |
 | IRQs | `/proc/interrupts` | **no parser** |
 | Display | `/proc/monitors` | **no parser** |
-| PCI, USB, sound, I/O ports, DMA, memory map, drivers, services, startup | nothing publishes these | — |
+| PCI, USB, sound, I/O ports, DMA, memory map, drivers, services, startup | ~~nothing publishes these~~ **WRONG -- a claim about the whole kernel made from looking at one filesystem** | see below |
 
 **The fix, in order:**
 
@@ -152729,6 +152736,201 @@ today.
 **Why this is filed rather than done:** it is the largest remaining item in
 this sweep and wants its own commits. Everything needed to start is above, and
 nothing about it is blocked.
+
+## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- OPEN 2026-09-15
+
+**In short:** across this tree there are 78 settings that a program reads for
+exactly one purpose: to show the value back to the person who set it. Nothing
+else ever looks at them. Change the setting, restart, read it in the window or
+the banner, and it will agree with you -- which is the only check available,
+and it passes. 43 of the 78 are in this lane.
+
+**Date:** 2026-09-15. **Lane:** C (35 of the 78 are lane B's).
+**Decided by:** Claude (autonomous) -- filed, not yet fixed.
+
+**Why this is worse than a setting nothing reads at all.** A dead setting is
+silent, and silence at least does not argue. An echoed setting produces
+positive evidence that it took effect, in the program's own voice, at the exact
+moment the operator is checking. It is the same shape as every fabrication
+cleared out of this tree this week -- **the observation that would falsify the
+claim is the same observation that confirms it** -- and this is the most
+persuasive form of it, because the confirming observation is the program's own
+output rather than a number it made up.
+
+Lane B named the case first, in `userspace/logind`:
+
+> `IdleActionSec` is in this list even though a field-level scan calls it READ,
+> and that difference is the point. Its only reader is the startup banner,
+> which prints `idle_timeout=600s` back at the operator -- so the one thing the
+> setting does is CONFIRM ITSELF. A scanner asking "is this field ever read?"
+> cannot see that, because printing is a read; the question that finds it is
+> "does anything ACT on it?".
+
+**How they are found:** `scripts/find-echoed-settings.py`. Reports, does not
+gate. The rule is per-**struct**, not per-field, which is what makes it usable
+at all: a `--show-config` dump reads *every* field into a print and is honest,
+so the finding is a field read only into output **while its siblings are read
+by code that acts**. That exonerates a dump wholesale without exonerating a
+straggler inside one.
+
+**The count is split three ways and the splits matter more than the total:**
+
+| | count | meaning |
+|---|---|---|
+| reaches a `println!`/`write!` | 24 | shown to a person for certain |
+| built with `format!` only | 54 | shown *if* it reaches a screen |
+| stranded (reported separately) | 23 | the formatter has no caller -- a different defect |
+
+That last row is why this is not simply 101. A field read only into a print
+has two explanations wanting opposite fixes: the print runs and misleads, or
+the print sits in a formatter nothing calls. The second is
+`find-stranded-serialisers`' finding and counting it here would be two tools
+reporting one defect.
+
+**And `[format]` means different things in different halves of the tree.** For
+a command-line program it is genuinely ambiguous -- `userspace/curl`'s
+`user_agent` is formatted into a request header, `userspace/objdump`'s `radix`
+picks a number base, and neither is shown to anybody. A GUI app has no stdout:
+every label it draws is `format!`-built and handed to the toolkit. So under
+`apps/` and `gui/`, `[format]` means **shown**.
+
+**This lane's 43, by file:**
+
+| file | n |
+|---|---|
+| `apps/mediaconvert` | 6 |
+| `gui/desktop/network_settings.rs` | 5 |
+| `gui/desktop/power.rs` | 5 |
+| `apps/remotedesktop`, `apps/settings/remote.rs`, `apps/videoplayer`, `gui/desktop/sound_settings.rs`, `gui/desktop/update_settings.rs` | 2 each |
+| `apps/fontmanager`, `apps/netscan`, `apps/paint`, `apps/weather`, `gui/desktop/datetime_settings.rs`, `gui/desktop/startup_settings.rs`, `gui/desktop/storage_settings.rs` | 1 each |
+
+**One verified by hand, because a count nobody checked is the thing this lane
+has spent the week finding.** `apps/mediaconvert`'s settings panel offers
+Quality, Strip metadata, Preserve aspect, and video and audio codec. It draws
+all five. Nothing acts on any of them, because that program cannot convert
+anything -- which it already says, in three lines, one of which warns against
+deleting an original on the strength of its queue. The settings panel is the
+half that was not covered by those three lines.
+
+**The fix, per program, is the one lane B already applied to `logind` and
+`tuned`:** keep the field, and have the program name the settings the operator
+actually set that it does not honour. Not a blanket "this is a mock" banner --
+a specific list, built from what was parsed, silent when nothing inert was set.
+That distinction is what makes it useful rather than noise.
+
+**Order of work:** `apps/mediaconvert` first, as the verified one and the
+largest single cluster in this lane. `gui/desktop`'s four settings pages next,
+since they are the operator's actual settings surface and the place where the
+confirmation is most convincing.
+
+**Until then:** nothing degrades, and nothing is at risk of data loss from
+these specifically. What is wrong is that a person can set a value, check it,
+and be told yes.
+
+
+## TD-C-SYSINFO-FILED-A-NEGATIVE-IT-NEVER-CHECKED -- OPEN 2026-09-15
+
+**In short:** the System Information window has nine categories -- PCI, USB,
+sound, I/O ports, DMA, the firmware memory map, drivers, services and startup
+items -- that say "cannot read". Yesterday I filed an entry saying that was
+correct, because "nothing publishes these". I had only looked in one place.
+Three of the nine have a source in `/proc` today that fills nearly every field
+the window shows, and several others have a partial one.
+
+**Date:** 2026-09-15. **Lane:** C. **Decided by:** Claude (autonomous) -- the
+error is mine and this entry is the correction.
+
+**How the wrong claim was made.** The nine categories read
+`/sys/hardware/{pci,usb,sound,ioports,memmap,dma}`, `/sys/services`,
+`/sys/drivers`, `/sys/startup`. I checked the kernel's **sysfs**, found no such
+nodes, and noted that §850 puts hardware under `/sys/devices` anyway, so no
+producer will ever appear at those paths. All true. Then I wrote down
+"nothing publishes these" -- a claim about the *whole kernel* -- on the
+strength of having looked at one filesystem. `kernel/src/fs/procfs.rs` has
+~470 generators and I had read none of them.
+
+This is the same defect this lane has spent the week finding in other people's
+code, in its own words: **a count without the thing that would let someone
+check it is read as coverage.** The table row carried no column saying where I
+had looked, so nobody reading it -- including me, the next day -- could tell
+that it meant "not in sysfs" rather than "not anywhere".
+
+**And then I overcorrected.** The first version of this entry said eight of
+the nine had sources "listing exactly the rows the window wants". That was the
+identical mistake pointed the other way: I had matched *categories* to
+*generators* by name and not checked a single field. Corrected below by
+reading both sides. The verdict is much less tidy than either claim.
+
+**What is actually there, field by field.**
+
+| category | struct fields | source | fields with a source |
+|---|---|---|---|
+| I/O ports | `start, end, device` | `/proc/ioport` per-region | **3 of 3** |
+| drivers | `name, path, status` | `/proc/kmod` per-module | 2 of 3 (no path; has version, size, refcount the struct lacks) |
+| startup | `name, path, source` | `/proc/autostart` per-item | 2-3 of 3 (`path` ← command, `source` ← phase) |
+| sound | `name, device_type, driver, status` | `/proc/audiodevice` per-device | 2 of 4 (`device_type` ← direction; no driver, no status) |
+| PCI | `bus, device, function, vendor_id, device_id, class, description, vendor_name` | `/proc/devicemgr` per-device | **1 of 8** -- `description` only |
+| USB | `port, vendor_id, product_id, description, speed` | `/proc/devicemgr` per-device | **1 of 5** -- `description` only |
+| DMA | `channel, device, mode` | `/proc/dmastat` | **1 of 3, and mismatched** |
+| memory map | `start, end, region_type, description` | none | **0** |
+| services | `name, status, start_type` | none | **0** |
+
+**Three of those rows need their mismatch stated, because a name match is not
+a data match:**
+
+- **`/proc/dmastat` is not DMA channels.** It reports IOMMU mapping statistics
+  per device -- maps, active mappings, bytes, faults. The category means the
+  legacy 8237 channels 0-7, which have a channel number and a transfer mode.
+  There is no channel number in the file because the subsystem does not model
+  one.
+- **`/proc/iomem` is not the firmware memory map.** It lists MMIO regions *the
+  kernel has mapped* -- `iomem::register(name, base, size)`, called for the
+  LAPIC, IOAPIC, HPET, a device BAR. The category means the map the firmware
+  hands over at boot: usable RAM, reserved, ACPI reclaim. Nothing in `kernel/`
+  matches `e820` at all.
+- **`/proc/devicemgr`'s `bus` is a bus *type*, not a bus *number*.** It is the
+  string "PCI" or "USB", which is how you would tell the two categories apart
+  -- and is not `PciDeviceInfo::bus`, which wants the 8-bit bus number of a
+  `bus:device.function` address. Wiring one to the other would put `PCI` in a
+  column headed Bus and it would look like data.
+
+**Two gaps are the kernel publishing less than it holds, and those are worth
+asking about rather than working around:**
+
+- `memlayout` tracks regions -- `gen_memlayout` prints `region_count`,
+  `total_ram`, `total_reserved`, `total_kernel` -- and publishes **no
+  per-region row**. The rows exist; only the totals are served.
+- `servicemgr` tracks services -- `gen_servicemgr` prints `service_count`,
+  `running`, `total_starts`, `total_stops`, `total_failures` -- and publishes
+  **no per-service row**. Same shape. `/proc/svcstart` is about the startup
+  orchestrator's phase and backoff policy, not about which services are up.
+
+**What the fix is.**
+
+1. **Wire the three that fit** -- I/O ports, drivers, startup -- leaving the
+   unpublished fields (`DriverInfo::path`) empty rather than filled, exactly as
+   Display's adapter fields were left empty today.
+2. **Parse in `procinfo`, not here.** Settled by the IRQ/monitors request and
+   lane B's agreement: two `/proc` parsers in one repository is the arrangement
+   where a kernel change fixes one program and not the other. `userspace/` will
+   want `lsmod` eventually.
+3. **Ask lane A for per-row output from `memlayout` and `servicemgr`.** Both
+   hold the rows already.
+4. **Leave PCI, USB and DMA saying they cannot be read**, because one field in
+   eight is not a category, and a window with a Vendor column full of blanks
+   next to a Description full of values invites the reader to assume the blanks
+   are the machine's rather than ours.
+
+**Until then the current state is safe:** the categories say they cannot be
+read, which remains true of the paths they name. What is lost is only that
+three of them could be showing real data.
+
+**The lesson, stated so it outlives the entry:** a negative finding needs its
+search recorded beside it. "Nothing publishes X" is a claim about everywhere,
+and the honest form of what I knew was "no sysfs node publishes X; I have not
+looked at procfs". Write the second one. It is the one that tells the next
+reader what is left to do.
+
 
 ## TD-C-THE-MUSIC-PLAYER-PLAYS-NOTHING-AND-DRAWS-A-VISUALISER-OF-IT -- FIXED 2026-09-15
 

@@ -99149,10 +99149,24 @@ fn cmd_fwupdate(args: &str) {
                 return;
             };
             match fwupdate::apply_update(id) {
-                Ok(()) => shell_println!(
-                    "Firmware update applied for device {}. Reboot required.",
-                    id
-                ),
+                // It used to say "applied ... Reboot required." -- a claim
+                // that a flash completed and that the machine must be
+                // power-cycled to finish it. `apply_update` writes no
+                // firmware; there is no firmware writer in this kernel. The
+                // comment above worried about applying to the WRONG device
+                // and never asked whether it wrote anything at all.
+                Ok(()) => {
+                    shell_println!(
+                        "Firmware update RECORDED for device {} -- NO FIRMWARE \
+                         WAS WRITTEN.",
+                        id
+                    );
+                    shell_println!(
+                        "This kernel has no firmware writer. The version it \
+                         reports for the device changed and nothing else did, \
+                         so do not reboot expecting a flash to complete."
+                    );
+                }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);

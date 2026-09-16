@@ -204,6 +204,14 @@ struct FilePatch {
 struct Options {
     strip: Option<usize>,
     patch_file: Option<OsString>,
+    /// `-u`/`-c`/`-n`: read the patch as this dialect instead of detecting it.
+    ///
+    /// Not a hint. Measured against GNU patch 2.7.6: forcing the wrong one
+    /// refuses the patch with `**** Only garbage was found in the patch
+    /// input.` and exit 2, leaving the target untouched. An implementation
+    /// that accepted the flags and went on auto-detecting would apply three
+    /// patches GNU declines.
+    forced_dialect: Option<Dialect>,
     reverse: bool,
     dry_run: bool,
     /// `--verbose`: narrate the run -- the dialect, the header block,
@@ -322,6 +330,12 @@ fn parse_args(args: &[OsString]) -> Result<Options, String> {
                     .map_err(|_| format!("**** strip count {rest} is not a number"))?;
                 opts.strip = Some(n);
             }
+        } else if a == "-u" || a == "--unified" {
+            opts.forced_dialect = Some(Dialect::Unified);
+        } else if a == "-c" || a == "--context" {
+            opts.forced_dialect = Some(Dialect::Context);
+        } else if a == "-n" || a == "--normal" {
+            opts.forced_dialect = Some(Dialect::Normal);
         } else if a == "-R" || a == "--reverse" {
             opts.reverse = true;
         } else if a == "--verbose" {
@@ -1545,7 +1559,13 @@ fn main() {
     // about input GNU applies without comment. A patch program that reads a
     // third of the formats `diff` emits is not a narrow patch program, it is a
     // wrong answer with a confident error message.
-    let dialect = detect_dialect(&patch_input);
+    // A forced dialect wins outright: `-u` on a context patch must FAIL rather
+    // than quietly fall back to detection. The refusal costs nothing to
+    // produce -- the chosen parser finds no hunks, and the empty-vs-garbage
+    // branch below already answers with GNU's own sentence and exit 2.
+    let dialect = opts
+        .forced_dialect
+        .unwrap_or_else(|| detect_dialect(&patch_input));
     let file_patches = match dialect {
         Dialect::Context => parse_context_patch(&patch_input),
         Dialect::Normal => parse_normal_patch(&patch_input),
@@ -1735,32 +1755,61 @@ fn main() {
                         // exactly this reason: `None` is "not supplied", not
                         // "supplied as zero", and `-p0` is a real and
                         // different thing.
-                        block.extend_from_slice(if opts.strip.is_none() {
-                            b"Perhaps you should have used the -p or --strip option?
+                        // BOTH the hint and the quoted block are suppressed
+                        // when the patch carried no header lines at all, which
+                        // is a NORMAL diff -- `2c2` and nothing above it.
+                        //
+                        // Measured: `patch -n` on a header-less patch gives
+                        // only `can't find file to patch at input line 1` and
+                        // goes straight to the prompt. It is consistent rather
+                        // than a special case: there is no filename in the
+                        // patch, so there is nothing for `-p` to have stripped
+                        // and nothing to quote back. This build printed the
+                        // `-p` advice anyway, followed by an empty quotation
+                        // between two rules -- advice about an option that
+                        // could not have helped, and a quotation of nothing.
+                        //
+                        // Found by a harness row added for `-n`, which was the
+                        // first case here with a header-less patch and no
+                        // target file named on the command line.
+                        if !fp.header_lines.is_empty() {
+                            block.extend_from_slice(if opts.strip.is_none() {
+                                b"Perhaps you should have used the -p or --strip option?
 "
-                        } else {
-                            b"Perhaps you used the wrong -p or --strip option?
+                            } else {
+                                b"Perhaps you used the wrong -p or --strip option?
 "
-                        });
-                        block.extend_from_slice(
-                            b"The text leading up to this was:
+                            });
+                            block.extend_from_slice(
+                                b"The text leading up to this was:
 ",
-                        );
-                        block.extend_from_slice(
-                            b"--------------------------
+                            );
+                            block.extend_from_slice(
+                                b"--------------------------
 ",
-                        );
-                        for h in &fp.header_lines {
-                            block.push(b'|');
-                            // Verbatim. GNU echoes back the header line it
-                            // read, and a render of it would not be that line.
-                            block.extend_from_slice(h);
-                            block.push(b'\n');
+                            );
                         }
-                        block.extend_from_slice(
-                            b"--------------------------
+                        if !fp.header_lines.is_empty() {
+                            for h in &fp.header_lines {
+                                block.push(b'|');
+                                // Verbatim. GNU echoes back the header line it
+                                // read, and a render of it would not be that
+                                // line.
+                                block.extend_from_slice(h);
+                                block.push(b'\n');
+                            }
+                            // The closing rule belongs to the quotation, so it
+                            // goes when the quotation goes -- otherwise a
+                            // header-less patch prints one bare rule with
+                            // nothing on either side of it.
+                            block.extend_from_slice(
+                                b"--------------------------
 ",
-                        );
+                            );
+                        }
+                        // The trailing space is GNU's, and it is load-bearing:
+                        // this is a PROMPT, echoed rather than asked, and the
+                        // cursor sits after the space.
                         block.extend_from_slice(
                             b"File to patch: 
 ",

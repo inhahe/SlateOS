@@ -100,6 +100,13 @@ extern int forkpty(int *amaster, char *name, const void *termp, const void *winp
  * yield primitive, so a spin built only on it can hold a CPU the writer needs. */
 extern int sched_yield(void);
 
+/* Where the staged binaries are AT RUNTIME. The image stages into `/bin` and
+ * the kernel mounts it at `/mnt`, so a running process execs `/mnt/bin/...`.
+ * See `ctest-coreutils-runs/main.c` for the full account -- this fixture had
+ * the same fault and would have reported it as exit 8, "python3 is missing",
+ * which would have been just as false and just as checkable. */
+#define BIN "/mnt/bin/"
+
 /* Steady state: the gap between two bytes of one line. */
 #define SPIN 2000000L
 /* Startup: an 11 MiB binary and a 20 MiB zip, before the first byte. */
@@ -239,7 +246,7 @@ int main(void)
     if (child == 0) {
         /* forkpty ran login_tty, so the slave is our controlling terminal and
          * is already fds 0/1/2. Nothing to wire up. */
-        execl("/bin/python3", "python3", "-q", "-i", "-u", (char *)0);
+        execl(BIN "python3", "python3", "-q", "-i", "-u", (char *)0);
         /* Only reached if exec failed. 127 is the shell's convention for it,
          * and is distinct from every code this fixture returns, so it cannot
          * be misread as one of our checks failing. */

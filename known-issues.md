@@ -154734,8 +154734,21 @@ because merging them would quietly remove things a user can currently see.
 |---|---|---|
 | `guitk::filetypes` | extension -> kind, MIME, description, icon | a 97-entry table, the real one |
 | `apps/fileassoc` | which types exist to associate | **fixed 2026-09-16** — derives from the table |
-| `apps/filesearch` (~350) | the search facet a result falls under | its own `match`, its own 11-variant enum |
-| `apps/diskanalyzer` (~771) | the colour a file gets in the usage map | its own `match`, extensions to palette roles |
+| `apps/filesearch` (~350) | the search facet a result falls under | **the one left** — its own `match`, its own 11-variant enum |
+| `apps/diskanalyzer` (~771) | the colour a file gets in the usage map | **fixed 2026-09-16** — derives from the table |
+
+**`diskanalyzer` done 2026-09-16, and it had already drifted.** Its list knew
+`.tiff` and `.zst` but not `.mpg`, `.m4v`, `.vob` or `.psd`, so a disk full of
+MPEG video drew in the fallback grey. That is what these lists produce when
+they age: not an error, a picture that is quietly wrong. The colours stayed --
+"video is blue" is a treemap policy, not a fact about files -- and only the
+classification moved. Four extensions keep an explicit entry there (`exe`,
+`dll`, `dylib`, `bin`), because the toolkit holds those out on purpose and
+deriving without the exception would have taken a colour away from every
+Windows binary on the disk.
+
+**So `apps/filesearch` is the only one left**, and it is still blocked on the
+`Font`/`Database` kinds, not on effort.
 
 **Why the remaining two were not simply merged, which is the useful part.**
 `apps/filesearch` has `Font` and `Database` facets. The toolkit files `.ttf`

@@ -29,12 +29,9 @@ patch -D
 patch -T
 patch -V
 patch -Y
-patch -c
 patch -e
 patch -g
-patch -n
 patch -t
-patch -u
 patch -z
 tar -A
 tar -B

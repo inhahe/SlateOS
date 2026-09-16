@@ -341,6 +341,23 @@ xfail_case() {
 # --- the three patch formats, applied straight --------------------------------
 run_case u.patch -p1
 run_case u0.patch -p1
+# --- forcing the dialect instead of detecting it --------------------------------
+#
+# `-u`, `-c` and `-n` were absent until 2026-09-16 -- `scripts/option-gap.sh`
+# found all three exiting with `invalid option`. They are not decoration:
+# measured, GNU genuinely FORCES the reader, so a patch in another dialect is
+# refused with `**** Only garbage was found in the patch input.` and exit 2,
+# and the target is left untouched.
+#
+# That is why the wrong-dialect rows matter more than the right-dialect ones.
+# An implementation that accepts the flags and keeps auto-detecting passes
+# every right-dialect row and APPLIES three patches GNU refuses.
+run_case u.patch -p1 -u
+run_case c.patch -c
+run_case n.patch -n
+run_case c.patch -p1 -u
+run_case u.patch -p1 -c
+run_case u.patch -p1 -n
 run_case c.patch -p1
 run_case n.patch a/base.txt
 run_case append.patch -p1

@@ -389,13 +389,8 @@ fn self_test_inner() {
         "Test Corp",
     )
     .expect("register display");
-    let _audio = register_driver(
-        "Test Audio",
-        DriverCategory::Audio,
-        "2.0.1",
-        "Test Corp",
-    )
-    .expect("register audio");
+    let _audio = register_driver("Test Audio", DriverCategory::Audio, "2.0.1", "Test Corp")
+        .expect("register audio");
     let net = register_driver(
         "Test Network",
         DriverCategory::Network,

@@ -86,6 +86,24 @@ an hour -- about twenty minutes after the run that produced the failure. That
 is the whole argument for fixing it rather than re-running it. A defect that
 cures itself on a timer trains everyone who meets it to stop looking.
 
+### The prediction held
+
+Confirmed the same day, on this machine, with no change to any code:
+
+```
+uptime 2,336s  ->  panicked: overflow when subtracting duration from instant
+uptime 3,858s  ->  test interp::tests::a_poll_before_the_grace_... ok
+```
+
+Two full workspace runs an hour apart, the second green on this test alone
+because the clock had moved. Nothing was fixed in between.
+
+That is the whole case for changing it rather than re-running it, and it is
+also why this is not a flake: a flake fails at random and eventually gets
+looked at, whereas this one is *reliable* -- reliably red on a fresh boot and
+reliably green an hour later. Anybody who meets it gets a working suite by
+waiting, which is precisely the response that keeps it here.
+
 ## How to reproduce without rebooting
 
 ```rust

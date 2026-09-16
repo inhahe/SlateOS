@@ -48,7 +48,7 @@
 //! (`loginctl unlock-session`, which systemd gates with polkit), and a screen
 //! lock that could call it would not be a lock.
 
-use crate::{CreateSessionParams, Daemon, SessionClass, SessionType};
+use crate::{CreateSessionParams, Daemon, InhibitMode, InhibitWhat, SessionClass, SessionType};
 use libservicebus::{Credentials, Message, fields};
 
 /// The well-known name logind registers on the service registry.
@@ -70,6 +70,14 @@ pub const ERR_ACCESS_DENIED: &str = "system.logind.Error.AccessDenied";
 pub const ERR_UNKNOWN_CALLER: &str = "system.logind.Error.UnknownCaller";
 /// `UnlockSession` without a preceding accepted `AuthenticateSession`.
 pub const ERR_NOT_AUTHENTICATED: &str = "system.logind.Error.NotAuthenticated";
+
+/// The inhibitor table is full (`MAX_INHIBITORS`).
+///
+/// A distinct error rather than a silent success, because a caller that
+/// believes it holds a lock it does not hold will go ahead with work that a
+/// shutdown can interrupt -- which is the failure an inhibitor exists to
+/// prevent, arrived at through the mechanism meant to prevent it.
+pub const ERR_TOO_MANY_INHIBITORS: &str = "system.logind.Error.TooManyInhibitors";
 
 // ---------------------------------------------------------------------------
 // Outcome wire codes
@@ -220,6 +228,9 @@ pub fn dispatch(
         "TerminateSession" => one_arg(payload, |id| terminate_session(daemon, id, caller)),
         "AuthenticateSession" => authenticate_session(daemon, payload, caller),
         "SetIdleHint" => set_idle_hint(daemon, payload, caller),
+        "AddInhibitor" => add_inhibitor(daemon, payload, caller),
+        "ReleaseInhibitor" => release_inhibitor(daemon, caller),
+        "ListInhibitors" => list_inhibitors(daemon, caller),
         _ => Reply::Error(ERR_UNKNOWN_METHOD),
     }
 }
@@ -262,6 +273,106 @@ fn list_sessions(daemon: &Daemon, caller: Option<Credentials>) -> Reply {
         .collect();
     lines.sort();
 
+    let refs: Vec<&[u8]> = lines.iter().map(|l| l.as_bytes()).collect();
+    Reply::Return(fields::encode(&refs))
+}
+
+/// `AddInhibitor(what, who, why, mode) -> ()`
+///
+/// Takes a lock against `what` until the holder releases it or exits. This is
+/// the method that makes `Daemon::is_inhibited` capable of answering yes:
+/// before it existed, `request_power_action` consulted an inhibitor table that
+/// nothing could fill, so the check ran on every poweroff, reboot, suspend and
+/// hibernate and could only ever say "not inhibited".
+///
+/// # The uid and pid are the CALLER's, not arguments
+///
+/// systemd's `Inhibit()` returns a file descriptor and the lock lasts as long
+/// as the peer holds it open. There is no descriptor passing here, so the lock
+/// is keyed on the caller's pid from `Credentials` -- which the bus recorded at
+/// connect time, not at call time, for the reason `libservicebus` gives: a pid
+/// read later can name a different process once the original has exited and the
+/// number been reused.
+///
+/// Taking them as arguments instead would let any caller inhibit *as* anyone
+/// else, and then release someone else's lock by naming their pid. The whole
+/// value of an inhibitor is that the holder is identifiable.
+///
+/// # Block requires root; Delay does not
+///
+/// A `Block` lock stops a shutdown outright, so an unprivileged caller holding
+/// one is a denial of service against every other user of the machine. A
+/// `Delay` lock only asks for time before the action proceeds, bounded by
+/// `InhibitDelayMaxSec`, which is what an ordinary program wants in order to
+/// save its work. systemd draws the same line with polkit; this draws it with
+/// the authority vocabulary that already exists here.
+fn add_inhibitor(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>) -> Reply {
+    let Some(caller) = caller else {
+        return Reply::Error(ERR_UNKNOWN_CALLER);
+    };
+    let Some(args) = fields::decode_exact(payload, 4) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let text = |i: usize| args.get(i).and_then(|b| core::str::from_utf8(b).ok());
+    let (Some(what), Some(who), Some(why), Some(mode)) = (text(0), text(1), text(2), text(3))
+    else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let (Some(what), Some(mode)) = (InhibitWhat::from_str(what), InhibitMode::from_str(mode))
+    else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+
+    // After decoding rather than before, unlike `CreateSession`: the answer
+    // depends on the MODE argument, so it cannot be decided without reading it.
+    if mode == InhibitMode::Block && !caller.is_root() {
+        return Reply::Error(ERR_ACCESS_DENIED);
+    }
+
+    match daemon.add_inhibitor(what, who, why, mode, caller.uid, caller.pid) {
+        Ok(()) => Reply::empty(),
+        // The only failure is the table being full, and saying so is better
+        // than an empty success: a caller that believes it holds a lock it does
+        // not hold will go ahead with work a shutdown can interrupt.
+        Err(_) => Reply::Error(ERR_TOO_MANY_INHIBITORS),
+    }
+}
+
+/// `ReleaseInhibitor() -> count`
+///
+/// Releases every lock held by the caller's pid, and reports how many. Takes no
+/// argument for the same reason `AddInhibitor` takes no pid: a caller may only
+/// release what it holds, and an id argument would be a way to name someone
+/// else's.
+///
+/// Releasing nothing is a success, not an error. A program that calls this in a
+/// cleanup path should not have to know whether it ever managed to take a lock.
+fn release_inhibitor(daemon: &mut Daemon, caller: Option<Credentials>) -> Reply {
+    let Some(caller) = caller else {
+        return Reply::Error(ERR_UNKNOWN_CALLER);
+    };
+    let n = daemon.remove_inhibitors_by_pid(caller.pid);
+    Reply::Return(fields::encode(&[n.to_string().as_bytes()]))
+}
+
+/// `ListInhibitors() -> [line, ...]`
+///
+/// Root sees every lock; anyone else sees their own. Same rule as
+/// `ListSessions`, and for the same reason: who is holding a lock on a shared
+/// machine is a fact about them, not about the caller.
+fn list_inhibitors(daemon: &Daemon, caller: Option<Credentials>) -> Reply {
+    let Some(caller) = caller else {
+        return Reply::Error(ERR_UNKNOWN_CALLER);
+    };
+    let mut lines: Vec<String> = daemon
+        .inhibitors
+        .iter()
+        .filter(|i| caller.is_root() || i.uid == caller.uid)
+        .map(crate::Inhibitor::format_line)
+        .collect();
+    // Sorted for `ListSessions`' reason: an answer that reshuffles between
+    // identical calls is one nobody can diff.
+    lines.sort();
     let refs: Vec<&[u8]> = lines.iter().map(|l| l.as_bytes()).collect();
     Reply::Return(fields::encode(&refs))
 }
@@ -559,6 +670,256 @@ mod tests {
 
     fn call(d: &mut Daemon, member: &str, args: &[&[u8]], who: Option<Credentials>) -> Reply {
         dispatch(d, member, &fields::encode(args), who)
+    }
+
+    /// `creds`, but with a pid of the caller's choosing.
+    ///
+    /// An inhibitor is keyed on the holder's pid, so "does releasing mine
+    /// release yours?" cannot be asked with a fixed one.
+    const fn creds_pid(uid: u32, pid: u32) -> Credentials {
+        Credentials { pid, uid, gid: uid }
+    }
+
+    fn inhibit_args(what: &'static str, mode: &'static str) -> Vec<&'static [u8]> {
+        vec![
+            what.as_bytes(),
+            b"updater",
+            b"installing a kernel",
+            mode.as_bytes(),
+        ]
+    }
+
+    // -- Inhibitors -------------------------------------------------------
+
+    /// The point of the whole method: a held lock makes the power check say no.
+    ///
+    /// Before `AddInhibitor` existed, `request_power_action` consulted
+    /// `is_inhibited` on a table nothing could fill, so it ran on every
+    /// poweroff, reboot, suspend and hibernate and could only ever answer
+    /// "not inhibited". It read like a guard and behaved like a comment.
+    ///
+    /// The first assertion is the control and is not decoration: without it
+    /// this test passes just as well against a `request_power_action` that
+    /// returns `Inhibited` unconditionally, which would be a machine nobody
+    /// can turn off.
+    #[test]
+    fn an_inhibitor_makes_the_power_check_refuse() {
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
+
+        assert_eq!(
+            d.request_power_action(crate::PowerAction::PowerOff, false),
+            crate::PowerActionResult::Allowed,
+            "with no inhibitor held, poweroff must be allowed"
+        );
+
+        let reply = call(
+            &mut d,
+            "AddInhibitor",
+            &inhibit_args("shutdown", "block"),
+            Some(creds(0)),
+        );
+        assert!(!reply.is_error(), "root was refused: {reply:?}");
+
+        assert_eq!(
+            d.request_power_action(crate::PowerAction::PowerOff, false),
+            crate::PowerActionResult::Inhibited,
+            "a shutdown block is held, so poweroff must be refused"
+        );
+
+        // ...and the lock is about `what`, not about power generally: a
+        // shutdown lock must not stop a suspend, or one program saving a file
+        // would prevent the lid from working.
+        assert_eq!(
+            d.request_power_action(crate::PowerAction::Suspend, false),
+            crate::PowerActionResult::Allowed,
+            "a shutdown lock must not inhibit sleep"
+        );
+
+        // `force` is the operator overriding the lock deliberately, which is
+        // what `loginctl poweroff --force` is for.
+        assert_eq!(
+            d.request_power_action(crate::PowerAction::PowerOff, true),
+            crate::PowerActionResult::Allowed,
+            "--force must override a block"
+        );
+    }
+
+    /// A block lock needs root; a delay lock does not.
+    #[test]
+    fn a_block_needs_root_and_a_delay_does_not() {
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
+
+        let denied = call(
+            &mut d,
+            "AddInhibitor",
+            &inhibit_args("shutdown", "block"),
+            Some(creds(1000)),
+        );
+        assert_eq!(
+            denied,
+            Reply::Error(ERR_ACCESS_DENIED),
+            "an unprivileged block is a denial of service against every other user"
+        );
+
+        let allowed = call(
+            &mut d,
+            "AddInhibitor",
+            &inhibit_args("shutdown", "delay"),
+            Some(creds(1000)),
+        );
+        assert!(
+            !allowed.is_error(),
+            "a delay is what an ordinary program wants: {allowed:?}"
+        );
+
+        // And a delay does NOT block: `is_inhibited` matches on mode too, so
+        // the grace-period lock must not be mistaken for a veto.
+        assert_eq!(
+            d.request_power_action(crate::PowerAction::PowerOff, false),
+            crate::PowerActionResult::Allowed,
+            "a delay lock is not a block"
+        );
+    }
+
+    /// An unidentified caller cannot take a lock at all.
+    #[test]
+    fn an_unknown_caller_cannot_inhibit() {
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
+        let r = call(
+            &mut d,
+            "AddInhibitor",
+            &inhibit_args("shutdown", "delay"),
+            None,
+        );
+        assert_eq!(r, Reply::Error(ERR_UNKNOWN_CALLER));
+    }
+
+    /// A mode this build does not know is refused, not guessed at.
+    ///
+    /// `InhibitMode::from_str` used to map every unrecognised string to
+    /// `Block`. That is the safe direction for the lock itself and the wrong
+    /// one here, because the bus now decides whether the caller needs root
+    /// from this value -- so a guess is a guess about who may do what.
+    #[test]
+    fn an_unknown_what_or_mode_is_refused() {
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
+        for bad in [
+            inhibit_args("shutdown", "blck"),
+            inhibit_args("shutdown", ""),
+            inhibit_args("shutdown", "BLOCK"),
+            inhibit_args("reboot-ish", "block"),
+        ] {
+            assert_eq!(
+                call(&mut d, "AddInhibitor", &bad, Some(creds(0))),
+                Reply::Error(ERR_INVALID_ARGUMENTS),
+                "args {bad:?} should not have been accepted"
+            );
+        }
+        assert!(
+            d.inhibitors.is_empty(),
+            "a refused call must not have taken a lock"
+        );
+    }
+
+    /// Releasing releases the caller's own locks, and only those.
+    #[test]
+    fn releasing_frees_only_the_callers_own_locks() {
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
+        let alice = creds_pid(1000, 100);
+        let bob = creds_pid(1001, 200);
+
+        assert!(
+            !call(
+                &mut d,
+                "AddInhibitor",
+                &inhibit_args("sleep", "delay"),
+                Some(alice)
+            )
+            .is_error()
+        );
+        assert!(
+            !call(
+                &mut d,
+                "AddInhibitor",
+                &inhibit_args("shutdown", "delay"),
+                Some(alice)
+            )
+            .is_error()
+        );
+        assert!(
+            !call(
+                &mut d,
+                "AddInhibitor",
+                &inhibit_args("sleep", "delay"),
+                Some(bob)
+            )
+            .is_error()
+        );
+        assert_eq!(d.inhibitors.len(), 3);
+
+        let reply = call(&mut d, "ReleaseInhibitor", &[], Some(alice));
+        assert_eq!(
+            reply,
+            Reply::Return(fields::encode(&[b"2".as_slice()])),
+            "alice held two and should be told so"
+        );
+        assert_eq!(
+            d.inhibitors.len(),
+            1,
+            "bob's lock must survive alice releasing hers"
+        );
+        assert_eq!(d.inhibitors[0].uid, 1001);
+
+        // Releasing nothing is a success: a cleanup path should not have to
+        // know whether it ever managed to take a lock.
+        let again = call(&mut d, "ReleaseInhibitor", &[], Some(alice));
+        assert_eq!(again, Reply::Return(fields::encode(&[b"0".as_slice()])));
+    }
+
+    /// Root sees every lock; anyone else sees their own.
+    #[test]
+    fn listing_inhibitors_shows_root_everything_and_others_themselves() {
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
+        let alice = creds_pid(1000, 100);
+        let bob = creds_pid(1001, 200);
+        assert!(
+            !call(
+                &mut d,
+                "AddInhibitor",
+                &inhibit_args("sleep", "delay"),
+                Some(alice)
+            )
+            .is_error()
+        );
+        assert!(
+            !call(
+                &mut d,
+                "AddInhibitor",
+                &inhibit_args("shutdown", "delay"),
+                Some(bob)
+            )
+            .is_error()
+        );
+
+        let Reply::Return(all) = call(&mut d, "ListInhibitors", &[], Some(creds(0))) else {
+            panic!("root listing errored");
+        };
+        assert_eq!(
+            fields::decode(&all).map(|v| v.len()),
+            Some(2),
+            "root sees both"
+        );
+
+        let Reply::Return(mine) = call(&mut d, "ListInhibitors", &[], Some(alice)) else {
+            panic!("alice listing errored");
+        };
+        let mine = fields::decode(&mine).expect("decodes");
+        assert_eq!(mine.len(), 1, "alice sees only her own");
+        assert!(
+            String::from_utf8_lossy(mine[0]).contains("1000"),
+            "the one line should be alice's: {:?}",
+            String::from_utf8_lossy(mine[0])
+        );
     }
 
     // -- CreateSession ----------------------------------------------------

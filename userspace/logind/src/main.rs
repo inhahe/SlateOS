@@ -599,18 +599,10 @@ enum InhibitMode {
     /// Block the operation entirely until the lock is released.
     Block,
     /// Delay the operation for a grace period.
-    // Vocabulary for a session that is never created. See the note on
-    // `Daemon::create_session`: nothing can construct a session, so no variant
-    // describing one is ever built and no parser for one is ever called.
-    #[allow(dead_code)]
     Delay,
 }
 
 impl InhibitMode {
-    // Vocabulary for a session that is never created. See the note on
-    // `Daemon::create_session`: nothing can construct a session, so no variant
-    // describing one is ever built and no parser for one is ever called.
-    #[allow(dead_code)]
     fn as_str(self) -> &'static str {
         match self {
             Self::Block => "block",
@@ -618,15 +610,24 @@ impl InhibitMode {
         }
     }
 
-    // Vocabulary for a session that is never created -- see the note on
-    // `Daemon::create_session`. On the enum rather than one variant: an allow on
-    // a variant covers that variant only, which is how four of these were left
-    // still warning on the first pass.
-    #[allow(dead_code)]
-    fn from_str(s: &str) -> Self {
+    /// Parse a mode name, or `None`.
+    ///
+    /// Fallible, and symmetrical with [`InhibitWhat::from_str`], which this did
+    /// not used to be. It mapped every unrecognised string to `Block`, so
+    /// `AddInhibitor(what, who, why, "")` took a full block and a caller who
+    /// typed `blck` got a lock of a kind they had not asked for.
+    ///
+    /// That default was the safe direction -- a stronger lock rather than a
+    /// weaker one -- and it stopped being merely untidy when the bus began
+    /// deciding authority from this value: `Block` requires root and `Delay`
+    /// does not, so a guess here is a guess about who may do what. A name this
+    /// build does not know is now refused, which is the answer that lets the
+    /// caller find out they are wrong.
+    fn from_str(s: &str) -> Option<Self> {
         match s {
-            "delay" => Self::Delay,
-            _ => Self::Block,
+            "delay" => Some(Self::Delay),
+            "block" => Some(Self::Block),
+            _ => None,
         }
     }
 }
@@ -653,11 +654,7 @@ struct Inhibitor {
 }
 
 impl Inhibitor {
-    // Vocabulary for a session that is never created -- see the note on
-    // `Daemon::create_session`. On the enum rather than one variant: an allow on
-    // a variant covers that variant only, which is how four of these were left
-    // still warning on the first pass.
-    #[allow(dead_code)]
+    /// One line of `ListInhibitors` output.
     fn format_line(&self) -> String {
         format!(
             "{:<20} {:<6} {:<6} {:<8} {}",
@@ -1203,9 +1200,6 @@ impl Daemon {
     }
 
     /// Add an inhibitor lock.
-    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
-    // for which half of it is unreachable and why these are kept.
-    #[allow(dead_code)]
     fn add_inhibitor(
         &mut self,
         what: InhibitWhat,
@@ -1230,9 +1224,6 @@ impl Daemon {
     }
 
     /// Remove inhibitor locks held by a given PID.
-    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
-    // for which half of it is unreachable and why these are kept.
-    #[allow(dead_code)]
     fn remove_inhibitors_by_pid(&mut self, pid: u32) -> usize {
         let before = self.inhibitors.len();
         self.inhibitors.retain(|i| i.pid != pid);
@@ -3196,9 +3187,17 @@ mod tests {
 
     #[test]
     fn test_inhibit_mode_roundtrip() {
-        assert_eq!(InhibitMode::from_str("block"), InhibitMode::Block);
-        assert_eq!(InhibitMode::from_str("delay"), InhibitMode::Delay);
-        assert_eq!(InhibitMode::from_str("unknown"), InhibitMode::Block);
+        assert_eq!(InhibitMode::from_str("block"), Some(InhibitMode::Block));
+        assert_eq!(InhibitMode::from_str("delay"), Some(InhibitMode::Delay));
+        // Was `Block` until 2026-09-15, when `AddInhibitor` began deciding
+        // whether the caller needs root from this value. An unknown mode
+        // silently becoming the privileged one means a caller can be refused
+        // for asking for something they did not ask for -- and, had the
+        // default gone the other way, could have believed they held a block
+        // while holding a delay.
+        assert_eq!(InhibitMode::from_str("unknown"), None);
+        assert_eq!(InhibitMode::from_str(""), None);
+        assert_eq!(InhibitMode::from_str("BLOCK"), None);
     }
 
     // --- Power action requests ---

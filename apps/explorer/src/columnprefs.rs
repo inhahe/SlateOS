@@ -66,6 +66,36 @@ pub fn set_for_folder(doc: &mut Document, folder: &Path, keys: &[&str]) -> bool 
     true
 }
 
+/// The thumbnail size the user chose, in pixels.
+const THUMB_SIZE: [&str; 2] = ["thumbnails", "size"];
+
+/// The sizes offered, smallest first.
+///
+/// A fixed list rather than a free number, for the reason the screen-lock
+/// delays are a list: the value is a choice the user makes from a few sensible
+/// options, and a text field would invite "300px" and "huge" and other things
+/// this would then have to refuse. `DiskCache` keys its entries on this, so a
+/// new size misses the cache and regenerates rather than serving one made at
+/// the old size.
+pub const THUMB_SIZES: [u32; 4] = [64, 96, 128, 192];
+
+/// The saved thumbnail size, if the user has chosen one.
+///
+/// A size that is not one of [`THUMB_SIZES`] answers `None` rather than being
+/// honoured: the list is what the menu can show a tick beside, and a value
+/// from outside it would leave every row unticked with no way to tell why.
+#[must_use]
+pub fn thumb_size(doc: &Document) -> Option<u32> {
+    let saved = doc.get_i64(&THUMB_SIZE)?;
+    let saved = u32::try_from(saved).ok()?;
+    THUMB_SIZES.contains(&saved).then_some(saved)
+}
+
+/// Remember `size` as the thumbnail size.
+pub fn set_thumb_size(doc: &mut Document, size: u32) {
+    doc.set_i64(&THUMB_SIZE, i64::from(size));
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -76,6 +106,28 @@ pub fn set_for_folder(doc: &mut Document, folder: &Path, keys: &[&str]) -> bool 
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thumbnail_size_round_trips() {
+        let mut doc = Document::new();
+        assert_eq!(thumb_size(&doc), None, "an unset machine claimed a size");
+        set_thumb_size(&mut doc, 192);
+        assert_eq!(thumb_size(&doc), Some(192));
+    }
+
+    /// A size outside the offered list is not honoured.
+    ///
+    /// The menu ticks the row matching the saved size, so a value from outside
+    /// the list would leave every row unticked and the user unable to see what
+    /// is in force. Falling back to the default is the honest answer.
+    #[test]
+    fn a_size_we_do_not_offer_is_ignored() {
+        let mut doc = Document::new();
+        doc.set_i64(&THUMB_SIZE, 300);
+        assert_eq!(thumb_size(&doc), None);
+        doc.set_i64(&THUMB_SIZE, -64);
+        assert_eq!(thumb_size(&doc), None, "a negative size was honoured");
+    }
 
     #[test]
     fn a_default_set_round_trips() {

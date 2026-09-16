@@ -761,7 +761,19 @@ impl ExplorerState {
             column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
-            thumb_config: ThumbConfig::default(),
+            thumb_config: {
+                // The size the user last chose, if they chose one. Applied
+                // here rather than after construction so the first listing is
+                // already generating at the right size -- otherwise every
+                // thumbnail on screen at start-up is made twice.
+                let mut config = ThumbConfig::default();
+                if let Some(size) =
+                    columnprefs::thumb_size(&settingsfile::load(columnprefs::CONFIG_NAME))
+                {
+                    config.size = size;
+                }
+                config
+            },
             pending_uploads: Vec::new(),
             uploaded: HashSet::new(),
             dropzone: DropZoneManager::new(start_path.to_path_buf()),
@@ -1780,6 +1792,67 @@ impl ExplorerState {
         x >= pane.x && x < pane.x + pane.width && y >= pane.y && y < pane.y + HEADER_H
     }
 
+    /// The thumbnail sizes offered, ticked at the one in force.
+    ///
+    /// A submenu rather than four rows in the folder menu: the sizes are one
+    /// choice, and four siblings among the file actions would read as four
+    /// unrelated commands.
+    fn thumb_size_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_THUMB_SIZE_BASE,
+            label: String::from("Thumbnail size"),
+            icon: None,
+            enabled: true,
+            children: columnprefs::THUMB_SIZES
+                .iter()
+                .map(|size| MenuItem::Action {
+                    id: MENU_THUMB_SIZE_BASE.saturating_add(u64::from(*size)),
+                    label: format!("{size} pixels"),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    checked: Some(self.thumb_config.size == *size),
+                })
+                .collect(),
+        }
+    }
+
+    /// Adopt `size` for thumbnails and remember it. Answers whether it was ours.
+    fn thumb_size_action(&mut self, id: u64) -> bool {
+        let Some(offset) = id.checked_sub(MENU_THUMB_SIZE_BASE) else {
+            return false;
+        };
+        let Ok(size) = u32::try_from(offset) else {
+            return false;
+        };
+        if !columnprefs::THUMB_SIZES.contains(&size) {
+            return false;
+        }
+        if self.thumb_config.size == size {
+            return true;
+        }
+        self.thumb_config.size = size;
+
+        // The in-memory cache holds pictures made at the *old* size, and
+        // `queue_thumbnails` skips anything it already has -- so without this
+        // the view keeps showing the previous size until the folder changes.
+        // The cache on disk needs no such help: its filenames carry the size,
+        // so a new size misses and regenerates while the old entries stay
+        // valid for anyone who switches back.
+        self.thumbs.clear();
+        self.queue_thumbnails();
+
+        columnprefs::set_thumb_size(&mut self.column_prefs, size);
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => format!("Thumbnails are now {size} pixels"),
+                Err(e) => {
+                    format!("Thumbnails are now {size} pixels, but the choice was not saved: {e}")
+                }
+            };
+        true
+    }
+
     /// The column picker: every column, ticked when shown, and the two saves.
     fn open_column_menu(&mut self, x: f32, y: f32) {
         let mut items = self.column_menu_items();
@@ -1849,7 +1922,12 @@ impl ExplorerState {
                     };
                 true
             }
-            _ if id >= MENU_COLUMN_BASE => {
+            // Bounded at both ends. This was `id >= MENU_COLUMN_BASE`, which
+            // claimed every id allocated above it -- so the thumbnail sizes,
+            // based at 2000 to stay clear, were swallowed here and never
+            // reached their own handler. An open-ended range does not stay
+            // clear of anything; it takes everything added later.
+            _ if (MENU_COLUMN_BASE..MENU_THUMB_SIZE_BASE).contains(&id) => {
                 let Ok(raw) = u32::try_from(id.saturating_sub(MENU_COLUMN_BASE)) else {
                     return false;
                 };
@@ -1885,7 +1963,7 @@ impl ExplorerState {
 
     /// What can be done to the folder being shown.
     fn folder_menu_items(&self) -> Vec<MenuItem> {
-        vec![
+        let mut items = vec![
             Self::menu_action(MENU_NEW_FOLDER, "New folder", true),
             // Greyed rather than absent when the clipboard is empty, for the
             // reason the toolbar's buttons are: a menu whose rows come and go
@@ -1893,7 +1971,15 @@ impl ExplorerState {
             // next.
             Self::menu_action(MENU_PASTE, "Paste", self.clipboard.is_some()),
             Self::menu_action(MENU_REFRESH, "Refresh", true),
-        ]
+        ];
+        // Only where thumbnails are drawn. In Details and List the sizes
+        // change nothing visible, and a submenu that silently does nothing is
+        // the control-that-cannot-act this tree has plenty of already.
+        if self.view_wants_thumbnails() {
+            items.push(MenuItem::Separator);
+            items.push(self.thumb_size_menu());
+        }
+        items
     }
 
     /// One row of a menu.
@@ -1931,7 +2017,7 @@ impl ExplorerState {
         // The column picker first: its per-column ids are allocated above
         // every action below, so asking it first costs one comparison and
         // keeps the two id spaces from having to be interleaved here.
-        if self.column_menu_action(id) {
+        if self.column_menu_action(id) || self.thumb_size_action(id) {
             return;
         }
         match id {
@@ -3756,6 +3842,8 @@ const MENU_COLUMNS_SAVE_GLOBAL: u64 = 101;
 /// One id per column, offset so it cannot collide with an action above.
 /// `ColumnId` is a small integer, and 1000 is far above every action here.
 const MENU_COLUMN_BASE: u64 = 1000;
+/// One id per offered thumbnail size, offset clear of the column ids above.
+const MENU_THUMB_SIZE_BASE: u64 = 2000;
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -5348,6 +5436,82 @@ mod tests {
             state.pathbar.current_path().contains("sub"),
             "the address bar still shows the old folder: {:?}",
             state.pathbar.current_path()
+        );
+    }
+
+    /// Choosing a size applies it and it survives the next window.
+    ///
+    /// The loop the control exists for. Applying without remembering, or
+    /// remembering without applying, both look like success from inside a
+    /// single test.
+    #[test]
+    fn a_chosen_thumbnail_size_applies_and_is_remembered() {
+        settingsfile::testing::with_scratch_config("explorer-thumb-size", |_root| {
+            let scratch = temp_dir("thumb_size");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            let mut state = state_at(&root);
+            let before = state.thumb_config.size;
+            let wanted = columnprefs::THUMB_SIZES
+                .iter()
+                .copied()
+                .find(|s| *s != before)
+                .expect("the offered sizes are not all the same");
+
+            state.activate_menu_item(MENU_THUMB_SIZE_BASE + u64::from(wanted));
+            assert_eq!(state.thumb_config.size, wanted, "the size was not applied");
+
+            let again = state_at(&root);
+            assert_eq!(
+                again.thumb_config.size, wanted,
+                "the chosen size did not survive a fresh window"
+            );
+        });
+    }
+
+    /// A size we do not offer is not adopted from a menu id.
+    ///
+    /// The ids are derived by adding the size to a base, so an id from
+    /// anywhere else lands in the same range. It has to be checked against the
+    /// list rather than trusted for being in range.
+    #[test]
+    fn an_unoffered_thumbnail_size_is_refused() {
+        let scratch = temp_dir("thumb_size_bad");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+        let before = state.thumb_config.size;
+
+        assert!(
+            !state.thumb_size_action(MENU_THUMB_SIZE_BASE + 300),
+            "a size outside the offered list was accepted"
+        );
+        assert_eq!(state.thumb_config.size, before);
+    }
+
+    /// The sizes are offered only where thumbnails are drawn.
+    #[test]
+    fn the_size_menu_is_absent_from_a_view_without_thumbnails() {
+        let scratch = temp_dir("thumb_size_view");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+
+        state.view_mode = ViewMode::Details;
+        let details = state.folder_menu_items();
+        assert!(
+            !details
+                .iter()
+                .any(|i| matches!(i, MenuItem::Submenu { .. })),
+            "the size submenu was offered in a view that draws no thumbnails"
+        );
+
+        state.view_mode = ViewMode::Icons;
+        let icons = state.folder_menu_items();
+        assert!(
+            icons.iter().any(|i| matches!(i, MenuItem::Submenu { .. })),
+            "the size submenu was missing from the icon view"
         );
     }
 

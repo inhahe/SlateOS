@@ -2314,6 +2314,80 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
     set_uts_name(crate::syscall::SYS_HOSTNAME_SET, name, len)
 }
 
+/// Make a registered keyboard layout the active one.
+///
+/// Issues `SYS_KEYLAYOUT_SET` (1074). `len == 0` clears the mapping back to
+/// the identity layout.
+///
+/// Not a POSIX call. It lives beside [`sethostname`] because it has the same
+/// shape -- a name, a length, a capability, one kernel publisher -- and
+/// because a reader who finds one will want the other.
+///
+/// # Errors, in the kernel's order
+///
+/// 1. no `Rights::SET_KEYLAYOUT`    → `EPERM`
+/// 2. `len > 64`, or not UTF-8      → `EINVAL`
+/// 3. null pointer with `len > 0`   → `EFAULT`
+/// 4. no such layout registered     → `ENOENT`
+///
+/// The capability is checked **first**, so an unprivileged caller cannot
+/// enumerate which layouts exist by watching a call it may not make. Nothing
+/// here re-implements that order: a userspace pre-check on the length would
+/// answer `EINVAL` to a caller the kernel would have refused with `EPERM`,
+/// turning a permission problem into an argument problem and sending the
+/// reader to fix the wrong thing.
+///
+/// `ENOENT` for an unregistered name is the one error with no analogue in
+/// `sethostname`, and it is worth having rather than folding into `EINVAL`:
+/// "that layout does not exist here" and "that name is malformed" want
+/// different responses, and `localectl` prints them differently.
+///
+/// # There is no `getkeylayout`
+///
+/// `/proc/keylayout` publishes the active layout and is the only read path.
+/// Adding a second would be the defect this call was built alongside --
+/// `localectl` reporting `/etc/vconsole.conf` as the system keymap, two
+/// sources for one fact, agreeing only because one was made of the other.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setkeylayout(name: *const u8, len: usize) -> i32 {
+    set_keylayout_impl(name, len)
+}
+
+#[cfg(target_os = "none")]
+fn set_keylayout_impl(name: *const u8, len: usize) -> i32 {
+    let rc = syscall2(crate::syscall::SYS_KEYLAYOUT_SET, name as u64, len as u64);
+    if rc >= 0 {
+        return 0;
+    }
+    let e = match rc {
+        errno::native::PERMISSION_DENIED | errno::native::INVALID_CAPABILITY => errno::EPERM,
+        errno::native::INVALID_ARGUMENT => errno::EINVAL,
+        errno::native::INVALID_ADDRESS => errno::EFAULT,
+        other => errno::errno_for(other),
+    };
+    errno::set_errno(e);
+    -1
+}
+
+/// The host has no kernel holding a keyboard layout, so this reports `ENOSYS`.
+///
+/// **Deliberately not a simulation.** `set_uts_name`'s host arm reproduces the
+/// kernel's validation order and its own doc says plainly that the tests
+/// exercising it are tests of the simulation. Repeating that here would buy
+/// nothing: this function has no userspace logic to exercise -- it issues one
+/// syscall and maps the result -- so a host arm that validated arguments would
+/// be testing code that does not exist on the target.
+///
+/// What tests the real path is a ring-3 fixture under `services/`, holding the
+/// real capability, setting a layout and reading it back through
+/// `/proc/keylayout`. Until that exists this call is unproven on hardware, and
+/// saying so here is better than a host test that looks like evidence.
+#[cfg(not(target_os = "none"))]
+fn set_keylayout_impl(_name: *const u8, _len: usize) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
 // ---------------------------------------------------------------------------
 // gethostid / sethostid — host identifier
 // ---------------------------------------------------------------------------

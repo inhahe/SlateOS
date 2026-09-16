@@ -94,6 +94,24 @@ pub const SYS_HOSTNAME_SET: u64 = 1072;
 /// the same errors as [`SYS_HOSTNAME_SET`].
 pub const SYS_DOMAINNAME_SET: u64 = 1073;
 
+/// `(ptr, len) -> 0`. Make a registered keyboard layout the active one.
+///
+/// `len` is `0..=64`; `len == 0` clears the mapping back to the identity
+/// layout. The name must be UTF-8 and must name a layout `keylayout` already
+/// knows -- an unknown name is refused rather than stored, so the active
+/// layout is never a name nothing can translate.
+///
+/// Its own right, `Rights::SET_KEYLAYOUT`, rather than `SET_HOSTNAME`: a
+/// layout decides what character every scancode produces for every reader of
+/// the console, a password prompt included. It does not observe what is typed,
+/// it decides it, so a container permitted to rename itself has no business
+/// remapping the host console.
+///
+/// There is deliberately no matching *getter*. `/proc/keylayout` already
+/// serves reads, and a second read path would give one value two sources that
+/// can disagree -- the same reason [`SYS_HOSTNAME_SET`] has none.
+pub const SYS_KEYLAYOUT_SET: u64 = 1074;
+
 // Console I/O
 pub const SYS_CONSOLE_WRITE: u64 = 100;
 pub const SYS_CONSOLE_READ_CHAR: u64 = 101;

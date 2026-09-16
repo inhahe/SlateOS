@@ -532,6 +532,20 @@ So the choice is between changing the pass scheme and buffering per chunk, and
 that is a design decision with a security dimension. It should be made
 deliberately, not as a side effect of clearing an unread field.
 
+**Put to the operator as B-Q20, 2026-09-16.** Until then this entry recorded a
+decision needing the operator and sat in `known-issues.md`, which is the bug
+tracker rather than the decision queue -- so it was never actually in front of
+them. `open-questions.md` is the queue; an entry that is not in it is not
+waiting on the operator, it is just waiting.
+
+The options there are A (overwrite in pairs, one chunk at a time -- bounded
+memory, different partial-wipe pattern after a power cut), B (buffer a whole
+pass -- nothing observable changes, and a 4 GB file needs 4 GB of memory) and C
+(leave it refused). A fourth -- seeding the PRNG from the file rather than
+consuming it as the byte stream -- is named there and explicitly NOT taken
+without an answer, because it silently diverges from GNU on a data-destruction
+tool.
+
 **Where it lives:** `userspace/pv/src/main.rs` — `parse_shred_args`'s
 `--random-source=` arm, `generate_shred_pattern`, `XorShift64`.
 
@@ -124404,9 +124418,30 @@ were pending as of this entry.
 ## TD-B-SYSINFOS-PROC-MOUNTS-PARSER-CAN-PANIC-DROPS-THE-WHOLE-TABLE-ON-ONE-ODD-BYTE-AND-MISREADS-ESCAPED-PATHS
 
 **Filed:** 2026-09-04 by lane B. **Where:** `userspace/sysinfo/src/main.rs`,
-`show_disk()` (lines 176-200) and `read_proc()` (line 30). **Status:** open;
-to be fixed as part of the `procinfo` extraction requested by lane C in
-`requests/c-b-the-proc-readers-in-userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md`.
+`show_disk()` (lines 176-200) and `read_proc()` (line 30).
+
+**Status: FIXED — closed 2026-09-16, and it had been fixed for some time.** The
+condition this entry parked on was "to be fixed as part of the `procinfo`
+extraction requested by lane C". That extraction landed: `userspace/sysinfo`
+depends on `procinfo`, and `show_disk` reads `proc.mounts()`. Nothing re-read
+this header afterwards, so it went on advertising work that no longer existed
+-- the same shape as the "look elsewhere" sentence in
+`B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`, which stood for five days after
+its question was answered.
+
+All four checked individually rather than inferred from the dependency:
+
+| defect | state |
+|---|---|
+| 1. `&parts[3][..20]` byte-slice panic | **gone.** The only surviving mention is the historical note at `main.rs:284` explaining what it used to do. |
+| 2. escaped paths misread | **gone.** `procinfo::unescape_octal` undoes ` `, `	`, `
+` and `\`, so `/mnt/my backup` no longer displays or compares as `/mnt/my backup`. |
+| 3. whole table lost behind "(mount info not available)" | **gone.** `status.take("/proc/mounts", proc.mounts())` reports the individual read rather than collapsing the table. |
+| 4. clippy never saw any of it | **gone.** `userspace/sysinfo/Cargo.toml` now carries `[lints] workspace = true`, so `indexing_slicing` reaches it -- which is what would have caught defect 1 as a lint rather than as a crash. |
+
+Item 4 is the one worth keeping in mind: the panic was a `clippy::indexing_slicing`
+finding that clippy had never been pointed at. The fix that matters long-term
+is not the slice, it is the crate joining the lint policy.
 
 **In short:** `sysinfo disk` — and the no-argument summary, which calls it —
 reads `/proc/mounts` in three ways that are each wrong for a file whose fields
@@ -148044,7 +148079,17 @@ judgement call.
 
 ## TD-B-TWENTY-NINE-OF-THE-SEVENTY-TWO-BINS-ON-THE-IMAGE-DECODE-LOSSILY (lane B, 2026-09-14)
 
-**Status:** OPEN — a candidate list, deliberately not a defect list
+**Status: RESOLVED 2026-09-14** — see the resolution section below. One real
+defect on the whole image (`diff`), fixed the same day; `scripts/lossy-decode.py`
+is the standing instrument.
+
+*Header corrected 2026-09-16.* It read `OPEN — a candidate list, deliberately
+not a defect list`, which was true when written and stopped being true in the
+same entry, four sections down. Anyone triaging by grepping for OPEN picked
+this up as work: I did, today, and read the whole entry before reaching the
+answer. That is the cost of a status line that disagrees with its own body --
+the body was right the whole time, and nothing re-read the header after the
+section that superseded it was appended.
 
 Cross-referencing `scripts/rootfs-bin-manifest.txt` against a grep for
 `from_utf8_lossy` in each binary's own source: **29 of the 72** Rust utilities
@@ -148302,7 +148347,44 @@ remainder.
 
 ## TD-B-CP-DIFF-CANNOT-SEE-A-DIFFERENCE-MADE-OF-NUL-BYTES (lane B, 2026-09-14)
 
-**Status:** OPEN — diagnosed and the fix written, but **reverted unverified**
+**Status: CLOSED 2026-09-16** — the fix landed 2026-09-14 (`49416d81a`) and
+this entry went on saying "reverted unverified" for two days. The verification
+it asked for was never done; it is done now, and permanent:
+`scripts/check-cp-diff-sees-nul.py`.
+
+**Both halves it demanded, as a gate rather than a one-off.** Two trees
+differing only in NUL bytes now compare DIFFERENT through the capture, and
+byte-identical trees still compare EQUAL. The gate extracts the real
+`contents()` out of `cp-diff.sh` and sources it, so it grades the function as
+edited rather than a reimplementation of it -- and its self-test sabotages that
+function by deleting the `sha` line, proving the gate can fail.
+
+**Writing it cost four silent ways to not run, which is the finding.** Each
+produced output indistinguishable from a verdict:
+
+1. `tempfile.TemporaryDirectory()` yields `C:/Users/...`, which MSYS bash
+   cannot resolve. The source failed, `contents` was never defined, both
+   captures were empty -- and empty equals empty, so the gate announced
+   "two trees differing only in NUL bytes compare EQUAL" and told the reader
+   `contents()` needed its hash line back. **The harness was fine.**
+2. `Path.write_text` translated the function to CRLF. `contents() {` is a
+   syntax error, so the function was never defined. Same empty, same verdict.
+3. Under `bash -c`, a function is NOT visible inside a command substitution on
+   this Git Bash -- MSYS emulates fork by re-execing and the definition does
+   not survive. `declare -F contents` reported it DEFINED in the same script
+   where `$(contents ...)` said `command not found`. Fixed by running the
+   probe from a script file.
+4. The substitution cannot simply be dropped to avoid (3): the capture is what
+   eats the NULs, so a probe reading the function on a pipe would not
+   reproduce the defect at all.
+
+The repair for all four is one function, `ran_at_all()`, which requires two
+markers: `DEFINED` (the sourcing worked) and `NONEMPTY` (calling it produced
+output). A defined function returning nothing compares equal to itself on every
+tree and reads as a clean verdict, which is how (1) got as far as a confident
+wrong answer. **A comparison that could not be made is not a comparison that
+failed** -- and the gate written to catch one instance of that defect produced
+four of its own before it worked.
 
 `scripts/cp-diff.sh` compares the copied tree's file contents by capturing them
 in a command substitution:
@@ -150361,7 +150443,38 @@ rather than me.
 apps wired their fixture into the constructor and broke 6 to 66 tests each;
 the one that wired it into `main` broke none. The fix is identical either way,
 so the cost is entirely in where the call sat.
-## TD-B-BLKID-HAS-NO-UDEV-OUTPUT-FORMAT -- OPEN 2026-09-15
+## TD-B-BLKID-HAS-NO-UDEV-OUTPUT-FORMAT -- FIXED 2026-09-16
+
+`blkid -o udev` is implemented, to the measured reference behaviour below
+rather than to a guess. `OutputFormat::Udev` emits `ID_FS_TYPE`, `ID_FS_UUID`
+/`_ENC`, `ID_FS_LABEL`/`_ENC`, `ID_PART_ENTRY_UUID` and
+`ID_PART_ENTRY_NAME`/`_ENC`. 23 -> 27 tests, clippy clean.
+
+**Two encoders, not one, and the tests exist to keep them apart.** The entry
+below says "Do not reuse one encoder for both -- they differ, and the
+difference is the point of having two tags", so the regression to guard is
+precisely somebody tidying them into one function. Probed: replacing
+`udev_plain`'s body with `udev_encode(raw)` fails the suite.
+
+The control is the pair `AÿþB` and `AþÿB` -- two DIFFERENT labels
+that the plain tag renders identically as `A__B`, while `_ENC` keeps them
+apart. That is the same collision `from_utf8_lossy` caused in this program
+before labels were carried as bytes, which is why the lossy tag is only safe
+to ship *alongside* the reversible one.
+
+`ID_FS_UUID_ENC` is emitted even though a UUID is hex-and-dashes and needs no
+escaping: a consumer reading `_ENC` uniformly should not have to special-case
+the one field that happens to be safe.
+
+No `DEVNAME` line, unlike `-o export`. `-o udev` is consumed by a udev rule
+that already knows which device it is processing, and the reference does not
+emit one -- checked rather than carried over from the neighbouring format.
+
+The description below is kept in the tense it was written in.
+
+---
+
+**The original entry, 2026-09-15, follows verbatim.**
 
 `blkid -o udev` is the one output format util-linux has that we do not. It is
 refused honestly today -- `unknown output format: udev` -- so nothing claims
@@ -151548,10 +151661,47 @@ on the written-never-read list. Both crates that had both were lying; none of
 the five with only the gate was. That pairing is worth more than either list
 alone, and it is cheap to compute.
 
-**Still open:** the five clean crates keep code the suite cannot reach.
+~~**Still open:** the five clean crates keep code the suite cannot reach.
 `ctags`'s `collect_dir`, `extract_tags_from_file` and `read_existing_ctags`
 are parsers with inputs and outputs and no tests, which is a real gap even
-though nothing is currently wrong behind it.
+though nothing is currently wrong behind it.~~
+
+**`ctags` CLOSED 2026-09-16.** `collect_files`, `collect_dir` and
+`extract_tags_from_file` are ungated and have five tests between them; 111 ->
+116, clippy clean. (`read_existing_ctags` was already ungated and tested --
+the row above was wrong about it, which is worth noting because the list was
+built by grepping for the attribute and that function does not carry one.)
+
+**The gate's effect, demonstrated rather than argued.** The moment the three
+attributes came off, the test build began warning `function is never used` for
+all three, with 111 tests passing. That is the entry's claim -- UNREACHABLE,
+not untested -- shown by the compiler instead of asserted. The warnings went
+away one at a time as each test landed, which is a coverage signal this crate
+did not previously have any form of.
+
+**What the tests are actually for**, since "add tests" is not a finding:
+
+* `collect_files` -- the `missing` out-parameter, which exists because
+  printing "cannot open" and returning only the successes is what made
+  `ctags /nonexistent` exit 0. Its own doc comment says so. Nothing could
+  call it to check until now. Tested with a present and an absent path in one
+  run, because "missing was flagged" alone passes against a function that
+  gives up on the first bad path, and "the good file was tagged" alone passes
+  against one that never noticed the bad one.
+* `collect_dir` -- sorting, which matters beyond tidiness: `read_dir` order
+  is filesystem order, so an unsorted collector produces a tags file that
+  differs between machines for no reason anyone can act on. Plus excludes and
+  hidden-directory skipping, with a control run collecting the same tree with
+  NO excludes -- without it, "target/gen.rs is absent" would pass against a
+  collector that found nothing at all.
+* `extract_tags_from_file` -- the half `extract_tags_from_content` cannot
+  cover: opening the file, and choosing the language from the PATH rather
+  than being handed one. The `.txt` case holds valid Rust in a file with the
+  wrong extension, which is exactly how a language-by-extension bug hides.
+
+**Still open:** `lex`, `yacc`, `chpasswd` and `mesg`. Those are
+`print_help`/`print_version`/`run` -- the cheap end of the list, where the
+gate costs a constant and an exit. Worth doing, worth doing last.
 
 **Why the gate is usually there at all.** These crates build `#![no_main]`
 for the real target and define a `main` the test harness must not duplicate.

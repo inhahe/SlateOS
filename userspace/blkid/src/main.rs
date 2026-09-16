@@ -71,6 +71,57 @@ struct BlkidInfo {
     fs_size: u64,
 }
 
+/// Bytes `-o udev` passes through unencoded.
+///
+/// util-linux's `blkid_encode_string` allows ASCII alphanumerics and this
+/// handful of punctuation; everything else -- every byte over 0x7f, every
+/// control byte, space, and the shell-significant characters -- is escaped.
+/// Taken from the reference rather than guessed, because the point of the
+/// format is that a udev rule can consume it without quoting.
+fn udev_safe(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'#' | b'+' | b'-' | b'.' | b':' | b'=' | b'@' | b'_')
+}
+
+/// `ID_FS_<TAG>_ENC`: unsafe bytes become `\x<hh>`.
+///
+/// This is `blkid_encode_string`. It is reversible -- a consumer can recover
+/// the exact on-disk bytes -- which is why it exists alongside the plain form.
+fn udev_encode(raw: &[u8]) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for &b in raw {
+        if udev_safe(b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\x{b:02x}"));
+        }
+    }
+    out
+}
+
+/// `ID_FS_<TAG>`: each unsafe byte becomes a single `_`.
+///
+/// NOT the same function as [`udev_encode`], and deliberately not built on it.
+/// util-linux emits both tags in the same output and they differ: one byte
+/// gives one underscore here and four characters there. Sharing an encoder
+/// would make them agree, which would quietly destroy the reason there are
+/// two of them.
+///
+/// # Why util-linux prints both
+///
+/// It is refusing to choose. `LABEL` in the other formats is the raw bytes;
+/// the escaping question is answered by emitting the safe-to-display form and
+/// the lossless form under DIFFERENT NAMES, so a consumer picks the one it can
+/// handle rather than having a policy imposed on it. The plain form is lossy
+/// on purpose -- `A\xff\xfeB` and `A\xfe\xffB` both render `A__B` -- which is
+/// exactly why the `_ENC` tag has to be there too.
+fn udev_plain(raw: &[u8]) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for &b in raw {
+        out.push(if udev_safe(b) { b as char } else { '_' });
+    }
+    out
+}
+
 /// Known filesystem magic signatures
 struct FsMagic {
     offset: usize,
@@ -456,6 +507,7 @@ enum OutputFormat {
     Full,      // -o full
     List,      // -o list
     Export,    // -o export
+    Udev,      // -o udev
 }
 
 impl Default for Config {
@@ -502,6 +554,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                         "full" => OutputFormat::Full,
                         "list" => OutputFormat::List,
                         "export" => OutputFormat::Export,
+                        "udev" => OutputFormat::Udev,
                         "device" => OutputFormat::Default,
                         other => return Err(format!("unknown output format: {other}")),
                     };
@@ -761,6 +814,48 @@ fn run_blkid(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
                     }
                     writeln!(writer)?;
                 }
+                OutputFormat::Udev => {
+                    // No DEVNAME line: `-o udev` is consumed by a udev rule
+                    // that already knows which device it is processing, and
+                    // util-linux does not emit one. Checked against the
+                    // reference rather than assumed from `-o export` above,
+                    // which does.
+                    if !info.fs_type.is_empty() {
+                        writeln!(writer, "ID_FS_TYPE={}", info.fs_type)?;
+                    }
+                    if !info.uuid.is_empty() {
+                        // UUIDs are generated hex-and-dashes, so both forms
+                        // are identical -- but both are still emitted, because
+                        // a consumer reading `ID_FS_UUID_ENC` uniformly should
+                        // not have to special-case the field that happens to
+                        // need no escaping.
+                        writeln!(writer, "ID_FS_UUID={}", info.uuid)?;
+                        writeln!(
+                            writer,
+                            "ID_FS_UUID_ENC={}",
+                            udev_encode(info.uuid.as_bytes())
+                        )?;
+                    }
+                    if !info.label.is_empty() {
+                        writeln!(writer, "ID_FS_LABEL={}", udev_plain(&info.label))?;
+                        writeln!(writer, "ID_FS_LABEL_ENC={}", udev_encode(&info.label))?;
+                    }
+                    if !info.partuuid.is_empty() {
+                        writeln!(writer, "ID_PART_ENTRY_UUID={}", info.partuuid)?;
+                    }
+                    if !info.part_label.is_empty() {
+                        writeln!(
+                            writer,
+                            "ID_PART_ENTRY_NAME={}",
+                            udev_plain(&info.part_label)
+                        )?;
+                        writeln!(
+                            writer,
+                            "ID_PART_ENTRY_NAME_ENC={}",
+                            udev_encode(&info.part_label)
+                        )?;
+                    }
+                }
             }
             found_any = true;
         }
@@ -915,6 +1010,78 @@ mod tests {
     )]
 
     use super::*;
+
+    // -- `-o udev` -------------------------------------------------------
+    //
+    // The expected strings here are not invented. They were measured from
+    // util-linux 2.39.3 against a real ext4 image whose label was set with
+    // `mkfs.ext4 -L $(printf 'A\xff\xfeB')` -- deliberately not valid UTF-8:
+    //
+    //     $ blkid -o udev lbl.img
+    //     ID_FS_LABEL=A__B
+    //     ID_FS_LABEL_ENC=A\xff\xfeB
+
+    /// The two label tags differ, and that difference is the whole point.
+    ///
+    /// util-linux emits both because it refuses to answer the escaping
+    /// question for the consumer: the plain tag is safe to display and
+    /// LOSSY, the `_ENC` tag is reversible. A single shared encoder would
+    /// make them agree and quietly remove the reason there are two.
+    #[test]
+    fn udev_label_tags_are_not_the_same_encoding() {
+        let raw = b"A\xff\xfeB";
+        assert_eq!(udev_plain(raw), "A__B");
+        assert_eq!(udev_encode(raw), r"A\xff\xfeB");
+        assert_ne!(
+            udev_plain(raw),
+            udev_encode(raw),
+            "the two tags collapsed to one encoding"
+        );
+    }
+
+    /// The plain form is lossy, and the encoded form is not.
+    ///
+    /// This is the control for the test above and the reason `_ENC` has to
+    /// exist: two DIFFERENT labels render identically in the plain tag. A
+    /// consumer that keyed on `ID_FS_LABEL` alone would merge these two
+    /// devices -- which is exactly the collision `from_utf8_lossy` caused
+    /// in this program before labels were carried as bytes.
+    #[test]
+    fn the_plain_tag_is_lossy_and_the_enc_tag_is_not() {
+        let a = b"A\xff\xfeB";
+        let b = b"A\xfe\xffB";
+        assert_eq!(udev_plain(a), udev_plain(b));
+        assert_ne!(
+            udev_encode(a),
+            udev_encode(b),
+            "the reversible tag lost the difference too"
+        );
+    }
+
+    /// Ordinary labels pass through untouched in both tags.
+    ///
+    /// Without this, an encoder that escaped everything would satisfy every
+    /// assertion above while making `ID_FS_LABEL=\x6d\x79..." out of
+    /// `my-disk`.
+    #[test]
+    fn safe_labels_are_unchanged_by_both_tags() {
+        for s in ["my-disk", "ROOT", "a.b:c=d@e_f+g#h", "123"] {
+            assert_eq!(udev_plain(s.as_bytes()), s, "plain mangled {s}");
+            assert_eq!(udev_encode(s.as_bytes()), s, "enc mangled {s}");
+        }
+    }
+
+    /// A space is not safe, which is the case a udev rule cares about most.
+    ///
+    /// The format exists so a rule can consume the value without quoting;
+    /// an unescaped space would split it. Called out separately because a
+    /// space looks harmless and is the likeliest byte to be added to the
+    /// safe set by someone tidying up.
+    #[test]
+    fn a_space_is_escaped_in_both_tags() {
+        assert_eq!(udev_plain(b"my disk"), "my_disk");
+        assert_eq!(udev_encode(b"my disk"), r"my\x20disk");
+    }
 
     #[test]
     fn test_detect_personality() {

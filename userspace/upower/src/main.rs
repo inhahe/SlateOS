@@ -1255,7 +1255,22 @@ fn remove_pid_file(path: &Path) {
 fn run_daemon(opts: &UpowerdOptions, out: &mut dyn Write) -> io::Result<i32> {
     let cfg = DaemonConfig::from_file(&opts.config_file);
 
-    writeln!(out, "upowerd: starting UPower daemon v{VERSION}")?;
+    // NOT "starting UPower daemon", which is what this said while making a
+    // single pass and returning. The code knew: `// In a real daemon, we'd
+    // enter an event loop. We simulate a single pass.` sits sixty lines below,
+    // and is the one place an operator never looks.
+    //
+    // That is §945's shape exactly -- the disclosure existed, in the source,
+    // where the person relying on the claim cannot read it. An operator who
+    // starts a power daemon and sees "starting" believes something is now
+    // watching the battery. The correct response to that line is to stop
+    // thinking about power, which is the response that costs them the machine
+    // at 3%.
+    writeln!(
+        out,
+        "upowerd: single pass v{VERSION} (this build has no event loop and does \
+         not keep running)"
+    )?;
     writeln!(
         out,
         "upowerd: config: PercentageLow={}, PercentageCritical={}, PercentageAction={}",
@@ -1273,7 +1288,17 @@ fn run_daemon(opts: &UpowerdOptions, out: &mut dyn Write) -> io::Result<i32> {
          power and cannot act on it)",
         cfg.critical_power_action
     )?;
-    writeln!(out, "upowerd: NoPollBatteries={}", cfg.no_poll_batteries)?;
+    // A polling control in a program that does not poll. Reported as read and
+    // inert rather than dropped: an operator who set it deserves to know it
+    // was seen, and one who did not set it deserves to know the default is not
+    // doing anything either. Honouring it would mean skipping a poll that does
+    // not exist.
+    writeln!(
+        out,
+        "upowerd: NoPollBatteries={} (no effect: there is no polling loop to \
+         suppress)",
+        cfg.no_poll_batteries
+    )?;
 
     // Write PID file.
     let pid = std::process::id();
@@ -1309,7 +1334,10 @@ fn run_daemon(opts: &UpowerdOptions, out: &mut dyn Write) -> io::Result<i32> {
     // Track history.
     let mut tracker = HistoryTracker::new(1000);
 
-    // In a real daemon, we'd enter an event loop. We simulate a single pass.
+    // One pass, and the banner above now says so out loud. This comment used
+    // to be the ONLY place that fact was written down, above a line announcing
+    // a daemon start -- which is why it is kept rather than deleted: it
+    // records that the gap was known and undisclosed, not newly discovered.
     for dev in &devices {
         if dev.device_type == DeviceType::Battery || dev.device_type == DeviceType::Ups {
             tracker.record_charge(0, dev.percentage, dev.state);

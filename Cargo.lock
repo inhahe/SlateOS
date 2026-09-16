@@ -1443,6 +1443,7 @@ dependencies = [
 name = "localectl"
 version = "0.1.0"
 dependencies = [
+ "libcall",
  "procinfo",
  "quoting",
 ]

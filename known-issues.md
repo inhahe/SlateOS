@@ -154861,11 +154861,37 @@ proposed above is not new. It is the conversion `apps/explorer` already went
 through, which `apps/fileassoc` had missed. `filesearch` and `diskanalyzer` are
 the two left.
 
-**Still true:** `guitk::filetypes::icon_for_extension` has no caller outside its
-own tests, and the table carries an `icon_glyph` per type that nothing draws.
-That is an unused capability rather than a rival source, since explorer draws a
-glyph per bucket by choice rather than one per type, so it belongs on the
-unused-export list and not this one.
+**Still true, and wider than one function.** Counted 2026-09-16, callers
+outside the module:
+
+| function | callers |
+|---|---|
+| `detect_from_extension` | 2 |
+| `category_from_extension` | 3 |
+| `icon_for_extension` | **0** |
+| `mime_for_extension` | **0** |
+| `is_text_file` | **0** |
+| `is_executable` | **0** |
+| `parse_extension` | **0** |
+| `detect_from_magic` | **0** |
+
+Six of eight have no caller, and the reason is visible in the two that do:
+consumers call `detect_from_extension` and then read the fields off the
+`FileTypeInfo` -- `apps/explorer` uses `info.is_text` and `info.description`
+directly. So the single-purpose accessors are a second API for what the general
+one already returns, and everybody picked the general one. That is a shape to
+decide about, not a defect: either they are convenience worth keeping for the
+next caller, or they are surface to remove. They are cheap either way.
+
+**`detect_from_magic` is not in that group and is the interesting one.** It
+identifies a file from its first bytes, and nothing anywhere calls it. Every
+classifier in this tree works from the extension alone, so a file with no
+extension -- ordinary on a POSIX system -- is `Unknown` everywhere, while the
+code to identify it properly is sitting written and tested in the toolkit. That
+is the same shape as the five features in open-questions C-Q17, and it wants
+the same decision. Wiring it has a real cost to weigh: it means reading the
+first bytes of files during a directory listing, which the extension path does
+not do.
 
 ## TD-C-A-CLEANUP-THAT-REMOVES-A-DISTINCTION -- METHOD 2026-09-16
 

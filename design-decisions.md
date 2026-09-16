@@ -67966,6 +67966,7 @@ not better checks -- it is making every check say what it looked at.
 | predicate miss | lane C's `find-stale-admissions` matched `cannot save`, not `cannot be saved` | named the right crate, for the wrong reason |
 | **result lookup** | lane C's sabotage harness searched for a named test result; the name was mistyped | `STAYED GREEN` -- absence rendered as clean |
 | **missing instrument** | I probed an ELF with `strings`, `nm` and `readelf`; none is installed here, and I had silenced their stderr | three `0`s, indistinguishable from "the symbol is absent" |
+| **vacuous comparison** | lane C's damage-tracking test compared a partial frame against a full one; a broken fixture rendered nothing in either | `0 <= 0` holds, so the assertion passed on a fixture that drew nothing |
 
 **The sixth is lane C's and is the worst of the set, because it is downstream
 of the others.** Their harness asked "did test X go red?", the name did not
@@ -68010,6 +68011,30 @@ have told them apart. The rule that follows is narrow and worth obeying:
 *never send stderr to /dev/null on a command whose output you are about to
 interpret as evidence* -- the discarded line is usually the one saying the
 measurement never happened.
+
+**The eighth is lane C's and sits beside the first five rather than under
+them.** Their compositor test asserted that redrawing one window costs a
+fraction of redrawing the desktop. If the fixture is broken and the *full*
+recomposite also draws nothing, both sides of the comparison go to zero, the
+relation holds, and the test reports a pass having established nothing. The
+distinction from the five corpus shapes is worth stating precisely, because
+it is why this is an eighth and not a variant of `empty corpus`: **the corpus
+is not empty -- the comparison is.** Two measurements were really taken; they
+just both degenerated, and a relation between two degenerate values is true
+for free.
+
+Their fix is the one this document keeps arriving at from different
+directions: **a control that fails if the fixture is not in the state the
+test claims to be about.** A full recomposite must re-render at least eight
+windows before the ratio means anything. Note what the control is *not* --
+it is not a tighter threshold, and no threshold would have helped, because
+the defect was on both sides of the comparison at once.
+
+Generalised, the eight rows share one instruction. **Print, or assert, the
+thing the verdict was computed from** -- the corpus size, the tree that was
+read, the set that matched, the instrument that ran, the magnitude of each
+side. Every shape here is a verdict that survived the disappearance of its
+own evidence.
 
 **The retroactive consequence, which is the part that changes behaviour.** Lane
 B kept the `__file__`-derived `ROOT` fix over their own on this ground: a gate

@@ -251,6 +251,8 @@ pub fn dispatch(
         "ListSeats" => list_seats(daemon, caller),
         "GetUser" => one_arg(payload, |uid| get_user(daemon, uid, caller)),
         "GetSeat" => one_arg(payload, |id| get_seat(daemon, id, caller)),
+        "TerminateUser" => one_arg(payload, |uid| terminate_user(daemon, uid, caller)),
+        "KillUser" => kill_user(daemon, payload, caller),
         "GetSession" => one_arg(payload, |id| get_session(daemon, id, caller)),
         "LockSession" => one_arg(payload, |id| lock_session(daemon, id, caller)),
         "UnlockSession" => one_arg(payload, |id| unlock_session(daemon, id, caller)),
@@ -465,6 +467,37 @@ fn get_session(daemon: &Daemon, id: &str, caller: Option<Credentials>) -> Reply 
     }
 }
 
+/// Decide whether `caller` may act on `uid`, and parse it.
+///
+/// Separate from [`authorize`] because that decides from a SESSION id, and
+/// these methods name a uid. Passing one to the other would look like a check
+/// and grade the wrong thing.
+///
+/// # Everything that is not "you, or root" answers [`ERR_NO_SUCH_USER`]
+///
+/// A uid that does not parse, a uid belonging to somebody else, and a uid
+/// nobody has ever used all give the same answer. If they differed, the
+/// difference would be a way to enumerate who uses this machine from an
+/// unprivileged account, one uid at a time -- and the same reasoning
+/// `authorize` gives for reporting another user's session as ABSENT rather
+/// than forbidden.
+///
+/// The caller not being identified at all is reported as itself, because that
+/// is a fact about the connection rather than about any user.
+fn authorize_uid(uid: &str, caller: Option<Credentials>) -> Result<u32, &'static str> {
+    let Some(caller) = caller else {
+        return Err(ERR_UNKNOWN_CALLER);
+    };
+    let Ok(uid) = uid.parse::<u32>() else {
+        return Err(ERR_NO_SUCH_USER);
+    };
+    if caller.is_root() || caller.uid == uid {
+        Ok(uid)
+    } else {
+        Err(ERR_NO_SUCH_USER)
+    }
+}
+
 /// `GetUser(uid) -> properties`
 ///
 /// Root, or the user themselves. `authorize` cannot be used: it decides from
@@ -477,18 +510,12 @@ fn get_session(daemon: &Daemon, id: &str, caller: Option<Credentials>) -> Reply 
 /// argument is malformed sends them to check their typing rather than their
 /// assumption.
 fn get_user(daemon: &Daemon, uid: &str, caller: Option<Credentials>) -> Reply {
-    let Some(caller) = caller else {
-        return Reply::Error(ERR_UNKNOWN_CALLER);
+    // Before the lookup, so a stranger cannot learn which uids have logged in
+    // by watching whether the answer is "denied" or "no such user".
+    let uid = match authorize_uid(uid, caller) {
+        Ok(u) => u,
+        Err(e) => return Reply::Error(e),
     };
-    let Ok(uid) = uid.parse::<u32>() else {
-        return Reply::Error(ERR_NO_SUCH_USER);
-    };
-    // Checked before the lookup, as `Required::Administrator` is above: a
-    // stranger must not learn which uids have logged in by watching whether
-    // the answer is "denied" or "no such user".
-    if !caller.is_root() && caller.uid != uid {
-        return Reply::Error(ERR_NO_SUCH_USER);
-    }
     match daemon.users.get(&uid) {
         Some(user) => Reply::Return(fields::encode(&[user.format_properties().as_bytes()])),
         None => Reply::Error(ERR_NO_SUCH_USER),
@@ -506,6 +533,50 @@ fn get_seat(daemon: &Daemon, id: &str, caller: Option<Credentials>) -> Reply {
     match daemon.seats.get(id) {
         Some(seat) => Reply::Return(fields::encode(&[seat.format_properties().as_bytes()])),
         None => Reply::Error(ERR_NO_SUCH_SEAT),
+    }
+}
+
+/// `TerminateUser(uid)`
+///
+/// Ends every session the user has. Root, or the user themselves.
+fn terminate_user(daemon: &mut Daemon, uid: &str, caller: Option<Credentials>) -> Reply {
+    let uid = match authorize_uid(uid, caller) {
+        Ok(u) => u,
+        Err(e) => return Reply::Error(e),
+    };
+    match daemon.terminate_user(uid) {
+        Ok(()) => Reply::empty(),
+        // `Daemon::terminate_user`'s only failure is "user has no sessions",
+        // which is its own answer rather than `NoSuchUser`: a caller told the
+        // latter checks the uid they typed, and one told the former checks
+        // whether the user is logged in.
+        Err(_) => Reply::Error(ERR_NO_SESSIONS),
+    }
+}
+
+/// `KillUser(uid, signal) -> [signalled, total]`
+///
+/// Signals every session leader the user has, and returns BOTH counts so a
+/// partial result is visible. One number cannot say "2 of 3", and the
+/// difference between that and "2" is the thing an operator needs.
+fn kill_user(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>) -> Reply {
+    let Some(args) = fields::decode_exact(payload, 2) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let text = |i: usize| args.get(i).and_then(|b| core::str::from_utf8(b).ok());
+    let (Some(uid), Some(signal)) = (text(0), text(1).and_then(|s| s.parse::<i32>().ok())) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let uid = match authorize_uid(uid, caller) {
+        Ok(u) => u,
+        Err(e) => return Reply::Error(e),
+    };
+    match daemon.kill_user(uid, signal) {
+        Ok((signalled, total)) => Reply::Return(fields::encode(&[
+            signalled.len().to_string().as_bytes(),
+            total.to_string().as_bytes(),
+        ])),
+        Err(e) => Reply::Error(e.bus_name()),
     }
 }
 
@@ -1192,6 +1263,137 @@ mod tests {
         assert_eq!(
             call(&mut d, "GetUser", &[b"1000"], None),
             Reply::Error(ERR_UNKNOWN_CALLER)
+        );
+    }
+
+    // -- TerminateUser / KillUser -----------------------------------------
+
+    /// Arguments for a uid-keyed method, so one test can drive both.
+    fn uid_args(member: &str, uid: &'static [u8]) -> Vec<&'static [u8]> {
+        match member {
+            "KillUser" => vec![uid, b"15"],
+            _ => vec![uid],
+        }
+    }
+
+    /// The enumeration control, for the two methods that act on a uid.
+    ///
+    /// `GetUser` is tested for this above. These two need their own case
+    /// because they reach the rule through a separate call to
+    /// `authorize_uid`, and a change that re-inlined the check into one
+    /// method would leave the other's test green while the property was gone
+    /// -- which is the failure a shared helper is supposed to prevent and
+    /// cannot, by itself, detect.
+    ///
+    /// The property: from an unprivileged account, "somebody else's uid" and
+    /// "a uid nobody has ever used" must answer alike. A difference is a
+    /// census of the machine's users, one uid per call.
+    #[test]
+    fn acting_on_another_uid_is_indistinguishable_from_acting_on_nobody() {
+        for member in ["TerminateUser", "KillUser"] {
+            let (mut d, _alice, _bob) = two_user_daemon();
+            let mine = call(
+                &mut d,
+                member,
+                &uid_args(member, b"1000"),
+                Some(creds(1001)),
+            );
+            let absent = call(
+                &mut d,
+                member,
+                &uid_args(member, b"4242"),
+                Some(creds(1001)),
+            );
+            let unparsable = call(
+                &mut d,
+                member,
+                &uid_args(member, b"bogus"),
+                Some(creds(1001)),
+            );
+            assert_eq!(mine, Reply::Error(ERR_NO_SUCH_USER), "{member}");
+            assert_eq!(
+                mine, absent,
+                "{member} tells a stranger which uids are in use"
+            );
+            assert_eq!(
+                mine, unparsable,
+                "{member} tells a stranger a typo apart from a real user"
+            );
+            assert_eq!(
+                call(&mut d, member, &uid_args(member, b"1000"), None),
+                Reply::Error(ERR_UNKNOWN_CALLER),
+                "{member} acted for a caller it could not identify"
+            );
+        }
+    }
+
+    /// `TerminateUser` ends every session that user has, and only theirs.
+    ///
+    /// The second call is the part worth having: once alice is gone, the
+    /// answer changes from success to [`ERR_NO_SESSIONS`], which is a
+    /// different fact from [`ERR_NO_SUCH_USER`]. A caller told the first
+    /// checks whether the user is logged in; one told the second checks the
+    /// uid they typed. Root may tell them apart because root may already
+    /// enumerate users; the test above is what stops anyone else.
+    #[test]
+    fn terminate_user_ends_that_users_sessions_and_leaves_the_others() {
+        let (mut d, alice, bob) = two_user_daemon();
+        let done = call(&mut d, "TerminateUser", &[b"1000"], Some(creds(0)));
+        assert!(!done.is_error(), "root could not terminate alice: {done:?}");
+        assert!(
+            call(&mut d, "GetSession", &[alice.as_bytes()], Some(creds(0))).is_error(),
+            "alice's session outlived TerminateUser"
+        );
+        assert!(
+            !call(&mut d, "GetSession", &[bob.as_bytes()], Some(creds(0))).is_error(),
+            "bob's session was collateral damage"
+        );
+        assert_eq!(
+            call(&mut d, "TerminateUser", &[b"1000"], Some(creds(0))),
+            Reply::Error(ERR_NO_SESSIONS)
+        );
+    }
+
+    /// `KillUser` refuses a payload it cannot read, and names the refusal.
+    ///
+    /// # What this cannot check
+    ///
+    /// Not the successful send, and not the `[signalled, total]` reply that
+    /// carries it. These tests run on the host, where `libcall::kill` is
+    /// `ENOSYS` by construction (`#[cfg(not(unix))]`), so `signalled` is
+    /// empty for every pid and `Daemon::kill_user` always takes its error
+    /// arm. The partial-success shape -- the "2 of 3" that is the reason the
+    /// method returns two numbers rather than one -- has no host path at all.
+    /// Saying so here beats a test that pretends otherwise; it is logged in
+    /// `todo.txt` under the same name.
+    #[test]
+    fn kill_user_refuses_a_payload_it_cannot_read() {
+        let (mut d, _alice, _bob) = two_user_daemon();
+        assert_eq!(
+            call(&mut d, "KillUser", &[b"1000"], Some(creds(0))),
+            Reply::Error(ERR_INVALID_ARGUMENTS),
+            "a missing signal was treated as a signal"
+        );
+        assert_eq!(
+            call(
+                &mut d,
+                "KillUser",
+                &[b"1000", b"not-a-number"],
+                Some(creds(0))
+            ),
+            Reply::Error(ERR_INVALID_ARGUMENTS)
+        );
+        // The fixture's sessions default `leader_pid` to 0, and
+        // `libcall::kill` rejects a non-positive pid before it can reach a
+        // process group. So this is the refusal, reported as itself.
+        assert_eq!(
+            call(&mut d, "KillUser", &[b"1000", b"15"], Some(creds(0))),
+            Reply::Error(ERR_NO_SESSION_LEADER)
+        );
+        // A user with no sessions at all is a different answer again.
+        assert_eq!(
+            call(&mut d, "KillUser", &[b"4242", b"15"], Some(creds(0))),
+            Reply::Error(ERR_NO_SESSIONS)
         );
     }
 

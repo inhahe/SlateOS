@@ -2272,6 +2272,58 @@ fn session_command_via_bus(member: &str, id: &str, past_tense: &str) -> i32 {
     }
 }
 
+/// `loginctl terminate-user <uid>`, asking the daemon.
+fn terminate_user_via_bus(uid: &str) -> i32 {
+    if uid.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: UID required");
+        return 1;
+    }
+    match call_logind("TerminateUser", &[uid.as_bytes()]) {
+        Ok(_) => {
+            println!("User {uid} terminated.");
+            0
+        }
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: cannot terminate user {uid}: {why}");
+            1
+        }
+    }
+}
+
+/// `loginctl kill-user <uid> [--signal=SIG]`, asking the daemon.
+///
+/// Prints "2 of 3" rather than "2". A leader that could not be signalled is
+/// what an operator needs to see, and a bare count hides it behind a number
+/// that looks like a result -- which is what this command printed before
+/// today, over a `kill_user` that signalled nothing at all.
+fn kill_user_via_bus(uid: &str, signal: i32) -> i32 {
+    if uid.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: UID required");
+        return 1;
+    }
+    let sig = signal.to_string();
+    match call_logind("KillUser", &[uid.as_bytes(), sig.as_bytes()]) {
+        Ok(fields) => {
+            let field = |i: usize| {
+                fields.get(i).map_or_else(
+                    || "?".to_string(),
+                    |b| String::from_utf8_lossy(b).into_owned(),
+                )
+            };
+            println!(
+                "Sent signal {signal} to {} of {} session leaders for user {uid}.",
+                field(0),
+                field(1)
+            );
+            0
+        }
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: cannot kill user {uid}: {why}");
+            1
+        }
+    }
+}
+
 /// One `show-*` command, asking the daemon.
 ///
 /// `show-session`, `show-user` and `show-seat` each print one block of
@@ -2743,6 +2795,8 @@ fn run_loginctl(args: &[String]) -> i32 {
         LoginctlCommand::ShowSession(id) => return show_via_bus("GetSession", "session ID", id),
         LoginctlCommand::ShowUser(uid) => return show_via_bus("GetUser", "UID", uid),
         LoginctlCommand::ShowSeat(id) => return show_via_bus("GetSeat", "seat", id),
+        LoginctlCommand::TerminateUser(uid) => return terminate_user_via_bus(uid),
+        LoginctlCommand::KillUser(uid, sig) => return kill_user_via_bus(uid, *sig),
         LoginctlCommand::Activate(id) => return activate_is_not_wired(id),
         _ => {}
     }
@@ -3900,6 +3954,34 @@ mod tests {
     fn killing_a_session_says_it_cannot_rather_than_reporting_a_signal() {
         let d = test_daemon();
         assert_eq!(d.kill_session("1", 15), Err(KillError::Unsupported));
+    }
+
+    /// A name `KillError` owns is NOT duplicated in `describe_bus_error`.
+    ///
+    /// Written after adding exactly that duplicate. `ERR_NO_SESSIONS` belongs
+    /// to `KillError::NoSessions`, and `describe_bus_error` consults
+    /// `from_bus_name` first, so a second arm for it was dead code that would
+    /// have drifted silently -- one copy changed, the other unreachable and
+    /// therefore never wrong in any way a test could see.
+    ///
+    /// The assertion is that every name the enum owns renders through the
+    /// enum, which is true only while no free-function arm shadows one.
+    #[test]
+    fn describe_bus_error_does_not_shadow_a_name_killerror_owns() {
+        for e in [
+            KillError::NoSuchSession,
+            KillError::NoSessions,
+            KillError::NoLeaderPid,
+            KillError::NotPermitted,
+            KillError::LeaderGone,
+            KillError::Unsupported,
+        ] {
+            assert_eq!(
+                describe_bus_error(e.bus_name()),
+                e.message(),
+                "{e:?}'s name renders through something other than the enum"
+            );
+        }
     }
 
     /// Every error name a method can return renders as a sentence.

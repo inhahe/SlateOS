@@ -155068,3 +155068,50 @@ improvement to a function that should not exist. **A thing can be carefully
 maintained for a long time without anyone asking whether the spec wanted it**,
 because maintenance asks "is this correct?" and only a reader of the design
 asks "should this be here?"
+
+## TD-C-THE-STRING-SHAPED-API-FOR-BYTES-SHAPED-DATA -- METHOD 2026-09-16
+
+**In short:** five times in one day, in five unrelated programs, a path or an
+environment variable was read through the part of the standard library that
+only handles text. Each time the code compiled, passed its tests and looked
+ordinary. The results ranged from a completion that offers a folder and then
+cannot open it, to a recycle bin that empties itself on restart.
+
+**Date:** 2026-09-16. **Lane:** C.
+
+**The five:**
+
+| where | the call | what it did |
+|---|---|---|
+| `apps/backup` `cmd_schedule` | `dest.to_string_lossy()` | stored a schedule naming a directory the user never gave |
+| `apps/fileassoc` / `gui/associations` | group name as text | (fixed as part of the shared-crate work) |
+| `apps/explorer` `completions_for` | `file_name().to_string_lossy()` | offered a completion for a folder that does not exist under that name |
+| `apps/explorer` `DiskCache::default_location` | `env::var("HOME")` | disabled the thumbnail cache entirely, silently, for the life of the install |
+| `apps/explorer` `RecycleBin::default_location` | `env::var("HOME")` | **put the recycle bin in `/tmp`, so deleting a file lost it at the next restart** |
+
+**Why it keeps happening, which is the point of writing it down.** Nobody was
+careless. `std` offers a `String`-shaped API for a bytes-shaped thing at every
+one of these boundaries, and the `String` one is shorter, needs no `?`, and
+reads better at the call site. `to_string_lossy` over `to_str`, `var` over
+`var_os` -- the wrong choice is the convenient one every time, which is why it
+recurs in crates written months apart by whoever was there.
+
+**The sharpest example of how local the knowledge is.** `RecycleBin` is
+*meticulous* about this exact hazard: `send_to_bin` encodes the original path
+losslessly, with a comment explaining that `Display` would write U+FFFD and
+restore would then recreate the wrong name. That care was undone one function
+earlier, by the location of the bin itself. **Understanding a trap does not
+generalise across a function boundary unless somebody goes looking.**
+
+**Two shapes, and they fail differently.** The lossy conversions produce a
+*wrong value* that looks right -- a name, a path, a key. The UTF-8-only reads
+produce *absence*: a feature that silently does not exist, with no bad data to
+notice. The second is harder to find, because there is nothing to see.
+
+**Do not sweep this blindly.** Two `env::var` calls in this lane are correct
+and must stay: `gui/compositor`'s `SLATE_DRM_CARD` parses to a `u32`, so a
+non-UTF-8 value is invalid input and is already refused with a message, and
+`gui/font`'s is a Windows-only test reading `WINDIR`. **The discriminator is
+not the API, it is whether the value is a path or a number.** A sweep that
+replaced every `var` with `var_os` would be churn in both places and would
+teach the next reader that the rule is mechanical.

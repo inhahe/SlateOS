@@ -56,6 +56,14 @@ caller that is itself dead, hiding the warning).
 Every file is restored from the bytes read at the start and the restore is
 verified by SHA-256.
 
+**It edits the working tree, so do not run it beside another build.** The
+stripped files are on disk for the length of one `cargo check`, and a workspace
+gate running at the same time would compile them -- reporting dead-code
+warnings that belong to this tool's scratch state, or worse, a green result
+about a tree that existed for four seconds. The same race cost a misleading
+PASS earlier in this tree's history when a gate started before two commits and
+appeared to cover them.
+
 Usage:  python scripts/find-stale-dead-code-allows.py --crate=apps/kanban
         python scripts/find-stale-dead-code-allows.py --roots=apps,gui
         python scripts/find-stale-dead-code-allows.py --self-test

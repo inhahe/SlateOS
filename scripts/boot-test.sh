@@ -3701,6 +3701,83 @@ check_eol() {
 
 check_eol
 
+# Lane B's manifest-producer gate.  Every entry in
+# `rootfs-bin-manifest.txt` must have something in the tree that produces
+# it, with aliases resolved to their producer.
+#
+# It was written after a near-miss worth repeating: `awk` appeared to have
+# no producer anywhere, git history showed a 3,726-line implementation
+# deleted five days earlier, and three further checks agreed.  Every one of
+# them was a form of `look for a file named awk*.rs`, so they were not three
+# witnesses but one -- `awk` is at `userspace/coreutils/src/bin/awk/`,
+# cargo's DIRECTORY form.  The gate enumerates four producer sources for
+# exactly that reason, and its author's note on the asymmetry is why it is
+# self-tested first: a scan that UNDER-reports producers makes every entry a
+# false positive, which is loud and self-correcting, while one that
+# OVER-reports turns a real defect into silence, which is not.
+check_manifest_producers() {
+    echo "=== Checking the manifest-producer gate against the tree it grades ==="
+    if ! run_checker check-manifest-producers-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-manifest-producers.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The manifest-producer gate fails its" >&2
+        echo "own cases, so its verdict on the manifest means nothing.  Its" >&2
+        echo "dangerous direction is over-reporting producers, which turns a" >&2
+        echo "missing binary into silence rather than into a finding." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that every manifest entry has a producer ==="
+    if run_checker check-manifest-producers "$py" \
+            "$PROJECT_ROOT/scripts/check-manifest-producers.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each manifest entry above names a binary" >&2
+    echo "nothing in this tree produces, so create-ext4-rootfs.sh will stage" >&2
+    echo "a /bin entry that does not exist -- or silently skip it, which is" >&2
+    echo "worse, because the manifest then lists a command the image lacks." >&2
+    echo "" >&2
+    echo "Check cargo's DIRECTORY form before concluding a producer is gone:" >&2
+    echo "src/bin/<name>/ is a multi-file binary and matches no *.rs glob." >&2
+    exit 1
+}
+
+check_manifest_producers
+
+# Lane B's NUL gate.  A NUL-only difference between two files must be
+# visible through whatever capture the comparison runs through, and two
+# identical trees must still compare equal.  Both halves matter: a capture
+# that drops NULs reports a difference as agreement, and one that mangles
+# every byte reports agreement as a difference.
+check_cp_diff_sees_nul() {
+    echo "=== Checking the NUL-visibility gate against itself ==="
+    if ! run_checker check-cp-diff-sees-nul-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-cp-diff-sees-nul.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The NUL-visibility gate fails its own" >&2
+        echo "cases.  Its subject is a difference the obvious instrument cannot" >&2
+        echo "see, so a broken version of it is indistinguishable from a clean" >&2
+        echo "tree by construction." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that a NUL-only difference is visible ==="
+    if run_checker check-cp-diff-sees-nul "$py" \
+            "$PROJECT_ROOT/scripts/check-cp-diff-sees-nul.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A NUL-only difference is not visible" >&2
+    echo "through the capture this tree's comparisons use, so two files that" >&2
+    echo "differ only in NUL bytes will be reported as identical." >&2
+    exit 1
+}
+
+check_cp_diff_sees_nul
+
 # `check_eol` above catches the *consequence* -- a file declared `text eol=lf`
 # sitting CRLF on disk.  This one catches the cause, immediately after it, on
 # purpose: the 2026-09-03 incident was thirteen files corrupted by one writer,

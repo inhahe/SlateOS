@@ -2271,8 +2271,8 @@ Process Management). The `pslist`/`psinfo`/`pstop`/`psctl`/`psblame`/`pswhy`
 CLI tools (§2.7 → Native Process Tools) are the text counterpart of everything
 below and read the same kernel views, so the two can never disagree._
 
-- [ ] Identify process by clicking window, kill it
-- [ ] Find process by name
+- [~] Identify process by clicking window, kill it *Written and unreachable, 2026-09-16: the window picker lives in `apps/procexplorer/src/features.rs`, which `main.rs` declares and never calls — one of the five features in open-questions **C-Q17**, whose answer decides whether this is wired or deleted. Not `[x]`: no user can reach it. Not `[ ]`: the code is written and tested.*
+- [x] Find process by name *Verified 2026-09-16: `filter_text` on the main state, focusable, lower-cased and matched against the process list in `main.rs` — reachable, unlike the window picker above it.*
 - [ ] Pause, resume, kill, change priority, restart
 - [ ] Show all libraries loaded by process
 - [ ] Show all subprocesses and threads

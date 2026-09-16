@@ -330,6 +330,31 @@ pub mod numerics {
 // CTCP (Client-To-Client Protocol)
 // ============================================================================
 
+/// What the window says instead of a conversation.
+///
+/// **This program opened on a fabricated one.** `seeded_client` set the
+/// connection state to `Connected`, named the server `irc.libera.chat`, joined
+/// `#slateos` and `#rust`, gave them topics, populated them with four users --
+/// alice, bob, charlie and a bot -- and filled the scrollback with a
+/// timestamped exchange between them. None of it happened. This client has no
+/// socket: `Cargo.toml` lists three GUI crates and nothing that opens one.
+///
+/// That is a worse thing to invent than a filename. A list of files is a claim
+/// that files exist; a conversation is a claim that *people said things*, with
+/// names and times attached, and the reader has no way to tell it from a log
+/// of a real session -- because the only difference is on the other side of a
+/// socket that is not there.
+///
+/// The three lines say what is true, in order of what the reader needs: there
+/// is no connection, there never was one, and the composer still works so
+/// typing is not pointless.
+const CANNOT_CONNECT_LINES: [&str; 3] = [
+    "Not connected: this program has no network access.",
+    "No server has been contacted, and nothing here was received from one.",
+    "Commands still parse -- typing one shows the line that would have been \
+sent.",
+];
+
 /// CTCP message types.
 #[derive(Debug, Clone)]
 pub enum CtcpMessage {
@@ -1866,8 +1891,46 @@ impl IrcClientApp {
             .map_or_else(|| "--:--".to_string(), |m| m.timestamp.clone())
     }
 
+    /// Say, in the window, that this client cannot connect.
+    ///
+    /// Unconditional for the reason `apps/netmanager`'s equivalent is: there
+    /// is no state in which this program *can* connect, so a condition here
+    /// would be one that is always true and would rot the moment it stopped
+    /// being.
+    fn push_cannot_connect_banner(&self, cmds: &mut Vec<RenderCommand>) {
+        let mut y = self.height - 4.0 - 14.0 * CANNOT_CONNECT_LINES.len() as f32;
+        for (i, line) in CANNOT_CONNECT_LINES.iter().enumerate() {
+            let (size, color) = if i == 0 {
+                (12.0, self.palette.ink(self.palette.yellow))
+            } else {
+                (10.0, self.palette.subtext0)
+            };
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                y,
+                text: (*line).to_owned(),
+                font_size: size,
+                color,
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(self.width - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            y += 14.0;
+        }
+    }
+
     pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(512);
+        // Drawn on every frame, not only when the channel list is empty. A
+        // user who types `/join #x` gets a channel -- the local half of the
+        // command is applied -- and a banner that vanished at that point would
+        // disappear exactly when the window started looking most like a real
+        // session.
+        self.push_cannot_connect_banner(&mut cmds);
 
         // Background
         cmds.push(RenderCommand::FillRect {
@@ -2526,6 +2589,13 @@ impl IrcClientApp {
 // Sample data and main
 // ============================================================================
 
+/// A populated client, for tests only.
+///
+/// This was `main`'s starting state until 2026-09-15. It is a perfectly good
+/// fixture -- a window with two channels and some scrollback is what most of
+/// these tests need -- and a thoroughly bad thing to show a user, because
+/// every name and timestamp in it is invented.
+#[cfg(test)]
 fn seeded_client() -> IrcClientApp {
     let mut app = IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
     app.connection = ConnectionState::Connected;
@@ -2678,9 +2748,26 @@ impl App for IrcClientApp {
     }
 }
 
+/// The state the window opens in.
+///
+/// **A named function rather than two lines inside `main`, because `main`
+/// cannot be tested and this can.** The first version of this change put
+/// `IrcClientApp::new(..)` directly in `main` and tested a separately
+/// constructed app, which is the door defect one level up: the test built its
+/// own starting state and asserted about that, so putting the seeding back
+/// into `main` left every test green. `scripts/sabotage.py` caught it by
+/// doing exactly that.
+fn initial_app() -> IrcClientApp {
+    // Disconnected and empty. It used to be `seeded_client`, which invented a
+    // whole session -- see `CANNOT_CONNECT_LINES`.
+    IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT)
+}
+
 fn main() -> ExitCode {
-    let mut app = seeded_client();
-    app::launch("ircclient", &mut app)
+    // One expression, deliberately. There is no local here for a later edit
+    // to mutate, so the only way to change what the window opens on is to
+    // change `initial_app` -- which is tested.
+    app::launch("ircclient", &mut initial_app())
 }
 
 #[cfg(test)]
@@ -3852,14 +3939,98 @@ mod tests {
         assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
     }
 
+    /// The window opens disconnected, empty, and saying so.
+    ///
+    /// **It used to open on a conversation that never happened.** `main`
+    /// called `seeded_client`, which set the state to `Connected`, named the
+    /// server `irc.libera.chat`, joined two channels, gave them topics and
+    /// four users, and filled the scrollback with a timestamped exchange
+    /// between alice, bob and charlie. This client has no socket; its whole
+    /// dependency list is three GUI crates.
+    ///
+    /// A list of invented filenames claims that files exist. An invented
+    /// conversation claims that *people said things*, with names and times,
+    /// and a reader cannot tell it from a log of a real session -- the only
+    /// difference is on the other side of a socket that is not there.
+    ///
+    /// The old test asserted the opposite of this one, under the name
+    /// `the_seeded_client_opens_on_a_conversation`, and it passed.
+    ///
+    /// **What this does not cover, said plainly.** It asserts about
+    /// `initial_app`, which is what `main` calls -- but nothing can assert
+    /// that `main` still calls it, because `main` launches a window and cannot
+    /// run in a test. `scripts/sabotage.py` demonstrated the gap by rewriting
+    /// `main` to build its own app: every test stayed green. The residual risk
+    /// is narrowed rather than closed -- `main` is now a single expression
+    /// with no local to mutate, so changing what the window opens on means
+    /// editing `initial_app`, which is covered. Recorded here because a limit
+    /// nobody wrote down reads as coverage.
     #[test]
-    fn the_seeded_client_opens_on_a_conversation() {
+    fn the_window_opens_disconnected_and_empty_and_says_so() {
+        // `initial_app`, not a fresh `IrcClientApp` -- this has to be the
+        // state `main` launches, or it tests a constructor nobody calls.
+        let app = initial_app();
+        assert_eq!(app.connection, ConnectionState::Disconnected);
+        assert!(
+            app.channels.is_empty(),
+            "the window opened already in {} channel(s)",
+            app.channels.len()
+        );
+
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in CANNOT_CONNECT_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+    }
+
+    /// ...and goes on saying it once the user has joined something locally.
+    ///
+    /// `/join #x` opens a channel, because the local half of the command is
+    /// applied -- which is the right behaviour and is exactly when the window
+    /// starts looking most like a real session. A banner that vanished at that
+    /// point would disappear at the moment it was most needed.
+    #[test]
+    fn the_notice_survives_a_local_join() {
+        let mut app = initial_app();
+        app.join_channel("#slateos");
+        assert!(
+            !app.channels.is_empty(),
+            "control: the join must have opened a channel"
+        );
+
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Not connected")),
+            "the notice went away as soon as the window had a channel in it"
+        );
+    }
+
+    /// The fixture still populates, because the tests below need it to.
+    #[test]
+    fn the_test_fixture_still_opens_on_a_conversation() {
         let app = seeded_client();
         assert!(!app.channels.is_empty());
         assert!(
             app.find_channel("#slateos")
                 .is_some_and(|ch| !ch.messages.is_empty()),
-            "the first window should have something in it"
+            "the fixture should have something in it"
         );
     }
 

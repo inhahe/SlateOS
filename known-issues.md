@@ -154436,8 +154436,23 @@ these three, and at least one clearly holds something:
   `apps/fileassoc` -- where it fixed a real bug on the way.
 * `power_settings.rs` models screen-off and sleep timeouts in minutes with
   "0 = never". Nothing persists them and nothing honours them, so they are an
-  echoed setting in waiting; but the *shape* is the one a lock delay wants,
-  and the compositor now has the idle watch that could act on it.
+  echoed setting in waiting.
+
+  **Half of it is now unblocked and half is not, which is worth separating.**
+  The compositor grew an idle watch on 2026-09-16, and it is a *map* rather
+  than one slot precisely so a second watcher can claim its own delay -- a
+  screen dimmer beside the lock screen was the example in its doc. So the
+  *timing* half exists. What does not is any way to turn a display off:
+  `Present` pushes pixels and has no power control, and the compositor has no
+  blanking or DPMS of any kind. Backing that on real hardware is lane A's DRM,
+  so the screen-off timeout is a joint task rather than a lane C one.
+
+  The sleep timeout is further still: suspending the machine is not a graphics
+  operation at all.
+
+  The lock delay took the route this one would take -- `gui/desktop`'s
+  `idle_lock` reads a `session` group, claims a watch, and acts. A screen-off
+  delay would be the same three steps once something can act.
 * `backup_settings.rs` holds a retention *policy* vocabulary -- `KeepAll`,
   `KeepCount(n)`, `KeepDays(n)`, `Tiered` -- where `apps/backup` takes concrete
   counts (`PruneOptions::keep_daily`, `keep_weekly`) and computes from them. The

@@ -2414,13 +2414,20 @@ Recorded in `known-issues.md` as
 `TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED`, which had the analysis but
 was not in this file — so it was never actually in front of you.
 
-## B-Q21 — [B] 211 of our 214 userspace programs are never installed. Should they be? — Status: OPEN
+## B-Q21 — [B] 203 of the 278 programs we have written are never installed. Should they be? — Status: OPEN
 
-**In short:** we have written about 214 small programs for this OS. Only three
-of them actually end up on the disk image that boots — everything else is built,
-tested, and then left behind. The reason is size: they all together are bigger
-than the image we build. The question is whether to make the image bigger, pick
-a subset deliberately, or leave things as they are.
+**In short:** we have written 278 small programs for this OS. 75 of them end up
+on the disk image that boots; the other 203 are built, tested, and then left
+behind. The reason is size: together they are bigger than the image we build.
+The question is whether to make the image bigger, pick a subset deliberately,
+or leave things as they are.
+
+*(Corrected 2026-09-16: this first said "211 of 214", which counted CRATES and
+called them programs. One crate — `coreutils` — holds 83 of the programs, so
+counting crates understates what ships by a lot. The image also carries 14
+compiled-Python utilities promoted by the fastpy block — `cat`, `ls`, `grep`,
+`mv` and others — so `/bin` holds about 89 commands we wrote, not three. The
+decision below is unchanged; the scale of it is not what I first said.)*
 
 **The numbers, measured 2026-09-16** (alias lines of the form `ranlib = ar`
 resolved to their producer, so these count crates rather than names).

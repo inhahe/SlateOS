@@ -4527,6 +4527,38 @@
 
 ## Judgment Calls
 
+The post-merge sweep is now a SCRIPT, at build/sweep.sh (lane A, 2026-09-15).
+Three boots paid for the routine version.
+
+  Boot 1: skipped the sweep entirely -- stale INDEX.md, gate 53.
+  Boot 2: ran image-check and sysroot-check and forgot the sweep -- stale
+          INDEX.md again, gate 53.
+  Boot 3: typed SIX of the nine from memory and omitted three, one being
+          check-fields-written-never-read -- gate 52 failed on exactly that.
+
+  A routine typed from memory gets typed partially, and a partial sweep is
+  worse than none: it returns green over the checks that ran and says nothing
+  about the ones omitted. That is the corpus problem of 942 in its smallest
+  form, and I produced it three times in one day while writing the entry.
+
+  Scripting it also pins the thing most likely to go wrong by hand: THE
+  INVOCATIONS ARE NOT UNIFORM. Two checks REQUIRE --check (without it
+  gen-script-index rewrites INDEX.md and scan-orphan-modules reports and
+  exits 0 -- a check turned into a repair that reports success for having
+  acted) and seven REJECT it with rc=2 that reads like a finding. One flag
+  for all nine is wrong in both directions at once.
+
+  RUN IT WITHOUT A PIPE. `sh build/sweep.sh 2>&1 | tail -14` reports tail's
+  status, so the harness recorded exit 0 over a SWEEP FAILED -- which I did,
+  on the very run testing a script whose docstring is about that bug. Use
+  `sh build/sweep.sh > log 2>&1; echo rc=$?` and read the log.
+
+  Worth promoting to scripts/ if it survives: it is useful to all three lanes
+  and lane C has started sweeping after merges too. Left in build/ for now
+  because a new file in scripts/ has to satisfy check-gates-are-wired, and a
+  convenience runner is not a gate -- that needs checking before it lands
+  rather than discovering it in someone else's boot.
+
 MacAddress is declared twice (lane A, 2026-09-15). Small, real, not urgent.
 
   kernel/src/wol.rs:59        pub struct MacAddress(pub [u8; 6])   1 use

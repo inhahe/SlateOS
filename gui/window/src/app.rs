@@ -984,9 +984,28 @@ impl ThemeWatch {
             return false;
         }
         self.settings = settings;
+        self.hand_over(app);
+        true
+    }
+
+    /// Install the settings in this process, then tell the application.
+    ///
+    /// The order is the point. `appearance_changed` is where an application
+    /// recomputes whatever it derived from the settings, and that work
+    /// measures text; installing the font family afterwards would leave the
+    /// layout measured in the old face and drawn in the new one, which is
+    /// exactly the disagreement `guitk::text::set_font_family`'s own note
+    /// warns about.
+    fn hand_over<A: App + ?Sized>(&self, app: &mut A) {
+        // The outcome is deliberately not acted on here. A family the machine
+        // does not have leaves the previous, working font in place, and there
+        // is nothing an event loop can usefully do about that; the place it
+        // is *reported* is the Settings font page, which asks
+        // `guitk::text::font_family()` what is actually in use rather than
+        // assuming the configured name took effect.
+        let _ = self.settings.fonts.apply();
         app.appearance_changed(&self.settings);
         app.theme_changed(&Palette::from_settings(&self.settings));
-        true
     }
 
     /// Hand over the opening palette, whether or not a file exists.
@@ -997,8 +1016,7 @@ impl ThemeWatch {
     /// to report.
     fn deliver<A: App + ?Sized>(&mut self, app: &mut A) {
         if !self.poll(app) {
-            app.appearance_changed(&self.settings);
-            app.theme_changed(&Palette::from_settings(&self.settings));
+            self.hand_over(app);
         }
     }
 }

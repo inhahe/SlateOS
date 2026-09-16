@@ -1005,6 +1005,91 @@ impl Default for FontSettings {
     }
 }
 
+/// What became of one configured font family when it was applied.
+///
+/// Three states rather than a `bool`, because "the user has chosen nothing"
+/// and "the user has chosen a font this machine does not have" are different
+/// facts with different things to say about them, and a page that collapsed
+/// them would report a missing font as a deliberate default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontOutcome {
+    /// No family is configured; whatever was in use stays in use.
+    Unset,
+    /// The family was found and is now in use.
+    Applied,
+    /// The family is not installed here. The previous, working font was kept
+    /// -- losing text to a bad setting is worse than ignoring the setting.
+    Missing,
+}
+
+/// What [`FontSettings::apply`] managed to install.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FontsApplied {
+    /// The UI family.
+    pub ui: FontOutcome,
+    /// The monospace family.
+    pub mono: FontOutcome,
+}
+
+impl FontSettings {
+    /// Draw in these families from now on, in *this* process.
+    ///
+    /// `guitk`'s font selection is per-process global state, and its own
+    /// documentation is explicit about the consequence: "callers must apply
+    /// the same change in every process that draws, or measuring and drawing
+    /// will disagree". So this is called wherever appearance is applied --
+    /// `gui/window`'s event loop, which covers every application, and
+    /// `gui/compositor` separately, because it draws window decorations in
+    /// its own process and does not use `oswindow`.
+    ///
+    /// **Why this did not exist before.** `ui_font` and `mono_font` were
+    /// written to `appearance.yaml`, covered by the every-field round-trip
+    /// test, and read by nothing except a demo binary -- a setting the user
+    /// could change that changed nothing. What hid it is that `ui_size` *was*
+    /// wired up, in the compositor's taskbar and the shell's text scaling: the
+    /// text did get bigger, so the settings looked as though they worked, and
+    /// only the family silently did not. A setting is not connected because
+    /// its neighbour is.
+    ///
+    /// An empty name is reported as [`FontOutcome::Unset`] rather than passed
+    /// down, so that "no preference" stays distinguishable from a family this
+    /// machine does not have.
+    #[must_use]
+    pub fn apply(&self) -> FontsApplied {
+        // Asking first, because installing is not free: `set_font_family`
+        // reloads the faces and drops every rasterized glyph, so calling it
+        // for the family already in use would throw the cache away to arrive
+        // back where it started. This is applied from an event loop that runs
+        // on every settings notification, so "already correct" is the common
+        // case rather than the rare one.
+        fn install(
+            current: Option<String>,
+            family: &str,
+            set: impl FnOnce(&str) -> bool,
+        ) -> FontOutcome {
+            if family.is_empty() {
+                FontOutcome::Unset
+            } else if current.as_deref() == Some(family) || set(family) {
+                FontOutcome::Applied
+            } else {
+                FontOutcome::Missing
+            }
+        }
+        FontsApplied {
+            ui: install(
+                guitk::text::font_family(),
+                &self.ui_font,
+                guitk::text::set_font_family,
+            ),
+            mono: install(
+                guitk::text::mono_family(),
+                &self.mono_font,
+                guitk::text::set_mono_family,
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubpixelMode {
     /// No subpixel rendering.
@@ -2352,6 +2437,65 @@ mod tests {
         s.validate();
         assert_eq!(s.scaling_percent, 300);
     }
+    /// A family this machine does not have leaves the working font alone.
+    ///
+    /// Only the two non-mutating outcomes are asserted here, deliberately.
+    /// `guitk`'s font selection is per-process global state, so a test that
+    /// successfully installed a family would change the face every *other*
+    /// test in this binary measures text with, and the damage would surface as
+    /// failures in unrelated assertions about layout. What can be checked
+    /// safely is that a failed lookup changes nothing, which is the property
+    /// the callers depend on: they discard the outcome precisely because a
+    /// miss is harmless.
+    #[test]
+    fn a_missing_family_is_reported_and_changes_nothing() {
+        let fonts = FontSettings {
+            ui_font: "NoSuchFamily-8f3a2c".to_string(),
+            mono_font: "NoSuchMonoFamily-8f3a2c".to_string(),
+            ..FontSettings::default()
+        };
+        let before_ui = guitk::text::font_family();
+        let before_mono = guitk::text::mono_family();
+        assert_eq!(
+            fonts.apply(),
+            FontsApplied {
+                ui: FontOutcome::Missing,
+                mono: FontOutcome::Missing
+            }
+        );
+        assert_eq!(
+            guitk::text::font_family(),
+            before_ui,
+            "a failed lookup changed the UI font"
+        );
+        assert_eq!(
+            guitk::text::mono_family(),
+            before_mono,
+            "a failed lookup changed the monospace font"
+        );
+    }
+
+    /// Choosing nothing is not the same as choosing something absent.
+    ///
+    /// The distinction is the reason this returns an enum rather than a bool:
+    /// a settings page that showed "not installed" for a user who has simply
+    /// expressed no preference would be inventing a problem.
+    #[test]
+    fn an_empty_family_is_unset_rather_than_missing() {
+        let fonts = FontSettings {
+            ui_font: String::new(),
+            mono_font: String::new(),
+            ..FontSettings::default()
+        };
+        assert_eq!(
+            fonts.apply(),
+            FontsApplied {
+                ui: FontOutcome::Unset,
+                mono: FontOutcome::Unset
+            }
+        );
+    }
+
     // ---- Configuration file ----
 
     /// Settings that differ from the defaults in every field, so a

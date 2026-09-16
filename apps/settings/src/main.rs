@@ -5566,8 +5566,7 @@ mod tests {
         // Asked of the toolkit, exactly as the page asks it. Hard-coding a
         // family here would make the test a statement about the developer's
         // machine rather than about the page.
-        let in_use =
-            guitk::text::font_family().unwrap_or_else(|| String::from("Built-in face"));
+        let in_use = guitk::text::font_family().unwrap_or_else(|| String::from("Built-in face"));
         assert!(
             text.contains(&in_use),
             "the page does not name the font the toolkit is drawing with ({in_use})"

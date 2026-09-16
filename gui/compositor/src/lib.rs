@@ -5322,7 +5322,11 @@ impl Compositor {
         }
         let mono = self.appearance.fonts.mono_font.clone();
         if !mono.is_empty() {
-            let _ = guitk::text::install_family_as(&mut self.render_engine.fonts, FontFamily::Mono, &mono);
+            let _ = guitk::text::install_family_as(
+                &mut self.render_engine.fonts,
+                FontFamily::Mono,
+                &mono,
+            );
         }
         // Resolved once here rather than per frame: the packing is arithmetic
         // on eleven colours, and they change only when this is called.

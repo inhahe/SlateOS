@@ -119,8 +119,15 @@ REPO = Path(__file__).resolve().parent.parent
 # so it cannot rot into a record of things that used to be true.
 KNOWN_COLLISIONS: dict[str, tuple[str, ...]] = {
     "kill": ("coreutils", "kill"),
-    "logger": ("coreutils", "logger"),
 }
+# `logger` was here and is RESOLVED (2026-09-16). `userspace/coreutils/src/bin/
+# logger.rs` is deleted; `userspace/logger` is the only program of that name.
+# It was not a straight deletion -- the applet had two things the survivor
+# lacked, `invalid option -- 'X'` and `unrecognized option '--x'`, and those
+# moved across first. Removing this line was not optional: the gate reported
+#     STALE BASELINE: bin `logger` no longer collides
+# and exited 1 until it went, which is the "may only shrink" rule working on
+# the real tree rather than only in the self-test.
 
 
 def load_metadata(root: Path) -> dict:

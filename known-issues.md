@@ -154373,11 +154373,15 @@ repaired this morning, and the same one lane B caught in
 `check-collapsed-messages` before that: **a count without the thing that would
 let someone check it is read as coverage.** Three tools, one shape, one day.
 
-## TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-LOGGER (lane B, 2026-09-16) — **open**
+## TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-LOGGER (lane B, 2026-09-16) — FIXED 2026-09-16
 
-**Status: OPEN**, found 2026-09-16. A gate now refuses any *new* instance
-(`scripts/check-bin-collisions.py`); these two are baselined in its
-`KNOWN_COLLISIONS` because resolving one means deleting a program.
+**Status: FIXED**, 2026-09-16. `userspace/coreutils/src/bin/logger.rs` is
+deleted and `userspace/logger` is the only program of that name, so `/bin/
+logger` no longer depends on link order. The five-step plan below was followed
+in order, with the deletion last; `scripts/check-bin-collisions.py` refused to
+pass until the `logger` line left its `KNOWN_COLLISIONS`, so the baseline
+shrank as the rule requires. `kill` remains, and is the harder one --
+TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL.
 
 **In short:** there are two different programs in this tree called `logger`,
 and they both compile to the same file. Every crate links into one shared

@@ -1174,6 +1174,18 @@ impl<T: Transport> EventLoop<T> {
         self.conn.grab_modifier_chord(window, modifiers)
     }
 
+    /// Ask to be told when the session has been idle for `after`.
+    ///
+    /// Like a chord grab, this takes nothing away from anyone: it is a claim
+    /// on a notification, not on input. A delay of nought withdraws.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_modifier_chord`](Self::grab_modifier_chord).
+    pub fn watch_idle(&mut self, window: u64, after: std::time::Duration) -> Result<(), Error<T>> {
+        self.conn.watch_idle(window, after)
+    }
+
     /// Give a claimed modifier chord back.
     ///
     /// # Errors

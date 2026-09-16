@@ -3791,6 +3791,60 @@ fn a_session_with_no_password_does_not_lock() {
     );
 }
 
+/// The idle watch locks the screen, the same way the shortcut does.
+///
+/// The compositor says the session has been quiet for the configured delay;
+/// this asserts the shell turns that into the same launch a lock shortcut
+/// produces. Without it the whole chain -- claim, deadline, notification,
+/// routing -- ends in a handler that does nothing, and every test beneath it
+/// still passes.
+#[test]
+fn an_idle_session_locks_itself() {
+    let (mut session, desktop, _dir) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    assert!(session.login().is_none(), "the desktop should be open");
+    drop(session.take_launches());
+
+    send_session_idle(&desktop, &mut session);
+    assert_eq!(
+        session.take_launches(),
+        [std::path::PathBuf::from(crate::hotkeys::LOCK_COMMAND)],
+        "an idle session did not ask for the lock screen"
+    );
+}
+
+/// 818 holds for the idle watch too, not only for the shortcut.
+///
+/// The rule lives in `queue_launches`, so routing the idle lock through that
+/// function is what makes this true rather than a second copy of the check --
+/// and this is the test that would notice if a later trigger pushed onto
+/// `launches` directly. A new way to lock that skips the rule is precisely how
+/// a passwordless session would come to show a lock screen anybody can clear,
+/// which tells the person standing at the machine it is protected.
+#[test]
+fn an_idle_session_with_no_password_does_not_lock() {
+    let (mut session, desktop, _dir) = session_with_passwordless_login();
+    type_password(&desktop, &mut session, "");
+    assert!(session.login().is_none(), "the desktop should be open");
+    drop(session.take_launches());
+
+    send_session_idle(&desktop, &mut session);
+    assert!(
+        session.take_launches().is_empty(),
+        "818: an idle session with no password must not ask for the lock screen"
+    );
+}
+
+/// Deliver the notification the compositor sends a window that claimed an
+/// idle watch.
+fn send_session_idle(desktop: &Desktop, session: &mut Session) {
+    let window = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(window, guitk::event::Event::SessionIdle)]);
+    session.pump().expect("pump");
+}
+
 /// And the same shortcut on an account that *has* one still locks.
 ///
 /// The negative control, and it is the half that makes the test above mean

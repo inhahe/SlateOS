@@ -96,6 +96,7 @@ pub mod file_drop;
 pub mod focus_assist;
 pub mod hotkeys;
 pub mod icons;
+pub mod idle_lock;
 pub mod input_method;
 pub mod language_settings;
 pub mod launcher;

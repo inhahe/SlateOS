@@ -3805,19 +3805,14 @@ mod tests {
         // At scale 30, where a term-capped sum could not get near. `a(0.6)`
         // is exact to all thirty places.
         assert_eq!(atan("a(0.6)", 30), ".540419500270584155443578364608");
-        // `a(1)` is exact to 24 and then drifts, and the ceiling is NOT this
-        // function: it is
-        // `TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES`, which
-        // caps every square root the reduction takes and predates this change.
-        // Asserted as a prefix rather than dropped, because the whole point of
-        // the fix is the digits that ARE right -- 24 of them where there were
-        // 3 -- and a test that only checked `a(1)` at scale 10 would not
-        // notice a regression back to a term-capped sum until someone asked
-        // for precision. The 24 becomes 30 when that entry closes.
-        assert!(
-            atan("a(1)", 30).starts_with(".785398163397448309615660"),
-            "a(1) at scale 30 was {}",
-            atan("a(1)", 30)
+        // `a(1)` was exact to only 24 places when this was written, capped not
+        // by this function but by the long-division borrow in `BigInt::divmod`
+        // that every square root in the reduction leans on. With that fixed it
+        // is exact to all thirty, and to fifty.
+        assert_eq!(atan("a(1)", 30), ".785398163397448309615660845819");
+        assert_eq!(
+            atan("a(1)", 50),
+            ".78539816339744830961566084581987572104929234984377"
         );
         // The neighbours are untouched: `j` sits in the same harness row and
         // was always right, so a change that broke it would be caught here

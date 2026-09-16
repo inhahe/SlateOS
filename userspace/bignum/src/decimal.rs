@@ -859,6 +859,76 @@ mod tests {
         d(a).sqrt(scale).unwrap().format_base10()
     }
 
+    /// Long division with a divisor of several limbs.
+    ///
+    /// `BigInt::divmod`'s multiply-subtract step used to take the borrow out
+    /// of the next limb instead of folding it into the next product. Both
+    /// quantities can approach the base, so the intermediate could reach about
+    /// `-2*LIMB_BASE`; the code added one base back and cast to `u32`, and
+    /// whenever they were both large that cast wrapped a negative number and
+    /// the limb became garbage.
+    ///
+    /// It needed a multi-limb divisor AND limb values that collide that way,
+    /// so it was invisible for small divisors and erratic for large ones --
+    /// which is why every case here is a specific measured size rather than a
+    /// round number. `(10^90)/d` was wrong for `d` of 27, 36, 40, 42, 45 and
+    /// 54 digits and right for 9, 18, 28 and 37, all checked against GNU bc
+    /// 1.07.1. The pass/fail split is kept intact below: a fix that repaired
+    /// only the sizes that used to fail, while breaking one that used to work,
+    /// would look like progress without it.
+    #[test]
+    fn long_division_survives_a_borrow_bigger_than_one_limb() {
+        // `1` followed by n-1 `4`s, the family the failures were found with.
+        let d = |n: usize| -> String {
+            let mut s = String::from("1");
+            for _ in 1..n {
+                s.push('4');
+            }
+            s
+        };
+        let big = format!("1{}", "0".repeat(90));
+        // Quotient * divisor + remainder == dividend, checked by construction
+        // rather than against a table of expected digits: the identity cannot
+        // be satisfied by a wrong quotient, and it needs no oracle.
+        for n in [9, 18, 27, 28, 36, 37, 40, 42, 45, 54, 63, 71] {
+            let divisor = d(n);
+            let q = div(&big, &divisor, 0);
+            // q * divisor <= big < (q+1) * divisor
+            let prod = d_mul(&q, &divisor);
+            let next = d_mul(&add_one(&q), &divisor);
+            assert!(
+                cmp_str(&prod, &big) <= 0,
+                "{n}-digit divisor: quotient too large ({q})"
+            );
+            assert!(
+                cmp_str(&next, &big) > 0,
+                "{n}-digit divisor: quotient too small ({q})"
+            );
+        }
+    }
+
+    fn d_mul(a: &str, b: &str) -> String {
+        d(a).mul(&d(b), 0).format_base10()
+    }
+
+    fn add_one(a: &str) -> String {
+        d(a).add(&Decimal::from_i64(1)).format_base10()
+    }
+
+    /// Compare two non-negative integer strings by value.
+    fn cmp_str(a: &str, b: &str) -> i32 {
+        let (a, b) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
+        match a.len().cmp(&b.len()) {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Greater => 1,
+            core::cmp::Ordering::Equal => match a.cmp(b) {
+                core::cmp::Ordering::Less => -1,
+                core::cmp::Ordering::Greater => 1,
+                core::cmp::Ordering::Equal => 0,
+            },
+        }
+    }
+
     /// The root must not depend on how many zeros the argument was written
     /// with.
     ///
@@ -878,16 +948,11 @@ mod tests {
             ("1.0049", "1.00490"),
             ("100", "100.0"),
         ] {
-            // Stops at 30 because of a SEPARATE and older defect,
-            // `TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES`: above
-            // that, `isqrt` returns a value slightly too large, and it does so
-            // by a different amount for the two spellings, so this invariant
-            // fails for a reason that has nothing to do with parity. Measured
-            // to predate this fix -- the same wrong digits come out of the
-            // commit before it. Raise this bound when that entry closes; it
-            // is a live assertion about how far the fix is known to hold, not
-            // a limit of the fix itself.
-            for scale in [0, 1, 5, 10, 20, 30] {
+            // Past 30 as well, which it could not be when this was written:
+            // the long-division borrow bug capped every root at about thirty
+            // places, and until that was fixed this invariant failed above it
+            // for a reason that had nothing to do with parity.
+            for scale in [0, 1, 5, 10, 20, 30, 45, 70] {
                 assert_eq!(
                     sq(bare, scale),
                     sq(padded, scale),
@@ -907,12 +972,19 @@ mod tests {
         assert_eq!(sq("2.0", 10), "1.4142135623");
         assert_eq!(sq("2", 30), "1.414213562373095048801688724209");
         assert_eq!(sq("2.0", 30), "1.414213562373095048801688724209");
-        // NOT asserted at 40: `sqrt(2)` there is
-        // `…242097601756851` where the true value is `…2096980785696`, wrong
-        // from the 31st place. That is
-        // `TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES`, measured
-        // to predate this change, and writing the wrong digits down here as
-        // "expected" would turn a known defect into a specification.
+        // Past thirty places, where this used to go wrong: `sqrt(2)` at 40 was
+        // `…242097601756851` against the true `…2096980785696`. The cause was
+        // not `sqrt` at all but the long-division borrow in `BigInt::divmod`,
+        // which `isqrt`'s Newton iteration leans on entirely.
+        assert_eq!(sq("2", 40), "1.4142135623730950488016887242096980785696");
+        assert_eq!(
+            sq("2", 70),
+            "1.4142135623730950488016887242096980785696718753769480731766797379907324"
+        );
+        // An exact root at a scale well past the old ceiling stays exact
+        // rather than drifting into 1.9999…, which is the other direction the
+        // same defect could have shown up in.
+        assert_eq!(sq("4", 50), format!("2.{}", "0".repeat(50)));
         // Exact roots stay exact rather than drifting into 1.99999….
         assert_eq!(sq("4", 20), "2.00000000000000000000");
         assert_eq!(sq("4.0", 20), "2.00000000000000000000");

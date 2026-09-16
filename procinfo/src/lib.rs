@@ -2650,27 +2650,35 @@ impl KeyLayouts {
     /// Parse `/proc/keylayout`.
     #[must_use]
     pub fn parse(content: &[u8]) -> Self {
-        let mut out = Self::default();
-        out.count = key_value(content, "Layouts").as_deref().and_then(parse_u64);
-        out.remaps = key_value(content, "Remaps").as_deref().and_then(parse_u64);
-        out.translates = key_value(content, "Translates")
-            .as_deref()
-            .and_then(parse_u64);
-        out.switches = key_value(content, "Switches")
-            .as_deref()
-            .and_then(parse_u64);
-        if let Some(a) = key_value(content, "Active") {
-            let a = trim(&a);
-            if a != b"(none)" {
-                out.active = a.to_vec();
-            }
+        let layouts = content
+            .split(|&b| b == b'\n')
+            .filter_map(KeyLayout::parse_row)
+            .collect();
+        // `(none)` is the kernel's rendering of "no layout active", flattened
+        // to empty here so a caller compares against a state rather than
+        // against a presentation choice.
+        let active = key_value(content, "Active")
+            .map(|a| {
+                let a = trim(&a);
+                if a == b"(none)" {
+                    Vec::new()
+                } else {
+                    a.to_vec()
+                }
+            })
+            .unwrap_or_default();
+        Self {
+            count: key_value(content, "Layouts").as_deref().and_then(parse_u64),
+            remaps: key_value(content, "Remaps").as_deref().and_then(parse_u64),
+            translates: key_value(content, "Translates")
+                .as_deref()
+                .and_then(parse_u64),
+            switches: key_value(content, "Switches")
+                .as_deref()
+                .and_then(parse_u64),
+            active,
+            layouts,
         }
-        for line in content.split(|&b| b == b'\n') {
-            if let Some(l) = KeyLayout::parse_row(line) {
-                out.layouts.push(l);
-            }
-        }
-        out
     }
 }
 

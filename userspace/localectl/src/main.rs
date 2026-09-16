@@ -351,14 +351,9 @@ fn cmd_status() -> i32 {
         }
     }
 
-    println!(
-        "       VC Keymap: {}",
-        if keymap.keymap.is_empty() {
-            "n/a"
-        } else {
-            &keymap.keymap
-        }
-    );
+    for line in keymap_status_lines(active_kernel_layout().as_deref(), &keymap.keymap) {
+        println!("{line}");
+    }
     if !keymap.keymap_toggle.is_empty() {
         println!("  VC Toggle Keymap: {}", keymap.keymap_toggle);
     }
@@ -405,6 +400,78 @@ fn cmd_set_locale(args: &[String]) -> i32 {
     }
 }
 
+/// The `VC Keymap` lines of `localectl status`.
+///
+/// Pure, and separate from the `/proc` read, because the decision is the part
+/// that was wrong and the part a test can hold. Reading a file is not what
+/// this program got wrong -- it read the WRONG file and called the answer the
+/// system's keymap.
+///
+/// `active` is what the kernel reports, `configured` is `/etc/vconsole.conf`.
+/// The kernel wins in every arm; the configured value is reported as
+/// configuration, never as the keymap in use, and is flagged when the two
+/// disagree -- which is the case an operator most needs to see and the one the
+/// old code was structurally incapable of showing, since it only ever read one
+/// of the two.
+fn keymap_status_lines(active: Option<&[u8]>, configured: &str) -> Vec<String> {
+    let configured = configured.trim();
+    let mut out = Vec::new();
+    match active {
+        Some(active) => {
+            out.push(format!(
+                "     VC Keymap: {} (in use)",
+                quoting::quotef(active)
+            ));
+            // Bytes, not renderings: `quotef` escapes unprintables, so two
+            // different names that escape alike would compare equal.
+            if !configured.is_empty() && configured.as_bytes() != active {
+                out.push(format!(
+                    "                {VCONSOLE_CONF} says {}, which is not in force",
+                    quoting::quotef(configured.as_bytes())
+                ));
+            }
+        }
+        None => {
+            out.push("     VC Keymap: unknown (no active layout in /proc/keylayout)".to_string());
+            if !configured.is_empty() {
+                out.push(format!(
+                    "                {VCONSOLE_CONF} says {}, which nothing reads",
+                    quoting::quotef(configured.as_bytes())
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The layout the kernel is actually translating keycodes with.
+///
+/// `None` when `/proc/keylayout` is absent or names no active layout -- which
+/// is the honest answer on a host build, and must not be confused with "the
+/// layout is whatever `/etc/vconsole.conf` says".
+///
+/// # Why this is not read from `/etc/vconsole.conf`
+///
+/// Because nothing reads that file. One grep over the tree, one hit, and it is
+/// this program. `localectl set-keymap de` wrote `KEYMAP=de` there and
+/// `localectl status` read it back and reported it as the system keymap --
+/// agreeing with itself because it was made of itself, while the keyboard went
+/// on producing the layout the kernel had. The file is a record of intent; the
+/// kernel's `keylayout` is the fact.
+///
+/// Returned as BYTES. A layout name crosses the OS boundary and is compared
+/// against the configured value; decoding it here would make the comparison
+/// one between a name and a rendering of a name.
+fn active_kernel_layout() -> Option<Vec<u8>> {
+    let procfs = procinfo::ProcFs::new();
+    let layouts = procfs.keylayout().ok().flatten()?;
+    if layouts.active.is_empty() {
+        None
+    } else {
+        Some(layouts.active)
+    }
+}
+
 fn cmd_set_keymap(keymap: &str, toggle: Option<&str>) -> i32 {
     let mut map = read_key_value_file(VCONSOLE_CONF);
     map.insert("KEYMAP".to_string(), keymap.to_string());
@@ -414,7 +481,40 @@ fn cmd_set_keymap(keymap: &str, toggle: Option<&str>) -> i32 {
 
     match write_key_value_file(VCONSOLE_CONF, &map) {
         Ok(()) => {
-            println!("localectl: VC keymap set to {}", quoteaf_os(keymap));
+            // "recorded", not "set". The write succeeded and the running
+            // layout did not change: nothing reads this file, and the kernel's
+            // `keylayout::set_active` has no syscall and no writable /proc
+            // node -- it is reachable only from the kernel shell.
+            //
+            // The distinction is what routes the next person correctly. "Not
+            // implemented" would invite them to implement it HERE, in
+            // userspace, where it cannot be done; the gap is a missing kernel
+            // write path, and saying so is what prevents the wasted afternoon.
+            //
+            // WHEN THAT WRITE PATH LANDS (lane A is building a capability-gated
+            // set/get pair against `keylayout` as the single publisher), this
+            // function must CALL it, and this file must stop being written
+            // independently -- generated from `/proc/keylayout` if anything
+            // still needs it. Two places recording the same setting is the
+            // four-hostname defect
+            // (`A-SYSFS-KEEPS-A-THIRD-HOSTNAME-THAT-NOTHING-ELSE-READS`) in a
+            // new subsystem, and the fix for this line must not create it.
+            println!(
+                "localectl: VC keymap recorded as {} in {VCONSOLE_CONF}",
+                quoteaf_os(keymap)
+            );
+            match active_kernel_layout() {
+                Some(active) => println!(
+                    "localectl: the console is still using {}; this build cannot \
+                     change the active layout (the kernel exposes /proc/keylayout \
+                     read-only, with no write path)",
+                    quoting::quotef(&active)
+                ),
+                None => println!(
+                    "localectl: this build cannot change the active layout (the \
+                     kernel exposes /proc/keylayout read-only, with no write path)"
+                ),
+            }
             0
         }
         Err(e) => {
@@ -575,6 +675,86 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+
+    /// The configured file is never reported as the keymap in use.
+    ///
+    /// This is the defect, stated as a property. `localectl status` used to
+    /// print `/etc/vconsole.conf`'s value under the label "VC Keymap", and
+    /// nothing but `localectl` reads that file -- so the status command was
+    /// reporting this program's own writes back to itself and calling them
+    /// the system's state. It agreed with `set-keymap` no matter what the
+    /// keyboard was actually doing, which makes it worse than having no
+    /// status command at all: it could not fail.
+    #[test]
+    fn the_configured_file_is_never_reported_as_the_keymap_in_use() {
+        let lines = keymap_status_lines(Some(b"us"), "de");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].contains("us"),
+            "the kernel's layout is not first: {lines:?}"
+        );
+        assert!(lines[0].contains("in use"), "{lines:?}");
+        assert!(
+            !lines[0].contains("de"),
+            "the configured value was reported as the one in use: {lines:?}"
+        );
+        assert!(
+            lines[1].contains("de") && lines[1].contains("not in force"),
+            "the disagreement is not flagged: {lines:?}"
+        );
+    }
+
+    /// When they agree there is nothing to flag, so only one line.
+    ///
+    /// The control for the test above: a disagreement line printed
+    /// unconditionally would pass every assertion there while crying wolf on
+    /// every correctly-configured machine.
+    #[test]
+    fn agreement_prints_no_disagreement_line() {
+        let lines = keymap_status_lines(Some(b"us"), "us");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("in use"), "{lines:?}");
+    }
+
+    /// No kernel answer is "unknown", never the configured value.
+    ///
+    /// The tempting fallback -- show the file when /proc has nothing -- is the
+    /// old defect with an extra step, so it is asserted against.
+    #[test]
+    fn an_absent_proc_node_does_not_fall_back_to_the_file() {
+        let lines = keymap_status_lines(None, "de");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("unknown"), "{lines:?}");
+        assert!(
+            !lines[0].contains("de"),
+            "fell back to the configured value: {lines:?}"
+        );
+        assert!(lines[1].contains("nothing reads"), "{lines:?}");
+
+        // And with nothing configured there is nothing to say about the file.
+        let bare = keymap_status_lines(None, "   ");
+        assert_eq!(
+            bare.len(),
+            1,
+            "whitespace counted as a configured value: {bare:?}"
+        );
+    }
+
+    /// A layout name is bytes, and is compared as bytes.
+    ///
+    /// A latin-1 byte and its UTF-8 spelling are different names. Comparing
+    /// the RENDERED forms would be the same class of error as comparing paths
+    /// as UTF-8, which this tree forbids outright.
+    #[test]
+    fn names_are_compared_as_bytes_not_as_renderings() {
+        let lines = keymap_status_lines(Some(b"caf\xe9"), "caf\u{e9}");
+        assert_eq!(
+            lines.len(),
+            2,
+            "a latin-1 byte and its UTF-8 spelling were treated as one name: {lines:?}"
+        );
+    }
+
     use super::*;
 
     #[test]

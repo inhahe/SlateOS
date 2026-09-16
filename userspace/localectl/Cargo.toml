@@ -7,3 +7,8 @@ description = "SlateOS localectl utility"
 # localectl names locales, keymaps and X11 layouts, strings read out of the
 # locale and keymap directories on disk.
 quoting = { path = "../quoting" }
+# For /proc/keylayout: the layout the KERNEL is actually using, which is a
+# different fact from whatever /etc/vconsole.conf records. Nothing but this
+# program reads that file, so reporting it as the system keymap was reporting
+# our own writes back to ourselves.
+procinfo = { path = "../../procinfo" }

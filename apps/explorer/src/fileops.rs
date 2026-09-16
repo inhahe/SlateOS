@@ -2,7 +2,8 @@
 //!
 //! Provides copy, move, delete, recycle, and undo operations with:
 //! - Progress tracking (bytes, files, ETA)
-//! - Crash-safe journaling for resume on interruption
+//! - Journalling that lets an interrupted operation continue without redoing
+//!   work (see the caveat below: this is not crash recovery)
 //! - Conflict resolution policies
 //! - Per-file error handling (skip, retry, stop)
 //! - Undo via an operation journal
@@ -12,9 +13,29 @@
 //! scanned to produce an [`OperationPlan`], which records total bytes and file
 //! count. The plan is then executed step-by-step, updating an
 //! [`OperationProgress`] after each file and writing completed actions to an
-//! [`OperationJournal`] so that a crashed/interrupted operation can be resumed
-//! by re-reading the journal and skipping already-finished items.
+//! [`OperationJournal`] so that an interrupted operation can continue by
+//! re-reading the journal and skipping already-finished items.
+//!
+//! # This is not crash recovery, and said plainly because it reads like it
+//!
+//! The journal records a plan **id** and which action indices finished. It
+//! does not record the plan: not the sources, not the destinations, not the
+//! operation. So it can tell a *running* executor which of its own steps are
+//! already done, and after a crash it can tell a new process that "actions
+//! 0..7 of plan 4391 completed" -- about a plan that no longer exists
+//! anywhere. Surviving a restart needs the plan persisted too, which is a
+//! change to this file's format rather than a reader to add. Recorded in
+//! `roadmap-detailed.md` §4.1 under durable bulk operations.
 
+// What this suppression is hiding, measured 2026-09-16 by removing it:
+// ten findings, including that three `ConflictPolicy` variants (`Overwrite`,
+// `OverwriteIfNewer`, `Ask`), two error policies (`StopOnFirst`, `RetryN`) and
+// `ExecutorConfig` are never constructed anywhere -- while the list at the top
+// of this file advertises "conflict resolution policies" and "per-file error
+// handling (skip, retry, stop)". The allow stays for now because removing it
+// means deciding, variant by variant, between wiring and deleting; it is no
+// longer *silent*, which was the part that let the gap live here unremarked.
+// See known-issues TD-C-THE-FILE-OPERATIONS-MODULE-ADVERTISES-POLICIES-NOTHING-SELECTS.
 #![allow(dead_code)]
 
 use std::collections::HashMap;

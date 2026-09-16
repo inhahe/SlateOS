@@ -853,9 +853,13 @@ impl ExplorerState {
     /// association in another window while this one is showing a folder, and a
     /// cache would open the previous choice with no way to notice.
     fn opener_for(path: &Path) -> Option<String> {
-        let ext = path.extension().and_then(|e| e.to_str())?.to_lowercase();
-        let doc = settingsfile::load(ASSOC_CONFIG_NAME);
-        doc.get_str(&["associations", &ext])
+        // `to_str` rather than bytes: the associations are keys in a YAML
+        // document, so they are text by construction and an extension that is
+        // not UTF-8 could never match one. Answering `None` here is a refusal,
+        // not a lossy conversion.
+        let ext = path.extension().and_then(|e| e.to_str())?;
+        let doc = settingsfile::load(associations::CONFIG_NAME);
+        associations::program_for(&doc, ext)
     }
 
     // ======================================================================
@@ -3603,13 +3607,6 @@ const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16)
 
 // Context menu row ids. Numbered rather than positional, so inserting a row
 // cannot silently reassign what the ones below it do.
-/// The File Associations program's configuration, which this one only reads.
-///
-/// Named here rather than imported because `apps/fileassoc` is a *binary*:
-/// there is nothing to link against, which is exactly why the file it writes
-/// records a runnable path instead of an id.
-const ASSOC_CONFIG_NAME: &str = "fileassoc";
-
 const MENU_OPEN: u64 = 1;
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
@@ -5241,8 +5238,16 @@ mod tests {
     fn opening_a_file_starts_what_the_user_chose_for_it() {
         settingsfile::testing::with_scratch_config("explorer-open-assoc", |_root| {
             let mut doc = yamldoc::Document::new();
-            doc.set_str(&["associations", "txt"], "/nowhere/chosen-editor");
-            settingsfile::store("fileassoc", &doc).expect("scratch config is writable");
+            // Through the shared constants, because what this test is about is
+            // that the file manager obeys the association -- not what the file
+            // is called. Spelled out here, a rename would leave this writing one
+            // file while the code read another.
+            doc.set_str(
+                &[associations::ASSOCIATIONS, "txt"],
+                "/nowhere/chosen-editor",
+            );
+            settingsfile::store(associations::CONFIG_NAME, &doc)
+                .expect("scratch config is writable");
 
             let scratch = temp_dir("open_assoc");
             let root = scratch.dir().to_path_buf();

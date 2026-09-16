@@ -78,13 +78,11 @@
 
 pub mod about;
 pub mod animations;
-pub mod backup_settings;
 pub mod bluetooth;
 pub mod calendar;
 pub mod clipboard_viewer;
 pub mod context_ext;
 pub mod datetime_settings;
-pub mod default_apps;
 pub mod device_settings;
 /// The sweep that proves a module draws nothing that is immediately erased.
 ///

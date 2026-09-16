@@ -154257,7 +154257,7 @@ the day that lands, `/proc/battery` starts carrying real readings and a
 works.
 
 
-## TD-C-A-GAUGE-NOBODY-MEASURED -- PARTLY FIXED 2026-09-15
+## TD-C-A-GAUGE-NOBODY-MEASURED -- FIXED 2026-09-16
 
 **In short:** the desktop's system-monitor widget drew a CPU bar at 45%, a
 memory bar at 62% and a disk bar at 38%. Those were three constants in the
@@ -154315,7 +154315,21 @@ quieter version of the same defect. The trough is still drawn when there is no
 reading, because an empty gauge is the honest shape of a gauge with no needle,
 and a line says which it is.
 
-**Still open:** nothing supplies the three. `gui/desktop` has no `procinfo`
+**Closed 2026-09-16: two of the three are supplied, and the third says it is
+not.** Re-read rather than assumed. `ShellState::sample_system` builds a
+`procinfo::ProcFs`, reads `memory()` and `cpu_stats()`, and fills
+`memory_fraction` and `cpu_fraction` from them; `prev_cpu` holds the previous
+sample because a processor fraction is a ratio over an interval, so the first
+call after start-up is `None` and the meter reads "CPU (not measured)" for that
+one second -- which the code documents as the honest answer rather than a gap.
+`disk_fraction` stays `None` with the reason written at the assignment: nothing
+in the tree reports how much of a disk is *in use*, only its capacity, so the
+meter says so instead of showing a plausible fraction of a number it does have.
+
+The paragraph below is what was true on 2026-09-15, kept because it records why
+the seam was typed as three `Option`s before anything could fill them:
+
+**Was open:** nothing supplies the three. `gui/desktop` has no `procinfo`
 dependency, so the shell cannot read `/proc/stat` or `/proc/meminfo` today.
 Wiring it is a contained job -- `apps/sysinfo`, `apps/procexplorer` and
 `apps/sysmonitor` all read through `procinfo` already -- and the seam is now
@@ -154323,7 +154337,31 @@ Wiring it is a contained job -- `apps/sysinfo`, `apps/procexplorer` and
 the widget both telling the truth until they are.
 
 
-## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- PARTLY FIXED 2026-09-15
+## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- LANE C DONE 2026-09-16
+
+**Re-read 2026-09-16: all three rows this entry left "real, open" are closed,
+two of them by work done after it was written.** Checked one at a time rather
+than trusted:
+
+| row | state on re-reading |
+|---|---|
+| `videoplayer` screenshot settings | **fixed.** The options are drawn with the fact that none can be taken, and `the_screenshot_options_say_no_screenshot_can_be_taken` pins it. |
+| `fontmanager` default size | **fixed.** `SETTINGS_NOT_CARRIED` is drawn directly under the value, deliberately there rather than at the foot of the panel, because "the numbers above are what read as confirmation". |
+| `settings/remote.rs` | **superseded.** `remote::` is named nowhere in `apps/settings/src/main.rs`, so the page cannot be opened and its values confirm themselves to nobody. Whether it is wired up or deleted is open-questions C-Q17, which is the operator's. A disclaimer on an unreachable page would be a notice nobody can read. |
+
+**Two rows of the `gui/` table above are now moot**: `backup_settings` was
+deleted on 2026-09-16 (see
+`TD-C-THREE-MORE-SHELL-SETTINGS-MODULES-ARE-REACHED-BY-NOTHING`), and
+`power_settings` survives only because it is kept deliberately
+(`TD-C-POWER-SETTINGS-IS-KEPT-ON-PURPOSE-DO-NOT-SWEEP-IT`). The disclaimers
+they gained were not wasted -- they were true while those pages existed -- but
+do not go looking for them.
+
+**Why this note exists at all.** The entry says its table is "what makes the
+second reading a lookup instead of an investigation", and on the second reading
+it was not: three rows said open and two of them had been fixed the same day
+the entry was written. A tracking file that lags is worse than one that is
+missing, because it is trusted. Marking work done is part of doing it.
 
 **In short:** across this tree there are 78 settings that a program reads for
 exactly one purpose: to show the value back to the person who set it. Nothing
@@ -154809,6 +154847,20 @@ usefully, a gate that refuses a test binary containing both
 
 ## TD-C-THREE-MORE-SHELL-SETTINGS-MODULES-ARE-REACHED-BY-NOTHING
 
+**Status 2026-09-16: all three triaged. Two deleted, one deliberately kept.**
+`default_apps.rs` went after its model was ported to `gui/associations`;
+`backup_settings.rs` went because `apps/backup` already implements a superset
+of it. `power_settings.rs` is **kept**, and the reason is below -- it is the
+one of the three that holds design recorded nowhere else, which is the same
+ground on which `remote.rs` was kept in the sibling entry.
+
+**Read that as the rule, not the score.** Three modules with identical
+symptoms -- `pub`, compiling, tested, reached by nothing -- split two-to-one on
+the only question that matters, which is whether a working implementation of
+the same idea exists somewhere else. Two had one; the third does not. A sweep
+that deleted all three for looking alike would have been right twice and
+destructive once.
+
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `gui/desktop/src/{power_settings,backup_settings,default_apps}.rs`.
 
@@ -154837,13 +154889,70 @@ design that is recorded nowhere else, so deleting it would lose knowledge
 rather than remove duplication". The same question has to be asked of each of
 these three, and at least one clearly holds something:
 
-* `default_apps.rs` models **categories** -- which application opens web
-  links, mail, music, video, images, documents. The Default Apps page built in
-  `apps/settings` on this date lists *extension to program* associations read
-  from the `fileassoc` group, which is a different fact. Porting the category
-  model is the precondition for deleting this, exactly as `associations.rs`
-  was deleted only after its fallback-handler logic moved into
-  `apps/fileassoc` -- where it fixed a real bug on the way.
+* `default_apps.rs` -- **DONE 2026-09-16, precondition met first.** The rule
+  above was that porting the category model came before deleting it. It did.
+  The model now lives in `gui/associations` as design-decisions 857, and it is
+  not a port so much as a grounding: the shell's version carried a
+  hand-written list of "the music extensions", and `guitk::filetypes` already
+  held `FILE_TYPE_TABLE`, 133 entries of extension to `FileCategory`, which
+  `apps/explorer` was already importing. So a category is now a *view* on that
+  table, and the toolkit gained `extensions_in()` -- the reverse of the
+  `category_from_extension()` it already had -- with a round-trip test that the
+  two directions agree.
+
+  Three of the six categories did not survive the move, and their absence is
+  the useful part. "Web browser" and "email" have no consumer anywhere in the
+  tree -- there is no browser in `apps/` at all, and the only mentions of
+  `mailto` were this dead module and `apps/qrcode`, which encodes the string
+  into a QR image. "Documents" was dropped because `txt` and `pdf` are both
+  filed under `Document` and do not share a program, so the row could only
+  impose a wrong association; that is now a test against the table rather than
+  a claim in prose.
+
+  Porting also found something the shell module could never have revealed:
+  there is **no write side**, and there cannot be one outside
+  `apps/fileassoc`. Its `write_into` prunes every entry its registry no longer
+  holds, so a second writer's associations are deleted at the next save with no
+  error anywhere. A `set_category` was written, compiled, tested against a
+  document, and deleted for that reason. What moved is the read side, which now
+  has a real consumer: the Settings page reports each kind as Agreed, Mixed or
+  Not set.
+
+  Removed: 2,325 lines, 35 public items, 35 tests -- a suite proving the
+  behaviour of a panel nobody could open. The shell's test count went 2,907 ->
+  2,872, exactly the 35, which is the check that nothing else went with it.
+* `backup_settings.rs` -- **DONE 2026-09-16.** 2,654 lines, 48 public items,
+  36 tests, persisting nothing: no `settingsfile` call, no write, no reference
+  but the `pub mod` line. It modelled backup types, frequencies, day-of-week,
+  targets, sources, exclude rules, retention policies, status and history.
+
+  `apps/backup` already implements all of it *and runs*: retention, exclusions,
+  incremental backups and pruning are live there. The one thing that looked
+  like unique knowledge was the shell's `RetentionPolicy::Tiered` -- keep daily
+  for 7 days, weekly for 4 weeks, monthly for 12 months -- and on reading the
+  app it turned out to be the weaker model: `apps/backup` takes `keep_last`,
+  `keep_daily`, `keep_weekly` and `keep_monthly` as *independent numbers*, so
+  the shell's variant is one frozen preset over what the app already computes.
+
+  **The general trap, worth keeping:** on the first survey the dead module read
+  as the *richer* of the two, because it had more named variants. It could
+  afford them. A model that never runs is not constrained by having to work, so
+  vocabulary accumulates in it and reads as sophistication. The live model was
+  more expressive with fewer names, because its names were parameters. Do not
+  size these two by counting their types.
+
+  Preserved rather than kept: the preset numbers 7/4/12 are a defensible
+  default someone chose, recorded here, which is one line rather than 2,654.
+
+  The deletion also broke a reference the compiler could not see:
+  `input_method.rs` cited this module's `InProgress => blue` as the precedent
+  for a status colour collapsing onto the accent. The trap was worth keeping
+  and the pointer was not, so the comment now states it without the citation.
+  This is the blind spot `scripts/check-unused-exports.py` documents -- prose
+  counts as a mention -- seen from the other side.
+
+  Test count: 2,872 -> 2,836, exactly the 36 removed.
+
 * `power_settings.rs` models screen-off and sleep timeouts in minutes with
   "0 = never". Nothing persists them and nothing honours them, so they are an
   echoed setting in waiting.
@@ -154878,3 +154987,103 @@ not merely dead code: it is a design that looks decided. Somebody adding a
 screen-lock delay would reasonably put it next to the sleep timeout in
 `power_settings.rs` and inherit a setting that changes nothing -- which is the
 defect this lane spent 2026-09-16 removing from eight other pages.
+
+## BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** `apps/backup/src/main.rs` — `cmd_schedule` (~2652), `schedules_path`
+(~1805).
+
+**In short:** the backup program offers to run a backup every day, week or
+month. Nothing in the whole operating system ever runs one. The command writes
+the schedule to a file and reports success, and that file is read by no
+program that exists — there is no timer, no service and no check at start-up
+that anything is due. A user who sets a daily backup and walks away has no
+backups at all, and nothing ever tells them so.
+
+**The evidence.** `schedules.json` is named in exactly four places in the tree,
+all inside `apps/backup`: the function that builds its path, the write in
+`cmd_schedule`, a comment about how it is written, and two assertions in that
+command's own test. There is no reader anywhere — not in `apps/backup`, not in
+`services/`, not in the shell.
+
+```
+backup schedule --source /home/me --dest /mnt/disk --interval daily
+  -> writes schedules.json, prints success
+  -> no program reads schedules.json, ever
+```
+
+**Why this is a bug and not a missing feature.** The command succeeds. A
+missing feature is one the user cannot ask for; this is one they *can* ask for,
+are told they have got, and have not got. It is the shape design-decisions 856
+is about, in the most costly place it can appear: the claim is "your data is
+being copied", the reality is that it is not, and the discovery comes when
+something is already lost.
+
+The operator named this exact failure when answering Q46: *"'periodic' needs a
+trigger nobody has defined; in practice it tends to mean 'never'"*, with the
+instruction *"Make a solution that will not result in 'never' in practice."*
+That answer was about benchmark profiles, so the remark was incidental there —
+but it describes this precisely.
+
+**What the fix needs, and why it is not a one-liner.** Something has to run
+when the machine is idle or at start-up, notice a schedule is due, and run the
+backup. There is no cron, no timer service and no user-level scheduler in the
+tree. Three candidate homes, none obviously right:
+
+| Home | Fits because | Does not fit because |
+|---|---|---|
+| a service under `services/` | a backup should run whether or not anyone is logged in | `services/**` is lane B's tree |
+| the shell (`gui/desktop`) | it already starts at login and already has an idle watch, which is a timer that works | no user logged in means no backup, and the shell is the wrong place to own data safety |
+| `apps/backup` itself, re-run on a trigger | keeps the logic where the knowledge is | still needs something to do the triggering |
+
+**The honest interim, which is in lane and worth doing regardless of which home
+wins:** `cmd_schedule` should say what it does. It records a schedule; it does
+not cause a backup. `apps/netmanager` already sets the precedent of refusing
+out loud rather than appearing to work, and `posix`'s `require_shell` is the
+in-tree model for a stub that documents its own emptiness rather than
+pretending. Silence here is the part that turns a missing feature into a bug.
+
+## TD-C-POWER-SETTINGS-IS-KEPT-ON-PURPOSE-DO-NOT-SWEEP-IT
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** `gui/desktop/src/power_settings.rs` (1,855 lines).
+
+**In short:** this file looks exactly like two others that were deleted today —
+it is a settings screen nobody can open, it saves nothing, and no code refers
+to it. It is being kept anyway. The two that went were duplicates of programs
+that already work; this one is the only place several ideas are written down at
+all, and the work that would make it real belongs to another team.
+
+**What is genuinely only here.** Measured against the live `power.rs`:
+
+| Concept | `power.rs` (live) | `power_settings.rs` |
+|---|---|---|
+| `PowerAction` | 61 mentions — live | 13 — duplicate |
+| `BatteryInfo` | live, and honest | second copy |
+| `PowerPlan` | absent | 19 — **only here** |
+| `BatteryHealth` | absent | 29 — **only here** |
+| `ChargeState` | absent | 23 — **only here** |
+| `ChargeHistorySample` | absent | 4 — **only here** |
+
+**Why it cannot simply be finished either.** Every unique thing in it needs
+hardware this lane does not own. A power plan needs CPU frequency control;
+battery health, charge state and charge history need a battery driver that
+calls `register_source`. Both are lane A's. So it is neither deletable (the
+knowledge has no other home) nor completable (the dependency is not ours) —
+which is exactly the state the sibling entry kept `remote.rs` in.
+
+**The live module is not the problem, and was checked rather than assumed.**
+`power.rs` defaults to `present: false, state: NoBattery` and nothing populates
+it from hardware, which looks like the fabrication design-decisions 856 is
+about until you read the comment at `lib.rs:6874`: that is *the true answer*,
+because `/proc/battery` reports zero sources until an ACPI driver registers
+one, and the line that changes when it does is named. The disk meter beside it
+does the same thing — `disk_fraction: None` with "the meter says so rather than
+showing a plausible fraction of a number we do have". Absent data reported as
+absent is the opposite of the defect.
+
+**What would change this entry.** Lane A landing either CPU frequency control
+or a battery source. At that point the *screens* go to `apps/settings` under
+815 and this file goes with them — but until then, deleting it loses the only
+written description of what those screens should do.

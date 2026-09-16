@@ -54,10 +54,14 @@ use keylayout::Layout;
 // disguise.** Blue is what `Palette::accent` resolves to on a fresh install, so
 // the title read as a properly accented heading for as long as nobody visited
 // Appearance — and became a stray blue that matched nothing else on screen the
-// moment somebody picked Green. This is `backup_settings`'s `InProgress => blue`
-// trap arriving from the other direction: there, a semantic hue would have
-// collapsed onto the accent; here, an accent-shaped decision was made by
-// writing the accent's *current value*. The title is now `p.text` bold, which is
+// moment somebody picked Green. It is the status-colour trap arriving from the
+// other direction: a status written as literal `blue` collapses into the accent
+// for every user who never changed theirs, so the two become indistinguishable
+// exactly when the reader most needs them apart; here, an accent-shaped
+// decision was made by writing the accent's *current value* instead. (This
+// cited `backup_settings`'s `InProgress => blue` until that module was deleted
+// on 2026-09-16. The trap is the point, not the site -- and a comment naming a
+// file is a reference the compiler cannot check, which is how it outlived it.) The title is now `p.text` bold, which is
 // what every other panel title in the shell is.
 //
 // The remaining six are neutral by construction and both clear the contrast

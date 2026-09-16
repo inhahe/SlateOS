@@ -2681,9 +2681,27 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
         }
     }
 
+    // Refused rather than converted. `to_string_lossy` here would replace any
+    // byte that is not UTF-8 with U+FFFD and store *that* as the destination,
+    // so the schedule would name a directory the user never gave and the
+    // failure would surface much later as a backup written somewhere else.
+    // Our paths allow every byte but `/` and NUL; the schedule file is JSON,
+    // which is text, and inventing an escape for this one field would be a
+    // format only this program could read.
+    let Some(dest_text) = dest.to_str() else {
+        eprintln!(
+            "error: the destination path is not valid UTF-8, and the schedule file is JSON.
+             Give a destination whose path is UTF-8, or back up now with `backup create`."
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination path is not valid UTF-8",
+        ));
+    };
+
     let entry = ScheduleEntry {
         source: source.to_string(),
-        dest: dest.to_string_lossy().to_string(),
+        dest: dest_text.to_string(),
         interval: interval.to_string(),
     };
 
@@ -2703,6 +2721,21 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
         source,
         dest.display(),
         interval
+    );
+    // Said plainly, because the command otherwise reads as a promise. Nothing
+    // in this system reads schedules.json: there is no timer, no service and
+    // no check at start-up, so a user who sets this and walks away has no
+    // backups and no way to find that out until they need one. Announcing the
+    // gap is what `apps/netmanager` does rather than appearing to work, and
+    // what `posix`'s `require_shell` does rather than faking a check.
+    // See known-issues.md
+    // BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS.
+    println!(
+        "
+Note: this records the schedule; it does not yet cause a backup.
+         Nothing on this system starts a backup at a scheduled time, so no
+         backup will happen until a scheduler exists. Use `backup create` to
+         back up now."
     );
     Ok(())
 }
@@ -5041,5 +5074,43 @@ mod tests {
         };
         assert_eq!(opts.source, PathBuf::from("--dest"));
         assert_eq!(opts.dest, PathBuf::from("/backups"));
+    }
+
+    /// A destination the schedule file cannot hold is refused, not mangled.
+    ///
+    /// Windows-only because that is where a non-UTF-8 path is constructible in
+    /// a test: an unpaired surrogate is a legal path component there and has
+    /// no UTF-8 encoding. The defect it guards is not platform-specific --
+    /// `to_string_lossy` would substitute U+FFFD and store a directory the
+    /// user never named, and the backup would land somewhere else with no
+    /// error at the time it was set up.
+    #[cfg(windows)]
+    #[test]
+    fn a_destination_that_is_not_utf8_is_refused_rather_than_mangled() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        // Built inside a scratch directory rather than as a bare relative
+        // path. The refusal happens before anything is created, so nothing
+        // should be written either way -- but when this test was first run
+        // against a deliberately broken version, `create_dir_all` reached the
+        // path and left a directory named with an unpaired surrogate sitting
+        // in the source tree, which `cargo fmt` then tripped over. A test
+        // whose failure mode litters the repository is one nobody will want to
+        // run twice.
+        let scratch = temp_dir("schedule_nonutf8");
+        let dest = scratch.dir().join(OsString::from_wide(&[0xD800_u16]));
+        assert!(
+            dest.to_str().is_none(),
+            "the fixture is not the case under test"
+        );
+
+        let err = cmd_schedule(&dest, "/some/source", "daily")
+            .expect_err("a destination that cannot be written down must be refused");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidInput,
+            "refused for the wrong reason: {err}"
+        );
     }
 }

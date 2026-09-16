@@ -1089,6 +1089,40 @@ interface. This is the pattern `known-issues.md` records as lesson 47, and the
 sharp version of it: the process explorer's *own source* quotes that lesson
 while this module sat beside it.
 
+**A worked example of option B's cost, measured 2026-09-16, added so both
+options have evidence.** Three shell panels of this same shape were triaged
+that day: settings screens nobody could open, saving nothing, reached by
+nothing. Two were deleted (4,979 lines, 83 tests) and one was kept, and the
+question that decided each was the same one: **does a working implementation of
+this idea already exist somewhere else?**
+
+- Default applications: yes — `apps/fileassoc` writes the associations and
+  `apps/explorer` obeys them. Deleted, after moving the one idea the panel had
+  that the app lacked.
+- Backup settings: yes — `apps/backup` already does retention, exclusions,
+  incremental backups and pruning, *and runs them*. Deleted outright.
+- Power settings: no. Power plans, battery health and charge history exist
+  nowhere else, and the hardware they need is another team's. Kept.
+
+**Applied to two of the five, 2026-09-16.** The discriminator splits them, so
+this may be five small questions rather than one large one:
+
+| feature | does a working implementation exist elsewhere? | suggests |
+|---|---|---|
+| image viewer — plays video (77 KB) | **Yes.** `apps/videoplayer` is a separate, launchable application: 7,201 lines, 154 tests, no stubs. | delete |
+| process explorer — affinity, deadlocks, memory map (83 KB) | **No.** `features.rs` is 2,624 unreachable lines, and *affinity* and *deadlock detection* appear nowhere else in the tree. `sysmonitor` has some priority handling and none of the rest. | wire up |
+
+The other three (installer/GRUB, hardware queries, remote settings) are **not
+checked** — a first pass was inconclusive and is not reported rather than
+guessed at. Answering for the two above does not depend on them.
+
+Two things in that are worth carrying to the five above. Deleting is far
+cheaper than wiring *when the answer is yes* — most of a day's reading, no new
+interface, no new tests. And the dead copy twice looked *richer* than the live
+one, because a model that never runs is not constrained by having to work, so
+it accumulates vocabulary that reads as sophistication. Sizing these five by
+how finished they look would overvalue them.
+
 **A worked example of option A's cost, measured 2026-09-14.** A sixth feature
 of this shape was wired that day, and it is offered here as evidence rather
 than as a decision: the desktop's wallpaper. `WallpaperManager` could already
@@ -1439,6 +1473,93 @@ everywhere else**, and an exception needs to be worth the inconsistency.
 **If it is never answered:** nothing degrades. The event is still in the day's
 detail card, whose colour bar sits on `mantle` and is unaffected, so the
 information is reachable — just not from the grid.
+
+## C-Q21 — [C] Setting a backup to run every day does nothing. What should run it? — Status: OPEN (raised 2026-09-16)
+
+**In short:** the backup program lets you say "back up every day". Nothing on
+the machine ever does it. The setting is written to a file that no program
+reads, so a person who sets it and walks away has no backups at all and is
+never told. Fixing it means deciding *what* wakes up and runs the backup, and
+that choice has a visible consequence for whether backups happen when nobody
+is signed in.
+
+**Why you are being asked rather than told.** The three candidates differ in
+something only you can settle — whether backing up someone's data is allowed to
+happen while they are not signed in — and one of them is not this team's code
+to write.
+
+| Option | What changes | Runs with nobody signed in? |
+|---|---|---|
+| **A. A background service** (a program the system starts at boot, before anyone signs in) | Backups happen on time whether or not anyone is using the machine | Yes |
+| **B. The desktop** (the program that draws your screen after you sign in) | Backups happen shortly after you sign in, and while you are signed in | No |
+| **C. Ask on sign-in** — the desktop notices one is due and offers to run it | You see "a backup is due — run it now?" and choose | No |
+
+*What changes, in one line each:*
+- **A** — the machine backs up at 3am with the screen off, as most people expect "daily backup" to mean.
+- **B** — the machine backs up the first time you sign in that day, and not at all on a day you do not sign in.
+- **C** — you are asked rather than surprised, at the cost of a prompt you can dismiss forever, which makes "daily" mean "when you agree".
+
+**My recommendation: A**, with **C**'s prompt as a fallback for a backup missed
+while the machine was off. "Daily" that silently means "on days you signed in"
+is the same class of quiet untruth this whole thing is about — it would be a
+smaller lie than today's, not a fix for it.
+
+**The catch that makes this a question and not a task.** A background service
+lives in `services/`, which is lane B's tree, not lane C's. So option A is a
+request to another team; B and C are work this lane can do alone. If you pick
+A, the schedule feature stays broken until lane B picks it up. That is a real
+cost and it is why B is tempting — it is worse and available.
+
+**If this is never answered:** the current behaviour stands, which is that the
+command claims a schedule and nothing runs. As of today it at least *says* so
+— it now prints that it records the schedule and does not cause a backup — so
+nobody is misled, but nobody gets a scheduled backup either. Nothing else is
+blocked by this, and it does not get worse with time. Tracked as
+`known-issues.md` BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS.
+
+## C-Q22 — [C] An account set to "log in automatically" still asks for a password. How does someone get past it to a different account? — Status: OPEN (raised 2026-09-16)
+
+**In short:** you can mark an account to sign in on its own, without typing a
+password. The machine records that and then ignores it — the password box
+appears anyway. Making it work is easy; what is not decided is how anyone
+reaches a *different* account afterwards, because once a machine signs itself
+in, the screen that lets you pick a user never appears. Pick wrong and a shared
+family computer becomes a one-person computer.
+
+**Why this needs you.** Every option below is a few lines of code. The
+difference between them is what a second person has to know, or discover, to
+use the machine at all.
+
+| Option | What changes |
+|---|---|
+| **A. Hold a key while it starts** (the way most systems do it) | The machine signs itself in; holding Shift during start-up shows the chooser instead. A second person cannot find this without being told. |
+| **B. A "Sign in as someone else" button on the way past** | The chooser appears for a few seconds with the account pre-selected and a visible button; if nobody touches it, it proceeds. Everyone can see the escape, at the cost of a pause on every start. |
+| **C. Only when there is one account** | Automatic sign-in works on a single-user machine and silently turns itself off the moment a second account exists. Nobody is ever locked out, and the setting stops working for a reason the user did not do deliberately. |
+
+*What changes, in one line each:*
+- **A** — fastest start, and a second user sees no way in.
+- **B** — every start pauses about three seconds and shows a button.
+- **C** — the feature quietly stops applying when a second account is added.
+
+**My recommendation: B.** A is the familiar answer and is also the reason
+people ask how to get into a computer they can see the desktop of; the escape
+being invisible is the whole problem, not a detail of it. B costs a short pause
+and makes the way out obvious to somebody who has never used the machine. C is
+safe but surprising — a setting that turns itself off is hard to tell from one
+that is broken, which is the shape of defect this project keeps finding.
+
+**A second, smaller answer this needs.** When the machine is being *recovered*
+— started for repair rather than for use — should automatic sign-in be skipped?
+Recommend **yes** for every option: recovery is when you most need to choose a
+different account, and the password is the only thing standing between a
+stolen laptop and its contents.
+
+**If this is never answered:** nothing breaks and nothing gets worse. An
+account marked for automatic sign-in keeps asking for a password, which is the
+safe direction to fail. As of today the module no longer *claims* the feature —
+its own documentation said it had autologin while doing nothing — so the only
+cost is a setting that does not do what its name says. `design-decisions.md`
+824 records why it was left undecided.
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS

@@ -71,6 +71,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "associations"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+ "settingsfile",
+ "yamldoc",
+]
+
+[[package]]
 name = "asteroids"
 version = "0.1.0"
 dependencies = [
@@ -785,6 +794,7 @@ name = "explorer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "byteread",
  "guitk",
  "imagecodec",
@@ -808,6 +818,7 @@ name = "fileassoc"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "guitk",
  "oswindow",
  "safeio",
@@ -2554,6 +2565,7 @@ name = "settings"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "compositor",
  "guitk",
  "inputsettings",

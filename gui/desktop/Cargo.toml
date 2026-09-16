@@ -32,6 +32,11 @@ path = "src/bin/demo.rs"
 
 [dependencies]
 guitk = { path = "../toolkit" }
+# `/proc` is read through the one parser, not a second copy. The same
+# crate serves apps/sysinfo, apps/procexplorer and apps/sysmonitor; two
+# /proc parsers in one repository is the arrangement where a kernel
+# change fixes one program and not the other.
+procinfo = { path = "../../procinfo" }
 
 # The compositor protocol's vocabulary — `WindowInfo`, the shape of the window
 # list a taskbar is built from, and `ShellControlAction`, the shape of what a

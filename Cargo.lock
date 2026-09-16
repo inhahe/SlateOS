@@ -568,6 +568,7 @@ dependencies = [
  "notifsettings",
  "oswindow",
  "posix",
+ "procinfo",
  "scratchdir",
  "settingsfile",
  "tzrules",
@@ -1442,6 +1443,7 @@ dependencies = [
 name = "localectl"
 version = "0.1.0"
 dependencies = [
+ "libcall",
  "procinfo",
  "quoting",
 ]

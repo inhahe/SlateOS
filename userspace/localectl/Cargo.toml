@@ -12,3 +12,6 @@ quoting = { path = "../quoting" }
 # program reads that file, so reporting it as the system keymap was reporting
 # our own writes back to ourselves.
 procinfo = { path = "../../procinfo" }
+# For SYS_KEYLAYOUT_SET (1074). Apps reach libc through `libcall`, never the
+# `posix` rlib, which stubs every syscall to -ENOSYS when linked that way.
+libcall = { path = "../../libcall" }

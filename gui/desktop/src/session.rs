@@ -2067,6 +2067,13 @@ impl<T: Transport> ShellSession<T> {
         // Widgets are dated like auto-hide rather than stepped: a clock is due
         // at a wall-clock moment, not after so many frames.
         if self.shell.widgets.tick(self.clock_ms) {
+            // Sampled here rather than in `live_readings`, which runs once per
+            // frame: the monitor widget is due once per second, and sixty
+            // reads of `/proc/stat` to answer a question asked once would be
+            // its own small defect. `tick` already reports whether anything
+            // became due, so the interval is the widget's own and not a second
+            // timer free to disagree with it.
+            self.shell.sample_system();
             self.dirty = true;
         }
         if self.autohide.tick(self.clock_ms) {

@@ -1016,6 +1016,17 @@ pub fn scroll(x: f32, y: f32, dy: f32) -> MouseEvent {
 
 /// Complete desktop shell state.
 pub struct DesktopShell {
+    /// The last processor sample, kept so the next one can be differenced.
+    ///
+    /// **A single sample cannot answer the question a gauge asks.** Everything
+    /// in `/proc/stat` counts since boot, so dividing one sample by its own
+    /// total says how the machine has spent its *life* -- after a few hours of
+    /// uptime that barely moves whatever the machine is doing, while looking
+    /// exactly like a live reading. `procinfo`'s `CpuTimes::since` exists for
+    /// this and says so in its own docs.
+    prev_cpu: Option<procinfo::CpuTimes>,
+    /// Processor and memory as of the last widget-due tick.
+    sampled: crate::widgets::SystemSample,
     /// All managed windows.
     pub windows: BTreeMap<WindowId, ManagedWindow>,
     /// Currently focused window.
@@ -1657,6 +1668,8 @@ const fn icon_button(button: MouseButton) -> icons::MouseButton {
 impl DesktopShell {
     pub fn new(screen_width: u32, screen_height: u32) -> Self {
         let mut shell = Self {
+            prev_cpu: None,
+            sampled: crate::widgets::SystemSample::default(),
             windows: BTreeMap::new(),
             focused_window: None,
             current_desktop: 0,
@@ -6797,6 +6810,35 @@ impl DesktopShell {
         core::mem::replace(&mut self.widgets_dirty, false)
     }
 
+    /// Read processor and memory from `/proc`, for the next frame to report.
+    ///
+    /// Called from the widget-due tick, which fires at the monitor widget's own
+    /// interval, rather than from `live_readings` -- that runs once a frame,
+    /// and sixty reads of `/proc/stat` a second to answer a question asked once
+    /// a second is its own small defect.
+    ///
+    /// **The first call after start-up measures nothing**, and that is correct
+    /// rather than a gap: a processor fraction is a ratio over an interval, and
+    /// at the first sample there is no interval yet. `None` until the second
+    /// tick is the honest answer, and the meter says "CPU (not measured)" for
+    /// that one second.
+    pub fn sample_system(&mut self) {
+        let fs = procinfo::ProcFs::new();
+        self.sampled.memory_fraction = fs
+            .memory()
+            .ok()
+            .flatten()
+            .and_then(crate::widgets::SystemSample::memory_used_fraction);
+        let now = fs.cpu_stats().ok().flatten().and_then(|c| c.total);
+        self.sampled.cpu_fraction = match (self.prev_cpu, now) {
+            (Some(prev), Some(now)) => crate::widgets::SystemSample::cpu_busy_fraction(&prev, &now),
+            _ => None,
+        };
+        if let Some(now) = now {
+            self.prev_cpu = Some(now);
+        }
+    }
+
     /// The readings the widget layer cannot derive for itself.
     ///
     /// The clock's strings come from the same `ClockDisplay` and time zone the
@@ -6817,14 +6859,25 @@ impl DesktopShell {
         crate::widgets::LiveReadings {
             clock_time: clock.format_time(secs, &zone),
             clock_date: clock.format_date(secs, &zone),
-            // `None`, and the widget says so. This is the shell's live-readings
-            // supplier and it has no source for these: `gui/desktop` does not
-            // depend on `procinfo`, so nothing here reads /proc/stat or
-            // /proc/meminfo. Filling them in is the whole of the remaining
-            // change, and until then the absence is typed rather than guessed.
-            cpu_fraction: None,
-            memory_fraction: None,
+            // Reported from the last sample rather than read here: this runs
+            // once per frame and the monitor widget is due once per second, so
+            // reading `/proc` from here would be sixty file reads for one
+            // answer. `sample_system` is called from the widget-due tick.
+            cpu_fraction: self.sampled.cpu_fraction,
+            memory_fraction: self.sampled.memory_fraction,
+            // **No source anywhere in this tree.**
+            // `/sys/devices/block/<name>/{sector_count,sector_size}` gives a
+            // disk's CAPACITY; nothing reports how much of it is in use, and
+            // `procinfo` has no `statfs`. The meter says so rather than
+            // showing a plausible fraction of a number we do have.
             disk_fraction: None,
+            // `Default`, which is `present: false, state: NoBattery` -- and
+            // that is the true answer, not a placeholder. `/proc/battery`
+            // reports zero sources because `kernel/src/fs/battery.rs` starts
+            // with none and no ACPI driver ever calls `register_source`. When
+            // one does, this is the line that changes, and everything
+            // downstream of it already works.
+            battery: crate::power::BatteryInfo::default(),
         }
     }
 

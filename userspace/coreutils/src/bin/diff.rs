@@ -70,6 +70,7 @@
 //! - 1: files differ
 //! - 2: error occurred
 
+use coreutils::errmsg::strerror;
 use quoting::{quoteaf_os, quotef_os};
 use std::borrow::Cow;
 use std::env;
@@ -715,11 +716,12 @@ fn read_file(path: &Path, text_mode: bool) -> Result<FileContent, String> {
         let mut data = Vec::new();
         io::stdin()
             .read_to_end(&mut data)
-            .map_err(|e| format!("-: {e}"))?;
+            .map_err(|e| format!("-: {}", strerror(&e)))?;
         return Ok(classify(data, text_mode));
     }
 
-    let metadata = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let metadata =
+        fs::metadata(path).map_err(|e| format!("{}: {}", path.display(), strerror(&e)))?;
 
     if metadata.len() > MAX_FILE_SIZE {
         return Err(format!(
@@ -730,7 +732,7 @@ fn read_file(path: &Path, text_mode: bool) -> Result<FileContent, String> {
         ));
     }
 
-    let data = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let data = fs::read(path).map_err(|e| format!("{}: {}", path.display(), strerror(&e)))?;
     Ok(classify(data, text_mode))
 }
 
@@ -2114,11 +2116,12 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
 
 /// List entries in a directory, returning just the file/dir names.
 fn list_dir(path: &Path) -> Result<Vec<OsString>, String> {
-    let entries = fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let entries =
+        fs::read_dir(path).map_err(|e| format!("{}: {}", path.display(), strerror(&e)))?;
 
     let mut names = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| format!("{}: {e}", path.display()))?;
+        let entry = entry.map_err(|e| format!("{}: {}", path.display(), strerror(&e)))?;
         // The name is taken as it is. This used to read
         //
         //     if let Some(name) = entry.file_name().to_str() { names.push(...) }

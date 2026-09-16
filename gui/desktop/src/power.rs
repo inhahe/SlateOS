@@ -378,7 +378,10 @@ impl PowerConfig {
 // ============================================================================
 
 /// Battery status information.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` so `LiveReadings` can carry one and still be compared in
+/// tests; every field is a plain scalar, so there is nothing subtle in it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct BatteryInfo {
     /// Whether a battery is present.
     pub present: bool,

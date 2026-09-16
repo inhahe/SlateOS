@@ -120,10 +120,50 @@ safe-but-incidentally so (an `is_empty()` check two lines above an `[0]`, a
 separate the guard from the access. Clippy refuses the build if `arg[0]`
 returns -- verified by putting it back.
 
-**What is left:** the same treatment for the other eight. None has the `arg[0]`
-argv pattern (checked), so there is no known panic in them today; what is
-unknown is whether any of their 500-odd allowed sites touches a length the
-program does not control.
+~~**What is left:** the same treatment for the other eight. None has the
+`arg[0]` argv pattern (checked), so there is no known panic in them today; what
+is unknown is whether any of their 500-odd allowed sites touches a length the
+program does not control.~~
+
+### That unknown is now measured, 2026-09-16: no defect in any of the eight
+
+Every parser in the eight crates that reads a length the program does not
+control was read. **All eight check before they index.** Stated per crate,
+because "I looked and it was fine" is not a measurement anyone can re-check:
+
+| crate | the uncontrolled-length path | the guard that makes it safe |
+|---|---|---|
+| `zip` | central directory, `data[pos + N]` for N up to 45, where `pos` comes from a field *in the file* | `if pos + 46 > data.len()` immediately above the loop body; `cd_offset + cd_size > data.len()` before that. Extraction adds an output cap (`inflate_limited`), a declared-size comparison and a CRC. |
+| `readelf` | ELF header/section reads at a file-supplied offset | `if end > data.len()` returning a structured `TruncatedData { what, offset, needed, available }` |
+| `objdump` | same shape, same code | same guard, character for character |
+| `ar` | archive member headers | `data.len() < AR_MAGIC.len()`, then `offset + AR_HDR_SIZE > data.len()` each iteration |
+| `stty` | the `-g` restore string, which a user pastes in | `parts.len() < 39` before `parts[0..38]` |
+| `telnet` | bytes off the wire | **`process_incoming` does not index at all** -- it is a `for &byte in input` state machine. `handle_subnegotiation` guards with `is_empty()` and reads its second byte with `.get(1)`. |
+| `ftp` | PASV reply, and the command line | `parts.len() != 6` before `parts[0]`; the other site is `splitn(3, ..)`, which yields at least one element by construction |
+| `ldd` | ELF reads | bounded, and its allow carries a written justification; uses `saturating_sub` for the reported remainder |
+
+**The arithmetic half is safe for a reason worth writing down rather than
+rechecking each time.** The offsets come from `u32` fields widened with
+`as usize`. On the 64-bit target `cd_offset + cd_size` cannot overflow a
+`usize`, so the additions in the guards are sound *because of the widening*,
+not because anyone bounded them. On a 32-bit target they would not be, and the
+guard would be the thing that overflows.
+
+**What this does and does not retire.** It retires the open question -- there is
+no reachable panic behind these allows. It does not retire the debt: the
+guarantee is still by inspection, and `gdb` is the proof that inspection fails,
+since its allow was justified as "gated by length checks at the call site" and
+two argv sites were not. The remedy the entry proposes -- re-arm the lint on
+the input parsers specifically -- is still worth doing and is now cheap, because
+the sites that would need it have been identified.
+
+**Method, since the count in this entry came from a grep.** `cargo clippy
+-- --force-warn clippy::indexing_slicing --force-warn
+clippy::arithmetic_side_effects` reports through a crate-level `allow`, so the
+real population is measurable without editing anything: 73 findings in `ftp`
+and `telnet` alone, against the 96 bare `[0]`s a grep suggested across all
+eight. Neither number is the finding; the finding is which of them sit behind
+an unchecked length, and that is 0.
 
 **Where it lives:** the nine `userspace/<crate>/src/main.rs` crate attributes;
 `gdb`'s is the worked example.
@@ -531,6 +571,20 @@ source breaks that reconstruction:
 So the choice is between changing the pass scheme and buffering per chunk, and
 that is a design decision with a security dimension. It should be made
 deliberately, not as a side effect of clearing an unread field.
+
+**Put to the operator as B-Q20, 2026-09-16.** Until then this entry recorded a
+decision needing the operator and sat in `known-issues.md`, which is the bug
+tracker rather than the decision queue -- so it was never actually in front of
+them. `open-questions.md` is the queue; an entry that is not in it is not
+waiting on the operator, it is just waiting.
+
+The options there are A (overwrite in pairs, one chunk at a time -- bounded
+memory, different partial-wipe pattern after a power cut), B (buffer a whole
+pass -- nothing observable changes, and a 4 GB file needs 4 GB of memory) and C
+(leave it refused). A fourth -- seeding the PRNG from the file rather than
+consuming it as the byte stream -- is named there and explicitly NOT taken
+without an answer, because it silently diverges from GNU on a data-destruction
+tool.
 
 **Where it lives:** `userspace/pv/src/main.rs` — `parse_shred_args`'s
 `--random-source=` arm, `generate_shred_pattern`, `XorShift64`.
@@ -75041,7 +75095,47 @@ fixes — the question to ask is not "how do I ignore other writers" but "what i
 this assertion actually claiming, and is that claim still true when the system
 is busy".
 
-## TD-B-COREUTILS-PRINT-THE-HOSTS-ERROR-TEXT (lane B, 2026-08-22) — OPEN
+## TD-B-COREUTILS-PRINT-THE-HOSTS-ERROR-TEXT (lane B, 2026-08-22) — FIXED 2026-09-16
+
+**Closed: the ratchet is empty.** `scripts/host-errmsg.py --check` reports
+`0 file(s) affected; 0 not in the baseline; 0 baseline line(s) now stale`, and
+`scripts/host-errmsg-baseline.txt` has 0 entries.
+
+**The last two bins were `diff` and `patch`**, 5 sites each. `patch` was
+half-converted -- one site already called `coreutils::errmsg::strerror` while
+five interpolated the host's `Display` -- which is exactly the state this entry
+warns about: a half-converted bin prints two wordings for the same failure, so
+the reader cannot tell which one the next error will use.
+
+**The counts in the section below are a month stale and were never corrected.**
+It says 92 sites across 29 bins. When measured today the answer was 2 files.
+The work was done incrementally and nothing updated the prose, so a reader
+picking this up would have budgeted for 29 bins and found two. The live figure
+is whatever `host-errmsg.py` prints; this paragraph is the only part of the
+entry that should be trusted about scale.
+
+**One conversion I made and reverted, because the distinction matters.**
+`patch.rs:1489` is `diag!("patch: {e}")` where `e` is a `String`, not an
+`io::Error`. It was never a finding and the scanner never reported it. I
+converted it anyway, because I worked from the `{e}` SPELLING rather than from
+the scanner's list, and `strerror(&e)` does not compile against a `String`.
+The compiler caught it in five seconds -- but the same mistake against a type
+that happened to satisfy the signature would have silently replaced a
+domain-specific message with a POSIX errno sentence. Convert the sites the
+tool names, not the ones that look similar.
+
+**And an argument list that needed reordering**, which the entry predicts: the
+multi-line `diag!("patch: cannot create backup {}: {e}", ...)` became two `{}`
+with one argument. That is why the guidance says to bind `let why = strerror(&e);`
+rather than inline -- advice I did not follow at the multi-line sites and
+should have.
+
+39 + 70 tests pass across the two bins; clippy has no deny-level findings and
+no new warnings at any converted line.
+
+The description below is kept in the tense it was written in.
+
+**The original entry, 2026-08-22, follows.**
 
 **In short:** When a tool like `cp` or `tar` fails to open a file, it prints a
 sentence explaining why — "No such file or directory". That sentence does not
@@ -124404,9 +124498,30 @@ were pending as of this entry.
 ## TD-B-SYSINFOS-PROC-MOUNTS-PARSER-CAN-PANIC-DROPS-THE-WHOLE-TABLE-ON-ONE-ODD-BYTE-AND-MISREADS-ESCAPED-PATHS
 
 **Filed:** 2026-09-04 by lane B. **Where:** `userspace/sysinfo/src/main.rs`,
-`show_disk()` (lines 176-200) and `read_proc()` (line 30). **Status:** open;
-to be fixed as part of the `procinfo` extraction requested by lane C in
-`requests/c-b-the-proc-readers-in-userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md`.
+`show_disk()` (lines 176-200) and `read_proc()` (line 30).
+
+**Status: FIXED — closed 2026-09-16, and it had been fixed for some time.** The
+condition this entry parked on was "to be fixed as part of the `procinfo`
+extraction requested by lane C". That extraction landed: `userspace/sysinfo`
+depends on `procinfo`, and `show_disk` reads `proc.mounts()`. Nothing re-read
+this header afterwards, so it went on advertising work that no longer existed
+-- the same shape as the "look elsewhere" sentence in
+`B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`, which stood for five days after
+its question was answered.
+
+All four checked individually rather than inferred from the dependency:
+
+| defect | state |
+|---|---|
+| 1. `&parts[3][..20]` byte-slice panic | **gone.** The only surviving mention is the historical note at `main.rs:284` explaining what it used to do. |
+| 2. escaped paths misread | **gone.** `procinfo::unescape_octal` undoes ` `, `	`, `
+` and `\`, so `/mnt/my backup` no longer displays or compares as `/mnt/my backup`. |
+| 3. whole table lost behind "(mount info not available)" | **gone.** `status.take("/proc/mounts", proc.mounts())` reports the individual read rather than collapsing the table. |
+| 4. clippy never saw any of it | **gone.** `userspace/sysinfo/Cargo.toml` now carries `[lints] workspace = true`, so `indexing_slicing` reaches it -- which is what would have caught defect 1 as a lint rather than as a crash. |
+
+Item 4 is the one worth keeping in mind: the panic was a `clippy::indexing_slicing`
+finding that clippy had never been pointed at. The fix that matters long-term
+is not the slice, it is the crate joining the lint policy.
 
 **In short:** `sysinfo disk` — and the no-argument summary, which calls it —
 reads `/proc/mounts` in three ways that are each wrong for a file whose fields
@@ -127789,7 +127904,45 @@ prompt. For an encrypted key that is currently right — there is no passphrase
 prompt to offer — but it stops being right the moment there is one. Revisit §778
 together with this entry.
 
-## TD-B-SSHD-ACCEPTS-ONLY-ONE-AUTHORIZEDKEYSFILE-PATH-WHERE-OPENSSH-ACCEPTS-A-LIST (lane B, 2026-09-05)
+## TD-B-SSHD-ACCEPTS-ONLY-ONE-AUTHORIZEDKEYSFILE-PATH-WHERE-OPENSSH-ACCEPTS-A-LIST (lane B, 2026-09-05) -- FIXED 2026-09-16
+
+`AuthorizedKeysFile` now takes a list. `authorized_keys_paths` splits the
+setting on whitespace and resolves each pattern independently;
+`pubkey_auth_for_account` reads every named file and a key in any of them
+authorises, which is what OpenSSH does. 235 -> 240 tests, clippy clean.
+
+**Two decisions inside it that are not obvious.**
+
+*The discard-on-error rule moved from the setting to each file.* An unreadable
+file authorising nothing -- indistinguishable from an empty one, so an
+unauthenticated peer cannot probe which accounts exist -- was right and stays.
+Applied to the whole SETTING it would have made a missing first file hide a
+present second one, which is precisely the `authorized_keys` +
+`authorized_keys2` case this entry is about.
+
+*The contents are joined with a newline, not concatenated.* A file whose last
+line lacks a trailing newline would otherwise be spliced onto the first line of
+the next, destroying one key from each and producing a single corrupt entry out
+of two valid ones -- a failure nobody would trace back to a missing byte.
+
+**Fail-closed on an empty setting:** zero patterns resolve to zero paths, so
+nothing is authorised. Resolving an empty setting to the home directory would
+have the daemon read a directory as a key list on every login.
+
+**Probed by restoring the defect** -- `vec![authorized_keys_path(setting, user)]`,
+the whole setting as one filename. Four of the five new tests fail; the fifth,
+`a_single_pattern_is_unchanged_by_list_support`, correctly still passes, because
+it pins the behaviour that was always right. A control that failed under the
+sabotage would have meant it was testing the bug rather than the invariant.
+
+**Not implemented, and named so nobody assumes it:** `AuthorizedKeysFile none`,
+which OpenSSH accepts to disable publickey auth entirely. Today `none` resolves
+as a relative filename (`~/none`), which almost certainly does not exist, so the
+effect is the same by accident. Worth doing properly if anyone relies on it.
+
+The description below is kept in the tense it was written in.
+
+**The original entry, 2026-09-05, follows.**
 
 **In short:** `sshd_config` has a setting, `AuthorizedKeysFile`, naming the file
 that lists which keys may log into an account. Real OpenSSH lets an
@@ -138275,7 +138428,63 @@ Land a new `services/ctest-*/` with a source and no ELF, then run
 reports OK. Build the ELF and it correctly reports the image STALE, which is the
 asymmetry: the check sees a fixture that is *newer* than the image but not one that
 is *missing* from it.
-## B-TWO-SESSION-REGISTRIES (lane B, 2026-09-10) — open
+## B-TWO-SESSION-REGISTRIES (lane B, 2026-09-10) — open, and ENTIRELY OFF-IMAGE
+
+**Severity corrected 2026-09-16, downward, and the direction is the point.**
+The "What it costs" section below states user-visible harms in the present
+tense. No user can reach any of them, because **none of the four programs
+involved is on the image**:
+
+| | in `scripts/rootfs-bin-manifest.txt`? |
+|---|---|
+| `who` | no |
+| `su` | no |
+| `loginctl` | no |
+| `logind` | no |
+
+Checked rather than inferred from the manifest alone, because the manifest is
+not the only path into `/bin`: the rootfs script also stages a handful of named
+tools (`dash`, `make`, `tcc`, `bash`, `pkgconf`) and "promoted" `fastpy-*`
+fixtures. None of those is one of these four. `who` and `su` are not coreutils
+personalities either -- there is no `who.rs` or `su.rs` under
+`userspace/coreutils/src/bin/`. `loginctl` appears in the tree only in three
+tooling baselines (`argv-utf8`, `multicall-aliases`, `workspace-lints`), never
+in staging, and `init/` does not start `logind`.
+
+So the split is **latent**: real in the source, unreachable from a booted
+system. Every consequence listed below is a consequence of shipping these,
+which nothing currently does.
+
+**This is a size constraint, not an oversight, and the distinction matters to
+whoever reads it next.** `TD-B-...-NOT-ON-THE-IMAGE`'s analysis already
+explains it: all 276 userspace binaries build and come to 204 MiB against a
+fixed 384M image already carrying ~127 MiB of fastpy test ELFs. They do not
+fit. Raising `IMG_SIZE` is available and nothing outside the rootfs script
+reads it, but "which utilities earn their bytes" is a real question and staging
+everything that compiles is not an answer to it. Measured while checking this:
+**3 of 214 `userspace/` crates reach `/bin`** -- `coreutils` provides 69 of the
+75 manifest names, two have their own crate, and four are aliases.
+
+**Why write this down rather than quietly lower the priority.** A severity
+stated too high costs the same thing as one stated too low -- it moves work in
+front of other work on evidence that does not hold. This entry reads like a
+user-facing breakage and is a latent design defect, and the next person
+triaging by severity would have started here.
+
+**It also re-frames a day's work of mine honestly.** On 2026-09-15 I routed
+nine `loginctl` commands through the service bus to the daemon, replacing a
+local empty `Daemon` that answered every query wrongly. That work is correct
+and tested and **is not reachable by any user**, for the same reason. It
+improves the code; it does not yet improve the system. The prerequisite for
+either that work or this entry to matter is wiring `logind` into the image and
+starting it from `init/`, which nothing has asked for yet.
+
+**What has NOT changed:** the two registries are still two, and the `su` record
+that outlives a process that died without cleanup is still unreconciled. If
+`logind` is ever shipped, this becomes live on the same day and should be fixed
+before it is rather than after.
+
+## B-TWO-SESSION-REGISTRIES (lane B, 2026-09-10) — original entry, 2026-09-10
 
 **In short:** this system keeps two separate lists of who is logged in. The
 programs that *show* you the list read one of them; the daemon whose job is to
@@ -148044,7 +148253,17 @@ judgement call.
 
 ## TD-B-TWENTY-NINE-OF-THE-SEVENTY-TWO-BINS-ON-THE-IMAGE-DECODE-LOSSILY (lane B, 2026-09-14)
 
-**Status:** OPEN — a candidate list, deliberately not a defect list
+**Status: RESOLVED 2026-09-14** — see the resolution section below. One real
+defect on the whole image (`diff`), fixed the same day; `scripts/lossy-decode.py`
+is the standing instrument.
+
+*Header corrected 2026-09-16.* It read `OPEN — a candidate list, deliberately
+not a defect list`, which was true when written and stopped being true in the
+same entry, four sections down. Anyone triaging by grepping for OPEN picked
+this up as work: I did, today, and read the whole entry before reaching the
+answer. That is the cost of a status line that disagrees with its own body --
+the body was right the whole time, and nothing re-read the header after the
+section that superseded it was appended.
 
 Cross-referencing `scripts/rootfs-bin-manifest.txt` against a grep for
 `from_utf8_lossy` in each binary's own source: **29 of the 72** Rust utilities
@@ -148302,7 +148521,45 @@ remainder.
 
 ## TD-B-CP-DIFF-CANNOT-SEE-A-DIFFERENCE-MADE-OF-NUL-BYTES (lane B, 2026-09-14)
 
-**Status:** OPEN — diagnosed and the fix written, but **reverted unverified**
+**Status: CLOSED 2026-09-16** — the fix landed 2026-09-14 (`49416d81a`) and
+this entry went on saying "reverted unverified" for two days. The verification
+it asked for was never done; it is done now, and permanent:
+`scripts/check-cp-diff-sees-nul.py`.
+
+**Both halves it demanded, as a gate rather than a one-off.** Two trees
+differing only in NUL bytes now compare DIFFERENT through the capture, and
+byte-identical trees still compare EQUAL. The gate extracts the real
+`contents()` out of `cp-diff.sh` and sources it, so it grades the function as
+edited rather than a reimplementation of it -- and its self-test sabotages that
+function by deleting the `sha` line, proving the gate can fail.
+
+**Writing it cost four silent ways to not run, which is the finding.** Each
+produced output indistinguishable from a verdict:
+
+1. `tempfile.TemporaryDirectory()` yields `C:/Users/...`, which MSYS bash
+   cannot resolve. The source failed, `contents` was never defined, both
+   captures were empty -- and empty equals empty, so the gate announced
+   "two trees differing only in NUL bytes compare EQUAL" and told the reader
+   `contents()` needed its hash line back. **The harness was fine.**
+2. `Path.write_text` translated the function to CRLF. `contents() {
+` is a
+   syntax error, so the function was never defined. Same empty, same verdict.
+3. Under `bash -c`, a function is NOT visible inside a command substitution on
+   this Git Bash -- MSYS emulates fork by re-execing and the definition does
+   not survive. `declare -F contents` reported it DEFINED in the same script
+   where `$(contents ...)` said `command not found`. Fixed by running the
+   probe from a script file.
+4. The substitution cannot simply be dropped to avoid (3): the capture is what
+   eats the NULs, so a probe reading the function on a pipe would not
+   reproduce the defect at all.
+
+The repair for all four is one function, `ran_at_all()`, which requires two
+markers: `DEFINED` (the sourcing worked) and `NONEMPTY` (calling it produced
+output). A defined function returning nothing compares equal to itself on every
+tree and reads as a clean verdict, which is how (1) got as far as a confident
+wrong answer. **A comparison that could not be made is not a comparison that
+failed** -- and the gate written to catch one instance of that defect produced
+four of its own before it worked.
 
 `scripts/cp-diff.sh` compares the copied tree's file contents by capturing them
 in a command substitution:
@@ -150361,7 +150618,38 @@ rather than me.
 apps wired their fixture into the constructor and broke 6 to 66 tests each;
 the one that wired it into `main` broke none. The fix is identical either way,
 so the cost is entirely in where the call sat.
-## TD-B-BLKID-HAS-NO-UDEV-OUTPUT-FORMAT -- OPEN 2026-09-15
+## TD-B-BLKID-HAS-NO-UDEV-OUTPUT-FORMAT -- FIXED 2026-09-16
+
+`blkid -o udev` is implemented, to the measured reference behaviour below
+rather than to a guess. `OutputFormat::Udev` emits `ID_FS_TYPE`, `ID_FS_UUID`
+/`_ENC`, `ID_FS_LABEL`/`_ENC`, `ID_PART_ENTRY_UUID` and
+`ID_PART_ENTRY_NAME`/`_ENC`. 23 -> 27 tests, clippy clean.
+
+**Two encoders, not one, and the tests exist to keep them apart.** The entry
+below says "Do not reuse one encoder for both -- they differ, and the
+difference is the point of having two tags", so the regression to guard is
+precisely somebody tidying them into one function. Probed: replacing
+`udev_plain`'s body with `udev_encode(raw)` fails the suite.
+
+The control is the pair `AÿþB` and `AþÿB` -- two DIFFERENT labels
+that the plain tag renders identically as `A__B`, while `_ENC` keeps them
+apart. That is the same collision `from_utf8_lossy` caused in this program
+before labels were carried as bytes, which is why the lossy tag is only safe
+to ship *alongside* the reversible one.
+
+`ID_FS_UUID_ENC` is emitted even though a UUID is hex-and-dashes and needs no
+escaping: a consumer reading `_ENC` uniformly should not have to special-case
+the one field that happens to be safe.
+
+No `DEVNAME` line, unlike `-o export`. `-o udev` is consumed by a udev rule
+that already knows which device it is processing, and the reference does not
+emit one -- checked rather than carried over from the neighbouring format.
+
+The description below is kept in the tense it was written in.
+
+---
+
+**The original entry, 2026-09-15, follows verbatim.**
 
 `blkid -o udev` is the one output format util-linux has that we do not. It is
 refused honestly today -- `unknown output format: udev` -- so nothing claims
@@ -151402,7 +151690,7 @@ Duplication is not only a maintenance cost paid later. It is a place where
 **two copies can already differ today and nothing reports it**, because each
 one is locally plausible and no test compares them.
 
-## TD-C-THE-IMPORTER-THAT-WAS-NOT-THERE -- OPEN 2026-09-15
+## TD-C-THE-IMPORTER-THAT-WAS-NOT-THERE -- FIXED 2026-09-16, AND THIS ENTRY WAS ITSELF STALE
 
 **In short:** a tracking entry in this file said `apps/kanban` has "a complete
 JSON importer" that only needs a file chooser to become useful. It does not.
@@ -151413,6 +151701,37 @@ have found half a parser missing. This entry corrects that one, and records
 why the mistake was easy to make.
 
 Corrects: `TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE`.
+
+**Status 2026-09-16: all four steps are done, and this entry became wrong in
+the other direction.** `JsonValue`, `parse_value`, `parse_object`,
+`parse_array` and `import_board` all exist; `import_board` has a caller; the
+file picker is wired. `validate_export` -- the validator that could not return
+false -- is deleted, with a note where it stood and a real round-trip test in
+its place.
+
+**Read this before trusting the next entry of its kind.** This entry was
+written to correct an earlier one that overstated the importer ("a complete
+JSON importer needing only a file chooser"). It then outlived its own subject
+and overstated the *absence*. A reader who believed it -- and I did, this
+morning, far enough to scope four slices and start writing a JSON value parser
+that already existed -- would have spent an afternoon rebuilding working code.
+
+The stop was reading the source, not re-reading the entry. The specific near
+miss is worth recording: I had staged a "correction" changing the `dead_code`
+reasons from `"import needs a file chooser"` to `"no value parser above it,
+and no file chooser"`, which would have replaced a nearly-right reason with a
+definitely-wrong one, on this document's authority.
+
+**Two defects the correction turned up, both invisible to the entry:**
+
+  * Six `#[allow(dead_code, …)]` attributes that outlived their reason.
+    Removing all six leaves the crate compiling cleanly. `check-dead-code-allows`
+    reports "0 new" for these, correctly -- a stale allow is not a new one, and
+    the gate is built to catch additions rather than survivals.
+  * `KanbanApp::export_json`, superseded by `write_board` and kept alive by a
+    test asserting its output was non-empty and contained the board name. Both
+    true, neither able to fail. **A test on the wrong function is how a
+    superseded function survives being superseded.**
 
 ### What is actually there
 
@@ -151548,10 +151867,47 @@ on the written-never-read list. Both crates that had both were lying; none of
 the five with only the gate was. That pairing is worth more than either list
 alone, and it is cheap to compute.
 
-**Still open:** the five clean crates keep code the suite cannot reach.
+~~**Still open:** the five clean crates keep code the suite cannot reach.
 `ctags`'s `collect_dir`, `extract_tags_from_file` and `read_existing_ctags`
 are parsers with inputs and outputs and no tests, which is a real gap even
-though nothing is currently wrong behind it.
+though nothing is currently wrong behind it.~~
+
+**`ctags` CLOSED 2026-09-16.** `collect_files`, `collect_dir` and
+`extract_tags_from_file` are ungated and have five tests between them; 111 ->
+116, clippy clean. (`read_existing_ctags` was already ungated and tested --
+the row above was wrong about it, which is worth noting because the list was
+built by grepping for the attribute and that function does not carry one.)
+
+**The gate's effect, demonstrated rather than argued.** The moment the three
+attributes came off, the test build began warning `function is never used` for
+all three, with 111 tests passing. That is the entry's claim -- UNREACHABLE,
+not untested -- shown by the compiler instead of asserted. The warnings went
+away one at a time as each test landed, which is a coverage signal this crate
+did not previously have any form of.
+
+**What the tests are actually for**, since "add tests" is not a finding:
+
+* `collect_files` -- the `missing` out-parameter, which exists because
+  printing "cannot open" and returning only the successes is what made
+  `ctags /nonexistent` exit 0. Its own doc comment says so. Nothing could
+  call it to check until now. Tested with a present and an absent path in one
+  run, because "missing was flagged" alone passes against a function that
+  gives up on the first bad path, and "the good file was tagged" alone passes
+  against one that never noticed the bad one.
+* `collect_dir` -- sorting, which matters beyond tidiness: `read_dir` order
+  is filesystem order, so an unsorted collector produces a tags file that
+  differs between machines for no reason anyone can act on. Plus excludes and
+  hidden-directory skipping, with a control run collecting the same tree with
+  NO excludes -- without it, "target/gen.rs is absent" would pass against a
+  collector that found nothing at all.
+* `extract_tags_from_file` -- the half `extract_tags_from_content` cannot
+  cover: opening the file, and choosing the language from the PATH rather
+  than being handed one. The `.txt` case holds valid Rust in a file with the
+  wrong extension, which is exactly how a language-by-extension bug hides.
+
+**Still open:** `lex`, `yacc`, `chpasswd` and `mesg`. Those are
+`print_help`/`print_version`/`run` -- the cheap end of the list, where the
+gate costs a constant and an exit. Worth doing, worth doing last.
 
 **Why the gate is usually there at all.** These crates build `#![no_main]`
 for the real target and define a `main` the test harness must not duplicate.
@@ -152877,6 +153233,58 @@ today.
 **Why this is filed rather than done:** it is the largest remaining item in
 this sweep and wants its own commits. Everything needed to start is above, and
 nothing about it is blocked.
+
+## TD-C-THE-BATTERY-WIDGET-AND-WHY-NO-PARSER-WAS-ASKED-FOR -- FIXED 2026-09-16
+
+**In short:** the desktop's battery widget drew the words "85%" and "3h 42m
+remaining". Not numbers computed from something -- those exact strings, on
+every desktop, including machines with no battery. It now reports the shell's
+battery model, which says "No battery" because there is none.
+
+**Date:** 2026-09-16. **Lane:** C. **Decided by:** Claude (autonomous).
+
+**The fix was small because the honest answer was already in the same crate.**
+`crate::power::BatteryInfo` exists and its `Default` is `present: false,
+state: NoBattery` -- already correct, and already what production code
+constructs. The widget reached past a correct model to invent two literals.
+
+Keyed on `present`, not on a charge of zero: "there is no battery" and "the
+battery is flat" are different facts, and a desktop reader acts on them
+differently. The time estimate is drawn only when there is one.
+
+**Why no `procinfo` parser was requested, which is the part worth keeping.**
+`/proc/battery` publishes `sources`, `charge_pct`, `state`, `cycle_count` and
+a row per source, so the obvious next step was to ask lane B for a parser, as
+was done for `/proc/ioport`, `/proc/kmod` and `/proc/autostart`.
+
+Checking the *producer* rather than the publisher stopped that.
+`kernel/src/fs/battery.rs` starts with **no power sources at all**, and says
+why in its own comments:
+
+> A battery/UPS is observed hardware state […] seeded values would surface as
+> hardware readings through `/proc/battery` and the `battery` shell command as
+> if a real ACPI power source had reported them. A desktop may have no battery
+> at all. Real sources appear only when an ACPI/power driver calls
+> `register_source()`.
+
+No such driver exists. So a parser would faithfully carry "zero sources"
+across three crates and arrive at the same answer the widget already gives.
+**Asking for it would have been work for lane B whose result was already on
+the screen.**
+
+That is the mirror of the question this lane has been asking all week. The
+usual failure is a setter with no consumer -- lane B found one the same day,
+having wired `SYS_KEYLAYOUT_SET` to a kernel field that nothing in the
+keystroke path reads. This is the same question pointed upstream: before
+asking for a reader, check that anything *writes*.
+
+**The trigger for revisiting:** `battery.rs` carries a `DEFERRED PROPER FIX`
+note to wire `register_source()`/`update_status()` to a real ACPI driver. On
+the day that lands, `/proc/battery` starts carrying real readings and a
+`procinfo` parser becomes worth asking for -- and the widget needs only its
+`LiveReadings.battery` filled, because everything downstream of that already
+works.
+
 
 ## TD-C-A-GAUGE-NOBODY-MEASURED -- PARTLY FIXED 2026-09-15
 

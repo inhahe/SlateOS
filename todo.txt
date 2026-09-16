@@ -54988,6 +54988,37 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 
 ## ############################################################################
 ## Lane C — graphics, apps & net
+
+### find-claimed-acts: all six current hits are cleared (2026-09-16)
+
+Written down so the next run is a lookup rather than an investigation. Each
+took under a minute to clear by reading, but only once, and only if the result
+is kept. Re-check a row if the crate changes.
+
+| crate | claim | why it is not a defect |
+|---|---|---|
+| `procexplorer` | `Sent {verb} to {name} (PID {pid})` | **True now.** Goes through `libcall::kill`. Flagged because the scanner files a signal under `[network]`, which is a category quirk, not a claim about the sentence. |
+| `sysmonitor` | same | same |
+| `terminal` | `terminated by {s:?}` | **A doc comment**, not output: "OSC string terminated by ST (ESC \)". The scanner reads prose it cannot tell from a format string. |
+| `tmux` | `Killed session: {name}` | **True.** The line follows `self.sessions.remove(index)`, and a multiplexer session *is* the layout it just removed. There is no child process to be wrong about. |
+| `vpnmanager` | `Connected to {name}` x2 | **Unreachable.** `connect` returns `Err(UNAVAILABLE)` on every path, and `report` uses the success string only on `Ok`. It is built and dropped. |
+
+The `vpnmanager` pair is the one worth re-reading if that crate is touched: the
+string is correct-by-unreachability rather than correct-by-construction, so the
+day `connect` can return `Ok` for any reason short of a real tunnel, the claim
+fires. The surrounding code is careful -- `local_ip` and `latency_ms` were an
+address nothing assigned and a round trip nothing measured, and both were
+cleared -- so the risk is a future edit, not the present state.
+
+**Two notes about the checker itself**, from this pass:
+
+  * It reads doc comments as though they were output. `terminal`'s hit is a
+    sentence *about* terminators, in prose. Worth narrowing if this recurs;
+    one occurrence is not yet evidence of a pattern.
+  * Its category labels (`[network]`, `[process]`) are a guess at what the act
+    touches, and `procexplorer` sending a signal is filed under network. The
+    label is not part of the finding and should not be read as one.
+
 - Autologin is read but not acted on. `LoginUser::autologin` comes from the
   account database and `LoginScreen::autologin_user` finds it, but an account
   marked for autologin still gets a password prompt. Skipping the prompt needs
@@ -58433,3 +58464,62 @@ rather than in `cargo test`. Trigger: next time a logind fixture is built.
 arity, an unparsable signal, a session whose leader pid is 0, and a uid with
 no sessions — each as a distinct error, so the four refusals cannot collapse
 into one another unnoticed.
+
+---
+
+## Echoed-settings triage: all 28 lane-B sites, 2026-09-15
+
+Lane C's `scripts/find-echoed-settings.py` flags a config field that is read
+**only into output**. 28 in this lane, across 14 programs. Triaged by hand
+because the scanner cannot know what a field is *for* — and the two most
+serious findings were fields it could not have ranked above the rest.
+
+Per-program rather than per-field, following lane C's note that the answer is
+usually about the program. Second reading should be a lookup, not an
+investigation.
+
+| Program | Fields | Verdict |
+|---|---|---|
+| `losetup` | 5 | **Not a defect.** The `format!` builds DATA handed to `fs::write(LOOP_CONTROL, …)`. It looks like output to a scanner keyed on `println!`. |
+| `nftables` | 4 | **Fixed.** `nft` has no kernel behind it; now prints "parsed, NOT applied — use `fw`". open-questions Q21, operator-chosen option C, 2026-07-14: the docs half landed then, the notice half never did. |
+| `audit` | 3 | **Not a defect.** The banner prints the rotation config and the daemon then refuses to start ("no daemon event loop"), three lines later. The refusal is the context. |
+| `bootctl` | 2 | **Not a defect.** `cmd_install` refuses outright. Worth contrasting with `grub2` below: same kind of tool, opposite honesty. |
+| `grub2` | 2 | **Fixed.** `grub2-install` printed "Installation finished. No error reported." and wrote no bootloader image — no EFI copy, no MBR, no core.img, and no code that could. |
+| `localectl` | 2 | **VC keymap fixed** — now calls `SYS_KEYLAYOUT_SET` (1074) and the `/etc/vconsole.conf` write is gone. **X11 layout: open**, see below. |
+| `plymouth` | 2 | **Not a defect.** Config dump in a tool that refuses; boot splash settings with no splash. |
+| `upower` | 2 | **Both fixed.** `critical_power_action` said "executing PowerOff" and contained no power action of any kind; `no_poll_batteries` was a polling control in a program with no polling loop, and chasing it found the daemon banner false too. |
+| `earlyoom` | 1 | **Fixed.** An OOM killer that printed "started" and "monitoring (every 1s)", then checked once and returned. No loop, no sleep. |
+| `firejail` | 1 | Already recorded at `known-issues.md:355`. |
+| `logind` | 1 | **Not a defect.** `idle_timeout` in a config dump — the original discriminator example. |
+| `lp` | 1 | **Not a defect.** Refuses, and the echo names what it refused. |
+| `sshd` | 1 | **Fixed.** `ListenAddress` never reached the kernel — `SYS_TCP_BIND` takes a port and nothing else. Now refuses rather than binding wider than asked. design-decisions 1024. |
+| `thermald` | 1 | **Not a defect.** The UUID is a label from a vendor XML, not a control an operator sets expecting behaviour to change. |
+
+**The discriminator that did the work**, refined from the earlier pass: is the
+field a **control** (set expecting behaviour to change) or a **label** (an
+identifier being displayed)? `thermald`'s UUID is a label. `sshd`'s
+`ListenAddress` is a control, and it was a *security* control, which is why it
+outranked everything else and why the scanner could not have said so.
+
+**Two still open, both minor and both stated rather than quietly dropped:**
+
+* ~~`upower.no_poll_batteries`~~ **Closed the same day.** Chasing it found
+  something larger: `upowerd` printed "starting UPower daemon" and made a
+  SINGLE PASS. Sixty lines below the banner sat `// In a real daemon, we'd
+  enter an event loop. We simulate a single pass.`, so the disclosure
+  existed, in the source, where the person relying on the claim cannot read
+  it. That is §945's shape precisely. Both corrected: the banner now says
+  "single pass ... does not keep running", and `NoPollBatteries` is reported
+  as read and inert, since honouring it would mean suppressing a poll that
+  does not exist.
+
+  The lesson is about the triage rather than the field. I ranked this
+  "minor, a power hint, not a safety property" from the field's NAME. The
+  field was minor; the program it sat in was not. A control with no effect
+  is worth one minute spent looking at what it was supposed to control.
+
+**What the triage cost, for calibration.** 28 sites, 14 programs, roughly two
+minutes each to clear by reading, and it produced five real defects of which
+two (`sshd`, `grub2`) were serious. A scanner reporting 28 where 5 are real is
+emphatically worth running; the cost is that a future reader re-clears the 23
+unless the triage is written down, which is what this entry is for.

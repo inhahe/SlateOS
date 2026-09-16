@@ -2359,6 +2359,142 @@ caught), `userspace/oils/src/interp.rs` (a comment about a timing trap written
 in the same pass as a smaller version of that trap, not caught until lane C
 reported it), and four more in lane C's tree.
 
+## B-Q20 — [B] `shred --random-source` is refused. Making it work means changing how the file is overwritten — which way? — Status: OPEN
+
+**In short:** `shred` destroys a file by overwriting it several times. There is
+an option to say "take the random bytes from this file instead of generating
+them", and ours currently refuses that option outright rather than pretending.
+Making it work properly would change the *order* in which we overwrite, and
+because the tool exists to destroy data, that order matters if the machine dies
+partway through. The question is which of two ways you want.
+
+**Why it refuses today rather than ignoring the flag.** The option was parsed,
+stored, and read by nothing — and its advertised default (`/dev/urandom`) was
+wrong too, because nothing here opens that device. `shred` destroys the file, so
+a user who asks for a particular source of random bytes and silently gets a
+different one has already lost the data by the time they could notice. Refusing
+before the first overwrite is the only outcome that leaves them a choice.
+
+**Why it is not a small fix.** Our overwrite scheme is: even passes are random
+bytes, and each odd pass is the **bitwise complement** (every 1 becomes a 0 and
+vice versa) of the pass before it. We can produce the complement cheaply
+because we generate the random bytes from a formula and can re-run it from the
+same starting point. Bytes read from a *file* cannot be re-run: you would have
+to either keep them or re-read them, and the usual sources (`/dev/urandom`, a
+pipe) cannot be rewound.
+
+| | *What changes* |
+|---|---|
+| **A. Overwrite in pairs, a chunk at a time** | Same passes, same bytes on disk at the end. What changes is the order during the wipe: we would write a chunk's random pass and its complement together before moving on, instead of sweeping the whole file once per pass. Memory stays small (one chunk). **If the power fails mid-wipe, the file is partly-wiped in a different pattern than today** — early chunks fully done, later ones untouched, rather than every chunk one pass deep. |
+| **B. Keep sweeping whole passes, buffer the pass** | Nothing observable changes about order or result. **A 4 GB file needs 4 GB of memory**, so it works on small files and fails on exactly the large ones people shred. |
+| **C. Leave it refused** (today) | `shred --random-source=FILE` exits 1 and the file is untouched. Everything else about `shred` works. |
+
+**One thing I will not do without you saying so.** A fourth option is to use
+the file to *seed* our formula rather than consuming it as the byte stream.
+That keeps the current scheme and costs nothing — but it is **not what GNU
+shred does**, and a user who supplied a specific stream of bytes would get
+different bytes on disk than they asked for. Silently diverging from the
+reference on a data-destruction tool is the kind of surprise this whole entry
+exists to avoid, so it is listed here and not taken.
+
+**My recommendation: A.** The memory bound in B is not a detail — it fails on
+the large files that are the reason anyone shreds rather than deletes. A's cost
+is a different partial-wipe pattern after a power cut, and I think that is the
+lesser harm: in both cases an interrupted wipe leaves recoverable data, so
+neither is safe to rely on, and A at least leaves *some* chunks completely
+destroyed rather than all of them one pass deep.
+
+**If this is never answered:** nothing breaks and nothing gets worse. `shred`
+works; only `--random-source` is unavailable, and it says so plainly instead of
+lying. This is a missing feature with an honest refusal, not a defect sitting
+in the tree. It is in your queue because the fix has a security dimension and a
+user-visible change of behaviour, not because anything is on fire.
+
+Recorded in `known-issues.md` as
+`TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED`, which had the analysis but
+was not in this file — so it was never actually in front of you.
+
+## B-Q21 — [B] 203 of the 278 programs we have written are never installed. Should they be? — Status: OPEN
+
+**In short:** we have written 278 small programs for this OS. 75 of them end up
+on the disk image that boots; the other 203 are built, tested, and then left
+behind. The reason is size: together they are bigger than the image we build.
+The question is whether to make the image bigger, pick a subset deliberately,
+or leave things as they are.
+
+*(Corrected 2026-09-16: this first said "211 of 214", which counted CRATES and
+called them programs. One crate — `coreutils` — holds 83 of the programs, so
+counting crates understates what ships by a lot. The image also carries 14
+compiled-Python utilities promoted by the fastpy block — `cat`, `ls`, `grep`,
+`mv` and others — so `/bin` holds about 89 commands we wrote, not three. The
+decision below is unchanged; the scale of it is not what I first said.)*
+
+**The numbers, measured 2026-09-16** (alias lines of the form `ranlib = ar`
+resolved to their producer, so these count crates rather than names).
+`scripts/rootfs-bin-manifest.txt` has 75 entries:
+
+| producer | names it supplies |
+|---|---|
+| `coreutils` | 71 (including `awk`) |
+| `ar` | 3 (`ar`, `ranlib`, `strip`) |
+| `logrotate` | 1 |
+
+So **3 of 214 `userspace/` crates reach `/bin`**, and `/bin` is the only
+place userspace binaries land: the rootfs script's only other destinations
+are `/tests`, `/lib` and `/usr/share/make`, with no `/sbin` or `/usr/bin`.
+
+**Correction, 2026-09-16, made before you read this.** An earlier version of
+this entry said `awk` had *no producer anywhere in the tree*. That was my
+measurement being wrong, not the tree. `awk` is
+`userspace/coreutils/src/bin/awk/` — cargo's directory form for a
+multi-file binary (`main.rs`, `lex.rs`, `parse.rs`, `interp.rs`, and four
+more), and it passes 171 differential cases against GNU awk. My scan looked
+only at `src/bin/*.rs` files and did not know about `src/bin/<name>/main.rs`,
+so it reported a working implementation as absent. The count of crates
+reaching `/bin` is unaffected — `awk` ships from `coreutils`, which was
+already counted.
+
+**Why, and it is a real constraint rather than an oversight.** All 276 built
+binaries come to 204 MiB against a fixed 384 MiB image that already carries
+~127 MiB of fastpy test fixtures. They do not fit. `IMG_SIZE` is a variable in
+`scripts/create-ext4-rootfs.sh` and nothing outside that script reads it.
+
+| | *What changes* |
+|---|---|
+| **A. Raise `IMG_SIZE` and stage everything that builds** | Every utility we write is on the machine and can be run. The image grows past 384 MiB — roughly 600 MiB to hold all 204 MiB with headroom. Boot-test download/copy times grow with it. |
+| **B. Curate: decide which utilities earn their bytes** | Someone picks a list; the rest stay unshipped. The image stays small. Requires a judgement per program, and the list needs maintaining as programs are added. |
+| **C. Leave it** (today) | `coreutils` and a couple of others ship. Everything else is a library that compiles and a test suite that passes, reachable only by a developer. |
+
+**What you may actually be deciding.** Not disk space — it is a VM image and
+the host has room. It is whether "we wrote a `logind`" means a user has one.
+Today it does not, and nothing in the tree says so at the point where someone
+would look; I found it only by grepping the manifest for a program I had spent
+a day improving.
+
+**My recommendation: B, but A first as a stopgap** if you want the question
+answered later rather than now. A costs bytes on a VM image, which is cheap,
+and buys the ability to *run* what we build — which is currently untested for
+almost everything. B is the right long-term answer and needs a criterion, and I
+do not think I should invent that criterion on your behalf: "which utilities
+earn their bytes" is a question about what this OS is for.
+
+**If this is never answered:** nothing breaks. The build stays green, the tests
+stay green, and the work keeps accumulating out of reach. The cost is invisible
+and compounding — it is effort spent on programs no one can run, and the longer
+it runs the larger the pile of code whose first real execution is still ahead of
+it.
+
+**Related but different:** `deferred-questions.md` D-Q1 asks which *implementation*
+(fastpy or Rust) a stock install should prefer once one is proven better. That
+assumes both ship. This asks whether they ship at all. Recorded in
+`known-issues.md` under the image-staging entry, which names "which utilities
+earn their bytes" as a real question and correctly declines to answer it — but
+named it there rather than here, so it has never been in front of you.
+
+
+
+
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

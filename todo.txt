@@ -4527,6 +4527,52 @@
 
 ## Judgment Calls
 
+### 2026-09-16 — pushed with ALLOW_STALE_RELEASE=1, and did NOT update
+### bench/last-release-boot.json
+
+The release boot ran (BOOT_OK at 166s, first release profile in 101
+commits) and the boot test reported FAILED, because `ctest-pty` failed
+with exit 45. boot-test.sh treats any `self-test failed` marker as fatal
+even for a Diagnostic-severity rung, which is deliberate and correct --
+its own comment records that a naive `grep BOOT_OK` once hid a stale
+procfs readdir-count assertion.
+
+So three things are true at once and none of them is a clean outcome:
+
+  * the release profile WAS exercised, which is what the staleness gate
+    exists to ensure -- the bench scatter-scale check only runs there and
+    it produced a real finding;
+  * the boot test FAILED, so the baseline must not be stamped with it;
+    the existing baseline's own note records its predecessor as a
+    `=== Boot test PASSED ===` run, and writing a green marker over a red
+    run is the exact defect class I spent the previous day removing;
+  * the gate therefore keeps refusing every push, at 104 commits and
+    rising.
+
+**Decision: use the documented escape hatch, leave the baseline stale.**
+`ALLOW_STALE_RELEASE=1` exists for "you are about to run the release boot
+test", and I literally am: the commit being pushed adds instrumentation
+whose only purpose is to produce a discriminating line on the *next*
+release boot. Publishing it is the prerequisite for the measurement that
+would let the gate be cleared honestly.
+
+**Rejected: re-disable `ctest-pty` so the boot passes.** That is the
+"raise the CEILING" move `check-unreachable-mutators` warns about in as
+many words, and design-decisions 944 exists because this rung had already
+been switched off across four disable cycles while the reason rotted. A
+rung switched off to make a boot green is a rung that will not come back.
+
+**Rejected: stamp the baseline with a qualifying note.** The previous
+author did something adjacent -- recorded a `dirty=true` run with a long
+justification -- but that was a *passing* boot with uncommitted edits.
+A failing boot is a different claim and the field is read by
+`merge-readiness.py` as well as by humans.
+
+**What clears this properly:** the next release boot. If the new `[tty]`
+line appears naming the pty's id, the fault is in acquiring the terminal
+and the fix follows; if it does not appear, the hypothesis is wrong and
+the child is blocked elsewhere. Either way the boot after *that* is the
+one whose SHA belongs in the baseline.
 The post-merge sweep is now a SCRIPT, at build/sweep.sh (lane A, 2026-09-15).
 Three boots paid for the routine version.
 

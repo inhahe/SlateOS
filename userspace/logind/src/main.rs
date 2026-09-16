@@ -2101,6 +2101,8 @@ fn describe_bus_error(name: &str) -> String {
         bus::ERR_NOT_AUTHENTICATED => "not authenticated".to_string(),
         bus::ERR_INVALID_ARGUMENTS => "the daemon rejected the arguments".to_string(),
         bus::ERR_UNKNOWN_METHOD => "this daemon does not implement that method".to_string(),
+        bus::ERR_NO_SUCH_USER => "no such user".to_string(),
+        bus::ERR_NO_SUCH_SEAT => "no such seat".to_string(),
         other => other.to_string(),
     }
 }
@@ -2212,6 +2214,38 @@ fn session_command_via_bus(member: &str, id: &str, past_tense: &str) -> i32 {
         }
         Err(why) => {
             let _ = writeln!(io::stderr(), "loginctl: cannot {member} {id}: {why}");
+            1
+        }
+    }
+}
+
+/// One `show-*` command, asking the daemon.
+///
+/// `show-session`, `show-user` and `show-seat` each print one block of
+/// `key=value` lines that the daemon renders. They used to read the local
+/// `Daemon` and report "'3' not found" for a session, user or seat that
+/// existed -- the same wrong-answer-that-reads-right the listings had, with
+/// the difference that a reader is likelier to believe it, because naming a
+/// specific id and being told it is absent sounds like a considered answer.
+///
+/// `noun` is only for the diagnostic. The properties come back already
+/// rendered, so there is nothing here that needs to know what it is looking
+/// at -- which is why one function serves three commands that print quite
+/// different blocks.
+fn show_via_bus(member: &str, noun: &str, id: &str) -> i32 {
+    if id.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: {noun} required");
+        return 1;
+    }
+    match call_logind(member, &[id.as_bytes()]) {
+        Ok(fields) => {
+            for field in &fields {
+                print!("{}", String::from_utf8_lossy(field));
+            }
+            0
+        }
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: cannot show {noun} {id}: {why}");
             1
         }
     }
@@ -2645,6 +2679,9 @@ fn run_loginctl(args: &[String]) -> i32 {
         LoginctlCommand::TerminateSession(id) => {
             return session_command_via_bus("TerminateSession", id, "terminated");
         }
+        LoginctlCommand::ShowSession(id) => return show_via_bus("GetSession", "session ID", id),
+        LoginctlCommand::ShowUser(uid) => return show_via_bus("GetUser", "UID", uid),
+        LoginctlCommand::ShowSeat(id) => return show_via_bus("GetSeat", "seat", id),
         LoginctlCommand::Activate(id) => return activate_is_not_wired(id),
         _ => {}
     }

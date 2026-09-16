@@ -85000,7 +85000,7 @@ remaining known bugs into `KFIXED` and all 14 deliberate differences into
 
 ---
 
-## TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE (lane B, 2026-08-24) — **open**
+## TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE (lane B, 2026-08-24) -- **Status: FIXED** 2026-09-16
 
 **In short:** `bc -l` provides a small library of maths functions. Ours gets
 the arctangent wrong — not by a rounding error in the last digit, but in the
@@ -85038,6 +85038,127 @@ precision**, with the working scale set a few digits above the requested
 extend the harness row to `a(0)`, `a(0.5)`, `a(1)`, `a(2)`, `a(-1)` and a large
 `scale` — a fixed-term series can be right at one argument and wrong at the
 next, which is exactly why one call was enough to miss this.
+
+---
+
+### Fixed 2026-09-16
+
+The diagnosis in this entry was right and is now confirmed against the code:
+`atan_series` summed a **fixed 100 terms**, and its `is_negligible` guard could
+never fire at `x = 1` because `x^2 = 1` leaves the numerator at ±1 for ever.
+The arithmetic identifies it rather than merely fitting it: an alternating
+series truncated after N terms sits within half the first omitted term, here
+`1/(2*100+1)/2 = 0.00248…`, and the measured error was
+`.7853981633 - .7828982258 = .0024999`.
+
+Fixed as prescribed — `atan(x) = 2*atan(x / (1 + sqrt(1 + x^2)))` applied until
+`|x| < 1/16`, then the series summed until the term falls below the working
+precision, with the term cap now derived from `scale` and serving only as a
+non-termination guard. `a(1)` needs five reductions and then gains ~2.4 digits
+per term. The entry's warning to extend the harness was taken: `a(0)`, `a(0.5)`,
+`a(1)`, `a(2)`, `a(-1)`, `a(1.0001)`, `a(100)`, `a(0.07)` and `4*a(1)` all now
+match GNU exactly at scale 10, and `a(0.6)` matches to all 30 places at
+scale 30.
+
+**Two things the entry did not anticipate.**
+
+The `|x| > 1` inversion was never the fix people assume it is: it maps
+`x = 1.0001` to `0.9999`, which is just as slow to sum as what it came from. So
+the reduction has to run on *both* branches, not just the small one.
+
+And the first version of the fix made things **worse** — `a(1)` came back as
+`53.18` — because the reduction calls `sqrt`, and `sqrt` turned out to have a
+bug of its own that nothing had hit before:
+`TD-B-BIGNUM-SQRT-IGNORED-THE-PARITY-OF-ITS-INPUT-SCALE`. That is why this
+entry could not be closed on its own.
+
+**What still limits it.** `a(1)` at `scale=30` is exact to 24 places rather
+than 30, capped by `TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES`,
+which is older than this change and bounds every square root the reduction
+takes. The test asserts the 24 as a prefix rather than asserting the wrong
+digits, and says to raise it when that entry closes.
+
+---
+
+## TD-B-BIGNUM-SQRT-IGNORED-THE-PARITY-OF-ITS-INPUT-SCALE (lane B, 2026-09-16) -- **Status: FIXED** 2026-09-16
+
+**In short:** `sqrt(4)` was `2`, and `sqrt(4.0)` was `.632…`. Writing a
+trailing zero — which changes nothing about a number's value — changed the
+answer, by a factor of the square root of ten. It affected **`bc` and `dc`
+both**, since they share the number type, and any value with an odd count of
+decimal places was hit: `sqrt(2.0)` gave `.4472…`, which is the square root of
+0.2.
+
+**Where:** `userspace/bignum/src/decimal.rs`, `Decimal::sqrt`.
+
+**Why.** A `Decimal` is `digits / 10^scale`, so its root is
+`sqrt(digits) / 10^(scale/2)` — and `scale/2` is only a whole number of decimal
+places when `scale` is **even**. The code computed the working scale as
+`self.scale + 2*result_scale + 2` and then halved it with `div_ceil(2)`. The
+added part is always even, so the parity was the *input's*: an odd one rounded
+the halving up and shifted the point half a place too far.
+
+That is what made it depend on how the number was written rather than on what
+it was — the defect's whole signature. It is also why it went unnoticed: every
+literal anyone tests with (`2`, `4`, `0.25`, `1.0049`) has an even count of
+decimal places, and so does every intermediate in the old `bc` math library.
+It surfaced only when the new arctangent reduction started feeding `sqrt` a
+value carried at the full working scale, which was odd.
+
+**Found by:** the first attempt at
+`TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE`, which returned `a(1) = 53.18`. The
+trace showed `sqrt(1.0049)` answering `.317…` instead of `1.0024…` — a factor
+of exactly `sqrt(10)`, which is what named the cause.
+
+**Fixed** by rounding the working scale *up to even* before the halving, and
+halving that same number rather than re-reading it from the rescaled value.
+Two tests: one asserting that a trailing zero cannot change a root (six pairs
+across six scales), and one pinning the known digits of `sqrt(2)`, `sqrt(4)`
+and `sqrt(0.25)` so the pair test cannot pass by both sides being wrong the
+same way. `dc` verified at the command line against GNU as well as `bc`.
+
+---
+
+## TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES (lane B, 2026-09-16) — **open**
+
+**In short:** ask for a square root to more than about thirty decimal places
+and the last ones are wrong. `sqrt(2)` at `scale=40` gives
+`1.4142135623730950488016887242097601756851` where the true value is
+`…2096980785696`: correct for 30 places, then drifting. It is not a rounding
+difference in the final digit — the tail is simply wrong.
+
+**Where:** `userspace/bignum/src/lib.rs`, `BigNat::isqrt`, reached through
+`Decimal::sqrt`. Affects `bc` and `dc` alike, and through the arctangent
+reduction it caps `a(x)` as well: `a(1)` at `scale=30` is exact to 24 places.
+
+**Measured**, against GNU bc 1.07.1:
+
+| Call | GNU | Ours |
+|---|---|---|
+| `scale=30; sqrt(2)` | `1.414213562373095048801688724209` | agrees |
+| `scale=40; sqrt(2)` | `…242096980785696` | `…242097601756851` |
+| `scale=70; sqrt(2)` | `…2096980785696718…` | diverges at ~33 places |
+| `scale=0; sqrt(2*10^62)` | `…2096` | `…2097` (one too large) |
+
+**Not caused by the parity fix above** — measured on the commit before it and
+the same wrong digits come out. The two are independent.
+
+**Diagnosis, not yet confirmed.** `isqrt` is Newton's method from an initial
+guess of `10^ceil(digits/2)`, terminating when the iterate stops decreasing.
+That shape is correct when the guess is at or above the true root, and it
+returns exact answers for large perfect squares — `sqrt(x*x) == x` was checked
+at 32, 40 and 41 digits. So the integer arithmetic is sound and the fault is
+more likely in the *termination*: the last iteration is skipped, leaving a
+value one too large, which then propagates into every digit the rescale keeps.
+The `sqrt(2*10^62)` row is the cleanest handle on it — a single `isqrt` call,
+no scaling, answer off by exactly one.
+
+**The proper fix:** after the loop, correct the result downward while
+`guess*guess > n` and upward while `(guess+1)^2 <= n`. Two multiplications
+settle it and make the answer exact by construction rather than by trusting the
+iteration to have converged. Then assert the known digits of `sqrt(2)` at
+scale 40 and 70 (the test in `decimal.rs` deliberately stops at 30 and says
+so), and raise the `a(1)` prefix assertion in `bc.rs` from 24 places to 30.
 
 ---
 

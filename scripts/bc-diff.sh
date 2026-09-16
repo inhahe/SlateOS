@@ -378,8 +378,22 @@ prog 'bare expression prints'  '1+1\n"literal"\n'
 prog 'mathlib scale default'   'scale\n' -l
 prog 'mathlib s and c'         'scale=10\nprint s(0), "\\n", c(0), "\\n"\n' -l
 prog 'mathlib e and l'         'scale=10\nprint e(1), "\\n", l(1), "\\n"\n' -l
-known_bug TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE
 prog 'mathlib a and j'         'scale=10\nprint a(1), "\\n", j(0,1), "\\n"\n' -l
+# Arctangent across its range, not just at 1.
+#
+# `TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE` asked for these when it was closed,
+# and gave the reason: a series with a term cap "can be right at one argument
+# and wrong at the next". The `a(1)` row above is what FOUND that bug, so one
+# sample was enough to find it -- but one sample is not enough to confirm a
+# FIX, and those are different jobs. The new implementation reduces by halving
+# the argument, which gives it a threshold (1/16) and an inversion branch
+# (|x| > 1) that the single row samples neither of.
+#
+# `a(1.0001)` is the interesting one: the |x|>1 inversion maps it to `a(.9999)`,
+# which is just as slow to sum as the argument it came from, so an
+# implementation that inverts but does not reduce passes `a(2)` and fails here.
+prog 'mathlib a across its range' 'scale=10\nprint a(0), "\\n", a(0.5), "\\n", a(2), "\\n", a(-1), "\\n"\n' -l
+prog 'mathlib a near the reduction boundary' 'scale=10\nprint a(0.06), "\\n", a(0.07), "\\n", a(1.0001), "\\n", a(100), "\\n"\n' -l
 known_bug TD-B-BC-MATHLIB-LOG-ERRORS-WHERE-GNU-SATURATES
 prog 'log of zero'             'scale=10\nprint l(0), "\\n"\n' -l
 

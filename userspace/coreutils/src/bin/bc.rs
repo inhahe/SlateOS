@@ -2261,8 +2261,13 @@ impl Interpreter {
         Ok(result.rescale(self.scale))
     }
 
-    /// atan(x) using Taylor series (converges for |x| <= 1).
-    /// For |x| > 1, use identity: atan(x) = pi/2 - atan(1/x).
+    /// atan(x), to the working scale.
+    ///
+    /// For |x| > 1, `atan(x) = ±pi/2 - atan(1/x)` brings the argument inside
+    /// the unit interval; [`Self::atan_reduced`] then does the real work. That
+    /// inversion is NOT enough on its own, which is the whole of
+    /// `TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE`: it maps `x = 1.0001` to
+    /// `0.9999`, which is just as slow to sum as the argument it came from.
     fn builtin_atan(&self, x: Decimal) -> Eval {
         let scale = self.working_scale();
         let one = Decimal::from_i64(1);
@@ -2271,7 +2276,7 @@ impl Interpreter {
             let pi_half = self.compute_pi(scale)?.div(&Decimal::from_i64(2), scale)?;
             // |x| > 1 is exactly the branch condition, so x is not zero.
             let inv = one.div(&x, scale)?;
-            let atan_inv = self.atan_series(&inv, scale)?;
+            let atan_inv = self.atan_reduced(&inv, scale)?;
             let result = if x.is_negative() {
                 pi_half.negate().sub(&atan_inv)
             } else {
@@ -2279,18 +2284,105 @@ impl Interpreter {
             };
             return Ok(result.rescale(self.scale));
         }
-        Ok(self.atan_series(&x, scale)?.rescale(self.scale))
+        Ok(self.atan_reduced(&x, scale)?.rescale(self.scale))
     }
 
+    /// atan(x) for |x| <= 1, by halving the argument until the series is
+    /// quick, then doubling the answer back.
+    ///
+    /// `atan(x) = 2 * atan( x / (1 + sqrt(1 + x^2)) )`, applied until |x| is
+    /// under [`Self::ATAN_REDUCE_TO`].
+    ///
+    /// # Why the plain series was wrong, and wrong in the third digit
+    ///
+    /// The Maclaurin series for arctangent is `x - x^3/3 + x^5/5 - …`, whose
+    /// terms fall off like `1/(2k+1)` when `x = 1` — it is the alternating
+    /// harmonic series there, and it converges so slowly that no practical
+    /// term count reaches even four correct digits. The old code summed a
+    /// **fixed 100 terms** and stopped, and its `is_negligible` guard could
+    /// never fire at `x = 1` because `x^2 = 1` leaves the numerator at ±1 for
+    /// ever.
+    ///
+    /// The arithmetic is exact enough to be worth stating, because it is what
+    /// identifies the cause rather than merely being consistent with it: an
+    /// alternating series truncated after N terms sits within half the first
+    /// omitted term, here `1/(2*100+1)/2 = 0.00248…`, and the measured error
+    /// was `.7853981633 - .7828982258 = .0024999`. That is the truncation, not
+    /// rounding drift and not a wrong formula.
+    ///
+    /// # Why reduction rather than more terms
+    ///
+    /// Raising the cap buys digits at a ruinous rate: the alternating harmonic
+    /// series needs about `10^d` terms for `d` digits, so even ten correct
+    /// digits is out of reach. Each halving instead costs one square root and
+    /// roughly halves the argument, so five of them take `x = 1` to about
+    /// `0.03`, where the series gains ~3 digits per term. Bounded work for
+    /// unbounded precision, which a term cap can never be.
+    fn atan_reduced(&self, x: &Decimal, outer_scale: usize) -> Eval {
+        // Guard digits of our own, on top of the caller's. Each halving is
+        // undone by a doubling at the end, so whatever error the series carries
+        // is multiplied by `2^halvings` -- about 16 -- and every reduction step
+        // truncates a division and a square root at the working scale. Ten
+        // spare digits cover both with room over; without them `a(0.6)` at
+        // `scale=30` agreed with GNU to only 17 places.
+        let scale = outer_scale.saturating_add(10);
+        let one = Decimal::from_i64(1);
+        let two = Decimal::from_i64(2);
+        let threshold = one.div(&Decimal::from_i64(Self::ATAN_REDUCE_TO), scale)?;
+
+        let mut v = x.clone();
+        let mut halvings = 0u32;
+        // The bound is a non-termination guard, not an accuracy parameter:
+        // each pass strictly shrinks |v|, and from |x| <= 1 the threshold is
+        // reached in five. A `while` with no bound would be a hang if some
+        // future `Decimal` rounding made the sequence stall.
+        while halvings < 64 && v.abs() > threshold {
+            // sqrt cannot fail here: 1 + v^2 >= 1 > 0.
+            // sqrt cannot fail here: 1 + v^2 >= 1 > 0.
+            let root = one.add(&v.mul(&v, scale)).sqrt(scale)?;
+            v = v.div(&one.add(&root), scale)?;
+            halvings = halvings.saturating_add(1);
+        }
+
+        let mut result = self.atan_series(&v, scale)?;
+        for _ in 0..halvings {
+            result = result.mul(&two, scale);
+        }
+        // Back to the caller's working scale; the extra digits were scaffolding.
+        Ok(result.rescale(outer_scale))
+    }
+
+    /// Reduce |x| below `1/ATAN_REDUCE_TO` before summing the series.
+    ///
+    /// 16 rather than something larger because the two costs pull opposite
+    /// ways: a smaller target means more square roots, a larger one means more
+    /// series terms. At 1/16 the series gains about 2.4 digits per term, which
+    /// puts even a 100-digit `scale` inside fifty terms, and `x = 1` needs
+    /// only five reductions to get there.
+    const ATAN_REDUCE_TO: i64 = 16;
+
+    /// The arctangent series itself, with no reduction: `x - x^3/3 + x^5/5 …`.
+    ///
+    /// Only correct to the working scale when |x| is comfortably below 1, so
+    /// it is private to [`Self::atan_reduced`], which is what guarantees that.
     fn atan_series(&self, x: &Decimal, scale: usize) -> Eval {
         let mut result = Decimal::zero();
         let mut term = x.clone();
         let x_sq = x.mul(x, scale);
         let neg_one = Decimal::from_i64(-1);
 
-        for i in 0..100i64 {
+        // Derived from the requested precision rather than fixed at 100. With
+        // |x| < 1/16 each term adds about 2.4 digits, so `scale` terms is
+        // ample; the `+ 64` covers small scales where the constant dominates.
+        // Accuracy comes from the `is_negligible` exit below -- this is only
+        // the guarantee that the loop ends. A FIXED cap was the bug: it made
+        // the answer depend on the argument rather than on the precision asked
+        // for, so `a(1)` was wrong in the third digit while `a(0.5)` was fine.
+        let max_terms = scale.saturating_mul(2).saturating_add(64);
+        for i in 0..max_terms {
             // 2i+1 is odd, so never zero.
-            let denom = Decimal::from_i64(i.saturating_mul(2).saturating_add(1));
+            let idx = i64::try_from(i).unwrap_or(i64::MAX);
+            let denom = Decimal::from_i64(idx.saturating_mul(2).saturating_add(1));
             let contrib = term.div(&denom, scale)?;
             result = result.add(&contrib);
             term = term.mul(&x_sq, scale).mul(&neg_one, scale);
@@ -3677,6 +3769,64 @@ mod tests {
             diagnostics("s = \"one\ntwo\"\nprint )\n"),
             ["3: syntax error"]
         );
+    }
+
+    #[test]
+    fn arctangent_is_right_where_its_series_converges_slowest() {
+        // `a(1)` is pi/4, and it is the hardest argument there is: the
+        // Maclaurin series becomes the alternating harmonic series at x = 1,
+        // and the old fixed 100-term sum stopped at `.7828982258` -- wrong in
+        // the THIRD digit, by 0.3%. Every value below was measured against GNU
+        // bc 1.07.1 and agrees with it exactly.
+        let atan = |expr: &str, scale: usize| -> String {
+            let src = format!("scale={scale}\n{expr}\n");
+            let mut interp = Interpreter::new(true);
+            let mut parser = Parser::new(&src);
+            let stmts = parser.parse_program();
+            interp.run(&stmts);
+            interp.output_buf.join("")
+        };
+
+        assert_eq!(atan("a(1)", 10), ".7853981633");
+        // Four times it is pi, which is the check a reader can do by eye.
+        assert_eq!(atan("4*a(1)", 10), "3.1415926532");
+        // Either side of 1, including the neighbourhood the |x|>1 inversion
+        // maps INTO the slow region: `a(1.0001)` becomes `a(.9999)`, which the
+        // inversion alone does not help at all.
+        assert_eq!(atan("a(0)", 10), "0");
+        assert_eq!(atan("a(0.5)", 10), ".4636476090");
+        assert_eq!(atan("a(2)", 10), "1.1071487177");
+        assert_eq!(atan("a(-1)", 10), "-.7853981633");
+        assert_eq!(atan("a(1.0001)", 10), ".7854481608");
+        assert_eq!(atan("a(100)", 10), "1.5607966601");
+        // Just over the reduction threshold of 1/16, where the argument is
+        // halved exactly once -- the boundary a fixed term count never had.
+        assert_eq!(atan("a(0.07)", 10), ".0698860016");
+        // At scale 30, where a term-capped sum could not get near. `a(0.6)`
+        // is exact to all thirty places.
+        assert_eq!(atan("a(0.6)", 30), ".540419500270584155443578364608");
+        // `a(1)` is exact to 24 and then drifts, and the ceiling is NOT this
+        // function: it is
+        // `TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES`, which
+        // caps every square root the reduction takes and predates this change.
+        // Asserted as a prefix rather than dropped, because the whole point of
+        // the fix is the digits that ARE right -- 24 of them where there were
+        // 3 -- and a test that only checked `a(1)` at scale 10 would not
+        // notice a regression back to a term-capped sum until someone asked
+        // for precision. The 24 becomes 30 when that entry closes.
+        assert!(
+            atan("a(1)", 30).starts_with(".785398163397448309615660"),
+            "a(1) at scale 30 was {}",
+            atan("a(1)", 30)
+        );
+        // The neighbours are untouched: `j` sits in the same harness row and
+        // was always right, so a change that broke it would be caught here
+        // rather than in a differential run hours later.
+        assert_eq!(atan("j(0,1)", 10), ".7651976865");
+        assert_eq!(atan("s(1)", 10), ".8414709848");
+        assert_eq!(atan("c(1)", 10), ".5403023058");
+        assert_eq!(atan("e(1)", 10), "2.7182818284");
+        assert_eq!(atan("l(2)", 10), ".6931471805");
     }
 
     #[test]

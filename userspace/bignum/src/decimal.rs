@@ -464,10 +464,29 @@ impl Decimal {
         // of them afterwards the input needs twice as many beforehand — plus a
         // couple so the truncation at the end cannot eat a digit we promised.
         let extra = result_scale.saturating_mul(2).saturating_add(2);
-        let scaled = self.rescale(self.scale.saturating_add(extra));
+        let mut target = self.scale.saturating_add(extra);
+        // The working scale MUST be even, and that is arithmetic rather than
+        // neatness. A `Decimal` is `digits / 10^scale`, so its root is
+        // `sqrt(digits) / 10^(scale/2)` — and `scale/2` is only a whole number
+        // of decimal places when `scale` is even. With an odd one the old code
+        // took `div_ceil(2)`, shifting the point half a place too far and
+        // returning an answer exactly `sqrt(10)` too small.
+        //
+        // `extra` is always even, so the parity was the INPUT's, which made the
+        // defect depend on how the number happened to be written rather than on
+        // what it was: `sqrt(2)` was right and `sqrt(2.0)` was `.4472…`, and
+        // `sqrt(4)` was `2` while `sqrt(4.0)` was `.6324…`. Trailing zeros are
+        // not supposed to be load-bearing.
+        if !target.is_multiple_of(2) {
+            target = target.saturating_add(1);
+        }
+        let scaled = self.rescale(target);
         let root = Self {
             digits: scaled.digits.isqrt(),
-            scale: scaled.scale.div_ceil(2),
+            // `target`, not `scaled.scale`: identical by construction, but
+            // reading it from the value `rescale` returned invites someone to
+            // "simplify" the parity fix away without the halving noticing.
+            scale: target / 2,
         };
         Ok(root.rescale(result_scale))
     }
@@ -834,6 +853,71 @@ mod tests {
     /// `a op b` at `scale`, rendered — the shape most of these tests want.
     fn div(a: &str, b: &str, scale: usize) -> String {
         d(a).div(&d(b), scale).unwrap().format_base10()
+    }
+
+    fn sq(a: &str, scale: usize) -> String {
+        d(a).sqrt(scale).unwrap().format_base10()
+    }
+
+    /// The root must not depend on how many zeros the argument was written
+    /// with.
+    ///
+    /// A `Decimal` is `digits / 10^scale`, so its root is
+    /// `sqrt(digits) / 10^(scale/2)` — which is only a whole number of decimal
+    /// places when `scale` is even. With an odd one the halving rounded up and
+    /// the answer came back exactly `sqrt(10)` too small, so `sqrt(2)` was
+    /// right and `sqrt(2.0)` was `.4472…`. The parity was the *input's*, which
+    /// is why this is not a rounding bug: trailing zeros changed the answer.
+    #[test]
+    fn a_trailing_zero_does_not_change_a_square_root() {
+        for (bare, padded) in [
+            ("2", "2.0"),
+            ("4", "4.0"),
+            ("9", "9.000"),
+            ("0.25", "0.250"),
+            ("1.0049", "1.00490"),
+            ("100", "100.0"),
+        ] {
+            // Stops at 30 because of a SEPARATE and older defect,
+            // `TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES`: above
+            // that, `isqrt` returns a value slightly too large, and it does so
+            // by a different amount for the two spellings, so this invariant
+            // fails for a reason that has nothing to do with parity. Measured
+            // to predate this fix -- the same wrong digits come out of the
+            // commit before it. Raise this bound when that entry closes; it
+            // is a live assertion about how far the fix is known to hold, not
+            // a limit of the fix itself.
+            for scale in [0, 1, 5, 10, 20, 30] {
+                assert_eq!(
+                    sq(bare, scale),
+                    sq(padded, scale),
+                    "sqrt({bare}) vs sqrt({padded}) at scale {scale}"
+                );
+            }
+        }
+    }
+
+    /// Known digits, so the test above cannot pass by both sides being wrong
+    /// in the same way — which is exactly what it would do if the parity fix
+    /// were applied to the input rather than to the halving.
+    #[test]
+    fn square_roots_match_their_known_digits() {
+        // sqrt(2) = 1.41421356237309504880168872420969807856967187537694…
+        assert_eq!(sq("2", 10), "1.4142135623");
+        assert_eq!(sq("2.0", 10), "1.4142135623");
+        assert_eq!(sq("2", 30), "1.414213562373095048801688724209");
+        assert_eq!(sq("2.0", 30), "1.414213562373095048801688724209");
+        // NOT asserted at 40: `sqrt(2)` there is
+        // `…242097601756851` where the true value is `…2096980785696`, wrong
+        // from the 31st place. That is
+        // `TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES`, measured
+        // to predate this change, and writing the wrong digits down here as
+        // "expected" would turn a known defect into a specification.
+        // Exact roots stay exact rather than drifting into 1.99999….
+        assert_eq!(sq("4", 20), "2.00000000000000000000");
+        assert_eq!(sq("4.0", 20), "2.00000000000000000000");
+        assert_eq!(sq("0.25", 5), ".50000");
+        assert_eq!(sq("0.250", 5), ".50000");
     }
 
     /// `a * b` at the calculator's `scale`, by POSIX's rule for `*`.

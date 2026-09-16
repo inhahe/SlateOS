@@ -225,12 +225,23 @@ def package_of(crate: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def warnings_of(name: str) -> tuple[set[str], bool]:
-    """The crate's dead-code warnings, and whether the build failed.
+def warnings_of(name: str, crate: Path) -> tuple[set[str], bool]:
+    """The crate's **own** dead-code warnings, and whether the build failed.
 
-    A set of whole warning lines rather than item names: the rule compares two
-    of these, so what matters is that the same warning text means the same
-    thing to both sides.
+    **Only this crate's files, and that distinction cost a whole sweep.**
+    `cargo check -p x` prints warnings from x's dependencies too -- but only
+    when it actually rebuilds them. A dependency already in the cache is
+    replayed silently, so the same command run twice can report different
+    warnings with no source change at all.
+
+    `apps/imageviewer` showed it: a baseline of zero, then one warning after an
+    allow was removed -- `variant SymModBelow is never constructed`, which is
+    in `gui/font`. The allow had nothing to do with it. The comparison was
+    measuring cargo's cache state.
+
+    Filtering on the `-->` line under each warning fixes it: a diagnostic
+    belongs to this crate only if it points at a file inside this crate's
+    directory.
     """
     r = subprocess.run(
         ["cargo", "check", "-p", name, "--target", TARGET],
@@ -242,7 +253,19 @@ def warnings_of(name: str) -> tuple[set[str], bool]:
     # read as a clean build; a non-zero exit is the fact that matters.
     if r.returncode != 0 or re.search(r"^error", out, re.M):
         return set(), True
-    return {ln.strip() for ln in out.splitlines() if NEVER_USED.search(ln)}, False
+    here = str(crate.resolve())
+    lines = out.splitlines()
+    mine = set()
+    for i, ln in enumerate(lines):
+        if not NEVER_USED.search(ln):
+            continue
+        # The `-->` line names the file the diagnostic is about. Without it a
+        # dependency's warning is indistinguishable from this crate's.
+        where = next((w for w in lines[i + 1: i + 4] if "-->" in w), "")
+        path = where.split("-->", 1)[-1].strip().split(":")[0]
+        if path and str((ROOT / path).resolve()).startswith(here):
+            mine.add(ln.strip())
+    return mine, False
 
 
 def check_crate(crate: Path) -> int:
@@ -267,7 +290,7 @@ def check_crate(crate: Path) -> int:
     stale: list[str] = []
     skipped = 0
     try:
-        base, broke = warnings_of(name)
+        base, broke = warnings_of(name, crate)
         if broke:
             print(f"--   {name}: does not compile as it stands; not evidence", flush=True)
             return 0
@@ -281,7 +304,7 @@ def check_crate(crate: Path) -> int:
             lines = text.splitlines(keepends=True)
             cut = "".join(lines[: lineno - 1] + lines[lineno:])
             path.write_text(cut, encoding="utf-8", newline="\n")
-            after, broke_one = warnings_of(name)
+            after, broke_one = warnings_of(name, crate)
             path.write_bytes(originals[path])
             if broke_one:
                 skipped += 1

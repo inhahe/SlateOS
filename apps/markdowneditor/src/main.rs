@@ -4418,6 +4418,27 @@ pub fn render_template_chooser(
 
 /// The full state of the markdown editor application.
 pub struct App {
+    /// The open/save dialog.
+    ///
+    /// **Both halves of this door already existed and nothing joined them.**
+    /// `App::open_file` reads a file into a new tab and `Document::save_as`
+    /// writes atomically and renames the tab; both have tests. What the
+    /// toolbar did was `ToolbarAction::OpenFile => self.new_document()` --
+    /// click Open, get a blank document -- and `ToolbarAction::SaveAs => {}`,
+    /// an empty body under the comment "Would open a save dialog in a real
+    /// app".
+    ///
+    /// The silent Save As was the dangerous one. A person who clicks it, sees
+    /// no dialog and no error, and closes the editor has been told nothing and
+    /// has every reason to believe the file was written under the new name.
+    ///
+    /// This is the shape `scripts/find-unpinned-picker-routing.py` was written
+    /// for: a control, a writer, and no routing between them. Twenty apps were
+    /// pinned against it; this one was not among them because it had no picker
+    /// at all.
+    pub picker: guitk::dialog::FilePicker,
+    /// What the last open or save did, or why it did not happen.
+    pub file_status: Option<String>,
     /// Milliseconds seen since the last whole second was handed to autosave.
     ///
     /// `tick_autosave` counts in whole seconds and `Event::Tick` arrives in
@@ -4507,6 +4528,8 @@ impl App {
         let toc = extract_toc(&text);
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            picker: guitk::dialog::FilePicker::new(),
+            file_status: None,
             tick_ms_carry: 0,
             documents: Tabs::with(doc),
             view_mode: ViewMode::Split,
@@ -4548,6 +4571,39 @@ impl App {
     }
 
     /// Create a new blank document and add it as a new tab.
+    /// Route an event to the picker, and act on a chosen path.
+    ///
+    /// Returns `true` when the picker consumed the event, so the caller stops:
+    /// an open dialog takes the keyboard, and a window that keeps typing into
+    /// the document behind one is a modal that is not modal.
+    pub fn picker_took(&mut self, event: &guitk::event::Event) -> bool {
+        // Read before `handle`: choosing a path takes the dialog down, and a
+        // flag read afterwards would be answering about a picker that is no
+        // longer up.
+        let saving = self.picker.is_saving();
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            guitk::dialog::Picked::Chose(path) => {
+                self.file_status = Some(if saving {
+                    match self.active_document_mut().save_as(&path) {
+                        Ok(()) => format!("Saved as {}", path.display()),
+                        Err(e) => format!("Could not save {}: {e}", path.display()),
+                    }
+                } else {
+                    match self.open_file(&path) {
+                        Ok(()) => format!("Opened {}", path.display()),
+                        Err(e) => format!("Could not open {}: {e}", path.display()),
+                    }
+                });
+                true
+            }
+            guitk::dialog::Picked::Handled | guitk::dialog::Picked::Cancelled => true,
+            guitk::dialog::Picked::Ignored => false,
+        }
+    }
+
     pub fn new_document(&mut self) {
         self.documents.open(Document::new());
         self.refresh_cache();
@@ -4723,15 +4779,14 @@ impl App {
         match action {
             ToolbarAction::NewFile => self.new_document(),
             ToolbarAction::OpenFile => {
-                // In a real app, this would open a file dialog.
-                // For now, we create a new document.
-                self.new_document();
+                self.picker.open_to_read();
             }
             ToolbarAction::Save => {
                 self.save_active();
             }
             ToolbarAction::SaveAs => {
-                // Would open a save dialog in a real app.
+                let name = self.active_document().name.clone();
+                self.picker.open_to_write(name);
             }
             ToolbarAction::Bold => {
                 insert_bold(self.active_document_mut());
@@ -5645,6 +5700,19 @@ impl oswindow::app::App for App {
     fn on_event(&mut self, event: &guitk::event::Event) -> oswindow::app::Response {
         use guitk::event::Event as GEvent;
         use oswindow::app::Response;
+
+        // **Before everything else.** An open dialog takes the keyboard, and a
+        // window that goes on typing into the document behind one is a modal
+        // that is not modal -- the half of this that `is_open()` tests cannot
+        // see, because the key handler is what opens the dialog.
+        //
+        // `Resize` is let through first so the picker is laid out against the
+        // size the compositor actually gave us; everything else stops here
+        // while a dialog is up.
+        if !matches!(event, GEvent::Resize { .. }) && self.picker_took(event) {
+            return Response::Redraw;
+        }
+
         match event {
             GEvent::CloseRequested => Response::Exit,
             GEvent::Resize { width, height } => {
@@ -5686,6 +5754,12 @@ impl oswindow::app::App for App {
         self.window_height = height;
         let mut tree = guitk::render::RenderTree::new();
         tree.commands = self.render_commands();
+        // Over the document, and last, so nothing is drawn on top of the
+        // dialog. A picker painted under the text it is asking about is the
+        // same defect as one that never receives an event, arriving by a
+        // different route.
+        tree.commands
+            .extend(self.picker.render(&self.palette, width, height));
         tree
     }
 }
@@ -5716,6 +5790,123 @@ mod tests {
     use scratchdir::ScratchDir;
 
     // --- Document tests ---
+
+    /// Open puts the picker up instead of quietly making a blank document.
+    ///
+    /// `ToolbarAction::OpenFile` called `self.new_document()`, under the
+    /// comment "In a real app, this would open a file dialog. For now, we
+    /// create a new document." Click Open, get a blank page -- and a tab count
+    /// that went up, so it looked like something had happened.
+    #[test]
+    fn open_puts_the_picker_up_rather_than_making_a_new_document() {
+        let mut app = App::new(1280.0, 800.0);
+        let before = app.documents.count();
+
+        app.handle_toolbar_action(&ToolbarAction::OpenFile);
+
+        assert!(app.picker.is_open(), "Open did not put a dialog up");
+        assert_eq!(
+            app.documents.count(),
+            before,
+            "Open created a document instead of asking for a file"
+        );
+    }
+
+    /// Save As puts the picker up instead of doing nothing at all.
+    ///
+    /// **This is the one with a cost attached.** `ToolbarAction::SaveAs` was
+    /// an empty body under the comment "Would open a save dialog in a real
+    /// app". No dialog, no file, no message. A person who clicks it, sees no
+    /// error and closes the editor has been told nothing and has every reason
+    /// to believe the file was written under the new name.
+    #[test]
+    fn save_as_puts_the_picker_up_rather_than_doing_nothing() {
+        let mut app = App::new(1280.0, 800.0);
+
+        app.handle_toolbar_action(&ToolbarAction::SaveAs);
+
+        assert!(app.picker.is_open(), "Save As did nothing at all");
+        assert!(
+            app.picker.is_saving(),
+            "Save As put up a dialog that would have opened a file"
+        );
+    }
+
+    /// An open dialog takes the keyboard from the document behind it.
+    ///
+    /// The other two tests pin that the toolbar *opens* the picker -- but the
+    /// toolbar handler is what opens it, so cutting the picker's event routing
+    /// entirely leaves both of them true. This is the half routing actually
+    /// decides, and it is the half `scripts/find-unpinned-picker-routing.py`
+    /// found missing in sixteen of twenty apps this morning. This app was not
+    /// among the twenty because it had no picker at all -- **a scanner that
+    /// looks for broken routing cannot see an app with no routing to break.**
+    #[test]
+    fn an_open_picker_takes_the_keyboard_from_the_document() {
+        let mut app = App::new(1280.0, 800.0);
+        app.handle_toolbar_action(&ToolbarAction::OpenFile);
+        assert!(app.picker.is_open(), "control: the picker must be up");
+        let before = app.active_document().lines.join("\n");
+
+        app.on_event(&guitk::event::Event::Key(guitk::event::KeyEvent {
+            key: guitk::event::Key::X,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::from("x"),
+        }));
+
+        assert_eq!(
+            app.active_document().lines.join("\n"),
+            before,
+            "a keystroke at the open dialog was typed into the document behind it"
+        );
+    }
+
+    /// A chosen path is written, and the tab is renamed to it.
+    ///
+    /// Through `picker_took`, which is what the event loop calls -- not
+    /// through `Document::save_as` directly. `save_as` already had a test and
+    /// already worked; what was missing was anything that reached it.
+    #[test]
+    fn a_path_chosen_in_the_save_dialog_is_written() {
+        let dir = std::env::temp_dir().join(format!(
+            "markdowneditor-saveas-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture");
+        let path = dir.join("chosen.md");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = App::new(1280.0, 800.0);
+        app.active_document_mut().lines = vec![String::from("# written through the door")];
+        // The dialog a Save As would put up, pointed at the fixture directory
+        // -- driven by a real Enter, not by a test-only hook, so the path the
+        // document is written to is the path the dialog computed.
+        app.picker.put_up(
+            guitk::dialog::FileDialog::save()
+                .with_initial_path(&dir)
+                .with_filename("chosen.md"),
+            true,
+        );
+        assert!(app.picker.is_open(), "control: the save dialog must be up");
+
+        let took = app.picker_took(&guitk::event::Event::Key(guitk::event::KeyEvent {
+            key: guitk::event::Key::Enter,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }));
+
+        assert!(took, "the picker did not consume the choice");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file the dialog named"),
+            "# written through the door"
+        );
+        assert_eq!(app.active_document().name, "chosen.md");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_document_new() {

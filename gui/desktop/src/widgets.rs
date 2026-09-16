@@ -516,17 +516,47 @@ impl Default for WidgetGridConfig {
     }
 }
 
+/// What the system-monitor widget says when it has no readings.
+///
+/// Three empty troughs with no explanation would read as "everything is at
+/// zero", which is a measurement. This says which it is.
+const NOT_MEASURED: &str = "Not measured: nothing on this system reports \
+processor, memory or disk use to the desktop.";
+
 /// The readings a widget shows that the widget layer cannot derive.
 ///
 /// Supplied by the caller each frame. Everything here is a *formatted string*
 /// rather than a number and a format, because the formatting is the part that
 /// has to agree with the rest of the desktop.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// `Eq` is gone with the three `Option<f32>` readings: a float has no total
+// equality. `PartialEq` is what the tests compare with and is enough.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveReadings {
     /// The time of day, as the taskbar clock would read it.
     pub clock_time: String,
     /// The date beneath it, in the same zone.
     pub clock_date: String,
+    /// Processor use, 0.0 to 1.0. `None` when nothing has measured it.
+    ///
+    /// **These three were constants.** The system-monitor widget drew its CPU
+    /// bar at `width * 0.45`, its memory bar at `0.62` and its disk bar at
+    /// `0.38` -- the same three figures on every desktop, every frame, for
+    /// every machine. A gauge is read at a glance and believed without
+    /// thinking, which is exactly what makes a fabricated one expensive.
+    ///
+    /// `Option`, not a default of zero: a bar at zero is a reading, and "the
+    /// processor is idle" is a different claim from "nothing measured the
+    /// processor". The widget says which.
+    ///
+    /// Nothing supplies these yet -- `gui/desktop` has no `procinfo` -- so the
+    /// widget reports that it is not measuring. The day the shell reads
+    /// `/proc/stat` and `/proc/meminfo`, filling these in is the whole of the
+    /// change, and it is a typed seam rather than a plausible number.
+    pub cpu_fraction: Option<f32>,
+    /// Memory in use, 0.0 to 1.0. `None` when nothing has measured it.
+    pub memory_fraction: Option<f32>,
+    /// Disk in use, 0.0 to 1.0. `None` when nothing has measured it.
+    pub disk_fraction: Option<f32>,
 }
 
 /// Manages all desktop widgets.
@@ -1077,88 +1107,65 @@ impl DesktopWidgetManager {
                 });
             }
             WidgetKind::SystemMonitor => {
-                // CPU bar.
                 let bar_h = 8.0;
-                commands.push(RenderCommand::Text {
-                    x,
-                    y,
-                    text: "CPU".to_string(),
-                    font_size: 10.0,
-                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                commands.push(RenderCommand::FillRect {
-                    x,
-                    y: y + 14.0,
-                    width,
-                    height: bar_h,
-                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                commands.push(RenderCommand::FillRect {
-                    x,
-                    y: y + 14.0,
-                    width: width * 0.45,
-                    height: bar_h,
-                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                // Memory bar.
-                commands.push(RenderCommand::Text {
-                    x,
-                    y: y + 32.0,
-                    text: "Memory".to_string(),
-                    font_size: 10.0,
-                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                commands.push(RenderCommand::FillRect {
-                    x,
-                    y: y + 46.0,
-                    width,
-                    height: bar_h,
-                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                commands.push(RenderCommand::FillRect {
-                    x,
-                    y: y + 46.0,
-                    width: width * 0.62,
-                    height: bar_h,
-                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                // Disk bar.
-                commands.push(RenderCommand::Text {
-                    x,
-                    y: y + 64.0,
-                    text: "Disk".to_string(),
-                    font_size: 10.0,
-                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                commands.push(RenderCommand::FillRect {
-                    x,
-                    y: y + 78.0,
-                    width,
-                    height: bar_h,
-                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                commands.push(RenderCommand::FillRect {
-                    x,
-                    y: y + 78.0,
-                    width: width * 0.38,
-                    height: bar_h,
-                    color: Color::rgba(p.peach.r, p.peach.g, p.peach.b, alpha),
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                let mut row = y;
+                let mut measured = false;
+                // Each meter keeps its own role colour. Collapsing the three
+                // into one blue was caught by `the_three_meters_never_look_alike`
+                // and `nothing_that_reports_a_measurement_follows_the_accent`,
+                // which are there because a reader tells the meters apart by
+                // colour and because a measurement must not wear the accent --
+                // the accent marks what the user CHOSE, not what was measured.
+                for (label, reading, role) in [
+                    ("CPU", live.cpu_fraction, p.blue),
+                    ("Memory", live.memory_fraction, p.green),
+                    ("Disk", live.disk_fraction, p.peach),
+                ] {
+                    commands.push(RenderCommand::Text {
+                        x,
+                        y: row,
+                        text: label.to_string(),
+                        font_size: 10.0,
+                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
+                        font_weight: FontWeightHint::Bold,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                    // The trough is drawn either way: an empty trough is the
+                    // shape of a gauge with no needle, which is what this is.
+                    commands.push(RenderCommand::FillRect {
+                        x,
+                        y: row + 14.0,
+                        width,
+                        height: bar_h,
+                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
+                        corner_radii: CornerRadii::all(4.0),
+                    });
+                    if let Some(f) = reading {
+                        measured = true;
+                        commands.push(RenderCommand::FillRect {
+                            x,
+                            y: row + 14.0,
+                            width: width * f.clamp(0.0, 1.0),
+                            height: bar_h,
+                            color: Color::rgba(role.r, role.g, role.b, alpha),
+                            corner_radii: CornerRadii::all(4.0),
+                        });
+                    }
+                    row += 32.0;
+                }
+                if !measured {
+                    commands.push(RenderCommand::Text {
+                        x,
+                        y: row,
+                        text: String::from(NOT_MEASURED),
+                        font_size: 9.0,
+                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(width),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
             }
             WidgetKind::Notes => {
                 let display = if w.state_text.is_empty() {
@@ -1364,6 +1371,13 @@ mod tests {
         LiveReadings {
             clock_time: "07:05".to_string(),
             clock_date: "Tuesday, 3 June".to_string(),
+            // Deliberately none of 0.45, 0.62 or 0.38 -- the three constants
+            // the widget used to draw. A fixture that happened to match one
+            // could not tell a reading from the fabrication it replaced, which
+            // is what this helper's own doc comment is already about.
+            cpu_fraction: Some(0.11),
+            memory_fraction: Some(0.73),
+            disk_fraction: Some(0.24),
         }
     }
     use appearance::palette_check::assert_drawn_from;
@@ -2236,6 +2250,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// With no readings, the meters are empty and the widget says why.
+    ///
+    /// **The three bars were constants**: CPU at `width * 0.45`, memory at
+    /// `0.62`, disk at `0.38`. The same three figures on every desktop, every
+    /// frame, on every machine. A gauge is read at a glance and believed
+    /// without thinking -- that is what the shape is for -- so the reader never
+    /// forms the question this test exists to answer.
+    ///
+    /// `Option`, not a default of `0.0`, and that is the point: **a bar at zero
+    /// is a reading.** "The processor is idle" is a different claim from
+    /// "nothing measured the processor". The trough is still drawn, because an
+    /// empty gauge is the honest shape of a gauge with no needle, and the line
+    /// below says which it is.
+    #[test]
+    fn with_no_readings_the_meters_are_empty_and_say_so() {
+        let p = Palette::for_mode(false);
+        let blank = LiveReadings {
+            clock_time: "07:05".to_string(),
+            clock_date: "Tuesday, 3 June".to_string(),
+            cpu_fraction: None,
+            memory_fraction: None,
+            disk_fraction: None,
+        };
+        let cmds = full_mgr().render(&p, &blank);
+        let bars = meter_rects(&cmds);
+
+        // The control: with readings there are six rects, a track and a fill
+        // for each meter. This is the same fixture minus the readings.
+        let with_readings = meter_rects(&full_mgr().render(&p, &sample_readings()));
+        assert_eq!(
+            with_readings.len(),
+            6,
+            "control: three meters should draw a track and a fill each"
+        );
+        assert_eq!(
+            bars.len(),
+            3,
+            "an unmeasured meter drew a fill: {} rect(s)",
+            bars.len()
+        );
+
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Not measured")),
+            "three empty troughs and no explanation read as everything at zero"
+        );
     }
 
     /// The three meters never look alike.

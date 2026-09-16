@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Settings — centralized system configuration UI"
 [dependencies]
+
+# The one model of which program opens which kind of file. This page reports
+# what is set; `apps/fileassoc` writes it and `apps/explorer` obeys it, and all
+# three used to spell the group name separately. See gui/associations/src/lib.rs.
+associations = { path = "../../gui/associations" }
 guitk = { path = "../../gui/toolkit" }
 # The Personalization pages edit the same preferences the desktop shell paints
 # from, so they share one model and one file rather than each keeping a copy.
@@ -50,11 +55,6 @@ compositor = { path = "../../gui/compositor" }
 # own. Cargo unifies this with the ordinary dependency when building tests,
 # so the module exists for `cargo test` and nowhere else.
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
-
-# The one model of which program opens which kind of file. This page reports
-# what is set; `apps/fileassoc` writes it and `apps/explorer` obeys it, and all
-# three used to spell the group name separately. See gui/filetypes/src/lib.rs.
-associations = { path = "../../gui/associations" }
 
 [lints]
 workspace = true

@@ -7,7 +7,7 @@ description = "SlateOS File Explorer — graphical file manager with tree view"
 
 # Which program opens which kind of file. This crate is the one that *obeys*
 # the associations, so it reads them through the shared model rather than
-# spelling the group name and key path itself. See gui/filetypes/src/lib.rs.
+# spelling the group name and key path itself. See gui/associations/src/lib.rs.
 associations = { path = "../../gui/associations" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }

@@ -1639,10 +1639,10 @@ pub fn category_from_extension(ext: &str) -> FileCategory {
 /// Used by `gui/associations` to turn "set the music player" into the set of
 /// extensions to write. See design-decisions 857.
 pub fn extensions_in(category: FileCategory) -> impl Iterator<Item = &'static str> {
-    FILE_TYPE_TABLE.iter().filter_map(move |info| {
-        (info.category == category)
-            .then(|| info.extension.strip_prefix('.').unwrap_or(info.extension))
-    })
+    FILE_TYPE_TABLE
+        .iter()
+        .filter(move |info| info.category == category)
+        .map(|info| info.extension.strip_prefix('.').unwrap_or(info.extension))
 }
 
 /// `true` if the extension is known to represent human-readable text.

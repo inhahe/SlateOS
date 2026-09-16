@@ -1281,6 +1281,36 @@ fn raw_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> Con
     let vquit = g(cc::VQUIT, 28);
     let vsusp = g(cc::VSUSP, 26);
     let sig_for = |ch: u8| -> Option<u8> {
+        // ROUND-2 DISCRIMINATOR for ctest-pty exit 45, reproducible across
+        // two boots. Round 1 instrumented the DELIVERY side
+        // (`signal_foreground_group`'s pgid==0 branch) and the print never
+        // fired, refuting the hypothesis that the signal was dropped for
+        // want of a foreground group.
+        //
+        // The byte is known to reach the input ring: ctest-pty returns 44
+        // when the master write fails and it returned 45. So the open
+        // question is whether the discipline sees it, and with ISIG on.
+        // Three answers, and the third is the absence of any line:
+        //
+        //   saw VINTR, isig=true   -> a signal WAS decided; loss is downstream
+        //   saw VINTR, isig=false  -> the slave's termios has ISIG off
+        //   no line at all         -> the byte never got here; the fault is
+        //                             the master-to-slave input path
+        //
+        // Fires only on the interrupt character, so a hot path stays quiet.
+        if ch == vintr {
+            crate::serial_println!(
+                concat!(
+                    "[tty] 
+raw_try_read
+: line discipline saw VINTR ",
+                    "(0x{:02x}) isig={} -- known-issues ",
+                    "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
+                ),
+                ch,
+                isig
+            );
+        }
         if !isig {
             return None;
         }
@@ -1425,6 +1455,36 @@ fn raw_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> Console
     let vquit = g(cc::VQUIT, 28);
     let vsusp = g(cc::VSUSP, 26);
     let sig_for = |ch: u8| -> Option<u8> {
+        // ROUND-2 DISCRIMINATOR for ctest-pty exit 45, reproducible across
+        // two boots. Round 1 instrumented the DELIVERY side
+        // (`signal_foreground_group`'s pgid==0 branch) and the print never
+        // fired, refuting the hypothesis that the signal was dropped for
+        // want of a foreground group.
+        //
+        // The byte is known to reach the input ring: ctest-pty returns 44
+        // when the master write fails and it returned 45. So the open
+        // question is whether the discipline sees it, and with ISIG on.
+        // Three answers, and the third is the absence of any line:
+        //
+        //   saw VINTR, isig=true   -> a signal WAS decided; loss is downstream
+        //   saw VINTR, isig=false  -> the slave's termios has ISIG off
+        //   no line at all         -> the byte never got here; the fault is
+        //                             the master-to-slave input path
+        //
+        // Fires only on the interrupt character, so a hot path stays quiet.
+        if ch == vintr {
+            crate::serial_println!(
+                concat!(
+                    "[tty] 
+raw_read
+: line discipline saw VINTR ",
+                    "(0x{:02x}) isig={} -- known-issues ",
+                    "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
+                ),
+                ch,
+                isig
+            );
+        }
         if !isig {
             return None;
         }

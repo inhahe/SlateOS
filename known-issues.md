@@ -152175,6 +152175,60 @@ The caller is `deliver_console_signal`, whose very next statement is `restart_re
 
 **The shape, for the record.** A silent early return that makes "nobody is listening" indistinguishable from "delivered", feeding a caller that retries on the assumption something happened. Same family as 942's rows: the verdict -- here, the restart -- survived the disappearance of its own evidence.
 
+### 2026-09-16 round 1: THE HYPOTHESIS ABOVE IS REFUTED
+
+The print fired **zero times**. `ctest-pty` returned 45 again, reproducibly, and `signal_foreground_group`'s `pgid == 0` branch was never taken. The table above committed in advance to what that means, so it is settled rather than argued: **the terminal signal is not being dropped for want of a foreground group.**
+
+Recording it here rather than deleting the section, because the reasoning was sound and the conclusion was wrong, and those are different things. It is also the reason only a print was committed: a fix would have changed behaviour on a guess and destroyed the evidence that the guess was wrong.
+
+**What round 1 narrowed, which is the useful part.** Two facts now bracket the fault:
+
+1. **The byte reaches the input ring.** `ctest-pty` returns 44 when the master write fails, and it returned 45 -- so `write(fm, "\003", 1)` returned 1.
+2. **Nothing ever decided a signal was due.** `signal_foreground_group` was not reached at all, which is upstream of delivery, not inside it.
+
+So the question is whether the line discipline SEES the byte, and with `ISIG` on when it does.
+
+**Round 2 instruments `sig_for`**, which already computes `isig` and `vintr` and is therefore the cheapest place to ask. It exists **twice** -- in `raw_try_read` (non-blocking) and `raw_read` (blocking) -- which an assertion caught before anything was written, so both are instrumented and labelled. Three outcomes, the third being the absence of any line:
+
+| next boot shows | means |
+|---|---|
+| `saw VINTR ... isig=true` | a signal WAS decided; the loss is downstream of `sig_for` |
+| `saw VINTR ... isig=false` | the slave's termios has `ISIG` off |
+| nothing | the byte never reached the discipline; the fault is the master-to-slave input path |
+
+A fourth outcome is possible and worth naming: the line appearing under `raw_read` rather than `raw_try_read` would mean the fixture is not reading the way its own header says it does.
+
+## A-CTEST-COREUTILS-RUNS-EXIT-3-WAS-A-MISSING-BINARY-NOT-A-BROKEN-ONE (lane A, 2026-09-16) — **Status: NOT A KERNEL DEFECT**
+
+**`ctest-coreutils-runs` exited 3 on its first run and it is not a finding about the kernel.** `/bin/true` is not on the image. `create-ext4-rootfs.sh` reported this during the rebuild, in plain words, and I did not read its output:
+
+```
+NOTE: none of the binaries named in scripts/rootfs-bin-manifest.txt have been
+      built, so /bin gets none of this project's own utilities. They
+      build for the HOST by default; the slateos target is separate
+NOTE: 72 name(s) in the manifest have no built binary and were skipped: ...
+```
+
+I ran the rebuild, checked `ROOTFS_RC=0` and that the *fixtures* staged, then booted a test whose entire subject is `/bin`. The information was present, timestamped, and addressed to me.
+
+**Two real defects sit underneath the mistake, though.**
+
+**The fixture cannot say which it is.** Its check is `rc != 0`, and a failed exec makes the child `_exit(127)`, so 127 arrives as 3: *could not exec* and *ran and failed* are the same code. That is the collapse lane B themselves fixed in `ctest-pty`, where 47 had stood for four causes -- their note there reads "ONE CODE PER CHILD STATUS". Reported to them; the fixture is theirs.
+
+**My diagnostic asserted the wrong subsystem.** It read *"our own ELFs do not exec, run or exit cleanly, which would explain every other ring-3 rung"* -- confident, specific, and pointing at the loader. The serial showed the fork succeeding and **no `ELF validated` line at all**, i.e. nothing was loaded. Rewritten to say it cannot distinguish the two cases and to send the reader to the rootfs log first: *a missing `/bin/true` looks exactly like a broken one.*
+
+**To actually run it:** build `userspace/coreutils` for the slateos target (`CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release`), rebuild the rootfs, re-boot.
+
+## A-PROC-KEYLAYOUT-CANNOT-BE-OPENED-FROM-RING-3 (lane A, 2026-09-16) — **Status: OPEN**, one observation
+
+`ctest-keylayout` exited **1**: cannot open `/proc/keylayout`. Checked rather than assumed -- `keylayout` IS in `procfs::ROOT_FILES` (top-level `/proc`), `generate()` serves it, `/proc` is mounted rw, and kernel-side self-tests read `/proc/version` and `/proc/sys/kernel/*` successfully in the same boot. So the failure is specific to a **ring-3 open**, not to the node's existence or the mount.
+
+Not yet diagnosed. Worth noting it is the same shape as the pty finding one layer up: a read path that works from inside the kernel and not from outside it.
+
+## A-WRITING-TO-A-PTY-MASTER-FAILS-FOR-THE-PYTHON-REPL-FIXTURE (lane A, 2026-09-16) — **Status: OPEN**, one observation
+
+`ctest-python-repl` exited **2**: writing the expression to the master failed. **This was predicted to be 3** ("no output at all", i.e. the same forkpty fault as `ctest-pty`) and the prediction was wrong -- which is the useful part, because 2 means `forkpty` SUCCEEDED and the master write failed. `ctest-pty`'s own master write returned 1 in the same boot, so two fixtures disagree about whether a master write works and the difference between them is what to look at next.
+
 ### Also from that boot, recorded here so neither is lost
 
 **`ctest-zombiewait` PASSED, exit 42, both orderings reaped.** All seven `[zw]` markers appeared, ending `ok (both orderings reaped)`. This is the first evidence on `B-FORKEXEC-BOOT-HANG` in either direction and it is a *negative*: **the hang is not reachable through plain fork-and-reap.** Both the already-a-corpse ordering and the waiter-blocked-first ordering work. That exonerates reap and wakeup and moves the search to exec, the loader, or the shell. Note the marker order differs from the rung's docstring -- `B wait` precedes `B child released` -- which is correct for waiter-first and not a defect: the docstring listed an idealised sequence, and two processes do not interleave deterministically.

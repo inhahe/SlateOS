@@ -8847,9 +8847,28 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
             Some(1) => "pipe() failed -- THIS FIXTURE'S OWN PLUMBING, not a finding",
             Some(2) => "fork() failed -- this fixture's own plumbing",
             Some(3) => {
-                "/bin/true did not exit 0. Nothing below this is interpretable: our \
-                 own ELFs do not exec, run or exit cleanly, which would explain \
-                 every other ring-3 rung and is the cheapest thing here to diagnose"
+                // DO NOT read this as a loader fault. The fixture's check is
+                // `rc != 0`, and a failed exec makes the child `_exit(127)`, so
+                // 127 arrives here as 3: `could not exec` is indistinguishable
+                // from `ran and failed`.
+                //
+                // Observed 2026-09-16, the rung's first run: the serial showed
+                // the fork succeeding and NO `ELF validated` line, so nothing
+                // was loaded -- and create-ext4-rootfs.sh had already reported,
+                // in plain words, that userspace/coreutils builds for the HOST
+                // by default, was never built for the slateos target, and that
+                // 72 manifest names were skipped as a result. The previous
+                // wording here asserted our ELFs do not exec or exit cleanly,
+                // which would have sent the next reader to the loader.
+                concat!(
+                    "/bin/true did not exit 0 -- and this code CANNOT tell ",
+                    "`could not exec` from `ran and failed`, because the ",
+                    "fixture folds the child's 127 into it. Read the ",
+                    "create-ext4-rootfs.sh log for skipped manifest names, and ",
+                    "check that userspace/coreutils was built for the slateos ",
+                    "target at all, BEFORE suspecting the loader: a missing ",
+                    "/bin/true looks exactly like a broken one."
+                )
             }
             Some(4) => {
                 "/bin/false did not exit 1 -- THE EXIT STATUS IS NOT BEING CARRIED. \

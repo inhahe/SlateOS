@@ -154444,21 +154444,49 @@ They are not stale — they are **measurements of a subject that changes between
 builds**, which is worse, because re-running the harness can flip them without
 anyone touching `logger` at all.
 
-### The proper fix
+### The proper fix — and why it is NOT "delete the applet"
 
-Keep one program and delete the other. The evidence points at keeping
-`userspace/logger`:
+The first draft of this entry said the standalone's option surface was "a
+strict superset of the applet's `-t`/`-p`, so deleting the applet loses no
+capability", and added that the claim should be confirmed behaviourally before
+acting on it. It was, the same hour, and **it is false.** Both programs were
+built to separate files and run side by side:
 
-- the rootfs script names `-p logger` explicitly, which is what someone
-  intended to ship;
-- its option surface is a strict superset of the applet's `-t`/`-p`, so
-  deleting the applet loses no capability, while deleting the crate loses
-  eleven options.
+| invocation | `coreutils` applet | standalone `logger` | util-linux reference |
+|---|---|---|---|
+| `-Q` | `logger: invalid option -- 'Q'` | `logger: unknown option '-Q'` | `logger: invalid option -- 'Q'` then `Try 'logger --help' for more information.` |
+| `-p nosuch.zz hi` | `logger: unknown priority: nosuch.zz` | `logger: unknown priority: 'nosuch.zz'` | `logger: unknown facility name: nosuch` |
+| `-t TAG hello` | `<13> 2026-09-16T11:16:03 TAG: hello` | `<13>Sep 16 11:16:04 localhost TAG: hello` | — |
+| no arguments | `<13> … user: ` (empty message, rc 0) | nothing at all (rc 0) | reads stdin |
 
-Before deleting, confirm the superset claim behaviourally rather than by
-reading the option lists — in particular the applet's `--` handling, its
-stdin path, and its exact diagnostic wording, since a differential harness may
-later be written against GNU's.
+So the surfaces cross rather than nest. The applet has **two** options and the
+*correct* unknown-option diagnostic — `invalid option -- 'Q'` is what getopt
+prints and what the reference prints. The standalone has **thirteen** options
+and gets that diagnostic wrong. Neither matches the reference on a bad
+priority, where it names the facility component (`unknown facility name:
+nosuch`) rather than echoing the whole argument, and neither prints the
+`Try 'logger --help'` line at all. The message formats differ from each other
+too: RFC3339-style with no hostname versus RFC3164 with a literal `localhost`.
+
+Deleting either therefore loses something real. The fix is a **merge**:
+
+1. keep `userspace/logger` as the surviving program — it has the eleven extra
+   options, and the rootfs script already names `-p logger`;
+2. take the applet's `invalid option -- 'X'` wording with it, and add the
+   `Try 'logger --help' for more information.` line the reference prints;
+3. correct the priority diagnostic on the survivor to name the facility, as
+   the reference does;
+4. settle the message format against the reference before deleting anything,
+   since that is the part no option list reveals;
+5. only then delete `userspace/coreutils/src/bin/logger.rs` and remove the
+   `logger` entry from `KNOWN_COLLISIONS`.
+
+**The general lesson is the one this entry nearly failed to learn.** Comparing
+two programs by their option *lists* answers "which accepts more flags", which
+is not the question "which can be deleted without loss". The lists were read
+first and gave a clean, wrong answer; running both binaries against each other
+and against the reference gave the real one, and took about a minute. A
+comparison of documentation is not a comparison of behaviour.
 
 ### TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL
 

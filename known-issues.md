@@ -84721,7 +84721,7 @@ signature and splitting them would mean editing every call site twice:
 
 ---
 
-## TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED (lane B, 2026-08-24) — **open**
+## TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED (lane B, 2026-08-24) -- **Status: FIXED** 2026-09-16
 
 **In short:** feed our `bc` a program with a mistake in it — a stray `)`, a
 character that is not part of the language, a quote that is never closed — and
@@ -84786,9 +84786,122 @@ fallback taken in a program that is actually valid — of which there should be
 none. So an implementation that is too eager shows up immediately as some
 other, currently-green harness row turning red.
 
+### Fixed 2026-09-16
+
+Done as prescribed above, with one structural difference and two corrections to
+the measurements in this entry.
+
+`Token::Illegal(u8)` now exists, the scanner counts lines in `Lexer::bump` —
+the one place the cursor ever moves, so the three separate branches that
+consume newlines cannot disagree — and `Parser` carries a `Vec<SyntaxError>`
+that `parse_primary`, `parse_stmt` and `expect` all write to. `Chunker` carries
+the running line base, so a diagnostic names its line in the *file* rather than
+in the unit.
+
+**The structural difference: a unit with an error in it does not run at all.**
+The entry proposed printing the errors and running the chunk anyway. That is
+not what GNU does, and the difference is the whole severity of this bug.
+Measured: `1; $ 2` prints *nothing* — not even the `1`, which is a finished
+statement sitting before the mistake — while `1\n$ 2\n` prints `1`, because
+there the good statement is on its own line. So the thing discarded is the
+whole unit. `Feed` grew a `Failed(Vec<SyntaxError>)` variant carrying no
+statements, which makes "a statement with a mistake in it does not run" a
+property of the type rather than a rule every caller has to remember.
+
+**Two corrections to the table above, both found by re-measuring rather than
+by reading it.** They are recorded because the table was written from a real
+run and was still wrong, which is the more useful lesson:
+
+1. `illegal character` **does** carry the `NAME LINE: ` prefix —
+   `prog.bc 1: illegal character: "`. The table shows it bare. Implementing
+   from the table would have produced a diagnostic missing its prefix on
+   exactly the two rows that have one.
+2. Rows 3 and 6 report `(standard_in) 1:` **even for a file operand**, and
+   even when the construct opens on line 4. That is not "the line the
+   construct started on" — it was checked with a 5-line file. At end of input
+   GNU's reporter reads a file handle and a line counter it has already torn
+   down, so it names neither the right file nor the right line.
+
+**Not copied, and now marked `differs_by_design` in the harness rather than
+`known_bug`:** that at-EOF misnaming, and GNU's treatment of a missing final
+newline as a syntax error. Both are GNU bugs. Filing them as known bugs would
+have put two entries in this file describing work nobody intends to do.
+
+**What is left is a different bug**, split out as
+`TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR`: `1 $ 2` gets `illegal character: $`
+but not the `syntax error` GNU also prints, because with the `$` dropped our
+grammar happily accepts `1 2` where GNU refuses it. That is a grammar gap, not
+a reporting gap, and it is the only row of the six still marked `known_bug`.
+
+**Evidence.** `scripts/bc-diff.sh` went from `129 passed, 17 known bugs` to
+`135 passed, 13 known bugs, 8 differ on purpose`, with the six rows for this
+key reported `KFIXED` in between — the harness fails on its own stale markers,
+which is how the closing of this entry was forced rather than remembered. The
+discrimination check the harness documents, `OURS=/usr/bin/bc`, turns all 13
+remaining known bugs into `KFIXED` and all 8 deliberate differences into
+`XPASS` and nothing else, so the suite can still tell agreement from
+disagreement. 91 unit tests in `bc.rs`, including a control asserting that nine
+*correct* programs produce no diagnostics at all — every other test here
+asserts that `bc` complains, and all of them would pass on a `bc` that
+complained about everything.
+
 ---
 
-## TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU (lane B, 2026-08-24) — **open**
+## TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR (lane B, 2026-09-16) — **open**
+
+**In short:** our `bc` accepts two statements written side by side with nothing
+between them. `1 2` on one line prints `1` and then `2`; GNU calls it
+`syntax error` and prints neither. Nobody writes `1 2` on purpose, so on its
+own this is harmless — it matters because it is what stops a *typo* from being
+reported. A stray character turns `1 $ 2` into `1 2` once the bad character is
+removed, and where GNU then says `syntax error`, we say nothing and compute.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, `Parser::parse_stmt` and
+`Parser::parse_program`. After a statement is parsed, `skip_terminator` is
+called but nothing *requires* that a terminator was actually there, so the
+next loop iteration simply starts a new statement wherever the last one
+stopped.
+
+**Measured**, GNU bc 1.07.1 under WSL:
+
+| Input | GNU | Ours |
+|---|---|---|
+| `1 2` | `syntax error`, no output | `1` and `2` |
+| `print 1 print 2` | `syntax error`, no output | prints both |
+| `1 $ 2` | `illegal character: $` **and** `syntax error` | `illegal character: $` only |
+| `1; 2` | prints both | prints both |
+| `1\n2` | prints both | prints both |
+
+**Why it is written up rather than fixed in the same change.** It is a
+different defect from the one that was being fixed
+(`TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED`, now closed): that one was *bc had
+nowhere to record that a mistake had happened*, this one is *bc's grammar is
+too permissive*. Fixing this needs its own measurement round, because the
+question "what may legally follow a statement with no separator" has a real
+answer that has to be established rather than guessed — `}` certainly may, and
+whether `else` and a function body's closing brace may is exactly the sort of
+thing that looks obvious and is not. Bolting a guess onto the end of the
+reporting change would have risked rejecting valid programs, which is worse
+than the bug: the current failure mode is over-acceptance of input nobody
+writes, and the failure mode of a wrong fix is refusing input people do write.
+
+**The proper fix.** Establish by measurement which tokens may follow a
+statement without a separator, then make `parse_stmt` require one and
+`record_error` otherwise. The single harness row
+`prog 'bad character' '1 $ 2\n'` turns green when it is right; the control
+`a_program_with_no_mistakes_in_it_says_nothing` in `bc.rs` is what catches a
+fix that is too eager, and should be extended with whatever the measurement
+turns up before the change is made, not after.
+
+**Severity: low.** It is a missing *second* diagnostic in a case that already
+gets a first one, and a wrong answer only for programs containing `1 2`, which
+no one writes deliberately. It is recorded because the reporting work above
+referred to it, and a reference to an entry that does not exist is how a known
+gap becomes an unknown one.
+
+---
+
+## TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU (lane B, 2026-08-24) -- **Status: FIXED** 2026-09-16
 
 **In short:** when a calculation goes wrong — dividing by zero, taking the
 square root of a negative number, calling a function that was never defined —
@@ -84833,6 +84946,57 @@ these three harness rows from `known_bug` to `xfail` with that reason.
 Do this **after** `TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED`, which builds the
 diagnostic plumbing (file name vs `(standard_in)`, line numbers) that this
 should reuse rather than duplicate.
+
+### Fixed 2026-09-16
+
+Recommendation (b) taken, and recorded as `design-decisions.md` §1025 —
+**omit a field we cannot produce honestly rather than fill it.** Output is now
+`Runtime error (func=(main)): Divide by zero`, matching GNU in everything but
+the absent `adr=`.
+
+**`adr=` is not a line number, which was measured rather than assumed.** `1/0`
+reports `adr=3` whether it is the first line of the file or the fourth, and
+`sqrt(-1)` reports `adr=4` — the offsets are into the `dc` program GNU compiles
+each *statement* into, and the counter restarts per statement. So the obvious
+substitute would have agreed with GNU by coincidence on one-line scripts and
+disagreed everywhere else, which is worse than an absent field because nothing
+in the output would say so.
+
+**`func=` is produced truthfully and matches GNU in all six cases measured**,
+including the two easy to get backwards:
+
+| Script | GNU | Ours |
+|---|---|---|
+| `1/0` | `func=(main)` | same |
+| `f(1)`, `f` undefined | `func=(main)` | same |
+| `g` faults, called from `f` | `func=g` *(innermost wins)* | same |
+| `g` undefined, called from inside `f` | `func=f` *(callee has no body to be inside of)* | same |
+| fault in `f`'s own body | `func=f` | same |
+| `g(1)` then `1/0` | `func=g` then `func=(main)` | same |
+
+That last row is why `Interpreter::run` clears `fault_fn` before **every
+statement** rather than after printing: without it the second fault inherits
+the first one's frame and blames a function it never entered. It has a test of
+its own, with a control asserting a script whose only fault *is* in `g` still
+says `g` — otherwise the assertion would pass on an implementation stuck on
+`(main)`.
+
+**The wording is capitalised, not reworded.** `DecimalError`'s text is shared
+with `dc` deliberately — its own comment says so — and GNU words these
+differently in the two programs: `bc` says `Divide by zero` and `Square root of
+a negative number`, `dc` says `divide by zero` and `square root of negative
+number`, without the `a`. The shared strings already match *bc*'s wording apart
+from the leading capital, so `bc` capitalises at its own layer and no second
+copy of the sentence exists to drift. Only `UndefinedFunction` is restated,
+because GNU's is a different sentence ending in a full stop:
+`Function f not defined.`
+
+**Evidence.** `scripts/bc-diff.sh`: known bugs 13 -> 7, differ-on-purpose 8 ->
+14, 0 differed. The three rows are now `differs_by_design` with the `adr=`
+reason rather than `known_bug`, because they describe a divergence nobody
+intends to close. The discrimination check `OURS=/usr/bin/bc` turns all 7
+remaining known bugs into `KFIXED` and all 14 deliberate differences into
+`XPASS` and nothing else. 94 unit tests in `bc.rs`, 0 failed.
 
 ---
 

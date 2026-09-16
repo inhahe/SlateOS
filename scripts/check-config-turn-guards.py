@@ -270,9 +270,18 @@ def selftest() -> int:
     return 1 if failed else 0
 
 
+# Both spellings, because the neighbouring gates disagree about which one it
+# is: `check-scratch-config.py` takes `--self-test` and this one was written
+# with `--selftest`. Accepting only one means the other spelling falls through
+# to the default action -- a real scan, which exits 0 -- so somebody who typed
+# the remembered form would be told the self-test passed when nothing had run
+# it. Caught by `check-selftest-reachability` on the push that added this file.
+SELFTEST_FLAGS = ("--selftest", "--self-test")
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
-    if "--selftest" in sys.argv:
+    if any(flag in sys.argv for flag in SELFTEST_FLAGS):
         return selftest()
 
     if selftest():

@@ -158,6 +158,19 @@ run_case -0
 run_case --null
 run_case -i
 run_case -i -0
+# `-v`/`--debug` traces each step to STDERR before doing it. Absent until
+# 2026-09-16, when `scripts/option-gap.sh` found `env -v` exiting with
+# `invalid option` -- GNU's only short option this program did not have.
+#
+# The ORDER of the lines is the point of the option: clear, then unset, then
+# assign, which is how a caller works out why `env -u FOO FOO=bar` leaves FOO
+# set. So these exercise the combinations rather than each flag alone.
+run_case -v
+run_case -v -i
+run_case -v -u ZETA
+run_case -v ALPHA=1
+run_case -v -i -u ZETA ALPHA=1 BETA=2
+run_case --debug ALPHA=1
 run_case --ignore-environment
 run_case -
 

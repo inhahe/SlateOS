@@ -8,7 +8,6 @@ diff -d
 diff -l
 diff -p
 diff -x
-env -v
 hostname -A
 hostname -a
 hostname -y

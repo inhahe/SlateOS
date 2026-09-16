@@ -2105,7 +2105,13 @@ while IFS= read -r name; do
 done < "$SLATE_MANIFEST"
 if [ "$SLATE_COUNT" -gt 0 ]; then
     SLATE_MIB=$((SLATE_BYTES / 1048576))
+    # `/bin` IN THE IMAGE, which is `/mnt/bin` once the kernel has mounted it.
+    # Saying both is not verbosity: `ctest-coreutils-runs` execed `/bin/true`,
+    # got ENOENT, and cost a boot, because this line and the manifest's name
+    # (`rootfs-bin-manifest`) are true of the image and a running process lives
+    # on the other side of the mount.
     echo "[rootfs] staged $SLATE_COUNT SlateOS-native utilities from userspace/ into /bin ($SLATE_MIB MiB)"
+    echo "[rootfs]          -- reachable at /mnt/bin/<name> once mounted, NOT /bin/<name>"
     if [ "$SLATE_SKIPPED" -gt 0 ]; then
         echo "[rootfs]          ($SLATE_SKIPPED skipped, already present -- see the NOTEs above)"
     fi

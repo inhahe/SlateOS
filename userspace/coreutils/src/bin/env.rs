@@ -109,6 +109,8 @@ struct Config {
     chdir: Option<OsString>,
     /// `-0`: NUL-terminate printed output.
     sep: Sep,
+    /// `-v`, `--debug`: trace each step to STDERR before doing it.
+    debug: bool,
     /// The command and its arguments. Empty means "print the environment".
     command: Vec<OsString>,
 }
@@ -537,6 +539,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
 fn parse_args(args: &[OsString]) -> Result<Config, Failure> {
     let mut cfg = Config {
         ignore_env: false,
+        debug: false,
         unset: Vec::new(),
         assign: Vec::new(),
         chdir: None,
@@ -578,6 +581,7 @@ fn parse_args(args: &[OsString]) -> Result<Config, Failure> {
             match item.map_err(fail)? {
                 Opt::Long("ignore-environment", _) | Opt::Short(b'i', _) => cfg.ignore_env = true,
                 Opt::Long("null", _) | Opt::Short(b'0', _) => cfg.sep = Sep::Nul,
+                Opt::Long("debug", _) | Opt::Short(b'v', _) => cfg.debug = true,
                 Opt::Long("unset", v) | Opt::Short(b'u', v) => {
                     cfg.unset.push(v.unwrap_or_default());
                 }
@@ -697,6 +701,23 @@ fn effective_env(cfg: &Config, inherited: Vec<(OsString, OsString)>) -> Vec<(OsS
 }
 
 /// Render an environment for printing, one `NAME=VALUE` per separator.
+/// One `-v` trace line, as BYTES, on stderr.
+///
+/// Bytes rather than a formatted string because the things being traced are a
+/// variable name, a value and an argv entry, and none of those is required to
+/// be UTF-8. `to_string_lossy` would put U+FFFD into a diagnostic whose entire
+/// job is to show the caller exactly what is being passed on — the one place a
+/// silent substitution is least acceptable. Self-review item 7.
+///
+/// A write failure is dropped: this is a trace, and a caller who closed stderr
+/// has said what they think of it. The program's real work must not fail
+/// because its commentary could not be delivered.
+fn trace(line: &[u8]) {
+    let mut err = io::stderr().lock();
+    let _ = err.write_all(line);
+    let _ = err.write_all(b"\n");
+}
+
 fn render(vars: &[(OsString, OsString)], sep: &Sep) -> Vec<u8> {
     let mut out = Vec::new();
     for (name, value) in vars {
@@ -775,6 +796,50 @@ fn run_main() -> ExitCode {
         }
     }
 
+    // `-v`'s trace, in the order the steps are APPLIED -- clear, then unset,
+    // then assign -- because that order is the whole point of the option: it
+    // is how a caller works out why `env -u FOO FOO=bar` leaves FOO set.
+    //
+    // To STDERR, measured: `env -v true 2>/dev/null` prints nothing. Printing
+    // it on stdout would put it in the pipeline the command under `env` is
+    // feeding, which is the one place it must never go.
+    //
+    // Printed even when there is no command; only the `executing:` block below
+    // needs one. Measured: `env -v -i` alone prints `cleaning environ` and
+    // then the (empty) environment.
+    if cfg.debug {
+        if cfg.ignore_env {
+            trace(b"cleaning environ");
+        }
+        // `-i` SUPPRESSES the unset trace entirely, which is measured and is
+        // not what the obvious reading gives. `env -v -u PATH` prints
+        // `unset:    PATH` whether or not PATH is set -- so the line is not
+        // conditional on the variable existing -- but `env -v -i -u PATH`
+        // prints no unset line at all. The clear has already emptied the
+        // environment, so there is nothing for the unset step to say.
+        //
+        // Found by `scripts/env-diff.sh`, not by reading: the combination row
+        // `-v -i -u ZETA ALPHA=1 BETA=2` differed while every single-flag row
+        // agreed. A rule that only shows itself when two options are given
+        // together is exactly what a per-flag test misses.
+        if !cfg.ignore_env {
+            for name in &cfg.unset {
+                // GNU pads these to a common column: `unset:` and four spaces,
+                // `setenv:` and three, so the names line up under each other.
+                let mut line = b"unset:    ".to_vec();
+                line.extend_from_slice(&os_bytes(name));
+                trace(&line);
+            }
+        }
+        for (name, value) in &cfg.assign {
+            let mut line = b"setenv:   ".to_vec();
+            line.extend_from_slice(&os_bytes(name));
+            line.push(b'=');
+            line.extend_from_slice(&os_bytes(value));
+            trace(&line);
+        }
+    }
+
     let vars = effective_env(&cfg, env::vars_os().collect());
 
     let Some(program) = cfg.command.first() else {
@@ -795,6 +860,23 @@ fn run_main() -> ExitCode {
         }
         return status(write_out(&render(&vars, &cfg.sep)));
     };
+
+    if cfg.debug {
+        let mut line = b"executing: ".to_vec();
+        line.extend_from_slice(&os_bytes(program));
+        trace(&line);
+        for (i, a) in cfg.command.iter().enumerate() {
+            // Curly quotes, which is what GNU uses here. Measured rather than
+            // assumed: this file already carries three different quoting
+            // styles because coreutils is not uniform about them, and
+            // `cannot change directory to '/nosuch'` a few lines below uses
+            // ASCII apostrophes while this uses U+2018/U+2019.
+            let mut arg = format!("   arg[{i}]= \u{2018}").into_bytes();
+            arg.extend_from_slice(&os_bytes(a));
+            arg.extend_from_slice("\u{2019}".as_bytes());
+            trace(&arg);
+        }
+    }
 
     let mut cmd = Command::new(program);
     cmd.args(cfg.command.get(1..).unwrap_or(&[]));

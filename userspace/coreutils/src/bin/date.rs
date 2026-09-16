@@ -84,10 +84,22 @@
 //! And beside an absolute date a weekday is **ignored** rather than checked or
 //! applied — `2021-06-15 12:00:00 Monday` is Tuesday June 15th, unchanged.
 //!
-//! Still outside: `yesterday 09:00` and `12 am`. And a signed relative
-//! straight after a bare time is refused rather than approximated, because
-//! there GNU reads the sign as a time-zone offset —
-//! `TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU`.
+//! **A day keyword with a time** (`yesterday 09:00`) and the **twelve-hour
+//! clock** (`12 am`, `1 pm`, `12:30 pm`) followed. The twelves are the only
+//! hard part: 12 am is midnight and 12 pm is noon, so the rule is not "add
+//! twelve for pm" — a version that simply adds twelve is right for ten hours
+//! in twelve and wrong at both ends of the day. `noon` and `midnight` are not
+//! keywords, which was measured rather than assumed: GNU refuses both.
+//!
+//! With that, every one of the 38 forms in the grammar probe is accepted —
+//! ours took 13 of them before 2026-09-16.
+//!
+//! The one form still refused is a signed relative straight after a bare time,
+//! because there GNU reads the sign as a time-zone offset and not as a
+//! displacement —
+//! `TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU`. It is
+//! refused rather than approximated, which is the same choice as everywhere
+//! else in this file: a visible refusal beats a plausible wrong instant.
 //!
 //! Out-of-range components are *refused*, not normalised: `date -d 2021-03-32`
 //! is an error even though the `mktime` underneath would carry it into April.
@@ -619,6 +631,52 @@ fn keyword_instant(tok: &str, zone: &Zone, now: i64) -> Option<i64> {
     )
 }
 
+/// Remove a `... am` / `... pm` time from `toks`, returning it as 24-hour.
+///
+/// Both shapes GNU takes: a bare hour (`1 pm`) and a full clock time
+/// (`12:30 pm`). Measured:
+///
+/// | operand | GNU |
+/// |---|---|
+/// | `12 am` | 00:00 |
+/// | `12 pm` | 12:00 |
+/// | `1 pm` | 13:00 |
+/// | `11 am` | 11:00 |
+/// | `12:30 pm` | 12:30 |
+///
+/// The twelves are the whole reason this is a function and not an `if`: 12 am
+/// is midnight and 12 pm is noon, so the conversion is not "add twelve for pm"
+/// — it is "12 becomes 0, then add twelve for pm". Getting that backwards
+/// gives a result that is right for ten hours in twelve.
+///
+/// `noon` and `midnight` are NOT keywords here, which was also measured:
+/// `date -d noon` is an error in GNU, so they are not accepted.
+fn take_meridiem_time(toks: &mut Vec<&str>) -> Option<(i64, i64, i64)> {
+    for i in 0..toks.len() {
+        let suffix = toks[i].to_ascii_lowercase();
+        let pm = match suffix.as_str() {
+            "am" => false,
+            "pm" => true,
+            _ => continue,
+        };
+        let prev = i.checked_sub(1).map(|p| toks[p])?;
+        // Either `H:M[:S]` or a bare hour.
+        let (h, m, s) = parse_hms(prev).or_else(|| prev.parse::<i64>().ok().map(|h| (h, 0, 0)))?;
+        if !(1..=12).contains(&h) {
+            return None;
+        }
+        let hour = match (h, pm) {
+            (12, false) => 0,
+            (12, true) => 12,
+            (_, true) => h.saturating_add(12),
+            (_, false) => h,
+        };
+        toks.drain(i.saturating_sub(1)..=i);
+        return Some((hour, m, s));
+    }
+    None
+}
+
 /// `[next|last] WEEKDAY`: which day, and whether the word forced a direction.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct WeekdayTerm {
@@ -825,6 +883,28 @@ fn take_relative_terms(toks: &mut Vec<&str>) -> Shift {
             i = i.saturating_add(1);
             continue;
         }
+        // `today` / `tomorrow` / `yesterday` as a DAY term, which is what
+        // makes `yesterday 09:00` work: the keyword moves the calendar day and
+        // the time token that follows replaces the time of day.
+        //
+        // Single-token operands never reach here -- `keyword_instant` above
+        // answers them and returns -- so this changes nothing about bare
+        // `yesterday`, which keeps the current time of day rather than going
+        // to midnight. Two spellings, two rules, and the early return is what
+        // keeps them apart.
+        if let Some(days) = match tok.to_ascii_lowercase().as_str() {
+            "today" => Some(0),
+            "tomorrow" => Some(1),
+            "yesterday" => Some(-1),
+            _ => None,
+        } {
+            terms.push(Shift {
+                days,
+                ..Shift::default()
+            });
+            i = i.saturating_add(1);
+            continue;
+        }
         // `next UNIT` / `last UNIT`.
         if (tok.eq_ignore_ascii_case("next") || tok.eq_ignore_ascii_case("last"))
             && let Some(next_tok) = toks.get(i.saturating_add(1))
@@ -981,8 +1061,12 @@ fn parse_date_spec(raw: &[u8], zone: &Zone, now: i64) -> Option<i64> {
         );
     }
 
+    // `1 pm` is taken out before the loop below, which would otherwise read
+    // the `1` as a bare number and refuse the `pm` outright.
+    let meridiem = take_meridiem_time(&mut toks);
+
     let mut ymd: Option<(i64, i64, i64)> = None;
-    let mut hms: Option<(i64, i64, i64)> = None;
+    let mut hms: Option<(i64, i64, i64)> = meridiem;
     let mut named_month: Option<i64> = None;
     let mut offset: Option<i64> = None;
     let mut bare: Vec<i64> = Vec::new();
@@ -1566,6 +1650,40 @@ mod tests {
         // is refused rather than half-read.
         assert_eq!(spec("Blursday"), None);
         assert_eq!(spec("Monday Tuesday"), None);
+    }
+
+    /// `TEST_NOW` is 2021-06-15 12:00:00 UTC; every expected instant below was
+    /// converted by GNU (`date -u -d '2021-06-14 09:00:00' +%s`).
+    #[test]
+    fn d_accepts_a_day_keyword_with_a_time_and_a_twelve_hour_clock() {
+        // A day keyword moves the calendar day and the time REPLACES the time
+        // of day. Bare `yesterday` keeps the clock instead, and still does --
+        // `keyword_instant` answers the single-token spelling before the
+        // relative extraction is ever reached.
+        assert_eq!(spec("yesterday 09:00"), Some(1_623_661_200));
+        assert_eq!(spec("tomorrow 17:30"), Some(1_623_864_600));
+        assert_eq!(spec("today 09:00"), Some(1_623_747_600));
+        assert_eq!(spec("yesterday"), Some(TEST_NOW - 86_400));
+
+        // The twelves are the whole difficulty: 12 am is MIDNIGHT and 12 pm is
+        // NOON, so the rule is not "add twelve for pm". A version that just
+        // added twelve is right for ten hours in twelve and wrong at both ends
+        // of the day.
+        assert_eq!(spec("12 am"), Some(1_623_715_200));
+        assert_eq!(spec("12 pm"), Some(1_623_758_400));
+        assert_eq!(spec("1 pm"), Some(1_623_762_000));
+        assert_eq!(spec("11 am"), Some(1_623_754_800));
+        assert_eq!(spec("12:30 pm"), Some(1_623_760_200));
+
+        // Beside a date, and the date wins for the day.
+        assert_eq!(spec("2021-06-15 3 pm"), Some(1_623_769_200));
+
+        // Controls, all refused by GNU too: an hour outside 1-12, and the
+        // words that look like they should be keywords and are not.
+        assert_eq!(spec("13 pm"), None);
+        assert_eq!(spec("0 am"), None);
+        assert_eq!(spec("noon"), None);
+        assert_eq!(spec("midnight"), None);
 
         // A bare time means TODAY at that time; an empty operand means today
         // at MIDNIGHT. Both measured, and they are different rules.

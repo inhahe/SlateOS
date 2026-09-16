@@ -135,6 +135,14 @@ run_case -s
 run_case --short
 run_case -d
 run_case --domain
+# `-y`/`--yp`/`--nis`: the NIS domain, which is a DIFFERENT name from `-d`.
+# `-d` is the DNS domain taken from the fully qualified host name; this is the
+# kernel's `domainname`, set by `setdomainname(2)` and unrelated to DNS. A host
+# can have one, both or neither and they need not agree, so both are rows and a
+# suite with only `-d` would not notice the two being confused.
+run_case -y
+run_case --yp
+run_case --nis
 run_case -f
 run_case --fqdn
 run_case --long

@@ -734,13 +734,24 @@ fn get_pid() -> u32 {
     0
 }
 
-fn format_syslog_entry(
-    opts: &Options,
-    message: &str,
-    hostname: &str,
-    tag: &str,
-    pid: u32,
-) -> String {
+/// Frame a message the way util-linux frames a LOCAL one.
+///
+/// There is no hostname field, and that is not an omission. util-linux emits
+/// one only on the network path, where RFC 3164 requires it because the
+/// receiving daemon cannot otherwise know who sent the datagram; for a local
+/// message the daemon is on the same machine and fills it in itself. Measured:
+///
+///     $ logger -s -p 0 hi
+///     <8>Sep 16 07:24:18 inhahe: hi
+///
+/// This program emitted `<8>Sep 16 07:24:18 localhost inhahe: hi` -- a field
+/// the reference does not write, whose value was the literal `localhost`
+/// whenever `/etc/hostname` was absent. `-n/--server` here is accepted and
+/// ignored, so there is no network path for the field to be right on.
+///
+/// `--json` keeps its hostname: that output is this program's own, not a
+/// syslog frame, and a log line that has left the machine benefits from it.
+fn format_syslog_entry(opts: &Options, message: &str, tag: &str, pid: u32) -> String {
     let pri = (opts.priority.0 as u32) * 8 + (opts.priority.1 as u32);
 
     let timestamp = if opts.rfc3339 {
@@ -765,10 +776,7 @@ fn format_syslog_entry(
         message
     };
 
-    format!(
-        "<{}>{} {} {}{}: {}",
-        pri, timestamp, hostname, tag, pid_part, msg
-    )
+    format!("<{pri}>{timestamp} {tag}{pid_part}: {msg}")
 }
 
 fn format_json_entry(opts: &Options, message: &str, hostname: &str, tag: &str, pid: u32) -> String {
@@ -834,7 +842,7 @@ fn log_message(opts: &Options, message: &str, hostname: &str, tag: &str, pid: u3
     let entry = if opts.json {
         format_json_entry(opts, message, hostname, tag, pid)
     } else {
-        format_syslog_entry(opts, message, hostname, tag, pid)
+        format_syslog_entry(opts, message, tag, pid)
     };
 
     write_log_entry(opts, &entry);
@@ -1175,12 +1183,16 @@ mod tests {
             message_parts: Vec::new(),
             read_stdin: false,
         };
-        let entry = format_syslog_entry(&opts, "test message", "myhost", "mytag", 1234);
+        let entry = format_syslog_entry(&opts, "test message", "mytag", 1234);
         // Priority: user(1)*8 + notice(5) = 13
         assert!(entry.starts_with("<13>"));
-        assert!(entry.contains("myhost"));
         assert!(entry.contains("mytag"));
         assert!(entry.contains("test message"));
+        // No hostname field: util-linux writes one only on the network path,
+        // and this program has none. The check is that the tag follows the
+        // timestamp DIRECTLY, which a `contains` could not tell apart from a
+        // hostname that merely happened to equal the tag.
+        assert!(entry.ends_with(" mytag: test message"), "{entry}");
     }
 
     #[test]
@@ -1199,7 +1211,7 @@ mod tests {
             message_parts: Vec::new(),
             read_stdin: false,
         };
-        let entry = format_syslog_entry(&opts, "error", "host", "daemon", 5678);
+        let entry = format_syslog_entry(&opts, "error", "daemon", 5678);
         // Priority: daemon(3)*8 + err(3) = 27
         assert!(entry.starts_with("<27>"));
         assert!(entry.contains("[5678]"));
@@ -1221,7 +1233,7 @@ mod tests {
             message_parts: Vec::new(),
             read_stdin: false,
         };
-        let entry = format_syslog_entry(&opts, "msg", "host", "tag", 1111);
+        let entry = format_syslog_entry(&opts, "msg", "tag", 1111);
         assert!(entry.contains("[9999]"));
         assert!(!entry.contains("[1111]"));
     }
@@ -1242,7 +1254,7 @@ mod tests {
             message_parts: Vec::new(),
             read_stdin: false,
         };
-        let entry = format_syslog_entry(&opts, "this is a very long message", "h", "t", 0);
+        let entry = format_syslog_entry(&opts, "this is a very long message", "t", 0);
         assert!(entry.contains("this is a "));
         assert!(!entry.contains("very long"));
     }

@@ -2798,7 +2798,16 @@ impl ExplorerState {
         let mut items: Vec<CompletionItem> = entries
             .filter_map(Result::ok)
             .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
+                // `to_str`, not `to_string_lossy`. A name that is not UTF-8
+                // would come back with U+FFFD substituted for the bytes that
+                // are not, and completing to it would produce a path that does
+                // not exist -- the bar would offer a folder and then report
+                // "No such folder" when it was chosen. Our filenames may hold
+                // any byte but `/` and NUL, and this widget is a text field
+                // that cannot represent them, so such an entry is skipped
+                // rather than mangled. Skipping loses a completion; mangling
+                // loses the user's trust in the ones that are offered.
+                let name = entry.file_name().to_str()?.to_owned();
                 if !name.starts_with(partial) {
                     return None;
                 }
@@ -5197,6 +5206,44 @@ mod tests {
             "the address bar still shows the old folder: {:?}",
             state.pathbar.current_path()
         );
+    }
+
+    /// A name the address bar cannot represent is skipped, not mangled.
+    ///
+    /// Windows-only because that is where a non-UTF-8 filename is
+    /// constructible in a test. The defect is not platform-specific:
+    /// `to_string_lossy` would offer a completion with U+FFFD where the real
+    /// bytes are, and choosing it would report "No such folder" for a folder
+    /// the user can see in the listing.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_not_offered_as_a_completion() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let scratch = temp_dir("completion_nonutf8");
+        let root = scratch.dir().to_path_buf();
+        // An unpaired surrogate: a legal Windows filename with no UTF-8 form.
+        let bad = root.join(OsString::from_wide(&[0x0041_u16, 0xD800]));
+        std::fs::create_dir(&bad).expect("the scratch directory is writable");
+        std::fs::create_dir(root.join("Alpha")).expect("writable");
+
+        let prefix = format!("{}/A", root.to_str().expect("scratch path is UTF-8"));
+        let names: Vec<String> = ExplorerState::completions_for(&prefix)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+
+        assert!(
+            names.contains(&String::from("Alpha")),
+            "the representable sibling was not offered: {names:?}"
+        );
+        for name in &names {
+            assert!(
+                !name.contains(char::REPLACEMENT_CHARACTER),
+                "offered a mangled name: {name:?}"
+            );
+        }
     }
 
     /// Completions are read off the disk, sorted, and filtered by the prefix.

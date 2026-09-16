@@ -153045,6 +153045,66 @@ exactly as the keylayout one did: exec has no `(File, EXECUTE)` gate and
 both matches are inside capability self-tests. A recent real cause distorts
 the search order.
 
+### 2026-09-16, second run: the path was fixed and it returned 11 again
+
+With `/mnt/bin/true` asked for correctly, the rung still returned **11**,
+now naming the right path. **Two independent faults had to be fixed before
+this rung could answer its question**, which is why it took two rounds:
+a wrong path, and a missing capability.
+
+The second was settled by a control in the same boot rather than by
+theory. `ctest-keylayout` holds `(File, READ)` and opened and read
+`/proc/keylayout` from ring 3 successfully. `ctest-coreutils-runs` holds
+`capabilities: &[]` and could not open `/mnt/bin/true` to exec it. Two
+arms, one boot, one difference.
+
+**This is the capability theory I reached for and dropped, and dropping it
+was still correct.** What I checked for -- a `(File, EXECUTE)` gate on
+exec -- genuinely does not exist; both matches are inside capability
+self-tests. What I missed is that **exec must OPEN the file to read its
+ELF**, and the open is what a process holding nothing cannot do. The theory
+was right, the reason for rejecting it was right, and they were about
+different steps. Granted `READ | EXECUTE` now, with the comparison written
+at the site rather than the inference.
+
+**A third case exists that the fixture's wording does not cover.** Exit 11
+says "missing from the image or not executable". Both were false here: the
+file is present at mode 0755 and the caller simply could not reach it. The
+honest third arm is *present, executable, and unreachable by this caller* --
+filed for the owning lane.
+
+## A-CTEST-KEYLAYOUT-PASSES-THE-GRANTED-ARM-OF-1074-EXISTS (lane A, 2026-09-16) — **Status: PASSED**
+
+First time this has ever run:
+
+```
+[spawn]   keyboard layout set from ring 3, confirmed through /proc/keylayout,
+          an unregistered name refused without moving the active layout, and
+          the original restored: OK
+```
+
+`SYS_KEYLAYOUT_SET` works end to end from userspace with the capability
+held. **The granted arm of the gate now exists**, which is what
+design-decisions 946 and the dispatch probe's own caveat said was missing:
+a probe that only ever gets refused cannot tell "the gate refuses
+everyone" from "the gate works". It works.
+
+Three properties the fixture proves that a weaker one would not:
+
+* it confirms through **`/proc/keylayout`**, the publisher, not through a
+  getter -- which is only possible because 1074 deliberately has none. A
+  getter would have made this the `vconsole.conf` round trip in a fixture's
+  clothes: asking the setter whether the setter worked.
+* an unregistered name is refused **and the active layout does not move**.
+  A refusal that still changed something is worse than an acceptance,
+  because nothing downstream expects it.
+* the original layout is restored and confirmed, so the rung leaves no
+  residue in state that `/proc` publishes.
+
+It also retires the withdrawn entry above by demonstration rather than by
+argument: `/proc/keylayout` is openable from ring 3, by a process that
+holds `(File, READ)`.
+
 ## A-PROC-KEYLAYOUT-CANNOT-BE-OPENED-FROM-RING-3 (lane A, 2026-09-16) — **Status: WITHDRAWN**, the fault was in my rung
 
 `ctest-keylayout` exited **1**: cannot open `/proc/keylayout`. Checked rather than assumed -- `keylayout` IS in `procfs::ROOT_FILES` (top-level `/proc`), `generate()` serves it, `/proc` is mounted rw, and kernel-side self-tests read `/proc/version` and `/proc/sys/kernel/*` successfully in the same boot. So the failure is specific to a **ring-3 open**, not to the node's existence or the mount.

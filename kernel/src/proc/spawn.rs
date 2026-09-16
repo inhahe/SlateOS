@@ -8801,13 +8801,36 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
     /// The fixture returns this only when all four ran and answered.
     const EXPECTED: i32 = 42;
 
+    // This rung held NOTHING, and that is the second of two independent
+    // faults that had to be fixed before it could answer its question. The
+    // first was the path: it asked for /bin/true when the image mounts at
+    // /mnt. With that fixed it still returned 11, and the control is in the
+    // same boot -- `ctest-keylayout`, which holds (File, READ), opened and
+    // read /proc/keylayout from ring 3 successfully, while this one, holding
+    // nothing, could not open /mnt/bin/true to exec it.
+    //
+    // Two arms, one difference. That is a measured comparison rather than the
+    // capability theory I reached for and dropped earlier: there is no
+    // (File, EXECUTE) gate on exec itself, but exec must OPEN the file to
+    // read its ELF, and the open is what a process with no capability cannot
+    // do.
+    //
+    // EXECUTE is granted alongside READ because executing is what this does,
+    // even though nothing checks it today -- so a future gate that does check
+    // it finds the grant already correct rather than this rung breaking.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ.union(Rights::EXECUTE),
+    )];
+
     let argv: &[&[u8]] = &[b"ctest-coreutils-runs"];
     let envp: &[&[u8]] = &[];
     let options = SpawnOptions {
         name: "ctest-coreutils-runs",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &caps,
         fd_map: &[],
         argv,
         envp,

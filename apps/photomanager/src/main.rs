@@ -13,7 +13,8 @@
 //! - Slideshow mode with configurable interval and transitions
 //! - Import from directory with date-based organization
 //! - Export with format/quality selection
-//! - Duplicate detection via perceptual hash
+//! - Re-import detection by path and size (NOT by image content:
+//!   nothing here decodes a picture)
 //! - Batch operations: tag, rate, move, delete
 //! - Multi-panel UI: sidebar, thumbnail grid, info panel
 //!
@@ -989,13 +990,33 @@ impl ImageAdjustments {
 /// A simple perceptual hash (average hash) for duplicate detection.
 /// In a real implementation this would operate on pixel data; here we hash the
 /// file path + size as a placeholder.
+/// An identity key for an imported file: its path and its size, hashed.
+///
+/// **This was called `ImportKey` and it is not one.** It is FNV-1a over
+/// the path string with the file size mixed in, and this program never sees a
+/// pixel -- its whole dependency list is three GUI crates, imports arrive as
+/// `(name, format, size)` tuples, and nothing decodes an image anywhere.
+///
+/// The name mattered because of what was built on it. There were `distance`
+/// and `is_similar(threshold)` methods computing Hamming distance between two
+/// of these, and a `find_similar(photo, threshold)` that returned the photos
+/// within a given distance -- presented as visual similarity. FNV avalanches:
+/// two different paths differ in about half their bits whatever the pictures
+/// look like, so that answer was noise with a plausible shape. The one test
+/// exercising it passed a threshold of 64 out of 64 bits, which accepts
+/// everything.
+///
+/// Those are deleted. What survives is what was actually being used: an
+/// exact-equality check at import time, which answers "have I already imported
+/// this exact path at this exact size" -- a real and useful question, and a
+/// different one from "is this the same picture".
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PerceptualHash {
+pub struct ImportKey {
     pub hash: u64,
 }
 
-impl PerceptualHash {
-    /// Compute a hash from file metadata (placeholder for real image hashing).
+impl ImportKey {
+    /// Hash the path and size. **Not** a function of the image's contents.
     pub fn from_metadata(path: &str, file_size: u64) -> Self {
         // Simple FNV-1a hash of the path + size
         let mut hash: u64 = 0xcbf29ce484222325;
@@ -1008,14 +1029,14 @@ impl PerceptualHash {
         Self { hash }
     }
 
-    /// Compute hamming distance between two hashes.
-    pub fn distance(&self, other: &Self) -> u32 {
-        (self.hash ^ other.hash).count_ones()
-    }
-
-    /// Check if two hashes are similar (likely duplicates).
-    pub fn is_similar(&self, other: &Self, threshold: u32) -> bool {
-        self.distance(other) <= threshold
+    /// Is this the same path at the same size?
+    ///
+    /// Exact equality, with no threshold. A threshold over a hash that is not
+    /// a function of the image would let the caller ask how *nearly* two
+    /// unrelated paths collide, which is a question with a confident answer
+    /// and no meaning.
+    pub fn same_file(&self, other: &Self) -> bool {
+        self.hash == other.hash
     }
 }
 
@@ -1072,7 +1093,7 @@ pub struct Photo {
     pub exif: ExifData,
     pub adjustments: ImageAdjustments,
     pub faces: Vec<FaceRegion>,
-    pub phash: PerceptualHash,
+    pub import_key: ImportKey,
     pub flagged: bool,
     pub hidden: bool,
 }
@@ -1101,7 +1122,7 @@ impl Photo {
             exif: ExifData::empty(),
             adjustments: ImageAdjustments::default(),
             faces: Vec::new(),
-            phash: PerceptualHash::from_metadata(path, size),
+            import_key: ImportKey::from_metadata(path, size),
             flagged: false,
             hidden: false,
         }
@@ -1690,9 +1711,10 @@ impl PhotoApp {
         let mut result = ImportResult::empty();
         for (name, format, size) in files {
             let path = format!("{dir}/{name}");
-            // Check for duplicates
-            let phash = PerceptualHash::from_metadata(&path, *size);
-            let is_dup = self.photos.iter().any(|p| p.phash.is_similar(&phash, 0));
+            // Already imported? Same path, same size -- not "same picture",
+            // which this program has no way to determine.
+            let key = ImportKey::from_metadata(&path, *size);
+            let is_dup = self.photos.iter().any(|p| p.import_key.same_file(&key));
             if is_dup {
                 result.duplicate_count = result.duplicate_count.saturating_add(1);
                 result.skipped_count = result.skipped_count.saturating_add(1);
@@ -1933,31 +1955,22 @@ impl PhotoApp {
     // Duplicate detection
     // -----------------------------------------------------------------------
 
-    /// Find duplicate groups (photos with identical perceptual hashes).
+    /// Group photos that share a path and a size.
+    ///
+    /// Not "the same picture": nothing here reads a pixel. Two copies of one
+    /// photograph under different names are two photos to this program, and
+    /// saying otherwise would need an image decoder it does not have.
     pub fn find_duplicates(&self) -> Vec<Vec<PhotoId>> {
         let mut hash_groups: HashMap<u64, Vec<PhotoId>> = HashMap::new();
         for photo in &self.photos {
             hash_groups
-                .entry(photo.phash.hash)
+                .entry(photo.import_key.hash)
                 .or_default()
                 .push(photo.id);
         }
         hash_groups
             .into_values()
             .filter(|group| group.len() > 1)
-            .collect()
-    }
-
-    /// Find photos similar to a given photo (within hamming distance threshold).
-    pub fn find_similar(&self, photo_id: PhotoId, threshold: u32) -> Vec<PhotoId> {
-        let target_hash = match self.find_photo(photo_id) {
-            Some(p) => &p.phash,
-            None => return Vec::new(),
-        };
-        self.photos
-            .iter()
-            .filter(|p| p.id != photo_id && target_hash.is_similar(&p.phash, threshold))
-            .map(|p| p.id)
             .collect()
     }
 
@@ -4064,23 +4077,21 @@ mod tests {
         assert_eq!(adj.rotation, 90);
     }
 
-    // --- PerceptualHash tests ---
+    // --- ImportKey tests ---
 
     #[test]
-    fn test_phash_same_input() {
-        let h1 = PerceptualHash::from_metadata("/photos/test.jpg", 1000);
-        let h2 = PerceptualHash::from_metadata("/photos/test.jpg", 1000);
+    fn the_same_path_and_size_give_the_same_key() {
+        let h1 = ImportKey::from_metadata("/photos/test.jpg", 1000);
+        let h2 = ImportKey::from_metadata("/photos/test.jpg", 1000);
         assert_eq!(h1.hash, h2.hash);
-        assert_eq!(h1.distance(&h2), 0);
-        assert!(h1.is_similar(&h2, 0));
+        assert!(h1.same_file(&h2));
     }
 
     #[test]
-    fn test_phash_different_input() {
-        let h1 = PerceptualHash::from_metadata("/photos/a.jpg", 1000);
-        let h2 = PerceptualHash::from_metadata("/photos/b.jpg", 2000);
+    fn a_different_path_or_size_gives_a_different_key() {
+        let h1 = ImportKey::from_metadata("/photos/a.jpg", 1000);
+        let h2 = ImportKey::from_metadata("/photos/b.jpg", 2000);
         assert_ne!(h1.hash, h2.hash);
-        assert!(h1.distance(&h2) > 0);
     }
 
     // --- Photo tests ---
@@ -4511,18 +4522,6 @@ mod tests {
         app.trash_photo(pid);
         let album = app.albums.first().unwrap();
         assert_eq!(album.photo_count(), 0);
-    }
-
-    #[test]
-    fn test_app_find_similar() {
-        let mut app = PhotoApp::new();
-        let p1 = app.import_photo("/a", "a", ImageFormat::Jpeg, 100);
-        let _p2 = app.import_photo("/b", "b", ImageFormat::Png, 200);
-
-        // p1 and p2 have very different hashes, so high threshold needed
-        let similar = app.find_similar(p1, 64);
-        // With a very high threshold, all photos might be considered similar
-        assert!(similar.len() <= 1);
     }
 
     #[test]

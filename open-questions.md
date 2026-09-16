@@ -1504,6 +1504,50 @@ command claims a schedule and nothing runs. As of today it at least *says* so
 nobody is misled, but nobody gets a scheduled backup either. Nothing else is
 blocked by this, and it does not get worse with time. Tracked as
 `known-issues.md` BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS.
+
+## C-Q22 — [C] An account set to "log in automatically" still asks for a password. How does someone get past it to a different account? — Status: OPEN (raised 2026-09-16)
+
+**In short:** you can mark an account to sign in on its own, without typing a
+password. The machine records that and then ignores it — the password box
+appears anyway. Making it work is easy; what is not decided is how anyone
+reaches a *different* account afterwards, because once a machine signs itself
+in, the screen that lets you pick a user never appears. Pick wrong and a shared
+family computer becomes a one-person computer.
+
+**Why this needs you.** Every option below is a few lines of code. The
+difference between them is what a second person has to know, or discover, to
+use the machine at all.
+
+| Option | What changes |
+|---|---|
+| **A. Hold a key while it starts** (the way most systems do it) | The machine signs itself in; holding Shift during start-up shows the chooser instead. A second person cannot find this without being told. |
+| **B. A "Sign in as someone else" button on the way past** | The chooser appears for a few seconds with the account pre-selected and a visible button; if nobody touches it, it proceeds. Everyone can see the escape, at the cost of a pause on every start. |
+| **C. Only when there is one account** | Automatic sign-in works on a single-user machine and silently turns itself off the moment a second account exists. Nobody is ever locked out, and the setting stops working for a reason the user did not do deliberately. |
+
+*What changes, in one line each:*
+- **A** — fastest start, and a second user sees no way in.
+- **B** — every start pauses about three seconds and shows a button.
+- **C** — the feature quietly stops applying when a second account is added.
+
+**My recommendation: B.** A is the familiar answer and is also the reason
+people ask how to get into a computer they can see the desktop of; the escape
+being invisible is the whole problem, not a detail of it. B costs a short pause
+and makes the way out obvious to somebody who has never used the machine. C is
+safe but surprising — a setting that turns itself off is hard to tell from one
+that is broken, which is the shape of defect this project keeps finding.
+
+**A second, smaller answer this needs.** When the machine is being *recovered*
+— started for repair rather than for use — should automatic sign-in be skipped?
+Recommend **yes** for every option: recovery is when you most need to choose a
+different account, and the password is the only thing standing between a
+stolen laptop and its contents.
+
+**If this is never answered:** nothing breaks and nothing gets worse. An
+account marked for automatic sign-in keeps asking for a password, which is the
+safe direction to fail. As of today the module no longer *claims* the feature —
+its own documentation said it had autologin while doing nothing — so the only
+cost is a setting that does not do what its name says. `design-decisions.md`
+824 records why it was left undecided.
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS

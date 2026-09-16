@@ -1,10 +1,27 @@
 //! Login screen (greeter) for the desktop shell.
 //!
 //! Renders a full-screen login UI before the desktop session starts.
-//! Features: user avatar list, password entry, autologin, login background
-//! image (can match desktop wallpaper), keyboard layout indicator,
-//! accessibility options, power options (shutdown/reboot/sleep), and
-//! on-screen keyboard toggle.
+//! Features: user avatar list, password entry, login background image (can
+//! match desktop wallpaper), keyboard layout indicator, accessibility options,
+//! power options (shutdown/reboot/sleep), and on-screen keyboard toggle.
+//!
+//! # Autologin is modelled here but does *not* happen
+//!
+//! This list said "autologin" until 2026-09-16, and it was not true. The field
+//! exists on [`LoginUser`], [`LoginScreen::autologin_user`] finds the account
+//! marked for it, and nothing acts on either: an account set to log in
+//! automatically still gets a password prompt. The finder is called by this
+//! file's own tests and by nothing else in the tree.
+//!
+//! It is left modelled rather than deleted because the missing part is a
+//! decision, not code. Skipping the prompt needs two answers that are
+//! user-visible policy: how someone *escapes* an autologin to reach a
+//! different account, and how the machine behaves when it is being recovered.
+//! See design-decisions 824 and open-questions C-Q22.
+//!
+//! A feature list is a claim like any other. Naming autologin here made the
+//! shell appear to support something a reader could not get, and a doc comment
+//! is the one place such a claim is never caught by a test.
 
 use appearance::Palette;
 use appearance::Surface;

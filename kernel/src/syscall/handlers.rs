@@ -5724,6 +5724,24 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
     // the case that would explain the hang, which is NOT ONE send succeeding.
     // A tolerated per-item failure hides a total failure, and a discarded
     // Result reports both as silence.
+    // ROUND-8. Rounds 3 and 4 established that a signal is decided and that
+    // delivery SUCCEEDS -- and the ctest-pty trace shows the child never got
+    // it. Both are consistent: `delivered > 0` only says somebody received
+    // it, not that the right group did. The pty child is its own group leader
+    // (login_tty/setsid), and the serial shows its group is 205 while the
+    // parent gave up and exited BEFORE any SIGINT arrived.
+    //
+    // So the target is the thing to print, not the count. Terminal signals are
+    // rare, so this is quiet.
+    let members = pcb::pids_in_group(pgid);
+    crate::serial_println!(
+        "[tty] signal {} -> fg pgid {} on tty {:?}: {} member(s) {:?}",
+        sig,
+        pgid,
+        tty,
+        members.len(),
+        members
+    );
     let mut delivered = 0usize;
     let mut failed = 0usize;
     for target in pcb::pids_in_group(pgid) {

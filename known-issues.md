@@ -153124,6 +153124,53 @@ classification sites and produced a zero I nearly called decisive. And a
 probe that reports *entry* as well as failure is what turned round 5's
 silence from ambiguous into informative.
 
+### 2026-09-16 round 7: the trampoline IS set up — and I over-read it
+
+The probe fired **56 times**, including once for pid 205, which is
+`ctest-pty`'s forkpty child. I read that as *the child got the signal, ran
+its handler, and exited*, and said so. **That was wrong, and two more lines
+of context showed it:**
+
+```
+3328  [thread] Process 204 has no threads left — now zombie   <- THE PARENT, FIRST
+3329  [pty] master closed: SIGHUP+SIGCONT to group 205
+3330  [signal] Process 205 continued
+3332  [sig] trampoline SET UP for pid Some(205)
+3333  [thread] Process 205 has no threads left — now zombie
+```
+
+The **parent gives up and exits first**. The master fd then closes *because*
+the parent died, which sends `SIGHUP+SIGCONT` to group 205 — so the
+trampoline is **SIGHUP's, post-mortem**. The child never received the `^C`.
+
+The mistake is the one this whole investigation is about: I had a line that
+fitted the hypothesis and stopped, instead of asking what *else* produces
+that line. The answer was three lines above it. A probe that fires for any
+signal cannot tell you *which* signal fired it, and I did not make it say.
+
+**What rounds 3 and 4 actually established, restated.** Neither was wrong;
+both were weaker than I read them.
+
+| round | what it proved | what I read it as |
+|---|---|---|
+| 3 | a `SIGINT` was **decided** by the discipline | (correct) |
+| 4 | **somebody** received a delivery | the child received it |
+| 7 | a trampoline was set up for pid 205 | the SIGINT handler ran |
+
+`delivered > 0` says a send succeeded, not that the **right group** got it.
+The pty child is its own group leader (`login_tty`/`setsid`), so its group is
+205 — and a terminal signal delivered to a stale or otherwise wrong
+foreground pgid succeeds, counts as success, and reaches nobody who cares.
+**A count told me the send worked and could not tell me who it reached.**
+That is the corpus problem in 942 applied to a destination rather than to a
+population.
+
+**Round 8 prints the target instead of counting it**: the foreground pgid,
+the member count, and the member pids, on every terminal-signal delivery.
+Terminal signals are rare, so it stays quiet. If the pgid is not 205, that is
+the bug and it has been hiding behind three successful-looking measurements.
+
+
 
 ## A-CTEST-KEYLAYOUT-PASSES-THE-GRANTED-ARM-OF-1074-EXISTS (lane A, 2026-09-16) — **Status: PASSED**
 

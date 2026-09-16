@@ -234,6 +234,8 @@ pub fn dispatch(
     match member {
         "CreateSession" => create_session(daemon, payload, caller),
         "ListSessions" => list_sessions(daemon, caller),
+        "ListUsers" => list_users(daemon, caller),
+        "ListSeats" => list_seats(daemon, caller),
         "GetSession" => one_arg(payload, |id| get_session(daemon, id, caller)),
         "LockSession" => one_arg(payload, |id| lock_session(daemon, id, caller)),
         "UnlockSession" => one_arg(payload, |id| unlock_session(daemon, id, caller)),
@@ -386,6 +388,52 @@ fn list_inhibitors(daemon: &Daemon, caller: Option<Credentials>) -> Reply {
         .collect();
     // Sorted for `ListSessions`' reason: an answer that reshuffles between
     // identical calls is one nobody can diff.
+    lines.sort();
+    let refs: Vec<&[u8]> = lines.iter().map(|l| l.as_bytes()).collect();
+    Reply::Return(fields::encode(&refs))
+}
+
+/// `ListUsers() -> [line, …]`
+///
+/// Root sees every user; anyone else sees themselves. The same rule as
+/// [`list_sessions`], for the same reason: who else is logged in is a fact
+/// about them.
+fn list_users(daemon: &Daemon, caller: Option<Credentials>) -> Reply {
+    let Some(caller) = caller else {
+        return Reply::Error(ERR_UNKNOWN_CALLER);
+    };
+    let mut lines: Vec<String> = daemon
+        .users
+        .values()
+        .filter(|u| caller.is_root() || u.uid == caller.uid)
+        .map(crate::User::format_list_line)
+        .collect();
+    lines.sort();
+    let refs: Vec<&[u8]> = lines.iter().map(|l| l.as_bytes()).collect();
+    Reply::Return(fields::encode(&refs))
+}
+
+/// `ListSeats() -> [line, …]`
+///
+/// Every caller sees every seat, and that is a decision rather than an
+/// omission. A seat is a set of hardware -- a screen, a keyboard, a mouse --
+/// and not something a user owns; `Seat` has no uid to filter on because
+/// there is nothing there to be private. Filtering by "seats my sessions are
+/// on" would hide the second seat of a two-seat machine from a user sitting
+/// at the first, which tells them the hardware does not exist.
+///
+/// A caller must still be identified. Not because the answer is sensitive but
+/// because an unidentified peer is one we know nothing about, which is this
+/// module's rule everywhere else and not worth an exception for one method.
+fn list_seats(daemon: &Daemon, caller: Option<Credentials>) -> Reply {
+    if caller.is_none() {
+        return Reply::Error(ERR_UNKNOWN_CALLER);
+    }
+    let mut lines: Vec<String> = daemon
+        .seats
+        .values()
+        .map(crate::Seat::format_list_line)
+        .collect();
     lines.sort();
     let refs: Vec<&[u8]> = lines.iter().map(|l| l.as_bytes()).collect();
     Reply::Return(fields::encode(&refs))
@@ -969,6 +1017,78 @@ mod tests {
             String::from_utf8_lossy(mine[0]).contains("1000"),
             "the one line should be alice's: {:?}",
             String::from_utf8_lossy(mine[0])
+        );
+    }
+
+    // -- ListUsers / ListSeats --------------------------------------------
+
+    /// Root sees every user; anyone else sees themselves.
+    ///
+    /// The control is the second half: a non-root caller must see their OWN
+    /// entry, not nothing. A filter that dropped everything would pass a test
+    /// that only checked root's view, and would look exactly like a machine
+    /// where nobody else is logged in -- which is the answer `list-users`
+    /// used to give for every caller.
+    #[test]
+    fn listing_users_shows_root_everyone_and_others_themselves() {
+        let (mut d, _alice, _bob) = two_user_daemon();
+
+        let Reply::Return(all) = call(&mut d, "ListUsers", &[], Some(creds(0))) else {
+            panic!("root listing errored");
+        };
+        assert_eq!(
+            fields::decode(&all).map(|v| v.len()),
+            Some(2),
+            "root sees both"
+        );
+
+        let Reply::Return(mine) = call(&mut d, "ListUsers", &[], Some(creds(1000))) else {
+            panic!("alice listing errored");
+        };
+        let mine = fields::decode(&mine).expect("decodes");
+        assert_eq!(mine.len(), 1, "alice sees herself and not bob");
+        assert!(
+            String::from_utf8_lossy(mine[0]).contains("1000"),
+            "the one line should be alice's: {:?}",
+            String::from_utf8_lossy(mine[0])
+        );
+
+        assert_eq!(
+            call(&mut d, "ListUsers", &[], None),
+            Reply::Error(ERR_UNKNOWN_CALLER)
+        );
+    }
+
+    /// Every identified caller sees every seat.
+    ///
+    /// Deliberately unlike `ListUsers` and `ListSessions`. A seat is hardware
+    /// -- a screen, a keyboard, a mouse -- and `Seat` has no uid because there
+    /// is nothing there to be private. Filtering by "seats my sessions are on"
+    /// would hide the second seat of a two-seat machine from a user sitting at
+    /// the first, which tells them the hardware does not exist.
+    ///
+    /// The caller must still be identified, which is the second assertion: an
+    /// unidentified peer is one we know nothing about, and that rule does not
+    /// get an exception for one method just because its answer is dull.
+    #[test]
+    fn listing_seats_shows_everyone_every_seat() {
+        let (mut d, _alice, _bob) = two_user_daemon();
+
+        let Reply::Return(as_root) = call(&mut d, "ListSeats", &[], Some(creds(0))) else {
+            panic!("root listing errored");
+        };
+        let Reply::Return(as_user) = call(&mut d, "ListSeats", &[], Some(creds(1000))) else {
+            panic!("alice listing errored");
+        };
+        assert_eq!(as_root, as_user, "a seat is not a private fact");
+        assert!(
+            fields::decode(&as_root).is_some_and(|v| !v.is_empty()),
+            "the fixture has seat0, so an empty answer would make the test vacuous"
+        );
+
+        assert_eq!(
+            call(&mut d, "ListSeats", &[], None),
+            Reply::Error(ERR_UNKNOWN_CALLER)
         );
     }
 

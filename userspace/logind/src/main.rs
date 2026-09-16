@@ -2062,17 +2062,23 @@ fn parse_loginctl_args(args: &[String]) -> LoginctlCommand {
 /// `Session::format_list_line`'s output already rendered, and re-parsing it
 /// into a struct here so it could be re-rendered would be two formats to keep
 /// in step for no gain.
-fn print_session_list(out: &mut impl Write, lines: &[String]) {
-    let _ = writeln!(
-        out,
-        "{:<8} {:<6} {:<16} {:<12} TTY",
-        "SESSION", "UID", "USER", "SEAT"
-    );
+fn print_listing(out: &mut impl Write, header: &str, lines: &[String], noun: &str) {
+    let _ = writeln!(out, "{header}");
     for line in lines {
         let _ = writeln!(out, "{line}");
     }
-    let _ = writeln!(out, "\n{} sessions listed.", lines.len());
+    let _ = writeln!(out, "\n{} {noun} listed.", lines.len());
 }
+
+/// The header for each listing, in one place.
+///
+/// Three copies of "header, rows, count" differed only in these strings, and
+/// each was a chance for the count to stop matching the rows it counted.
+/// `ListSessions` and its two siblings return `format_list_line`'s output
+/// already rendered, so the header is the only part the client owns.
+const SESSION_HEADER: &str = "SESSION  UID    USER             SEAT         TTY";
+const USER_HEADER: &str = "UID      USER             STATE";
+const SEAT_HEADER: &str = "SEAT";
 
 /// Render a `system.logind.Error.*` name as a sentence.
 ///
@@ -2211,6 +2217,35 @@ fn session_command_via_bus(member: &str, id: &str, past_tense: &str) -> i32 {
     }
 }
 
+/// One listing command, asking the daemon.
+///
+/// `list-sessions`, `list-users` and `list-seats` differ in a method name, a
+/// header and a noun. They used to differ in three copies of the same loop
+/// over a local `Daemon` with nothing in it, so each printed its header, no
+/// rows, "0 listed." and exited 0 -- three separate assertions that the
+/// machine was empty, made without asking it.
+fn listing_via_bus(member: &str, header: &str, noun: &str) -> i32 {
+    let fields = match call_logind(member, &[]) {
+        Ok(f) => f,
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: {why}");
+            return 1;
+        }
+    };
+    // Lossy is right for a listing about to be printed and wrong for a path:
+    // these lines are logind's rendering of its own ids and names, so a byte
+    // that is not text means the daemon is not the one this build expects --
+    // and a replacement character says so where a dropped line would not.
+    let lines: Vec<String> = fields
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .collect();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    print_listing(&mut out, header, &lines, noun);
+    0
+}
+
 /// `loginctl list-sessions`, asking the daemon.
 ///
 /// # Why this does not go through `run_loginctl_command`
@@ -2226,26 +2261,7 @@ fn session_command_via_bus(member: &str, id: &str, past_tense: &str) -> i32 {
 /// opposite in meaning, and the previous behaviour picked the wrong one
 /// silently. Exiting non-zero is what lets a script tell them apart.
 fn list_sessions_via_bus() -> i32 {
-    let fields = match call_logind("ListSessions", &[]) {
-        Ok(f) => f,
-        Err(why) => {
-            let _ = writeln!(io::stderr(), "loginctl: {why}");
-            return 1;
-        }
-    };
-    // Lossy is wrong for a path and right for a listing that is about to be
-    // printed: these lines are logind's own rendering of its own ids, uids and
-    // user names, so a byte that is not text means the daemon is not the one
-    // this build expects -- and showing the replacement character says so
-    // where discarding the line would not.
-    let lines: Vec<String> = fields
-        .iter()
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .collect();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    print_session_list(&mut out, &lines);
-    0
+    listing_via_bus("ListSessions", SESSION_HEADER, "sessions")
 }
 
 /// Execute a loginctl command.
@@ -2279,12 +2295,12 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
         LoginctlCommand::ListSessions => {
             // Reached only by the tests, which use it to check the FORMATTING
             // against a daemon they populated themselves. The real command
-            // goes through `list_sessions_via_bus` in `run_loginctl`, because
-            // the `daemon` here is a local object with nothing in it.
+            // goes through `listing_via_bus` in `run_loginctl`, because the
+            // `daemon` here is a local object with nothing in it.
             let mut sessions: Vec<&Session> = daemon.sessions.values().collect();
             sessions.sort_by(|a, b| a.id.cmp(&b.id));
             let lines: Vec<String> = sessions.iter().map(|s| s.format_list_line()).collect();
-            print_session_list(&mut out, &lines);
+            print_listing(&mut out, SESSION_HEADER, &lines, "sessions");
             0
         }
         LoginctlCommand::ListUsers => {
@@ -2610,7 +2626,11 @@ fn run_loginctl(args: &[String]) -> i32 {
     // it looked in the empty local `Daemon` -- a wrong answer that read as a
     // right one.
     match &cmd {
-        LoginctlCommand::ListSessions => return list_sessions_via_bus(),
+        LoginctlCommand::ListSessions => {
+            return listing_via_bus("ListSessions", SESSION_HEADER, "sessions");
+        }
+        LoginctlCommand::ListUsers => return listing_via_bus("ListUsers", USER_HEADER, "users"),
+        LoginctlCommand::ListSeats => return listing_via_bus("ListSeats", SEAT_HEADER, "seats"),
         LoginctlCommand::KillSession(id, sig) => return kill_session_via_bus(id, *sig),
         LoginctlCommand::LockSession(id) => {
             return session_command_via_bus("LockSession", id, "locked");
@@ -4246,13 +4266,18 @@ HandleSuspendKey=ignore
     #[test]
     fn the_session_footer_counts_the_lines_it_printed() {
         let mut buf = Vec::new();
-        print_session_list(&mut buf, &["a".to_string(), "b".to_string()]);
+        print_listing(
+            &mut buf,
+            SESSION_HEADER,
+            &["a".to_string(), "b".to_string()],
+            "sessions",
+        );
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("2 sessions listed."), "{s}");
         assert!(s.contains("SESSION"), "header missing: {s}");
 
         let mut empty = Vec::new();
-        print_session_list(&mut empty, &[]);
+        print_listing(&mut empty, SESSION_HEADER, &[], "sessions");
         assert!(
             String::from_utf8(empty)
                 .unwrap()

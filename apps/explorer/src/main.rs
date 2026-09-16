@@ -7146,9 +7146,23 @@ mod tests {
         );
     }
 
-    /// A directory has no meaningful byte count, so its Size cell stays blank
-    /// — which is what the hand-written view did, and what every file manager
-    /// does.
+    /// A directory's Size cell is blank today, and the spec says it should not
+    /// be.
+    ///
+    /// This said "what every file manager does", which is true and is the
+    /// reasoning `roadmap-detailed.md` §4.1 explicitly considered and
+    /// rejected: *"Most file managers leave this blank because computing it on
+    /// every directory listing is expensive; we cache instead."* The intended
+    /// behaviour is a recursive total of the contents, served from the
+    /// directory-size cache.
+    ///
+    /// The cache is not buildable yet -- its invalidation rides on the
+    /// filesystem change-notification stream, which does not exist, and its
+    /// shrinking on the kernel shrinker. Both are lane A's. So the blank cell
+    /// stays, and this test pins it; what changed is that the reason is now
+    /// "the cache it needs is not built" rather than "this is what everyone
+    /// does", because the second reads as a decision that has been made.
+    /// See known-issues TD-C-THE-SIZE-CELL-AGREES-WITH-CONVENTION-AND-NOT-WITH-THE-SPEC.
     #[test]
     fn a_folder_row_leaves_the_size_cell_blank() {
         let root_scratch = temp_dir("cols_dir_size");

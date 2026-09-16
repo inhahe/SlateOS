@@ -1,0 +1,43 @@
+apps/procexplorer: Kill, Pause and Resume send a signal
+
+libcall::kill landed, so the three controls that have been reporting
+that nothing here can signal a process now send SIGKILL, SIGSTOP and
+SIGCONT and report what the kernel said.
+
+**The row is still not touched.** These controls used to report the act
+and then make the report come true in the display -- the process
+vanished from the list exactly as it would have if it had died, so
+nothing inside the program could tell the user otherwise. Now that a
+real signal is sent the temptation is stronger and the rule is the same:
+a signal that was accepted is not a process that has exited. SIGTERM is
+catchable, and even SIGKILL leaves the task visible until it is reaped.
+The list is rebuilt from /proc and shows the kernel's answer, not ours.
+Ok reports "Sent kill to X (PID n)" and never "Killed X".
+
+ESRCH and EPERM get their own messages. They are the two most useful
+things the kernel can say -- it is already gone, you are not allowed --
+and the operator's next action differs completely between them. A
+manager that folds them into one "could not signal" throws away the only
+actionable part of the answer.
+
+The right-click menu goes through the same function rather than a second
+copy. When these were repaired the first time only the toolbar was, and
+the menu two lines away went on claiming a kill for an hour until a
+scanner noticed. the_toolbar_and_the_menu_give_the_same_answer is the
+pin that makes repairing one alone impossible.
+
+The mapping is tested through signal_outcome rather than a real kill: on
+this host the signalling arm is cfg(unix) and every call answers ENOSYS,
+so a test going through send would exercise one branch and report
+coverage of a mapping it had never run.
+
+send uses i32::try_from rather than as: a u32 above i32::MAX wraps to a
+negative, which libcall::kill refuses as a broadcast -- so the failure
+would be reported correctly by luck rather than by intent.
+
+Five sabotages, all caught. One test bug found by its own control: the
+list is sorted, so selected_index 0 is not processes[0], and the first
+version compared the toolbar's answer about editor with the menu's about
+init.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

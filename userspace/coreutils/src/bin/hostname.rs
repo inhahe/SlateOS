@@ -55,6 +55,13 @@ const PROC_HOSTNAME: &str = "/proc/sys/kernel/hostname";
 /// Persistent host name, read at boot. Written by us and by `dhcpcd`.
 const ETC_HOSTNAME: &str = "/etc/hostname";
 
+/// Where the kernel keeps the NIS/YP domain name.
+///
+/// The sibling of `PROC_HOSTNAME`, and read the same way for the same reason:
+/// `getdomainname(2)` and this file are two views of one value, and reading
+/// the file keeps `hostname` free of a syscall it needs nowhere else.
+const PROC_DOMAINNAME: &str = "/proc/sys/kernel/domainname";
+
 /// Resolver configuration, the source of the domain part for `-f` and `-d`.
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 
@@ -85,6 +92,14 @@ enum Query {
     Ip,
     /// Addresses on every interface.
     AllIp,
+    /// `-y`, `--yp`, `--nis`: the NIS/YP domain name.
+    ///
+    /// A DIFFERENT name from [`Query::Domain`], which is the DNS domain taken
+    /// from the fully qualified host name. This one is the kernel's
+    /// `domainname`, set by `setdomainname(2)` and unrelated to DNS -- a host
+    /// can have one, both or neither, and they need not agree. Measured:
+    /// `hostname -y` answers exactly what `/proc/sys/kernel/domainname` holds.
+    NisDomain,
 }
 
 /// What the command line asked for.
@@ -215,6 +230,7 @@ fn parse_long(
         b"short" => *query = Some(Query::Short),
         b"fqdn" | b"long" => *query = Some(Query::Fqdn),
         b"domain" => *query = Some(Query::Domain),
+        b"yp" | b"nis" => *query = Some(Query::NisDomain),
         b"ip-address" => *query = Some(Query::Ip),
         b"all-ip-addresses" => *query = Some(Query::AllIp),
         b"boot" => *boot = true,
@@ -256,6 +272,7 @@ fn parse_shorts(
             b's' => *query = Some(Query::Short),
             b'f' => *query = Some(Query::Fqdn),
             b'd' => *query = Some(Query::Domain),
+            b'y' => *query = Some(Query::NisDomain),
             b'i' => *query = Some(Query::Ip),
             b'I' => *query = Some(Query::AllIp),
             b'b' => *boot = true,
@@ -680,6 +697,16 @@ fn show(query: &Query) -> Result<u8, String> {
             let name = read_hostname()?;
             Ok(write_line(&domain_of(&name, read_domain().as_deref())))
         }
+        // An unset NIS domain reads as the literal `(none)` on Linux, and GNU
+        // prints it unchanged rather than treating it as absent -- so this
+        // does not special-case it either. A missing file is a different
+        // thing from a file saying `(none)`, and only the first is an error.
+        Query::NisDomain => match read_trimmed(PROC_DOMAINNAME) {
+            Some(d) => Ok(write_line(&d)),
+            None => Err(format!(
+                "cannot determine the NIS domain name: {PROC_DOMAINNAME} could not be read"
+            )),
+        },
     }
 }
 

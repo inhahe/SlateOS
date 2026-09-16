@@ -9,7 +9,6 @@ diff -p
 diff -x
 hostname -A
 hostname -a
-hostname -y
 logger -P
 logger -S
 logger -T

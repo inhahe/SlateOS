@@ -153073,6 +153073,58 @@ file is present at mode 0755 and the caller simply could not reach it. The
 honest third arm is *present, executable, and unreachable by this caller* --
 filed for the owning lane.
 
+### 2026-09-16 RESOLVED: libc's `execl` passes a NULL path
+
+Six rounds, and the answer came from the first thing I should have done:
+asking the kernel what errno it returned.
+
+```
+[exec] linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14
+```
+
+`frame.arg0` is `execve`'s filename pointer and it is **0x0**; errno 14 is
+`EFAULT`. The kernel is correct -- `read_user_cstr(0)` must fail -- and it
+fails *before* `linux_exec_common`, which is why round 5's probe wrapped
+around that function never fired at all. That silence was the clue: it
+meant the failure was upstream, not that nothing failed.
+
+**The discriminator is in the same boot.** `fastpy-run` (pid 212) and pid
+214 exec'd successfully -- `ELF validated for exec`, entry `0x29c1cc` --
+using the vector form. `ctest-coreutils-runs` uses `execl`, the list form,
+and lost its first argument. Same kernel, same boot, same image. `cat` (pid
+211) is created fine through the kernel spawn path, so the binaries are
+sound.
+
+So **"staged is not run" was never a question about the Rust userland.** The
+image is right, the binaries are right at mode 0755, the kernel execs
+correctly. No C program on this system can exec by the list form --
+`execl("/bin/sh", "sh", "-c", cmd, NULL)`, which is what most real code
+writes. Filed for lane B, whose `posix/` owns it.
+
+**The three theories that were wrong, and why they were expensive.**
+
+| theory | disproved by | cost |
+|---|---|---|
+| not staged in the image | `debugfs`: inode 108, mode 0755 | one boot |
+| wrong path | real, and fixed to `/mnt/bin` -- still failed | one boot |
+| caller holds no capability | granted `(File, READ\|EXECUTE)` -- still failed | one boot |
+
+Each was plausible and each was a guess wearing a diagnosis. The fixture
+could only ever report *that* exec failed; **the errno existed in the kernel
+the whole time and nothing printed it.** The lesson is not that the theories
+were bad -- the second was even true, and had to be fixed -- but that a
+measurement available from round one was deferred behind three rounds of
+inference.
+
+**Two probe-design points worth keeping.** Wrapping a function beats
+instrumenting its error sites: `linux_exec_common` has eight or more
+`return -i64::from(..)` paths, and a probe per site is eight chances to miss
+the one that fires -- the same way `sig_for` covered two of four
+classification sites and produced a zero I nearly called decisive. And a
+probe that reports *entry* as well as failure is what turned round 5's
+silence from ambiguous into informative.
+
+
 ## A-CTEST-KEYLAYOUT-PASSES-THE-GRANTED-ARM-OF-1074-EXISTS (lane A, 2026-09-16) — **Status: PASSED**
 
 First time this has ever run:

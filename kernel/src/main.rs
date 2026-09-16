@@ -2735,6 +2735,23 @@ extern "C" fn kernel_main() -> ! {
         case();
     }
 
+    // The granted arm of SYS_KEYLAYOUT_SET. The kernel-side dispatch probe
+    // only ever gets refused, so it cannot tell "the gate refuses everyone"
+    // from "the gate works"; this is the other arm.
+    selftest::dispatch_debug(
+        "keyboard layout set from ring 3 (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_ctest_keylayout(),
+    );
+
+    // AFTER the pty rung on purpose: this forkpty()s, so while ctest-pty is
+    // red this will be red for the same reason and is one finding, not two.
+    selftest::dispatch_debug(
+        "CPython interactive REPL over a pty (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_ctest_python_repl(),
+    );
+
     {
         #[inline(never)]
         fn case() {

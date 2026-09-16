@@ -8469,6 +8469,270 @@ pub fn self_test_cfortify() -> KernelResult<()> {
 ///
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-pgroup/main.c`).
+/// Set the console keyboard layout from ring 3 and confirm through /proc.
+///
+/// The granted half of `SYS_KEYLAYOUT_SET`. The kernel-side dispatch probe
+/// only ever gets *refused*, so it cannot tell "the gate refuses everyone"
+/// from "the gate works"; this supplies the other arm, now that
+/// `Rights::INIT_PROCESS` carries `SET_KEYLAYOUT` and a descendant can hold
+/// it.
+///
+/// **It confirms through `/proc/keylayout`, not through a getter**, and that
+/// only works because 1074 deliberately has none. Asking the setter whether
+/// the setter worked is the `localectl`/`vconsole.conf` defect this syscall
+/// was added to fix -- see design-decisions 946.
+///
+/// A refusal that still moved something is worse than an acceptance, so the
+/// fixture checks both that an unregistered name is refused AND that the
+/// active layout did not change. Exit 42 on success.
+pub fn self_test_ctest_keylayout() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-keylayout", "ctest-keylayout")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running keyboard-layout set + /proc confirmation (ring 3, C, \
+         native ABI) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// Every check passed.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-keylayout"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-keylayout",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-keylayout spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Three syscalls and a few /proc reads: no exec, no fork, so pgroup's
+    // budget is ample.
+    let mut became_zombie = false;
+    for _ in 0..6000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-keylayout (ring 3) did not finish -- state {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(3) {
+        // NOT a failure of the syscall. Reported as unrunnable, which is the
+        // distinction 942 keeps arriving at: a check that could not run must
+        // not report the same thing as one that ran and passed.
+        serial_println!(
+            "[spawn]   ctest-keylayout: UNRUNNABLE -- fewer than two layouts are \
+             registered, so there is nothing to switch to. This proves nothing \
+             about SYS_KEYLAYOUT_SET either way"
+        );
+        return Ok(());
+    }
+
+    if exit_code != Some(EXPECTED) {
+        let meaning = match exit_code {
+            Some(1) => "cannot open /proc/keylayout -- the node is absent or unreadable",
+            Some(2) => "/proc/keylayout has no `Active:` line -- the format changed",
+            Some(4) => {
+                concat!(
+                    "set of a VALID registered layout was REFUSED. The ",
+                    "capability is the first suspect: INIT_PROCESS carries ",
+                    "SET_KEYLAYOUT, and fork clones the table, so a descendant ",
+                    "should hold it"
+                )
+            }
+            Some(5) => {
+                concat!(
+                    "set reported SUCCESS and /proc/keylayout still shows the ",
+                    "old layout -- accepted-and-dropped, the exact defect ",
+                    "confirming through the publisher exists to catch"
+                )
+            }
+            Some(6) => {
+                "set of an UNREGISTERED name SUCCEEDED -- keylayout::set_active \
+                 validates, so the gate is not being reached"
+            }
+            Some(7) => {
+                "the unregistered name was refused but the active layout changed \
+                 ANYWAY -- a refusal that still moved something"
+            }
+            Some(8) => "restoring the original layout was refused",
+            Some(9) => "restore reported success and the layout did not come back",
+            Some(10) => "a read of /proc/keylayout failed partway",
+            _ => "an unexpected code; see the legend in services/ctest-keylayout/main.c",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ctest-keylayout (ring 3) exit code was {:?}, expected \
+             {}: {}",
+            exit_code,
+            EXPECTED,
+            meaning
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   keyboard layout set from ring 3, confirmed through \
+         /proc/keylayout, an unregistered name refused without moving the active \
+         layout, and the original restored: OK"
+    );
+    Ok(())
+}
+
+/// Run CPython interactively on SlateOS: does the REPL actually evaluate?
+///
+/// The roadmap's remaining CPython work, stated there as "nobody has ever run
+/// it interactively". `self_test_cpython_on_slateos_libc` proves startup and
+/// byte-exact output with stdout on a *pipe*; between that and a REPL lie
+/// `isatty` answering true on a pty slave, CPython taking its interactive
+/// branch, the line discipline assembling a typed line and delivering it on
+/// ENTER, and prompt traffic coming back.
+///
+/// **The expression is `6*7`, and that is the whole design.** A pty echoes
+/// what is typed, so with `print(1+1)` the answer `2` appears inside the echo
+/// and a scan for it passes without the interpreter evaluating anything --
+/// reading back your own writes, in the fixture written to avoid exactly that.
+/// `6*7` does not contain `42`. Any replacement must keep that property.
+///
+/// **Expect this to fail while `ctest-pty` does.** It `forkpty`s, so if the
+/// pty path is broken this exits 3 (no output at all) for the same reason
+/// ctest-pty exits 45, and the two are one finding rather than two. Do not
+/// bisect it twice.
+pub fn self_test_ctest_python_repl() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-python-repl", "ctest-python-repl")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running CPython interactive REPL over a pty (ring 3, C, native \
+         ABI) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The interpreter evaluated the expression and returned the answer.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-python-repl"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-python-repl",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-python-repl spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // An 11 MiB interpreter reading a 20 MiB zip, then a REPL round trip.
+    // The largest budget in this suite by a wide margin, and deliberately so:
+    // the gap before the first byte is nothing like the gap between two bytes
+    // of one line, which is why the fixture itself keeps two budgets.
+    let mut became_zombie = false;
+    for _ in 0..200_000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-python-repl (ring 3) did not finish -- state \
+             {:?}. A hang here is most likely interpreter startup rather than the \
+             REPL round trip; check whether any prompt bytes appeared at all",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        let meaning = match exit_code {
+            Some(1) => "forkpty() failed -- the fixture's own plumbing",
+            Some(2) => "writing the expression to the master failed",
+            Some(3) => {
+                concat!(
+                    "the interpreter produced NO OUTPUT AT ALL -- it never ",
+                    "started. Loader or staging, not the REPL. If ctest-pty is ",
+                    "also red this is the SAME finding, not a second one"
+                )
+            }
+            Some(4) => {
+                concat!(
+                    "output appeared but the answer never did -- THE ACTUAL ",
+                    "SUBJECT. The interpreter started and the REPL did not ",
+                    "evaluate, or the typed line never reached it"
+                )
+            }
+            Some(5) => "waitpid() failed or returned the wrong pid -- plumbing",
+            Some(6) => "the interpreter exited non-zero after being asked to quit",
+            Some(7) => "writing the quit command failed",
+            _ => "an unexpected code; see services/ctest-python-repl/main.c",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ctest-python-repl (ring 3) exit code was {:?}, \
+             expected {}: {}",
+            exit_code,
+            EXPECTED,
+            meaning
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   CPython ran interactively on SlateOS: isatty true on the pty \
+         slave, the interactive branch taken, a typed line assembled and \
+         delivered, and 6*7 evaluated to 42: OK"
+    );
+    Ok(())
+}
+
 /// Does ANY of our Rust userland execute on SlateOS?
 ///
 /// `create-ext4-rootfs.sh` puts 71 binaries from `userspace/coreutils` into
@@ -8605,7 +8869,20 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
                 "a read of a child's output failed or never finished -- this \
                  fixture's own plumbing"
             }
-            Some(127) => "a child could not exec -- 127 is the shell's convention",
+            Some(127) => {
+                // Not one of the eight verdicts, and deliberately outside
+                // their range. 127 is the shell's convention for a failed
+                // exec, chosen because it collides with nothing the fixture
+                // returns -- but that only helps if this arm refuses to fold
+                // it into "some other failure".
+                concat!(
+                    "127: a child could NOT EXEC. /bin/true is missing from ",
+                    "the image or is not executable, which is a ",
+                    "create-ext4-rootfs.sh STAGING problem and not a finding ",
+                    "about the utility. Nothing about exec, wait or the ",
+                    "utilities is proven or disproven."
+                )
+            }
             _ => "an unexpected code; see the legend at the top of main.c",
         };
         serial_println!(

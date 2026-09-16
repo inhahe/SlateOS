@@ -67967,6 +67967,7 @@ not better checks -- it is making every check say what it looked at.
 | **result lookup** | lane C's sabotage harness searched for a named test result; the name was mistyped | `STAYED GREEN` -- absence rendered as clean |
 | **missing instrument** | I probed an ELF with `strings`, `nm` and `readelf`; none is installed here, and I had silenced their stderr | three `0`s, indistinguishable from "the symbol is absent" |
 | **vacuous comparison** | lane C's damage-tracking test compared a partial frame against a full one; a broken fixture rendered nothing in either | `0 <= 0` holds, so the assertion passed on a fixture that drew nothing |
+| **tautological check** | lane B's `for cmd in MUTATING { assert!(armed(cmd)) }` asserted that every member of a list is in that list | deleting an entry left all 195 tests green, because the corpus shrank instead of the assertion failing |
 
 **The sixth is lane C's and is the worst of the set, because it is downstream
 of the others.** Their harness asked "did test X go red?", the name did not
@@ -68030,7 +68031,24 @@ windows before the ratio means anything. Note what the control is *not* --
 it is not a tighter threshold, and no threshold would have helped, because
 the defect was on both sides of the comparison at once.
 
-Generalised, the eight rows share one instruction. **Print, or assert, the
+**The ninth is lane B's, and is the only one where damage makes the check
+*greener*.** They looped over a `MUTATING` list asserting each of its
+members was armed -- a predicate derived from the corpus it quantifies
+over, so it cannot fail for any input at all. Deleting an entry did not
+fail the assertion; it removed the case that would have tested it, and all
+195 tests stayed green. That is the distinction from the eighth: lane C's
+comparison degenerates on both sides *for a particular input*, whereas this
+one is unfalsifiable for *every* input.
+
+**A check that responds to damage by testing less is worse than one that
+responds by passing**, because the count going down reads as progress. The
+remedy is the general form of every fix in this entry: the corpus and the
+expectation must come from different places, or the check is a mirror. Lane
+B restated the expected set independently as `EXPECTED_MUTATING` and loops
+over that, so the same sabotage now fails. Found by sabotage rather than by
+reading -- their words: they would have shipped it.
+
+Generalised, the nine rows share one instruction. **Print, or assert, the
 thing the verdict was computed from** -- the corpus size, the tree that was
 read, the set that matched, the instrument that ran, the magnitude of each
 side. Every shape here is a verdict that survived the disappearance of its
@@ -68205,6 +68223,50 @@ long-lived reason into recurring noise, and the failure mode of noise on this
 project is documented one section up: lane B's first version of the same pass
 printed 41 unchanging lines, which is how the five real findings underneath
 get skipped.
+
+### Amended the same day: executable is necessary, not sufficient
+
+Lane B fixed the staging gap, and the fix uncovered a second layer that
+changes what this entry asks for. The harness's synthetic repositories had
+been skipping gate 42 on this line:
+
+```sh
+[ -f "$toi" ] || skip_toi=1
+```
+
+That is precisely what this entry asks for. It is a disable condition that
+is *executed* rather than written in prose, re-evaluated every run, and
+incapable of going stale. **And it hid the gate anyway, because it disabled
+silently.**
+
+Lane B sharpened the diagnosis after reading the above, and the sharpening
+is the point: **the condition was never wrong for a moment.** `[ -f ]` is
+correct and was correct on every run. So the failure is not staleness at
+all -- it is that **a skip produces the same output as a pass**. The
+distinction was in fact recorded, by `note_gate test-order "$skip_toi"`,
+into a channel nobody reads at verdict time. Which makes this 942 one level
+up: the information existed, and the verdict did not carry it.
+
+So executable is necessary and not sufficient. The qualifier: **an
+executable skip must announce itself where the verdict is read.** 942 is a
+check that ran and proved nothing; this is a check that never ran and said
+nothing. Both render green.
+
+The detail worth keeping is that **supplying a missing file activated a
+gate**. Staging one dependency turned a skip into a run, and the run then
+failed for the *tree* rather than for the checker. The fixtures had been
+passing gate 42 by not having it -- and so would any tree missing that
+file. It is the cleanest case in this document of a green verdict
+describing an absence.
+
+Lane B's two refusals are recorded because the reasoning generalises. They
+declined to key the replacement guard on the graded crates existing (the
+fixture creates `posix/`, so the condition is true there and does not
+discriminate) and on *one graded crate missing* -- which would have silently
+disabled the gate on the day somebody deleted a graded crate, which is
+exactly when it should be loudest. **A guard that weakens precisely when the
+thing it guards is damaged is worse than no guard**, because it converts a
+loud failure into a quiet pass.
 
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 

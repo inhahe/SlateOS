@@ -5680,6 +5680,38 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
 
     let pgid = crate::tty::foreground_pgid(tty);
     if pgid == 0 {
+        // A terminal signal was DUE and nobody is registered to receive
+        // it, so it is dropped. Announced rather than returned silently,
+        // because the caller's very next move is
+        // `restart_result(ERESTARTSYS)`: the reader restarts, the byte
+        // that caused this is already consumed, and nothing will ever
+        // arrive. That is an unbounded restart loop with no signal, no
+        // data and no EOF -- and until this line existed it left no
+        // trace anywhere.
+        //
+        // Suspected cause of `ctest-pty` exit 45 on 2026-09-16, the
+        // rung's first real run, where the child never returned from its
+        // read on the pty slave. `foreground_pgid` is
+        // `pcb::ctty_fg_pgrp(id).unwrap_or(0)`, so 0 means no session
+        // holds this terminal -- which for a `forkpty` child means
+        // `login_tty`'s TIOCSCTTY/tcsetpgrp did not take effect.
+        //
+        // This print is the discriminator, and that is the whole point of
+        // adding it before changing any behaviour: if it appears naming
+        // the pty's id, the fault is in acquiring the terminal and NOT in
+        // the line discipline, which had already decided correctly that a
+        // signal was due. If it does not appear, the hypothesis is wrong
+        // and the child is blocked somewhere else entirely.
+        crate::serial_println!(
+            concat!(
+                "[tty] signal {} due on tty {:?} but NO foreground group ",
+                "is registered: DROPPED, and the reader will now restart. ",
+                "See known-issues ",
+                "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
+            ),
+            sig,
+            tty
+        );
         return;
     }
     for target in pcb::pids_in_group(pgid) {

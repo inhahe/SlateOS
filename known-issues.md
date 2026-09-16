@@ -151789,6 +151789,42 @@ exposed defect 3 needs no new fixture at all -- it is already attached on every
 boot. What it needs is I/O pressure, which is a load question, not a fixture
 one.
 
+## A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED (lane A, 2026-09-16) — **Status: OPEN**, instrumented, hypothesis not yet confirmed
+
+**In short:** a `^C` typed at a terminal that has no registered foreground process group is thrown away, and the reader that consumed it is then told to *restart*. The byte is gone, no signal was sent, and nothing will ever arrive -- so the read spins forever. Until 2026-09-16 that left no trace anywhere: the drop was a bare `return`.
+
+**Where.** `syscall/handlers.rs::signal_foreground_group`:
+
+```rust
+let pgid = crate::tty::foreground_pgid(tty);
+if pgid == 0 {
+    return;          // <- no diagnostic, and the caller restarts
+}
+```
+
+The caller is `deliver_console_signal`, whose very next statement is `restart_result(ERESTARTSYS)`. So the sequence is: line discipline reads `0x03`, sees `ISIG` and `VINTR == 3`, correctly decides a `SIGINT` is due, returns `ConsoleRead::Signal(2)` -- and the delivery step finds nobody to deliver to, says nothing, and restarts the reader.
+
+`foreground_pgid(id)` is `pcb::ctty_fg_pgrp(id).unwrap_or(0)`. That `unwrap_or(0)` is where the information is lost: *no session holds this terminal* becomes the same value a caller would read as *nothing to do*.
+
+**How it surfaced.** `ctest-pty`'s first real run, 2026-09-16, after the rung had been switched off across four disable cycles (see design-decisions 944). It exited **45**, not the historical blanket 44 -- 45 means the parent's `waitpid(WNOHANG)` spin of 2,000,000 iterations never saw the child become reapable. The serial then shows `[pty] master closed: SIGHUP+SIGCONT to group 203`, i.e. the parent gave up and exited, which closed the master. **The child never returned from its read.** An unbounded restart loop explains that exactly.
+
+**This is a hypothesis and is labelled as one.** Everything above is a reading of the code plus one exit code; nothing has yet observed the `pgid == 0` branch being taken. So the change committed today is *only instrumentation*: the branch now prints which signal and which tty it dropped. That print is the discriminator, and the two outcomes say different things:
+
+| next boot shows | means |
+|---|---|
+| the line, naming the pty's id | the fault is in **acquiring the terminal** -- `login_tty`'s TIOCSCTTY/tcsetpgrp did not take effect -- and the line discipline is exonerated, having decided correctly |
+| nothing | the hypothesis is **wrong**; the child is blocked somewhere else and this branch is not on the path |
+
+**Why behaviour was not changed in the same commit.** Two candidate fixes exist and picking between them needs the measurement above. Returning an error instead of a restart stops the spin but changes semantics for a console that legitimately has no session during early boot; fixing `login_tty` instead leaves the restart loop in place for the next caller to fall into. Changing behaviour now would also destroy the evidence -- a boot that no longer loops cannot tell me whether it was looping for this reason.
+
+**The shape, for the record.** A silent early return that makes "nobody is listening" indistinguishable from "delivered", feeding a caller that retries on the assumption something happened. Same family as 942's rows: the verdict -- here, the restart -- survived the disappearance of its own evidence.
+
+### Also from that boot, recorded here so neither is lost
+
+**`ctest-zombiewait` PASSED, exit 42, both orderings reaped.** All seven `[zw]` markers appeared, ending `ok (both orderings reaped)`. This is the first evidence on `B-FORKEXEC-BOOT-HANG` in either direction and it is a *negative*: **the hang is not reachable through plain fork-and-reap.** Both the already-a-corpse ordering and the waiter-blocked-first ordering work. That exonerates reap and wakeup and moves the search to exec, the loader, or the shell. Note the marker order differs from the rung's docstring -- `B wait` precedes `B child released` -- which is correct for waiter-first and not a defect: the docstring listed an idealised sequence, and two processes do not interleave deterministically.
+
+**`[bench] scatter scale check: FAILED`** -- 16.7 cycles/scattered store at N=64 against 22.7 at N=128, 35% apart on a 25% tolerance, with the check's own verdict being that *a physical per-access cost cannot depend on how many pages the loop walks, so this run's budget calibration is not a physical quantity*. Release profile, so it had not run in 101 commits. Not investigated tonight; it is a timing check and therefore squarely lane C's 855 territory (prefer a count; if you cannot count it, the bound must catch a catastrophe rather than a fluctuation).
+
 ## A-THE-KERNEL-DESCRIBES-ITS-OWN-PLACEHOLDERS-AND-NOBODY-READS-THE-DESCRIPTIONS (lane A, 2026-09-15) — **Status: OPEN**, one fixed, population triaged
 
 **The search, which is lane C's and is the useful part.** Grep for code that *describes itself* as a placeholder:

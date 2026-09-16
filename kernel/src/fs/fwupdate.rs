@@ -148,7 +148,6 @@ pub fn init_defaults() {
     if guard.is_some() {
         return;
     }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         // No devices. This list used to hold three: a "System UEFI" with an
         // update available, a "TPM 2.0", and an "Intel I225-V" -- a real

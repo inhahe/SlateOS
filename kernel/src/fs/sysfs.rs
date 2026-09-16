@@ -21,6 +21,10 @@
 //! │   ├── pci/
 //! │   │   ├── BB:DD.F      PCI device info per BDF address
 //! │   │   └── ...
+//! │   ├── net/                          The interface, when one exists
+//! │   │   ├── up                        1 if the link is up
+//! │   │   ├── mac                       Hardware address
+//! │   │   └── ip, subnet_mask, gateway, dns
 //! │   ├── memmap/                       Firmware memory map, one dir per region
 //! │   │   └── <N>/                      Index into the bootloader's own list
 //! │   │       ├── start                 First byte, 0x%016x
@@ -165,6 +169,10 @@ enum SysPath<'a> {
     MemoryDir,
     /// A memory file: /sys/devices/system/memory/total_kb etc.
     MemoryFile(&'a str),
+    /// The devices/net/ directory. Absent when no NIC is present.
+    NetDir,
+    /// A net file: /sys/devices/net/mac etc.
+    NetFile(&'a str),
     /// The devices/memmap/ directory.
     MemmapDir,
     /// One firmware memory-map region: /sys/devices/memmap/3/
@@ -231,6 +239,14 @@ const BLOCK_FILES: &[&str] = &["sector_count", "sector_size", "read_only"];
 /// `size` in 939 there is no unit to misread, and the size is derivable --
 /// emitting it too would be a second answer to one question.
 const MEMMAP_FILES: &[&str] = &["start", "end", "type"];
+
+/// Files under `/sys/devices/net/`.
+///
+/// No per-interface level above them: `net::interface` has `info()` and
+/// `ns_info()` and no enumeration at all, so the kernel models one interface
+/// per namespace and there is no N to name. Inventing a level that always
+/// holds one entry is the same mistake as inventing `eth0`.
+const NET_FILES: &[&str] = &["up", "mac", "ip", "subnet_mask", "gateway", "dns"];
 
 /// Per-CPU topology files in /sys/devices/system/cpu/cpuN/topology/.
 ///
@@ -425,6 +441,20 @@ fn classify_path(rel: &str) -> SysPath<'_> {
                         SysPath::PciDir
                     } else if !tail.contains('/') {
                         SysPath::PciDevice(tail)
+                    } else {
+                        SysPath::NotFound
+                    }
+                } else if second == "net" {
+                    // Absent entirely when no NIC is present: an all-zero
+                    // interface is indistinguishable from a real one at
+                    // 0.0.0.0, and the MAC is the field that cannot be
+                    // coincidentally zero on real hardware.
+                    if !net_present() {
+                        SysPath::NotFound
+                    } else if tail.is_empty() {
+                        SysPath::NetDir
+                    } else if !tail.contains('/') && NET_FILES.contains(&tail) {
+                        SysPath::NetFile(tail)
                     } else {
                         SysPath::NotFound
                     }
@@ -710,6 +740,33 @@ fn gen_memory_file(name: &str) -> KernelResult<Vec<u8>> {
 "
     )
     .into_bytes())
+}
+
+/// Whether a network interface exists at all.
+///
+/// Keyed on the MAC rather than on `up`, because `up` is link state and a
+/// present NIC with a down link is a real thing to report. An all-zero MAC is
+/// the default `IFACE` state, i.e. nothing was ever detected.
+fn net_present() -> bool {
+    crate::net::interface::info().mac.0 != [0u8; 6]
+}
+
+/// One interface fact, or `NotFound` if the name is unknown.
+fn gen_net_file(name: &str) -> KernelResult<Vec<u8>> {
+    let info = crate::net::interface::info();
+    let text = match name {
+        "up" => alloc::format!("{}", u8::from(info.up)),
+        "mac" => alloc::format!("{}", info.mac),
+        "ip" => alloc::format!("{}", info.ip),
+        "subnet_mask" => alloc::format!("{}", info.subnet_mask),
+        "gateway" => alloc::format!("{}", info.gateway),
+        "dns" => alloc::format!("{}", info.dns),
+        _ => return Err(KernelError::NotFound),
+    };
+    let mut out = text.into_bytes();
+    // 10 rather than an escape: no backslash reaches this file through a shell.
+    out.push(10);
+    Ok(out)
 }
 
 /// One firmware memory-map fact, or `NotFound` if the index or name is unknown.
@@ -1025,7 +1082,7 @@ impl FileSystem for SysFs {
                 // device is registered. That is a different statement from
                 // its absence, which would say this kernel does not model
                 // block devices at all.
-                Ok(vec![
+                let mut out = alloc::vec![
                     DirEntry {
                         ino: 0,
                         name: PathBuf::from("pci"),
@@ -1050,7 +1107,20 @@ impl FileSystem for SysFs {
                         entry_type: EntryType::Directory,
                         size: 0,
                     },
-                ])
+                ];
+                // `net/` is listed ONLY when a NIC exists, unlike the others:
+                // block/ and memmap/ always exist and may be empty, but an
+                // absent interface has no directory at all, so listing the name
+                // unconditionally would offer something a lookup then refuses.
+                if net_present() {
+                    out.push(DirEntry {
+                        ino: 0,
+                        name: PathBuf::from("net"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    });
+                }
+                Ok(out)
             }
             SysPath::SystemDir => {
                 // cpu/ and memory/. A node/ tree can follow.
@@ -1194,6 +1264,23 @@ impl FileSystem for SysFs {
             // runtime. `cargo clippy` named the three matches that needed arms
             // for memmap and could not name this one, because the catch-all
             // absorbs it. Add the arm here by hand.
+            SysPath::NetDir => {
+                // Only what reads back, same rule as MemoryDir and
+                // BlockDevice. Reached only when `net_present()` held during
+                // classification, so every file here has a value.
+                let entries = NET_FILES
+                    .iter()
+                    .filter_map(|name| {
+                        gen_net_file(name).ok().map(|d| DirEntry {
+                            ino: 0,
+                            name: PathBuf::from(*name),
+                            entry_type: EntryType::File,
+                            size: d.len() as u64,
+                        })
+                    })
+                    .collect();
+                Ok(entries)
+            }
             SysPath::MemmapDir => {
                 // One directory per region, numbered as the bootloader ordered
                 // them. Empty is a legitimate answer -- it would mean the
@@ -1314,7 +1401,8 @@ impl FileSystem for SysFs {
             | SysPath::BlockDir
             | SysPath::BlockDevice(_)
             | SysPath::MemmapDir
-            | SysPath::MemmapRegion(_) => Err(KernelError::IsADirectory),
+            | SysPath::MemmapRegion(_)
+            | SysPath::NetDir => Err(KernelError::IsADirectory),
 
             SysPath::KernelFile(name) => gen_kernel_file(name),
             SysPath::ParamFile(name) => gen_param_file(name),
@@ -1328,6 +1416,7 @@ impl FileSystem for SysFs {
             SysPath::MemoryFile(name) => gen_memory_file(name),
             SysPath::BlockFile(dev, name) => gen_block_file(dev, name),
             SysPath::MemmapFile(idx, name) => gen_memmap_file(idx, name),
+            SysPath::NetFile(name) => gen_net_file(name),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -1459,6 +1548,21 @@ impl FileSystem for SysFs {
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
+            SysPath::NetDir => Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("net"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::NetFile(name) => {
+                let size = gen_net_file(name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    ino: 0,
+                    name: PathBuf::from(name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
             SysPath::MemmapRegion(idx) => Ok(DirEntry {
                 ino: 0,
                 name: PathBuf::from(format!("{idx}")),
@@ -1575,7 +1679,8 @@ impl FileSystem for SysFs {
             | SysPath::CpuidFile(_)
             | SysPath::MemoryFile(_)
             | SysPath::BlockFile(_, _)
-            | SysPath::MemmapFile(_, _) => {
+            | SysPath::MemmapFile(_, _)
+            | SysPath::NetFile(_) => {
                 // Read-only files (we do not model runtime CPU hot-plug).
                 Err(KernelError::NotSupported)
             }
@@ -1594,7 +1699,8 @@ impl FileSystem for SysFs {
             | SysPath::BlockDir
             | SysPath::BlockDevice(_)
             | SysPath::MemmapDir
-            | SysPath::MemmapRegion(_) => Err(KernelError::IsADirectory),
+            | SysPath::MemmapRegion(_)
+            | SysPath::NetDir => Err(KernelError::IsADirectory),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -2546,6 +2652,79 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::IoError);
         }
 
+        // 7. The interface, when there is one. `net_present()` keys on the MAC
+        //    because an all-zero interface cannot be told from a real one that
+        //    happens to be unconfigured -- and `up: 0` on a present NIC is a
+        //    measurement, not a substituted zero.
+        let ifinfo = crate::net::interface::info();
+        let have_nic = ifinfo.mac.0 != [0u8; 6];
+        match fs.readdir(Path::new("/devices/net")) {
+            Ok(entries) => {
+                if !have_nic {
+                    serial_println!(
+                        "[sysfs]   FAIL: /devices/net exists with no NIC; an all-zero \
+                         interface is indistinguishable from an unconfigured real one"
+                    );
+                    return Err(KernelError::IoError);
+                }
+                if entries.len() != 6 {
+                    serial_println!(
+                        "[sysfs]   FAIL: /devices/net lists {} file(s), want 6",
+                        entries.len()
+                    );
+                    return Err(KernelError::IoError);
+                }
+                let want = [
+                    ("up", alloc::format!("{}", u8::from(ifinfo.up))),
+                    ("mac", alloc::format!("{}", ifinfo.mac)),
+                    ("ip", alloc::format!("{}", ifinfo.ip)),
+                    ("subnet_mask", alloc::format!("{}", ifinfo.subnet_mask)),
+                    ("gateway", alloc::format!("{}", ifinfo.gateway)),
+                    ("dns", alloc::format!("{}", ifinfo.dns)),
+                ];
+                for (leaf, expect) in &want {
+                    let path = alloc::format!("/devices/net/{leaf}");
+                    let got = match fs.read_file(Path::new(&path)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            serial_println!("[sysfs]   FAIL: read {path}: {e:?}");
+                            return Err(e);
+                        }
+                    };
+                    let got_s = core::str::from_utf8(&got).unwrap_or("").trim();
+                    if got_s != expect.as_str() {
+                        serial_println!(
+                            "[sysfs]   FAIL: {path} reads {got_s:?}, interface says {expect:?}"
+                        );
+                        return Err(KernelError::IoError);
+                    }
+                }
+                // A name outside the set must not resolve.
+                if fs.read_file(Path::new("/devices/net/hostname")).is_ok() {
+                    serial_println!("[sysfs]   FAIL: /devices/net/hostname answered");
+                    return Err(KernelError::IoError);
+                }
+                serial_println!(
+                    "[sysfs]   devices/net: up/mac/ip/subnet_mask/gateway/dns all match \
+                     interface::info(), no per-interface level invented, unknown name \
+                     absent: OK"
+                );
+            }
+            Err(_) => {
+                if have_nic {
+                    serial_println!(
+                        "[sysfs]   FAIL: a NIC is present ({}) but /devices/net is absent",
+                        ifinfo.mac
+                    );
+                    return Err(KernelError::IoError);
+                }
+                serial_println!(
+                    "[sysfs]   devices/net: absent, and no NIC is present: OK -- but the \
+                     per-field checks proved nothing this run"
+                );
+            }
+        }
+
         if regions.is_empty() {
             serial_println!(
                 "[sysfs]   devices/memmap: listed and empty, and one past the end is \
@@ -2560,6 +2739,50 @@ pub fn self_test() -> KernelResult<()> {
             );
         }
     }
+    // 8. THE ROUTE, not the implementation. Every check above calls
+    //    `SysFs` directly with a path relative to its own root, so all of
+    //    them would stay green if `/sys` stopped being mounted or the VFS
+    //    stopped translating paths into it -- the nodes would be correct and
+    //    unreachable, and nothing here would say so.
+    //
+    //    Lane C found that shape live on 2026-09-15: torrent's Ctrl+O never
+    //    worked because the handler returned before the `Key::O` arm, and
+    //    every test was green because they called `open_to_read()` directly
+    //    instead of pressing the key. Sixteen of twenty apps had a variant of
+    //    it. This is the same door, one layer down.
+    //
+    //    One read through `Vfs` at the real mounted path is enough to notice.
+    match crate::fs::Vfs::read_file("/sys/kernel/ostype") {
+        Ok(v) => {
+            let via_mount = core::str::from_utf8(&v).unwrap_or("").trim();
+            // Read into a binding first: `from_utf8_lossy` yields a `Cow`, and
+            // `.trim()` on it borrows a temporary that cannot outlive the
+            // statement. Comparing two `&str` needs no allocation either.
+            let direct_raw = fs
+                .read_file(Path::new("/kernel/ostype"))
+                .unwrap_or_default();
+            let direct = core::str::from_utf8(&direct_raw).unwrap_or("").trim();
+            if via_mount != direct || via_mount.is_empty() {
+                serial_println!(
+                    "[sysfs]   FAIL: /sys/kernel/ostype via the mount reads {via_mount:?} \
+                     but {direct:?} directly -- the tree is served but the route is wrong"
+                );
+                return Err(KernelError::IoError);
+            }
+            serial_println!(
+                "[sysfs]   the mounted route works: /sys/kernel/ostype through Vfs \
+                 matches SysFs directly ({via_mount}): OK"
+            );
+        }
+        Err(e) => {
+            serial_println!(
+                "[sysfs]   FAIL: /sys is not readable through Vfs ({e:?}), so every \
+                 check above was about a tree nothing can reach"
+            );
+            return Err(e);
+        }
+    }
+
     serial_println!("[sysfs] Self-test passed{}.", skips.suffix());
     Ok(())
 }

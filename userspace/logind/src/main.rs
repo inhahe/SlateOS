@@ -599,18 +599,10 @@ enum InhibitMode {
     /// Block the operation entirely until the lock is released.
     Block,
     /// Delay the operation for a grace period.
-    // Vocabulary for a session that is never created. See the note on
-    // `Daemon::create_session`: nothing can construct a session, so no variant
-    // describing one is ever built and no parser for one is ever called.
-    #[allow(dead_code)]
     Delay,
 }
 
 impl InhibitMode {
-    // Vocabulary for a session that is never created. See the note on
-    // `Daemon::create_session`: nothing can construct a session, so no variant
-    // describing one is ever built and no parser for one is ever called.
-    #[allow(dead_code)]
     fn as_str(self) -> &'static str {
         match self {
             Self::Block => "block",
@@ -618,15 +610,24 @@ impl InhibitMode {
         }
     }
 
-    // Vocabulary for a session that is never created -- see the note on
-    // `Daemon::create_session`. On the enum rather than one variant: an allow on
-    // a variant covers that variant only, which is how four of these were left
-    // still warning on the first pass.
-    #[allow(dead_code)]
-    fn from_str(s: &str) -> Self {
+    /// Parse a mode name, or `None`.
+    ///
+    /// Fallible, and symmetrical with [`InhibitWhat::from_str`], which this did
+    /// not used to be. It mapped every unrecognised string to `Block`, so
+    /// `AddInhibitor(what, who, why, "")` took a full block and a caller who
+    /// typed `blck` got a lock of a kind they had not asked for.
+    ///
+    /// That default was the safe direction -- a stronger lock rather than a
+    /// weaker one -- and it stopped being merely untidy when the bus began
+    /// deciding authority from this value: `Block` requires root and `Delay`
+    /// does not, so a guess here is a guess about who may do what. A name this
+    /// build does not know is now refused, which is the answer that lets the
+    /// caller find out they are wrong.
+    fn from_str(s: &str) -> Option<Self> {
         match s {
-            "delay" => Self::Delay,
-            _ => Self::Block,
+            "delay" => Some(Self::Delay),
+            "block" => Some(Self::Block),
+            _ => None,
         }
     }
 }
@@ -653,11 +654,7 @@ struct Inhibitor {
 }
 
 impl Inhibitor {
-    // Vocabulary for a session that is never created -- see the note on
-    // `Daemon::create_session`. On the enum rather than one variant: an allow on
-    // a variant covers that variant only, which is how four of these were left
-    // still warning on the first pass.
-    #[allow(dead_code)]
+    /// One line of `ListInhibitors` output.
     fn format_line(&self) -> String {
         format!(
             "{:<20} {:<6} {:<6} {:<8} {}",
@@ -690,24 +687,53 @@ impl PowerAction {
     }
 }
 
+// ---------------------------------------------------------------------------
+// THE WRITE SIDE: what a bus message can reach, and what it cannot
+//
+// `bus::dispatch` (src/bus.rs) serves nine methods: CreateSession,
+// ListSessions, GetSession, LockSession, UnlockSession, ForceUnlockSession,
+// TerminateSession, AuthenticateSession and SetIdleHint. `login` calls
+// CreateSession after authentication and TerminateSession when the shell
+// exits (userspace/login/src/main.rs:1084), so sessions really do appear and
+// the read side answers about a real world.
+//
+// STILL REACHABLE FROM NOTHING: inhibitors (`add_inhibitor`,
+// `remove_inhibitors_by_pid`), VT switching (`switch_vt`), and seat
+// add/remove. No bus method creates one and nothing else calls them, which
+// has a consequence worth stating plainly rather than leaving to be noticed:
+// `request_power_action` consults `is_inhibited` on a table that is always
+// empty, so the inhibitor check runs on every poweroff, reboot, suspend and
+// hibernate and can only ever answer "not inhibited". It reads like a guard
+// and behaves like a comment.
+//
+// Kept, not deleted: they are the working half of a gap that is entirely lane
+// B's to close, and deleting them would throw away the part that already
+// works. See known-issues.md ->
+// B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT, whose plan puts
+// AddInhibitor/ReleaseInhibitor next in order of usefulness.
+//
+// WHY THIS IS IN ONE PLACE. It used to be fifteen copies of a paragraph
+// saying the write side was reachable from nothing at all and that `login`
+// and `getty` "contain no reference to logind" -- true when written, false
+// from 2026-09-13 when CreateSession landed and login began calling it. One
+// of the fifteen sat directly above `CreateSessionParams`, the struct that
+// exists because it landed. A fact repeated in fifteen places goes stale in
+// fifteen places, and no care at the keyboard prevents that; only having one
+// copy does.
+//
+// Verified 2026-09-15 against src/bus.rs's dispatch table and
+// userspace/login/src/main.rs. If you change what dispatch serves, this
+// paragraph is the thing to change with it.
+// ---------------------------------------------------------------------------
+
 /// Daemon configuration.
 #[derive(Debug, Clone)]
 struct DaemonConfig {
     /// How many seconds of inactivity before the system is considered idle.
     idle_timeout: u64,
     /// Delay in seconds after idle before taking idle action.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     idle_action_delay: u64,
     /// What action to take on idle ("ignore", "poweroff", "suspend", etc.).
@@ -774,18 +800,8 @@ impl Default for DaemonConfig {
 /// them into a struct with named fields keeps call sites self-documenting and
 /// prevents silent argument-swap bugs among the several `&str` fields. The
 /// [`Default`] impl lets callers specify only the attributes they care about.
-// Part of logind's write side, which is implemented and reachable from
-// nothing. `bus::dispatch` exposes only the read-and-modify half --
-// ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-// SetIdleHint -- so no message can create a session, add an inhibitor,
-// switch a VT or add a seat. Nothing else calls these either: `login` and
-// `getty` contain no reference to logind at all. The daemon therefore
-// answers every query about a world that is permanently empty.
-//
-// Kept, not deleted: it is the working half of a gap that is entirely
-// lane B's to close (a CreateSession method plus callers in login/getty),
-// and deleting it would throw away the part that already works. See
-// known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+// Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+// for which half of it is unreachable and why these are kept.
 #[allow(dead_code)]
 struct CreateSessionParams<'a> {
     /// UID of the user owning the session.
@@ -845,48 +861,18 @@ struct Daemon {
     /// Active inhibitor locks.
     inhibitors: Vec<Inhibitor>,
     /// Next session ID to allocate.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     next_session_id: u64,
     /// Whether the system is considered idle.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     system_idle: bool,
     /// Timestamp when system became idle (0 if not idle).
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     idle_since: u64,
     /// Configuration.
@@ -942,36 +928,16 @@ impl Daemon {
     /// `/etc/shadow`. A daemon supervising sessions inside a chroot needs
     /// stores under that root, and tests need stores they wrote themselves —
     /// both are the same substitution, so there is one way to make it.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     fn set_verifier(&mut self, auth: authlib::Authenticator) {
         self.auth = auth;
     }
 
     /// Allocate a new unique session ID.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     fn allocate_session_id(&mut self) -> String {
         let id = self.next_session_id;
@@ -987,18 +953,8 @@ impl Daemon {
     }
 
     /// Create a new session and register it with the daemon.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     fn create_session(&mut self, params: CreateSessionParams) -> Result<String, &'static str> {
         if self.sessions.len() >= self.config.max_sessions {
@@ -1244,19 +1200,6 @@ impl Daemon {
     }
 
     /// Add an inhibitor lock.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
-    #[allow(dead_code)]
     fn add_inhibitor(
         &mut self,
         what: InhibitWhat,
@@ -1281,19 +1224,6 @@ impl Daemon {
     }
 
     /// Remove inhibitor locks held by a given PID.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
-    #[allow(dead_code)]
     fn remove_inhibitors_by_pid(&mut self, pid: u32) -> usize {
         let before = self.inhibitors.len();
         self.inhibitors.retain(|i| i.pid != pid);
@@ -1311,36 +1241,16 @@ impl Daemon {
     }
 
     /// Check whether a given action is inhibited (any mode).
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     fn is_inhibited_any(&self, what: InhibitWhat) -> bool {
         self.inhibitors.iter().any(|i| i.what == what)
     }
 
     /// Update the system idle state based on all sessions.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     fn update_idle_state(&mut self, now: u64) {
         let all_idle = self.sessions.values().all(|s| s.idle);
@@ -1356,18 +1266,8 @@ impl Daemon {
     }
 
     /// Switch VTs on a seat (for multi-session seats).
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     fn switch_vt(&mut self, seat_id: &str, vt_nr: u32) -> Result<(), &'static str> {
         let seat = self.seats.get(seat_id).ok_or("seat not found")?;
@@ -1415,18 +1315,8 @@ impl Daemon {
     }
 
     /// Create a new seat.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     fn create_seat(&mut self, id: &str) -> Result<(), &'static str> {
         if self.seats.contains_key(id) {
@@ -1437,18 +1327,8 @@ impl Daemon {
     }
 
     /// Remove a seat and detach all sessions from it.
-    // Part of logind's write side, which is implemented and reachable from
-    // nothing. `bus::dispatch` exposes only the read-and-modify half --
-    // ListSessions, GetSession, Lock/Unlock, Terminate, AuthenticateSession,
-    // SetIdleHint -- so no message can create a session, add an inhibitor,
-    // switch a VT or add a seat. Nothing else calls these either: `login` and
-    // `getty` contain no reference to logind at all. The daemon therefore
-    // answers every query about a world that is permanently empty.
-    //
-    // Kept, not deleted: it is the working half of a gap that is entirely
-    // lane B's to close (a CreateSession method plus callers in login/getty),
-    // and deleting it would throw away the part that already works. See
-    // known-issues.md -> B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+    // Reachable from no bus message. See "THE WRITE SIDE" above `DaemonConfig`
+    // for which half of it is unreachable and why these are kept.
     #[allow(dead_code)]
     fn remove_seat(&mut self, seat_id: &str) -> Result<(), &'static str> {
         if seat_id == "seat0" {
@@ -3307,9 +3187,17 @@ mod tests {
 
     #[test]
     fn test_inhibit_mode_roundtrip() {
-        assert_eq!(InhibitMode::from_str("block"), InhibitMode::Block);
-        assert_eq!(InhibitMode::from_str("delay"), InhibitMode::Delay);
-        assert_eq!(InhibitMode::from_str("unknown"), InhibitMode::Block);
+        assert_eq!(InhibitMode::from_str("block"), Some(InhibitMode::Block));
+        assert_eq!(InhibitMode::from_str("delay"), Some(InhibitMode::Delay));
+        // Was `Block` until 2026-09-15, when `AddInhibitor` began deciding
+        // whether the caller needs root from this value. An unknown mode
+        // silently becoming the privileged one means a caller can be refused
+        // for asking for something they did not ask for -- and, had the
+        // default gone the other way, could have believed they held a block
+        // while holding a delay.
+        assert_eq!(InhibitMode::from_str("unknown"), None);
+        assert_eq!(InhibitMode::from_str(""), None);
+        assert_eq!(InhibitMode::from_str("BLOCK"), None);
     }
 
     // --- Power action requests ---

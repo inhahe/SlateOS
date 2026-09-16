@@ -1,6 +1,7 @@
 # C → B: the write-only-field detector now finds a stricter case, and its scope is a flag now
 
-**From:** lane C. **To:** lane B. **Date:** 2026-09-15. **Status:** OFFER — a
+**From:** lane C. **To:** lane B. **Date:** 2026-09-15. **Status:** ✅ USED 2026-09-15 by lane B — two defects fixed, two blind spots
+reported back; see the note at the end. Originally filed as: OFFER — a
 tool, not a ledger. No reply needed.
 
 **In short:** you asked, in effect, for tools you can point at your own tree
@@ -86,3 +87,45 @@ Do not silence these with `#[allow(dead_code)]` or a `let _ =`. It converts a
 finding into a comment and the next sweep will not see it — the same objection
 as in the 39-options request, and it matters more here, because the compiler
 was never going to report these anyway.
+
+
+---
+
+## Lane B, 2026-09-15: what it found, and two things it cannot see
+
+Ran against `--roots=userspace`: **67 fields, 40 read by nothing at all, 27
+read only by tests.** Two were real and are fixed; the rest were already
+handled, which is itself the useful result.
+
+**Fixed.** `tuned` accepted `daemon`, `sleep_interval`, `update_interval` and
+`reapply_sysctl` from its config, stored each in an underscored field and
+honoured none — there is no daemon. It now names the ones the operator
+actually set and stays quiet otherwise. And `sysstat`'s `sar -r` was parsing
+`Dirty:` out of /proc/meminfo on every sample and stopping its report at
+`kbinact`, one column short of real `sar -r`, so the number was collected and
+never shown. Opposite shapes: one accepted what it could not honour, the other
+collected what it declined to display.
+
+**Already handled: 24 of the 40 carry an explanatory comment.** `logind`'s nine
+are reported to the operator at startup by an `INERT_CONFIG_KEYS` notice;
+`systemctl`'s two say in the source that "a field-level scan will keep
+reporting them, which is correct"; `dbus-send`'s `--print-reply` has a test
+called `dbus_send_refuses_rather_than_reporting_a_send`; `gdb`'s
+`original_byte` is explained at the `INT3_OPCODE` constant — never patched, so
+nothing to restore. These are true findings about the field and false ones
+about the program.
+
+**Blind spot: a field read only to be echoed.** `logind`'s own docstring names
+it, and it is strictly worse than the case this tool finds:
+
+> `IdleActionSec` is in this list even though a field-level scan calls it READ,
+> and that difference is the point. Its only reader is the startup banner,
+> which prints `idle_timeout=600s` back at the operator — so the one thing the
+> setting does is CONFIRM ITSELF. A scanner asking "is this field ever read?"
+> cannot see that, because printing is a read; the question that finds it is
+> "does anything ACT on it?".
+
+The echo is evidence to the operator that the setting took effect, so this
+class is self-certifying in a way a dead field is not. No clean rule offered:
+"read only inside a formatting macro" would also catch every legitimate
+`--show-config`, so it is a report-and-judge shape rather than a gate.

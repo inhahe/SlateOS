@@ -750,7 +750,7 @@ fn print_cpu_row(out: &mut impl Write, ts: &str, usage: &CpuUsage) {
 fn print_mem_header(out: &mut impl Write) {
     let _ = writeln!(
         out,
-        "{:<12} {:>12} {:>12} {:>12} {:>10} {:>12} {:>12} {:>12} {:>12} {:>12}",
+        "{:<12} {:>12} {:>12} {:>12} {:>10} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
         "Time",
         "kbmemfree",
         "kbavail",
@@ -760,7 +760,8 @@ fn print_mem_header(out: &mut impl Write) {
         "kbcached",
         "kbcommit",
         "kbactive",
-        "kbinact"
+        "kbinact",
+        "kbdirty"
     );
 }
 
@@ -773,7 +774,7 @@ fn print_mem_row(out: &mut impl Write, ts: &str, mem: &MemInfo) {
     };
     let _ = writeln!(
         out,
-        "{:<12} {:>12} {:>12} {:>12} {:>10.2} {:>12} {:>12} {:>12} {:>12} {:>12}",
+        "{:<12} {:>12} {:>12} {:>12} {:>10.2} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
         ts,
         mem.free_kb,
         mem.available_kb,
@@ -783,7 +784,8 @@ fn print_mem_row(out: &mut impl Write, ts: &str, mem: &MemInfo) {
         mem.cached_kb,
         mem.committed_kb,
         mem.active_kb,
-        mem.inactive_kb
+        mem.inactive_kb,
+        mem.dirty_kb
     );
 }
 
@@ -2737,6 +2739,51 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("kbmemfree"));
         assert!(output.contains("%memused"));
+    }
+
+    /// `kbdirty` is reported, and carries the value rather than just a column.
+    ///
+    /// `sar -r`'s last column is kbdirty, and `Dirty:` was already being read
+    /// out of /proc/meminfo into `MemInfo::dirty_kb` -- parsed, stored and
+    /// never printed, which is how a field-level scan found it. Adding the
+    /// header alone would satisfy a `contains("kbdirty")` check while the
+    /// number stayed invisible, so this asserts the VALUE from the fixture
+    /// appears in the row. The header and the row are formatted by two
+    /// separate functions with two separate format strings, so they can
+    /// disagree about how many columns there are, and only a test that reads
+    /// both can see it.
+    #[test]
+    fn the_memory_report_shows_kbdirty_and_its_value() {
+        let mut head = Vec::new();
+        print_mem_header(&mut head);
+        let head = String::from_utf8(head).unwrap();
+        assert!(head.contains("kbdirty"), "header: {head}");
+
+        let mem = sample_meminfo();
+        let mut row = Vec::new();
+        print_mem_row(&mut row, "12:00:00 PM", &mem);
+        let row = String::from_utf8(row).unwrap();
+        assert!(
+            row.contains(&mem.dirty_kb.to_string()),
+            "dirty_kb {} missing from row: {row}",
+            mem.dirty_kb
+        );
+
+        // The two format strings must agree on the column count, or the row
+        // silently slides out from under its own header.
+        //
+        // The timestamp is space-free here on purpose: the first version of
+        // this used "12:00:00 PM", which `split_whitespace` reads as two
+        // columns, so the assertion failed on a row that was in fact correct.
+        // A control that fails for its own reasons teaches you to delete it.
+        let mut row12 = Vec::new();
+        print_mem_row(&mut row12, "12:00:00", &mem);
+        let row12 = String::from_utf8(row12).unwrap();
+        assert_eq!(
+            head.split_whitespace().count(),
+            row12.split_whitespace().count(),
+            "header and row disagree on column count"
+        );
     }
 
     #[test]

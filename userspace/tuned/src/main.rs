@@ -320,13 +320,57 @@ fn get_profile_mode() -> String {
         .to_string()
 }
 
-fn read_daemon_config() -> DaemonConfig {
-    let content = match std::fs::read_to_string(TUNED_CONF) {
-        Ok(c) => c,
-        Err(_) => return DaemonConfig::default(),
-    };
+/// `tuned.conf` keys this build parses and stores but nothing ACTS on.
+///
+/// Every name here is a promise the file appears to make and this build does
+/// not keep, and they are inert for one shared reason rather than four: there
+/// is no daemon. `tuned` parses its configuration, prints what it would do,
+/// and exits, so there is no loop for `sleep_interval` to pace and no
+/// re-application for `reapply_sysctl` to trigger. `daemon=0` cannot turn off
+/// something that never starts.
+///
+/// The underscore prefixes on the fields these set say the same thing to the
+/// COMPILER and nothing at all to the operator, which is the gap this closes.
+/// Someone who writes `sleep_interval=30` has stated an intent; silence in
+/// reply is indistinguishable from agreement.
+///
+/// When one of these is wired up, delete its entry. The test below checks
+/// every name here is a key `read_daemon_config` actually recognises --
+/// crossing this list against the parser's own answer rather than against
+/// itself -- so a typo or a renamed key fails. Nothing can check that a name
+/// is STILL inert, so removing one is a deliberate act and has to stay that
+/// way. Pattern and reasoning taken from `userspace/logind`, which solved
+/// this first for `logind.conf`.
+const INERT_CONFIG_KEYS: &[&str] = &[
+    "daemon",
+    "reapply_sysctl",
+    "sleep_interval",
+    "update_interval",
+];
 
+/// Parse `tuned.conf`, and report which of the keys it set are inert.
+///
+/// The second half of the return is empty unless the operator actually set
+/// one: silence when nothing was asked for, and a plain statement when
+/// something was. A warning printed unconditionally is one the reader learns
+/// to skip.
+fn read_daemon_config() -> (DaemonConfig, Vec<&'static str>) {
+    match std::fs::read_to_string(TUNED_CONF) {
+        Ok(content) => parse_daemon_config(&content),
+        Err(_) => (DaemonConfig::default(), Vec::new()),
+    }
+}
+
+/// Parse `tuned.conf` from text, so the tests can drive it.
+///
+/// Separated from the file read for the reason `logind::parse_config` is:
+/// a function that opens a fixed path cannot be given content, so every
+/// assertion about what the parser does would have to be made against
+/// whatever happens to be on the machine running the test -- which on this
+/// host is nothing at all.
+fn parse_daemon_config(content: &str) -> (DaemonConfig, Vec<&'static str>) {
     let mut config = DaemonConfig::default();
+    let mut inert: Vec<&'static str> = Vec::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -335,18 +379,58 @@ fn read_daemon_config() -> DaemonConfig {
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
             let value = value.trim();
-            match key {
-                "daemon" => config._daemon = value == "1" || value == "true",
-                "sleep_interval" => config._sleep_interval = value.parse().unwrap_or(1),
-                "update_interval" => config._update_interval = value.parse().unwrap_or(10),
-                "dynamic_tuning" => config.dynamic_tuning = value == "1" || value == "true",
-                "recommend_command" => config.recommend_command = value == "1" || value == "true",
-                "reapply_sysctl" => config._reapply_sysctl = value == "1" || value == "true",
-                _ => {}
+            // `recognised` comes from the MATCH, not from the inert list.
+            // Asking only "is this key in INERT_CONFIG_KEYS?" would make the
+            // staleness test a tautology -- look the key up, find it, push it,
+            // then assert it is in the list -- which a bogus entry passes.
+            // Crossing the parser's answer with the list's is what gives that
+            // test something to fail on.
+            let recognised = match key {
+                "daemon" => {
+                    config._daemon = value == "1" || value == "true";
+                    true
+                }
+                "sleep_interval" => {
+                    config._sleep_interval = value.parse().unwrap_or(1);
+                    true
+                }
+                "update_interval" => {
+                    config._update_interval = value.parse().unwrap_or(10);
+                    true
+                }
+                "dynamic_tuning" => {
+                    config.dynamic_tuning = value == "1" || value == "true";
+                    true
+                }
+                "recommend_command" => {
+                    config.recommend_command = value == "1" || value == "true";
+                    true
+                }
+                "reapply_sysctl" => {
+                    config._reapply_sysctl = value == "1" || value == "true";
+                    true
+                }
+                _ => false,
+            };
+            if recognised
+                && let Some(name) = INERT_CONFIG_KEYS.iter().find(|k| **k == key)
+                && !inert.contains(name)
+            {
+                inert.push(name);
             }
         }
     }
-    config
+    (config, inert)
+}
+
+/// Print the inert-key notice, if the operator set any.
+fn warn_inert(inert: &[&'static str]) {
+    if !inert.is_empty() {
+        eprintln!(
+            "tuned: these settings were read and are not honoured by this build: {}",
+            inert.join(", ")
+        );
+    }
 }
 
 // ── tuned-adm commands ─────────────────────────────────────────────────
@@ -451,7 +535,8 @@ fn cmd_profile_info(args: &[String]) {
 }
 
 fn cmd_recommend() {
-    let config = read_daemon_config();
+    let (config, inert) = read_daemon_config();
+    warn_inert(&inert);
     if !config.recommend_command {
         println!("Recommendation disabled in configuration.");
         return;
@@ -583,7 +668,8 @@ fn run_daemon(args: &[String]) {
         println!("tuned: would daemonize (simulated)");
     }
 
-    let config = read_daemon_config();
+    let (config, inert) = read_daemon_config();
+    warn_inert(&inert);
     if config.dynamic_tuning {
         println!("tuned: dynamic tuning enabled");
     }
@@ -851,6 +937,67 @@ mod tests {
             .find(|p| p.name == "network-latency")
             .unwrap();
         assert_eq!(nl.include.as_deref(), Some("latency-performance"));
+    }
+
+    /// A setting this build does not honour is said out loud.
+    #[test]
+    fn an_inert_setting_is_reported_to_the_operator() {
+        let (_, inert) = parse_daemon_config("sleep_interval=30\n");
+        assert_eq!(inert, vec!["sleep_interval"]);
+
+        // Several at once, each named once however often it appears.
+        let (_, inert) =
+            parse_daemon_config("daemon=1\nsleep_interval=5\nsleep_interval=9\nreapply_sysctl=1\n");
+        assert_eq!(inert, vec!["daemon", "sleep_interval", "reapply_sysctl"]);
+    }
+
+    /// ...and a setting that DOES something is not.
+    ///
+    /// The control, and the half that matters. Without it the test above
+    /// passes equally against a parser that calls every key inert, which
+    /// would bury the real four in noise and train the operator to skip the
+    /// line -- the failure the notice exists to avoid.
+    #[test]
+    fn a_setting_that_acts_is_not_reported_inert() {
+        let (config, inert) = parse_daemon_config("dynamic_tuning=1\nrecommend_command=1\n");
+        assert!(config.dynamic_tuning);
+        assert!(config.recommend_command);
+        assert!(
+            inert.is_empty(),
+            "dynamic_tuning and recommend_command are read by cmd_daemon and \
+             cmd_recommend, so they must not be reported inert"
+        );
+    }
+
+    /// Silence when nothing was asked for.
+    #[test]
+    fn a_config_setting_nothing_inert_says_nothing() {
+        let (_, inert) = parse_daemon_config("");
+        assert!(inert.is_empty());
+        let (_, inert) = parse_daemon_config("# a comment\nnot_a_key=1\n");
+        assert!(
+            inert.is_empty(),
+            "an unrecognised key is not inert -- it is unrecognised, and \
+             reporting it would claim this build knows a setting it does not"
+        );
+    }
+
+    /// Every name in the list is a key the parser recognises.
+    ///
+    /// Crosses the list against the PARSER rather than against itself. A typo
+    /// or a renamed key fails here rather than silently dropping a setting
+    /// out of the notice, which would restore the original defect -- accepted
+    /// in silence -- for that one key only, and invisibly.
+    #[test]
+    fn every_inert_name_is_a_key_the_parser_knows() {
+        for key in INERT_CONFIG_KEYS {
+            let (_, inert) = parse_daemon_config(&format!("{key}=1\n"));
+            assert_eq!(
+                inert,
+                vec![*key],
+                "{key} is listed inert but the parser does not recognise it"
+            );
+        }
     }
 
     #[test]

@@ -1,13 +1,18 @@
 # `userspace/zip` carries a third DEFLATE, a second ZIP parser, and a fifth CRC-32
 
-**Status:** 🟡 PARTIALLY CONSUMED 2026-08-30 by lane B — steps 1 and 2's
-decompressor are done; the rest is blocked or declined, itemised here.
+**Status:** ✅ CONSUMED — steps 1, 2a and 2b are all landed; step 3 is declined
+with reasoning. Re-checked 2026-09-15 and the table below was stale: 2b
+unblocked on 2026-08-30 when lane A granted `deflate_level` in full, and landed
+2026-09-02. Verified by measurement rather than by the comment claiming it:
+`userspace/zip` has no `deflate_compress`, no `BitWriter` and no length or
+distance tables left, and calls `deflate::deflate_level`,
+`deflate::inflate_limited` and `crc32::crc32`.
 
 | Ask | Outcome |
 |---|---|
 | 1. `crc32` crate | ✅ landed `05ced5983`. Pure deletion, no behaviour change. |
 | 2a. `deflate::inflate_limited` for unzip | ✅ landed `b5ede6224` — and it fixed the bomb. |
-| 2b. `deflate::deflate` for zip | ⛔ blocked — the crate has no compression level and `zip` documents nine. `requests/b-a-deflate-cannot-express-a-compression-level.md`. |
+| 2b. `deflate::deflate` for zip | ✅ landed 2026-09-02. Was blocked on the crate having no compression level; lane A granted `deflate_level` on 2026-08-30 and the local 380-line LZ77 + fixed-Huffman encoder went with it. Details in `requests/a-b-deflate-level-has-landed-and-your-local-compressor-was-the-better-one.md`. |
 | 3. `ziparchive` | ❌ declined for now, per this request's own scepticism. |
 
 **Your hunch about the bomb was right, and it was the most valuable part of

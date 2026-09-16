@@ -1420,6 +1420,49 @@ mod tests {
         assert_eq!(link.pending_input(), 0);
     }
 
+    /// A claimed idle watch reaches its client, and nobody else's.
+    ///
+    /// End to end through the real routing rather than against
+    /// `idle_deadlines_passed`, which the compositor's own tests already
+    /// cover. What this adds is the wiring: that a deadline becomes a queued
+    /// notification, that the notification is addressed to the claimant, and
+    /// that routing hands it to that client and not to the other one. A test
+    /// against the bookkeeping would pass with the notification never
+    /// delivered, which is the half a user would notice.
+    #[test]
+    fn an_idle_watch_reaches_only_the_window_that_claimed_it() {
+        use std::time::Duration;
+
+        let (mut comp, mut link) = wired();
+        let watcher = open(&mut comp, &mut link, "Watcher");
+        let mut other = ClientLink::new(99);
+        let _bystander = open(&mut comp, &mut other, "Bystander");
+
+        // Drain the focus traffic opening windows produced, so the counts
+        // below are about the idle notification and nothing else.
+        comp.route_input(&mut link);
+        comp.route_input(&mut other);
+        drop(link.take_outgoing());
+        drop(other.take_outgoing());
+
+        comp.watch_idle(crate::WindowId::from_raw(watcher), Duration::from_mins(5))
+            .expect("a real window");
+
+        // Before the deadline, nothing is queued for anybody.
+        let start = comp.last_input();
+        comp.queue_idle_notifications(start + Duration::from_mins(4));
+        assert_eq!(comp.route_input(&mut link), 0, "told before the delay");
+
+        // After it, exactly one event, to the claimant.
+        comp.queue_idle_notifications(start + Duration::from_mins(5));
+        assert_eq!(comp.route_input(&mut link), 1, "the claimant was not told");
+        assert_eq!(
+            comp.route_input(&mut other),
+            0,
+            "a window that claimed nothing was told the session went idle"
+        );
+    }
+
     #[test]
     fn input_goes_only_to_the_client_that_owns_the_window() {
         let (mut comp, mut link) = wired();

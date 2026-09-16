@@ -3376,6 +3376,11 @@ pub enum EventNotification {
     /// variant exists to avoid — a client reading that could not tell the
     /// gesture from an ordinary Shift release during Alt+Shift+Tab, which is
     /// the precise confusion that left the layout switcher unbound.
+    /// The session has been quiet for as long as this window asked.
+    ///
+    /// Addressed to the claimant, like [`Self::ModifierChord`]. A window that
+    /// never called [`Compositor::watch_idle`] is never sent one.
+    SessionIdle { window_id: WindowId },
     ModifierChord {
         window_id: WindowId,
         /// Every modifier that was held. Sides are already collapsed: holding
@@ -3399,6 +3404,7 @@ impl EventNotification {
             | Self::WindowResized { window_id, .. }
             | Self::FocusGained { window_id }
             | Self::FocusLost { window_id } => *window_id,
+            Self::SessionIdle { window_id } => *window_id,
             Self::SettingsChanged { window_id, .. } | Self::ModifierChord { window_id, .. } => {
                 *window_id
             }
@@ -3469,6 +3475,9 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
         }
         EventNotification::SettingsChanged { window_id, group } => {
             guiremote::InputEvent::new(window_id.0, ClientEvent::SettingsChanged { group })
+        }
+        EventNotification::SessionIdle { window_id } => {
+            guiremote::InputEvent::new(window_id.0, ClientEvent::SessionIdle)
         }
         EventNotification::ModifierChord {
             window_id,
@@ -7164,6 +7173,21 @@ impl Compositor {
         // ids have no meaningful order -- but a stable report does need one.
         due.sort_unstable_by_key(|w| w.raw());
         due
+    }
+
+    /// Queue a notification for every idle deadline that has just passed.
+    ///
+    /// Called once a tick. The check is a subtraction against one `Instant`
+    /// and a walk of however many watchers there are -- which is nought or one
+    /// on any machine anybody has -- so it does not need scheduling: the
+    /// server is already running a frame loop, and design-decisions 812's
+    /// objection is to waking an *idle desktop* to poll, not to a running
+    /// compositor answering a question it already has the answer to.
+    pub fn queue_idle_notifications(&mut self, now: Instant) {
+        for window_id in self.idle_deadlines_passed(now) {
+            self.pending_notifications
+                .push_back(EventNotification::SessionIdle { window_id });
+        }
     }
 
     /// Process an input event and route it to the appropriate window.

@@ -5714,6 +5714,18 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
         );
         return;
     }
+    // ROUND-4 DISCRIMINATOR for ctest-pty exit 45. Rounds 1 and 3 settled
+    // that the byte reaches the discipline, that ISIG is on, that a signal is
+    // decided (at `canonical_try_read`/`step()`), and that `pgid != 0` so
+    // delivery is attempted. The child still never returns from its read.
+    //
+    // These counters exist because the per-member `let _ =` below cannot tell
+    // the benign case its own comment describes -- one member exited -- from
+    // the case that would explain the hang, which is NOT ONE send succeeding.
+    // A tolerated per-item failure hides a total failure, and a discarded
+    // Result reports both as silence.
+    let mut delivered = 0usize;
+    let mut failed = 0usize;
     for target in pcb::pids_in_group(pgid) {
         let send_args = SyscallArgs {
             arg0: target,
@@ -5723,9 +5735,35 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
             arg4: 0,
             arg5: 0,
         };
-        // Best-effort: a member that exited between the membership snapshot
-        // and delivery just fails its own send; the rest still receive it.
-        let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
+        // Best-effort, per member: a member that exited between the membership
+        // snapshot and delivery just fails its own send and the rest still
+        // receive it. Counted rather than discarded so the aggregate can be
+        // judged even though no individual failure is worth reporting.
+        // `SyscallResult` is not a `Result`: it carries an i64 `value` whose
+        // negative range is the error code. Assuming the API from the name
+        // cost a compile here, which is the cheapest place to be wrong.
+        if sys_signal_send_with_info(&send_args, SI_KERNEL, 0).value < 0 {
+            failed = failed.saturating_add(1);
+        } else {
+            delivered = delivered.saturating_add(1);
+        }
+    }
+    // Deliberately silent unless NOTHING was delivered to a non-empty group.
+    // Printing each failure would bury this case in noise on a busy system and
+    // tell a reader nothing the discarded Result did not already tell them.
+    if delivered == 0 && failed > 0 {
+        crate::serial_println!(
+            concat!(
+                "[tty] signal {} decided for pgid {} on tty {:?}: {} member(s) ",
+                "and NOT ONE delivery succeeded. The line discipline was ",
+                "right and the delivery is the fault -- known-issues ",
+                "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
+            ),
+            sig,
+            pgid,
+            tty,
+            failed
+        );
     }
 }
 

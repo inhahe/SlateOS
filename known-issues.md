@@ -152837,6 +152837,60 @@ and five true procfs checks about the wrong subject. The common step is
 not carelessness about the result; it is not asking what the instrument's
 coverage was before interpreting its quiet.
 
+### 2026-09-16 round 3: THE BYTE ARRIVES AND A SIGNAL IS DECIDED
+
+The canonical probe fired **three times**:
+
+```
+[tty] canonical: line discipline saw VINTR (0x03) isig=true
+```
+
+Instrument verified before the result was read -- three probe strings in
+the staged kernel `build/esp/boot/kernel`, one canonical-specific, with a
+positive control. So this is a real positive, and the first in the
+investigation.
+
+It also confirms round 2's zero was a **coverage gap and not a null
+result**: every hit is on the canonical path, the site `sig_for` does not
+serve. Without round 3, that zero would have been recorded as "the byte
+never reached the discipline" and sent the search to the master-to-slave
+path, which is empty.
+
+**Five links are now settled, and the child still never returns from its
+read:**
+
+| link | settled by |
+|---|---|
+| the master write reaches the input ring | ctest-pty returning 45, not 44 |
+| the discipline sees the byte | round 3 |
+| `ISIG` is on | round 3 |
+| a `SIGINT` is decided | round 3 |
+| the foreground group is non-empty | round 1's silence at `pgid == 0` |
+
+**Round 4 probes the next link: do the sends to the group members actually
+succeed?** Nothing could tell, because the loop discarded every result:
+
+```rust
+// Best-effort: a member that exited between the membership snapshot
+// and delivery just fails its own send; the rest still receive it.
+let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
+```
+
+That justification is correct **per member** and the wrong shape for the
+whole. One member exiting is benign; *not one* send succeeding is the bug,
+and a discarded `Result` reports both as silence -- a tolerated per-item
+failure hiding a total failure.
+
+Round 4 counts, and prints only when a non-empty group received nothing:
+quiet on a healthy system, quiet on the benign case the comment describes,
+loud on exactly the case that would explain exit 45. Printing every failure
+would have buried the distinction in noise and told a reader nothing the
+discarded result did not.
+
+(`SyscallResult` is not a `Result` and has no `is_err`; it carries an `i64`
+`value` whose negative range is the error code. Assuming the API from the
+name cost one compile, which is the cheapest place to be wrong.)
+
 ## A-CTEST-COREUTILS-RUNS-EXIT-3-WAS-A-MISSING-BINARY-NOT-A-BROKEN-ONE (lane A, 2026-09-16) — **Status: NOT A KERNEL DEFECT**
 
 **`ctest-coreutils-runs` exited 3 on its first run and it is not a finding about the kernel.** `/bin/true` is not on the image. `create-ext4-rootfs.sh` reported this during the rebuild, in plain words, and I did not read its output:
@@ -152856,7 +152910,48 @@ I ran the rebuild, checked `ROOTFS_RC=0` and that the *fixtures* staged, then bo
 
 **My diagnostic asserted the wrong subsystem.** It read *"our own ELFs do not exec, run or exit cleanly, which would explain every other ring-3 rung"* -- confident, specific, and pointing at the loader. The serial showed the fork succeeding and **no `ELF validated` line at all**, i.e. nothing was loaded. Rewritten to say it cannot distinguish the two cases and to send the reader to the rootfs log first: *a missing `/bin/true` looks exactly like a broken one.*
 
-**To actually run it:** build `userspace/coreutils` for the slateos target (`CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release`), rebuild the rootfs, re-boot.
+**RESOLVED 2026-09-16: the path was wrong. The rootfs mounts at `/mnt`.**
+
+With all five producing crates built and 72 utilities staged with zero
+skipped names, the rung still failed -- as lane B's new exit **11**, with
+the serial saying `COULD NOT EXEC /bin/true -- it is not on the image, or
+is not executable.` That claim is checkable, so I stopped trusting the
+staging log and inspected the image:
+
+```
+$ debugfs -R "stat /bin/true" rootfs.ext4
+Inode: 108   Type: regular    Mode: 0755   Size: 796064
+```
+
+Present, executable, byte-size-identical to the built binary -- which left
+the path. And the serial says `[vfs] Mounted ext4 filesystem at '/mnt'`.
+`create-ext4-rootfs.sh` stages into `$STAGE/bin`, i.e. `/bin` *inside the
+image*, and the image mounts at `/mnt`, so the runtime path is
+`/mnt/bin/true`. Five fixtures shared the fault; lane B fixed all five
+behind a `BIN "/mnt/bin/"` macro and made the staging log name both forms.
+
+**`/bin` means two different things depending on which side of the mount
+you are on.** `rootfs-bin-manifest`, "staged into /bin", and
+`execl("/bin/true")` are all true sentences about different sides of it.
+The day's recurring shape, with the ambiguity in a **name** rather than in
+an instrument.
+
+**Exit 11 found this in four minutes where exit 3 would have sent me to
+the loader**, and lane B's generalisation is the keeper: *diagnostic
+precision is about falsifiability, not correctness.* Exit 11's claim was
+**wrong**, and being wrong in a checkable way is what made it the fastest
+route to the truth. A diagnosis narrow enough to disprove in one command
+beats a broad one that happens to be true.
+
+**Two retractions from resolving it.** I twice offered the absence of an
+`ELF validated` line as evidence nothing was loaded; that line comes from
+kernel-side `spawn_process`, not the `execl` syscall path, so it was never
+evidence about exec -- and lane B repeated it back as settled, which is two
+witnesses agreeing because one was quoting the other. And I chased a
+capability theory first, because this rung passes `capabilities: &[]`
+exactly as the keylayout one did: exec has no `(File, EXECUTE)` gate and
+both matches are inside capability self-tests. A recent real cause distorts
+the search order.
 
 ## A-PROC-KEYLAYOUT-CANNOT-BE-OPENED-FROM-RING-3 (lane A, 2026-09-16) — **Status: WITHDRAWN**, the fault was in my rung
 

@@ -154399,9 +154399,10 @@ usefully, a gate that refuses a test binary containing both
 
 ## TD-C-THREE-MORE-SHELL-SETTINGS-MODULES-ARE-REACHED-BY-NOTHING
 
-**Status 2026-09-16: one of three resolved** (`default_apps.rs`, deleted after
-its model was ported to `gui/associations`; see below). `backup_settings.rs`
-and `power_settings.rs` remain.
+**Status 2026-09-16: two of three resolved.** `default_apps.rs` was deleted
+after its model was ported to `gui/associations`, and `backup_settings.rs` was
+deleted because `apps/backup` already implements a superset of it (both below).
+Only `power_settings.rs` remains, and it is half blocked on lane A.
 
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `gui/desktop/src/{power_settings,backup_settings,default_apps}.rs`.
@@ -154463,6 +154464,38 @@ these three, and at least one clearly holds something:
   Removed: 2,325 lines, 35 public items, 35 tests -- a suite proving the
   behaviour of a panel nobody could open. The shell's test count went 2,907 ->
   2,872, exactly the 35, which is the check that nothing else went with it.
+* `backup_settings.rs` -- **DONE 2026-09-16.** 2,654 lines, 48 public items,
+  36 tests, persisting nothing: no `settingsfile` call, no write, no reference
+  but the `pub mod` line. It modelled backup types, frequencies, day-of-week,
+  targets, sources, exclude rules, retention policies, status and history.
+
+  `apps/backup` already implements all of it *and runs*: retention, exclusions,
+  incremental backups and pruning are live there. The one thing that looked
+  like unique knowledge was the shell's `RetentionPolicy::Tiered` -- keep daily
+  for 7 days, weekly for 4 weeks, monthly for 12 months -- and on reading the
+  app it turned out to be the weaker model: `apps/backup` takes `keep_last`,
+  `keep_daily`, `keep_weekly` and `keep_monthly` as *independent numbers*, so
+  the shell's variant is one frozen preset over what the app already computes.
+
+  **The general trap, worth keeping:** on the first survey the dead module read
+  as the *richer* of the two, because it had more named variants. It could
+  afford them. A model that never runs is not constrained by having to work, so
+  vocabulary accumulates in it and reads as sophistication. The live model was
+  more expressive with fewer names, because its names were parameters. Do not
+  size these two by counting their types.
+
+  Preserved rather than kept: the preset numbers 7/4/12 are a defensible
+  default someone chose, recorded here, which is one line rather than 2,654.
+
+  The deletion also broke a reference the compiler could not see:
+  `input_method.rs` cited this module's `InProgress => blue` as the precedent
+  for a status colour collapsing onto the accent. The trap was worth keeping
+  and the pointer was not, so the comment now states it without the citation.
+  This is the blind spot `scripts/check-unused-exports.py` documents -- prose
+  counts as a mention -- seen from the other side.
+
+  Test count: 2,872 -> 2,836, exactly the 36 removed.
+
 * `power_settings.rs` models screen-off and sleep timeouts in minutes with
   "0 = never". Nothing persists them and nothing honours them, so they are an
   echoed setting in waiting.

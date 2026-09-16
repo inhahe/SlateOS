@@ -78,7 +78,6 @@
 
 pub mod about;
 pub mod animations;
-pub mod backup_settings;
 pub mod bluetooth;
 pub mod calendar;
 pub mod clipboard_viewer;

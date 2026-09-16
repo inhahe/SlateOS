@@ -155020,6 +155020,25 @@ the default set ever appears. Removing it to comply with the spec would leave
 the user with name/size/date and no way to ask for anything else — strictly
 worse than today, and delivered as a correctness fix.
 
+**One thing the picker will need that does not exist yet, found while sizing
+it.** Its "save as default for this folder" has to write down *which* columns,
+and neither field of `ColumnDef` can carry that:
+
+* `id: ColumnId(u32)` is a position in a hand-numbered list. Saving integers
+  means a renumbering silently repoints every saved preference at a different
+  column -- the `FileTypeInfo::default_app` failure exactly, where stored data
+  looked authoritative and resolved to the wrong thing.
+* `label: String` is display text, and the const table sets it to
+  `String::new()` with the comment "replaced at runtime", so it is not even
+  populated at rest.
+
+So the persistence format needs a stable third identifier -- a `key:
+&'static str` per column, never shown and never renumbered -- set at the 21
+`ColumnDef` construction sites, with a test that the keys are unique and that
+an unknown key in a saved file is skipped rather than guessed at. That field
+should land *with* the persistence that reads it and not before: a key nothing
+consults is the unused-field shape this entry's neighbours are about.
+
 **So the order is fixed:** build the column picker and its persistence first,
 then remove `auto_detect_columns` in the same change that makes it
 unnecessary. Both halves are lane C and neither is blocked on another lane.

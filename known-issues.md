@@ -154399,10 +154399,19 @@ usefully, a gate that refuses a test binary containing both
 
 ## TD-C-THREE-MORE-SHELL-SETTINGS-MODULES-ARE-REACHED-BY-NOTHING
 
-**Status 2026-09-16: two of three resolved.** `default_apps.rs` was deleted
-after its model was ported to `gui/associations`, and `backup_settings.rs` was
-deleted because `apps/backup` already implements a superset of it (both below).
-Only `power_settings.rs` remains, and it is half blocked on lane A.
+**Status 2026-09-16: all three triaged. Two deleted, one deliberately kept.**
+`default_apps.rs` went after its model was ported to `gui/associations`;
+`backup_settings.rs` went because `apps/backup` already implements a superset
+of it. `power_settings.rs` is **kept**, and the reason is below -- it is the
+one of the three that holds design recorded nowhere else, which is the same
+ground on which `remote.rs` was kept in the sibling entry.
+
+**Read that as the rule, not the score.** Three modules with identical
+symptoms -- `pub`, compiling, tested, reached by nothing -- split two-to-one on
+the only question that matters, which is whether a working implementation of
+the same idea exists somewhere else. Two had one; the third does not. A sweep
+that deleted all three for looking alike would have been right twice and
+destructive once.
 
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `gui/desktop/src/{power_settings,backup_settings,default_apps}.rs`.
@@ -154586,3 +154595,47 @@ not cause a backup. `apps/netmanager` already sets the precedent of refusing
 out loud rather than appearing to work, and `posix`'s `require_shell` is the
 in-tree model for a stub that documents its own emptiness rather than
 pretending. Silence here is the part that turns a missing feature into a bug.
+
+## TD-C-POWER-SETTINGS-IS-KEPT-ON-PURPOSE-DO-NOT-SWEEP-IT
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** `gui/desktop/src/power_settings.rs` (1,855 lines).
+
+**In short:** this file looks exactly like two others that were deleted today —
+it is a settings screen nobody can open, it saves nothing, and no code refers
+to it. It is being kept anyway. The two that went were duplicates of programs
+that already work; this one is the only place several ideas are written down at
+all, and the work that would make it real belongs to another team.
+
+**What is genuinely only here.** Measured against the live `power.rs`:
+
+| Concept | `power.rs` (live) | `power_settings.rs` |
+|---|---|---|
+| `PowerAction` | 61 mentions — live | 13 — duplicate |
+| `BatteryInfo` | live, and honest | second copy |
+| `PowerPlan` | absent | 19 — **only here** |
+| `BatteryHealth` | absent | 29 — **only here** |
+| `ChargeState` | absent | 23 — **only here** |
+| `ChargeHistorySample` | absent | 4 — **only here** |
+
+**Why it cannot simply be finished either.** Every unique thing in it needs
+hardware this lane does not own. A power plan needs CPU frequency control;
+battery health, charge state and charge history need a battery driver that
+calls `register_source`. Both are lane A's. So it is neither deletable (the
+knowledge has no other home) nor completable (the dependency is not ours) —
+which is exactly the state the sibling entry kept `remote.rs` in.
+
+**The live module is not the problem, and was checked rather than assumed.**
+`power.rs` defaults to `present: false, state: NoBattery` and nothing populates
+it from hardware, which looks like the fabrication design-decisions 856 is
+about until you read the comment at `lib.rs:6874`: that is *the true answer*,
+because `/proc/battery` reports zero sources until an ACPI driver registers
+one, and the line that changes when it does is named. The disk meter beside it
+does the same thing — `disk_fraction: None` with "the meter says so rather than
+showing a plausible fraction of a number we do have". Absent data reported as
+absent is the opposite of the defect.
+
+**What would change this entry.** Lane A landing either CPU frequency control
+or a battery source. At that point the *screens* go to `apps/settings` under
+815 and this file goes with them — but until then, deleting it loses the only
+written description of what those screens should do.

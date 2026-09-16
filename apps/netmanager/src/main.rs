@@ -4057,6 +4057,17 @@ mod tests {
         let before = app.vpn_states[1].clone();
         assert!(app.toggle_vpn(1).is_ok());
         assert_eq!(app.vpn_states[1], before, "the VPN switch moved");
+        // Asserted on this path too, not just the connect one. The message is
+        // set under `if let Some(vpn) = self.vpn_configs.get(index)`, so a
+        // `vpn_configs` shorter than `vpn_states` refuses in silence -- a
+        // switch that does not move and says nothing reads as a dead control
+        // rather than an honest refusal, and only the connect test would have
+        // noticed.
+        assert!(
+            app.status_message.contains("Cannot"),
+            "the switch did not move and nothing said why: {}",
+            app.status_message,
+        );
     }
 
     #[test]

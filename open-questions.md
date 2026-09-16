@@ -1104,6 +1104,18 @@ this idea already exist somewhere else?**
 - Power settings: no. Power plans, battery health and charge history exist
   nowhere else, and the hardware they need is another team's. Kept.
 
+**Applied to two of the five, 2026-09-16.** The discriminator splits them, so
+this may be five small questions rather than one large one:
+
+| feature | does a working implementation exist elsewhere? | suggests |
+|---|---|---|
+| image viewer — plays video (77 KB) | **Yes.** `apps/videoplayer` is a separate, launchable application: 7,201 lines, 154 tests, no stubs. | delete |
+| process explorer — affinity, deadlocks, memory map (83 KB) | **No.** `features.rs` is 2,624 unreachable lines, and *affinity* and *deadlock detection* appear nowhere else in the tree. `sysmonitor` has some priority handling and none of the rest. | wire up |
+
+The other three (installer/GRUB, hardware queries, remote settings) are **not
+checked** — a first pass was inconclusive and is not reported rather than
+guessed at. Answering for the two above does not depend on them.
+
 Two things in that are worth carrying to the five above. Deleting is far
 cheaper than wiring *when the answer is yes* — most of a day's reading, no new
 interface, no new tests. And the dead copy twice looked *richer* than the live

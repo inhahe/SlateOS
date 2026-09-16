@@ -386,6 +386,12 @@ struct Options {
     size_limit: Option<usize>,
     message_parts: Vec<String>,
     read_stdin: bool,
+    /// `-e`. Empty lines are logged by DEFAULT; this suppresses them.
+    skip_empty: bool,
+    /// One message per line, from `-f`. Kept apart from `message_parts`
+    /// because those are argv words that get joined into a single message,
+    /// and a file's lines are not words -- they are separate messages.
+    line_messages: Vec<String>,
 }
 
 fn print_help() {
@@ -400,6 +406,7 @@ fn print_help() {
     println!("  -i, --id                  log the process ID with each line");
     println!("  -f, --file FILE           log the contents of FILE");
     println!("  -s, --stderr              output to stderr as well as syslog");
+    println!("  -e, --skip-empty          do not log empty lines from -f or stdin");
     println!("  -u, --socket SOCKET       write to SOCKET instead of /dev/log");
     println!("  -n, --server HOST         ignored (compatibility)");
     println!("  -P, --port PORT           ignored (compatibility)");
@@ -464,6 +471,8 @@ fn parse_args(args: &[OsString]) -> Options {
         size_limit: Some(1024),
         message_parts: Vec::new(),
         read_stdin: false,
+        skip_empty: false,
+        line_messages: Vec::new(),
     };
 
     let mut i = 0;
@@ -526,6 +535,9 @@ fn parse_args(args: &[OsString]) -> Options {
             }
             "--json" => {
                 opts.json = true;
+            }
+            "-e" | "--skip-empty" => {
+                opts.skip_empty = true;
             }
             "--size" => {
                 i += 1;
@@ -657,13 +669,20 @@ fn parse_args(args: &[OsString]) -> Options {
         i += 1;
     }
 
-    // If -f was given, read that file's contents as messages
+    // If -f was given, each LINE of that file is its own message.
+    //
+    // It used to push them into `message_parts`, which `main` joins with
+    // spaces -- so a six-line file became one log entry reading
+    // `one two three` instead of six entries. And it dropped empty lines
+    // unconditionally, which is `-e` behaviour applied whether or not `-e`
+    // was given; the reference logs an empty line as an empty message and
+    // skips it only on request.
     if let Some(file_path) = file_to_log {
         match fs::read_to_string(&file_path) {
             Ok(content) => {
                 for line in content.lines() {
-                    if !line.is_empty() {
-                        opts.message_parts.push(line.to_string());
+                    if !(opts.skip_empty && line.is_empty()) {
+                        opts.line_messages.push(line.to_string());
                     }
                 }
             }
@@ -675,8 +694,8 @@ fn parse_args(args: &[OsString]) -> Options {
         }
     }
 
-    // If no message parts, read from stdin
-    if opts.message_parts.is_empty() {
+    // Only with no message at all -- neither argv words nor a `-f` file.
+    if opts.message_parts.is_empty() && opts.line_messages.is_empty() {
         opts.read_stdin = true;
     }
 
@@ -862,13 +881,18 @@ fn main() {
     let tag = opts.tag.clone().unwrap_or_else(get_username);
     let pid = get_pid();
 
-    if opts.read_stdin {
-        // Log each line from stdin
+    if !opts.line_messages.is_empty() {
+        // `-f`: one entry per line of the file, in order.
+        for msg in &opts.line_messages {
+            log_message(&opts, msg, &hostname, &tag, pid);
+        }
+    } else if opts.read_stdin {
+        // Each line read is its own message, as with `-f`.
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
             match line {
                 Ok(msg) => {
-                    if !msg.is_empty() {
+                    if !(opts.skip_empty && msg.is_empty()) {
                         log_message(&opts, &msg, &hostname, &tag, pid);
                     }
                 }
@@ -879,7 +903,7 @@ fn main() {
             }
         }
     } else {
-        // Log the command-line message
+        // Argv words ARE joined -- `logger hello world` is one message.
         let message = opts.message_parts.join(" ");
         log_message(&opts, &message, &hostname, &tag, pid);
     }
@@ -1182,6 +1206,8 @@ mod tests {
             size_limit: Some(1024),
             message_parts: Vec::new(),
             read_stdin: false,
+            skip_empty: false,
+            line_messages: Vec::new(),
         };
         let entry = format_syslog_entry(&opts, "test message", "mytag", 1234);
         // Priority: user(1)*8 + notice(5) = 13
@@ -1210,6 +1236,8 @@ mod tests {
             size_limit: Some(1024),
             message_parts: Vec::new(),
             read_stdin: false,
+            skip_empty: false,
+            line_messages: Vec::new(),
         };
         let entry = format_syslog_entry(&opts, "error", "daemon", 5678);
         // Priority: daemon(3)*8 + err(3) = 27
@@ -1232,6 +1260,8 @@ mod tests {
             size_limit: Some(1024),
             message_parts: Vec::new(),
             read_stdin: false,
+            skip_empty: false,
+            line_messages: Vec::new(),
         };
         let entry = format_syslog_entry(&opts, "msg", "tag", 1111);
         assert!(entry.contains("[9999]"));
@@ -1253,6 +1283,8 @@ mod tests {
             size_limit: Some(10),
             message_parts: Vec::new(),
             read_stdin: false,
+            skip_empty: false,
+            line_messages: Vec::new(),
         };
         let entry = format_syslog_entry(&opts, "this is a very long message", "t", 0);
         assert!(entry.contains("this is a "));
@@ -1275,6 +1307,8 @@ mod tests {
             size_limit: Some(1024),
             message_parts: Vec::new(),
             read_stdin: false,
+            skip_empty: false,
+            line_messages: Vec::new(),
         };
         let entry = format_json_entry(&opts, "test msg", "myhost", "mytag", 42);
         assert!(entry.starts_with('{'));
@@ -1303,6 +1337,8 @@ mod tests {
             size_limit: Some(1024),
             message_parts: Vec::new(),
             read_stdin: false,
+            skip_empty: false,
+            line_messages: Vec::new(),
         };
         let entry = format_json_entry(&opts, "msg", "h", "t", 42);
         assert!(entry.contains("\"pid\":42"));
@@ -1364,5 +1400,94 @@ mod tests {
         let opts = parse_args(&args);
         assert_eq!(opts.message_parts, vec!["hello", "world"]);
         assert!(!opts.read_stdin);
+    }
+
+    /// Write `body` to a uniquely named temp file and hand back the path.
+    ///
+    /// Named from the test's own name plus the pid, because two of this
+    /// crate's tests using one fixed filename would race under `cargo test`'s
+    /// thread pool -- the same defect as
+    /// `c-b-two-audit-tests-share-one-env-var-and-race`.
+    fn temp_with(name: &str, body: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!("logger-{name}-{}.txt", process::id()));
+        fs::write(&path, body).expect("write fixture");
+        path
+    }
+
+    #[test]
+    fn dash_f_logs_one_message_per_line_and_keeps_the_blank_ones() {
+        // This read a six-line file into `message_parts`, which `main` joins
+        // with spaces, so the whole file became ONE entry reading
+        // `one two three`. The reference emits six, blanks included:
+        //     $ logger -s -t T -f blanks.txt
+        //     <13>... T: one
+        //     <13>... T:
+        //     <13>... T: two      (and so on)
+        let path = temp_with(
+            "perline",
+            "one
+
+two
+
+
+three
+",
+        );
+        let args = vec!["-f".into(), OsString::from(&path)];
+        let opts = parse_args(&args);
+        assert_eq!(
+            opts.line_messages,
+            vec!["one", "", "two", "", "", "three"],
+            "a file's lines are separate messages, and an empty line is an              empty message rather than no message"
+        );
+        // `message_parts` must stay empty: anything in it would be joined
+        // into the argv message and logged a second time.
+        assert!(opts.message_parts.is_empty());
+        // ...and stdin must NOT be read, or a `-f` run would block.
+        assert!(!opts.read_stdin);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dash_e_is_what_drops_the_blank_lines_and_it_is_off_by_default() {
+        let path = temp_with(
+            "skipempty",
+            "one
+
+two
+",
+        );
+        let args = vec!["-e".into(), "-f".into(), OsString::from(&path)];
+        let opts = parse_args(&args);
+        assert!(opts.skip_empty);
+        assert_eq!(opts.line_messages, vec!["one", "two"]);
+
+        // The control arm, which is the half that was broken: WITHOUT -e the
+        // blank survives. Asserting only the -e case would have passed
+        // against the old code, which dropped blanks unconditionally.
+        let args = vec!["-f".into(), OsString::from(&path)];
+        let opts = parse_args(&args);
+        assert!(!opts.skip_empty);
+        assert_eq!(opts.line_messages, vec!["one", "", "two"]);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn argv_words_are_still_joined_into_one_message() {
+        // The counterpart to the rule above: a file's LINES are separate
+        // messages, but argv WORDS are one. `logger hello world` logs
+        // "hello world", not two entries.
+        let args = vec!["hello".into(), "world".into()];
+        let opts = parse_args(&args);
+        assert!(opts.line_messages.is_empty());
+        assert_eq!(opts.message_parts.join(" "), "hello world");
+    }
+
+    #[test]
+    fn skip_empty_has_both_spellings() {
+        for spelling in ["-e", "--skip-empty"] {
+            let args = vec![OsString::from(spelling), "hi".into()];
+            assert!(parse_args(&args).skip_empty, "{spelling}");
+        }
     }
 }

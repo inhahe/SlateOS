@@ -9785,12 +9785,21 @@ pub fn self_test_ctest_hostname() -> KernelResult<()> {
 /// completion without its `SIGINT` handler firing, meaning the line discipline
 /// did not turn `0x03` into a signal that reached the foreground group.
 ///
-/// The fixture contains no `alarm`/`setitimer` calls (those are known-broken:
-/// `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`).  Every read is non-blocking
-/// with a bounded spin, so it can fail but cannot hang.
-// Wired into main.rs but currently commented-out while Lane B routes
-// PtySlave reads through 872/873.
-#[allow(dead_code)]
+/// The fixture contains no `alarm`/`setitimer` calls. That was once because
+/// they were broken; `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING` is stamped
+/// **FIXED 2026-09-12** and `SIGALRM` arrives. They stay out for a better
+/// reason than the original one: a pty test whose bounds depend on the timer
+/// subsystem reports a timer regression as a pty failure and sends the reader
+/// to the wrong subsystem. Every read is non-blocking with a bounded spin, so
+/// it can fail but cannot hang.
+///
+/// No disable note here on purpose. This function used to carry one saying the
+/// rung was off while lane B routed PtySlave reads through 872/873 -- which
+/// landed 2026-09-09 and was four disable cycles out of date, while the live
+/// reason sat at the call site in main.rs. A teammate read this copy, believed
+/// it, and nearly filed a request against code that was not the problem. If
+/// this rung is ever switched off again, the reason goes at the call site,
+/// because the call site is what stopped running. See design-decisions.md 944.
 pub fn self_test_ctest_pty() -> KernelResult<()> {
     let Some(ctest_elf) = pathz_test_elf("ctest-pty", "ctest-pty")? else {
         return Ok(());

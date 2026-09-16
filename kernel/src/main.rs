@@ -2694,32 +2694,34 @@ extern "C" fn kernel_main() -> ! {
     // child is genuinely alive. Read in services/ctest-pty/main.c rather than
     // inferred from a run.
     //
-    // What blocks it now is the STAGED BINARY, which is not the same question.
-    // services/ctest-pty/ctest-pty.elf is dated 2026-09-10 07:43 and the fix is 13
-    // hours later, so the ELF this rung would load cannot contain the new logic --
-    // re-enabling collects 44 from the old fixture and reddens every lane for a bug
-    // that is already fixed. Restaging means rebuilding the sysroot (libc.a is
-    // behind lane B's posix/src/unistd.rs and utsname.rs) and relinking under
-    // services/**, which boot-test.sh calls "a repair lane A must not make".
+    // RE-ENABLED 2026-09-15. Both halves measured in THIS worktree rather than
+    // taken from lane B's, because the second half is not a property of the repo:
     //
-    // RE-ENABLE when `scripts/ctest-fixtures.py sysroot-check` passes AND
-    // services/ctest-pty/ctest-pty.elf is newer than 6e19f88a1 -- both checkable in
-    // one command. Check rather than assume: the re-enable condition written here
-    // has now been satisfied twice while the rung stayed off for another reason.
-    // Asked of lane B in
-    // `requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md`.
+    //   * `scripts/ctest-fixtures.py sysroot-check` -> rc 0, reporting that
+    //     libc.a matches the sources it is built from.
+    //   * ctest-pty.elf carries the `child_verdict` symbol -- two byte offsets,
+    //     binary not stripped -- so the ELF that loads here contains 6e19f88a1's
+    //     reap-first logic and cannot report the old blanket 44.
     //
-    // {
-    //     #[inline(never)]
-    //     fn case() {
-    //         selftest::dispatch_debug(
-    //             "pty ^C signal delivery (ring 3)",
-    //             selftest::Severity::Diagnostic,
-    //             proc::spawn::self_test_ctest_pty(),
-    //         );
-    //     }
-    //     case();
-    // }
+    // The condition this replaces asked whether the ELF was NEWER than 6e19f88a1.
+    // Lane B declined to settle it that way and was right twice over. The ELF is
+    // gitignored, so it is a per-worktree build artifact with no canonical
+    // instance -- their timestamp said nothing about mine. And a rebuild refreshes
+    // a timestamp whether or not the source changed, which is precisely how the
+    // stale binary came to look staged in the first place. A condition phrased
+    // over provenance can pass for the wrong reason; phrase it over content.
+    // See design-decisions.md 944.
+    {
+        #[inline(never)]
+        fn case() {
+            selftest::dispatch_debug(
+                "pty ^C signal delivery (ring 3)",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_ctest_pty(),
+            );
+        }
+        case();
+    }
 
     {
         #[inline(never)]

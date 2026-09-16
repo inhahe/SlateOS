@@ -24,6 +24,7 @@
 // out the arithmetic that names the unit.
 #![allow(clippy::duration_suboptimal_units)]
 
+mod columnprefs;
 mod columns;
 mod drives;
 mod dropzone;
@@ -671,6 +672,13 @@ pub struct ExplorerState {
     /// images grows a Dimensions column and a folder of source grows Language
     /// and Lines without the user asking.
     pub columns: ColumnManager,
+    /// The saved column preferences, read once rather than per listing.
+    ///
+    /// Held rather than re-read on every navigation: `load_directory` runs on
+    /// every step through the tree, and a settings file opened that often is a
+    /// cost the user pays for a value that changes only when they change it.
+    /// Re-read when the picker writes, which is the only thing that alters it.
+    pub column_prefs: yamldoc::Document,
     /// Generated thumbnails, keyed by path + mtime + size.
     ///
     /// Read from [`Self::render`] through [`ThumbnailCache::peek`], never
@@ -750,6 +758,7 @@ impl ExplorerState {
             recycle: RecycleBin::default_location(),
             modal: None,
             columns: ColumnManager::with_defaults(),
+            column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
             thumb_config: ThumbConfig::default(),
@@ -926,7 +935,16 @@ impl ExplorerState {
 
         self.sort_entries();
         self.update_status();
-        detect_columns(&mut self.columns, &self.entries);
+        // A preference the user saved wins over anything guessed from the
+        // folder's contents. The guess itself is what `roadmap-detailed.md`
+        // §4.1 forbids outright, and it goes when the picker can replace it --
+        // see known-issues
+        // TD-C-THE-COLUMN-VIEW-DOES-THE-ONE-THING-THE-SPEC-FORBIDS. Until
+        // then it is the only way a column beyond the default set appears, so
+        // it stays as the last resort rather than the first.
+        if !self.apply_saved_columns() {
+            detect_columns(&mut self.columns, &self.entries);
+        }
         self.queue_thumbnails();
     }
 
@@ -2750,6 +2768,30 @@ impl ExplorerState {
         );
         tree.commands.extend(commands);
         tree.untranslate();
+    }
+
+    /// Show the columns saved for this folder, or the saved default.
+    ///
+    /// Answers whether either existed. The folder's own preference wins; a
+    /// folder with none falls back to the default the user saved for
+    /// everything; with neither, the caller decides what to show.
+    fn apply_saved_columns(&mut self) -> bool {
+        let saved = columnprefs::for_folder(&self.column_prefs, &self.current_path)
+            .or_else(|| columnprefs::global(&self.column_prefs));
+        let Some(keys) = saved else {
+            return false;
+        };
+        let unknown = self.columns.apply_keys(&keys);
+        if !unknown.is_empty() {
+            // Named rather than silently dropped: a column that vanishes from
+            // a saved view with no explanation reads as a bug in the view.
+            self.status_message = format!(
+                "{} saved column(s) are not available here: {}",
+                unknown.len(),
+                unknown.join(", ")
+            );
+        }
+        true
     }
 
     /// Hand an event to the address bar and act on what it says.
@@ -5206,6 +5248,56 @@ mod tests {
             "the address bar still shows the old folder: {:?}",
             state.pathbar.current_path()
         );
+    }
+
+    /// A column set saved for a folder is what that folder shows.
+    ///
+    /// The whole point of the preference, and the thing a wiring change can
+    /// break without any unit test noticing: the module round-trips its keys,
+    /// the manager applies them, and neither proves the explorer ever asks.
+    #[test]
+    fn a_folder_shows_the_columns_saved_for_it() {
+        settingsfile::testing::with_scratch_config("explorer-saved-columns", |_root| {
+            let scratch = temp_dir("saved_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            // Saved before the state exists, because the preferences are read
+            // once when it is built rather than on every listing.
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(columnprefs::set_for_folder(
+                &mut doc,
+                &root,
+                &["size", "name"]
+            ));
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let state = state_at(&root);
+            assert_eq!(
+                state.columns.visible_keys(),
+                vec!["size", "name"],
+                "the folder's saved columns were not applied, or not in order"
+            );
+        });
+    }
+
+    /// With nothing saved for the folder, the saved default is used.
+    #[test]
+    fn a_folder_with_no_preference_falls_back_to_the_default() {
+        settingsfile::testing::with_scratch_config("explorer-default-columns", |_root| {
+            let scratch = temp_dir("default_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            columnprefs::set_global(&mut doc, &["name", "date_modified"]);
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let state = state_at(&root);
+            assert_eq!(state.columns.visible_keys(), vec!["name", "date_modified"]);
+        });
     }
 
     /// A name the address bar cannot represent is skipped, not mangled.

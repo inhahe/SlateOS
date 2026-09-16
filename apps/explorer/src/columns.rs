@@ -176,6 +176,15 @@ impl ColumnCategory {
 #[derive(Clone, Debug)]
 pub struct ColumnDef {
     pub id: ColumnId,
+    /// Stable name for this column on disk. Never shown, never renumbered.
+    ///
+    /// Saved column preferences name columns by this and by nothing else.
+    /// `id` is a position in a hand-numbered list, so writing integers would
+    /// mean a renumbering silently repointed every saved preference at a
+    /// different column; `label` is display text, and the table below leaves
+    /// it empty because it is filled at runtime. Neither survives being
+    /// written to a file and read back a release later.
+    pub key: &'static str,
     /// Header text displayed in the column header row.
     pub label: String,
     /// How the column's width is determined.
@@ -435,6 +444,50 @@ impl ColumnManager {
         self.active_columns.contains(&id)
     }
 
+    /// The visible columns named the way a saved preference names them.
+    ///
+    /// Order is the display order, because a preference records the columns
+    /// *and* their arrangement -- restoring the set but not the order would
+    /// give the user back a view they did not save.
+    #[must_use]
+    pub fn visible_keys(&self) -> Vec<&'static str> {
+        self.active_columns
+            .iter()
+            .filter_map(|id| self.column_def(*id).map(|d| d.key))
+            .collect()
+    }
+
+    /// Show exactly the columns `keys` names, in that order.
+    ///
+    /// Returns the keys it did not recognise. **They are skipped, never
+    /// guessed at**: a preference saved by a later version, or naming a column
+    /// since removed, loses that one column and keeps the rest. Filling the
+    /// gap positionally would silently hand the user a different column than
+    /// the one they chose, which is worse than a missing one because it looks
+    /// deliberate.
+    ///
+    /// A set naming nothing recognisable is refused entirely -- the caller
+    /// keeps what it had, rather than showing an empty row of headers.
+    pub fn apply_keys(&mut self, keys: &[String]) -> Vec<String> {
+        let mut wanted = Vec::new();
+        let mut unknown = Vec::new();
+        for key in keys {
+            match self
+                .all_column_defs()
+                .iter()
+                .find(|d| d.key == key.as_str())
+                .map(|d| d.id)
+            {
+                Some(id) => wanted.push(id),
+                None => unknown.push(key.clone()),
+            }
+        }
+        if !wanted.is_empty() {
+            self.active_columns = wanted;
+        }
+        unknown
+    }
+
     /// The currently active (visible) columns in display order.
     pub fn active_columns(&self) -> &[ColumnId] {
         &self.active_columns
@@ -672,6 +725,7 @@ impl StandardColumns {
     const DEFS: &'static [ColumnDef] = &[
         ColumnDef {
             id: ColumnId::NAME,
+            key: "name",
             label: String::new(), // replaced at runtime
             width: ColumnWidth::Flexible {
                 min: 120.0,
@@ -685,6 +739,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::SIZE,
+            key: "size",
             label: String::new(),
             width: ColumnWidth::Fixed(90.0),
             alignment: Alignment::Right,
@@ -695,6 +750,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::DATE_MODIFIED,
+            key: "date_modified",
             label: String::new(),
             width: ColumnWidth::Fixed(140.0),
             alignment: Alignment::Left,
@@ -705,6 +761,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::TYPE,
+            key: "type",
             label: String::new(),
             width: ColumnWidth::Fixed(80.0),
             alignment: Alignment::Left,
@@ -715,6 +772,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::DATE_CREATED,
+            key: "date_created",
             label: String::new(),
             width: ColumnWidth::Fixed(140.0),
             alignment: Alignment::Left,
@@ -725,6 +783,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::ATTRIBUTES,
+            key: "attributes",
             label: String::new(),
             width: ColumnWidth::Fixed(80.0),
             alignment: Alignment::Left,
@@ -849,6 +908,7 @@ impl ImageColumns {
         vec![
             ColumnDef {
                 id: ColumnId::DIMENSIONS,
+                key: "dimensions",
                 label: "Dimensions".to_string(),
                 width: ColumnWidth::Fixed(110.0),
                 alignment: Alignment::Right,
@@ -859,6 +919,7 @@ impl ImageColumns {
             },
             ColumnDef {
                 id: ColumnId::COLOR_DEPTH,
+                key: "color_depth",
                 label: "Color Depth".to_string(),
                 width: ColumnWidth::Fixed(80.0),
                 alignment: Alignment::Right,
@@ -869,6 +930,7 @@ impl ImageColumns {
             },
             ColumnDef {
                 id: ColumnId::ASPECT_RATIO,
+                key: "aspect_ratio",
                 label: "Aspect Ratio".to_string(),
                 width: ColumnWidth::Fixed(90.0),
                 alignment: Alignment::Right,
@@ -919,6 +981,7 @@ impl AudioColumns {
         vec![
             ColumnDef {
                 id: ColumnId::DURATION,
+                key: "duration",
                 label: "Duration".to_string(),
                 width: ColumnWidth::Fixed(70.0),
                 alignment: Alignment::Right,
@@ -929,6 +992,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::BITRATE,
+                key: "bitrate",
                 label: "Bitrate".to_string(),
                 width: ColumnWidth::Fixed(80.0),
                 alignment: Alignment::Right,
@@ -939,6 +1003,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::SAMPLE_RATE,
+                key: "sample_rate",
                 label: "Sample Rate".to_string(),
                 width: ColumnWidth::Fixed(90.0),
                 alignment: Alignment::Right,
@@ -949,6 +1014,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::ARTIST,
+                key: "artist",
                 label: "Artist".to_string(),
                 width: ColumnWidth::Flexible {
                     min: 80.0,
@@ -962,6 +1028,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::ALBUM,
+                key: "album",
                 label: "Album".to_string(),
                 width: ColumnWidth::Flexible {
                     min: 80.0,
@@ -975,6 +1042,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::TITLE,
+                key: "title",
                 label: "Title".to_string(),
                 width: ColumnWidth::Flexible {
                     min: 80.0,
@@ -1032,6 +1100,7 @@ impl CodeColumns {
         vec![
             ColumnDef {
                 id: ColumnId::LINE_COUNT,
+                key: "line_count",
                 label: "Lines".to_string(),
                 width: ColumnWidth::Fixed(70.0),
                 alignment: Alignment::Right,
@@ -1042,6 +1111,7 @@ impl CodeColumns {
             },
             ColumnDef {
                 id: ColumnId::LANGUAGE,
+                key: "language",
                 label: "Language".to_string(),
                 width: ColumnWidth::Fixed(90.0),
                 alignment: Alignment::Left,
@@ -1115,6 +1185,7 @@ impl ArchiveColumns {
         vec![
             ColumnDef {
                 id: ColumnId::COMPRESSED_SIZE,
+                key: "compressed_size",
                 label: "Compressed".to_string(),
                 width: ColumnWidth::Fixed(90.0),
                 alignment: Alignment::Right,
@@ -1125,6 +1196,7 @@ impl ArchiveColumns {
             },
             ColumnDef {
                 id: ColumnId::COMPRESSION_RATIO,
+                key: "compression_ratio",
                 label: "Ratio".to_string(),
                 width: ColumnWidth::Fixed(60.0),
                 alignment: Alignment::Right,
@@ -1135,6 +1207,7 @@ impl ArchiveColumns {
             },
             ColumnDef {
                 id: ColumnId::FILE_COUNT_INSIDE,
+                key: "file_count_inside",
                 label: "Files Inside".to_string(),
                 width: ColumnWidth::Fixed(80.0),
                 alignment: Alignment::Right,
@@ -2738,5 +2811,89 @@ mod tests {
         assert!(by_cat.contains_key(&ColumnCategory::Audio));
         assert!(by_cat.contains_key(&ColumnCategory::Code));
         assert!(by_cat.contains_key(&ColumnCategory::Archive));
+    }
+
+    /// What is shown round-trips through the names a preference uses.
+    #[test]
+    fn the_visible_set_round_trips_through_its_keys() {
+        let mut mgr = ColumnManager::with_defaults();
+        let before = mgr.visible_keys();
+        assert!(before.contains(&"name"), "keys: {before:?}");
+
+        let saved: Vec<String> = before.iter().map(|k| (*k).to_string()).collect();
+        mgr.set_columns(vec![ColumnId::NAME]);
+        assert_eq!(mgr.visible_keys(), vec!["name"]);
+
+        let unknown = mgr.apply_keys(&saved);
+        assert!(
+            unknown.is_empty(),
+            "known keys reported unknown: {unknown:?}"
+        );
+        assert_eq!(
+            mgr.visible_keys(),
+            before,
+            "the saved view did not come back"
+        );
+    }
+
+    /// Order is part of what a preference saved, so it comes back too.
+    #[test]
+    fn applying_keys_restores_their_order() {
+        let mut mgr = ColumnManager::with_defaults();
+        let wanted = vec![String::from("size"), String::from("name")];
+        assert!(mgr.apply_keys(&wanted).is_empty());
+        assert_eq!(mgr.visible_keys(), vec!["size", "name"]);
+    }
+
+    /// An unrecognised name loses its column and nothing else.
+    ///
+    /// The case a later version's preference file produces. Filling the gap
+    /// positionally would hand back a different column than the one chosen,
+    /// which is worse than a missing one because it looks deliberate.
+    #[test]
+    fn an_unknown_key_is_skipped_and_named() {
+        let mut mgr = ColumnManager::with_defaults();
+        let wanted = vec![
+            String::from("name"),
+            String::from("column_from_the_future"),
+            String::from("size"),
+        ];
+        let unknown = mgr.apply_keys(&wanted);
+        assert_eq!(unknown, vec![String::from("column_from_the_future")]);
+        assert_eq!(
+            mgr.visible_keys(),
+            vec!["name", "size"],
+            "the unknown key shifted the others"
+        );
+    }
+
+    /// A preference naming nothing we know leaves the view alone.
+    #[test]
+    fn a_wholly_unknown_set_does_not_empty_the_header_row() {
+        let mut mgr = ColumnManager::with_defaults();
+        let before = mgr.visible_keys();
+        let unknown = mgr.apply_keys(&[String::from("nothing_we_have")]);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(mgr.visible_keys(), before, "the header row was emptied");
+    }
+
+    /// Every column's saved name is unique and non-empty.
+    ///
+    /// Two columns sharing a key would make a saved preference ambiguous, and
+    /// `apply_keys` would resolve it to whichever the table lists first.
+    #[test]
+    fn every_column_key_is_unique_and_not_empty() {
+        let mgr = ColumnManager::with_defaults();
+        let mut seen: Vec<&str> = Vec::new();
+        for def in mgr.all_column_defs() {
+            assert!(!def.key.is_empty(), "{:?} has no key", def.id);
+            assert!(
+                !seen.contains(&def.key),
+                "two columns share the key {:?}",
+                def.key
+            );
+            seen.push(def.key);
+        }
+        assert!(seen.len() >= 20, "only {} columns have keys", seen.len());
     }
 }

@@ -54910,6 +54910,37 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 
 ## ############################################################################
 ## Lane C — graphics, apps & net
+
+### find-claimed-acts: all six current hits are cleared (2026-09-16)
+
+Written down so the next run is a lookup rather than an investigation. Each
+took under a minute to clear by reading, but only once, and only if the result
+is kept. Re-check a row if the crate changes.
+
+| crate | claim | why it is not a defect |
+|---|---|---|
+| `procexplorer` | `Sent {verb} to {name} (PID {pid})` | **True now.** Goes through `libcall::kill`. Flagged because the scanner files a signal under `[network]`, which is a category quirk, not a claim about the sentence. |
+| `sysmonitor` | same | same |
+| `terminal` | `terminated by {s:?}` | **A doc comment**, not output: "OSC string terminated by ST (ESC \)". The scanner reads prose it cannot tell from a format string. |
+| `tmux` | `Killed session: {name}` | **True.** The line follows `self.sessions.remove(index)`, and a multiplexer session *is* the layout it just removed. There is no child process to be wrong about. |
+| `vpnmanager` | `Connected to {name}` x2 | **Unreachable.** `connect` returns `Err(UNAVAILABLE)` on every path, and `report` uses the success string only on `Ok`. It is built and dropped. |
+
+The `vpnmanager` pair is the one worth re-reading if that crate is touched: the
+string is correct-by-unreachability rather than correct-by-construction, so the
+day `connect` can return `Ok` for any reason short of a real tunnel, the claim
+fires. The surrounding code is careful -- `local_ip` and `latency_ms` were an
+address nothing assigned and a round trip nothing measured, and both were
+cleared -- so the risk is a future edit, not the present state.
+
+**Two notes about the checker itself**, from this pass:
+
+  * It reads doc comments as though they were output. `terminal`'s hit is a
+    sentence *about* terminators, in prose. Worth narrowing if this recurs;
+    one occurrence is not yet evidence of a pattern.
+  * Its category labels (`[network]`, `[process]`) are a guess at what the act
+    touches, and `procexplorer` sending a signal is filed under network. The
+    label is not part of the finding and should not be read as one.
+
 - Autologin is read but not acted on. `LoginUser::autologin` comes from the
   account database and `LoginScreen::autologin_user` finds it, but an account
   marked for autologin still gets a password prompt. Skipping the prompt needs

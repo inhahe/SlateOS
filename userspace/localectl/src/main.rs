@@ -418,8 +418,15 @@ fn keymap_status_lines(active: Option<&[u8]>, configured: &str) -> Vec<String> {
     let mut out = Vec::new();
     match active {
         Some(active) => {
+            // NOT "(in use)". Written when I believed the kernel's active
+            // layout was what the keyboard used; it is what the kernel
+            // RECORDS. `keyboard.rs::scancode_to_ascii` is a hardcoded US
+            // QWERTY table that never consults `keylayout`, so "in use"
+            // would be the same over-claim one layer up from the one this
+            // function exists to remove. Lane C asked the question I had
+            // not: does anything READ the value?
             out.push(format!(
-                "     VC Keymap: {} (in use)",
+                "     VC Keymap: {} (recorded in the kernel; the console driver does not consult it yet)",
                 quoting::quotef(active)
             ));
             // Bytes, not renderings: `quotef` escapes unprintables, so two
@@ -537,7 +544,19 @@ fn cmd_set_keymap(keymap: &str, toggle: Option<&str>) -> i32 {
         );
         return 1;
     }
-    println!("localectl: VC keymap set to {}", quoteaf_os(keymap));
+    println!(
+        "localectl: VC keymap recorded in the kernel as {}",
+        quoteaf_os(keymap)
+    );
+    // "recorded", not "in effect". The syscall succeeded and the kernel's
+    // `keylayout` now names this layout; nothing translates keystrokes
+    // through it, so the keys still produce US characters. Naming the
+    // specific gap -- the driver does not consult it -- rather than "not
+    // supported" is what stops the next person looking for the bug in
+    // userspace, where it is not.
+    println!(
+        "localectl: the console keyboard does not consult this yet -- its driver          uses a fixed US QWERTY table, so typed characters are unchanged"
+    );
 
     // Said every time, not only on failure. The layout IS set -- the call
     // succeeded -- and it will be gone after a reboot, because nothing applies
@@ -551,55 +570,61 @@ fn cmd_set_keymap(keymap: &str, toggle: Option<&str>) -> i32 {
     0
 }
 
+/// `localectl set-x11-keymap` — refused, because there is no X server here.
+///
+/// # Why refuse rather than write the file
+///
+/// It used to write `/etc/X11/xorg.conf.d/00-keyboard.conf` and report
+/// success. That is the `/etc/vconsole.conf` defect and then some: vconsole
+/// at least described a thing that exists. This configures an X server
+/// SlateOS does not have and is not getting — `xorg`, `xorg.conf`,
+/// `00-keyboard` and `xkb` appear zero times across `gui/`, `apps/` and
+/// `net*/` (measured by lane C, who own that tree). The compositor takes its
+/// layout from `input.yaml` through its own `gui/keylayout` crate, which is a
+/// different mechanism entirely.
+///
+/// So this is not a missing reader. It is a missing subsystem, and the
+/// difference decides what the message should say: "no reader yet" invites
+/// someone to write one, and there is nothing for it to read.
+///
+/// # Why not alias it to `set-keymap`
+///
+/// Tempting — on a machine with one compositor and one layout they *mean* the
+/// same thing. Rejected because the arguments do not correspond: X11 takes
+/// `layout model variant options`, and the console takes one layout name.
+/// Silently reinterpreting the first as the second is a smaller copy of the
+/// defect being removed, and it would succeed loudly while dropping three of
+/// the four things the caller said. Lane C argued this and is right.
+///
+/// The parameters are still taken and named in the refusal, so an operator can
+/// see the command was understood and rejected rather than mis-parsed.
 fn cmd_set_x11_keymap(
     layout: &str,
     model: Option<&str>,
     variant: Option<&str>,
     options: Option<&str>,
 ) -> i32 {
-    let conf = format!(
-        "Section \"InputClass\"\n\
-         \tIdentifier \"system-keyboard\"\n\
-         \tMatchIsKeyboard \"on\"\n\
-         \tOption \"XkbLayout\" \"{layout}\"\n\
-         {}\
-         {}\
-         {}\
-         EndSection\n",
-        model
-            .map(|m| format!("\tOption \"XkbModel\" \"{m}\"\n"))
-            .unwrap_or_default(),
-        variant
-            .map(|v| format!("\tOption \"XkbVariant\" \"{v}\"\n"))
-            .unwrap_or_default(),
-        options
-            .map(|o| format!("\tOption \"XkbOptions\" \"{o}\"\n"))
-            .unwrap_or_default(),
+    eprintln!(
+        "localectl: cannot set an X11 keymap: this system has no X server, and \
+         nothing reads {X11_CONF}"
     );
-
-    if let Some(parent) = Path::new(X11_CONF).parent() {
-        // Discarded deliberately: the write below is checked and reports the
-        // same underlying cause against the path the caller cares about.
-        // `create_dir_all` also succeeds when the directory already exists,
-        // which is every run after the first.
-        let _ = fs::create_dir_all(parent);
+    let mut asked = format!("layout {}", quoteaf_os(layout));
+    if let Some(m) = model {
+        asked.push_str(&format!(", model {}", quoteaf_os(m)));
     }
-
-    match fs::write(X11_CONF, conf) {
-        Ok(()) => {
-            println!("localectl: X11 keymap set to {}", quoteaf_os(layout));
-            0
-        }
-        Err(e) => {
-            eprintln!("localectl: {e}");
-            1
-        }
+    if let Some(v) = variant {
+        asked.push_str(&format!(", variant {}", quoteaf_os(v)));
     }
+    if let Some(o) = options {
+        asked.push_str(&format!(", options {}", quoteaf_os(o)));
+    }
+    eprintln!("localectl: understood the request ({asked}) and did not act on it");
+    eprintln!(
+        "localectl: the console keyboard layout is set with `localectl set-keymap`; \
+         the graphical session takes its layout from input.yaml"
+    );
+    1
 }
-
-// ============================================================================
-// Main
-// ============================================================================
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -714,19 +739,25 @@ mod tests {
     /// status command at all: it could not fail.
     #[test]
     fn the_configured_file_is_never_reported_as_the_keymap_in_use() {
-        let lines = keymap_status_lines(Some(b"us"), "de");
+        // The configured name is deliberately one that cannot occur by
+        // accident in English prose. It was "de" until the kernel line gained
+        // the word "recorded", which contains it -- so the negative assertion
+        // below started failing on the wording rather than on the behaviour.
+        // A substring oracle over free text is only as good as the text, and
+        // the fix belongs in the oracle rather than in the sentence.
+        let lines = keymap_status_lines(Some(b"us"), "zz-nonesuch");
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(
             lines[0].contains("us"),
             "the kernel's layout is not first: {lines:?}"
         );
-        assert!(lines[0].contains("in use"), "{lines:?}");
+        assert!(lines[0].contains("recorded in the kernel"), "{lines:?}");
         assert!(
-            !lines[0].contains("de"),
+            !lines[0].contains("zz-nonesuch"),
             "the configured value was reported as the one in use: {lines:?}"
         );
         assert!(
-            lines[1].contains("de") && lines[1].contains("not in force"),
+            lines[1].contains("zz-nonesuch") && lines[1].contains("not in force"),
             "the disagreement is not flagged: {lines:?}"
         );
     }
@@ -740,7 +771,7 @@ mod tests {
     fn agreement_prints_no_disagreement_line() {
         let lines = keymap_status_lines(Some(b"us"), "us");
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("in use"), "{lines:?}");
+        assert!(lines[0].contains("recorded in the kernel"), "{lines:?}");
     }
 
     /// No kernel answer is "unknown", never the configured value.
@@ -749,11 +780,11 @@ mod tests {
     /// old defect with an extra step, so it is asserted against.
     #[test]
     fn an_absent_proc_node_does_not_fall_back_to_the_file() {
-        let lines = keymap_status_lines(None, "de");
+        let lines = keymap_status_lines(None, "zz-nonesuch");
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].contains("unknown"), "{lines:?}");
         assert!(
-            !lines[0].contains("de"),
+            !lines[0].contains("zz-nonesuch"),
             "fell back to the configured value: {lines:?}"
         );
         assert!(lines[1].contains("nothing reads"), "{lines:?}");

@@ -18,6 +18,11 @@ description = "SlateOS logind - session manager (logind/loginctl)"
 [dependencies]
 authlib = { path = "../authlib" }
 libservicebus = { path = "../libservicebus" }
+# For `kill_session`, which used to return the leader pid and send nothing.
+# Through `libcall` and not `posix`, per design-decisions.md §768: an app that
+# depends on the posix rlib gets a second libc with every syscall stubbed to
+# -ENOSYS, and then reads an errno from a cell libc.a never wrote.
+libcall = { path = "../../libcall" }
 
 # Tests only, to compute the `$6$` entry in the shadow fixture rather than
 # paste one: a pasted hash silently stops testing anything the day the hasher

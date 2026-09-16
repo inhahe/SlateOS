@@ -108,6 +108,10 @@ enum Format {
     Context,
     /// Side-by-side (`-y`).
     SideBySide,
+    /// An `ed` script (`-e`, `--ed`): commands that turn file 1 into file 2.
+    Ed,
+    /// RCS's own diff format (`-n`, `--rcs`).
+    Rcs,
 }
 
 // ============================================================================
@@ -520,6 +524,12 @@ fn parse_args(args: &[OsString]) -> ParseResult {
                     continue;
                 }
                 'y' => format = Format::SideBySide,
+                'e' => format = Format::Ed,
+                'n' => format = Format::Rcs,
+                // GNU's `-v` is `--version`, and it was the only one of this
+                // program's thirteen missing short options that was purely an
+                // alias: the other twelve were features that did not exist.
+                'v' => return ParseResult::Version,
                 'W' => {
                     // -W may have value glued on or as next arg.
                     let rest: String = chars
@@ -1490,6 +1500,97 @@ fn range_str(start: usize, count: usize) -> String {
     }
 }
 
+/// Where a hunk's change begins in each file, and how many lines it touches.
+///
+/// The leading context is skipped first, which is why this is shared rather
+/// than repeated: every renderer needs the position of the first CHANGED line,
+/// and computing it from `start1` alone is wrong for any hunk with context.
+fn hunk_change_span(hunk: &Hunk) -> (usize, usize, usize, usize) {
+    let del_count = hunk.lines.iter().filter(|e| e.op == Op::Delete).count();
+    let ins_count = hunk.lines.iter().filter(|e| e.op == Op::Insert).count();
+    let mut line1_pos = hunk.start1;
+    let mut line2_pos = hunk.start2;
+    for Edit { op, .. } in &hunk.lines {
+        if *op == Op::Equal {
+            line1_pos += 1;
+            line2_pos += 1;
+        } else {
+            break;
+        }
+    }
+    (line1_pos, line2_pos, del_count, ins_count)
+}
+
+/// `-e`: an `ed` script that turns file 1 into file 2.
+///
+/// **Emitted in REVERSE order**, which is the whole subtlety. `ed` applies the
+/// commands in the order given and each one renumbers the lines after it, so a
+/// script written front-to-back would have every command after the first
+/// aiming at the wrong line. Measured: GNU prints `4a` before `2c` for a file
+/// whose change is at line 2 and whose append is at line 4.
+///
+/// A delete has no body and no terminator; an append and a change carry their
+/// lines followed by a lone `.`.
+fn print_ed(hunks: &[Hunk], config: &Config) {
+    let out = io::stdout();
+    let mut w = out.lock();
+
+    for hunk in hunks.iter().rev() {
+        let (line1_pos, _, del_count, ins_count) = hunk_change_span(hunk);
+        let (has_del, has_ins) = (del_count > 0, ins_count > 0);
+        let op_char = match (has_del, has_ins) {
+            (true, true) => 'c',
+            (true, false) => 'd',
+            (false, true) => 'a',
+            (false, false) => continue,
+        };
+        let _ = writeln!(w, "{}{}", range_str(line1_pos, del_count), op_char);
+        if !has_ins {
+            continue;
+        }
+        for Edit { op, text, .. } in &hunk.lines {
+            if *op == Op::Insert {
+                write_text_line(&mut w, config, b"", text, None);
+            }
+        }
+        // `ed` ends an insert with a line holding a single dot. A body line
+        // that is itself a dot would end the insert early; GNU has the same
+        // hole, and a diff that cannot be applied is upstream's behaviour
+        // rather than something invented here.
+        let _ = writeln!(w, ".");
+    }
+}
+
+/// `-n`: RCS's diff format.
+///
+/// Forward order, unlike `-e`, because the commands carry explicit counts and
+/// are defined against the ORIGINAL line numbering rather than being applied
+/// to a file that shifts under them.
+///
+/// A change is a delete AND an append, and the append's position is measured
+/// past the deleted lines: GNU answers a one-line change at line 2 with
+/// `d2 1` then `a2 1`, not `a1 1`. That `+ del_count` is the one piece of this
+/// that reasoning gets wrong.
+fn print_rcs(hunks: &[Hunk], config: &Config) {
+    let out = io::stdout();
+    let mut w = out.lock();
+
+    for hunk in hunks {
+        let (line1_pos, _, del_count, ins_count) = hunk_change_span(hunk);
+        if del_count > 0 {
+            let _ = writeln!(w, "d{} {}", line1_pos.saturating_add(1), del_count);
+        }
+        if ins_count > 0 {
+            let _ = writeln!(w, "a{} {}", line1_pos.saturating_add(del_count), ins_count);
+            for Edit { op, text, .. } in &hunk.lines {
+                if *op == Op::Insert {
+                    write_text_line(&mut w, config, b"", text, None);
+                }
+            }
+        }
+    }
+}
+
 fn print_normal(hunks: &[Hunk], config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
@@ -2348,6 +2449,17 @@ fn diff_files(p1: &Path, p2: &Path, config: &Config, in_dir_walk: bool) -> i32 {
         Format::Normal => {
             let hunks = build_hunks(&ops, 0);
             print_normal(&hunks, config);
+        }
+        // Both take zero context: an `ed` script and an RCS delta are
+        // instructions, not a readable rendering, so a surrounding line would
+        // be applied as though it were a change.
+        Format::Ed => {
+            let hunks = build_hunks(&ops, 0);
+            print_ed(&hunks, config);
+        }
+        Format::Rcs => {
+            let hunks = build_hunks(&ops, 0);
+            print_rcs(&hunks, config);
         }
         Format::Unified => {
             let hunks = build_hunks(&ops, config.context_lines);

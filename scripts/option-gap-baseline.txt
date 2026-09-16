@@ -5,11 +5,8 @@ diff -I
 diff -S
 diff -X
 diff -d
-diff -e
 diff -l
-diff -n
 diff -p
-diff -v
 diff -x
 env -v
 hostname -A

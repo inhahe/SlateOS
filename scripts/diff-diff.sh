@@ -424,6 +424,27 @@ run_case -U -1 long.txt long2.txt
 # `option '--width' requires an argument`. We had the long form's phrasing on
 # both, so every short option that takes a value printed a sentence GNU does
 # not.
+# --- the two remaining classic output formats ----------------------------------
+#
+# `-e` writes an ed script and `-n` writes an RCS delta. Both were absent until
+# 2026-09-16 -- `diff -e` exited 2 with `invalid option`, so a script using it
+# stopped rather than getting different output.
+#
+# The reversal is why `-e` gets more than one row. An ed script is APPLIED in
+# order and each command renumbers the lines after it, so the hunks come out
+# back to front; a single-hunk case cannot tell a correct implementation from
+# one that forgot. `long.txt`/`long3.txt` has several.
+run_case -e base.txt mid.txt
+run_case -e base.txt added.txt
+run_case -e long.txt long3.txt
+run_case -e base.txt base.txt
+run_case -n base.txt mid.txt
+run_case -n base.txt added.txt
+run_case -n long.txt long3.txt
+run_case -n base.txt base.txt
+# A change is a delete AND an append in RCS, and the append is positioned past
+# the deleted lines -- `d2 1` then `a2 1`, not `a1 1`.
+run_case -n mid.txt base.txt
 run_case -C notanumber long.txt long2.txt
 run_case -C -1 long.txt long2.txt
 run_case -C

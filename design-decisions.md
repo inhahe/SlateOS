@@ -75190,6 +75190,29 @@ and each loosening buys less signal for the same flakiness. A ratio tight
 enough to mean anything is tight enough to be hit by load, so the choice was
 never between 3x and 2x -- it was between timing and counting.
 
+**A correction to the diagnosis, added 2026-09-16.** The conclusion above is
+sound and the argument that produced it was not, which is worth separating.
+
+"Failed in the workspace gate, passed alone" was read here as *load*. It is
+equally the signature of a **rare flake** and of a **test-order dependency**,
+and nothing in the observation distinguishes them. Lane B made the mirror of
+this mistake the same week: an `oils` test that failed in company and passed
+alone was reported by this lane as order interference, and was in fact a
+1-in-32770 collision -- `$RANDOM` seeded from the clock, 131064 of the 2^32
+seeds giving two equal draws. No neighbouring test was involved.
+
+**Running alone is one trial; a workspace run is hundreds.** Company gives more
+*trials*, not more interference, so a rare event looks exactly like a shared-state
+bug. The discriminator is cheap and should be run before any theory is
+adopted: **run the failing test alone a thousand times.** If it ever fails
+alone, order was never the cause.
+
+The counting fix in this entry happens to immunise against all three causes at
+once, so a correct decision survived a guessed diagnosis. That will not always
+be true, and a future reader reaching for this entry to justify a rewrite
+should confirm *which* of the three they have first -- the remedies differ:
+counting for load, a pinned seed for a flake, an isolated fixture for order.
+
 **Where this bites next:** anything measuring a frame, a parse, a layout pass
 or a search. Before writing `assert!(elapsed < N)`, ask what the elapsed time
 is standing in for. It is usually a count of something -- windows re-rendered,

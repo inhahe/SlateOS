@@ -35,7 +35,6 @@ use std::process::ExitCode;
 // ============================================================================
 
 /// Catppuccin Mocha dark theme colors.
-#[allow(dead_code)]
 mod mocha {
 
     // Pink, flamingo and rosewater are palette roles now, not constants.

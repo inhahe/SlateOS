@@ -63,6 +63,29 @@ Each result was found by checking a single reported row by hand before
 believing the total. That cost one build each time and would have cost an
 afternoon to act on.
 
+## The signal is not reliable on its own, and the remedy is to apply the list
+
+`cargo check` emits a crate's warnings **only when it actually compiles it**.
+A repeat invocation with nothing changed prints nothing. So the "before" run is
+frequently a cached no-op while the "after" run -- forced by the edit -- is a
+real compile, and the two sides are not comparable.
+
+Measured: with an allow removed, `cargo check -p imageviewer` printed nothing
+on a second run, having printed a warning on the first. Nothing in the source
+changed between them.
+
+**So treat the output as a list of candidates, and let the build be the
+verdict.** Remove them, build every affected package with `--all-targets` --
+which is what this project's lint gate uses -- and restore the ones that warn.
+On the first full sweep that was 38 candidates, of which 11 survived the build
+and 27 did not.
+
+That ordering matters more than it sounds. Hand-checking a sample twice found
+nothing wrong while this checker was still wrong twice over, because the
+hand-check ran the same command and parsed the same output -- it shared the
+defect exactly. Applying the whole list and compiling is the step that
+surfaced both the package-name bug and the cached-warning bug.
+
 ## What it cannot see, said plainly
 
   * **Nothing about block-level allows or repeated names**, which the first

@@ -39,7 +39,6 @@ const BUTTON_SPACING: f32 = 8.0;
 const ANNOTATION_TOOLBAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 
-#[allow(dead_code)]
 // A scrim over the captured image, and black on purpose: it darkens whatever
 // was on screen, which is not the theme's to tint. `palette_check` exempts
 // black at any alpha for exactly this.

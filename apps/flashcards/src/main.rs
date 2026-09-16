@@ -536,7 +536,6 @@ impl Deck {
     /// Advertised in the module doc ("Import/export (simple text format)") and
     /// reachable from nothing: there is no control that calls it and no
     /// filesystem to write to. See `todo.txt`.
-    #[allow(dead_code, reason = "no import/export control yet -- see todo.txt")]
     fn export_text(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("# {}\n", escape_field(&self.name)));
@@ -566,7 +565,6 @@ impl Deck {
     /// The leniency is confined to *structure*; values are decoded exactly, so
     /// anything this program wrote comes back byte for byte.
     /// Read a deck back from `export_text`'s format. Same story: no caller.
-    #[allow(dead_code, reason = "no import/export control yet -- see todo.txt")]
     fn import_text(&mut self, text: &str) -> Imported {
         let mut done = Imported::default();
         let mut front: Option<String> = None;

@@ -154764,8 +154764,23 @@ not a fact about files. Its extension lists are what duplicate the table.
 3. Then give diskanalyzer its colour policy over toolkit kinds instead of over
    its own extension lists.
 
-**Also noticed:** `guitk::filetypes::icon_for_extension` has no caller outside
-its own tests. The table carries an `icon_glyph` per type and nothing draws it.
-That is worth checking before anything is built on it — an icon nobody asks for
-may mean the file lists get their glyphs somewhere else, which would be a fifth
-place deciding what kind of file something is.
+**A fifth place was suspected and is not one.** `apps/explorer` has its own
+nine-bucket `FileType` with its own icon glyphs, which has the shape of another
+duplicate. It is not: `FileType::from_extension` already asks
+`detect_from_extension` and maps the toolkit's sixteen kinds onto its nine,
+exactly as `fileassoc::FileCategory::from_toolkit` now does. Its doc records
+that it used to be a hard-coded list, "one of three in this application", and
+why the enum survives the conversion: `is_text` separates a `.txt` from a
+`.pdf`, both `Document` to the registry, and only one is something a text
+thumbnail can be made of.
+
+Worth saying plainly, because it changes what this entry is: the method
+proposed above is not new. It is the conversion `apps/explorer` already went
+through, which `apps/fileassoc` had missed. `filesearch` and `diskanalyzer` are
+the two left.
+
+**Still true:** `guitk::filetypes::icon_for_extension` has no caller outside its
+own tests, and the table carries an `icon_glyph` per type that nothing draws.
+That is an unused capability rather than a rival source, since explorer draws a
+glyph per bucket by choice rather than one per type, so it belongs on the
+unused-export list and not this one.

@@ -565,7 +565,11 @@ fn run_install(args: &[String]) -> Result<(), GrubError> {
             "grub.efi"
         };
 
-        println!("  EFI binary: {efi_boot_dir}/{efi_binary}");
+        // "would be" -- this path is computed and announced and nothing is
+        // ever written to it. There is no fs::copy and no write of an EFI
+        // image anywhere in this program; `efi_binary` is used on this line
+        // and nowhere else.
+        println!("  EFI binary would be: {efi_boot_dir}/{efi_binary} (NOT written)");
     } else {
         // BIOS installation requires a device.
         let device = opts.device.as_deref().unwrap_or("/dev/sda");
@@ -593,7 +597,36 @@ fn run_install(args: &[String]) -> Result<(), GrubError> {
         println!("  Wrote {device_map_path}");
     }
 
-    println!("Installation finished. No error reported.");
+    // NOT "Installation finished. No error reported.", which is what this said
+    // until 2026-09-15 and is the sentence real grub-install prints when a
+    // machine has become bootable.
+    //
+    // This program writes a `grub/` directory and a one-line `device.map`. It
+    // does not write a bootloader image: no EFI binary is copied, no MBR or
+    // core.img is embedded, and there is no code here that could do either.
+    // An administrator who ran it and read that line had every reason to
+    // believe the disk would boot.
+    //
+    // That is a fabricated ACTION rather than a fabricated fact (§945): it
+    // claims something happened, and cannot be un-said, because the reader may
+    // already have acted on it -- by rebooting, or by wiping the installer
+    // media, or simply by crossing it off. The reader's correct response to
+    // "Installation finished" is to stop thinking about the bootloader, and
+    // stopping is what leaves the machine unbootable.
+    //
+    // The lines below say what WAS done, because that part is real and useful,
+    // and then say plainly what was not. Naming the missing piece rather than
+    // saying "not supported" is what routes the next person: the gap is a
+    // bootloader image writer, not a flag nobody passed.
+    println!(
+        "Prepared {}/grub: device.map and directory layout.",
+        opts.boot_directory
+    );
+    println!(
+        "NOT INSTALLED: no bootloader image was written -- this build has no \
+         EFI-image writer and no MBR/core.img embedder, so nothing here makes \
+         a disk bootable."
+    );
     Ok(())
 }
 

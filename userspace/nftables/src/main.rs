@@ -830,10 +830,78 @@ impl Table {
 // Ruleset (top-level state)
 // ---------------------------------------------------------------------------
 
+/// Commands that ask to CHANGE the ruleset rather than read it.
+///
+/// Shared by the dispatch in [`exec_command`] and by [`NOT_APPLIED`]'s
+/// trigger, so a command cannot be added to one and forgotten in the other --
+/// which would give a mutating command that silently claims to have worked,
+/// the exact defect this notice exists to prevent.
+const MUTATING: [&str; 6] = ["add", "create", "delete", "flush", "rename", "insert"];
+
+/// Printed once per invocation, to stderr, when a mutating command was parsed.
+///
+/// # Why this exists
+///
+/// `nft` on SlateOS has no kernel behind it. It has never issued a syscall,
+/// never opened a netlink socket, and never written a file: the ruleset lives
+/// in this process's memory and dies with it. `nft add rule ... ; nft list
+/// ruleset` in two invocations shows nothing, because the second process
+/// starts empty.
+///
+/// Without this line the tool is not merely useless, it is *reassuring*. Type
+/// a chain with `policy drop` and `nft list ruleset` echoes it back -- built
+/// out of the very words just typed, so it agrees with them because it is made
+/// of them. The reader concludes the firewall is dropping. Nothing is
+/// filtering anything.
+///
+/// # Why it names `fw`
+///
+/// A notice that said only "not applied" would be true and would send the
+/// reader nowhere. Their packets *can* be filtered -- by `fw`, which drives
+/// the real kernel firewall syscalls (860-864) -- so the useful half of the
+/// message is where to go, not what failed. A disclaimer has to be specific
+/// enough to route the next person correctly.
+///
+/// # Why stderr, and why once
+///
+/// stderr so that `nft list ruleset` stays machine-readable for anything
+/// parsing stdout. Once per invocation because a `-f` script with fifty `add`
+/// lines would otherwise print fifty identical notices and teach the reader to
+/// ignore them -- and the fiftieth is no more informative than the first.
+///
+/// Decided by the operator as open-questions Q21, 2026-07-14 (option C, of
+/// three). The documentation half of that decision landed; this is the half
+/// that did not, found two months later by lane C's echoed-settings scanner
+/// flagging `BaseChainConfig`'s four fields as read-only-into-output.
+const NOT_APPLIED: &str = "nft: parsed, NOT applied -- this ruleset is not installed anywhere.\n\
+     nft on SlateOS is a parser and pretty-printer; it does not reach the \
+     kernel, and\n     the ruleset is discarded when this process exits. \
+     To change the running\n     firewall, use `fw`.";
+
+/// Does this command line ask to change the ruleset?
+///
+/// The first word is the command; everything after it is the object. A command
+/// this does not recognise is NOT treated as mutating -- `exec_command` will
+/// reject it as unknown, and a notice about not applying something that was
+/// never a command would be noise.
+fn is_mutating(words: &[String]) -> bool {
+    words
+        .first()
+        .is_some_and(|w| MUTATING.contains(&w.as_str()))
+}
+
 /// The entire nftables ruleset.
 struct Ruleset {
     tables: Vec<Table>,
     next_handle: u64,
+    /// Whether any mutating command was seen, so [`NOT_APPLIED`] prints once.
+    ///
+    /// Kept on the ruleset rather than returned from `exec_command` because
+    /// three separate call paths execute commands (file, single-command and
+    /// interactive) and a return value would have to be threaded through all
+    /// three -- three chances to drop it, in the code whose failure mode is
+    /// exactly "the report and the reality disagree".
+    mutated: bool,
 }
 
 impl Ruleset {
@@ -841,6 +909,7 @@ impl Ruleset {
         Self {
             tables: Vec::new(),
             next_handle: 1,
+            mutated: false,
         }
     }
 
@@ -1249,6 +1318,13 @@ fn exec_command(rs: &mut Ruleset, flags: &Flags, words: &[String]) -> Result<Str
 
     let mut tokens = Tokens::new(words);
     let cmd = tokens.expect("command")?;
+
+    // Before dispatch, and through the same predicate the tests exercise: a
+    // command that FAILS to parse still asked to change the ruleset, and the
+    // reader still needs to know that succeeding would not have applied it.
+    if is_mutating(words) {
+        rs.mutated = true;
+    }
 
     match cmd {
         "add" => exec_add(rs, &mut tokens),
@@ -2836,12 +2912,21 @@ fn run(args: Vec<String>) -> Result<String, String> {
 
     // Batch file mode
     if let Some(ref path) = batch_file {
-        return run_batch_file(&mut rs, &flags, path);
+        // Same shape as the interactive path below: capture, notify, return.
+        // `-f` is the PRIMARY way a ruleset is applied, so an early return
+        // here is the one place the notice must not be missed -- and it was,
+        // in the first version of this change, despite the flag existing
+        // precisely because three call paths were three chances to drop it.
+        let out = run_batch_file(&mut rs, &flags, path);
+        warn_if_not_applied(&rs);
+        return out;
     }
 
     // Interactive mode
     if interactive {
-        return run_interactive(&mut rs, &flags);
+        let out = run_interactive(&mut rs, &flags);
+        warn_if_not_applied(&rs);
+        return out;
     }
 
     // Single command mode
@@ -2858,7 +2943,18 @@ fn run(args: Vec<String>) -> Result<String, String> {
         }
         output.push_str(&exec_command(&mut rs, &flags, cmd_tokens)?);
     }
+    warn_if_not_applied(&rs);
     Ok(output)
+}
+
+/// Print [`NOT_APPLIED`] if any mutating command was seen this invocation.
+///
+/// Separate from `run` so the three execution paths cannot each grow their own
+/// slightly different version of it.
+fn warn_if_not_applied(rs: &Ruleset) {
+    if rs.mutated {
+        eprintln!("{NOT_APPLIED}");
+    }
 }
 
 fn run_interactive(rs: &mut Ruleset, flags: &Flags) -> Result<String, String> {
@@ -2940,6 +3036,159 @@ mod tests {
             output.push_str(&exec_command(rs, flags, cmd_tokens)?);
         }
         Ok(output)
+    }
+
+    // -----------------------------------------------------------------------
+    // "parsed, NOT applied" (open-questions Q21, operator-chosen option C)
+    // -----------------------------------------------------------------------
+
+    /// The six commands that change the ruleset, restated independently.
+    ///
+    /// A second copy of `MUTATING`, deliberately, and the reason is worth the
+    /// lines. The first version of the test below looped over `MUTATING`
+    /// itself -- which asserts that everything in the list is in the list, and
+    /// cannot fail. Sabotage found it: deleting `"insert"` from `MUTATING`
+    /// left all 195 tests green, because the loop simply stopped testing the
+    /// entry that had been removed.
+    ///
+    /// Restating them here gives the assertion an oracle the code cannot move.
+    /// Drop one from `MUTATING` now and this loop still asks about it, finds
+    /// the flag unset, and fails. Same reasoning as `libcall`'s
+    /// `constants_agree_with_posix`: a second copy is acceptable exactly when
+    /// it exists only in a test binary and is the control for the first.
+    ///
+    /// # What it still cannot catch
+    ///
+    /// A brand-new mutating arm added to `exec_command`'s dispatch and to
+    /// neither list. Nothing here can see the dispatch, so that case needs a
+    /// human -- which is why `MUTATING` sits next to the dispatch it mirrors
+    /// and says so.
+    const EXPECTED_MUTATING: [&str; 6] = ["add", "create", "delete", "flush", "rename", "insert"];
+
+    /// Every command that changes the ruleset sets the flag.
+    ///
+    /// Driven through `exec_command` rather than by calling `is_mutating`
+    /// directly, because the thing that can break is the WIRING: a mutating
+    /// arm present in the dispatch but missing from `MUTATING` would leave
+    /// `is_mutating`'s own test green while the notice silently stopped
+    /// covering it -- and a mutating command that prints no notice is exactly
+    /// the defect this whole change exists to remove.
+    #[test]
+    fn every_mutating_command_arms_the_notice() {
+        assert_eq!(
+            MUTATING.len(),
+            EXPECTED_MUTATING.len(),
+            "MUTATING gained or lost an entry; update EXPECTED_MUTATING too, \
+             deliberately, because it is the control rather than a duplicate"
+        );
+        for cmd in EXPECTED_MUTATING {
+            let mut rs = Ruleset::new();
+            let flags = Flags::new();
+            let words = tokenize(&format!("{cmd} table inet filter"));
+            // The result is deliberately ignored: `rename` and friends need
+            // more arguments than this and will error. The question is whether
+            // the ATTEMPT was recorded, and an attempt that failed to parse
+            // still asked to change the ruleset.
+            let _ = exec_command(&mut rs, &flags, &words);
+            assert!(
+                rs.mutated,
+                "`{cmd}` changed the ruleset without arming the not-applied notice"
+            );
+        }
+    }
+
+    /// Reading does not arm it. This is the control, and it is the one that
+    /// keeps the notice worth reading.
+    ///
+    /// If `nft list ruleset` printed "NOT applied", the line would appear on
+    /// every invocation including the ones where nothing was claimed, and a
+    /// warning that is always present is one nobody reads -- which would leave
+    /// the mutating case no better off than before.
+    #[test]
+    fn reading_the_ruleset_does_not_arm_the_notice() {
+        for cmd in ["list ruleset", "export json", "monitor"] {
+            let mut rs = Ruleset::new();
+            let flags = Flags::new();
+            let words = tokenize(cmd);
+            let _ = exec_command(&mut rs, &flags, &words);
+            assert!(
+                !rs.mutated,
+                "`{cmd}` only reads, but armed the not-applied notice"
+            );
+        }
+    }
+
+    /// A `-f` batch arms it too, which is the case that matters most.
+    ///
+    /// `nft -f ruleset.nft` is how a ruleset is actually applied, and it
+    /// reaches `exec_command` through `run_batch_string` rather than through
+    /// the single-command path. The first version of this change wired the
+    /// notice into the single-command and interactive paths and left `-f`
+    /// returning early without it -- so the one invocation people really use
+    /// would have stayed silent. This drives the batch entry point directly.
+    #[test]
+    fn a_batch_script_arms_the_notice() {
+        let mut rs = Ruleset::new();
+        let flags = Flags::new();
+        let script = "# a comment
+add table inet filter
+list ruleset
+";
+        let _ = run_batch_string(&mut rs, &flags, script);
+        assert!(
+            rs.mutated,
+            "a -f script added a table without arming the notice"
+        );
+
+        // Control: a batch that only reads stays quiet, or every scripted
+        // `nft -f` that merely lists would cry wolf.
+        let mut ro = Ruleset::new();
+        let _ = run_batch_string(
+            &mut ro,
+            &flags,
+            "# only reading
+list ruleset
+",
+        );
+        assert!(
+            !ro.mutated,
+            "a read-only batch armed the not-applied notice"
+        );
+    }
+
+    /// A word that is not a command arms nothing.
+    ///
+    /// `exec_command` rejects it as unknown, and a notice explaining that
+    /// something was not applied -- when it was never a command to begin with
+    /// -- would point the reader at the wrong problem entirely.
+    #[test]
+    fn an_unknown_word_arms_nothing() {
+        let mut rs = Ruleset::new();
+        let flags = Flags::new();
+        assert!(exec_command(&mut rs, &flags, &tokenize("frobnicate table x")).is_err());
+        assert!(!rs.mutated);
+        // And an empty command line is not a mutation either.
+        assert!(!is_mutating(&[]));
+    }
+
+    /// The notice names `fw`, and says the state does not survive the process.
+    ///
+    /// Asserted as SUBSTRINGS rather than by comparing with the constant,
+    /// which would pass against any text at all including an empty string.
+    /// The two facts are what make it actionable: without `fw` the reader is
+    /// told they have a problem and not where to go, and without the lifetime
+    /// they may conclude a later `nft list` will show their rules.
+    #[test]
+    fn the_notice_routes_the_reader_somewhere() {
+        assert!(NOT_APPLIED.contains("NOT applied"), "{NOT_APPLIED}");
+        assert!(
+            NOT_APPLIED.contains("`fw`"),
+            "does not name the working tool"
+        );
+        assert!(
+            NOT_APPLIED.contains("discarded when this process exits"),
+            "does not say the ruleset dies with the process"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -127,9 +127,37 @@ def remove(root: str, rel: str) -> None:
 # being enumerated as exceptions.
 _IMPORT_RE = re.compile(r"^\s*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
 
+# A SECOND KIND OF DEPENDENCY, and the reason gate 3 refused every boot in all
+# three lanes for a day.
+#
+# `raced-globals.py` does not import `check-test-order-independence.py` -- it
+# cannot, the name is not an identifier. It OPENS it, by path, at runtime, to
+# cross-check that gate 42's CRATES list covers what it found. Imports were the
+# only dependency kind staged, so the file was absent, the cross-check refused
+# (correctly: a comparison that could not be made is not a comparison that
+# passed), and all 13 gate-3 assertions failed -- including the arms that
+# assert a CLEAN tree passes, which is what made it look like the checker had
+# found something rather than failed to start.
+#
+# The comment above already argues the general case against fixing this by
+# listing the file: an enumeration that needs one entry per instance misses the
+# next one by construction. That was written about modules and is just as true
+# about opens. 15 checkers in `scripts/` name a sibling this way today.
+#
+# Deliberately narrow: only `parent / "name.py"`, which is the shape every one
+# of the 15 uses. A path built from a variable is not matched and would need a
+# different mechanism -- but it would also fail loudly at fixture time rather
+# than silently, because the checker would not start.
+_SIBLING_RE = re.compile(r'parent\s*/\s*"([A-Za-z0-9_.\-]+\.py)"')
+
 
 def support_for(checkers: tuple[str, ...]) -> tuple[str, ...]:
-    """Sibling modules `checkers` import, transitively, as filenames."""
+    """Sibling files `checkers` need on disk, transitively, as filenames.
+
+    Two kinds, both derived rather than listed: modules they **import**, and
+    sibling scripts they **open** by name. See `_SIBLING_RE` for why the second
+    kind exists.
+    """
     found: set[str] = set()
     queue = list(checkers)
     while queue:
@@ -141,8 +169,9 @@ def support_for(checkers: tuple[str, ...]) -> tuple[str, ...]:
             # A checker named by a case but absent is that case's problem to
             # report, not this function's to hide.
             continue
-        for name in _IMPORT_RE.findall(source):
-            module = name + ".py"
+        named = [name + ".py" for name in _IMPORT_RE.findall(source)]
+        named += _SIBLING_RE.findall(source)
+        for module in named:
             if module in found or module in checkers:
                 continue
             if os.path.exists(os.path.join(HERE, module)):

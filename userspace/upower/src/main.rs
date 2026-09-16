@@ -1201,6 +1201,44 @@ impl HistoryTracker {
     }
 }
 
+/// What `upowerd` says when the battery reaches the action threshold.
+///
+/// # This used to be a lie, and it was the most expensive one in this lane
+///
+/// Until 2026-09-15 it read `CRITICAL: battery at 3% -- executing PowerOff`.
+/// `upowerd` contains no power action of any kind: no syscall, no `libcall`,
+/// no spawned `powerctl`. "Executing" is present tense and asserts an action
+/// in progress, so the one reader who ever sees this line -- an operator
+/// watching a laptop at 3% -- was told the machine was powering itself down,
+/// and then it was not. The battery dies hard and unsynced writes go with it.
+///
+/// That is worse than an echoed setting. An echo merely agrees with what was
+/// typed; this agreed with what was ABOUT to happen, and the reader's correct
+/// response to it -- do nothing, it is handled -- is the one that loses the
+/// data.
+///
+/// # Why it names an action for the human
+///
+/// "Not performed" alone tells an operator they have a problem and not where
+/// to go. `logind` is the service that would perform it, and it says the same
+/// thing about itself ("is permitted, but this build cannot perform it"), so
+/// there is nothing to forward to yet. The honest routing is the person at the
+/// keyboard, and they have seconds rather than minutes.
+///
+/// # Why a function
+///
+/// So the claim is testable. Inline in the daemon loop it could only be
+/// checked by reading, and the whole family of defects this belongs to is
+/// "nobody re-read it".
+fn critical_action_notice(percentage: f64, action: CriticalPowerAction) -> String {
+    format!(
+        "upowerd: CRITICAL: battery at {percentage:.0}% -- CriticalPowerAction={action} \
+         is NOT being performed\n\
+         upowerd: this build monitors power and cannot act on it -- save your work \
+         and power down now"
+    )
+}
+
 fn write_pid_file(path: &Path, pid: u32) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1223,9 +1261,16 @@ fn run_daemon(opts: &UpowerdOptions, out: &mut dyn Write) -> io::Result<i32> {
         "upowerd: config: PercentageLow={}, PercentageCritical={}, PercentageAction={}",
         cfg.percentage_low, cfg.percentage_critical, cfg.percentage_action
     )?;
+    // `(never performed)` here and not only at the moment it matters. A
+    // daemon's startup banner is what an operator reads when deciding whether
+    // the machine is configured correctly, and reading `CriticalPowerAction=
+    // PowerOff` there is what makes them stop thinking about it -- months
+    // before the 3% line they may never see at all, because it is printed to
+    // a log on a machine that is about to lose power.
     writeln!(
         out,
-        "upowerd: CriticalPowerAction={}",
+        "upowerd: CriticalPowerAction={} (never performed: this build monitors \
+         power and cannot act on it)",
         cfg.critical_power_action
     )?;
     writeln!(out, "upowerd: NoPollBatteries={}", cfg.no_poll_batteries)?;
@@ -1275,8 +1320,8 @@ fn run_daemon(opts: &UpowerdOptions, out: &mut dyn Write) -> io::Result<i32> {
             if warning == WarningLevel::Action {
                 writeln!(
                     out,
-                    "upowerd: CRITICAL: battery at {:.0}% -- executing {}",
-                    dev.percentage, cfg.critical_power_action
+                    "{}",
+                    critical_action_notice(dev.percentage, cfg.critical_power_action)
                 )?;
             } else if warning == WarningLevel::Critical {
                 writeln!(
@@ -1390,6 +1435,52 @@ mod tests {
     // -----------------------------------------------------------------------
     // Personality detection
     // -----------------------------------------------------------------------
+
+    /// The critical-battery line must not claim an action is being taken.
+    ///
+    /// The positive assertions are what an operator needs; the NEGATIVE one is
+    /// what keeps the defect from coming back. "executing {action}" is a
+    /// natural thing to write here -- it is what the real upowerd says,
+    /// because the real upowerd does it -- so the word is likely to be
+    /// reintroduced by anyone porting behaviour across without checking
+    /// whether this build can act.
+    #[test]
+    fn the_critical_notice_does_not_claim_to_be_acting() {
+        let msg = critical_action_notice(3.0, CriticalPowerAction::PowerOff);
+        assert!(
+            !msg.contains("executing"),
+            "upowerd claims to be executing a power action it cannot perform: {msg}"
+        );
+        assert!(msg.contains("NOT being performed"), "{msg}");
+        assert!(
+            msg.contains("PowerOff"),
+            "does not name the configured action: {msg}"
+        );
+        assert!(
+            msg.contains("power down now"),
+            "does not tell the operator what to do instead: {msg}"
+        );
+        assert!(
+            msg.contains("3%"),
+            "does not report the level that triggered it: {msg}"
+        );
+    }
+
+    /// It names whichever action was configured, not a hardcoded one.
+    ///
+    /// The control for the test above: asserting "PowerOff" appears would pass
+    /// against a message with the word baked in, which would then be wrong for
+    /// every operator who configured Hibernate.
+    #[test]
+    fn the_critical_notice_names_the_configured_action() {
+        for (action, want) in [
+            (CriticalPowerAction::Hibernate, "Hibernate"),
+            (CriticalPowerAction::HybridSleep, "HybridSleep"),
+        ] {
+            let msg = critical_action_notice(2.0, action);
+            assert!(msg.contains(want), "{action} rendered as: {msg}");
+        }
+    }
 
     #[test]
     fn personality_upower_bare() {

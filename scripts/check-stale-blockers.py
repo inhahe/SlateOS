@@ -942,7 +942,10 @@ MOVED_SELFTEST = [
 DISABLED_FORMS = (
     # A call to a `self_test_*` rung, commented out. The rungs are the boot
     # test's whole content, so a commented-out call is a test that does not run.
-    (re.compile(r"^[ \t]*//[ \t]*[\w:]*\bself_test_\w+[ \t]*\("), "call commented out"),
+    # No `[ \t]*` before the paren: a CALL has none, and allowing it matched
+    # prose -- `... Extracted to self_test_get_mempolicy (TD4).` read as a
+    # commented-out call to a rung that is in fact invoked on the next line.
+    (re.compile(r"^[ \t]*//[ \t]*[\w:]*\bself_test_(\w+)\("), "call commented out"),
     # A BARE `#[ignore]`. Not `#[ignore = "..."]` -- see IGNORE_WITH_REASON.
     (re.compile(r"^[ \t]*#\[ignore\][ \t]*$"), "#[ignore] with no reason"),
 )
@@ -1018,9 +1021,18 @@ def disabled_tests(sources):
                 continue
             form = None
             for pat, label in DISABLED_FORMS:
-                if pat.match(line):
-                    form = label
-                    break
+                m = pat.match(line)
+                if not m:
+                    continue
+                # A commented-out call names a rung. If that rung is called
+                # live ANYWHERE, the comment is documentation and not a
+                # disabled test -- the same rule the dead-code waiver uses,
+                # and for the same reason. `#[ignore]` captures no name, so
+                # `m.groups()` is empty and it is always a finding.
+                if m.groups() and m.group(1) in called:
+                    continue
+                form = label
+                break
             if form is None and DEAD_SELFTEST.match(line):
                 # Look past any further attributes to the item itself, so
                 # `#[allow(dead_code)]` on an unrelated struct is not a hit.
@@ -1058,6 +1070,21 @@ DISABLED_SELFTEST = [
         "...and the live call beside it is NOT a hit",
         "kernel/src/main.rs",
         ["    proc::spawn::self_test_ctest_pty(),"],
+        0,
+    ),
+    (
+        "a comment naming a rung CALLED on the next line is documentation",
+        "kernel/src/syscall/linux.rs",
+        [
+            "    //      ... Extracted to self_test_get_mempolicy (TD4).",
+            "    self_test_get_mempolicy()?;",
+        ],
+        0,
+    ),
+    (
+        "...and the parenthetical alone was never call syntax",
+        "kernel/src/syscall/linux.rs",
+        ["    // Extracted to self_test_nothing_calls_me (TD4)."],
         0,
     ),
     (

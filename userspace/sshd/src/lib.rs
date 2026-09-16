@@ -584,6 +584,33 @@ fn get_pid() -> u64 {
     if ret < 0 { 0 } else { ret as u64 }
 }
 
+/// Is this `ListenAddress` one we can actually honour?
+///
+/// Only the wildcards, because the wildcards are the only ones that describe
+/// what the bind will really do.
+///
+/// # Why this exists
+///
+/// `SYS_TCP_BIND` takes a port and nothing else. `sys_tcp_bind` reads
+/// `args.arg0 as u16` and calls `net::tcp::bind(ns, port)`; there is no
+/// address parameter anywhere on the path, so a listener accepts on every
+/// interface the stack has. `ListenAddress` was parsed, stored, printed into
+/// the startup log -- "listening on 127.0.0.1:22" -- and never passed to
+/// anything.
+///
+/// That is not a cosmetic echo. `ListenAddress 127.0.0.1` is how an
+/// administrator says "do not accept ssh from the network", and they got a
+/// daemon reachable from the network plus a log line telling them it was
+/// restricted. A security control that silently does not apply is worse than
+/// one that is absent, because its presence is what stops anyone looking for
+/// another.
+///
+/// `0.0.0.0` and `::` are honoured because they are true: the bind really
+/// does accept everywhere. An empty value is the same statement by omission.
+fn listen_address_is_honoured(addr: &str) -> bool {
+    matches!(addr.trim(), "" | "0.0.0.0" | "::" | "*")
+}
+
 /// Bind a TCP listener to a local port. Returns a listener handle.
 fn tcp_bind(port: u16) -> Result<u64, SshdError> {
     // SAFETY: SYS_TCP_BIND takes one scalar argument (port number).
@@ -6835,6 +6862,37 @@ pub fn run_cli() -> i32 {
         return 1;
     }
 
+    // REFUSE rather than bind wider than was asked for.
+    //
+    // Starting anyway with a warning was the other option and is the wrong
+    // one here: the failure mode of a warning is an administrator who does not
+    // read it and is exposed, and the failure mode of refusing is an
+    // administrator who reads one line and sets `0.0.0.0`. A security control
+    // must fail closed, and this one cannot be provided at all.
+    //
+    // The default is `0.0.0.0`, so nothing that works today stops working.
+    // Only a configuration that ASKED for a restriction we cannot deliver is
+    // refused -- which is exactly the set of people who would be harmed by
+    // proceeding.
+    if !listen_address_is_honoured(&config.listen_address) {
+        log_error(
+            &format!(
+                "ListenAddress {} cannot be honoured: this kernel's tcp bind takes \
+                 a port and no address, so the listener would accept on every \
+                 interface",
+                config.listen_address
+            ),
+            opts.log_stderr,
+        );
+        log_error(
+            "refusing to start rather than accept connections you asked to \
+             exclude; set ListenAddress 0.0.0.0 to run on all interfaces \
+             deliberately",
+            opts.log_stderr,
+        );
+        return 1;
+    }
+
     // Bind listener.
     let listener = match tcp_bind(config.port) {
         Ok(l) => l,
@@ -6847,10 +6905,14 @@ pub fn run_cli() -> i32 {
         }
     };
 
+    // "all interfaces", not the configured address. Echoing `ListenAddress`
+    // here is what made the unhonoured setting invisible: the one line an
+    // administrator would check confirmed the restriction that was not
+    // applied. Past the refusal above this is always a wildcard anyway, so
+    // saying what the bind DOES costs nothing and cannot drift from it.
     log_info(
         &format!(
-            "listening on {}:{} (pid {})",
-            config.listen_address,
+            "listening on all interfaces, port {} (pid {})",
             config.port,
             get_pid()
         ),
@@ -6974,6 +7036,30 @@ mod tests {
     fn test_config_parse_port() {
         let config = SshdConfig::parse(b"Port 2222").unwrap();
         assert_eq!(config.port, 2222);
+    }
+
+    /// Only an address the bind can actually deliver is honoured.
+    ///
+    /// The wildcards are true statements about what happens: the listener does
+    /// accept everywhere. Everything else is a restriction this kernel cannot
+    /// apply, and the daemon refuses rather than binding wider than asked.
+    #[test]
+    fn only_wildcard_listen_addresses_are_honoured() {
+        for ok in ["0.0.0.0", "::", "*", "", "  0.0.0.0  "] {
+            assert!(
+                listen_address_is_honoured(ok),
+                "{ok:?} describes the bind and should be accepted"
+            );
+        }
+        // The control, and the reason the whole change exists. 127.0.0.1 is
+        // how an administrator says "not from the network". Accepting it would
+        // bind every interface while the startup log said otherwise.
+        for bad in ["127.0.0.1", "192.168.1.1", "::1", "10.0.0.1", "localhost"] {
+            assert!(
+                !listen_address_is_honoured(bad),
+                "{bad:?} is a restriction this kernel cannot apply, but was accepted"
+            );
+        }
     }
 
     #[test]

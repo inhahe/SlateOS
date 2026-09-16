@@ -969,7 +969,15 @@ IGNORE_WITH_REASON = re.compile(r'^[ \t]*#\[ignore[ \t]*=[ \t]*"([^"]*)"[ \t]*\]
 # from the two above: nothing is commented out, the function is simply not
 # called from anywhere, and the attribute is what stops the compiler saying so.
 DEAD_SELFTEST = re.compile(r"^[ \t]*#\[allow\(dead_code\)\]")
-SELFTEST_FN = re.compile(r"^[ \t]*(?:pub )?fn[ \t]+self_test_\w+")
+SELFTEST_FN = re.compile(r"^[ \t]*(?:pub )?fn[ \t]+(self_test_\w+)")
+# A CALL to a self_test rung, on a line that is not a comment. Used to decide
+# whether a `#[allow(dead_code)]` waiver is hiding a disabled test or is merely
+# defensive -- `kernel/src/sync.rs` has one on `self_test_stall`, which is
+# called 33 lines above it as Test 7 of a live self-test. Reporting that was a
+# false positive, found by checking the gate's own output rather than trusting
+# the design.
+CALL_SITE = re.compile(r"\bself_test_(\w+)[ \t]*\(")
+DEFINITION = re.compile(r"^[ \t]*(?:pub )?fn[ \t]")
 
 REPORT_CEILING = 12
 
@@ -986,6 +994,20 @@ def disabled_tests(sources):
     itself a finding: a test switched off with no note is one nobody can
     evaluate at all.
     """
+    sources = list(sources)
+
+    # First pass: which rungs are actually called from live code anywhere?
+    # A definition line matches `self_test_x(` too, so it is excluded
+    # explicitly -- otherwise every rung would look like its own caller and the
+    # waiver check could never fire.
+    called = set()
+    for _name, text in sources:
+        for line in text.split(chr(10)):
+            bare = line.lstrip()
+            if bare.startswith("//") or DEFINITION.match(line):
+                continue
+            called.update(CALL_SITE.findall(line))
+
     found = []
     deliberate = 0
     for name, text in sources:
@@ -1005,8 +1027,11 @@ def disabled_tests(sources):
                 j = i + 1
                 while j < len(lines) and lines[j].lstrip().startswith("#["):
                     j += 1
-                if j < len(lines) and SELFTEST_FN.match(lines[j]):
-                    form = "dead_code waiver on a self_test fn"
+                m = SELFTEST_FN.match(lines[j]) if j < len(lines) else None
+                # ...and only when nothing calls it. A waiver on a rung that IS
+                # called is defensive, not disabling.
+                if m and m.group(1)[len("self_test_"):] not in called:
+                    form = "dead_code waiver, and nothing calls it"
             if form is None:
                 continue
             reason = []
@@ -1046,6 +1071,32 @@ DISABLED_SELFTEST = [
         "kernel/src/proc/spawn.rs",
         ["#[allow(dead_code)]", "pub fn self_test_ctest_pty() -> KernelResult<()> {"],
         1,
+    ),
+    (
+        "...but NOT when something actually calls it",
+        "kernel/src/sync.rs",
+        [
+            "    self_test_stall();",
+            "#[allow(dead_code)]",
+            "fn self_test_stall() {",
+        ],
+        0,
+    ),
+    (
+        # TWO hits, and that is right rather than a duplicate: the commented-out
+        # call is one finding and the now-uncallable function is another. In the
+        # real tree they are in different files 7000 lines apart (main.rs and
+        # spawn.rs), and a reader chasing this needs both -- the call site says
+        # what stopped running, the definition says what is now unreachable.
+        # I first wrote `1` here and the self-test corrected me.
+        "...and a commented-out call does not count as calling it",
+        "kernel/src/sync.rs",
+        [
+            "    // self_test_stall();",
+            "#[allow(dead_code)]",
+            "fn self_test_stall() {",
+        ],
+        2,
     ),
     (
         "...but the same waiver on anything else is not",

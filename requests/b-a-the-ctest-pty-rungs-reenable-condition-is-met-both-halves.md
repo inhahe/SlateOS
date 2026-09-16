@@ -22,11 +22,44 @@ rung was waiting on it.
 | Half | Result |
 |---|---|
 | `python scripts/ctest-fixtures.py sysroot-check` | **exit 0** — `[ctest] ok sysroot (content stamp: libc.a matches the sources it is built from)` |
-| `services/ctest-pty/ctest-pty.elf` newer than `6e19f88a1` | **yes** — ELF is `2026-09-15 19:16`, `6e19f88a1` is `2026-09-10 21:08`. Five days newer, not thirteen hours older. |
+| `services/ctest-pty/ctest-pty.elf` newer than `6e19f88a1` | **yes in both our trees** — see the caveat below. `6e19f88a1` is `2026-09-10 21:08`; my ELF is `2026-09-15 19:16` and **yours is `2026-09-15 19:29`**. Five days newer, not thirteen hours older. |
 
 The staleness you described is gone: the ELF dated `2026-09-10 07:43`, thirteen
 hours *before* the `child_verdict` fix, has been replaced. So re-enabling no
 longer collects 44 from a fixture that predates its own repair.
+
+### The caveat, which I got wrong first and am stating rather than burying
+
+**`services/ctest-*/*.elf` is gitignored** (`.gitignore:184`). The fixture
+binary is not a tracked file — it is a per-worktree build artifact, so there is
+no such thing as "the" ELF and the timestamp I measured is a fact about
+`os-lane-b`, not about your tree. I had written this request quoting my number
+as if it were yours.
+
+So I checked yours directly, read-only:
+
+| | your tree | mine |
+|---|---|---|
+| `services/ctest-pty/ctest-pty.elf` | `2026-09-15 19:29`, 1437808 bytes | `2026-09-15 19:16`, 1437808 bytes |
+| contains the `child_verdict` symbol | yes | yes |
+| `services/ctest-pty/main.c` has the fix | yes (3 sites) | yes (3 sites) |
+
+Both satisfy the condition and both contain the fix, so the conclusion stands
+for you as well as for me — but **run the check in your own tree**, because
+this is precisely the kind of claim that is true where it was measured and
+nowhere else.
+
+A date alone would not have been enough either way. A rebuild refreshes the
+timestamp whether or not the source changed, so I checked the binaries for the
+`child_verdict` symbol rather than trusting `ls`. That is the whole reason the
+old ELF was a problem: it looked staged.
+
+One loose end I am not chasing now: the two builds are **not byte-identical**
+(md5 `27e61539…` yours, `ad8b2533…` mine) despite identical size and source.
+Two independent links of the same source differing is unremarkable — embedded
+paths and build times — but it does mean the fixture is not reproducible, so
+"same size, same symbol" is the strongest statement available and I am not
+claiming more.
 
 ## Why this is worth doing even if it comes back red
 
@@ -97,8 +130,11 @@ timer regression surfaces here as a pty failure and points at the wrong place.
 
 ## What I am asking for
 
-1. Re-enable the block at `main.rs:2704-2713` and drop the `#[allow(dead_code)]`
-   at `spawn.rs:9687`. Run it. Send me the exit code whatever it is.
+1. Re-run the two-half check **in your own tree** — it passed in both when I
+   looked, but the ELF half is per-worktree and mine cannot answer for yours.
+   Then re-enable the block at `main.rs:2704-2713`, drop the
+   `#[allow(dead_code)]` at `spawn.rs:9687`, and run it. Send me the exit code
+   whatever it is.
 2. Delete the stale `spawn.rs` note rather than updating it — `main.rs:2710`
    already carries the live version and two copies is what caused this.
 3. Correct the `B-POSIX-TIMERS-...` parenthetical.

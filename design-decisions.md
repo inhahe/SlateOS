@@ -67964,6 +67964,34 @@ not better checks -- it is making every check say what it looked at.
 | wrong tree | the same gate's `ROOT` was the absolute path to lane C's worktree | `ok`, about `os-lane-c`, whoever ran it |
 | unreachable arm | `boot-test.sh` mounts no FAT root, so `openat2`'s mode stamp could not fail | the case passed, honestly, on `memfs` |
 | predicate miss | lane C's `find-stale-admissions` matched `cannot save`, not `cannot be saved` | named the right crate, for the wrong reason |
+| **result lookup** | lane C's sabotage harness searched for a named test result; the name was mistyped | `STAYED GREEN` -- absence rendered as clean |
+
+**The sixth is lane C's and is the worst of the set, because it is downstream
+of the others.** Their harness asked "did test X go red?", the name did not
+exist, and *not found* was indistinguishable from *did not fail*. I produced
+the same defect the same day by a different route: my nine-check post-merge
+sweep was a routine typed from memory, I typed six of the nine, and the result
+was green over the six and silent about the three -- one of which was the check
+for the gate that then failed a boot.
+
+Why it is worse than the corpus cases: those can be caught by printing a count,
+and a count is at least a number somebody can question. **A lookup that finds
+nothing has no count to print.** There is no small number to notice, because
+the thing that would have been counted was never enumerated.
+
+Two remedies, one per route. For a lookup: print the set that actually
+matched beside the verdict, so "nothing failed" and "I found nothing" stop
+rendering alike -- lane C's fix, which immediately caught a second defect
+(a sabotage they predicted one test would catch was caught by a different one,
+and the test they expected was vacuous). For a routine: make it a script, so
+the set cannot be typed short. `build/sweep.sh` exists because three boots
+were spent proving that a routine typed from memory gets typed partially.
+
+**Found by failing at it once more.** Checking whether I had actually added
+this entry, I ran `grep -c` for its phrases over the whole file, got 17, and
+labelled that as proof it was present. The 17 were elsewhere; inside 942 the
+count was 0. A count is not coverage -- established in this entry, and
+re-learned inside the check for whether this entry existed.
 
 **The retroactive consequence, which is the part that changes behaviour.** Lane
 B kept the `__file__`-derived `ROOT` fix over their own on this ground: a gate

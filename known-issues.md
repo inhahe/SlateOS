@@ -154395,3 +154395,53 @@ every test that writes a settings file, across more than one lane's trees.
 Filed rather than done, with the trigger being the next recurrence -- or, more
 usefully, a gate that refuses a test binary containing both
 `testing::desktop()` and `with_scratch_config` without a `config_turn()`.
+
+
+## TD-C-THREE-MORE-SHELL-SETTINGS-MODULES-ARE-REACHED-BY-NOTHING
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** `gui/desktop/src/{power_settings,backup_settings,default_apps}.rs`.
+
+**In short:** the desktop shell carries three settings screens that no code
+anywhere opens. Together they are about 6,800 lines. They compile, their tests
+pass, and nothing reaches them -- `pub` in a library, so the compiler cannot
+say so. Found while looking for somewhere to put a screen-lock delay and
+noticing that the obvious home already modelled screen-off and sleep timeouts
+that nothing persists and nothing honours.
+
+| Module | Lines | Reached by |
+|---|---|---|
+| `power_settings.rs` | 1855 | nothing -- its one mention elsewhere is inside a doc comment |
+| `backup_settings.rs` | 2654 | nothing |
+| `default_apps.rs` | 2325 | nothing |
+
+This is the same shape as
+`TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING`, which named
+`snapshots.rs`, `associations.rs` and `remote.rs` and is two-thirds resolved.
+These three were not in that entry. (`privacy_settings.rs`, listed alongside
+them in an older triage, has since been deleted.)
+
+**Do not simply delete them.** That entry's own conclusion is the rule: two
+were removed, and `remote.rs` was *kept* because "both halves of it hold
+design that is recorded nowhere else, so deleting it would lose knowledge
+rather than remove duplication". The same question has to be asked of each of
+these three, and at least one clearly holds something:
+
+* `default_apps.rs` models **categories** -- which application opens web
+  links, mail, music, video, images, documents. The Default Apps page built in
+  `apps/settings` on this date lists *extension to program* associations read
+  from the `fileassoc` group, which is a different fact. Porting the category
+  model is the precondition for deleting this, exactly as `associations.rs`
+  was deleted only after its fallback-handler logic moved into
+  `apps/fileassoc` -- where it fixed a real bug on the way.
+* `power_settings.rs` models screen-off and sleep timeouts in minutes with
+  "0 = never". Nothing persists them and nothing honours them, so they are an
+  echoed setting in waiting; but the *shape* is the one a lock delay wants,
+  and the compositor now has the idle watch that could act on it.
+* `backup_settings.rs` is unexamined.
+
+**Why it matters beyond the line count.** A settings screen nobody can open is
+not merely dead code: it is a design that looks decided. Somebody adding a
+screen-lock delay would reasonably put it next to the sleep timeout in
+`power_settings.rs` and inherit a setting that changes nothing -- which is the
+defect this lane spent 2026-09-16 removing from eight other pages.

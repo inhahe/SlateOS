@@ -7392,9 +7392,19 @@ mod tests {
         let state = state_at(&root);
         let drawn = texts(&details_tree(&state));
 
-        for label in ["Name", "Size", "Date Modified", "Type"] {
+        // Asked of the manager rather than listed here: this test is about the
+        // header drawing what is active, and a hand-written list makes it a
+        // test of which columns ship visible as well -- which is how it failed
+        // when the default set was trimmed to the three the spec names.
+        for id in state.columns.active_columns() {
+            let label = state
+                .columns
+                .column_def(*id)
+                .expect("an active column with no definition")
+                .label
+                .clone();
             assert!(
-                drawn.iter().any(|t| t == label),
+                drawn.contains(&label),
                 "the header should name every active column; {label:?} missing from {drawn:?}"
             );
         }

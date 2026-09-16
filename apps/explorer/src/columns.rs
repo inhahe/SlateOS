@@ -386,12 +386,14 @@ impl ColumnManager {
         mgr.register_provider(Box::new(ArchiveColumns));
 
         // Activate standard columns by default.
-        mgr.active_columns = vec![
-            ColumnId::NAME,
-            ColumnId::SIZE,
-            ColumnId::DATE_MODIFIED,
-            ColumnId::TYPE,
-        ];
+        // Exactly the three `roadmap-detailed.md` §4.1 calls the
+        // out-of-the-box set: "fixed and minimal -- name, size, datetime
+        // modified -- independent of what's in any directory. The user expands
+        // from there." Type was here as a fourth until 2026-09-16, when the
+        // column picker made "expands from there" something a user can
+        // actually do; before that, trimming this would have taken away a
+        // column nobody could put back.
+        mgr.active_columns = vec![ColumnId::NAME, ColumnId::SIZE, ColumnId::DATE_MODIFIED];
         mgr
     }
 
@@ -2195,9 +2197,25 @@ mod tests {
     #[test]
     fn test_remove_column() {
         let mut mgr = ColumnManager::with_defaults();
+        // Added first rather than assumed visible: this test is about
+        // `remove_column`, and pinning it to whichever columns happen to be
+        // on by default made it fail when the default set changed for an
+        // unrelated reason.
+        mgr.add_column(ColumnId::TYPE);
         assert!(mgr.is_visible(ColumnId::TYPE));
         mgr.remove_column(ColumnId::TYPE);
         assert!(!mgr.is_visible(ColumnId::TYPE));
+    }
+
+    /// The out-of-the-box set is the three the spec names, and no more.
+    ///
+    /// Pinned because it is a rule about restraint, and restraint is what
+    /// erodes: every column here is defensible on its own, which is how a
+    /// "minimal" default grows a fourth and then a fifth.
+    #[test]
+    fn the_out_of_the_box_columns_are_the_three_the_spec_names() {
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(mgr.visible_keys(), vec!["name", "size", "date_modified"]);
     }
 
     #[test]
@@ -2228,6 +2246,16 @@ mod tests {
     #[test]
     fn test_reorder_move_backward() {
         let mut mgr = ColumnManager::with_defaults();
+        // The set is stated here rather than inherited from the defaults. This
+        // read `reorder(3, 0)` and expected Type at the front, which was true
+        // only while Type happened to be the fourth default column; the test
+        // is about moving an item backwards, not about what ships visible.
+        mgr.set_columns(vec![
+            ColumnId::NAME,
+            ColumnId::SIZE,
+            ColumnId::DATE_MODIFIED,
+            ColumnId::TYPE,
+        ]);
         mgr.reorder(3, 0);
         let active = mgr.active_columns();
         assert_eq!(active[0], ColumnId::TYPE);

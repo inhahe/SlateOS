@@ -153,6 +153,62 @@ def in_any_span(pos: int, spans: list[tuple[int, int]]) -> bool:
     return any(a <= pos < b for a, b in spans)
 
 
+_AUDIT = None
+
+
+def _refuses_honestly(code: str) -> bool:
+    """`audit-cli-fabrication.py`'s predicate, imported rather than copied.
+
+    **Why an import through `importlib` and not a second definition.** The
+    rule -- every `exit(0)` is behind `--help`, and there is at least one
+    non-zero exit -- exists once, in the checker it was written for. Two
+    copies of one predicate is the arrangement where a fix lands in one and
+    not the other and nobody notices, which is the same argument this lane
+    made to lane B about two `/proc` parsers in one repository. The file name
+    has a hyphen in it, so a plain `import` cannot reach it; that is a reason
+    to use `importlib`, not a reason to retype the function.
+
+    **What it clears.** `userspace/lp` parses `printer` and never acts on it,
+    because `lp` exits non-zero: "cannot queue a print job: nothing on this
+    system prints". The parsed value is a *record of what was asked for*,
+    which the refusal is then able to name. Deleting it would make the
+    refusal less informative, not more honest.
+
+    **The asymmetry is the point, and is written down so nobody removes it.**
+    This rule can only ever fire under `userspace/`: a GUI app has no exit
+    status to read, so it can never be an honest refusal in this sense. That
+    does not make it a worse rule -- **it is a rule about programs that exit,
+    and the absence of findings under `apps/` is a property of the tree rather
+    than of the check.** Anyone who later "fixes" the asymmetry by loosening
+    the predicate until it reports something under `apps/` will have replaced
+    a rule that means something with one that fires.
+
+    Applied per file, which for these programs is per crate. A file that
+    refuses on every path is not confirming a setting back to anybody,
+    because it does not get far enough to.
+    """
+    global _AUDIT
+    if _AUDIT is None:
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "audit-cli-fabrication.py"
+        spec = importlib.util.spec_from_file_location("audit_cli_fabrication", path)
+        _AUDIT = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_AUDIT)
+    # **Stricter than the shared predicate, deliberately.** That one has a
+    # fallback branch -- no `exit(0)` anywhere, at least one non-zero exit --
+    # which is sound enough where it is used (only for crates that do no I/O
+    # at all) and much too loose here. An ordinary tool that errors with
+    # `exit(1)` and succeeds by returning normally from `main` matches it, and
+    # applying that broadly cleared 18 files that are nothing of the kind.
+    #
+    # What is wanted is the `lp`/`unshare` shape specifically: a `--help` arm
+    # that exits 0, and every other path non-zero. Requiring an `exit(0)` site
+    # to exist selects exactly that, and leaves the fallback branch unused
+    # here rather than reimplemented.
+    return bool(_AUDIT._EXIT_OK.search(code)) and _AUDIT.refuses_honestly(code)
+
+
 def top_level_args(code: str, span: tuple[int, int]) -> list[tuple[int, int]]:
     """Spans of the macro's own comma-separated arguments, nesting excluded."""
     a, b = span
@@ -289,6 +345,14 @@ def is_called(code: str, fn: str) -> bool:
     # method's call site *is* `x.summary()`, and excluding it made every method
     # in the tree look uncalled -- which would have filed every echo as
     # stranded and produced a checker that reports nothing it was built for.
+    # `main` has no call site in the source and is called by definition.
+    # Without this, everything a program prints directly from `main` -- which
+    # for a small command-line tool is most of what it prints -- was filed as
+    # a formatter nobody calls. It was caught by a control fixture whose whole
+    # job was to be the opposite of the case above it, and which returned the
+    # same answer: two cases agreeing for a reason neither was testing.
+    if fn == "main":
+        return True
     for m in re.finditer(rf"(?<![A-Za-z0-9_]){re.escape(fn)}\s*\(", code):
         # Its own declaration is not a call.
         before = code[max(0, m.start() - 4):m.start()]
@@ -307,6 +371,11 @@ def analyse(
     `stranded` instead -- a different defect with a different fix, and one
     `find-stranded-serialisers.py` already reports.
     """
+    if _refuses_honestly(code):
+        # A program that refuses on every path is not confirming a setting
+        # back to anyone. What it holds is a record of what was asked for,
+        # which its refusal can then name.
+        return []
     spans = print_spans(code)
     shown_spans = print_spans(code, SHOWN_CALL)
     found = []
@@ -504,6 +573,35 @@ impl ImageSettings {
            analyse(called, all_structs=False, stranded=bucket2),
            [("ImageSettings", "quality", False)])
     expect("...with nothing left in the stranded bucket", bucket2, [])
+
+    # --- an honest refusal ---------------------------------------------------
+    # `userspace/lp` parses `printer`, never acts on it, and exits non-zero:
+    # "cannot queue a print job: nothing on this system prints". The parsed
+    # value is a record of what was asked for, which the refusal names.
+    refusal = """
+struct Config {
+    pub printer: String,
+    pub copies: u32,
+}
+fn main() {
+    let cfg = parse();
+    if args[0] == "--help" {
+        print_help();
+        process::exit(0);
+    }
+    if cfg.copies > 1 { note_copies(); }
+    eprintln!("lp: cannot queue a print job for {}: nothing prints", cfg.printer);
+    process::exit(1);
+}
+"""
+    expect("a program that refuses on every path reports nothing",
+           analyse(refusal, all_structs=False), [])
+    # The control: the SAME source reaching exit 0 is an ordinary echo. Without
+    # this, the clause above could be clearing on something other than the
+    # exit code and nothing here would tell.
+    reaches_zero = refusal.replace("    process::exit(1);", "    process::exit(0);")
+    expect("...and the same source that can exit 0 is not cleared",
+           analyse(reaches_zero, all_structs=False), [("Config", "printer", True)])
 
     # --- bound to a {} vs handed to a function -------------------------------
     # `userspace/acpi`'s `fahrenheit`, `arp`'s `numeric`, `objdump`'s two

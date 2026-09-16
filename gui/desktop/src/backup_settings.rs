@@ -416,6 +416,33 @@ fn format_bytes(bytes: u64) -> String {
 // Backup settings aggregate
 // ============================================================================
 
+/// What the page says under the schedule it just read back to you.
+///
+/// **This is the most expensive echo in the tree and it is worth saying why.**
+/// Set the frequency to Weekly, pick Sunday and 02:00, and the page answers
+/// "Every Sun at 02:00". That sentence is built by `schedule_description`
+/// from the three fields you just set, and it is the only evidence available
+/// to the person who set them. It agrees with them because it is made of
+/// them.
+///
+/// Nothing else in this tree reads `BackupSettings`. `schedule_time_hour`,
+/// `schedule_time_minute` and `schedule_day` were found by
+/// `scripts/find-echoed-settings.py` to have exactly one reader between them,
+/// and it is the line that prints them. There is no scheduler, no timer, and
+/// no service watching this struct; the page does not write the settings
+/// anywhere either, so they do not outlive the window.
+///
+/// `userspace/backup` is a real backup tool -- it hashes and copies files --
+/// and it has never heard of this page. Naming it is the useful half: the
+/// operator's data can in fact be backed up, by running it, and a notice that
+/// only says "this does nothing" would leave them thinking otherwise.
+///
+/// The cost of the silent version is not a wrong label. It is a person who
+/// configures a weekly backup, sees it confirmed, and stops thinking about
+/// backups.
+const SCHEDULE_NOT_IN_EFFECT: &str = "Not scheduled: nothing on this system runs backups automatically, and \
+these settings are not saved. Run the `backup` command to make one.";
+
 /// Complete backup configuration.
 #[derive(Clone, Debug)]
 pub struct BackupSettings {
@@ -834,6 +861,20 @@ impl BackupSettingsUI {
             y: row_y + 44.0,
             text: self.settings.schedule_description(),
             font_size: 12.0,
+            color: p.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - 52.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // Directly beneath the schedule, not in a corner of the page. The
+        // sentence above is what the operator reads as confirmation, and a
+        // correction they have to go looking for is one they will not find.
+        cmds.push(RenderCommand::Text {
+            x: x + 36.0,
+            y: row_y + 62.0,
+            text: SCHEDULE_NOT_IN_EFFECT.to_owned(),
+            font_size: 11.0,
             color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 52.0),
@@ -1928,6 +1969,59 @@ mod tests {
 
         let last = settings.last_successful_backup().unwrap();
         assert_eq!(last.id, 1);
+    }
+
+    /// The page says the schedule it just read back is not in effect.
+    ///
+    /// Set Weekly, Sunday, 02:00 and the page answers "Every Sun at 02:00".
+    /// That sentence is built by `schedule_description` out of the three
+    /// fields just set, so it agrees with them because it is made of them --
+    /// and it is the only evidence available to the person who set them.
+    ///
+    /// Nothing else in this tree reads `BackupSettings`. There is no
+    /// scheduler, no timer and no service watching it, and the page does not
+    /// save the settings anywhere either. `userspace/backup` is a real backup
+    /// tool and has never heard of this page.
+    ///
+    /// Found by `scripts/find-echoed-settings.py`, which flagged
+    /// `schedule_day`, `schedule_time_hour` and `schedule_time_minute` as
+    /// having exactly one reader between them: the line that prints them.
+    ///
+    /// The cost of the silent version is not a wrong label. It is a person
+    /// who configures a weekly backup, sees it confirmed, and stops thinking
+    /// about backups.
+    #[test]
+    fn the_schedule_is_drawn_with_the_fact_that_it_does_not_run() {
+        let mut ui = BackupSettingsUI::new();
+        ui.settings.enabled = true;
+        ui.settings.frequency = BackupFrequency::Weekly;
+        ui.settings.schedule_day = DayOfWeek::Sunday;
+        ui.settings.schedule_time_hour = 2;
+        ui.settings.schedule_time_minute = 0;
+
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 700.0, 800.0, &Tz::utc());
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control. Without it this passes against a page that draws no
+        // schedule at all, which is not the thing being pinned.
+        assert!(
+            texts.iter().any(|t| t.contains("Every Sun at 02:00")),
+            "control: the page must be reading the schedule back for this test \
+to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not scheduled") && t.contains("not saved")),
+            "the page confirmed a backup schedule and did not say it does not run"
+        );
     }
 
     #[test]

@@ -1083,6 +1083,25 @@ ask than guess.
 | system information | queries hardware details | 73 KB |
 | settings | a remote-settings page | 46 KB |
 
+**How each one escapes the compiler, measured 2026-09-16.** The tests are one
+reason; there is a second, and it differs per feature:
+
+| feature | why `dead_code` is silent |
+|---|---|
+| image viewer — video | `#![allow(dead_code)]` at the top of `video.rs` |
+| process explorer — features | `#![allow(dead_code)]` at the top of `features.rs` |
+| settings — remote page | `#![allow(dead_code)]` at the top of `remote.rs` |
+| installer — GRUB | `pub mod grub` in a crate with a `[lib]` section: `dead_code` stops at the crate boundary and cannot see that no one outside calls it |
+| system information — hardware queries | `pub mod hwquery`, same boundary |
+
+So three were silenced deliberately and two are structurally invisible. That
+matters for the decision: the first three would each start warning the moment
+the suppression came off, and the last two would not warn however the code was
+arranged, because the compiler has no way to know a library's public API has no
+users. Whatever is decided here, **the three suppressions are worth removing in
+the same change** -- otherwise the next feature to lose its last caller lands
+in exactly the same silence.
+
 **Why nobody noticed.** Each has its own tests and they all pass, because a
 test calls the code directly — it does not have to find a way in through the
 interface. This is the pattern `known-issues.md` records as lesson 47, and the

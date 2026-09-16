@@ -2817,6 +2817,34 @@ impl SettingsState {
             // table as data rather than as behaviour.
             //
             // See `TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`.
+            //
+            // WHY `LockScreen` IS STILL A PLACEHOLDER, checked 2026-09-16.
+            //
+            // Its obvious control is "lock the screen after N minutes of
+            // inactivity", and **nothing in this tree knows how long the user
+            // has been inactive.** Grep for `last_input`, `last_activity`,
+            // `idle_since`, `idle_ms` across `gui/compositor` and
+            // `gui/desktop`: nothing. The auto-lock timers that do exist
+            // (`gui/credentials`, `apps/credmanager`) lock a *password store*
+            // and never the session.
+            //
+            // So the setting would be the echoed-setting defect again, and
+            // design-decisions 856 is the reason it is not being written. The
+            // feature it is waiting for is real and belongs to this lane: the
+            // compositor already sees every input event, so it can record when
+            // the last one arrived and schedule *one* wake-up at the deadline.
+            // That is specifically not the timer design-decisions 812 refuses
+            // -- 812 rejects waking once a second to poll a file that is
+            // almost never different, which is a poll; a single wake at a
+            // known deadline is not.
+            //
+            // This page gets its controls when that lands.
+            //
+            // `InstalledApps`, same date, shorter answer: there is no package
+            // database to read. No `installed_packages`, no `package_db`, no
+            // `/var/lib/pkg` anywhere under `apps/installer`, `userspace/` or
+            // `services/`. This one cannot even *list* truthfully, let alone
+            // uninstall, so it is not waiting on a consumer but on a source.
             _ => self.build_placeholder_page(sink),
         }
     }

@@ -3740,7 +3740,12 @@ fn a_press_beside_the_box_closes_it_without_starting_anything() {
 /// calls `with_scratch_config` 28 times, and `cargo test` runs them as threads
 /// of one process, so without the turn a login built here can read a scratch
 /// directory a neighbouring test installed.
-fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir, settingsfile::testing::ConfigTurn) {
+fn session_with_login() -> (
+    Session,
+    Desktop,
+    scratchdir::ScratchDir,
+    settingsfile::testing::ConfigTurn,
+) {
     let turn = settingsfile::testing::config_turn();
     let dir = scratchdir::ScratchDir::new("shell-login");
     let path = dir.path("users.yaml");
@@ -3783,7 +3788,12 @@ fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir, settingsfi
 /// calls `with_scratch_config` 28 times, and `cargo test` runs them as threads
 /// of one process, so without the turn a login built here can read a scratch
 /// directory a neighbouring test installed.
-fn session_with_passwordless_login() -> (Session, Desktop, scratchdir::ScratchDir, settingsfile::testing::ConfigTurn) {
+fn session_with_passwordless_login() -> (
+    Session,
+    Desktop,
+    scratchdir::ScratchDir,
+    settingsfile::testing::ConfigTurn,
+) {
     let turn = settingsfile::testing::config_turn();
     let dir = scratchdir::ScratchDir::new("shell-login-open");
     let path = dir.path("users.yaml");

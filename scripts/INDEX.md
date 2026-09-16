@@ -378,10 +378,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/which-lane.py` | Print which of the three parallel-agent lanes *this* session owns. |
 | `scripts/who-holds-dir.py` | Report which processes are keeping a directory un-renamable, without admin. |
 | `scripts/whoami-diff.sh` | whoami-diff.sh — compare our `whoami` against the real GNU one, inside WSL. |
-| `scripts/wire-three-app-notices.py` | Three settings surfaces that present controls for acts nothing performs. |
 | `scripts/workspace-test.py` | workspace-test.py — the workspace test gate, with the three mistakes |
 | `scripts/write-error-diff.sh` | write-error-diff.sh — one question, asked of every utility that answers it: |
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_374 scripts._
+_373 scripts._

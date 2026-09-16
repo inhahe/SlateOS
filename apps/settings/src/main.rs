@@ -2845,6 +2845,37 @@ impl SettingsState {
             // `/var/lib/pkg` anywhere under `apps/installer`, `userspace/` or
             // `services/`. This one cannot even *list* truthfully, let alone
             // uninstall, so it is not waiting on a consumer but on a source.
+            //
+            // `WiFi`, `Ethernet` and `VPN`, same date, one answer for all
+            // three: `apps/netmanager` is the network manager, it is 5,700
+            // lines, and it has already been through this. `apply_ip_config`
+            // returns "nothing here can reach the interface"; `connect_wifi`
+            // returns "nothing here can reach a radio", with a comment
+            // recording that it used to report a join against a network
+            // `sample_wifi_networks` had invented; `toggle_vpn` deliberately
+            // leaves the switch where it is. `net80211`'s only `scan` parses a
+            // frame it is handed -- there is no device scan to call. A page
+            // here would be a *second* network configurator over the same
+            // absent write path, and the first one at least refuses out loud.
+            //
+            // `Power`: blocked on lane A, not on judgement.
+            // `gui/desktop/src/power_settings.rs` has `set_brightness_ac` and
+            // `set_brightness_battery` and there is no syscall under them --
+            // filed as `requests/c-a-brightness-has-setters-and-no-door.md`,
+            // still unconsumed. This is the one placeholder whose page gets
+            // written the day another lane answers, rather than the day this
+            // lane builds something.
+            //
+            // That accounts for all seven that still fall through here: two
+            // waiting on a consumer (StartupApps, LockScreen), one on a source
+            // (InstalledApps), three on a write path the dedicated app has
+            // already declared missing (WiFi, Ethernet, VPN), and one on lane A
+            // (Power). Fonts was the eighth this morning and is a page now,
+            // because its consumer landed.
+            //
+            // The set is asserted by `the_placeholder_pages_are_exactly_these`
+            // rather than counted in prose here, the count having drifted three
+            // times in one day -- eleven, then eight, then seven.
             _ => self.build_placeholder_page(sink),
         }
     }
@@ -5520,9 +5551,12 @@ mod tests {
 
     /// The Notifications page is a page, not a roadworks sign.
     ///
-    /// Eight of the twenty-nine pages fall through `build_page`'s `_ =>` arm
+    /// Some of the twenty-nine pages fall through `build_page`'s `_ =>` arm
     /// to `build_placeholder_page`, which draws "This page is under
-    /// construction". Asserted by the text on screen rather than by the
+    /// construction" -- which ones is asserted by
+    /// [`the_placeholder_pages_are_exactly_these`] rather than counted in
+    /// prose here, because the number written in this sentence was wrong twice
+    /// in one day. Asserted by the text on screen rather than by the
     /// dispatch arm, because an arm that rendered nothing would satisfy the
     /// arm and not the user.
     #[test]
@@ -5598,6 +5632,60 @@ mod tests {
         assert!(
             text.contains(&in_use),
             "the page does not name the font the toolkit is drawing with ({in_use})"
+        );
+    }
+
+    /// Exactly these pages still draw "This page is under construction".
+    ///
+    /// The count was written in prose three times in one day and was wrong
+    /// twice -- eleven, then eight, then seven -- because it is a fact about
+    /// the `_ =>` arm of `build_page`, and prose does not get recompiled when
+    /// that arm loses a variant.
+    ///
+    /// The *set* rather than the count, because the set makes the failure
+    /// useful in both directions: finishing a page tells you which one left,
+    /// and a page that regresses to the placeholder -- which is what a
+    /// mis-ordered match arm looks like -- tells you which one arrived.
+    /// Asserted from the screen rather than from the match, for the reason the
+    /// Notifications test gives: an arm that rendered nothing would satisfy
+    /// the arm and not the user.
+    ///
+    /// Each page's reason for being here is recorded on the `_ =>` arm itself.
+    #[test]
+    fn the_placeholder_pages_are_exactly_these() {
+        const EXPECTED: &[SettingsPage] = &[
+            SettingsPage::Ethernet,
+            SettingsPage::InstalledApps,
+            SettingsPage::LockScreen,
+            SettingsPage::Power,
+            SettingsPage::StartupApps,
+            SettingsPage::VPN,
+            SettingsPage::WiFi,
+        ];
+
+        let mut found: Vec<SettingsPage> = Vec::new();
+        for category in SettingsCategory::ALL {
+            for page in category.pages() {
+                // A page can be listed under two categories, and rendering it
+                // twice would put it in the list twice.
+                if found.contains(page) {
+                    continue;
+                }
+                let mut app = SettingsState::new();
+                app.go_to_page(*page);
+                if format!("{:?}", app.render_tree()).contains("under construction") {
+                    found.push(*page);
+                }
+            }
+        }
+
+        let mut found_labels: Vec<&str> = found.iter().map(|p| p.label()).collect();
+        found_labels.sort_unstable();
+        let mut want_labels: Vec<&str> = EXPECTED.iter().map(|p| p.label()).collect();
+        want_labels.sort_unstable();
+        assert_eq!(
+            found_labels, want_labels,
+            "the set of pages drawing the placeholder changed"
         );
     }
 

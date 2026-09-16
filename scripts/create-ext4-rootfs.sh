@@ -1990,7 +1990,17 @@ fi
 #
 # Build them with:
 #   cd userspace/coreutils
-#   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release
+#   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \
+#     -p coreutils -p ar -p kill -p logger -p logrotate
+#
+# The `-p` list is NOT decoration. The manifest's names come from FIVE
+# crates, not one: coreutils produces 70 of them and `ar`, `kill`, `logger`
+# and `logrotate` produce one each. A plain `cargo build` in
+# `userspace/coreutils` builds only that crate, so following the old form of
+# this instruction left four binaries -- and the `ranlib`, `strip` and
+# `killall` aliases that need two of them -- off the image, reported as a
+# NOTE nobody reads. Measured with `scripts/check-manifest-producers.py`,
+# not guessed, and the command above was run before being printed here.
 #
 # ABSENCE IS AN ERROR AS OF 2026-09-16, which is what the paragraph that used
 # to sit here asked for:
@@ -2121,8 +2131,8 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
         echo "[rootfs] They link a stale libc and prove nothing about the current one."
         echo "[rootfs] Rebuild them:"
         echo "[rootfs]   cd userspace/coreutils"
-        echo "[rootfs]   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
-        echo "[rootfs] and the same in userspace/ar and userspace/logrotate."
+        echo "[rootfs]   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \\"
+        echo "[rootfs]     -p coreutils -p ar -p kill -p logger -p logrotate"
         if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
             echo "[rootfs] NOTE: ALLOW_STALE_FIXTURES=1 — packing them anyway."
         else
@@ -2168,7 +2178,8 @@ else
     echo "[rootfs]        built, so /bin would get none of this project's own utilities."
     echo "[rootfs]        They build for the HOST by default; the slateos target is separate:"
     echo "[rootfs]          cd userspace/coreutils"
-    echo "[rootfs]          CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release"
+    echo "[rootfs]          CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \\"
+    echo "[rootfs]            -p coreutils -p ar -p kill -p logger -p logrotate"
     echo "[rootfs]        then re-run this script."
     echo "[rootfs]"
     echo "[rootfs]        This was a NOTE until 2026-09-16, with the condition for"

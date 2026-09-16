@@ -56,6 +56,24 @@ dealt with. **That is paid with a note, not with a looser rule.** The entry
 have been answered and how, so the second reading is a lookup rather than an
 investigation.
 
+## The question to ask of every row: is it a CONTROL or a LABEL?
+
+Lane B triaged 28 rows down to 5 real defects with one question, and it is a
+question this checker structurally cannot answer:
+
+  * A **control** is set by somebody expecting behaviour to change.
+    `sshd`'s `ListenAddress` is a control -- `ListenAddress 127.0.0.1` is how an
+    administrator says "do not accept ssh from the network". Nothing on the
+    bind path carries an address, so it produced a daemon reachable from the
+    network *and a log line saying it was listening on 127.0.0.1*.
+  * A **label** is an identifier being displayed. `thermald`'s UUID comes from
+    a vendor XML file and exists to be shown. Read-only-into-output is what a
+    correct label looks like.
+
+The row this checker prints is identical for both. A human separates them in
+about two seconds, and it is the fastest triage available -- so ask it first,
+before reading any code.
+
 ## Why this reports and does not gate
 
 The rule above is a good discriminator, not a proof. Three shapes defeat it

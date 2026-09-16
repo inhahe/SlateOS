@@ -6817,6 +6817,14 @@ impl DesktopShell {
         crate::widgets::LiveReadings {
             clock_time: clock.format_time(secs, &zone),
             clock_date: clock.format_date(secs, &zone),
+            // `None`, and the widget says so. This is the shell's live-readings
+            // supplier and it has no source for these: `gui/desktop` does not
+            // depend on `procinfo`, so nothing here reads /proc/stat or
+            // /proc/meminfo. Filling them in is the whole of the remaining
+            // change, and until then the absence is typed rather than guessed.
+            cpu_fraction: None,
+            memory_fraction: None,
+            disk_fraction: None,
         }
     }
 

@@ -48,6 +48,22 @@ word meaning "not evidence", will under-report exactly as quietly as one that
 scans the wrong directory.** The two apps route through `state.picker` rather
 than `self.picker`, which is what the widened pattern is for.
 
+WHAT IT CANNOT SEE, AND THIS IS THE ONE THAT COST SOMETHING. It finds apps
+whose picker routing is *broken*. An app with **no picker at all** is invisible
+to it: `apps_with_a_picker` selects on `"picker.handle(" in source`, so a
+program that never opens a dialog is never considered, and its absence from the
+report looks exactly like a pass.
+
+`apps/markdowneditor` was that app, found on 2026-09-15 by reading a comment
+rather than by running anything. Its Open toolbar action called
+`new_document()` -- click Open, get a blank page -- and its Save As was an
+empty body under "Would open a save dialog in a real app". Both `open_file` and
+`Document::save_as` existed and were tested; nothing reached them. This checker
+reported twenty apps, all pinned, and was right about all twenty.
+
+So the zero it prints means "no app that has routing has broken routing". It
+does not mean every app that should offer a file dialog does.
+
 WHY IT HAS A SELF-TEST. Every app is pinned now, so this reports zero and will
 go on reporting zero -- which is indistinguishable from a pattern that has
 stopped matching. **That is not hypothetical: it already happened.** The first

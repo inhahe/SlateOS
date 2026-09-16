@@ -8863,6 +8863,21 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
         let meaning = match exit_code {
             Some(1) => "pipe() failed -- THIS FIXTURE'S OWN PLUMBING, not a finding",
             Some(2) => "fork() failed -- this fixture's own plumbing",
+            Some(11) => {
+                // Added by lane B after exit 3 cost a boot: `execl` failing
+                // sends the child to `_exit(127)`, which used to arrive as an
+                // ordinary status and fall through step 1's `rc != 0`. Now
+                // separated, and reported as a fact about the IMAGE rather
+                // than a verdict about the program.
+                concat!(
+                    "11: a program could not be EXEC'd at all -- missing from ",
+                    "the image or not executable. NOT a finding about the Rust ",
+                    "userland: check that create-ext4-rootfs.sh staged the ",
+                    "manifest binaries, and that all five producing crates ",
+                    "(coreutils, ar, kill, logger, logrotate) were built for ",
+                    "the slateos target. The serial names the path."
+                )
+            }
             Some(3) => {
                 // DO NOT read this as a loader fault. The fixture's check is
                 // `rc != 0`, and a failed exec makes the child `_exit(127)`, so

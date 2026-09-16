@@ -859,6 +859,134 @@ mod tests {
         d(a).sqrt(scale).unwrap().format_base10()
     }
 
+    /// A deterministic 64-bit xorshift, so these cases are the same on every
+    /// run and a failure can be pinned rather than retold.
+    ///
+    /// Hand-rolled rather than pulled in: `bignum` has no dependencies and is
+    /// not going to acquire one for a test fixture. The quality bar is "spreads
+    /// digits around", not cryptographic.
+    struct Xs(u64);
+
+    impl Xs {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// An `n`-digit decimal string with no leading zero.
+        fn digits(&mut self, n: usize) -> String {
+            let mut s = String::with_capacity(n);
+            s.push(char::from(b'1' + (self.next() % 9) as u8));
+            for _ in 1..n {
+                s.push(char::from(b'0' + (self.next() % 10) as u8));
+            }
+            s
+        }
+    }
+
+    /// Every operator, checked against its own definition at operand sizes
+    /// that straddle the limb boundary.
+    ///
+    /// # Why identities rather than expected values
+    ///
+    /// There is nothing to look up and nothing to keep in step.
+    /// `a == (a/b)*b + (a%b)` is what division MEANS, so no wrong quotient can
+    /// satisfy it, and the test needs no reference, no WSL and no network.
+    /// The alternative -- a table of expected digits -- has to be produced by
+    /// something, and whatever produces it becomes a second thing that can be
+    /// wrong.
+    ///
+    /// # Why these sizes
+    ///
+    /// `TD-B-BIGNUM-LONG-DIVISION-DROPS-A-BORROW-BIGGER-THAN-ONE-LIMB` was a
+    /// wrong *quotient* that survived in a shipped calculator, and the reason
+    /// it survived is stated in its own entry: **nothing in the suite divided
+    /// by a number that big.** Every operand here is generated at a size on or
+    /// either side of a multiple of the limb width (9), because that bug
+    /// needed a multi-limb divisor and limb values that collided -- invisible
+    /// below the boundary, erratic above it.
+    ///
+    /// This is the check that was missing. Run against the commit before the
+    /// fix it does fail — at `36-digit / 8-digit: sqrt too small`, which is
+    /// the *root* assertion rather than the division one, because `isqrt`'s
+    /// correction loops were reverted along with it and `sqrt` is the first
+    /// thing to notice a division that lies.
+    ///
+    /// Recorded that way round on purpose: the obvious thing to write here was
+    /// "the division identity fails", and it does not. The division identity
+    /// specifically is pinned by
+    /// [`long_division_survives_a_borrow_bigger_than_one_limb`] below, which
+    /// was checked the same way and fails with `27-digit divisor: quotient too
+    /// large`. Two tests, two probes, and neither claim borrowed from the
+    /// other.
+    #[test]
+    fn large_operand_arithmetic_obeys_its_own_definitions() {
+        let sizes = [
+            1usize, 8, 9, 10, 17, 18, 19, 26, 27, 28, 36, 37, 45, 54, 71, 90,
+        ];
+        let mut rng = Xs(0x2026_0916_1234_5678);
+        let zero = Decimal::from_i64(0);
+
+        for &a_len in &sizes {
+            for &b_len in &sizes {
+                if b_len > a_len {
+                    continue;
+                }
+                let a = d(&rng.digits(a_len));
+                let b = d(&rng.digits(b_len));
+                let where_ = format!("{a_len}-digit / {b_len}-digit");
+
+                // Division: a == (a/b)*b + (a%b). The identity the borrow bug
+                // broke.
+                let q = a.div(&b, 0).expect("b is non-zero");
+                let r = a.modulo(&b, 0).expect("b is non-zero");
+                let back = q.mul(&b, 0).add(&r);
+                assert_eq!(back.format_base10(), a.format_base10(), "{where_}: q*b+r");
+                // ...and the remainder is a remainder: 0 <= r < b.
+                assert!(r >= zero, "{where_}: negative remainder");
+                assert!(r < b, "{where_}: remainder not less than divisor");
+
+                // Multiplication undone by division, which exercises the same
+                // limb carries in the opposite direction.
+                let prod = a.mul(&b, 0);
+                assert_eq!(
+                    prod.div(&b, 0).expect("b is non-zero").format_base10(),
+                    a.format_base10(),
+                    "{where_}: (a*b)/b"
+                );
+                // Commutative, which a carry that leaks between limbs is not.
+                assert_eq!(
+                    prod.format_base10(),
+                    b.mul(&a, 0).format_base10(),
+                    "{where_}: a*b == b*a"
+                );
+
+                // Addition and subtraction, same shape.
+                assert_eq!(
+                    a.add(&b).sub(&b).format_base10(),
+                    a.format_base10(),
+                    "{where_}: (a+b)-b"
+                );
+                assert_eq!(
+                    a.sub(&b).add(&b).format_base10(),
+                    a.format_base10(),
+                    "{where_}: (a-b)+b"
+                );
+
+                // Square root by its definition: g^2 <= a < (g+1)^2. This is
+                // what `isqrt`'s correction loops establish, asserted here so
+                // the two cannot drift apart.
+                let g = a.sqrt(0).expect("a is positive");
+                let one = Decimal::from_i64(1);
+                assert!(g.mul(&g, 0) <= a, "{where_}: sqrt too large");
+                let up = g.add(&one);
+                assert!(up.mul(&up, 0) > a, "{where_}: sqrt too small");
+            }
+        }
+    }
+
     /// Long division with a divisor of several limbs.
     ///
     /// `BigInt::divmod`'s multiply-subtract step used to take the borrow out

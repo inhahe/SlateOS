@@ -85237,6 +85237,24 @@ identity `q*d <= n < (q+1)*d` rather than a table of expected digits — it need
 no oracle and cannot be satisfied by a wrong quotient. Confirmed to fail
 against the previous commit, reporting `27-digit divisor: quotient too large`.
 
+**The rest of the arithmetic was then audited, and is clean.** A wrong `/` in
+a shipped calculator is the kind of finding that should not be trusted to be
+alone, so 1197 generated cases — `*`, `/`, `%`, `+`, `-`, `^`, `sqrt` and the
+division identity, at operand sizes from 1 to 90 digits chosen to straddle the
+9-digit limb boundary, plus fractional work at `scale=60` — were run through
+both our `bc` and GNU's and compared. **All 1197 agree.** So the borrow was the
+whole of it, and the other operators' limb carries are sound at sizes nothing
+had previously reached.
+
+That audit is a one-off and is not checked in: it needs WSL and a GNU
+reference, which most runs of this tree do not have. What *is* checked in is
+the part that needs neither —
+`large_operand_arithmetic_obeys_its_own_definitions` in `decimal.rs`, which
+asserts the same operators against their own definitions over the same size
+grid with a fixed seed. That is the check whose absence let this bug live:
+**nothing in the suite divided by a number that big.** It now does, on every
+`cargo test`, with no external oracle to go stale.
+
 ---
 
 ---

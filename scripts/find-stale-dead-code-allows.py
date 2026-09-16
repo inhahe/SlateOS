@@ -144,9 +144,9 @@ def _self_test() -> int:
         nonlocal failures
         if got != want:
             failures += 1
-            print(f"FAIL  {label}\n  got  {got!r}\n  want {want!r}")
+            print(f"FAIL  {label}\n  got  {got!r}\n  want {want!r}", flush=True)
         else:
-            print(f"  ok    {label}")
+            print(f"  ok    {label}", flush=True)
 
     src = [
         '#[allow(dead_code, reason = "x")]\n',
@@ -224,7 +224,7 @@ def check_crate(crate: Path) -> int:
     try:
         base, broke = warnings_of(name)
         if broke:
-            print(f"--   {name}: does not compile as it stands; not evidence")
+            print(f"--   {name}: does not compile as it stands; not evidence", flush=True)
             return 0
 
         for path, line_text, lineno in sites:
@@ -252,11 +252,11 @@ def check_crate(crate: Path) -> int:
             )
 
     if stale:
-        print(f"!!   {name}: {len(stale)} of {len(sites)} allow(s) suppressing nothing")
+        print(f"!!   {name}: {len(stale)} of {len(sites)} allow(s) suppressing nothing", flush=True)
         for row in stale:
-            print(f"       {row}")
+            print(f"       {row}", flush=True)
     else:
-        print(f"ok   {name}: {len(sites)} allow(s), all still needed")
+        print(f"ok   {name}: {len(sites)} allow(s), all still needed", flush=True)
     if skipped:
         print(f"       ({skipped} not measured: a duplicate line, or the strip "
               f"did not compile)")
@@ -294,9 +294,9 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    print(f"{len(crates)} crate(s) with at least one dead_code allow\n")
+    print(f"{len(crates)} crate(s) with at least one dead_code allow\n", flush=True)
     total = sum(check_crate(c) for c in crates)
-    print(f"\n{total} allow(s) suppressing nothing")
+    print(f"\n{total} allow(s) suppressing nothing", flush=True)
     return 0
 
 

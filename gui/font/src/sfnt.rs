@@ -181,6 +181,18 @@ fn first_at_or_after(data: &[u8], first: usize, stride: usize, count: usize, bas
     lo
 }
 
+/// `post.isFixedPitch`: a uint32 at offset 12 of the `post` table. Non-zero
+/// means every glyph in the face advances by the same width.
+const POST_IS_FIXED_PITCH: usize = 12;
+
+/// PANOSE's `bProportion`. OS/2 offset 32 begins a ten-byte PANOSE
+/// classification and `bProportion` is its fourth byte, so 35.
+const OS2_PANOSE_PROPORTION: usize = 35;
+
+/// The `bProportion` value meaning monospaced. Zero means "any" -- an
+/// unclassified face, not a proportional one.
+const PANOSE_MONOSPACED: u8 = 9;
+
 pub(crate) fn u32_at(d: &[u8], off: usize) -> Option<u32> {
     let end = off.checked_add(4)?;
     let b: [u8; 4] = d.get(off..end)?.try_into().ok()?;
@@ -497,6 +509,9 @@ pub struct Face {
     /// Where this face sits in its family. Decoded eagerly, unlike `name`,
     /// because it is six bytes at fixed offsets rather than a table walk.
     style: Style,
+    /// Whether every glyph advances by the same width. See
+    /// [`Face::is_monospaced`].
+    monospaced: bool,
     /// Pair kerning, from `GPOS` or the legacy `kern` table. `None` for the
     /// many faces — monospace ones especially — that carry none.
     kerning: Option<Kerning>,
@@ -681,6 +696,7 @@ impl Face {
         let mut cmap = None;
         let mut name = None;
         let mut os2 = None;
+        let mut post = None;
         let mut cff = None;
         let mut gdef = None;
         let mut gpos = None;
@@ -720,6 +736,7 @@ impl Face {
                 b"cmap" => cmap = Some(span),
                 b"name" => name = Some(span),
                 b"OS/2" => os2 = Some(span),
+                b"post" => post = Some(span),
                 b"CFF " => cff = Some(span),
                 b"GDEF" => gdef = Some(span),
                 b"GPOS" => gpos = Some(span),
@@ -805,6 +822,27 @@ impl Face {
         let os2_data = os2.and_then(|s| data.get(s.off..s.off.checked_add(s.len)?));
         let style = Self::parse_style(os2_data, head_data);
 
+        // Whether every glyph advances the same width -- what a terminal needs
+        // and what a font picker offering "Terminal Font" has to be able to
+        // ask. Before this, nothing in the tree could tell a fixed-pitch
+        // family from a proportional one, and `set_mono_family`'s own note
+        // said so: a caller pointing it at a proportional face "gets a
+        // terminal with a broken grid".
+        //
+        // `post.isFixedPitch` first, because that field means exactly this and
+        // nothing else. PANOSE's bProportion is a fallback and deliberately
+        // not the primary test: it is one byte of a ten-byte classification
+        // that a great many families leave entirely zero, and zero there means
+        // "any", not "proportional". Reading it first would call every
+        // unclassified face proportional, which is most of them.
+        let post_data = post.and_then(|s| data.get(s.off..s.off.checked_add(s.len)?));
+        let monospaced = post_data
+            .and_then(|p| u32_at(p, POST_IS_FIXED_PITCH))
+            .is_some_and(|fixed| fixed != 0)
+            || os2_data
+                .and_then(|o| o.get(OS2_PANOSE_PROPORTION).copied())
+                .is_some_and(|proportion| proportion == PANOSE_MONOSPACED);
+
         // Eager, unlike `name`: the result is a short list of offsets, and
         // deferring it would mean re-deciding "GPOS or the legacy table?" on
         // every pair of glyphs drawn.
@@ -882,6 +920,7 @@ impl Face {
             variations,
             name,
             style,
+            monospaced,
             kerning,
             substitutions,
             marks,
@@ -1160,6 +1199,25 @@ impl Face {
     #[must_use]
     pub const fn style(&self) -> Style {
         self.style
+    }
+
+    /// Whether every glyph in this face advances by the same width.
+    ///
+    /// What a terminal needs and what a "Terminal Font" picker has to be able
+    /// to ask before it offers a family. `guitk::text::set_mono_family` will
+    /// install whatever it is given and says so plainly -- a caller that
+    /// points it at a proportional face "gets a terminal with a broken grid,
+    /// and that is the caller's decision to have made" -- so this is how a
+    /// caller avoids making that decision by accident.
+    ///
+    /// Read from `post.isFixedPitch`, falling back to PANOSE's `bProportion`.
+    /// A face that declares neither is reported as *not* monospaced, which is
+    /// the safe direction: leaving a genuinely fixed-pitch family out of a
+    /// terminal picker is a missing choice, and letting a proportional one in
+    /// is a broken terminal.
+    #[must_use]
+    pub const fn is_monospaced(&self) -> bool {
+        self.monospaced
     }
 
     /// Map a character to a glyph id, or `None` when the face has no glyph
@@ -2836,6 +2894,75 @@ pub(crate) mod tests {
     /// glyph's stored `xMin` of 600 then contradicts.
     fn build_test_font_with_trailing_lsb(lsb: i16) -> Vec<u8> {
         assemble(&build_test_tables(lsb))
+    }
+
+    /// A minimal `post` table whose `isFixedPitch` is `fixed`.
+    ///
+    /// 32 bytes: version, italicAngle, underlinePosition, underlineThickness,
+    /// then `isFixedPitch` at offset 12 and four memory-usage fields nothing
+    /// here reads.
+    fn post_table(fixed: u32) -> Vec<u8> {
+        let mut post = vec![0_u8; 32];
+        post.splice(12..16, fixed.to_be_bytes());
+        post
+    }
+
+    /// A minimal OS/2 table whose PANOSE `bProportion` is `proportion`.
+    fn os2_with_panose(proportion: u8) -> Vec<u8> {
+        let mut os2 = vec![0_u8; 78];
+        os2[35] = proportion;
+        os2
+    }
+
+    /// `post.isFixedPitch` set is the whole answer.
+    #[test]
+    fn a_fixed_pitch_post_table_makes_a_face_monospaced() {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.push((*b"post", post_table(1)));
+        let face = Face::parse(assemble(&tables)).expect("synthetic font must parse");
+        assert!(face.is_monospaced(), "a fixed-pitch face was called proportional");
+    }
+
+    /// ...and `isFixedPitch` of zero is a face that says it is *not* fixed.
+    ///
+    /// The control for the test above: without it, a bug that reported every
+    /// face with a `post` table as monospaced would pass.
+    #[test]
+    fn a_post_table_declaring_zero_is_not_monospaced() {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.push((*b"post", post_table(0)));
+        let face = Face::parse(assemble(&tables)).expect("synthetic font must parse");
+        assert!(!face.is_monospaced(), "a proportional face was called monospaced");
+    }
+
+    /// With no `post` table, PANOSE answers.
+    #[test]
+    fn panose_answers_when_there_is_no_post_table() {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.push((*b"OS/2", os2_with_panose(PANOSE_MONOSPACED)));
+        let face = Face::parse(assemble(&tables)).expect("synthetic font must parse");
+        assert!(face.is_monospaced(), "PANOSE said monospaced and was not consulted");
+    }
+
+    /// An unclassified PANOSE is not an answer.
+    ///
+    /// Zero in `bProportion` means "any", and a great many families ship the
+    /// whole ten-byte classification as zeros. Reading that as "proportional"
+    /// would be a guess dressed as a fact -- but it must still not be read as
+    /// *monospaced*, which is what this pins.
+    #[test]
+    fn an_all_zero_panose_is_not_monospaced() {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.push((*b"OS/2", os2_with_panose(0)));
+        let face = Face::parse(assemble(&tables)).expect("synthetic font must parse");
+        assert!(!face.is_monospaced(), "an unclassified face was called monospaced");
+    }
+
+    /// A face with neither table is not monospaced.
+    #[test]
+    fn a_face_declaring_nothing_is_not_monospaced() {
+        let face = Face::parse(build_test_font()).expect("synthetic font must parse");
+        assert!(!face.is_monospaced(), "a face that declared nothing was guessed at");
     }
 
     /// The fixture's tables, before they are laid out.

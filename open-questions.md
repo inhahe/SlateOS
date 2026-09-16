@@ -2428,20 +2428,24 @@ resolved to their producer, so these count crates rather than names).
 
 | producer | names it supplies |
 |---|---|
-| `coreutils` | 70 |
+| `coreutils` | 71 (including `awk`) |
 | `ar` | 3 (`ar`, `ranlib`, `strip`) |
 | `logrotate` | 1 |
-| **no producer anywhere in the tree** | 1 — `awk` |
 
 So **3 of 214 `userspace/` crates reach `/bin`**, and `/bin` is the only
 place userspace binaries land: the rootfs script's only other destinations
 are `/tests`, `/lib` and `/usr/share/make`, with no `/sbin` or `/usr/bin`.
 
-**`awk` is a separate small finding, noted here rather than filed alone.**
-The manifest names it and nothing in the tree implements it — no
-`userspace/awk`, no `awk.rs`, no multicall alias. The rootfs build counts it
-in `SLATE_MISSING` and reports it, so this is loud rather than silent: the
-manifest is promising something that has never existed, not regressing.
+**Correction, 2026-09-16, made before you read this.** An earlier version of
+this entry said `awk` had *no producer anywhere in the tree*. That was my
+measurement being wrong, not the tree. `awk` is
+`userspace/coreutils/src/bin/awk/` — cargo's directory form for a
+multi-file binary (`main.rs`, `lex.rs`, `parse.rs`, `interp.rs`, and four
+more), and it passes 171 differential cases against GNU awk. My scan looked
+only at `src/bin/*.rs` files and did not know about `src/bin/<name>/main.rs`,
+so it reported a working implementation as absent. The count of crates
+reaching `/bin` is unaffected — `awk` ships from `coreutils`, which was
+already counted.
 
 **Why, and it is a real constraint rather than an oversight.** All 276 built
 binaries come to 204 MiB against a fixed 384 MiB image that already carries

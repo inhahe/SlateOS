@@ -3268,13 +3268,32 @@ fn closing_the_pane_slides_it_out_and_it_stays_out() {
         session.step_frame(16).expect("a frame should not fail");
     }
 
+    // Drain whatever tick is due before asking for the close.
+    //
+    // `Event::Tick` carries *real* elapsed time -- `EventLoop` computes it as
+    // `now - since` for the window -- and `step_frame` deliberately saturates a
+    // long one to the end of every animation, "which is where a user returning
+    // after 49 days expects to find them". Both are right. Together they mean
+    // the delta this close is measured against is however long the 200
+    // iterations above took in wall-clock time, which under a full workspace
+    // run is long enough to finish the slide in one step. This test then failed
+    // with "the close snapped instead of sliding" while nothing was wrong.
+    //
+    // Draining first resets `since`, so the pump below carries a fresh tick
+    // rather than an accumulated one.
+    session.pump().expect("the harness refused");
+
     desktop
         .borrow_mut()
         .send_input(&[InputEvent::new(panel, super_n())]);
     session.pump().expect("the harness refused");
     assert!(
-        session.shell().notifications.pane_state().is_visible(),
-        "the close snapped instead of sliding"
+        matches!(
+            session.shell().notifications.pane_state(),
+            crate::notif_pane::PaneState::SlideOut(_)
+        ),
+        "the close snapped instead of sliding: {:?}",
+        session.shell().notifications.pane_state()
     );
 
     for _ in 0..200 {

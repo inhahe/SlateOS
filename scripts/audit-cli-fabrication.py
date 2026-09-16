@@ -130,6 +130,30 @@ independent ways (dependencies, a wider net than `IO_MARKERS`, and reverse
 dependencies) -- see the commit and `known-issues.md`. The warning above still
 applies in full: do not delete straight from `--list`.
 
+**Two exonerations, added 2026-09-15 after both remaining hits turned out to
+be correct programs.** With 2,285 crates deleted, the population the rules were
+tuned against is gone, and a rule that was right by correlation over a
+fabricating population is not right by construction over an honest one.
+
+  * **A command that refuses honestly.** `refuses_honestly` -- both rules
+    measure I/O, and the property 1006 deletes on is *claiming success it did
+    not achieve*. The discriminator is the exit code and neither rule reads it.
+    `unshare` looks at nothing and exits 1, which is the stub this audit's own
+    filing said was fine to keep.
+  * **A command that does its I/O one crate down.** `delegates_io` --
+    `passwd` stopped editing `/etc/shadow` itself and calls
+    `userdb::UserDb::load`/`.save` through `authlib`. The markers count call
+    sites in the crate's own sources and conclude the report is unbacked.
+
+Neither is baselined, deliberately: `cli-fabrication-baseline.txt` says an
+entry there "is a defect being tolerated, not a rule being configured", and
+pinning a correct program records it as known-bad while leaving the real gap
+unstated. Both belong in the rules, where they can be argued with.
+
+The honest-refusal clears are **printed under their own heading** rather than
+silently dropped. A checker that quietly withholds what it decided not to
+report under-reports exactly as invisibly as one scanning the wrong directory.
+
 Usage:  python scripts/audit-cli-fabrication.py [--list] [--limit N]
 """
 
@@ -266,7 +290,28 @@ PURE_ARGV = {
 }
 
 
+_SOURCES_CACHE: dict[str, str] = {}
+
+
 def crate_sources(crate: Path) -> str:
+    """Cached by resolved path.
+
+    `delegates_io` asks each of a crate's path-dependencies whether it does
+    I/O, and the dependencies are shared -- `authlib`, `libcall` and
+    `procinfo` are named by dozens of crates each. Uncached, `--check` went
+    from under a second to 73, which is the sort of cost that gets a gate
+    removed rather than fixed. It is in `pre-boot.py`, so every lane pays it
+    before every boot test.
+    """
+    key = str(crate.resolve())
+    hit = _SOURCES_CACHE.get(key)
+    if hit is None:
+        hit = _crate_sources_uncached(crate)
+        _SOURCES_CACHE[key] = hit
+    return hit
+
+
+def _crate_sources_uncached(crate: Path) -> str:
     src = crate / "src"
     if not src.is_dir():
         return ""
@@ -389,6 +434,74 @@ def has_io_marker(body: str) -> bool:
     return _MARKER_RE.search(body) is not None
 
 
+# Not a defect: reported so the suppression is visible, excluded from every
+# count of what 1006 deletes, and never written to the baseline -- an entry
+# there "is a defect being tolerated, not a rule being configured".
+PATH_DEP = re.compile(
+    r'^\s*([a-zA-Z0-9_-]+)\s*=\s*\{[^}]*path\s*=\s*"([^"]+)"', re.M
+)
+
+
+_DEP_IO_CACHE: dict[str, bool] = {}
+
+
+def _dep_does_io(dep: Path) -> bool:
+    """Does this crate do I/O? One answer per directory, cached.
+
+    The cache is the difference between a gate and a thing people delete.
+    `strip_tests` over `libcall` and `procinfo` is not cheap and dozens of
+    crates name each of them, so the uncached form re-derived the same boolean
+    a hundred-odd times.
+    """
+    key = str(dep.resolve())
+    hit = _DEP_IO_CACHE.get(key)
+    if hit is None:
+        src = crate_sources(dep)
+        hit = bool(src) and has_io_marker(strip_tests(src))
+        _DEP_IO_CACHE[key] = hit
+    return hit
+
+
+def delegates_io(crate: Path, body: str, cargo: str) -> bool:
+    """Does this crate do its I/O one crate down?
+
+    **The case.** `userspace/passwd` deliberately stopped editing
+    `/etc/shadow` itself: its module doc records the decision, and it now
+    calls `userdb::UserDb::load` and `.save(&self.path)` through `authlib`.
+    Every marker in `IO_MARKERS` counts call sites *in the crate's own
+    sources*, finds one, and concludes the report is unbacked. The work is
+    real; it is just not here.
+
+    **Why the obvious form of this rule is useless, and this one is not.**
+    "Does any dependency do I/O" was the first shape proposed, with the
+    correct objection that it is nearly always true. Measured against this
+    tree rather than assumed: **42%** of the 213 crates have a path-dependency
+    whose sources hold an I/O marker, and **38%** also name that dependency's
+    items by path. So it is not nearly always true, and the second clause --
+    the crate must actually *call into* the dependency, not merely list it --
+    is what makes it a statement about this crate rather than about the
+    workspace.
+
+    **What it cannot see.** A crate that calls into a dependency *and*
+    fabricates beside it is exonerated by this, exactly as one holding a
+    direct I/O marker already was. That is what `ALSO_FABRICATING` is for, and
+    it is checked before this runs.
+    """
+    for name, rel in PATH_DEP.findall(cargo):
+        dep = (crate / rel).resolve()
+        if not dep.is_dir():
+            continue
+        if not _dep_does_io(dep):
+            continue
+        ident = name.replace("-", "_")
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(ident)}\s*::", body):
+            return True
+    return False
+
+
+HONEST_REFUSAL = "is inert, but refuses honestly and exits non-zero"
+
+
 def builds_binary(body: str) -> bool:
     """Does this crate produce a command, as opposed to a library?
 
@@ -400,8 +513,69 @@ def builds_binary(body: str) -> bool:
     return re.search(r"\bfn\s+main\s*\(", body) is not None
 
 
+# An `exit(0)` reached only through `--help` or `--version` is not a working
+# path. These are the tokens that mark such a site; the window is small because
+# the arm that prints help is short.
+_HELP_CONTEXT = re.compile(
+    r'--help|--version|"-h"|"-V"|print_help|print_usage|\busage\s*\(|\bVERSION\b'
+)
+_EXIT_OK = re.compile(r"(?:std::)?process::exit\s*\(\s*0\s*\)|ExitCode::SUCCESS")
+_EXIT_ERR = re.compile(
+    r"(?:std::)?process::exit\s*\(\s*(?!0\s*\))[^)]+\)|ExitCode::FAILURE"
+)
+_HELP_WINDOW = 300
+
+
+def refuses_honestly(body: str) -> bool:
+    """Can this command reach exit 0 only by printing its own help?
+
+    **Why this exists.** Rules 1 and 2 both measure I/O, but the property 1006
+    deletes on is *claiming success it did not achieve*, and the discriminator
+    for that is the exit code, which neither rule reads. `userspace/unshare`
+    is the case that made it concrete: it validates its flags, reports that
+    this system has no namespace subsystem, and exits 1. It looks at nothing,
+    so rule 2 fires -- and it is exactly the honest stub the filing that
+    produced this script said was fine to keep:
+
+        A stub that prints "not implemented" and exits 1 is honest and
+        harmless: every caller in the world already knows what to do with it.
+        A stub that prints a plausible measurement and exits 0 is
+        indistinguishable from the real tool.
+
+    "Looks at nothing" is equally true of both halves of that sentence. Only
+    the exit code tells them apart.
+
+    **This is a heuristic, and it is deliberately pointed at suppression.** It
+    cannot prove a program never reaches exit 0 -- that needs control flow this
+    script does not have, and a `fn main` with no explicit exit falls off its
+    end and returns 0 regardless of what it printed. So it is conservative in
+    the direction where being wrong is cheap: a *false* clear hides a defect,
+    a false accusation retires a working program. Requiring at least one
+    non-zero exit is what keeps a crate with no exits at all -- the
+    falls-off-the-end case -- out.
+
+    **And the clears are printed, not swallowed.** A checker that quietly drops
+    what it decides not to report under-reports exactly as invisibly as one
+    scanning the wrong directory; `find-unpinned-picker-routing.py` learned
+    that by filing two apps it could not parse under a word meaning "not
+    evidence". Every crate cleared here is listed under its own heading.
+    """
+    ok_sites = list(_EXIT_OK.finditer(body))
+    if not ok_sites:
+        # No exit(0) anywhere is not the same as never exiting 0: `fn main`
+        # returns 0 by falling off its end. Only a program that does exit,
+        # and only ever non-zero, has been shown anything about.
+        return bool(_EXIT_ERR.search(body))
+    if not _EXIT_ERR.search(body):
+        return False
+    return all(
+        _HELP_CONTEXT.search(body[max(0, m.start() - _HELP_WINDOW):m.start()])
+        for m in ok_sites
+    )
+
+
 def reason_to_delete(
-    name: str, text: str, *, binary: bool | None = None
+    name: str, text: str, *, binary: bool | None = None, delegated: bool = False
 ) -> str | None:
     """Why `design-decisions.md` 1006 deletes this crate, or None if it does not.
 
@@ -411,7 +585,10 @@ def reason_to_delete(
     if name in PURE_ARGV:
         return None
     body = strip_tests(text)
-    has_io = has_io_marker(body)
+    # `delegated` defaults False so a text-only caller -- the self-test -- gets
+    # the same answer it always did; `main` computes the real one, which needs
+    # the directory and the manifest. Same split as `binary`.
+    has_io = has_io_marker(body) or delegated
 
     # Rule 1 -- it asserts something it could not have looked up. Named
     # exceptions are checked even though they do hold an I/O marker.
@@ -430,6 +607,10 @@ def reason_to_delete(
         binary = builds_binary(body)
     if not binary:
         return None
+    if refuses_honestly(body):
+        # Inert, and 1006 does not reach it: it claims nothing. Returned as a
+        # reason rather than as None so the report can show what it cleared.
+        return HONEST_REFUSAL
     return "is a command that never looks at anything"
 
 
@@ -481,6 +662,102 @@ def _self_test() -> int:
            "std::fs::read" in strip_tests(CONCAT), True)
     expect("...and one that only prints usage is not",
            fabricates("probe", 'fn main() { println!("usage: probe [-v]"); }'), False)
+
+    # --- delegated I/O ------------------------------------------------------
+    # `userspace/passwd` in miniature: a report with no I/O call of its own,
+    # backed by a load/save one crate down.
+    delegating = """
+fn main() {
+    let mut db = userdb::UserDb::load(&path).expect("load");
+    db.set_password(&user, &hash);
+    db.save(&self.path).expect("save");
+    println!("passwd: password updated successfully");
+}
+"""
+    expect("delegated I/O is still I/O",
+           reason_to_delete("passwd", delegating, binary=True, delegated=True),
+           None)
+    expect("...and without the delegation it reads as a bare claim",
+           reason_to_delete("passwd", delegating, binary=True),
+           "states a fact it did not measure")
+    # The exception list still wins: a named crate is flagged even when it
+    # delegates, which is the whole reason that list is consulted first.
+    expect("a named exception is not exonerated by delegating",
+           reason_to_delete(
+               next(iter(ALSO_FABRICATING)), delegating,
+               binary=True, delegated=True,
+           ),
+           "states a fact it did not measure")
+
+    # --- the honest-refusal clear ------------------------------------------
+    # `userspace/unshare` verbatim: the only two `exit(0)` sites are the help
+    # and version arms, and the worker diverges into `exit(1)`.
+    unshare = """
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    cmd_unshare(&args);
+}
+fn cmd_unshare(args: &[String]) -> ! {
+    match args[0].as_str() {
+        "-h" | "--help" => {
+            print_help();
+            process::exit(0);
+        }
+        "-V" | "--version" => {
+            println!("unshare {VERSION}");
+            process::exit(0);
+        }
+        _ => {}
+    }
+    let _ = writeln!(err, "unshare: refusing to run {what}, because running \
+it UNISOLATED is not what was asked for.");
+    process::exit(1);
+}
+"""
+    expect("an honest refusal is cleared, not deleted",
+           reason_to_delete("unshare", unshare), HONEST_REFUSAL)
+    expect("...and refuses_honestly says so directly",
+           refuses_honestly(unshare), True)
+
+    # The discriminator, pointed the other way: identical I/O (none), a
+    # plausible success sentence, and exit 0 on the working path. This is the
+    # program 1006 deletes, and the one the exit code tells apart.
+    liar = """
+fn main() {
+    match args[0].as_str() {
+        "--help" => {
+            print_help();
+            process::exit(0);
+        }
+        _ => {}
+    }
+    println!("mount: /dev/sda1 mounted successfully on /mnt");
+    process::exit(0);
+}
+"""
+    expect("a success claim on the working path is not honest",
+           refuses_honestly(liar), False)
+
+    # No exit at all: `fn main` falls off its end and returns 0, so nothing
+    # has been shown. This is the case the "at least one non-zero" clause is
+    # for, and dropping it would clear every inert crate in the tree.
+    expect("a program with no exits is not cleared",
+           refuses_honestly('fn main() { println!("done, 14 files checked"); }'),
+           False)
+
+    # Only ever non-zero, with no exit(0) anywhere.
+    expect("exiting non-zero and never zero is cleared",
+           refuses_honestly(
+               'fn main() { eprintln!("not implemented"); process::exit(1); }'),
+           True)
+
+    # An `exit(0)` far from any help token is a working path even if the file
+    # has a --help arm somewhere else entirely.
+    far = ('fn main() {\n    if a { print_help(); process::exit(0); }\n'
+           + '    let _x = 1;\n' * 40
+           + '    process::exit(0);\n    process::exit(2);\n}')
+    expect("a distant exit(0) is not covered by a far-off --help",
+           refuses_honestly(far), False)
 
     # --- rule 2: a command that never looks at anything --------------------
     #
@@ -706,9 +983,25 @@ def main() -> int:
             cargo = ""
         binary = (crate / "src" / "main.rs").is_file() or "[[bin]]" in cargo
         why = reason_to_delete(crate.name, text, binary=binary)
+        # Delegation can only ever EXONERATE -- it is an extra way of holding
+        # an I/O marker -- so it is worth asking about only for a crate already
+        # flagged. Two of 213 on the day this was written, and the difference
+        # between a 25-second gate and a 12-second one.
+        if why is not None:
+            why = reason_to_delete(
+                crate.name, text, binary=binary,
+                delegated=delegates_io(crate, strip_tests(text), cargo),
+            )
         if why is not None:
             reasons[crate.name] = why
-    fabricating = sorted(reasons)
+    # An honest refusal is not a defect: 1006 deletes a command that does not
+    # work AND cannot be told apart from one that does, and a program exiting
+    # non-zero can be told apart by every caller there is. Excluded from the
+    # counts, excluded from the baseline, and printed below so the exclusion
+    # is something a reader can argue with rather than something they have to
+    # notice is missing.
+    refusing = sorted(n for n, w in reasons.items() if w == HONEST_REFUSAL)
+    fabricating = sorted(n for n, w in reasons.items() if w != HONEST_REFUSAL)
 
     if args.pin:
         BASELINE.parent.mkdir(parents=True, exist_ok=True)
@@ -756,10 +1049,11 @@ def main() -> int:
         return _marker_report(userspace)
 
     rule1 = sum(1 for w in reasons.values() if w.startswith("states"))
-    rule2 = len(reasons) - rule1
+    rule2 = len(fabricating) - rule1
     print(f"userspace crates with sources : {total}")
     print(f"assert a fact, do no I/O      : {rule1}")
     print(f"commands that look at nothing : {rule2}")
+    print(f"inert but refusing honestly   : {len(refusing)}  (not deletable)")
     print(f"total deletable under 1006    : {len(fabricating)}")
     if total:
         print(f"                              : {100 * len(fabricating) / total:.1f}%")
@@ -768,6 +1062,11 @@ def main() -> int:
             print(f"  {name} -- {reasons[name]}")
         if len(fabricating) > args.limit:
             print(f"  ... and {len(fabricating) - args.limit} more")
+    if refusing:
+        print()
+        print("cleared -- inert, but every exit 0 is behind --help/--version:")
+        for name in refusing:
+            print(f"  {name}")
     return 0
 
 

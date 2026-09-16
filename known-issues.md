@@ -155625,7 +155625,23 @@ not the API, it is whether the value is a path or a number.** A sweep that
 replaced every `var` with `var_os` would be churn in both places and would
 teach the next reader that the rule is mechanical.
 
-## TD-C-THE-THUMBNAIL-CACHE-HAS-NO-CEILING
+## TD-C-THE-THUMBNAIL-CACHE-HAS-NO-CEILING -- FIXED 2026-09-16
+
+**Fixed the same day.** `DiskCache::enforce_cap` deletes oldest-first until the
+directory is under a byte budget, run once when the generator takes its default
+cache. The budget is a *parameter*; `DEFAULT_DISK_CACHE_BYTES` (256 MiB) only
+supplies it, so the install-time sizing §4.1 wants can pass a number later
+without touching the eviction.
+
+**What is still not done, and is not this entry's:** the sizing itself, which
+needs a filesystem-capacity reading nothing here can make, and the
+pressure-aware shrinking, which is lane A's kernel shrinker. Unbounded growth
+is what got fixed; "the right bound, adjusted under pressure" is what remains.
+
+Eviction is oldest-*written*, not least-recently-*used*, because a true LRU
+needs a last-read time that is not reliably available and would cost a write
+per thumbnail served. Recorded here because it is the first thing someone will
+want to change, and the reason is not obvious from the code.
 
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `apps/explorer/src/thumbs.rs` — `DiskCache`.
@@ -155641,10 +155657,28 @@ beside the source files, which is what §4.1 requires; and invalidation is
 sound, because `cache_filename` keys on the path, the source mtime *and* the
 size cap, so a changed file or a changed cap simply misses and regenerates.
 
-**What is missing** is the whole of §4.1's "size cap" bullet: no byte budget,
-no eviction, no notion of cold entries. `DiskCache` has no `prune`, no
-`max_bytes`, and the `evicted` field nearby belongs to the *in-memory* LRU,
+**What is missing** is §4.1's "size cap" bullet: no byte budget and no notion
+of cold entries. The `evicted` field nearby belongs to the *in-memory* LRU,
 which bounds a `HashMap` and not the directory.
+
+**Correction, made within the hour of filing this.** This entry first said
+there was "no eviction" at all. That is wrong: `DiskCache::purge_stale` exists,
+is careful -- it compares cache filenames as *bytes*, with a comment noting
+that rendering a name lossily first could make a foreign file *look* like one
+of ours and get it deleted -- and is tested. **It is called by nothing outside
+those tests.** So the unbounded growth is not a missing mechanism; it is an
+unused one, which is the seventh capability found in this state today.
+
+**But it cannot simply be wired up, which is the useful part.** `purge_stale`
+takes the set of entries that are still valid and deletes everything else. The
+only such set explorer can produce is *the directory it is currently showing*,
+and calling it with that would delete every other folder's thumbnails on every
+navigation -- bounding growth by destroying the cache. Its contract assumes a
+global "files we still care about", and nothing in the tree keeps one.
+
+So the two halves are: `purge_stale` answers "this source is gone or changed",
+and the missing cap answers "this cache is too big". They are different
+questions, and only the first has code.
 
 **Why this is not simply "add a cap".** The spec asks for two things, and only
 one is ours:

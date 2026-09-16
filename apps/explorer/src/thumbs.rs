@@ -84,6 +84,19 @@ const FOLDER_PREVIEW_ITEMS: usize = 4;
 /// Disk cache directory name under the user's cache root.
 const DISK_CACHE_DIR: &str = ".cache/thumbs";
 
+/// How many bytes of thumbnails to keep on disk, by default.
+///
+/// A fixed figure, not the install-time fraction of the drive
+/// `roadmap-detailed.md` §4.1 asks for: sizing it that way needs the capacity
+/// of the filesystem the home directory is on, which nothing in this tree can
+/// read yet -- the same gap that leaves the shell's disk meter at `None`. The
+/// budget is a *parameter* of [`DiskCache::enforce_cap`] so that when the
+/// reading exists it supplies a number and the eviction below is untouched.
+///
+/// 256 MiB holds a few thousand thumbnails at the sizes this generator makes,
+/// which is a large photo collection browsed several times.
+const DEFAULT_DISK_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
 // ============================================================================
 // Thumbnail
 // ============================================================================
@@ -1319,7 +1332,19 @@ impl ThumbnailGenerator {
     /// if there is no home directory to put it in.
     #[must_use]
     pub fn with_default_disk_cache() -> Self {
-        DiskCache::default_location().map_or_else(Self::new, Self::with_disk_cache)
+        DiskCache::default_location().map_or_else(Self::new, |cache| {
+            // Once per session, not per save: the cut needs a directory scan,
+            // and paying that on every thumbnail written would slow the path
+            // the cache exists to speed up. Once at start-up bounds what a
+            // session can leave behind, which is what was unbounded.
+            //
+            // The error is dropped deliberately: a cache that cannot be tidied
+            // is still a usable cache, and refusing to start a file manager
+            // because its thumbnail directory is unreadable would be worse
+            // than the overgrowth.
+            let _ = cache.enforce_cap(DEFAULT_DISK_CACHE_BYTES);
+            Self::with_disk_cache(cache)
+        })
     }
 
     /// The disk cache this generator reads and writes, if it has one.
@@ -1481,6 +1506,61 @@ impl DiskCache {
         data.extend_from_slice(&thumb.height.to_le_bytes());
         data.extend_from_slice(&thumb.pixels);
         fs::write(file_path, &data)
+    }
+
+    /// Delete oldest entries until the cache holds at most `max_bytes`.
+    ///
+    /// Returns the number of bytes kept. The cache had no ceiling at all until
+    /// 2026-09-16: every thumbnail ever made stayed for the life of the
+    /// install, which this project's own instructions single out as the way
+    /// disk space is actually lost.
+    ///
+    /// **Oldest-written, not least-recently-used, and deliberately so.** The
+    /// honest LRU wants a last-*read* time, and there is no reliable one: file
+    /// access times are off or coarse on most systems, and touching each entry
+    /// as it is served would mean a write for every thumbnail displayed --
+    /// paying a disk write to save a disk read, on the exact path that exists
+    /// to be fast. Oldest-written approximates it and cannot be worse than the
+    /// unbounded growth it replaces.
+    ///
+    /// Only files this cache wrote are considered, matched on the `.thumb`
+    /// suffix **as bytes**, for the reason [`Self::purge_stale`] gives: a
+    /// foreign name rendered lossily could come to look like one of ours, and
+    /// this function deletes what it matches.
+    pub fn enforce_cap(&self, max_bytes: u64) -> std::io::Result<u64> {
+        if !self.cache_dir.is_dir() {
+            return Ok(0);
+        }
+        let mut entries: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+        let mut total: u64 = 0;
+        for entry in fs::read_dir(&self.cache_dir)? {
+            let entry = entry?;
+            if !entry.file_name().as_encoded_bytes().ends_with(b".thumb") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let written = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            let size = meta.len();
+            total = total.saturating_add(size);
+            entries.push((written, size, entry.path()));
+        }
+        if total <= max_bytes {
+            return Ok(total);
+        }
+        // Oldest first, so the newest survive the cut.
+        entries.sort_by_key(|(written, _, _)| *written);
+        for (_, size, path) in entries {
+            if total <= max_bytes {
+                break;
+            }
+            if fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(size);
+            }
+        }
+        Ok(total)
     }
 
     /// Remove the cached thumbnail for a specific path/mtime/cap.
@@ -2847,6 +2927,93 @@ mod tests {
     /// Purging is keyed on the hash alone, so a live file keeps its entries at
     /// every cap. A purge that matched whole filenames would delete the sizes
     /// the caller did not happen to name.
+    /// Set a file's modified time, so an eviction test does not depend on how
+    /// fine the clock is.
+    ///
+    /// Two files written in the same tick can share a timestamp, which would
+    /// make "the older one goes" a coin toss on a fast machine.
+    fn filetime_set(path: &Path, when: std::time::SystemTime) {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the cache entry is writable");
+        file.set_times(fs::FileTimes::new().set_modified(when))
+            .expect("the filesystem records a modified time");
+    }
+
+    /// Over budget, the oldest entries go and the newest stay.
+    #[test]
+    fn the_cap_evicts_oldest_first() {
+        let scratch = ScratchDir::new("thumbs_cap_evicts");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+
+        // Written oldest-first, with the mtimes set explicitly rather than
+        // trusted: two files written in the same tick can share a timestamp,
+        // and a test whose order depends on clock resolution is a test that
+        // passes on one machine.
+        let old = make_test_thumb("old.png", 16);
+        let new_one = make_test_thumb("new.png", 16);
+        cache.save(&old, 64).unwrap();
+        cache.save(&new_one, 64).unwrap();
+        let old_file = cache.cache_filename(&old.source_path, old.source_mtime, 64);
+        let new_file = cache.cache_filename(&new_one.source_path, new_one.source_mtime, 64);
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        filetime_set(&old_file, long_ago);
+
+        let one_entry = fs::metadata(&new_file).unwrap().len();
+        let kept = cache.enforce_cap(one_entry).unwrap();
+
+        assert!(
+            kept <= one_entry,
+            "kept {kept} bytes against a cap of {one_entry}"
+        );
+        assert!(!old_file.exists(), "the older entry survived the cut");
+        assert!(new_file.exists(), "the newer entry was evicted instead");
+    }
+
+    /// Under budget, nothing is touched.
+    #[test]
+    fn the_cap_leaves_a_small_cache_alone() {
+        let scratch = ScratchDir::new("thumbs_cap_small");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+        let thumb = make_test_thumb("only.png", 8);
+        cache.save(&thumb, 64).unwrap();
+
+        let kept = cache.enforce_cap(u64::MAX).unwrap();
+        assert!(kept > 0, "reported an empty cache when one entry exists");
+        assert!(
+            cache
+                .load(Path::new("only.png"), thumb.source_mtime, 64)
+                .is_some(),
+            "an entry was evicted while under budget"
+        );
+    }
+
+    /// A file this cache did not write is never deleted, whatever its name.
+    ///
+    /// The cut deletes what it matches, so what it matches has to be ours.
+    /// Matched on the `.thumb` suffix as bytes, so a name that is not UTF-8
+    /// cannot be rendered into looking like one of ours.
+    #[test]
+    fn the_cap_only_deletes_its_own_files() {
+        let scratch = ScratchDir::new("thumbs_cap_foreign");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+
+        let stranger = scratch.dir().join("someone-elses.png");
+        fs::write(&stranger, vec![7_u8; 4096]).unwrap();
+        let thumb = make_test_thumb("ours.png", 16);
+        cache.save(&thumb, 64).unwrap();
+
+        cache.enforce_cap(0).unwrap();
+        assert!(
+            stranger.exists(),
+            "the cut deleted a file this cache never wrote"
+        );
+    }
+
     #[test]
     fn purging_keeps_a_live_files_other_sizes() {
         let scratch = ScratchDir::new("thumbs_test_purge_caps");

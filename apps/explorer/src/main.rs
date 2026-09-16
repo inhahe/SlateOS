@@ -234,7 +234,15 @@ const ICON_CELL_W: f32 = 96.0;
 
 /// Height of one icon-view cell: the thumbnail box, the gap, and two lines of
 /// name beneath it.
-const ICON_CELL_H: f32 = 108.0;
+/// An icon cell with no labels under it: the thumbnail and its padding.
+const ICON_CELL_BASE_H: f32 = 92.0;
+
+/// Height of one label line under an icon.
+///
+/// `ICON_CELL_BASE_H` plus one of these is 108, which is what the cell was
+/// before the labels became choosable -- so the default view is unchanged to
+/// the pixel, and only a user who asks for more lines gets taller cells.
+const ICON_LABEL_LINE_H: f32 = 16.0;
 
 /// Side of the square a thumbnail is fitted into, inside its cell.
 const ICON_THUMB_SIZE: f32 = 64.0;
@@ -693,6 +701,8 @@ pub struct ExplorerState {
     pub thumb_gen: ThumbnailGenerator,
     /// Size and colours new thumbnails are generated at.
     pub thumb_config: ThumbConfig,
+    /// Which labels the icon view draws under each thumbnail.
+    pub icon_labels: columnprefs::IconLabels,
     /// Thumbnails generated but not yet handed to the compositor.
     ///
     /// Drained by [`Self::take_pending_uploads`]. The explorer cannot register
@@ -761,7 +771,20 @@ impl ExplorerState {
             column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
-            thumb_config: ThumbConfig::default(),
+            icon_labels: columnprefs::icon_labels(&settingsfile::load(columnprefs::CONFIG_NAME)),
+            thumb_config: {
+                // The size the user last chose, if they chose one. Applied
+                // here rather than after construction so the first listing is
+                // already generating at the right size -- otherwise every
+                // thumbnail on screen at start-up is made twice.
+                let mut config = ThumbConfig::default();
+                if let Some(size) =
+                    columnprefs::thumb_size(&settingsfile::load(columnprefs::CONFIG_NAME))
+                {
+                    config.size = size;
+                }
+                config
+            },
             pending_uploads: Vec::new(),
             uploaded: HashSet::new(),
             dropzone: DropZoneManager::new(start_path.to_path_buf()),
@@ -1078,25 +1101,37 @@ impl ExplorerState {
     /// need the path, and are the one place a non-UTF-8 name costs anything:
     /// a blank cell, never a wrong one.
     fn row_values(&self, entry: &FileEntry) -> Vec<ColumnValue> {
-        let path = entry.path.to_str();
         self.columns
             .active_columns()
             .iter()
-            .map(|&id| match id {
-                ColumnId::NAME => ColumnValue::Text(entry.name.clone()),
-                // A directory's own byte count is not what a Size column
-                // means, so it stays blank — as it did before this view used
-                // the column system at all.
-                ColumnId::SIZE if entry.is_dir => ColumnValue::Empty,
-                ColumnId::SIZE => ColumnValue::Size(entry.size),
-                ColumnId::DATE_MODIFIED => entry
-                    .modified
-                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map_or(ColumnValue::Empty, |d| ColumnValue::DateTime(d.as_secs())),
-                ColumnId::TYPE => ColumnValue::Text(entry.type_label()),
-                other => path.map_or(ColumnValue::Empty, |p| self.columns.get_value(p, other)),
-            })
+            .map(|&id| self.entry_value(entry, id))
             .collect()
+    }
+
+    /// One column's value for one entry.
+    ///
+    /// Extracted from [`Self::row_values`] so the icon view's labels come from
+    /// the same place as the detail cells. §4.1 asks for exactly that -- "the
+    /// date/size shown match" -- and the only way to be sure of it is for both
+    /// to call one function rather than to format the same field twice.
+    fn entry_value(&self, entry: &FileEntry, id: ColumnId) -> ColumnValue {
+        match id {
+            ColumnId::NAME => ColumnValue::Text(entry.name.clone()),
+            // A directory's own byte count is not what a Size column
+            // means, so it stays blank — as it did before this view used
+            // the column system at all.
+            ColumnId::SIZE if entry.is_dir => ColumnValue::Empty,
+            ColumnId::SIZE => ColumnValue::Size(entry.size),
+            ColumnId::DATE_MODIFIED => entry
+                .modified
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map_or(ColumnValue::Empty, |d| ColumnValue::DateTime(d.as_secs())),
+            ColumnId::TYPE => ColumnValue::Text(entry.type_label()),
+            other => entry
+                .path
+                .to_str()
+                .map_or(ColumnValue::Empty, |p| self.columns.get_value(p, other)),
+        }
     }
 
     /// Keep the detail header's sort arrow on the column the list is actually
@@ -1780,6 +1815,135 @@ impl ExplorerState {
         x >= pane.x && x < pane.x + pane.width && y >= pane.y && y < pane.y + HEADER_H
     }
 
+    /// How tall one icon cell is, given the labels in force.
+    ///
+    /// The grid stays even because every cell in it is the same height: the
+    /// count of *lines* decides it, not the length of any one file's name.
+    /// §4.1 asks for that directly -- long names ellipsize rather than wrap
+    /// the cell taller than its neighbours.
+    fn icon_cell_h(&self) -> f32 {
+        ICON_CELL_BASE_H + f32::from(self.icon_labels.lines()) * ICON_LABEL_LINE_H
+    }
+
+    /// The three labels an icon may carry, ticked where they are drawn.
+    fn icon_label_menu(&self) -> MenuItem {
+        let labels = self.icon_labels;
+        MenuItem::Submenu {
+            id: MENU_ICON_LABEL_BASE,
+            label: String::from("Show under icons"),
+            icon: None,
+            enabled: true,
+            children: vec![
+                Self::label_row(MENU_ICON_LABEL_BASE, "Name", labels.name),
+                Self::label_row(MENU_ICON_LABEL_BASE + 1, "Date modified", labels.date),
+                Self::label_row(MENU_ICON_LABEL_BASE + 2, "Size", labels.size),
+            ],
+        }
+    }
+
+    /// One tickable label row.
+    fn label_row(id: u64, label: &str, on: bool) -> MenuItem {
+        MenuItem::Action {
+            id,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: Some(on),
+        }
+    }
+
+    /// Toggle one icon label and remember the set. Answers whether it was ours.
+    fn icon_label_action(&mut self, id: u64) -> bool {
+        let Some(which) = id.checked_sub(MENU_ICON_LABEL_BASE) else {
+            return false;
+        };
+        let labels = &mut self.icon_labels;
+        match which {
+            0 => labels.name = !labels.name,
+            1 => labels.date = !labels.date,
+            2 => labels.size = !labels.size,
+            _ => return false,
+        }
+
+        let chosen = self.icon_labels;
+        columnprefs::set_icon_labels(&mut self.column_prefs, chosen);
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                // Said as a count rather than a list, because the menu already
+                // shows which: the sentence is here to confirm the change was
+                // written down, not to repeat what is on screen.
+                Ok(()) => match chosen.lines() {
+                    0 => String::from("Icons now show no labels"),
+                    1 => String::from("Icons now show 1 label"),
+                    n => format!("Icons now show {n} labels"),
+                },
+                Err(e) => format!("The label choice was not saved: {e}"),
+            };
+        true
+    }
+
+    /// The thumbnail sizes offered, ticked at the one in force.
+    ///
+    /// A submenu rather than four rows in the folder menu: the sizes are one
+    /// choice, and four siblings among the file actions would read as four
+    /// unrelated commands.
+    fn thumb_size_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_THUMB_SIZE_BASE,
+            label: String::from("Thumbnail size"),
+            icon: None,
+            enabled: true,
+            children: columnprefs::THUMB_SIZES
+                .iter()
+                .map(|size| MenuItem::Action {
+                    id: MENU_THUMB_SIZE_BASE.saturating_add(u64::from(*size)),
+                    label: format!("{size} pixels"),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    checked: Some(self.thumb_config.size == *size),
+                })
+                .collect(),
+        }
+    }
+
+    /// Adopt `size` for thumbnails and remember it. Answers whether it was ours.
+    fn thumb_size_action(&mut self, id: u64) -> bool {
+        let Some(offset) = id.checked_sub(MENU_THUMB_SIZE_BASE) else {
+            return false;
+        };
+        let Ok(size) = u32::try_from(offset) else {
+            return false;
+        };
+        if !columnprefs::THUMB_SIZES.contains(&size) {
+            return false;
+        }
+        if self.thumb_config.size == size {
+            return true;
+        }
+        self.thumb_config.size = size;
+
+        // The in-memory cache holds pictures made at the *old* size, and
+        // `queue_thumbnails` skips anything it already has -- so without this
+        // the view keeps showing the previous size until the folder changes.
+        // The cache on disk needs no such help: its filenames carry the size,
+        // so a new size misses and regenerates while the old entries stay
+        // valid for anyone who switches back.
+        self.thumbs.clear();
+        self.queue_thumbnails();
+
+        columnprefs::set_thumb_size(&mut self.column_prefs, size);
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => format!("Thumbnails are now {size} pixels"),
+                Err(e) => {
+                    format!("Thumbnails are now {size} pixels, but the choice was not saved: {e}")
+                }
+            };
+        true
+    }
+
     /// The column picker: every column, ticked when shown, and the two saves.
     fn open_column_menu(&mut self, x: f32, y: f32) {
         let mut items = self.column_menu_items();
@@ -1849,7 +2013,12 @@ impl ExplorerState {
                     };
                 true
             }
-            _ if id >= MENU_COLUMN_BASE => {
+            // Bounded at both ends. This was `id >= MENU_COLUMN_BASE`, which
+            // claimed every id allocated above it -- so the thumbnail sizes,
+            // based at 2000 to stay clear, were swallowed here and never
+            // reached their own handler. An open-ended range does not stay
+            // clear of anything; it takes everything added later.
+            _ if (MENU_COLUMN_BASE..MENU_THUMB_SIZE_BASE).contains(&id) => {
                 let Ok(raw) = u32::try_from(id.saturating_sub(MENU_COLUMN_BASE)) else {
                     return false;
                 };
@@ -1885,7 +2054,7 @@ impl ExplorerState {
 
     /// What can be done to the folder being shown.
     fn folder_menu_items(&self) -> Vec<MenuItem> {
-        vec![
+        let mut items = vec![
             Self::menu_action(MENU_NEW_FOLDER, "New folder", true),
             // Greyed rather than absent when the clipboard is empty, for the
             // reason the toolbar's buttons are: a menu whose rows come and go
@@ -1893,7 +2062,16 @@ impl ExplorerState {
             // next.
             Self::menu_action(MENU_PASTE, "Paste", self.clipboard.is_some()),
             Self::menu_action(MENU_REFRESH, "Refresh", true),
-        ]
+        ];
+        // Only where thumbnails are drawn. In Details and List the sizes
+        // change nothing visible, and a submenu that silently does nothing is
+        // the control-that-cannot-act this tree has plenty of already.
+        if self.view_wants_thumbnails() {
+            items.push(MenuItem::Separator);
+            items.push(self.thumb_size_menu());
+            items.push(self.icon_label_menu());
+        }
+        items
     }
 
     /// One row of a menu.
@@ -1931,7 +2109,7 @@ impl ExplorerState {
         // The column picker first: its per-column ids are allocated above
         // every action below, so asking it first costs one comparison and
         // keeps the two id spaces from having to be interleaved here.
-        if self.column_menu_action(id) {
+        if self.column_menu_action(id) || self.thumb_size_action(id) || self.icon_label_action(id) {
             return;
         }
         match id {
@@ -3043,7 +3221,7 @@ impl ExplorerState {
         match self.view_mode {
             ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.height),
             ViewMode::Details => scroll_window::capacity(ROW_H, (pane.height - HEADER_H).max(0.0)),
-            ViewMode::Icons => scroll_window::capacity(ICON_CELL_H, pane.height)
+            ViewMode::Icons => scroll_window::capacity(self.icon_cell_h(), pane.height)
                 .saturating_mul(self.icon_columns()),
         }
     }
@@ -3219,7 +3397,8 @@ impl ExplorerState {
             .checked_div(cols)
             .unwrap_or(0)
             .saturating_mul(cols);
-        let icon_rows = scroll_window::capacity(ICON_CELL_H, h);
+        let cell_h = self.icon_cell_h();
+        let icon_rows = scroll_window::capacity(cell_h, h);
         let visible_cells = icon_rows.saturating_mul(cols);
 
         tree.translate(x, y);
@@ -3245,7 +3424,7 @@ impl ExplorerState {
             // loop free of an operation whose safety the reader has to prove
             // from a line thirty above it.
             let cx = cell.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W;
-            let cy = cell.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H;
+            let cy = cell.checked_div(cols).unwrap_or(0) as f32 * cell_h;
 
             // Registered in window coordinates, not the pane-local ones the
             // commands are emitted in: the pointer position a drop arrives
@@ -3255,7 +3434,7 @@ impl ExplorerState {
             zones.register_file_row(
                 i,
                 &entry.path,
-                Rect::new(x + cx, y + cy, ICON_CELL_W, ICON_CELL_H),
+                Rect::new(x + cx, y + cy, ICON_CELL_W, cell_h),
                 entry.is_dir,
             );
 
@@ -3264,7 +3443,7 @@ impl ExplorerState {
                     cx + 2.0,
                     cy + 2.0,
                     ICON_CELL_W - 4.0,
-                    ICON_CELL_H - 4.0,
+                    cell_h - 4.0,
                     with_alpha(self.palette.accent, 40),
                     guitk::style::CornerRadii::all(4.0),
                 );
@@ -3276,7 +3455,7 @@ impl ExplorerState {
             let ty = cy + 8.0;
             self.push_thumb(tree, entry, tx, ty, ICON_THUMB_SIZE);
 
-            let label_y = ty + ICON_THUMB_SIZE + 6.0;
+            let mut label_y = ty + ICON_THUMB_SIZE + 6.0;
             let name_color = if entry.is_dir {
                 self.palette.accent
             } else {
@@ -3285,14 +3464,45 @@ impl ExplorerState {
             // Elided rather than clipped: a name cut mid-word with no mark is
             // read as the whole name, which is how one file gets mistaken for
             // another whose name it is a prefix of.
-            tree.text_in(
-                cx + 4.0,
-                label_y,
-                ICON_CELL_W - 8.0,
-                &entry.name,
-                name_color,
-                ICON_LABEL_SIZE,
-            );
+            if self.icon_labels.name {
+                tree.text_in(
+                    cx + 4.0,
+                    label_y,
+                    ICON_CELL_W - 8.0,
+                    &entry.name,
+                    name_color,
+                    ICON_LABEL_SIZE,
+                );
+                label_y += ICON_LABEL_LINE_H;
+            }
+            // Date and size come from `entry_value`, which is what the detail
+            // cells use, so the two views cannot disagree about the same file.
+            // Drawn in the dimmer ink: they are context for the name, and
+            // three lines of equal weight under every icon reads as a table
+            // that has lost its columns.
+            for (wanted, id) in [
+                (self.icon_labels.date, ColumnId::DATE_MODIFIED),
+                (self.icon_labels.size, ColumnId::SIZE),
+            ] {
+                if !wanted {
+                    continue;
+                }
+                let text = self.entry_value(entry, id).display();
+                if !text.is_empty() {
+                    tree.text_in(
+                        cx + 4.0,
+                        label_y,
+                        ICON_CELL_W - 8.0,
+                        &text,
+                        self.palette.subtext0,
+                        ICON_LABEL_SIZE,
+                    );
+                }
+                // Advanced even when the value is blank -- a folder has no
+                // size -- so every cell's lines land at the same heights and
+                // the grid reads as rows rather than as drifting text.
+                label_y += ICON_LABEL_LINE_H;
+            }
         }
 
         tree.unclip();
@@ -3756,6 +3966,10 @@ const MENU_COLUMNS_SAVE_GLOBAL: u64 = 101;
 /// One id per column, offset so it cannot collide with an action above.
 /// `ColumnId` is a small integer, and 1000 is far above every action here.
 const MENU_COLUMN_BASE: u64 = 1000;
+/// One id per offered thumbnail size, offset clear of the column ids above.
+const MENU_THUMB_SIZE_BASE: u64 = 2000;
+/// One id per icon-view label toggle, clear of the sizes above.
+const MENU_ICON_LABEL_BASE: u64 = 3000;
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -5348,6 +5562,187 @@ mod tests {
             state.pathbar.current_path().contains("sub"),
             "the address bar still shows the old folder: {:?}",
             state.pathbar.current_path()
+        );
+    }
+
+    /// Turning a label on puts it under the icons; turning it off removes it.
+    ///
+    /// Drawn text is the check, not the flag: a toggle that flips a bool the
+    /// renderer ignores would pass any test of the state alone.
+    #[test]
+    fn icon_labels_appear_and_disappear_as_they_are_toggled() {
+        settingsfile::testing::with_scratch_config("explorer-icon-labels", |_root| {
+            let scratch = temp_dir("icon_labels");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("note.txt"), "hello");
+
+            let mut state = state_at(&root);
+            state.view_mode = ViewMode::Icons;
+
+            // The name alone by default, which is what this view always drew.
+            let drawn = texts(&icons_tree(&state));
+            assert!(drawn.iter().any(|t| t == "note.txt"), "no name: {drawn:?}");
+
+            // Size on: the same text the detail view shows for that file.
+            state.activate_menu_item(MENU_ICON_LABEL_BASE + 2);
+            let entry = state
+                .entries
+                .iter()
+                .find(|e| e.name == "note.txt")
+                .expect("the file is in the listing")
+                .clone();
+            let expected = state.entry_value(&entry, ColumnId::SIZE).display();
+            let drawn = texts(&icons_tree(&state));
+            assert!(
+                drawn.contains(&expected),
+                "the size label {expected:?} is missing from {drawn:?}"
+            );
+
+            // Name off: the pure-image wall, with the size still there.
+            state.activate_menu_item(MENU_ICON_LABEL_BASE);
+            let drawn = texts(&icons_tree(&state));
+            assert!(
+                !drawn.iter().any(|t| t == "note.txt"),
+                "the name is still drawn after being turned off: {drawn:?}"
+            );
+            assert!(drawn.contains(&expected), "the size went too");
+        });
+    }
+
+    /// The cell grows by exactly one line per label.
+    #[test]
+    fn the_icon_cell_grows_with_the_labels() {
+        let scratch = temp_dir("icon_cell_h");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+        let mut state = state_at(&root);
+
+        state.icon_labels = columnprefs::IconLabels {
+            name: false,
+            date: false,
+            size: false,
+        };
+        let bare = state.icon_cell_h();
+        state.icon_labels = columnprefs::IconLabels {
+            name: true,
+            date: false,
+            size: false,
+        };
+        let one = state.icon_cell_h();
+        state.icon_labels = columnprefs::IconLabels {
+            name: true,
+            date: true,
+            size: true,
+        };
+        let three = state.icon_cell_h();
+
+        assert!(
+            (one - bare - ICON_LABEL_LINE_H).abs() < 0.001,
+            "one line: {one} vs {bare}"
+        );
+        assert!(
+            (three - bare - 3.0 * ICON_LABEL_LINE_H).abs() < 0.001,
+            "three lines: {three} vs {bare}"
+        );
+        // The default has to be what the view was before any of this existed,
+        // or every user's icons move on upgrade for a feature they never used.
+        assert!(
+            (one - 108.0).abs() < 0.001,
+            "the default cell changed height: {one}"
+        );
+    }
+
+    /// The choice survives a fresh window.
+    #[test]
+    fn icon_labels_are_remembered() {
+        settingsfile::testing::with_scratch_config("explorer-icon-labels-saved", |_root| {
+            let scratch = temp_dir("icon_labels_saved");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.activate_menu_item(MENU_ICON_LABEL_BASE + 1); // date on
+            state.activate_menu_item(MENU_ICON_LABEL_BASE); // name off
+            let chosen = state.icon_labels;
+
+            let again = state_at(&root);
+            assert_eq!(again.icon_labels, chosen, "the labels did not survive");
+        });
+    }
+
+    /// Choosing a size applies it and it survives the next window.
+    ///
+    /// The loop the control exists for. Applying without remembering, or
+    /// remembering without applying, both look like success from inside a
+    /// single test.
+    #[test]
+    fn a_chosen_thumbnail_size_applies_and_is_remembered() {
+        settingsfile::testing::with_scratch_config("explorer-thumb-size", |_root| {
+            let scratch = temp_dir("thumb_size");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            let mut state = state_at(&root);
+            let before = state.thumb_config.size;
+            let wanted = columnprefs::THUMB_SIZES
+                .iter()
+                .copied()
+                .find(|s| *s != before)
+                .expect("the offered sizes are not all the same");
+
+            state.activate_menu_item(MENU_THUMB_SIZE_BASE + u64::from(wanted));
+            assert_eq!(state.thumb_config.size, wanted, "the size was not applied");
+
+            let again = state_at(&root);
+            assert_eq!(
+                again.thumb_config.size, wanted,
+                "the chosen size did not survive a fresh window"
+            );
+        });
+    }
+
+    /// A size we do not offer is not adopted from a menu id.
+    ///
+    /// The ids are derived by adding the size to a base, so an id from
+    /// anywhere else lands in the same range. It has to be checked against the
+    /// list rather than trusted for being in range.
+    #[test]
+    fn an_unoffered_thumbnail_size_is_refused() {
+        let scratch = temp_dir("thumb_size_bad");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+        let before = state.thumb_config.size;
+
+        assert!(
+            !state.thumb_size_action(MENU_THUMB_SIZE_BASE + 300),
+            "a size outside the offered list was accepted"
+        );
+        assert_eq!(state.thumb_config.size, before);
+    }
+
+    /// The sizes are offered only where thumbnails are drawn.
+    #[test]
+    fn the_size_menu_is_absent_from_a_view_without_thumbnails() {
+        let scratch = temp_dir("thumb_size_view");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+
+        state.view_mode = ViewMode::Details;
+        let details = state.folder_menu_items();
+        assert!(
+            !details
+                .iter()
+                .any(|i| matches!(i, MenuItem::Submenu { .. })),
+            "the size submenu was offered in a view that draws no thumbnails"
+        );
+
+        state.view_mode = ViewMode::Icons;
+        let icons = state.folder_menu_items();
+        assert!(
+            icons.iter().any(|i| matches!(i, MenuItem::Submenu { .. })),
+            "the size submenu was missing from the icon view"
         );
     }
 
@@ -7376,6 +7771,13 @@ mod tests {
             .collect()
     }
 
+    fn icons_tree(state: &ExplorerState) -> RenderTree {
+        let mut tree = RenderTree::new();
+        let mut zones = DropZoneManager::new(state.current_path.clone());
+        state.render_icons(&mut tree, &mut zones, 0.0, 0.0, 600.0, 400.0);
+        tree
+    }
+
     fn details_tree(state: &ExplorerState) -> RenderTree {
         let mut tree = RenderTree::new();
         let mut zones = DropZoneManager::new(state.current_path.clone());
@@ -7766,7 +8168,7 @@ mod tests {
         assert!((ya - yb).abs() < f32::EPSILON, "a and b share a row");
         assert!(yc > yb, "c wrapped onto the next row: {yc} vs {yb}");
         assert!(
-            (yc - ya - ICON_CELL_H).abs() < 0.001,
+            (yc - ya - state.icon_cell_h()).abs() < 0.001,
             "exactly one cell height down: {yc} - {ya}"
         );
 
@@ -7816,8 +8218,8 @@ mod tests {
                 (
                     x + index.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W
                         + ICON_CELL_W / 2.0,
-                    y + index.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H
-                        + ICON_CELL_H / 2.0,
+                    y + index.checked_div(cols).unwrap_or(0) as f32 * state.icon_cell_h()
+                        + state.icon_cell_h() / 2.0,
                 )
             }
         }

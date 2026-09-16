@@ -1347,12 +1347,45 @@ impl Daemon {
     }
 
     /// Send a signal to all processes in a session.
-    fn kill_session(&self, session_id: &str, _signal: i32) -> Result<u32, &'static str> {
+    /// Send `signal` to the session's leader, and report which pid it went to.
+    ///
+    /// It used to look the session up, return `leader_pid`, and send nothing,
+    /// while `loginctl` printed "Sent signal 15 to session 3 (leader PID
+    /// 412)." -- a present-tense claim about a signal that did not exist. The
+    /// `_signal` parameter's underscore was the whole defect, visible in the
+    /// signature.
+    ///
+    /// # The leader only, not the session's processes
+    ///
+    /// systemd signals every process in the session's cgroup. There are no
+    /// cgroups here, and walking `/proc` for children would be a different
+    /// and much larger piece of work with its own races. Signalling the
+    /// leader is what this does and what it says: the caller is told the pid,
+    /// so a caller that wanted the whole tree can see it did not get one.
+    ///
+    /// # Errors
+    ///
+    /// * `session not found`.
+    /// * `session has no leader pid` -- a session registered with 0, which
+    ///   `libcall::kill` refuses because a non-positive pid means a process
+    ///   GROUP and would signal the caller's own.
+    /// * `not permitted to signal the session leader` -- EPERM.
+    /// * `the session leader is gone` -- ESRCH, which is ordinary rather than
+    ///   exceptional: a leader can exit between a listing and a keypress.
+    /// * `this build cannot signal a process` -- ENOSYS, which is every
+    ///   non-SlateOS target, including the one the tests run on.
+    fn kill_session(&self, session_id: &str, signal: i32) -> Result<u32, &'static str> {
         let session = self.sessions.get(session_id).ok_or("session not found")?;
-        // In a real implementation this would walk the session's cgroup and
-        // send the signal to every process. We return the leader PID to
-        // indicate the target.
-        Ok(session.leader_pid)
+        let pid =
+            i32::try_from(session.leader_pid).map_err(|_| "session leader pid is not a pid")?;
+        match libcall::kill(pid, signal) {
+            Ok(()) => Ok(session.leader_pid),
+            Err(libcall::EINVAL) => Err("session has no leader pid"),
+            Err(libcall::EPERM) => Err("not permitted to signal the session leader"),
+            Err(libcall::ESRCH) => Err("the session leader is gone"),
+            Err(libcall::ENOSYS) => Err("this build cannot signal a process"),
+            Err(_) => Err("failed to signal the session leader"),
+        }
     }
 
     /// Send a signal to all processes belonging to a user.
@@ -3498,11 +3531,59 @@ mod tests {
 
     // --- Kill session/user ---
 
+    /// The host cannot signal, and says so rather than reporting a send.
+    ///
+    /// This test used to be `let pid = d.kill_session("1", 15).unwrap();
+    /// assert_eq!(pid, 100)` -- which passed because `kill_session` looked the
+    /// session up, returned `leader_pid` and sent nothing. The `_signal`
+    /// parameter's underscore was the defect written into the signature, and
+    /// the test certified it.
+    ///
+    /// On any target that is not SlateOS, `libcall::kill` answers ENOSYS. So
+    /// this pins the FAILURE path, which is the only one this host can reach,
+    /// and a green run means "logind says so when it cannot signal" rather
+    /// than "killing works". The other half needs a boot test.
     #[test]
-    fn test_kill_session() {
+    fn killing_a_session_says_it_cannot_rather_than_reporting_a_signal() {
         let d = test_daemon();
-        let pid = d.kill_session("1", 15).unwrap();
-        assert_eq!(pid, 100); // leader PID from test_daemon.
+        assert_eq!(
+            d.kill_session("1", 15),
+            Err("this build cannot signal a process")
+        );
+    }
+
+    /// A session whose leader pid is 0 is refused, and for the right reason.
+    ///
+    /// This is where two pieces of today's work meet. `libcall::kill` refuses
+    /// a non-positive pid because `kill(2)` reads it as a process GROUP -- pid
+    /// 0 being the CALLER's own group, so `loginctl kill-session` on a session
+    /// registered without a leader would have signalled logind and everything
+    /// beside it, in response to a request to signal one session.
+    ///
+    /// `Session::new` defaults `leader_pid` to 0, so this is not a contrived
+    /// input: any session created without one has it.
+    ///
+    /// The distinct message matters. Reporting ENOSYS here would say "this
+    /// build cannot signal", which is true of the build and not of this
+    /// session -- and would be wrong on the target, where signalling works and
+    /// this call must still be refused.
+    #[test]
+    fn a_session_with_no_leader_pid_is_refused_before_any_signal() {
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
+        let id = d
+            .create_session(CreateSessionParams {
+                uid: 1000,
+                user: "alice",
+                seat_id: "seat0",
+                ..Default::default()
+            })
+            .expect("session");
+        assert_eq!(d.sessions[&id].leader_pid, 0, "the default really is 0");
+        assert_eq!(
+            d.kill_session(&id, 15),
+            Err("session has no leader pid"),
+            "pid 0 means the caller's own process group, not this session"
+        );
     }
 
     #[test]

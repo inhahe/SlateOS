@@ -149,6 +149,8 @@ pub struct Reloads {
     pub input: bool,
     /// `notifications.yaml` was rewritten.
     pub notifications: bool,
+    /// `session.yaml` was rewritten -- the screen-lock delay.
+    pub session: bool,
 }
 
 /// A picture an application wants the compositor to be holding, or to stop
@@ -680,6 +682,9 @@ fn announce_reloads<T: Transport>(
     }
     if reloads.notifications {
         events.notifications_changed()?;
+    }
+    if reloads.session {
+        events.session_changed()?;
     }
     Ok(())
 }
@@ -1684,6 +1689,12 @@ mod tests {
             .filter_map(|r| match r.body {
                 crate::RequestBody::ReloadAppearance => Some("appearance"),
                 crate::RequestBody::ReloadInput => Some("input"),
+                // Both were falling into the wildcard below, so a test that
+                // announced either saw an empty list and could only assert
+                // that nothing else was sent. Named now, which is what the
+                // wildcard was hiding.
+                crate::RequestBody::ReloadNotifications => Some("notifications"),
+                crate::RequestBody::ReloadSession => Some("session"),
                 _ => None,
             })
             .collect()
@@ -1703,6 +1714,7 @@ mod tests {
             appearance: true,
             input: false,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1716,6 +1728,31 @@ mod tests {
         assert_eq!(reloads_seen(&desktop), ["appearance"]);
     }
 
+    /// A rewritten session file is announced too.
+    ///
+    /// The delay it carries is claimed by the shell at startup and nowhere
+    /// else, so without this announcement a user who changes it waits until
+    /// the next sign-in for it to mean anything.
+    #[test]
+    fn a_rewritten_session_file_is_announced_to_the_compositor() {
+        let mut app = Recorder::new(Response::Redraw).having_written(Reloads {
+            appearance: false,
+            input: false,
+            notifications: false,
+            session: true,
+        });
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(reloads_seen(&desktop), ["session"]);
+    }
+
     /// Drained, not peeked: an implementation that answered the same news for
     /// ever would have the compositor re-read the file on every mouse move for
     /// the rest of the session.
@@ -1725,6 +1762,7 @@ mod tests {
             appearance: true,
             input: false,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1754,6 +1792,7 @@ mod tests {
             appearance: false,
             input: true,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1780,6 +1819,7 @@ mod tests {
             appearance: true,
             input: true,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1817,6 +1857,7 @@ mod tests {
             appearance: true,
             input: false,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");

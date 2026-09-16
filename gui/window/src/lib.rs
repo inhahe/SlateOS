@@ -1261,6 +1261,19 @@ impl<T: Transport> EventLoop<T> {
         self.conn.confirm(RequestBody::ReloadNotifications)
     }
 
+    /// Tell everyone the session settings changed.
+    ///
+    /// The desktop shell answers by re-reading the screen-lock delay and
+    /// re-claiming its idle watch. Without this a delay the user just chose
+    /// takes effect at the next sign-in.
+    ///
+    /// # Errors
+    ///
+    /// As [`notifications_changed`](Self::notifications_changed).
+    pub fn session_changed(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::ReloadSession)
+    }
+
     /// Every window on the desktop, bottom-to-top, as of the last update.
     ///
     /// Empty until the first list arrives — which, for a client that never

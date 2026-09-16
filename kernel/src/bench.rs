@@ -15,6 +15,43 @@
 //! Results are printed to serial in a format that can be compared
 //! against the baselines in `bench/baselines.toml`.
 //!
+//! ## Durations here are measured and printed. They never decide.
+//!
+//! Every `elapsed` comparison in this file is a min/max **accumulator**.
+//! None of them fails anything, and none of them should start to. That was
+//! previously true only by accident -- nothing prevented the next person
+//! writing `if elapsed > N { return Err(..) }` -- so it is written down
+//! here, because a posture nobody stated is a posture that lasts until the
+//! next edit.
+//!
+//! The rule is lane C's (design-decisions 855). Their compositor asserted a
+//! partial frame costs at least 3x less than a full one. Under
+//! `cargo test --workspace`, with dozens of test binaries live, it measured
+//! 2.77x and failed the gate; re-run alone minutes later, no code change
+//! in between, 5.4x and passed. It already took the `min()` of three runs,
+//! and its own comment already said a tight ratio would fail for noise and
+//! had chosen 3x to avoid exactly that. Neither helped, because the load was
+//! sustained for the length of the run. **No threshold would have helped**,
+//! which is the part worth keeping: the problem was never the number.
+//!
+//! 1. **If the property can be counted, count it.** Before writing
+//!    `assert!(elapsed < N)`, ask what the elapsed time stands in for. It is
+//!    usually a count -- frames drawn, nodes visited, bytes copied,
+//!    allocations made -- and a count does not move when the machine is
+//!    busy. Their fix was a `windows_rendered` counter asserting `4 < 19`.
+//!    The timing is still measured and printed, because it is why anyone
+//!    cares; it is just no longer what decides whether the tree is broken.
+//! 2. **If it genuinely cannot be counted, the bound must only catch a
+//!    catastrophe.** The test to apply: can you say the regression it
+//!    catches is *N times*, not *N percent*? If you cannot, you have no
+//!    model of the thing being measured and the bound is a guess wearing a
+//!    number.
+//!
+//! A regression here is caught by a human comparing the printed figures
+//! against `bench/baselines.toml`, not by a threshold, and deliberately so.
+//! Performance work needs the distribution; a pass/fail bound discards it
+//! and reports the one bit that was least informative.
+//!
 //! ## TSC frequency
 //!
 //! The TSC (Time Stamp Counter) is calibrated against the PIT at boot.

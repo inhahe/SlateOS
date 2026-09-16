@@ -528,6 +528,15 @@ pub fn self_test() -> KernelResult<()> {
     let targets = [WaitTarget::PollOnly];
     let n = wait_multiple(&targets, Some(50_000_000), || 0)?; // holds no handle
     let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+    // Audited against 855's second clause. The LOWER bound is the assertion:
+    // a 50 ms timeout that returns in less than 50 ms fired early, which is
+    // the defect, and it is exact rather than a margin. The UPPER bound is a
+    // catastrophe ceiling at 10x nominal -- it catches a timeout that never
+    // fires at all, not one that overshoots, because an overshoot under load
+    // says nothing about this code. Do not tighten it toward the nominal: a
+    // ceiling close enough to 50 ms to detect a slow wakeup is close enough
+    // to be hit by whatever else the host is running, and would then redden
+    // the tree while naming the wrong subsystem.
     if n != 0 || elapsed < 50_000_000 || elapsed > 500_000_000 {
         serial_println!("[multiwait]   FAIL: poll-only timeout returned n={n} after {elapsed}ns");
         return Err(KernelError::InternalError);

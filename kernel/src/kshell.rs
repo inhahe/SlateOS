@@ -56133,7 +56133,12 @@ fn cmd_sysinfo(args: &str) {
             shell_println!("Codename:   {}", os.codename);
             shell_println!("Arch:       {}", os.arch);
             shell_println!("Kernel:     {}", os.kernel_version);
-            shell_println!("Website:    {}", os.website);
+            // Guarded like the `sysinfo` site above. Unguarded, this
+            // prints a label with nothing after it, which reads as a
+            // blank fact rather than an absent one.
+            if !os.website.is_empty() {
+                shell_println!("Website:    {}", os.website);
+            }
             shell_println!("Uptime:     {} s", os.uptime_secs);
         }
         "cpu" => {

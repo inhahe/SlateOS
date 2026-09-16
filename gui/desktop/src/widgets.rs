@@ -516,12 +516,98 @@ impl Default for WidgetGridConfig {
     }
 }
 
-/// What the system-monitor widget says when it has no readings.
+/// Processor and memory as of the last sample.
 ///
-/// Three empty troughs with no explanation would read as "everything is at
-/// zero", which is a measurement. This says which it is.
-const NOT_MEASURED: &str = "Not measured: nothing on this system reports \
-processor, memory or disk use to the desktop.";
+/// Separated from the reading so the arithmetic can be tested without a
+/// `/proc` -- the same seam as `signal_outcome` in the two process managers.
+/// A fraction computed from counters is exactly the kind of thing that is
+/// plausible when wrong.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SystemSample {
+    /// Processor busy over the last interval, 0.0 to 1.0.
+    pub cpu_fraction: Option<f32>,
+    /// Memory in use, 0.0 to 1.0.
+    pub memory_fraction: Option<f32>,
+}
+
+impl SystemSample {
+    /// Busy time as a fraction of the interval between two `/proc/stat` reads.
+    ///
+    /// **Two samples, because one cannot answer this.** `/proc/stat` counts
+    /// since boot, so a fraction taken from a single sample says how the
+    /// machine has spent its life -- after a few hours of uptime that is nearly
+    /// constant whatever the machine is doing, and it looks exactly like a live
+    /// reading. `CpuTimes::since` exists for this and its own docs say why.
+    ///
+    /// **`iowait` counts as idle here, and that is a choice.** `top` shows it
+    /// as its own column, neither busy nor idle. A desktop meter labelled
+    /// "CPU" is read as "how hard is the processor working", and a machine
+    /// blocked on a slow disk is not working hard -- so waiting is not busy.
+    /// Recorded because a silent convention here becomes unexplainable later.
+    ///
+    /// `None` when no time passed between the samples: a ratio over a
+    /// zero-length interval is not a small number, it is not a number.
+    #[must_use]
+    pub fn cpu_busy_fraction(prev: &procinfo::CpuTimes, now: &procinfo::CpuTimes) -> Option<f32> {
+        let d = now.since(prev);
+        let total = d.total();
+        if total == 0 {
+            return None;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "tick counts over one second; f32 is exact far beyond this"
+        )]
+        let idle = (d.idle.saturating_add(d.iowait)) as f32 / total as f32;
+        Some((1.0 - idle).clamp(0.0, 1.0))
+    }
+
+    /// Memory in use as a fraction of the total.
+    ///
+    /// **`available`, not `free`.** Free memory excludes the page cache, which
+    /// the kernel will hand back the moment anything asks -- reporting it as
+    /// "in use" tells the operator their machine is nearly full when it is
+    /// doing exactly what it should. `MemAvailable` is the kernel's own answer
+    /// to "how much could a new program get", which is the question a meter is
+    /// read as answering.
+    ///
+    /// `None` if either figure is missing or the total is zero, rather than a
+    /// fraction of nothing.
+    #[must_use]
+    pub fn memory_used_fraction(m: procinfo::MemInfo) -> Option<f32> {
+        let total = m.total_kib?;
+        let available = m.available_kib?;
+        if total == 0 {
+            return None;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "kibibytes of RAM; f32 is exact to 16 TiB"
+        )]
+        let used = total.saturating_sub(available) as f32 / total as f32;
+        Some(used.clamp(0.0, 1.0))
+    }
+}
+
+/// What a meter's label says when nothing has measured it.
+///
+/// **Per meter, not per widget, and that distinction is the whole of this
+/// change.** The first version set one flag if *any* reading was present and
+/// drew a single line underneath. That is correct while all three are absent
+/// and wrong the moment one arrives: with CPU and memory measured and disk
+/// not, the line disappears and the disk trough sits empty with no
+/// explanation -- which reads as *disk at 0%*.
+///
+/// That is the same argument that made these `Option` rather than `0.0`,
+/// resurfacing for the mixed case. A bar at zero is a reading; so is an empty
+/// trough with nothing said about it. The label is the one place a reader
+/// cannot miss it and cannot attach it to the wrong meter.
+///
+/// It was found by working out what the *next* change makes true -- wiring
+/// `procinfo` gives CPU and memory and cannot give disk, because nothing in
+/// this tree reports free space. No test could reach the mixed state before
+/// that, so nothing was going to catch it.
+const NOT_MEASURED_SUFFIX: &str = " (not measured)";
 
 /// The readings a widget shows that the widget layer cannot derive.
 ///
@@ -1109,7 +1195,6 @@ impl DesktopWidgetManager {
             WidgetKind::SystemMonitor => {
                 let bar_h = 8.0;
                 let mut row = y;
-                let mut measured = false;
                 // Each meter keeps its own role colour. Collapsing the three
                 // into one blue was caught by `the_three_meters_never_look_alike`
                 // and `nothing_that_reports_a_measurement_follows_the_accent`,
@@ -1121,10 +1206,15 @@ impl DesktopWidgetManager {
                     ("Memory", live.memory_fraction, p.green),
                     ("Disk", live.disk_fraction, p.peach),
                 ] {
+                    let heading = if reading.is_some() {
+                        label.to_string()
+                    } else {
+                        format!("{label}{NOT_MEASURED_SUFFIX}")
+                    };
                     commands.push(RenderCommand::Text {
                         x,
                         y: row,
-                        text: label.to_string(),
+                        text: heading,
                         font_size: 10.0,
                         color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                         font_weight: FontWeightHint::Bold,
@@ -1142,7 +1232,6 @@ impl DesktopWidgetManager {
                         corner_radii: CornerRadii::all(4.0),
                     });
                     if let Some(f) = reading {
-                        measured = true;
                         commands.push(RenderCommand::FillRect {
                             x,
                             y: row + 14.0,
@@ -1153,18 +1242,6 @@ impl DesktopWidgetManager {
                         });
                     }
                     row += 32.0;
-                }
-                if !measured {
-                    commands.push(RenderCommand::Text {
-                        x,
-                        y: row,
-                        text: String::from(NOT_MEASURED),
-                        font_size: 9.0,
-                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(width),
-                        overflow: TextOverflow::Ellipsis,
-                    });
                 }
             }
             WidgetKind::Notes => {
@@ -2252,6 +2329,122 @@ mod tests {
         }
     }
 
+    fn ticks(user: u64, system: u64, idle: u64, iowait: u64) -> procinfo::CpuTimes {
+        procinfo::CpuTimes {
+            user,
+            system,
+            idle,
+            iowait,
+            ..procinfo::CpuTimes::default()
+        }
+    }
+
+    /// Busy time is measured over the interval, not over the machine's life.
+    ///
+    /// **This is the trap a single sample sets.** `/proc/stat` counts since
+    /// boot, so a fraction taken from one sample says how the machine has
+    /// spent its whole uptime -- after a few hours that is nearly constant
+    /// whatever is happening, and it looks exactly like a live reading. It
+    /// would be arithmetically correct, derived from genuinely-read kernel
+    /// counters, and would pass any test written about it. It just answers a
+    /// different question from the one a gauge is read as asking.
+    #[test]
+    fn the_processor_reading_is_a_ratio_over_the_interval_not_since_boot() {
+        // A long-running machine that has been mostly idle, and is now busy.
+        let prev = ticks(1_000, 500, 98_500, 0);
+        let now = ticks(1_600, 900, 98_500, 0);
+
+        let f = SystemSample::cpu_busy_fraction(&prev, &now).expect("an interval passed");
+        assert!(
+            (f - 1.0).abs() < 0.001,
+            "the interval was entirely busy and read as {f}"
+        );
+
+        // The control, and the point of the test: the same `now` read on its
+        // own says 2.5%, because that is what this machine has done since it
+        // booted. Nothing is wrong with that number except the question it
+        // answers.
+        let since_boot =
+            SystemSample::cpu_busy_fraction(&procinfo::CpuTimes::default(), &now).expect("a total");
+        assert!(
+            since_boot < 0.05,
+            "control: the since-boot figure should be nearly idle, and was {since_boot}"
+        );
+    }
+
+    /// Waiting on a disk is not working.
+    ///
+    /// A choice rather than a fact -- `top` shows `iowait` as its own column,
+    /// neither busy nor idle. A meter labelled "CPU" is read as "how hard is
+    /// the processor working", and a machine blocked on a slow disk is not
+    /// working hard.
+    #[test]
+    fn time_spent_waiting_on_a_disk_is_not_counted_as_busy() {
+        let prev = ticks(0, 0, 0, 0);
+        let now = ticks(10, 0, 10, 80);
+        let f = SystemSample::cpu_busy_fraction(&prev, &now).expect("an interval");
+        assert!((f - 0.1).abs() < 0.001, "iowait was counted as work: {f}");
+    }
+
+    /// No time between samples is not a small number; it is not a number.
+    #[test]
+    fn a_zero_length_interval_reports_nothing() {
+        let same = ticks(5, 5, 5, 5);
+        assert_eq!(SystemSample::cpu_busy_fraction(&same, &same), None);
+    }
+
+    /// Memory in use is measured against `available`, not `free`.
+    ///
+    /// **Free memory excludes the page cache**, which the kernel hands back the
+    /// moment anything asks for it. Reporting that as "in use" tells an
+    /// operator their machine is nearly full when it is doing exactly what it
+    /// should. `MemAvailable` is the kernel's own answer to "how much could a
+    /// new program get", which is what a memory meter is read as showing.
+    #[test]
+    fn memory_in_use_is_measured_against_available_not_free() {
+        let m = procinfo::MemInfo {
+            total_kib: Some(8_000_000),
+            // Almost nothing free, because the cache has taken it -- but most
+            // of it available, because the cache will give it back.
+            free_kib: Some(200_000),
+            available_kib: Some(6_000_000),
+            ..procinfo::MemInfo::default()
+        };
+        let f = SystemSample::memory_used_fraction(m).expect("both figures");
+        assert!(
+            (f - 0.25).abs() < 0.001,
+            "memory read as {f}; against `free` it would have been 0.975"
+        );
+    }
+
+    /// A missing figure reports nothing rather than a fraction of nothing.
+    #[test]
+    fn memory_with_no_total_reports_nothing() {
+        let m = procinfo::MemInfo {
+            total_kib: None,
+            available_kib: Some(1_000),
+            ..procinfo::MemInfo::default()
+        };
+        assert_eq!(SystemSample::memory_used_fraction(m), None);
+    }
+
+    /// A total of zero reports nothing too, which is not the same case.
+    ///
+    /// The test above passes `total_kib: None` and returns at the `?` without
+    /// ever reaching the zero guard, so it covers a *missing* total and not a
+    /// *zero* one. Sabotaging the guard to `Some(0.0)` left that test green,
+    /// which is how the gap was found -- the two look like one case and are
+    /// two.
+    #[test]
+    fn memory_with_a_zero_total_reports_nothing() {
+        let m = procinfo::MemInfo {
+            total_kib: Some(0),
+            available_kib: Some(0),
+            ..procinfo::MemInfo::default()
+        };
+        assert_eq!(SystemSample::memory_used_fraction(m), None);
+    }
+
     /// With no readings, the meters are empty and the widget says why.
     ///
     /// **The three bars were constants**: CPU at `width * 0.45`, memory at
@@ -2300,10 +2493,65 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            texts.iter().any(|t| t.contains("Not measured")),
-            "three empty troughs and no explanation read as everything at zero"
+        // Each meter says it for itself. A single line under the widget would
+        // pass this too, and would then vanish the moment one reading arrived.
+        for label in ["CPU", "Memory", "Disk"] {
+            assert!(
+                texts
+                    .iter()
+                    .any(|t| t == &format!("{label} (not measured)")),
+                "the {label} meter drew an empty trough and did not say why"
+            );
+        }
+    }
+
+    /// With some readings and not others, the unmeasured meter still says so.
+    ///
+    /// **This is the state the per-meter notice exists for, and it is the one
+    /// no test could reach before.** A single flag set by *any* reading, with
+    /// one line underneath, is correct while all three are absent and wrong the
+    /// moment one arrives: the line goes away and the remaining empty trough
+    /// reads as a measurement of zero.
+    ///
+    /// It is also the state the tree is about to be in. `procinfo` can supply
+    /// processor and memory; nothing anywhere reports free disk space, so the
+    /// disk meter is going to be `None` while its neighbours are not.
+    #[test]
+    fn a_measured_meter_beside_an_unmeasured_one_does_not_hide_it() {
+        let p = Palette::for_mode(false);
+        let mixed = LiveReadings {
+            clock_time: "07:05".to_string(),
+            clock_date: "Tuesday, 3 June".to_string(),
+            cpu_fraction: Some(0.11),
+            memory_fraction: Some(0.73),
+            disk_fraction: None,
+        };
+        let cmds = full_mgr().render(&p, &mixed);
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control: the two measured meters must be drawing fills, or this
+        // is the all-absent case wearing a different fixture.
+        assert_eq!(
+            meter_rects(&cmds).len(),
+            5,
+            "control: two measured meters and one not should draw three troughs and two fills"
         );
+        assert!(
+            texts.iter().any(|t| t == "Disk (not measured)"),
+            "the unmeasured meter went quiet once its neighbours had readings"
+        );
+        for measured in ["CPU", "Memory"] {
+            assert!(
+                texts.iter().any(|t| t == measured),
+                "a measured meter was labelled as unmeasured"
+            );
+        }
     }
 
     /// The three meters never look alike.

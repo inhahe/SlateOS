@@ -96,6 +96,88 @@ pub fn set_thumb_size(doc: &mut Document, size: u32) {
     doc.set_i64(&THUMB_SIZE, i64::from(size));
 }
 
+/// Which labels the icon view draws under each thumbnail.
+const ICON_LABELS: [&str; 2] = ["thumbnails", "labels"];
+
+/// The three labels an icon may carry, each independent of the others.
+///
+/// All three off is a deliberate choice, not an empty state:
+/// `roadmap-detailed.md` §4.1 calls it "a pure-image wall", against "a
+/// labelled contact-sheet look" with all three on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IconLabels {
+    pub name: bool,
+    pub date: bool,
+    pub size: bool,
+}
+
+impl Default for IconLabels {
+    /// The name alone, which is what the icon view drew before any of this was
+    /// choosable -- so a user who never opens the menu sees no change.
+    fn default() -> Self {
+        Self {
+            name: true,
+            date: false,
+            size: false,
+        }
+    }
+}
+
+impl IconLabels {
+    /// Whether any label is drawn at all.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.name || self.date || self.size
+    }
+
+    /// How many lines of text a cell carries.
+    #[must_use]
+    pub fn lines(self) -> u16 {
+        // Saturating, though three booleans cannot overflow a u16: the lint
+        // is right that the reader should not have to prove that, and the
+        // proof stops holding the moment a fourth label is added.
+        u16::from(self.name)
+            .saturating_add(u16::from(self.date))
+            .saturating_add(u16::from(self.size))
+    }
+}
+
+/// The saved icon labels, or the default when nothing is saved.
+///
+/// Unlike the column set, an absent key here is not "nothing chosen" but
+/// "never changed", and the two want the same answer: the name alone.
+#[must_use]
+pub fn icon_labels(doc: &Document) -> IconLabels {
+    let saved = doc.get_seq(&ICON_LABELS);
+    let Some(saved) = saved else {
+        return IconLabels::default();
+    };
+    IconLabels {
+        name: saved.iter().any(|s| s == "name"),
+        date: saved.iter().any(|s| s == "date"),
+        size: saved.iter().any(|s| s == "size"),
+    }
+}
+
+/// Remember which labels the icon view draws.
+///
+/// Written as the list of what is *on*, so the file reads as the answer rather
+/// than as three flags, and an empty list is a real state -- the pure-image
+/// wall -- rather than an absent key.
+pub fn set_icon_labels(doc: &mut Document, labels: IconLabels) {
+    let mut on: Vec<&str> = Vec::new();
+    if labels.name {
+        on.push("name");
+    }
+    if labels.date {
+        on.push("date");
+    }
+    if labels.size {
+        on.push("size");
+    }
+    doc.set_seq(&ICON_LABELS, &on);
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -106,6 +188,59 @@ pub fn set_thumb_size(doc: &mut Document, size: u32) {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_labels_default_to_the_name_alone() {
+        let doc = Document::new();
+        let labels = icon_labels(&doc);
+        assert_eq!(
+            labels,
+            IconLabels {
+                name: true,
+                date: false,
+                size: false
+            }
+        );
+        assert_eq!(labels.lines(), 1);
+        assert!(labels.any());
+    }
+
+    #[test]
+    fn every_combination_of_labels_round_trips() {
+        for name in [false, true] {
+            for date in [false, true] {
+                for size in [false, true] {
+                    let want = IconLabels { name, date, size };
+                    let mut doc = Document::new();
+                    set_icon_labels(&mut doc, want);
+                    assert_eq!(icon_labels(&doc), want, "{want:?} did not survive");
+                }
+            }
+        }
+    }
+
+    /// All three off is a state, not an absence.
+    ///
+    /// The pure-image wall §4.1 names. Stored as an empty list, which has to
+    /// read back as "nothing chosen" rather than falling through to the
+    /// default and putting the name back.
+    #[test]
+    fn turning_every_label_off_is_remembered() {
+        let mut doc = Document::new();
+        let none = IconLabels {
+            name: false,
+            date: false,
+            size: false,
+        };
+        set_icon_labels(&mut doc, none);
+        assert_eq!(
+            icon_labels(&doc),
+            none,
+            "an empty choice reverted to the default"
+        );
+        assert!(!icon_labels(&doc).any());
+        assert_eq!(icon_labels(&doc).lines(), 0);
+    }
 
     #[test]
     fn a_thumbnail_size_round_trips() {

@@ -2984,6 +2984,24 @@ impl DisplayManager {
 pub struct FrameStats {
     /// Time taken to composite the last frame (microseconds).
     pub last_frame_time_us: u64,
+    /// Windows re-rendered during the last frame.
+    ///
+    /// **This exists so a test can stop using the clock.** Whether damage
+    /// tracking narrows the work is a question about how much work is done,
+    /// and `damage_narrows_the_work.rs` was answering it by comparing two
+    /// wall-clock durations. That assertion holds comfortably on an idle
+    /// machine -- eight windows against one is about 5x -- and fails under
+    /// `cargo test --workspace`, where dozens of test binaries run at once:
+    /// it measured 2.77x during a full gate run and 5.4x alone, minutes
+    /// apart, with no code change between.
+    ///
+    /// A flaky assertion in a gate every lane pays is worse than no
+    /// assertion, because it teaches its readers to re-run rather than to
+    /// read. The countable property is the one actually wanted: a partial
+    /// frame re-renders the windows that overlap the damage, and a full
+    /// recomposite re-renders all of them. That number does not move when the
+    /// machine is busy.
+    pub windows_rendered: u64,
     /// Total frames composited since startup.
     pub frames_composited: u64,
     /// Frames dropped (compose took longer than frame interval).
@@ -3005,12 +3023,17 @@ impl FrameStats {
             dropped_frames: 0,
             bypass_frames: 0,
             target_interval,
+            windows_rendered: 0,
             last_frame_start: None,
         }
     }
 
     /// Mark the start of a new frame.
     pub fn begin_frame(&mut self) {
+        // Zeroed here rather than accumulated: the field is "during the last
+        // frame", and a running total would answer a different question while
+        // looking like this one.
+        self.windows_rendered = 0;
         self.last_frame_start = Some(Instant::now());
     }
 
@@ -8792,6 +8815,7 @@ impl Compositor {
     }
 
     fn render_window(&mut self, window_id: WindowId) {
+        self.frame_stats.windows_rendered = self.frame_stats.windows_rendered.saturating_add(1);
         // Gather window data we need (avoiding borrow conflicts with self).
         let win_data = match self.window_ref(window_id) {
             Some(win) if win.is_showing(self.current_workspace) => (

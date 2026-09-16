@@ -83,40 +83,68 @@ fn desktop() -> (Compositor, Vec<compositor::WindowId>) {
 }
 
 /// A cold frame: everything is damaged, so this is the full path.
-fn full_frame() -> u64 {
+fn full_frame() -> (u64, u64) {
     let (mut comp, _) = desktop();
     comp.compose_frame();
-    comp.frame_stats().last_frame_time_us
+    {
+        let s = comp.frame_stats();
+        (s.windows_rendered, s.last_frame_time_us)
+    }
 }
 
 /// A warm frame in which one window redrew its own content.
-fn one_window_frame() -> u64 {
+///
+/// Returns (windows re-rendered, microseconds). The first is what is
+/// asserted; the second is printed.
+fn one_window_frame() -> (u64, u64) {
     let (mut comp, ids) = desktop();
     comp.compose_frame();
     let id = *ids.first().expect("eight windows");
     comp.submit_render(id, window_tree(480.0, 360.0).commands)
         .expect("submit");
     comp.compose_frame();
-    comp.frame_stats().last_frame_time_us
+    let s = comp.frame_stats();
+    (s.windows_rendered, s.last_frame_time_us)
 }
 
+/// Redrawing one window of eight re-renders fewer windows than a full frame.
+///
+/// **This used to compare two wall-clock durations, and it was flaky in the
+/// one place it mattered.** On an idle machine a full recomposite takes
+/// roughly five times a one-window frame and the assertion passed
+/// comfortably; under `cargo test --workspace`, with dozens of test binaries
+/// running at once, it measured 2.77x and failed the whole gate. Minutes
+/// apart, no code change between. Taking `min()` of three runs does not help
+/// when the load is sustained for the length of the run.
+///
+/// **A flaky assertion in a gate every lane pays is worse than no assertion**,
+/// because it teaches its readers to re-run rather than to read -- and the one
+/// time it is right, it is indistinguishable from the times it was not.
+///
+/// The property actually wanted is countable: a partial frame re-renders the
+/// windows overlapping the damage, a full recomposite re-renders all of them.
+/// That number does not move when the machine is busy. The timing is still
+/// measured and printed, because it is the reason anyone cares -- it is just
+/// no longer what decides whether the tree is broken.
 #[test]
 fn redrawing_one_window_costs_a_fraction_of_the_whole_desktop() {
-    let full = (0..3).map(|_| full_frame()).min().expect("three");
-    let steady = (0..3).map(|_| one_window_frame()).min().expect("three");
+    let (full_windows, full_us) = full_frame();
+    let (steady_windows, steady_us) = one_window_frame();
 
-    println!("full recomposite {full} us, one window redrawn {steady} us");
+    println!(
+        "full recomposite {full_windows} window(s) in {full_us} us, one window redrawn {steady_windows} window(s) in {steady_us} us"
+    );
 
-    // A third, not an eighth. What is asserted is that the partial path is
-    // genuinely partial; a tight ratio would fail for the ordinary reason
-    // that these are two measurements on a shared machine. An eighth is what
-    // it actually measures.
+    // The control. Without it this passes when the full frame renders nothing
+    // either -- which is what a broken `desktop()` fixture would produce, and
+    // "0 is not more than 0" would have read as a pass.
     assert!(
-        steady * 3 < full,
-        "redrawing one window of eight cost {steady} us against {full} us for \
-         the whole desktop. Damage tracking is not narrowing the work: check \
-         first whether the windows overlap, which makes every partial \
-         recomposite a full one."
+        full_windows >= 8,
+        "control: a full recomposite of eight windows should re-render all of them, and re-rendered {full_windows}"
+    );
+    assert!(
+        steady_windows < full_windows,
+        "redrawing one window of eight re-rendered {steady_windows} of them, against {full_windows} for the whole desktop. Damage tracking is not narrowing the work: check first whether the windows overlap, which makes every partial recomposite a full one."
     );
 }
 

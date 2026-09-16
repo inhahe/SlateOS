@@ -32,19 +32,66 @@ reported as suppressing nothing. In a tree with as many test-only helpers as
 this one that is not an edge case; it is most of the output. The plain build is
 the configuration the lint is about.
 
-One build per crate rather than one per allow -- the compiler reports every
-dead item at once, so stripping them all together is both faster and more
-accurate than stripping one at a time (removing a single allow can leave a
-caller that is itself dead, hiding the warning).
+**The rule is: does removing this allow change what the compiler says?** Take
+the crate's warnings with every allow in place, then remove one allow and take
+them again. If the two sets are identical, that allow suppressed nothing.
+
+**This is the third rule tried, and the first two were wrong in ways worth
+recording**, because both sounded right.
+
+*Strip them all and take one build.* The reasoning was that the compiler
+reports every dead item at once. It does not: `dead_code` names the **roots**
+of a dead subgraph, so stripping everything lets an item become reachable
+*from another dead item* and go unmentioned. On `apps/credmanager` this called
+twelve allows stale; removing `toggle_star`'s alone produced exactly `method
+toggle_star is never used`. **Wrong about three-quarters of its own output, in
+the direction of telling someone to delete working code.**
+
+*Strip one and look for that item's name.* Closer, and still wrong. Removing
+`remove_folder`'s allow produced a warning about **`set_folder`** -- a
+different item. An allow's removal has effects past the item it sits on,
+because reachability is a graph and an allowed item is still dead for the
+purpose of what it keeps alive. Asking "was my item named?" answers a
+question about one node; asking "did anything change?" answers the question
+that was meant.
+
+The third rule needs no mapping from an allow to an item at all, which is
+also why it has no trouble with block-level allows or with two types sharing a
+method name. It costs one build per allow plus one baseline.
+
+Each result was found by checking a single reported row by hand before
+believing the total. That cost one build each time and would have cost an
+afternoon to act on.
+
+## The signal is not reliable on its own, and the remedy is to apply the list
+
+`cargo check` emits a crate's warnings **only when it actually compiles it**.
+A repeat invocation with nothing changed prints nothing. So the "before" run is
+frequently a cached no-op while the "after" run -- forced by the edit -- is a
+real compile, and the two sides are not comparable.
+
+Measured: with an allow removed, `cargo check -p imageviewer` printed nothing
+on a second run, having printed a warning on the first. Nothing in the source
+changed between them.
+
+**So treat the output as a list of candidates, and let the build be the
+verdict.** Remove them, build every affected package with `--all-targets` --
+which is what this project's lint gate uses -- and restore the ones that warn.
+On the first full sweep that was 38 candidates, of which 11 survived the build
+and 27 did not.
+
+That ordering matters more than it sounds. Hand-checking a sample twice found
+nothing wrong while this checker was still wrong twice over, because the
+hand-check ran the same command and parsed the same output -- it shared the
+defect exactly. Applying the whole list and compiling is the step that
+surfaced both the package-name bug and the cached-warning bug.
 
 ## What it cannot see, said plainly
 
-  * **An allow on a whole `impl` block or module.** The warning names the
-    item; matching it to a block-level allow is guesswork, so those are
-    reported as `unmatched` rather than guessed at either way.
-  * **A name guarded twice** -- two types with an allowed `fn all`, say. An
-    absent warning could mean either is live, so those are reported and not
-    judged.
+  * **Nothing about block-level allows or repeated names**, which the first
+    two rules both stumbled on. Comparing warning sets asks about the allow
+    rather than about an item, so an allow over an `impl` block and two types
+    sharing a `fn all` are both ordinary cases.
   * **Items dead only under a different `--cfg`.** This builds one
     configuration. An allow covering a `cfg(unix)`-only item will look stale
     on a Windows host and is not.
@@ -56,8 +103,8 @@ caller that is itself dead, hiding the warning).
 Every file is restored from the bytes read at the start and the restore is
 verified by SHA-256.
 
-**It edits the working tree, so do not run it beside another build.** The
-stripped files are on disk for the length of one `cargo check`, and a workspace
+**It edits the working tree, so do not run it beside another build.** A file
+is modified for the length of each `cargo check`, one per allow, and a workspace
 gate running at the same time would compile them -- reporting dead-code
 warnings that belong to this tool's scratch state, or worse, a green result
 about a tree that existed for four seconds. The same race cost a misleading
@@ -120,9 +167,9 @@ def _self_test() -> int:
         nonlocal failures
         if got != want:
             failures += 1
-            print(f"FAIL  {label}\n  got  {got!r}\n  want {want!r}")
+            print(f"FAIL  {label}\n  got  {got!r}\n  want {want!r}", flush=True)
         else:
-            print(f"  ok    {label}")
+            print(f"  ok    {label}", flush=True)
 
     src = [
         '#[allow(dead_code, reason = "x")]\n',
@@ -154,6 +201,15 @@ def _self_test() -> int:
     expect("an unrelated allow is left alone",
            bool(ALLOW.search("#[allow(unused_variables)]\n")), False)
 
+    # The package name is not the directory name, and reading the wrong one
+    # produced sixteen confident false positives.
+    expect("the package name comes from Cargo.toml",
+           package_of(ROOT / "gui" / "font"), "osfont")
+    expect("...and is not the directory name",
+           package_of(ROOT / "gui" / "toolkit"), "guitk")
+    expect("a directory with no manifest is not guessed at",
+           package_of(ROOT / "scripts"), None)
+
     out = "warning: method `export_json` is never used\nwarning: field `raw` is never read\n"
     expect("both warning shapes are read",
            set(NEVER_USED.findall(out)), {"export_json", "raw"})
@@ -163,41 +219,122 @@ def _self_test() -> int:
     return 1 if failures else 0
 
 
+PKG_NAME = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
+
+
+def package_of(crate: Path) -> str | None:
+    """The crate's package name, which is **not** its directory name.
+
+    `gui/font` is `osfont`, `apps/tmux` is `tmux-app`, `gui/toolkit` is
+    `guitk`. Passing the directory name to `-p` produced
+
+        error: package ID specification `font` did not match any packages
+
+    which contains neither `error[E` nor `error: could not compile`, so the
+    build-failed check below read it as a clean build with no warnings -- and
+    every allow in every such crate was then reported as suppressing nothing,
+    because removing one also produced no warnings. Three crates, sixteen
+    allows, all wrong, and the wrongness was silent.
+
+    This is the same trap `audit-cli-fabrication.py` hit with `sysinfo`, whose
+    package is `sysinfo-app`: four passing runs that were building a crates.io
+    crate of the same name.
+    """
+    try:
+        text = (crate / "Cargo.toml").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = PKG_NAME.search(text.split("[dependencies]")[0])
+    return m.group(1) if m else None
+
+
+def warnings_of(name: str, crate: Path) -> tuple[set[str], bool]:
+    """The crate's **own** dead-code warnings, and whether the build failed.
+
+    **Only this crate's files, and that distinction cost a whole sweep.**
+    `cargo check -p x` prints warnings from x's dependencies too -- but only
+    when it actually rebuilds them. A dependency already in the cache is
+    replayed silently, so the same command run twice can report different
+    warnings with no source change at all.
+
+    `apps/imageviewer` showed it: a baseline of zero, then one warning after an
+    allow was removed -- `variant SymModBelow is never constructed`, which is
+    in `gui/font`. The allow had nothing to do with it. The comparison was
+    measuring cargo's cache state.
+
+    Filtering on the `-->` line under each warning fixes it: a diagnostic
+    belongs to this crate only if it points at a file inside this crate's
+    directory.
+    """
+    r = subprocess.run(
+        ["cargo", "check", "-p", name, "--target", TARGET],
+        capture_output=True, text=True, errors="replace", cwd=ROOT,
+    )
+    out = r.stdout + r.stderr
+    # Any error line, not two specific ones. `error: package ID specification
+    # ... did not match any packages` matched neither of the originals and was
+    # read as a clean build; a non-zero exit is the fact that matters.
+    if r.returncode != 0 or re.search(r"^error", out, re.M):
+        return set(), True
+    here = str(crate.resolve())
+    lines = out.splitlines()
+    mine = set()
+    for i, ln in enumerate(lines):
+        if not NEVER_USED.search(ln):
+            continue
+        # The `-->` line names the file the diagnostic is about. Without it a
+        # dependency's warning is indistinguishable from this crate's.
+        where = next((w for w in lines[i + 1: i + 4] if "-->" in w), "")
+        path = where.split("-->", 1)[-1].strip().split(":")[0]
+        if path and str((ROOT / path).resolve()).startswith(here):
+            mine.add(ln.strip())
+    return mine, False
+
+
 def check_crate(crate: Path) -> int:
-    name = crate.name
+    name = package_of(crate)
+    if name is None:
+        print(f"--   {crate.name}: no package name in Cargo.toml; not evidence",
+              flush=True)
+        return 0
     files = sorted(crate.rglob("*.rs"))
     originals = {f: f.read_bytes() for f in files}
     digests = {f: hashlib.sha256(b).hexdigest() for f, b in originals.items()}
 
-    guarded: dict[str, list[str]] = {}
-    unmatched = 0
+    sites: list[tuple[Path, str, int]] = []
+    for f in files:
+        lines = originals[f].decode("utf-8", errors="replace").splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            if ALLOW.match(line):
+                sites.append((f, line, i + 1))
+    if not sites:
+        return 0
+
+    stale: list[str] = []
+    skipped = 0
     try:
-        for f in files:
-            text = f.read_text(encoding="utf-8", errors="replace")
+        base, broke = warnings_of(name, crate)
+        if broke:
+            print(f"--   {name}: does not compile as it stands; not evidence", flush=True)
+            return 0
+
+        for path, line_text, lineno in sites:
+            text = originals[path].decode("utf-8", errors="replace")
+            # By line number, not by text. One reason string is often shared by
+            # several items -- `credmanager` reuses one across nine -- and
+            # cutting by text would remove the first every time: that one
+            # measured nine times, the other eight never.
             lines = text.splitlines(keepends=True)
-            for i, line in enumerate(lines):
-                if ALLOW.match(line):
-                    item = guarded_item(lines, i)
-                    if item is None:
-                        unmatched += 1
-                    else:
-                        guarded.setdefault(item, []).append(str(f.relative_to(ROOT)))
-            stripped = ALLOW.sub("", text)
-            if stripped != text:
-                f.write_text(stripped, encoding="utf-8", newline="\n")
-
-        if not guarded and not unmatched:
-            return 0
-
-        r = subprocess.run(
-            ["cargo", "check", "-p", name, "--target", TARGET],
-            capture_output=True, text=True, errors="replace", cwd=ROOT,
-        )
-        out = r.stdout + r.stderr
-        if "error[E" in out or "error: could not compile" in out:
-            print(f"--   {name}: did not compile without its allows; not evidence")
-            return 0
-        dead = set(NEVER_USED.findall(out))
+            cut = "".join(lines[: lineno - 1] + lines[lineno:])
+            path.write_text(cut, encoding="utf-8", newline="\n")
+            after, broke_one = warnings_of(name, crate)
+            path.write_bytes(originals[path])
+            if broke_one:
+                skipped += 1
+                continue
+            if after == base:
+                rel = path.relative_to(ROOT)
+                stale.append(f"{rel}:{lineno}  {line_text.strip()}")
     finally:
         for f, b in originals.items():
             f.write_bytes(b)
@@ -205,24 +342,15 @@ def check_crate(crate: Path) -> int:
                 f"RESTORE FAILED for {f}"
             )
 
-    # **A name guarded twice cannot be judged from the warning.** The
-    # compiler names the item, not which of two `fn all` it meant, so an
-    # absent warning could mean either one is live. Rare -- one crate in
-    # `apps/` -- and reported rather than guessed, because a wrong "delete
-    # this" is exactly the damage this checker exists to prevent elsewhere.
-    ambiguous = sorted(k for k, v in guarded.items() if len(v) > 1)
-    stale = sorted(k for k in guarded if k not in dead and k not in ambiguous)
-    if ambiguous:
-        print(f"??   {name}: {len(ambiguous)} name(s) guarded more than once, "
-              f"not judged: {', '.join(ambiguous)}")
     if stale:
-        print(f"!!   {name}: {len(stale)} allow(s) suppressing nothing")
-        for item in stale:
-            print(f"       {item}  ({guarded[item][0]})")
+        print(f"!!   {name}: {len(stale)} of {len(sites)} allow(s) suppressing nothing", flush=True)
+        for row in stale:
+            print(f"       {row}", flush=True)
     else:
-        print(f"ok   {name}: {len(guarded)} allow(s), all still needed")
-    if unmatched:
-        print(f"       ({unmatched} block-level allow(s) not matched to an item)")
+        print(f"ok   {name}: {len(sites)} allow(s), all still needed", flush=True)
+    if skipped:
+        print(f"       ({skipped} not measured: a duplicate line, or the strip "
+              f"did not compile)")
     return len(stale)
 
 
@@ -257,9 +385,9 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    print(f"{len(crates)} crate(s) with at least one dead_code allow\n")
+    print(f"{len(crates)} crate(s) with at least one dead_code allow\n", flush=True)
     total = sum(check_crate(c) for c in crates)
-    print(f"\n{total} allow(s) suppressing nothing")
+    print(f"\n{total} allow(s) suppressing nothing", flush=True)
     return 0
 
 

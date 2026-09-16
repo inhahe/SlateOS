@@ -1518,7 +1518,6 @@ fn add_key_at_path(
 ///
 /// Used only by [`add_key_at_path`], and therefore reachable exactly when that
 /// is.
-#[allow(dead_code, reason = "used only by `add_key_at_path`")]
 fn get_value_at_path_mut<'a>(
     root: &'a mut JsonValue,
     path: &[PathSegment],

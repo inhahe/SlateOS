@@ -28,6 +28,15 @@ notifsettings = { path = "../../gui/notifsettings" }
 # names the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# The File Associations program's configuration, for the Default Apps page.
+# Read here, written by `apps/fileassoc`, and obeyed by `apps/explorer`, which
+# is what makes a row on that page a real setting rather than a decoration.
+settingsfile = { path = "../../gui/settingsfile" }
+
+# `yamldoc::Document` is named in `defaultapps`'s signature. `settingsfile`
+# hands one back but keeps the type private, so the name comes from here.
+yamldoc = { path = "../../yamldoc" }
+
 # The real compositor, for the one test module that puts the shipped code on
 # *both* ends of the display protocol. A test against a stand-in compositor and
 # a test against a stand-in client can both pass while the two real halves

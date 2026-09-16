@@ -223,7 +223,6 @@ struct VersionInfo {
     // block counts imply is the transcription's only proofreader, and it
     // caught sixteen of the forty rows. `dead_code` is a per-target analysis,
     // so a test-only reader does not count for the binary.
-    #[allow(dead_code, reason = "read by the table's proofreading test")]
     version: u8,
     #[allow(dead_code, reason = "read by the table's proofreading test")]
     ec_level: EcLevel,

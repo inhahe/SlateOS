@@ -1480,8 +1480,34 @@ impl From<DecimalError> for RuntimeError {
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Math(e) => write!(f, "{e}"),
-            Self::UndefinedFunction(name) => write!(f, "undefined function {name}"),
+            // Capitalised rather than reworded, and that is the point.
+            // `DecimalError`'s text is shared with `dc` on purpose — its own
+            // comment says so, "the wording is the calculators' own, so a
+            // caller can print this straight through without restating it and
+            // drifting from the other". GNU words them differently in the two
+            // programs: `bc` says `Divide by zero` and `Square root of a
+            // negative number`, `dc` says `divide by zero` and `square root of
+            // negative number` (no `a`). Our shared strings already match
+            // *bc*'s wording exactly apart from the leading capital, so
+            // capitalising here reaches GNU's bc text without a second copy of
+            // the words existing to fall out of step with the first.
+            Self::Math(e) => {
+                let text = e.to_string();
+                let mut chars = text.chars();
+                match chars.next() {
+                    Some(first) => {
+                        for c in first.to_uppercase() {
+                            write!(f, "{c}")?;
+                        }
+                        f.write_str(chars.as_str())
+                    }
+                    None => Ok(()),
+                }
+            }
+            // Restated, because this one is a different sentence and not a
+            // different case: GNU's is `Function f not defined.`, ending in a
+            // full stop, where ours was `undefined function f`.
+            Self::UndefinedFunction(name) => write!(f, "Function {name} not defined."),
             Self::LogOfNonPositive => f.write_str("log of non-positive number"),
             Self::Halt => f.write_str("halt"),
         }
@@ -1514,6 +1540,22 @@ struct Interpreter {
     /// stated width, so `BC_LINE_LENGTH=10` puts 8 digits on a line. Zero
     /// disables the break; see [`bignum::wrap_number`].
     wrap_chunk: usize,
+    /// The innermost function a runtime error escaped from, for `func=` in the
+    /// diagnostic. `None` means the fault was at the top level, which GNU
+    /// spells `(main)`.
+    ///
+    /// Recorded when the error leaves a function *body* rather than when it is
+    /// raised, because by the time [`Interpreter::run`] catches it the call
+    /// stack has already unwound and there is nothing left to ask. The first
+    /// body it escapes wins and later frames do not overwrite it — measured,
+    /// an error inside `g` called from `f` is `func=g`, the innermost, not the
+    /// outermost.
+    ///
+    /// Cleared before every statement. Without that a *second* error would
+    /// inherit the first one's function: measured, `g(1)` then `1/0` is
+    /// `func=g` and then `func=(main)`, so the reset is load-bearing rather
+    /// than tidiness.
+    fault_fn: Option<String>,
     /// When set, output is captured here instead of going to stdout.
     /// Used by tests to verify output without I/O.
     #[cfg(test)]
@@ -1533,6 +1575,7 @@ impl Interpreter {
             last: Decimal::zero(),
             math_lib,
             wrap_chunk: line_length_from_env("BC_LINE_LENGTH"),
+            fault_fn: None,
             #[cfg(test)]
             output_buf: Vec::new(),
         }
@@ -1663,8 +1706,19 @@ impl Interpreter {
     /// `break` ends the *program text* it was given but leaves the session
     /// alive; `quit` ends the session, and the caller must not read the next
     /// line, let alone evaluate it.
+    /// What `func=` should say for the fault just caught: the innermost
+    /// function the error escaped, or GNU's `(main)` for the top level.
+    fn fault_label(&self) -> &str {
+        self.fault_fn.as_deref().unwrap_or("(main)")
+    }
+
     fn run(&mut self, stmts: &[Stmt]) -> Session {
         for stmt in stmts {
+            // Cleared per statement, not per error: a statement that faults
+            // inside `g` must not leave `g` behind for the next statement's
+            // fault at the top level. Measured on GNU -- `g(1)` then `1/0`
+            // reports `func=g` and then `func=(main)`.
+            self.fault_fn = None;
             match self.exec_stmt(stmt) {
                 Ok(StmtResult::Normal) => {}
                 // Not a diagnostic, and not printed as one: `quit` under an
@@ -1679,7 +1733,18 @@ impl Interpreter {
                 // chose. The name is what `scripts/host-errmsg.py` reads to
                 // tell those apart, and the file stays under that gate — a
                 // whole-file exemption would hide the next real site here.
-                Err(why) => diag!("Runtime error: {why}"),
+                //
+                // `(func=…)` but no `adr=`. GNU prints
+                // `Runtime error (func=(main), adr=3): Divide by zero`, where
+                // `adr` is the byte offset into the dc program it compiled the
+                // statement to. We walk a tree and compile nothing, so there
+                // is no honest value to put there — and it is not a line
+                // number standing in disguise: measured, `1/0` is `adr=3`
+                // whether it is the first line of the file or the fourth. A
+                // number that looks meaningful and is not would be worse than
+                // an absent field, because the absence is visible and the
+                // fiction is not. See `design-decisions.md` §1025.
+                Err(why) => diag!("Runtime error (func={}): {why}", self.fault_label()),
             }
         }
         Session::Continue
@@ -2084,6 +2149,19 @@ impl Interpreter {
                     break;
                 }
                 Err(e) => {
+                    // The error is leaving THIS function's body, so this is
+                    // the frame GNU names — but only if nothing inner claimed
+                    // it first. `get_or_insert_with` is the whole of the
+                    // innermost-wins rule: for `f` calling `g`, `g`'s body is
+                    // unwound before `f`'s, so `g` writes here and `f` finds
+                    // it already set. Measured: GNU says `func=g`.
+                    //
+                    // `Halt` is deliberately not recorded — it is not an
+                    // error and is never printed, so naming a function for it
+                    // would leave a stale value behind for the next real one.
+                    if !matches!(e, RuntimeError::Halt) {
+                        self.fault_fn.get_or_insert_with(|| name.to_string());
+                    }
                     outcome = Err(e);
                     break;
                 }
@@ -3309,6 +3387,16 @@ mod tests {
         interp.output_buf
     }
 
+    /// Run a script and report what `func=` would have said for the LAST
+    /// fault in it.
+    fn fault_context(input: &str) -> String {
+        let mut interp = Interpreter::new(false);
+        let mut parser = Parser::new(input);
+        let stmts = parser.parse_program();
+        interp.run(&stmts);
+        interp.fault_label().to_string()
+    }
+
     fn capture_output_ml(input: &str) -> Vec<String> {
         let mut interp = Interpreter::new(true);
         let mut parser = Parser::new(input);
@@ -3589,6 +3677,90 @@ mod tests {
             diagnostics("s = \"one\ntwo\"\nprint )\n"),
             ["3: syntax error"]
         );
+    }
+
+    #[test]
+    fn a_runtime_error_is_worded_the_way_gnu_words_it() {
+        // GNU capitalises in `bc` and does not in `dc`, and the two programs
+        // do not even use the same words -- `dc` says "square root of negative
+        // number", with no "a". The shared `DecimalError` text is `dc`-shaped
+        // apart from the capital, so `bc` capitalises it rather than keeping a
+        // second copy of the sentence that could drift from the first.
+        assert_eq!(
+            RuntimeError::Math(DecimalError::DivideByZero).to_string(),
+            "Divide by zero"
+        );
+        assert_eq!(
+            RuntimeError::Math(DecimalError::NegativeSqrt).to_string(),
+            "Square root of a negative number"
+        );
+        // A different sentence, not a different case: GNU's ends in a full
+        // stop, and ours used to read `undefined function f`.
+        assert_eq!(
+            RuntimeError::UndefinedFunction("f".to_string()).to_string(),
+            "Function f not defined."
+        );
+        // The capitalisation is a transformation, not a lookup table, so it
+        // must not mangle a message that is already capitalised or empty.
+        // Nothing produces those today; the point is that the next variant
+        // added to `DecimalError` cannot quietly break this.
+        assert_eq!(
+            RuntimeError::LogOfNonPositive.to_string(),
+            "log of non-positive number",
+            "only the Math arm is capitalised -- the others are bc's own text"
+        );
+    }
+
+    #[test]
+    fn a_runtime_error_names_the_function_it_happened_in() {
+        // All measured against GNU bc 1.07.1 before being written here.
+        // Top level is GNU's `(main)`, spelled with the parentheses.
+        assert_eq!(fault_context("1/0\n"), "(main)");
+        assert_eq!(fault_context("sqrt(-1)\n"), "(main)");
+        // A function that was never defined is a fault in the CALLER, because
+        // the callee has no body to be inside of.
+        assert_eq!(fault_context("f(1)\n"), "(main)");
+        // The innermost frame wins. `f` calls `g`, `g` divides by zero, and
+        // GNU says `func=g` -- the frame the fault happened in, not the one
+        // the user typed.
+        assert_eq!(
+            fault_context("define g(x) { return (x/0) }\ndefine f(x) { return (g(x)) }\nf(1)\n"),
+            "g"
+        );
+        // ...and when the callee does not exist, the innermost frame that DOES
+        // exist is the caller, so this is `f` and not `(main)`.
+        assert_eq!(
+            fault_context("define f(x) {\n  return (g(x))\n}\nf(1)\n"),
+            "f"
+        );
+        // The fault in `f`'s own body, with `g` succeeding, is `f`.
+        assert_eq!(
+            fault_context("define g(x) { return (x) }\ndefine f(x) { return (g(x)/0) }\nf(1)\n"),
+            "f"
+        );
+    }
+
+    #[test]
+    fn the_function_name_does_not_survive_into_the_next_statement() {
+        // The reason `run` clears `fault_fn` every statement rather than after
+        // printing. Measured: GNU reports `func=g` and then `func=(main)` for
+        // exactly this script. Without the reset the second fault inherits the
+        // first one's frame and blames a function it never entered -- a wrong
+        // answer in a diagnostic, which is the failure this whole pair of
+        // entries is about.
+        assert_eq!(
+            fault_context("define g(x) { return (x/0) }\ng(1)\n1/0\n"),
+            "(main)"
+        );
+        // The control for it: a run whose only fault IS in `g` still says `g`,
+        // so the assertion above is about the reset and not about the label
+        // being stuck on `(main)` for every script that has two statements.
+        assert_eq!(
+            fault_context("define g(x) { return (x/0) }\n1\ng(1)\n"),
+            "g"
+        );
+        // And a script with no fault at all never acquires a frame.
+        assert_eq!(fault_context("2+2\n"), "(main)");
     }
 
     #[test]

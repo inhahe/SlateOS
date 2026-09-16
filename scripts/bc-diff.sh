@@ -53,8 +53,17 @@
 #
 # Three of the xfails are about identity rather than behaviour — `--help` omits
 # the GNU project's `Report bugs to:` block, `--version` names SlateOS, and the
-# banner does too. Two are behavioural, added 2026-09-16, and both are cases
-# where GNU is the one with the bug:
+# banner does too. Three are behavioural, all added 2026-09-16. In two of them
+# GNU is the one with the bug; the third is a field we cannot honestly produce:
+#
+#   * `adr=` in a runtime error. GNU prints
+#     `Runtime error (func=(main), adr=3): Divide by zero`, where `adr` is the
+#     byte offset into the dc program it compiled the statement to. We walk a
+#     tree and compile nothing, so there is no honest value for it — and it is
+#     not a line number wearing a disguise: measured, `1/0` is `adr=3` whether
+#     it is the first line of the file or the fourth. We emit `func=`, which we
+#     can produce truthfully, and omit `adr=` rather than invent one. An absent
+#     field is visible; a fabricated number is not.
 #
 #   * a missing final newline. GNU calls `print "A"` with no trailing newline a
 #     syntax error and runs nothing. We run the line, because a file is far more
@@ -325,9 +334,9 @@ prog 'sqrt'                    'scale=10\nsqrt(2)\nsqrt(0)\n'
 prog 'length and scale'        'length(123.456)\nscale(123.456)\nlength(0)\n'
 prog 'parentheses and unary'   '-(3+4)\n- -5\n2*-3\n'
 prog 'big numbers'             '2^100\n(2^64)-1\n'
-known_bug TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU
+differs_by_design 'GNU adds adr=, a byte offset into the dc program it compiles to; we walk a tree'
 prog 'division by zero'        '1/0\nprint "after"\n'
-known_bug TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU
+differs_by_design 'GNU adds adr=, a byte offset into the dc program it compiles to; we walk a tree'
 prog 'sqrt of a negative'      'sqrt(-1)\nprint "after"\n'
 
 # --- ibase / obase ------------------------------------------------------------
@@ -356,7 +365,7 @@ prog 'define and call'         'define f(x) { return (x*2) }\nprint f(21), "\\n"
 prog 'recursion'               'define f(n) { if (n<=1) return (1); return (n*f(n-1)) }\nprint f(10), "\\n"\n'
 prog 'auto locals'             'define f(x) { auto t; t = x+1; return (t) }\nt = 99\nprint f(1), " ", t, "\\n"\n'
 prog 'no explicit return'      'define f() { 1 }\nprint f(), "\\n"\n'
-known_bug TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU
+differs_by_design 'GNU adds adr=, a byte offset into the dc program it compiles to; we walk a tree'
 prog 'undefined function'      'print f(1)\nprint "after"\n'
 
 # --- print --------------------------------------------------------------------

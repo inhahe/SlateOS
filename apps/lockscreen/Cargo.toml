@@ -9,11 +9,9 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The password hash, and the constant-time comparison it is checked with. This
 # file used to carry its own copy of both.
-sha2 = { path = "../../sha2" }
 # The password derivation: salt, stretching, and the stored verifier. This
 # file used to keep a bare unsalted SHA-256 of the password, which is both
 # weaker than and incompatible with what the credential store produces.
-pwkdf = { path = "../../pwkdf" }
 # The window and its event loop. Without this the whole program was
 # unreachable: `fn main` was empty.
 oswindow = { path = "../../gui/window" }
@@ -45,6 +43,14 @@ loginusers = { path = "../../gui/loginusers" }
 # would make each assert against the other's data. Same reason `authlib` uses
 # it. See that crate's module docs.
 [dev-dependencies]
+# Key derivation is a *test* dependency now. The shipped lock screen hands the
+# typed password to `authlib` and never computes anything over it -- shape A of
+# requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md. What
+# still needs them is `PasswordValidator`, kept under `#[cfg(test)]` so the trait
+# is exercised against a real derivation rather than a stub, and the regression
+# test that a stored verifier is not a bare `sha256(password)`.
+sha2 = { path = "../../sha2" }
+pwkdf = { path = "../../pwkdf" }
 scratchdir = { path = "../../userspace/scratchdir" }
 # Test-only. The end-to-end "the right password opens the screen" test needs a
 # stored entry, and it computes one with the same hasher `authlib` will

@@ -1455,8 +1455,6 @@ enum RuntimeError {
     Math(DecimalError),
     /// A call to a name that is neither a builtin nor a defined function.
     UndefinedFunction(String),
-    /// `l(x)` for `x <= 0`, where the logarithm is not defined over the reals.
-    LogOfNonPositive,
     /// Not an error: `halt` reached inside a called function.
     ///
     /// A `halt` in a statement position comes back as [`StmtResult::Halt`], but
@@ -1508,7 +1506,6 @@ impl std::fmt::Display for RuntimeError {
             // different case: GNU's is `Function f not defined.`, ending in a
             // full stop, where ours was `undefined function f`.
             Self::UndefinedFunction(name) => write!(f, "Function {name} not defined."),
-            Self::LogOfNonPositive => f.write_str("log of non-positive number"),
             Self::Halt => f.write_str("halt"),
         }
     }
@@ -2393,10 +2390,45 @@ impl Interpreter {
         Ok(result)
     }
 
+    /// What `l(x)` answers for `x <= 0`: GNU's saturating stand-in for minus
+    /// infinity, which is `-(10^scale - 1)` at the current scale.
+    ///
+    /// Measured at six scales rather than one, because the tracker entry
+    /// warned in as many words that a constant matching at `scale=10` "would
+    /// be a new bug wearing the old one's clothes" — and it would have been:
+    ///
+    /// | scale | GNU |
+    /// |---|---|
+    /// | 0 | `0` |
+    /// | 1 | `-9.0` |
+    /// | 5 | `-99999.00000` |
+    /// | 10 | `-9999999999.0000000000` |
+    /// | 20 | twenty nines |
+    /// | 50 | fifty nines |
+    ///
+    /// `scale=0` giving `0` rather than a minus sign is the formula agreeing
+    /// with itself: `10^0 - 1` is zero.
+    ///
+    /// The same sweep answered the entry's other open question. **Every**
+    /// non-positive argument saturates identically — `l(-1)`, `l(-100)` and
+    /// `l(-0.5)` all give the value `l(0)` does — so GNU has no error path
+    /// here at all, and neither do we now.
+    fn log_saturation(&self) -> Decimal {
+        // 10^scale - 1, negated. Built by arithmetic rather than by writing
+        // out nines, so it cannot drift from the formula it is documenting.
+        let ten = Decimal::from_i64(10);
+        let exp = Decimal::from_i64(i64::try_from(self.scale).unwrap_or(i64::MAX));
+        let magnitude = ten
+            .pow(&exp, self.scale)
+            .unwrap_or_else(|_| Decimal::zero())
+            .sub(&Decimal::from_i64(1));
+        magnitude.negate().rescale(self.scale)
+    }
+
     /// Natural logarithm using series: ln(x) = 2 * sum( ((x-1)/(x+1))^(2k+1) / (2k+1) ).
     fn builtin_ln(&self, x: &Decimal) -> Eval {
         if x.is_zero() || x.is_negative() {
-            return Err(RuntimeError::LogOfNonPositive);
+            return Ok(self.log_saturation());
         }
         let scale = self.working_scale();
         let one = Decimal::from_i64(1);
@@ -3825,6 +3857,51 @@ mod tests {
     }
 
     #[test]
+    fn the_log_of_a_non_positive_number_saturates_as_gnu_does() {
+        let ml = |expr: &str, scale: usize| -> String {
+            let src = format!("scale={scale}\n{expr}\n");
+            let mut interp = Interpreter::new(true);
+            let mut parser = Parser::new(&src);
+            let stmts = parser.parse_program();
+            interp.run(&stmts);
+            interp.output_buf.join("")
+        };
+
+        // `-(10^scale - 1)`, rendered at the current scale. Measured against
+        // GNU bc 1.07.1 at every scale below -- and at six of them rather than
+        // one, because a constant that happened to match at `scale=10` would
+        // have looked exactly like a fix.
+        assert_eq!(ml("l(0)", 0), "0");
+        assert_eq!(ml("l(0)", 1), "-9.0");
+        assert_eq!(ml("l(0)", 5), "-99999.00000");
+        assert_eq!(ml("l(0)", 10), "-9999999999.0000000000");
+        assert_eq!(ml("l(0)", 20), "-99999999999999999999.00000000000000000000");
+        // `scale=0` answering `0` and not `-0` is the formula agreeing with
+        // itself: `10^0 - 1` is zero, and zero has no sign.
+        assert_eq!(ml("l(0)", 0), "0");
+
+        // EVERY non-positive argument, not just zero. GNU has no error path
+        // here, which the entry listed as unmeasured and this settles.
+        for arg in ["l(-1)", "l(-100)", "l(-0.5)", "l(0)"] {
+            assert_eq!(ml(arg, 10), "-9999999999.0000000000", "on {arg}");
+        }
+
+        // The control: a positive argument still computes a logarithm rather
+        // than saturating. Without this, an `l` that returned the sentinel for
+        // everything would pass every assertion above.
+        assert_eq!(ml("l(1)", 10), "0");
+        assert_eq!(ml("l(2)", 10), ".6931471805");
+        assert_eq!(ml("l(7)", 10), "1.9459101490");
+        assert_eq!(ml("l(0.5)", 10), "-.6931471805");
+        // `e(l(7))` is `6.9999999996`, NOT `7.0000000000` -- measured on GNU,
+        // which answers the same. Written down as the round trip really comes
+        // out rather than as the number it ought to be: the first draft of
+        // this line asserted the tidy value, which is a claim about arithmetic
+        // nobody performed.
+        assert_eq!(ml("e(l(7))", 10), "6.9999999996");
+    }
+
+    #[test]
     fn a_runtime_error_is_worded_the_way_gnu_words_it() {
         // GNU capitalises in `bc` and does not in `dc`, and the two programs
         // do not even use the same words -- `dc` says "square root of negative
@@ -3845,15 +3922,10 @@ mod tests {
             RuntimeError::UndefinedFunction("f".to_string()).to_string(),
             "Function f not defined."
         );
-        // The capitalisation is a transformation, not a lookup table, so it
-        // must not mangle a message that is already capitalised or empty.
-        // Nothing produces those today; the point is that the next variant
-        // added to `DecimalError` cannot quietly break this.
-        assert_eq!(
-            RuntimeError::LogOfNonPositive.to_string(),
-            "log of non-positive number",
-            "only the Math arm is capitalised -- the others are bc's own text"
-        );
+        // Only the `Math` arm is capitalised; `Halt` is bc's own text and is
+        // never printed at all. Asserted so that a future variant cannot be
+        // added to the capitalising arm by accident.
+        assert_eq!(RuntimeError::Halt.to_string(), "halt");
     }
 
     #[test]

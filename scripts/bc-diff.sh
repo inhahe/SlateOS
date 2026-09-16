@@ -394,8 +394,14 @@ prog 'mathlib a and j'         'scale=10\nprint a(1), "\\n", j(0,1), "\\n"\n' -l
 # implementation that inverts but does not reduce passes `a(2)` and fails here.
 prog 'mathlib a across its range' 'scale=10\nprint a(0), "\\n", a(0.5), "\\n", a(2), "\\n", a(-1), "\\n"\n' -l
 prog 'mathlib a near the reduction boundary' 'scale=10\nprint a(0.06), "\\n", a(0.07), "\\n", a(1.0001), "\\n", a(100), "\\n"\n' -l
-known_bug TD-B-BC-MATHLIB-LOG-ERRORS-WHERE-GNU-SATURATES
 prog 'log of zero'             'scale=10\nprint l(0), "\\n"\n' -l
+# The saturation value is `-(10^scale - 1)`, so a row at ONE scale cannot tell
+# a correct implementation from a hard-coded constant -- which is precisely the
+# trap the tracker entry warned about. Two more scales, either side, and a
+# negative argument, since GNU saturates for every non-positive input and not
+# only for zero.
+prog 'log of zero at other scales' 'scale=1\nprint l(0), "\\n"\nscale=20\nprint l(0), "\\n"\n' -l
+prog 'log of a negative'       'scale=10\nprint l(-1), "\\n", l(-0.5), "\\n"\n' -l
 
 # --- comments and whitespace --------------------------------------------------
 prog 'block comment'           '/* a comment */ 1+1\n'

@@ -75095,7 +75095,47 @@ fixes — the question to ask is not "how do I ignore other writers" but "what i
 this assertion actually claiming, and is that claim still true when the system
 is busy".
 
-## TD-B-COREUTILS-PRINT-THE-HOSTS-ERROR-TEXT (lane B, 2026-08-22) — OPEN
+## TD-B-COREUTILS-PRINT-THE-HOSTS-ERROR-TEXT (lane B, 2026-08-22) — FIXED 2026-09-16
+
+**Closed: the ratchet is empty.** `scripts/host-errmsg.py --check` reports
+`0 file(s) affected; 0 not in the baseline; 0 baseline line(s) now stale`, and
+`scripts/host-errmsg-baseline.txt` has 0 entries.
+
+**The last two bins were `diff` and `patch`**, 5 sites each. `patch` was
+half-converted -- one site already called `coreutils::errmsg::strerror` while
+five interpolated the host's `Display` -- which is exactly the state this entry
+warns about: a half-converted bin prints two wordings for the same failure, so
+the reader cannot tell which one the next error will use.
+
+**The counts in the section below are a month stale and were never corrected.**
+It says 92 sites across 29 bins. When measured today the answer was 2 files.
+The work was done incrementally and nothing updated the prose, so a reader
+picking this up would have budgeted for 29 bins and found two. The live figure
+is whatever `host-errmsg.py` prints; this paragraph is the only part of the
+entry that should be trusted about scale.
+
+**One conversion I made and reverted, because the distinction matters.**
+`patch.rs:1489` is `diag!("patch: {e}")` where `e` is a `String`, not an
+`io::Error`. It was never a finding and the scanner never reported it. I
+converted it anyway, because I worked from the `{e}` SPELLING rather than from
+the scanner's list, and `strerror(&e)` does not compile against a `String`.
+The compiler caught it in five seconds -- but the same mistake against a type
+that happened to satisfy the signature would have silently replaced a
+domain-specific message with a POSIX errno sentence. Convert the sites the
+tool names, not the ones that look similar.
+
+**And an argument list that needed reordering**, which the entry predicts: the
+multi-line `diag!("patch: cannot create backup {}: {e}", ...)` became two `{}`
+with one argument. That is why the guidance says to bind `let why = strerror(&e);`
+rather than inline -- advice I did not follow at the multi-line sites and
+should have.
+
+39 + 70 tests pass across the two bins; clippy has no deny-level findings and
+no new warnings at any converted line.
+
+The description below is kept in the tense it was written in.
+
+**The original entry, 2026-08-22, follows.**
 
 **In short:** When a tool like `cp` or `tar` fails to open a file, it prints a
 sentence explaining why — "No such file or directory". That sentence does not

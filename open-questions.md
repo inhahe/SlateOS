@@ -2414,13 +2414,20 @@ Recorded in `known-issues.md` as
 `TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED`, which had the analysis but
 was not in this file — so it was never actually in front of you.
 
-## B-Q21 — [B] 211 of our 214 userspace programs are never installed. Should they be? — Status: OPEN
+## B-Q21 — [B] 203 of the 278 programs we have written are never installed. Should they be? — Status: OPEN
 
-**In short:** we have written about 214 small programs for this OS. Only three
-of them actually end up on the disk image that boots — everything else is built,
-tested, and then left behind. The reason is size: they all together are bigger
-than the image we build. The question is whether to make the image bigger, pick
-a subset deliberately, or leave things as they are.
+**In short:** we have written 278 small programs for this OS. 75 of them end up
+on the disk image that boots; the other 203 are built, tested, and then left
+behind. The reason is size: together they are bigger than the image we build.
+The question is whether to make the image bigger, pick a subset deliberately,
+or leave things as they are.
+
+*(Corrected 2026-09-16: this first said "211 of 214", which counted CRATES and
+called them programs. One crate — `coreutils` — holds 83 of the programs, so
+counting crates understates what ships by a lot. The image also carries 14
+compiled-Python utilities promoted by the fastpy block — `cat`, `ls`, `grep`,
+`mv` and others — so `/bin` holds about 89 commands we wrote, not three. The
+decision below is unchanged; the scale of it is not what I first said.)*
 
 **The numbers, measured 2026-09-16** (alias lines of the form `ranlib = ar`
 resolved to their producer, so these count crates rather than names).
@@ -2428,20 +2435,24 @@ resolved to their producer, so these count crates rather than names).
 
 | producer | names it supplies |
 |---|---|
-| `coreutils` | 70 |
+| `coreutils` | 71 (including `awk`) |
 | `ar` | 3 (`ar`, `ranlib`, `strip`) |
 | `logrotate` | 1 |
-| **no producer anywhere in the tree** | 1 — `awk` |
 
 So **3 of 214 `userspace/` crates reach `/bin`**, and `/bin` is the only
 place userspace binaries land: the rootfs script's only other destinations
 are `/tests`, `/lib` and `/usr/share/make`, with no `/sbin` or `/usr/bin`.
 
-**`awk` is a separate small finding, noted here rather than filed alone.**
-The manifest names it and nothing in the tree implements it — no
-`userspace/awk`, no `awk.rs`, no multicall alias. The rootfs build counts it
-in `SLATE_MISSING` and reports it, so this is loud rather than silent: the
-manifest is promising something that has never existed, not regressing.
+**Correction, 2026-09-16, made before you read this.** An earlier version of
+this entry said `awk` had *no producer anywhere in the tree*. That was my
+measurement being wrong, not the tree. `awk` is
+`userspace/coreutils/src/bin/awk/` — cargo's directory form for a
+multi-file binary (`main.rs`, `lex.rs`, `parse.rs`, `interp.rs`, and four
+more), and it passes 171 differential cases against GNU awk. My scan looked
+only at `src/bin/*.rs` files and did not know about `src/bin/<name>/main.rs`,
+so it reported a working implementation as absent. The count of crates
+reaching `/bin` is unaffected — `awk` ships from `coreutils`, which was
+already counted.
 
 **Why, and it is a real constraint rather than an oversight.** All 276 built
 binaries come to 204 MiB against a fixed 384 MiB image that already carries

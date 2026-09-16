@@ -24,6 +24,7 @@
 //! ```
 
 use coreutils::diag;
+use coreutils::errmsg::strerror;
 use coreutils::quote;
 use coreutils::quote::quotef_os;
 use coreutils::stdfd::Stream;
@@ -1504,7 +1505,7 @@ fn main() {
     if let Some(dir) = &opts.directory
         && let Err(e) = env::set_current_dir(dir)
     {
-        diag!("patch: {}: {e}", quotef_os(dir));
+        diag!("patch: {}: {}", quotef_os(dir), strerror(&e));
         process::exit(2);
     }
 
@@ -1524,7 +1525,7 @@ fn main() {
                     // the same `os error` trim: coreutils::errmsg gives the
                     // POSIX text an errno really has, which is what a C
                     // program prints.
-                    coreutils::errmsg::strerror(&e)
+                    strerror(&e)
                 );
                 process::exit(2);
             }
@@ -2216,8 +2217,9 @@ fn main() {
                 let backup_path = [file_path.as_slice(), b".orig"].concat();
                 if let Err(e) = fs::copy(&file_path_os, quote::os_from_bytes(&backup_path)) {
                     diag!(
-                        "patch: cannot create backup {}: {e}",
-                        quote::quotef(&backup_path)
+                        "patch: cannot create backup {}: {}",
+                        quote::quotef(&backup_path),
+                        strerror(&e)
                     );
                 }
             }
@@ -2264,11 +2266,19 @@ fn main() {
                 // `-E` removes a file the patch has emptied. Measured: the file
                 // is gone from the tree, not left at zero length.
                 if let Err(e) = fs::remove_file(&dest_os) {
-                    diag!("patch: cannot remove {}: {e}", quote::quotef(&dest));
+                    diag!(
+                        "patch: cannot remove {}: {}",
+                        quote::quotef(&dest),
+                        strerror(&e)
+                    );
                     any_failed = true;
                 }
             } else if let Err(e) = write_result(&dest_os, &output, opts.output_file.is_some()) {
-                diag!("patch: cannot write {}: {e}", quote::quotef(&dest));
+                diag!(
+                    "patch: cannot write {}: {}",
+                    quote::quotef(&dest),
+                    strerror(&e)
+                );
                 any_failed = true;
             }
         }

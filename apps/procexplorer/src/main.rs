@@ -3492,7 +3492,20 @@ mod tests {
         // The row the toolbar acts on, so the menu acts on the same one.
         let row = state.visible_indices[0];
         let pid = state.processes[row].pid;
+
+        // **Not the fixture's own status.** A resume that writes the row sets
+        // it to Running, and the demo's first process is already Running -- so
+        // against an unmodified fixture "the status did not change" is
+        // satisfied by that write as readily as by its absence. Sysmonitor's
+        // identical test proved it under sabotage: the restyle stayed green
+        // until the fixture started somewhere else.
+        state.processes[row].status = ProcessStatus::Sleeping;
         let was = state.processes[row].status;
+        assert_ne!(
+            was,
+            ProcessStatus::Running,
+            "control: the starting status must differ from the one a bad resume would write, or this assertion cannot fail"
+        );
         for act in [
             ProcessExplorerState::kill_selected,
             ProcessExplorerState::pause_selected,

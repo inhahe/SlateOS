@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS System Monitor — graphical dashboard for CPU, memory, disk, network, and process monitoring"
 [dependencies]
+# `kill(2)` is stateful and therefore reachable only through the C ABI,
+# per design-decisions 768. `libcall` is that door.
+libcall = { path = "../../libcall" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

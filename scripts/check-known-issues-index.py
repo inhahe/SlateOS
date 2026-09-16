@@ -68,7 +68,26 @@ HEADING = re.compile(r"^## (TD-[A-Z]-.*)$", re.MULTILINE)
 # Hence `--triage`, below. The point is not that counting is hard, it is that
 # the vocabulary has exactly one home and a reader who wants a number should
 # not have to reconstruct it.
-MARKERS = ("fixed", "resolved", "withdrawn", "closed", "done")
+# 2026-09-15 added `cleared` and `retracted`, which is the fourth and fifth
+# entry on this list and the same lesson each time: the vocabulary is whatever
+# the writers reached for, not whatever seemed sufficient.
+#
+# `retracted` is the sharpest case for that. The self-test below already
+# carries `TD-C-THE-HTTP-CLIENT-CANNOT-MAKE-A-REQUEST -- **WITHDRAWN, THE
+# CLAIM WAS FALSE**`, and the file also contains `TD-B-THE-THIRTY-TWO-SUITES-
+# ... -- **RETRACTED, THE CLAIM WAS FALSE**`. The identical sentence, one
+# synonym apart, and only one of them counted.
+#
+# `cleared` came from `TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY
+# -- GATED 2026-08-23, backlog CLEARED 2026-08-23 (1798 -> 0)`. A backlog taken
+# to zero is as closed as an entry gets.
+#
+# `triaged` is deliberately NOT here. `TD-C-THE-STRANDED-SERIALISER-COUNT-WAS-
+# MOSTLY-NOT-DOORS -- TRIAGED 2026-09-15` has been assessed, not fixed, and
+# adding the word would close an entry its author left open. The test for a new
+# word is whether it means the work is DONE, not whether it appears where a
+# status goes.
+MARKERS = ("fixed", "resolved", "withdrawn", "closed", "done", "cleared", "retracted")
 MARKER = re.compile(r" -- [*]{0,2}(" + "|".join(MARKERS) + r")", re.IGNORECASE)
 # Whether a heading is marked closed, decided from the part AFTER the slug.
 #
@@ -238,6 +257,23 @@ def _self_test() -> int:
         ("TD-C-A-THING (lane C, 2026-08-22)", False, "an inline date is not a status"),
         ("TD-B-FIXED-POINT-MATH-IS-WRONG", False, "FIXED inside the slug is a name"),
         ("TD-C-RESOLVED-CONFLICTS-ARE-LOST", False, "RESOLVED inside the slug is a name"),
+        # Added 2026-09-15, both transcribed rather than invented, like the
+        # rest: each was being counted OPEN by this checker while its heading
+        # said otherwise in a word the list did not have.
+        ("TD-B-THE-THIRTY-TWO-SUITES-THAT-VERIFY-THE-CHECKERS-ARE-THEMSELVES-RUN-BY-NOTHING "
+         + EM + " **RETRACTED, THE CLAIM WAS FALSE**",
+         True, "RETRACTED, the same sentence as the WITHDRAWN case two lines up"),
+        ("TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY (lane B, 2026-08-22) "
+         + EM + " GATED 2026-08-23, backlog CLEARED 2026-08-23 (1798 " + chr(0x2192) + " 0)",
+         True, "CLEARED, in a heading that also says GATED"),
+        # The control, and the reason this is two words rather than four.
+        # TRIAGED sits exactly where a status goes and does not mean done;
+        # counting it closed would shut an entry its author left open.
+        ("TD-C-THE-STRANDED-SERIALISER-COUNT-WAS-MOSTLY-NOT-DOORS -- TRIAGED 2026-09-15",
+         False, "TRIAGED is an assessment, not a closure"),
+        ("TD-B-A-THING -- GATED 2026-08-23",
+         False, "GATED alone says a gate exists, not that the work is done"),
+        ("TD-B-CLEARED-BUFFERS-ARE-NOT-ZEROED", False, "CLEARED inside the slug is a name"),
     ]
     bad = 0
     for heading, want, why in closed_cases:

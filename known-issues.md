@@ -150398,7 +150398,38 @@ rather than me.
 apps wired their fixture into the constructor and broke 6 to 66 tests each;
 the one that wired it into `main` broke none. The fix is identical either way,
 so the cost is entirely in where the call sat.
-## TD-B-BLKID-HAS-NO-UDEV-OUTPUT-FORMAT -- OPEN 2026-09-15
+## TD-B-BLKID-HAS-NO-UDEV-OUTPUT-FORMAT -- FIXED 2026-09-16
+
+`blkid -o udev` is implemented, to the measured reference behaviour below
+rather than to a guess. `OutputFormat::Udev` emits `ID_FS_TYPE`, `ID_FS_UUID`
+/`_ENC`, `ID_FS_LABEL`/`_ENC`, `ID_PART_ENTRY_UUID` and
+`ID_PART_ENTRY_NAME`/`_ENC`. 23 -> 27 tests, clippy clean.
+
+**Two encoders, not one, and the tests exist to keep them apart.** The entry
+below says "Do not reuse one encoder for both -- they differ, and the
+difference is the point of having two tags", so the regression to guard is
+precisely somebody tidying them into one function. Probed: replacing
+`udev_plain`'s body with `udev_encode(raw)` fails the suite.
+
+The control is the pair `AÿþB` and `AþÿB` -- two DIFFERENT labels
+that the plain tag renders identically as `A__B`, while `_ENC` keeps them
+apart. That is the same collision `from_utf8_lossy` caused in this program
+before labels were carried as bytes, which is why the lossy tag is only safe
+to ship *alongside* the reversible one.
+
+`ID_FS_UUID_ENC` is emitted even though a UUID is hex-and-dashes and needs no
+escaping: a consumer reading `_ENC` uniformly should not have to special-case
+the one field that happens to be safe.
+
+No `DEVNAME` line, unlike `-o export`. `-o udev` is consumed by a udev rule
+that already knows which device it is processing, and the reference does not
+emit one -- checked rather than carried over from the neighbouring format.
+
+The description below is kept in the tense it was written in.
+
+---
+
+**The original entry, 2026-09-15, follows verbatim.**
 
 `blkid -o udev` is the one output format util-linux has that we do not. It is
 refused honestly today -- `unknown output format: udev` -- so nothing claims

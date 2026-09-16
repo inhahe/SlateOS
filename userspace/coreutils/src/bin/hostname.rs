@@ -40,7 +40,7 @@
 use coreutils::diag;
 use coreutils::stdfd;
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, ErrorKind, Write};
 use std::path::Path;
@@ -71,11 +71,23 @@ const PROC_DOMAINNAME: &str = "/proc/sys/kernel/domainname";
 /// Resolver configuration, the source of the domain part for `-f` and `-d`.
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 
-/// Interface address table, the source for `-i` and `-I`.
-const PROC_IF_INET: &str = "/proc/net/if_inet";
+/// The kernel's network block, and the ONLY address source that exists on
+/// SlateOS.
+///
+/// `/proc/net` is a file here, not a directory -- see `procfs.rs`'s
+/// `ROOT_FILES` and `gen_net()` -- so nothing can live beneath it.
+const PROC_NET: &str = "/proc/net";
 
-/// Per-interface network directory, the fallback source for `-i` and `-I`.
-const SYS_NET_DIR: &str = "/sys/class/net";
+/// Interface address table, the source for `-i` and `-I` on systems that have
+/// one.
+///
+/// NOTHING IN THIS TREE PRODUCES IT. Two programs read it -- this one and
+/// `userspace/ifconfig` -- and no kernel code writes it, which is why both
+/// fell through to a fallback. Kept as a second choice rather than deleted
+/// because it costs one `read` that fails, and removing it would leave
+/// `ifconfig` the only reader of a path with no producer. Tracked in
+/// `known-issues.md`.
+const PROC_IF_INET: &str = "/proc/net/if_inet";
 
 /// Maximum total host name length, RFC 1123 §2.1.
 const MAX_HOSTNAME_LEN: usize = 253;
@@ -132,6 +144,7 @@ enum Action {
 /// non-UTF-8 byte surviving the trip.
 #[cfg(unix)]
 fn os_from_bytes(b: &[u8]) -> OsString {
+    use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     OsStr::from_bytes(b).to_os_string()
 }
@@ -619,34 +632,64 @@ fn canonical_in_hosts(content: &[u8], name: &[u8]) -> Option<Vec<u8>> {
 /// Addresses on every interface: the address table if it has any, otherwise a
 /// scan of the per-interface directories.
 fn read_addresses() -> Vec<Vec<u8>> {
+    // `/proc/net` FIRST, because on SlateOS it is the only one of these that
+    // exists. It is a FILE, not a directory -- `procfs.rs`'s `ROOT_FILES`
+    // lists `net` and `gen_net()` writes a readable block -- so
+    // `/proc/net/if_inet` cannot exist here at all, whatever it may be on
+    // another system.
+    if let Ok(content) = fs::read(PROC_NET) {
+        let ips = parse_proc_net(&content);
+        if !ips.is_empty() {
+            return ips;
+        }
+    }
     if let Ok(content) = fs::read(PROC_IF_INET) {
         let ips = parse_proc_if_inet(&content);
         if !ips.is_empty() {
             return ips;
         }
     }
-    scan_interface_dir()
+    // NO FALLBACK TO THE INTERFACE DIRECTORY.
+    //
+    // `/sys/class/net/<if>/address` is the LINK-LAYER address, and returning
+    // it here made `hostname -I` answer `bc:a8:a6:f8:91:20` -- a MAC, exit 0,
+    // to a caller asking for an IP address. The old code even filtered
+    // `00:00:00:00:00:00`, which is a MAC-shaped sentinel, so what it was
+    // reading was never in doubt.
+    //
+    // Printing nothing is the right answer when no address source is
+    // readable: `hostname -I` on a host with no addresses prints an empty
+    // line, and a script that gets nothing can tell. A script that gets a MAC
+    // cannot, and will put it in a URL.
+    Vec::new()
 }
 
-/// Read `<SYS_NET_DIR>/*/address`, skipping loopback and all-zero addresses.
-fn scan_interface_dir() -> Vec<Vec<u8>> {
-    let mut addrs = Vec::new();
-    let Ok(entries) = fs::read_dir(Path::new(SYS_NET_DIR)) else {
-        return addrs;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name() == OsStr::new("lo") {
-            continue;
-        }
-        let Ok(content) = fs::read(entry.path().join("address")) else {
+/// IPv4 address from `/proc/net`, which on SlateOS is a readable block:
+///
+/// ```text
+/// Interface: eth0  (UP)
+///   MAC:     52:54:00:12:34:56
+///   IPv4:    10.0.2.15
+///   Netmask: 255.255.255.0
+/// ```
+///
+/// Only the `IPv4:` line is taken. The `MAC:` line sits two lines above it and
+/// is exactly what the old fallback was reporting as an address, so a parser
+/// here that matched on "the value after a colon" would reintroduce the bug it
+/// replaces -- the key is checked, not just the shape.
+fn parse_proc_net(content: &[u8]) -> Vec<Vec<u8>> {
+    let mut ips = Vec::new();
+    for line in content.split(|&b| b == b'\n') {
+        let line = trim(line);
+        let Some(rest) = line.strip_prefix(b"IPv4:") else {
             continue;
         };
-        let addr = trim(&content);
-        if !addr.is_empty() && addr != b"00:00:00:00:00:00" && !is_loopback(addr) {
-            addrs.push(addr.to_vec());
+        let addr = trim(rest);
+        if !addr.is_empty() && !is_loopback(addr) && addr != b"0.0.0.0" {
+            ips.push(addr.to_vec());
         }
     }
-    addrs
+    ips
 }
 
 /// Write the name to the live parameter and to the persistent file.
@@ -881,6 +924,41 @@ mod tests {
     const HOSTS: &[u8] = b"127.0.0.1\tlocalhost\n\
 127.0.1.1\tLogoplex3.localdomain\tLogoplex3\n\
 ::1     ip6-localhost ip6-loopback\n";
+
+    /// `/proc/net` as `gen_net()` writes it.
+    const PROC_NET_BLOCK: &[u8] = b"Interface: eth0  (UP)\n\
+  MAC:     52:54:00:12:34:56\n\
+  IPv4:    10.0.2.15\n\
+  Netmask: 255.255.255.0\n\
+  Gateway: 10.0.2.2\n\
+  DNS:     10.0.2.3\n";
+
+    #[test]
+    fn an_address_query_never_answers_with_a_mac() {
+        // The bug this replaces: with no readable address source, `-I` fell
+        // back to `/sys/class/net/<if>/address` -- the LINK-LAYER address --
+        // and answered `bc:a8:a6:f8:91:20`, exit 0, to a caller asking for an
+        // IP. A script cannot tell that from an address and will put it in a
+        // URL.
+        assert_eq!(parse_proc_net(PROC_NET_BLOCK), vec![b"10.0.2.15".to_vec()]);
+
+        // The MAC sits TWO LINES ABOVE the address in the same block, so a
+        // parser matching "the value after a colon" would take it. The key is
+        // checked, and this is the case that says so.
+        let ips = parse_proc_net(PROC_NET_BLOCK);
+        assert!(
+            !ips.iter().any(|a| a.contains(&b':')),
+            "an IPv4 answer must not contain a colon: {ips:?}"
+        );
+
+        // Nothing to report is an empty list, not a guess. `-I` then prints an
+        // empty line, which a caller can act on.
+        assert!(parse_proc_net(b"Interface: eth0  (DOWN)\n  MAC: 52:54:00:12:34:56\n").is_empty());
+        assert!(parse_proc_net(b"").is_empty());
+        // Loopback and the unconfigured address are not answers either.
+        assert!(parse_proc_net(b"  IPv4:    127.0.0.1\n").is_empty());
+        assert!(parse_proc_net(b"  IPv4:    0.0.0.0\n").is_empty());
+    }
 
     #[test]
     fn the_fqdn_comes_from_the_hosts_table_not_the_search_domain() {

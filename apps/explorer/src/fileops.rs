@@ -4400,4 +4400,33 @@ mod tests {
         assert!(meta.file_type().is_symlink());
         assert_eq!(fs::read_to_string(&made).expect("resolves"), "hello");
     }
+
+    /// Two names that differ only in undecodable bytes get different scratch
+    /// names.
+    ///
+    /// The collision this guards is silent and destructive: with a lossy
+    /// scratch name both files copy through `.<U+FFFD>.fileop-tmp`, so two
+    /// copies into one directory can overwrite each other's temporary and one
+    /// arrives holding the other's contents. Windows-only because that is
+    /// where such a name can be built in a test; the defect is not.
+    #[cfg(windows)]
+    #[test]
+    fn scratch_names_keep_bytes_that_are_not_utf8_apart() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let a = PathBuf::from(OsString::from_wide(&[0x0041_u16, 0xD800]));
+        let b = PathBuf::from(OsString::from_wide(&[0x0041_u16, 0xD801]));
+        assert_ne!(a, b, "the fixture is not two different names");
+        assert!(
+            a.to_str().is_none() && b.to_str().is_none(),
+            "fixture is UTF-8"
+        );
+
+        assert_ne!(
+            OperationExecutor::temp_name(&a),
+            OperationExecutor::temp_name(&b),
+            "two distinct names share one scratch name, so a copy can land holding the wrong file"
+        );
+    }
 }

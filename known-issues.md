@@ -155132,10 +155132,28 @@ beside the source files, which is what §4.1 requires; and invalidation is
 sound, because `cache_filename` keys on the path, the source mtime *and* the
 size cap, so a changed file or a changed cap simply misses and regenerates.
 
-**What is missing** is the whole of §4.1's "size cap" bullet: no byte budget,
-no eviction, no notion of cold entries. `DiskCache` has no `prune`, no
-`max_bytes`, and the `evicted` field nearby belongs to the *in-memory* LRU,
+**What is missing** is §4.1's "size cap" bullet: no byte budget and no notion
+of cold entries. The `evicted` field nearby belongs to the *in-memory* LRU,
 which bounds a `HashMap` and not the directory.
+
+**Correction, made within the hour of filing this.** This entry first said
+there was "no eviction" at all. That is wrong: `DiskCache::purge_stale` exists,
+is careful -- it compares cache filenames as *bytes*, with a comment noting
+that rendering a name lossily first could make a foreign file *look* like one
+of ours and get it deleted -- and is tested. **It is called by nothing outside
+those tests.** So the unbounded growth is not a missing mechanism; it is an
+unused one, which is the seventh capability found in this state today.
+
+**But it cannot simply be wired up, which is the useful part.** `purge_stale`
+takes the set of entries that are still valid and deletes everything else. The
+only such set explorer can produce is *the directory it is currently showing*,
+and calling it with that would delete every other folder's thumbnails on every
+navigation -- bounding growth by destroying the cache. Its contract assumes a
+global "files we still care about", and nothing in the tree keeps one.
+
+So the two halves are: `purge_stale` answers "this source is gone or changed",
+and the missing cap answers "this cache is too big". They are different
+questions, and only the first has code.
 
 **Why this is not simply "add a cap".** The spec asks for two things, and only
 one is ours:

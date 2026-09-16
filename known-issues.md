@@ -154517,6 +154517,31 @@ than a cleanup.
   `kill -l [EXIT_STATUS...]`. This is what every shell script expects, and
   what a differential harness against GNU would compare.
 
+### The measured comparison (2026-09-16)
+
+Both built to separate files and run side by side against the reference, which
+for `kill` is **procps-ng 4.0.4** (`/bin/kill`) rather than util-linux:
+
+| invocation | coreutils applet | standalone `kill` | procps-ng |
+|---|---|---|---|
+| `-l` | `HUP INT QUIT ILL TRAP ABRT ...` | `Available signal names (Slate OS compatibility mapping):` | `HUP INT QUIT ILL TRAP ABRT ...` |
+| `-l 9` | `KILL` | the same header; does not decode | `KILL` |
+| `-s TERM 999999` | reaches the send path | `kill: unknown signal: s` | `/bin/kill: (999999): No such process` |
+| no arguments | `kill: missing operand` | `kill: no process specified` | usage |
+
+**This is the opposite of the `logger` case and the reason the two entries do
+not share a conclusion.** There, the standalone had the richer surface and the
+applet had two better diagnostics. Here the APPLET is the one that speaks the
+reference's language: it lists signals in procps' format, decodes `-l 9` to
+`KILL`, and understands `-s`. The standalone does not implement `-s` at all --
+it reads the `s` as a signal name and refuses -- so a script running
+`kill -s TERM $pid`, which is the POSIX spelling, fails outright against it.
+
+What the standalone has that the applet does not is the part that matters on
+this OS: it sends IPC messages, which `design.txt` requires, and it has
+`--name`. So neither is deletable, and "which one is better" has no answer --
+they are better at different halves.
+
 ### Why this one is not a simple deletion
 
 The architectural rule and the compatibility remit point opposite ways, and

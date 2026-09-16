@@ -75,6 +75,23 @@ const WINDOW_HEIGHT: f32 = 720.0;
 const MIN_WINDOW_WIDTH: f32 = 480.0;
 const MIN_WINDOW_HEIGHT: f32 = 320.0;
 
+/// What the Screenshots block says under the options it offers.
+///
+/// **The shortcut for this was already removed as impossible.** `Shortcuts
+/// ::list` used to advertise `Ctrl+S` (take a screenshot) and no longer does,
+/// with the reason recorded there: "this tree has neither a file chooser nor a
+/// way to read back the framebuffer, and a help panel that promises what the
+/// program cannot do is the same defect one level up".
+///
+/// The settings block was left behind, still naming a format, a quality and a
+/// subtitle option. `CANNOT_PLAY_LINES` does cover the prerequisites -- no
+/// frame is decoding and there is no filesystem -- but it is drawn at the top
+/// left of the window, and relying on a reader having seen it before reaching
+/// a settings panel is what `apps/mediaconvert` got wrong: three lines about
+/// the queue did not reach the panel that configured it.
+const NO_SCREENSHOTS: &str = "Not applied: this player cannot take a \
+screenshot -- no frame is decoded and there is nowhere to write one.";
+
 /// A rectangle on screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -4614,6 +4631,17 @@ impl VideoPlayerApp {
             max_width: Some(500.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        cmds.push(RenderCommand::Text {
+            x: label_x + 8.0,
+            y: extra_y + 144.0,
+            text: NO_SCREENSHOTS.to_owned(),
+            font_size: 11.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(500.0),
+            overflow: TextOverflow::Ellipsis,
+        });
     }
 
     fn render_shortcuts(&self, cmds: &mut Vec<RenderCommand>) {
@@ -4990,6 +5018,45 @@ mod tests {
     /// second application of eighteen where that was true, and the second
     /// where removing the fabrication broke no tests at all -- 151 passed
     /// before and after. The other was `apps/email`.
+    /// The screenshot options are drawn with the fact that none can be taken.
+    ///
+    /// **`Ctrl+S` was already removed from `Shortcuts::list` as impossible**,
+    /// with the reason recorded there: this tree has neither a file chooser
+    /// nor a way to read back the framebuffer. The settings block was left
+    /// behind, still naming a format, a quality and a subtitle option.
+    ///
+    /// `CANNOT_PLAY_LINES` does cover the prerequisites -- no frame is
+    /// decoded, there is no filesystem -- but it is drawn at the top left of
+    /// the window. Relying on a reader having passed it before reaching a
+    /// settings panel is exactly what `apps/mediaconvert` got wrong: three
+    /// lines about the queue did not reach the panel that configured it.
+    #[test]
+    fn the_screenshot_options_say_no_screenshot_can_be_taken() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.active_tab = PlayerTab::Settings;
+        let texts: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t == "Screenshots"),
+            "control: the panel must be drawing the screenshot block for this \
+test to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("screenshot")),
+            "the panel offered screenshot options and did not say none can be taken"
+        );
+    }
+
     #[test]
     fn a_fresh_player_holds_no_file_and_no_playlist() {
         let app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);

@@ -135,6 +135,25 @@ REPLY_SECTION_RE = re.compile(
 # status` conflation arriving one step earlier: a reader is told the file was
 # never stamped, so they go to stamp it, and find it already was.
 #
+# There is a THIRD typesetting, found 2026-09-15, and it is the same lesson a
+# second time: `**Status: LANDED**`, with the colon inside the bold AND the
+# verdict inside it too. Six files write it, and five of those carry a finished
+# word -- LANDED, DONE, fulfilled -- that this script could not see, so they sat
+# in the open list. One of them, `a-b-a-gate-can-be-a-shell-script...`, says in
+# plain words "Nothing needed from you" and had been listed as work outstanding
+# against lane B since 2026-09-04.
+#
+# Rendered, all three are indistinguishable: bold "Status", a colon, a verdict.
+# The writer cannot see which one they typed by looking at the artifact, which
+# is precisely why the parser must accept all three rather than the convention
+# being restated. Restating it would produce a fourth.
+#
+# The loose alternative goes LAST in the alternation deliberately. Python tries
+# alternatives left to right, so `**Status:**` still matches the first branch
+# and its captured marker is unchanged; only a line no earlier branch accepts
+# reaches this one. Putting it first would quietly re-capture all 324 files
+# that use the ordinary form, changing what the reason line quotes.
+#
 # The marker is captured, not just skipped, so the reason line can quote the
 # file as written. Reporting `**Status:** FIXED ...` for a file that says
 # `**Status**: FIXED ...` would send a reader grepping for a string that is not
@@ -151,7 +170,7 @@ REPLY_SECTION_RE = re.compile(
 # and the cost of matching prose is a false clear, which is the direction this
 # report must not fail in.
 STATUS_BLOCK_RE = re.compile(
-    r"(\*\*status(?::\*\*|\*\*[ \t]*:))(.*?)(?:\n[ \t]*\n|\Z)",
+    r"(\*\*status(?::\*\*|\*\*[ \t]*:|[ \t]*:))(.*?)(?:\n[ \t]*\n|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 

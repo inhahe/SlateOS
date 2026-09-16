@@ -19,6 +19,12 @@ a harness that only asks "did the expected test fail?" reports the same word it
 would report for a genuine hole. Every sabotage here is required to match
 exactly once, and a miss is `DID NOT APPLY`, never a pass.
 
+A sabotage may say `"count": N` when the text genuinely appears N times -- two
+panels drawing one label is a real case -- and then all N are replaced. What is
+not allowed is silence: a plan that expects one and finds three is a plan whose
+author did not know what they were editing, and the harness reports how many it
+found so the plan can be corrected rather than guessed at.
+
 **"Did not fail" and "is not there" are indistinguishable to a lookup.** A
 harness that searches the output for a named test result and finds nothing
 cannot tell "that test passed" from "that test does not exist". Mistype the
@@ -145,10 +151,19 @@ def run(plan: dict) -> int:
     try:
         for sab in plan["sabotages"]:
             src = f.read_text(encoding="utf-8")
-            applied = src.count(sab["old"]) == 1
+            # `count` defaults to 1 and must be stated when it is not. Two
+            # identical draw sites is a real case -- `apps/diskimager` draws
+            # the same block-size label on two panels -- and the first version
+            # of this refused it as DID-NOT-APPLY, which was the right refusal
+            # of the wrong plan. What must not be allowed is *silence* about
+            # how many were expected: a plan that expects one and finds three
+            # is a plan whose author did not know what they were editing.
+            want = sab.get("count", 1)
+            found = src.count(sab["old"])
+            applied = found == want
             broke, red = False, set()
             if applied:
-                f.write_text(src.replace(sab["old"], sab["new"], 1),
+                f.write_text(src.replace(sab["old"], sab["new"]),
                              encoding="utf-8", newline="\n")
                 r = subprocess.run(
                     [sys.executable, str(ROOT / "scripts" / "run-timeout.py"), "600",
@@ -160,6 +175,10 @@ def run(plan: dict) -> int:
                 red = red_tests(out)
                 f.write_bytes(original)
             verdict, why = classify(applied, broke, red, sab.get("expect", []))
+            if verdict == "DID-NOT-APPLY":
+                why = (f"matched {found} time(s), expected {want}"
+                       + (f' -- say "count": {found} if that is right'
+                          if found else ""))
             results.append((verdict, sab["name"]))
             # The red set is printed every time, including when it is empty,
             # because that is the whole point: an empty set is a fact about
@@ -167,12 +186,18 @@ def run(plan: dict) -> int:
             print(f"{MARK[verdict]}{sab['name']}: {why}")
             print(f"      red: {sorted(red) or 'none'}")
     finally:
+        # No `return` in here. A `return` inside `finally` discards any
+        # exception on its way out -- so a crash mid-run would have exited
+        # with a tidy status and no traceback, which is this tool's own
+        # failure mode wearing its own clothes. The restore still happens on
+        # every path; only the verdict waits until after.
         f.write_bytes(original)
-        if hashlib.sha256(f.read_bytes()).hexdigest() != before:
-            print("RESTORE FAILED -- the file on disk is not what it was",
-                  file=sys.stderr)
-            return 2
-        print("restore verified by hash")
+        restored = hashlib.sha256(f.read_bytes()).hexdigest() == before
+        print("restore verified by hash" if restored
+              else "RESTORE FAILED -- the file on disk is not what it was")
+
+    if not restored:
+        return 2
 
     bad = [n for v, n in results if v in ("HOLE", "DID-NOT-APPLY")]
     unsure = [n for v, n in results if v in ("PREDICTION", "NOT-EVIDENCE")]

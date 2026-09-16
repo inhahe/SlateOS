@@ -89,6 +89,19 @@ pub const ERR_NO_SESSION_LEADER: &str = "system.logind.Error.NoSessionLeader";
 /// for a bookkeeping bug that is not there.
 pub const ERR_NO_SUCH_PROCESS: &str = "system.logind.Error.NoSuchProcess";
 
+/// No user with that uid is known to the daemon.
+///
+/// Also the answer when a caller asks about someone else's uid, so that a
+/// stranger cannot learn who has logged in by watching which error comes
+/// back -- the same reasoning `authorize` uses for sessions.
+pub const ERR_NO_SUCH_USER: &str = "system.logind.Error.NoSuchUser";
+
+/// The user has no sessions to act on.
+pub const ERR_NO_SESSIONS: &str = "system.logind.Error.NoSessions";
+
+/// No seat with that id.
+pub const ERR_NO_SUCH_SEAT: &str = "system.logind.Error.NoSuchSeat";
+
 /// This build cannot signal a process at all.
 pub const ERR_CANNOT_SIGNAL: &str = "system.logind.Error.CannotSignal";
 
@@ -234,6 +247,12 @@ pub fn dispatch(
     match member {
         "CreateSession" => create_session(daemon, payload, caller),
         "ListSessions" => list_sessions(daemon, caller),
+        "ListUsers" => list_users(daemon, caller),
+        "ListSeats" => list_seats(daemon, caller),
+        "GetUser" => one_arg(payload, |uid| get_user(daemon, uid, caller)),
+        "GetSeat" => one_arg(payload, |id| get_seat(daemon, id, caller)),
+        "TerminateUser" => one_arg(payload, |uid| terminate_user(daemon, uid, caller)),
+        "KillUser" => kill_user(daemon, payload, caller),
         "GetSession" => one_arg(payload, |id| get_session(daemon, id, caller)),
         "LockSession" => one_arg(payload, |id| lock_session(daemon, id, caller)),
         "UnlockSession" => one_arg(payload, |id| unlock_session(daemon, id, caller)),
@@ -391,6 +410,52 @@ fn list_inhibitors(daemon: &Daemon, caller: Option<Credentials>) -> Reply {
     Reply::Return(fields::encode(&refs))
 }
 
+/// `ListUsers() -> [line, …]`
+///
+/// Root sees every user; anyone else sees themselves. The same rule as
+/// [`list_sessions`], for the same reason: who else is logged in is a fact
+/// about them.
+fn list_users(daemon: &Daemon, caller: Option<Credentials>) -> Reply {
+    let Some(caller) = caller else {
+        return Reply::Error(ERR_UNKNOWN_CALLER);
+    };
+    let mut lines: Vec<String> = daemon
+        .users
+        .values()
+        .filter(|u| caller.is_root() || u.uid == caller.uid)
+        .map(crate::User::format_list_line)
+        .collect();
+    lines.sort();
+    let refs: Vec<&[u8]> = lines.iter().map(|l| l.as_bytes()).collect();
+    Reply::Return(fields::encode(&refs))
+}
+
+/// `ListSeats() -> [line, …]`
+///
+/// Every caller sees every seat, and that is a decision rather than an
+/// omission. A seat is a set of hardware -- a screen, a keyboard, a mouse --
+/// and not something a user owns; `Seat` has no uid to filter on because
+/// there is nothing there to be private. Filtering by "seats my sessions are
+/// on" would hide the second seat of a two-seat machine from a user sitting
+/// at the first, which tells them the hardware does not exist.
+///
+/// A caller must still be identified. Not because the answer is sensitive but
+/// because an unidentified peer is one we know nothing about, which is this
+/// module's rule everywhere else and not worth an exception for one method.
+fn list_seats(daemon: &Daemon, caller: Option<Credentials>) -> Reply {
+    if caller.is_none() {
+        return Reply::Error(ERR_UNKNOWN_CALLER);
+    }
+    let mut lines: Vec<String> = daemon
+        .seats
+        .values()
+        .map(crate::Seat::format_list_line)
+        .collect();
+    lines.sort();
+    let refs: Vec<&[u8]> = lines.iter().map(|l| l.as_bytes()).collect();
+    Reply::Return(fields::encode(&refs))
+}
+
 /// `GetSession(id) -> properties`
 fn get_session(daemon: &Daemon, id: &str, caller: Option<Credentials>) -> Reply {
     if let Err(e) = authorize(daemon, id, caller, Required::Owner) {
@@ -399,6 +464,119 @@ fn get_session(daemon: &Daemon, id: &str, caller: Option<Credentials>) -> Reply 
     match daemon.sessions.get(id) {
         Some(session) => Reply::Return(fields::encode(&[session.format_properties().as_bytes()])),
         None => Reply::Error(ERR_NO_SUCH_SESSION),
+    }
+}
+
+/// Decide whether `caller` may act on `uid`, and parse it.
+///
+/// Separate from [`authorize`] because that decides from a SESSION id, and
+/// these methods name a uid. Passing one to the other would look like a check
+/// and grade the wrong thing.
+///
+/// # Everything that is not "you, or root" answers [`ERR_NO_SUCH_USER`]
+///
+/// A uid that does not parse, a uid belonging to somebody else, and a uid
+/// nobody has ever used all give the same answer. If they differed, the
+/// difference would be a way to enumerate who uses this machine from an
+/// unprivileged account, one uid at a time -- and the same reasoning
+/// `authorize` gives for reporting another user's session as ABSENT rather
+/// than forbidden.
+///
+/// The caller not being identified at all is reported as itself, because that
+/// is a fact about the connection rather than about any user.
+fn authorize_uid(uid: &str, caller: Option<Credentials>) -> Result<u32, &'static str> {
+    let Some(caller) = caller else {
+        return Err(ERR_UNKNOWN_CALLER);
+    };
+    let Ok(uid) = uid.parse::<u32>() else {
+        return Err(ERR_NO_SUCH_USER);
+    };
+    if caller.is_root() || caller.uid == uid {
+        Ok(uid)
+    } else {
+        Err(ERR_NO_SUCH_USER)
+    }
+}
+
+/// `GetUser(uid) -> properties`
+///
+/// Root, or the user themselves. `authorize` cannot be used: it decides from
+/// a SESSION id, and this method names a uid -- passing one to the other
+/// would look like a check and grade the wrong thing.
+///
+/// A uid that does not parse is [`ERR_NO_SUCH_USER`] rather than
+/// [`ERR_INVALID_ARGUMENTS`], deliberately. `loginctl show-user bogus` is a
+/// caller asking about a user that does not exist, and telling them their
+/// argument is malformed sends them to check their typing rather than their
+/// assumption.
+fn get_user(daemon: &Daemon, uid: &str, caller: Option<Credentials>) -> Reply {
+    // Before the lookup, so a stranger cannot learn which uids have logged in
+    // by watching whether the answer is "denied" or "no such user".
+    let uid = match authorize_uid(uid, caller) {
+        Ok(u) => u,
+        Err(e) => return Reply::Error(e),
+    };
+    match daemon.users.get(&uid) {
+        Some(user) => Reply::Return(fields::encode(&[user.format_properties().as_bytes()])),
+        None => Reply::Error(ERR_NO_SUCH_USER),
+    }
+}
+
+/// `GetSeat(id) -> properties`
+///
+/// Any identified caller, for [`list_seats`]' reason: a seat is hardware and
+/// not something a user owns.
+fn get_seat(daemon: &Daemon, id: &str, caller: Option<Credentials>) -> Reply {
+    if caller.is_none() {
+        return Reply::Error(ERR_UNKNOWN_CALLER);
+    }
+    match daemon.seats.get(id) {
+        Some(seat) => Reply::Return(fields::encode(&[seat.format_properties().as_bytes()])),
+        None => Reply::Error(ERR_NO_SUCH_SEAT),
+    }
+}
+
+/// `TerminateUser(uid)`
+///
+/// Ends every session the user has. Root, or the user themselves.
+fn terminate_user(daemon: &mut Daemon, uid: &str, caller: Option<Credentials>) -> Reply {
+    let uid = match authorize_uid(uid, caller) {
+        Ok(u) => u,
+        Err(e) => return Reply::Error(e),
+    };
+    match daemon.terminate_user(uid) {
+        Ok(()) => Reply::empty(),
+        // `Daemon::terminate_user`'s only failure is "user has no sessions",
+        // which is its own answer rather than `NoSuchUser`: a caller told the
+        // latter checks the uid they typed, and one told the former checks
+        // whether the user is logged in.
+        Err(_) => Reply::Error(ERR_NO_SESSIONS),
+    }
+}
+
+/// `KillUser(uid, signal) -> [signalled, total]`
+///
+/// Signals every session leader the user has, and returns BOTH counts so a
+/// partial result is visible. One number cannot say "2 of 3", and the
+/// difference between that and "2" is the thing an operator needs.
+fn kill_user(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>) -> Reply {
+    let Some(args) = fields::decode_exact(payload, 2) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let text = |i: usize| args.get(i).and_then(|b| core::str::from_utf8(b).ok());
+    let (Some(uid), Some(signal)) = (text(0), text(1).and_then(|s| s.parse::<i32>().ok())) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let uid = match authorize_uid(uid, caller) {
+        Ok(u) => u,
+        Err(e) => return Reply::Error(e),
+    };
+    match daemon.kill_user(uid, signal) {
+        Ok((signalled, total)) => Reply::Return(fields::encode(&[
+            signalled.len().to_string().as_bytes(),
+            total.to_string().as_bytes(),
+        ])),
+        Err(e) => Reply::Error(e.bus_name()),
     }
 }
 
@@ -478,15 +656,12 @@ fn kill_session(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>
     if let Err(e) = authorize(daemon, id, caller, Required::Owner) {
         return Reply::Error(e);
     }
+    // `KillError::bus_name` rather than a match here: the same list lives in
+    // `loginctl`, which now reads these names back off the wire, and two
+    // copies would be free to disagree about which failure is which.
     match daemon.kill_session(id, signal) {
         Ok(pid) => Reply::Return(fields::encode(&[pid.to_string().as_bytes()])),
-        Err(crate::KillError::NoSuchSession) => Reply::Error(ERR_NO_SUCH_SESSION),
-        Err(crate::KillError::NoLeaderPid) => Reply::Error(ERR_NO_SESSION_LEADER),
-        Err(crate::KillError::NotPermitted) => Reply::Error(ERR_ACCESS_DENIED),
-        Err(crate::KillError::LeaderGone) => Reply::Error(ERR_NO_SUCH_PROCESS),
-        Err(crate::KillError::Unsupported | crate::KillError::Failed) => {
-            Reply::Error(ERR_CANNOT_SIGNAL)
-        }
+        Err(e) => Reply::Error(e.bus_name()),
     }
 }
 
@@ -972,6 +1147,273 @@ mod tests {
             String::from_utf8_lossy(mine[0]).contains("1000"),
             "the one line should be alice's: {:?}",
             String::from_utf8_lossy(mine[0])
+        );
+    }
+
+    // -- ListUsers / ListSeats --------------------------------------------
+
+    /// Root sees every user; anyone else sees themselves.
+    ///
+    /// The control is the second half: a non-root caller must see their OWN
+    /// entry, not nothing. A filter that dropped everything would pass a test
+    /// that only checked root's view, and would look exactly like a machine
+    /// where nobody else is logged in -- which is the answer `list-users`
+    /// used to give for every caller.
+    #[test]
+    fn listing_users_shows_root_everyone_and_others_themselves() {
+        let (mut d, _alice, _bob) = two_user_daemon();
+
+        let Reply::Return(all) = call(&mut d, "ListUsers", &[], Some(creds(0))) else {
+            panic!("root listing errored");
+        };
+        assert_eq!(
+            fields::decode(&all).map(|v| v.len()),
+            Some(2),
+            "root sees both"
+        );
+
+        let Reply::Return(mine) = call(&mut d, "ListUsers", &[], Some(creds(1000))) else {
+            panic!("alice listing errored");
+        };
+        let mine = fields::decode(&mine).expect("decodes");
+        assert_eq!(mine.len(), 1, "alice sees herself and not bob");
+        assert!(
+            String::from_utf8_lossy(mine[0]).contains("1000"),
+            "the one line should be alice's: {:?}",
+            String::from_utf8_lossy(mine[0])
+        );
+
+        assert_eq!(
+            call(&mut d, "ListUsers", &[], None),
+            Reply::Error(ERR_UNKNOWN_CALLER)
+        );
+    }
+
+    /// Every identified caller sees every seat.
+    ///
+    /// Deliberately unlike `ListUsers` and `ListSessions`. A seat is hardware
+    /// -- a screen, a keyboard, a mouse -- and `Seat` has no uid because there
+    /// is nothing there to be private. Filtering by "seats my sessions are on"
+    /// would hide the second seat of a two-seat machine from a user sitting at
+    /// the first, which tells them the hardware does not exist.
+    ///
+    /// The caller must still be identified, which is the second assertion: an
+    /// unidentified peer is one we know nothing about, and that rule does not
+    /// get an exception for one method just because its answer is dull.
+    #[test]
+    fn listing_seats_shows_everyone_every_seat() {
+        let (mut d, _alice, _bob) = two_user_daemon();
+
+        let Reply::Return(as_root) = call(&mut d, "ListSeats", &[], Some(creds(0))) else {
+            panic!("root listing errored");
+        };
+        let Reply::Return(as_user) = call(&mut d, "ListSeats", &[], Some(creds(1000))) else {
+            panic!("alice listing errored");
+        };
+        assert_eq!(as_root, as_user, "a seat is not a private fact");
+        assert!(
+            fields::decode(&as_root).is_some_and(|v| !v.is_empty()),
+            "the fixture has seat0, so an empty answer would make the test vacuous"
+        );
+
+        assert_eq!(
+            call(&mut d, "ListSeats", &[], None),
+            Reply::Error(ERR_UNKNOWN_CALLER)
+        );
+    }
+
+    // -- GetUser / GetSeat ------------------------------------------------
+
+    /// Asking about someone else's uid is answered "no such user".
+    ///
+    /// The control is the LAST pair, and it is the whole point. Bob asking
+    /// about alice, and anybody asking about a uid that has never logged in,
+    /// must get the SAME error -- otherwise the difference between them is a
+    /// way to enumerate who uses this machine, one uid at a time, from an
+    /// unprivileged account.
+    ///
+    /// `authorize` makes the same choice for sessions and says so; this is
+    /// that reasoning applied to a lookup keyed on a uid, which `authorize`
+    /// cannot check because it decides from a session id.
+    #[test]
+    fn asking_about_another_uid_is_indistinguishable_from_asking_about_nobody() {
+        let (mut d, _alice, _bob) = two_user_daemon();
+
+        // Root sees anyone.
+        assert!(!call(&mut d, "GetUser", &[b"1000"], Some(creds(0))).is_error());
+        // Alice sees herself.
+        assert!(!call(&mut d, "GetUser", &[b"1000"], Some(creds(1000))).is_error());
+
+        let someone_else = call(&mut d, "GetUser", &[b"1000"], Some(creds(1001)));
+        let nobody = call(&mut d, "GetUser", &[b"4242"], Some(creds(1001)));
+        assert_eq!(someone_else, Reply::Error(ERR_NO_SUCH_USER));
+        assert_eq!(
+            someone_else, nobody,
+            "a real user and an absent one must answer alike, or the difference enumerates users"
+        );
+
+        // A uid that does not parse is also "no such user": the caller is
+        // asking about a user that does not exist, and telling them their
+        // argument is malformed sends them to check their typing rather than
+        // their assumption.
+        assert_eq!(
+            call(&mut d, "GetUser", &[b"bogus"], Some(creds(0))),
+            Reply::Error(ERR_NO_SUCH_USER)
+        );
+        assert_eq!(
+            call(&mut d, "GetUser", &[b"1000"], None),
+            Reply::Error(ERR_UNKNOWN_CALLER)
+        );
+    }
+
+    // -- TerminateUser / KillUser -----------------------------------------
+
+    /// Arguments for a uid-keyed method, so one test can drive both.
+    fn uid_args(member: &str, uid: &'static [u8]) -> Vec<&'static [u8]> {
+        match member {
+            "KillUser" => vec![uid, b"15"],
+            _ => vec![uid],
+        }
+    }
+
+    /// The enumeration control, for the two methods that act on a uid.
+    ///
+    /// `GetUser` is tested for this above. These two need their own case
+    /// because they reach the rule through a separate call to
+    /// `authorize_uid`, and a change that re-inlined the check into one
+    /// method would leave the other's test green while the property was gone
+    /// -- which is the failure a shared helper is supposed to prevent and
+    /// cannot, by itself, detect.
+    ///
+    /// The property: from an unprivileged account, "somebody else's uid" and
+    /// "a uid nobody has ever used" must answer alike. A difference is a
+    /// census of the machine's users, one uid per call.
+    #[test]
+    fn acting_on_another_uid_is_indistinguishable_from_acting_on_nobody() {
+        for member in ["TerminateUser", "KillUser"] {
+            let (mut d, _alice, _bob) = two_user_daemon();
+            let mine = call(
+                &mut d,
+                member,
+                &uid_args(member, b"1000"),
+                Some(creds(1001)),
+            );
+            let absent = call(
+                &mut d,
+                member,
+                &uid_args(member, b"4242"),
+                Some(creds(1001)),
+            );
+            let unparsable = call(
+                &mut d,
+                member,
+                &uid_args(member, b"bogus"),
+                Some(creds(1001)),
+            );
+            assert_eq!(mine, Reply::Error(ERR_NO_SUCH_USER), "{member}");
+            assert_eq!(
+                mine, absent,
+                "{member} tells a stranger which uids are in use"
+            );
+            assert_eq!(
+                mine, unparsable,
+                "{member} tells a stranger a typo apart from a real user"
+            );
+            assert_eq!(
+                call(&mut d, member, &uid_args(member, b"1000"), None),
+                Reply::Error(ERR_UNKNOWN_CALLER),
+                "{member} acted for a caller it could not identify"
+            );
+        }
+    }
+
+    /// `TerminateUser` ends every session that user has, and only theirs.
+    ///
+    /// The second call is the part worth having: once alice is gone, the
+    /// answer changes from success to [`ERR_NO_SESSIONS`], which is a
+    /// different fact from [`ERR_NO_SUCH_USER`]. A caller told the first
+    /// checks whether the user is logged in; one told the second checks the
+    /// uid they typed. Root may tell them apart because root may already
+    /// enumerate users; the test above is what stops anyone else.
+    #[test]
+    fn terminate_user_ends_that_users_sessions_and_leaves_the_others() {
+        let (mut d, alice, bob) = two_user_daemon();
+        let done = call(&mut d, "TerminateUser", &[b"1000"], Some(creds(0)));
+        assert!(!done.is_error(), "root could not terminate alice: {done:?}");
+        assert!(
+            call(&mut d, "GetSession", &[alice.as_bytes()], Some(creds(0))).is_error(),
+            "alice's session outlived TerminateUser"
+        );
+        assert!(
+            !call(&mut d, "GetSession", &[bob.as_bytes()], Some(creds(0))).is_error(),
+            "bob's session was collateral damage"
+        );
+        assert_eq!(
+            call(&mut d, "TerminateUser", &[b"1000"], Some(creds(0))),
+            Reply::Error(ERR_NO_SESSIONS)
+        );
+    }
+
+    /// `KillUser` refuses a payload it cannot read, and names the refusal.
+    ///
+    /// # What this cannot check
+    ///
+    /// Not the successful send, and not the `[signalled, total]` reply that
+    /// carries it. These tests run on the host, where `libcall::kill` is
+    /// `ENOSYS` by construction (`#[cfg(not(unix))]`), so `signalled` is
+    /// empty for every pid and `Daemon::kill_user` always takes its error
+    /// arm. The partial-success shape -- the "2 of 3" that is the reason the
+    /// method returns two numbers rather than one -- has no host path at all.
+    /// Saying so here beats a test that pretends otherwise; it is logged in
+    /// `todo.txt` under the same name.
+    #[test]
+    fn kill_user_refuses_a_payload_it_cannot_read() {
+        let (mut d, _alice, _bob) = two_user_daemon();
+        assert_eq!(
+            call(&mut d, "KillUser", &[b"1000"], Some(creds(0))),
+            Reply::Error(ERR_INVALID_ARGUMENTS),
+            "a missing signal was treated as a signal"
+        );
+        assert_eq!(
+            call(
+                &mut d,
+                "KillUser",
+                &[b"1000", b"not-a-number"],
+                Some(creds(0))
+            ),
+            Reply::Error(ERR_INVALID_ARGUMENTS)
+        );
+        // The fixture's sessions default `leader_pid` to 0, and
+        // `libcall::kill` rejects a non-positive pid before it can reach a
+        // process group. So this is the refusal, reported as itself.
+        assert_eq!(
+            call(&mut d, "KillUser", &[b"1000", b"15"], Some(creds(0))),
+            Reply::Error(ERR_NO_SESSION_LEADER)
+        );
+        // A user with no sessions at all is a different answer again.
+        assert_eq!(
+            call(&mut d, "KillUser", &[b"4242", b"15"], Some(creds(0))),
+            Reply::Error(ERR_NO_SESSIONS)
+        );
+    }
+
+    /// A seat is shown to any identified caller, and an absent one is named.
+    #[test]
+    fn a_seat_is_shown_to_anyone_identified() {
+        let (mut d, _alice, _bob) = two_user_daemon();
+        let as_root = call(&mut d, "GetSeat", &[b"seat0"], Some(creds(0)));
+        let as_user = call(&mut d, "GetSeat", &[b"seat0"], Some(creds(1001)));
+        assert!(!as_root.is_error(), "root was refused: {as_root:?}");
+        assert_eq!(as_root, as_user, "a seat is hardware, not a private fact");
+
+        assert_eq!(
+            call(&mut d, "GetSeat", &[b"seat9"], Some(creds(0))),
+            Reply::Error(ERR_NO_SUCH_SEAT),
+            "an absent seat is named as absent, not reported as denied"
+        );
+        assert_eq!(
+            call(&mut d, "GetSeat", &[b"seat0"], None),
+            Reply::Error(ERR_UNKNOWN_CALLER)
         );
     }
 

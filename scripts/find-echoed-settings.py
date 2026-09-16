@@ -36,6 +36,26 @@ That exonerates a `--show-config` dump wholesale without exonerating a
 straggler hiding inside one. It is the reason this is worth running at all
 rather than being the obvious idea everyone rejects.
 
+## This checker cannot see its own fix, and that is on purpose
+
+The repair for an echoed setting is not to delete the field. It is for the
+program to say, beside the value, that nothing applies it -- `gui/desktop`'s
+seven settings pages now do. **The field is still read only into output
+afterwards, so it still reports here, forever.**
+
+That is the right behaviour and not a wart. The finding is "this value reaches
+the operator and nothing acts on it", which remains true of a disclaimed
+setting; what changed is that the program stopped implying otherwise. A
+checker that went quiet when a disclaimer appeared would be measuring the
+disclaimer rather than the defect, and the day someone wires the setting up for
+real it would have nothing to say.
+
+The cost is re-triage: the next person runs this and re-reads rows already
+dealt with. **That is paid with a note, not with a looser rule.** The entry
+`TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES` in `known-issues.md` lists which
+have been answered and how, so the second reading is a lookup rather than an
+investigation.
+
 ## Why this reports and does not gate
 
 The rule above is a good discriminator, not a proof. Three shapes defeat it
@@ -151,6 +171,62 @@ def print_spans(code: str, rx: re.Pattern | None = None) -> list[tuple[int, int]
 
 def in_any_span(pos: int, spans: list[tuple[int, int]]) -> bool:
     return any(a <= pos < b for a, b in spans)
+
+
+_AUDIT = None
+
+
+def _refuses_honestly(code: str) -> bool:
+    """`audit-cli-fabrication.py`'s predicate, imported rather than copied.
+
+    **Why an import through `importlib` and not a second definition.** The
+    rule -- every `exit(0)` is behind `--help`, and there is at least one
+    non-zero exit -- exists once, in the checker it was written for. Two
+    copies of one predicate is the arrangement where a fix lands in one and
+    not the other and nobody notices, which is the same argument this lane
+    made to lane B about two `/proc` parsers in one repository. The file name
+    has a hyphen in it, so a plain `import` cannot reach it; that is a reason
+    to use `importlib`, not a reason to retype the function.
+
+    **What it clears.** `userspace/lp` parses `printer` and never acts on it,
+    because `lp` exits non-zero: "cannot queue a print job: nothing on this
+    system prints". The parsed value is a *record of what was asked for*,
+    which the refusal is then able to name. Deleting it would make the
+    refusal less informative, not more honest.
+
+    **The asymmetry is the point, and is written down so nobody removes it.**
+    This rule can only ever fire under `userspace/`: a GUI app has no exit
+    status to read, so it can never be an honest refusal in this sense. That
+    does not make it a worse rule -- **it is a rule about programs that exit,
+    and the absence of findings under `apps/` is a property of the tree rather
+    than of the check.** Anyone who later "fixes" the asymmetry by loosening
+    the predicate until it reports something under `apps/` will have replaced
+    a rule that means something with one that fires.
+
+    Applied per file, which for these programs is per crate. A file that
+    refuses on every path is not confirming a setting back to anybody,
+    because it does not get far enough to.
+    """
+    global _AUDIT
+    if _AUDIT is None:
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "audit-cli-fabrication.py"
+        spec = importlib.util.spec_from_file_location("audit_cli_fabrication", path)
+        _AUDIT = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_AUDIT)
+    # **Stricter than the shared predicate, deliberately.** That one has a
+    # fallback branch -- no `exit(0)` anywhere, at least one non-zero exit --
+    # which is sound enough where it is used (only for crates that do no I/O
+    # at all) and much too loose here. An ordinary tool that errors with
+    # `exit(1)` and succeeds by returning normally from `main` matches it, and
+    # applying that broadly cleared 18 files that are nothing of the kind.
+    #
+    # What is wanted is the `lp`/`unshare` shape specifically: a `--help` arm
+    # that exits 0, and every other path non-zero. Requiring an `exit(0)` site
+    # to exist selects exactly that, and leaves the fallback branch unused
+    # here rather than reimplemented.
+    return bool(_AUDIT._EXIT_OK.search(code)) and _AUDIT.refuses_honestly(code)
 
 
 def top_level_args(code: str, span: tuple[int, int]) -> list[tuple[int, int]]:
@@ -289,6 +365,14 @@ def is_called(code: str, fn: str) -> bool:
     # method's call site *is* `x.summary()`, and excluding it made every method
     # in the tree look uncalled -- which would have filed every echo as
     # stranded and produced a checker that reports nothing it was built for.
+    # `main` has no call site in the source and is called by definition.
+    # Without this, everything a program prints directly from `main` -- which
+    # for a small command-line tool is most of what it prints -- was filed as
+    # a formatter nobody calls. It was caught by a control fixture whose whole
+    # job was to be the opposite of the case above it, and which returned the
+    # same answer: two cases agreeing for a reason neither was testing.
+    if fn == "main":
+        return True
     for m in re.finditer(rf"(?<![A-Za-z0-9_]){re.escape(fn)}\s*\(", code):
         # Its own declaration is not a call.
         before = code[max(0, m.start() - 4):m.start()]
@@ -299,7 +383,11 @@ def is_called(code: str, fn: str) -> bool:
 
 
 def analyse(
-    code: str, *, all_structs: bool, stranded: list | None = None
+    code: str,
+    *,
+    all_structs: bool,
+    stranded: list | None = None,
+    scope: list | None = None,
 ) -> list[tuple[str, str]]:
     """(struct, field) pairs read only inside prints, with an acting sibling.
 
@@ -307,6 +395,11 @@ def analyse(
     `stranded` instead -- a different defect with a different fix, and one
     `find-stranded-serialisers.py` already reports.
     """
+    if _refuses_honestly(code):
+        # A program that refuses on every path is not confirming a setting
+        # back to anyone. What it holds is a record of what was asked for,
+        # which its refusal can then name.
+        return []
     spans = print_spans(code)
     shown_spans = print_spans(code, SHOWN_CALL)
     found = []
@@ -314,10 +407,15 @@ def analyse(
         if not all_structs and not CONFIG_STRUCT.search(struct):
             continue
         if len(fields) < 2:
+            # Counted before the `continue` below so the tally is "structs
+            # this could have judged", which is the number a zero needs
+            # beside it.
             # "All siblings" needs siblings. A one-field struct cannot
             # distinguish a dump from a straggler, and guessing would make the
             # report's least reliable rows its most numerous.
             continue
+        if scope is not None:
+            scope.append(struct)
         echoed, acting = [], False
         for f in fields:
             reads = field_reads(code, f)
@@ -505,6 +603,35 @@ impl ImageSettings {
            [("ImageSettings", "quality", False)])
     expect("...with nothing left in the stranded bucket", bucket2, [])
 
+    # --- an honest refusal ---------------------------------------------------
+    # `userspace/lp` parses `printer`, never acts on it, and exits non-zero:
+    # "cannot queue a print job: nothing on this system prints". The parsed
+    # value is a record of what was asked for, which the refusal names.
+    refusal = """
+struct Config {
+    pub printer: String,
+    pub copies: u32,
+}
+fn main() {
+    let cfg = parse();
+    if args[0] == "--help" {
+        print_help();
+        process::exit(0);
+    }
+    if cfg.copies > 1 { note_copies(); }
+    eprintln!("lp: cannot queue a print job for {}: nothing prints", cfg.printer);
+    process::exit(1);
+}
+"""
+    expect("a program that refuses on every path reports nothing",
+           analyse(refusal, all_structs=False), [])
+    # The control: the SAME source reaching exit 0 is an ordinary echo. Without
+    # this, the clause above could be clearing on something other than the
+    # exit code and nothing here would tell.
+    reaches_zero = refusal.replace("    process::exit(1);", "    process::exit(0);")
+    expect("...and the same source that can exit 0 is not cleared",
+           analyse(reaches_zero, all_structs=False), [("Config", "printer", True)])
+
     # --- bound to a {} vs handed to a function -------------------------------
     # `userspace/acpi`'s `fahrenheit`, `arp`'s `numeric`, `objdump`'s two
     # `radix` fields: a display flag's whole job is to change output, so "read
@@ -626,6 +753,7 @@ def main() -> int:
         return 2
 
     per_crate: dict[str, list[tuple[str, str]]] = {}
+    scope: list[str] = []
     files = 0
     for root in roots:
         for path in sorted(root.rglob("*.rs")):
@@ -638,13 +766,19 @@ def main() -> int:
             files += 1
             code, _ = rustlex.live_code(src)
             code = rustlex.strip_noise(code)
-            hits = analyse(code, all_structs=args.all_structs)
+            hits = analyse(code, all_structs=args.all_structs, scope=scope)
             if hits:
                 per_crate.setdefault(str(path.relative_to(ROOT)), []).extend(hits)
 
     total = sum(len(v) for v in per_crate.values())
     shown_n = sum(1 for v in per_crate.values() for h in v if h[2])
     print(f"files scanned                  : {files}")
+    # **A zero needs this line beside it.** Without it, "0 settings" reads the
+    # same whether the tree is clean or whether `CONFIG_STRUCT` matched no
+    # struct at all -- and the second is a fact about the filter, not about the
+    # code. `net*/` scans 32 files and judges very few structs; knowing which
+    # is the difference between a clean result and an inert one.
+    print(f"config-like structs judged     : {len(scope)}")
     print(f"settings read only into output : {total}")
     print(f"  ...reach a println!/write!   : {shown_n}")
     print(f"  ...only built with format!   : {total - shown_n}")
@@ -662,8 +796,15 @@ def main() -> int:
         # A zero here is a real answer only because the self-test above proves
         # the pattern still matches the shapes it was built for. Say so, so a
         # silently-broken pattern is not read as a clean tree.
-        print("\nnone -- and --self-test passes, so the pattern still matches "
-              "the shapes it was built for")
+        if scope:
+            print(f"\nnone -- across {len(scope)} struct(s) that were judged, "
+                  "and --self-test passes, so the pattern still matches the "
+                  "shapes it was built for")
+        else:
+            print("\nnone -- AND NOTHING WAS JUDGED. No struct here is named "
+                  "Config/Settings/Options/Opts/Prefs/Params with two or more "
+                  "fields, so this is a fact about the filter rather than "
+                  "about the code. Re-run with --all-structs to widen it.")
         return 0
     print()
     for path in sorted(per_crate, key=lambda p: -len(per_crate[p])):

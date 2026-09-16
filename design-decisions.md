@@ -74144,6 +74144,146 @@ statement it withdrew.
 
 ---
 
+## 1023. A distinguishable error is an oracle: refusals collapse to one answer
+
+**Date:** 2026-09-15
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** When `loginctl` asks about a user account that belongs to
+somebody else, logind answers "no such user" -- the same words it uses for an
+account that has never existed. That is deliberate, and it is a small lie. The
+alternative, "you are not allowed to see that account", is more helpful and
+also tells an attacker, one guess at a time, exactly which accounts exist on
+the machine. We chose the less helpful answer for every refusal that a caller
+could ask over and over.
+
+**The decision.** Every method keyed on a user id -- `GetUser`,
+`TerminateUser`, `KillUser` -- gives `NoSuchUser` for all four of: a uid that
+is not a number, a uid nobody has ever used, a uid that exists and belongs to
+somebody else, and a uid that exists and is the caller's own but has no state
+to report. `authorize_uid` in `userspace/logind/src/bus.rs` is the single
+place that decides it. `authorize` had already made the same call for session
+ids and says so in its own comment; this generalises it and names why.
+
+**Why it is a real tradeoff and not an obvious win.** The refused caller is
+usually not an attacker. They are an administrator who typed the wrong uid,
+and we have just sent them to check their typing when the actual problem was
+their privileges. That cost is paid on every honest mistake, forever, to deny
+an attacker a capability they can get other ways on most systems anyway. It is
+paid in the place where diagnostics matter most -- an operator at a terminal
+with something broken.
+
+We took it because the asymmetry is unequal in a way that does not show up in
+either anecdote. The administrator's confusion is recoverable in seconds by
+trying as root. The enumeration is not recoverable at all: it is silent,
+unlogged, automatable, and its product -- a list of who uses this machine --
+is durable long after the hole is closed.
+
+**The rule, stated so it transfers.** *If a caller can ask a question
+repeatedly and the answer varies with something they are not entitled to know,
+the variation is the leak -- not the answer.* An error that distinguishes
+"absent" from "forbidden" is a one-bit read of privileged state with
+unlimited retries. This is why the fix is never "make the message vaguer"; a
+vague message that still differs between the two cases leaks exactly as much.
+What must collapse is the *distinction*, and vagueness is only the side effect
+of collapsing it.
+
+**Where it does NOT apply, which is most places.** `ERR_UNKNOWN_CALLER` is
+reported as itself, because "I could not identify this connection" is a fact
+about the connection rather than about any user -- the caller learns nothing
+about anyone else by receiving it. `ERR_NO_SESSIONS` likewise survives as a
+distinct answer for root, who is already entitled to enumerate: collapsing it
+there would cost the diagnostic and buy nothing. And `KillUser`'s four
+refusals (bad arity, unparsable signal, leader pid 0, no sessions) stay four
+different answers, because they describe the *request* rather than the
+machine's population.
+
+The discriminator: collapse errors that vary with **state the caller may not
+read**; keep errors that vary with **what the caller sent**.
+
+**How it is held.** `acting_on_another_uid_is_indistinguishable_from_acting_on_nobody`
+asserts the four cases are one `Reply`, and drives both new methods through it
+rather than testing the shared helper once -- a change that re-inlined the
+check into one method would otherwise leave the other's test green. Sabotaged
+before being believed: making the someone-else case answer `AccessDenied`
+fails exactly two assertions.
+
+**Arrived at twice, independently.** Lane C reached the same conclusion from
+the other end the same day, reviewing an unrelated settings page, and put it
+this way: a distinguishable error is an oracle. Two lanes finding one rule
+from different evidence is the reason it is written here rather than left in
+the comment where it started -- the next person to read those two error
+branches will see one is more helpful than the other, be right about the code,
+and wrong about the consequence.
+
+---
+
+## 1024. sshd refuses to start rather than bind wider than it was asked to
+
+**Date:** 2026-09-15
+**Decided by:** Claude (autonomous) -- a user-visible policy, so flagged for the
+operator to overrule
+**Lane:** B
+
+**In short:** If you tell our ssh server to accept connections only from this
+machine (`ListenAddress 127.0.0.1`), it cannot do that -- the kernel's network
+code can reserve a port but cannot restrict which network card it answers on.
+Until today the server accepted connections from everywhere anyway and wrote
+"listening on 127.0.0.1:22" in its log, so the one place you would check
+confirmed a restriction that was not in force. It now refuses to start and
+tells you why. The choice being recorded is refuse-vs-warn.
+
+**The defect.** `SYS_TCP_BIND` takes a port and nothing else:
+`sys_tcp_bind` reads `args.arg0 as u16` and calls `net::tcp::bind(ns, port)`.
+There is no address anywhere on the path. `ListenAddress` was parsed into
+`SshdConfig`, stored, formatted into the startup log, and never passed to
+anything. Found by triaging lane C's echoed-settings scanner, which flagged the
+field as read-only-into-output; the scanner could not know it was a security
+control, which is why the triage had to be by hand.
+
+**The options.**
+
+| | *What changes* |
+|---|---|
+| **A. Warn, bind anyway** | sshd starts, logs a warning, accepts from everywhere. A machine configured for loopback-only ssh keeps working and is reachable from the network. |
+| **B. Refuse to start** (taken) | sshd exits 1 with two lines saying why. A machine configured for loopback-only ssh does not run sshd until someone writes `0.0.0.0`. |
+| C. Bind, then drop non-local connections in userspace | sshd enforces the restriction itself by checking the peer address after accept. |
+
+**Why B.** The two failure modes are not symmetric. A's is an administrator who
+does not read the warning and is exposed -- silently, indefinitely, with the
+log actively reassuring them. B's is an administrator who reads one line and
+changes one word. A security control must fail closed, and this one cannot be
+provided at all, so the only honest options are "refuse" or "do it in
+userspace".
+
+The cost is bounded in a way worth stating: **the default is `0.0.0.0`**, so
+nothing that works today stops working. The only configurations refused are the
+ones that asked for a restriction we cannot deliver -- exactly the set of people
+who would be harmed by proceeding.
+
+**Why not C**, which is the one that actually delivers the feature: it is the
+right long-term answer and it is not a substitute for the kernel doing it. A
+userspace check happens *after* `accept`, so the connection is established, the
+TCP handshake has completed, and the daemon has already spent a slot -- a
+remote attacker can still reach and exhaust it. It also puts the boundary in
+the process the boundary exists to protect. Worth building when there is a
+reason to, but shipping it as though it were the same guarantee would be
+another control that looks stronger than it is, which is the defect this entry
+is about.
+
+**If it is never revisited:** loopback-only ssh is unavailable rather than
+falsely reported, which is the safe direction. The honest fix is a kernel bind
+that takes an address; the shape is the same as `keylayout` (1023's neighbour
+in this session) -- a capability that exists nowhere rather than a userspace
+bug, and the distinction decides which lane can fix it.
+
+**Reversing this** is one predicate, `listen_address_is_honoured`, and its
+test. If the operator prefers A, widen it to accept everything and turn the
+two `log_error` calls into one `log_warn`.
+
+---
+
 ## 834. Selection is a change of colour, not of weight
 
 **Date:** 2026-09-12
@@ -75367,3 +75507,69 @@ right fix is a confirmation, not a silent write.
 **Recorded in** `known-issues.md` under
 `TD-C-FINISHED-SERIALISERS-THAT-NOBODY-COULD-REACH`, which carries the wider
 sweep this came out of.
+## 855. A test may assert on the clock only when the property cannot be counted
+
+**In short:** some tests check that code is fast. They do it by timing it, and
+a timed test fails when the machine is busy rather than when the code is
+wrong. Two of ours do this and only one of them should. The rule is: if you can
+count the work instead of timing it, count it -- and if you genuinely cannot,
+set the bound so loose that only a disaster trips it.
+
+**Date:** 2026-09-15. **Lane:** C. **Decided by:** Claude (autonomous).
+
+**What happened.** `gui/compositor`'s
+`redrawing_one_window_costs_a_fraction_of_the_whole_desktop` turned the
+workspace gate red. It compares two wall-clock durations and wants the partial
+frame to be at least three times cheaper. Under `cargo test --workspace`, with
+dozens of test binaries running at once, it measured 2.77x. Re-run alone
+minutes later, no code change between: 5.4x, pass.
+
+It already took `min()` of three runs, and the comment above the assertion
+already said a tight ratio would fail for noise and chose 3x to avoid that.
+Neither helped, because the load was sustained for the length of the run and
+the noise scales with whatever else the machine was asked to do. **No threshold
+would have helped**, which is the part worth generalising: the problem was not
+the number.
+
+**Why a flaky gate is worse than no gate.** It teaches its readers to re-run
+rather than to read. The first thing I did was go looking for a compositor
+regression that did not exist. And on the one occasion such a test is right, it
+is indistinguishable from the occasions it was not -- which is the same shape
+this tree has been clearing out all week, an observation that confirms and
+falsifies identically.
+
+**The rule, in two clauses.**
+
+1. **If the property can be counted, count it.** "Damage tracking narrows the
+   work" is a claim about how much work is done. `FrameStats` gained
+   `windows_rendered` -- zeroed per frame, incremented in `render_window` --
+   and the test now asserts 4 < 19 instead of comparing microseconds. That
+   number does not move when the machine is busy. The timing is still measured
+   and printed, because it is why anyone cares; it is no longer what decides
+   whether the tree is broken.
+2. **If it genuinely cannot be counted, the bound must only catch a
+   catastrophe.** `gui/appearance/tests/resolve_cost.rs` is the case that
+   should stay timed: there is no counter for "how expensive is this
+   function", the regression it exists to catch is a `powf` creeping back into
+   the contrast path, and that costs 30-100x rather than 50%. Its bound is
+   twenty times the measured figure, and its module docs say why in those
+   terms. A bound that only catches a catastrophe is the right bound when only
+   catastrophes are possible.
+
+**The alternative considered and rejected:** loosening the damage test's ratio
+to 2x, or to 1.5x. It would have passed that day and failed on a busier one,
+and each loosening buys less signal for the same flakiness. A ratio tight
+enough to mean anything is tight enough to be hit by load, so the choice was
+never between 3x and 2x -- it was between timing and counting.
+
+**Where this bites next:** anything measuring a frame, a parse, a layout pass
+or a search. Before writing `assert!(elapsed < N)`, ask what the elapsed time
+is standing in for. It is usually a count of something -- windows re-rendered,
+nodes visited, bytes copied, allocations made -- and the count is both more
+precise and immune to the machine.
+
+**Not a ban on benchmarks.** `cargo bench` is where a slow machine costs a
+number rather than a red gate, and the performance-targets protocol still
+applies in full. This is about the test suite, which every lane pays for
+before every boot.
+

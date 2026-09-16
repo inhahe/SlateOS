@@ -37,9 +37,29 @@
  * fired because its *parent* wrote 0x03 to the master end.  Nothing in
  * userspace can fake that.
  *
- * Deliberately no timeouts.  `alarm`/`setitimer` report success and arm
- * nothing (`known-issues.md` -> `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`), so
- * a fixture that trusted them would hang the boot test rather than fail it.
+ * Deliberately no timeouts -- and as of 2026-09-15 that is a choice rather
+ * than a constraint, which is worth the two extra lines to say.
+ *
+ * It used to read: `alarm`/`setitimer` report success and arm nothing
+ * (`B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`), so a fixture that trusted them
+ * would hang the boot test rather than fail it.  That stopped being true on
+ * 2026-09-12, when the timers were routed to the kernel's real interval timer
+ * (`SYS_ITIMER_SET`/`SYS_ITIMER_GET`, 1069/1070) and `SIGALRM` began actually
+ * arriving.  An `alarm(N)` backstop is available to this file today.
+ *
+ * It is still not taken, for a reason that survives the fix: **a fixture's
+ * bounds should not depend on a subsystem other than the one under test.**
+ * The bounds below are structural -- a non-blocking read and a counted spin --
+ * so they hold whatever the timer code is doing.  An alarm-based bound would
+ * make a pty result depend on `setitimer`, and a timer regression would then
+ * surface here, as a pty failure, pointing at the wrong subsystem.  That is
+ * worse than the hang it would prevent, because a hang is at least honest
+ * about not knowing.
+ *
+ * There is a second reason, specific to this file: the fixture's subject is
+ * *signal delivery to a foreground process group*.  Introducing `SIGALRM` into
+ * a test about `SIGINT` adds a second signal to the very mechanism being
+ * measured.
  *
  * Two independent bounds, because the first version of this file had only one
  * and it did not hold.  It set `O_NONBLOCK` and trusted it, and hung the boot

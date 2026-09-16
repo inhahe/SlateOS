@@ -945,10 +945,43 @@ impl Table {
 // Firewall state
 // ---------------------------------------------------------------------------
 
+/// Printed once per invocation, to stderr, when a mutating command is executed.
+///
+/// `iptables` on SlateOS has no kernel behind it. The ruleset is built in this
+/// process's memory, printed, and discarded on exit: `iptables -A INPUT -j
+/// DROP` followed by a separate `iptables -L` shows nothing, because the
+/// second process starts empty.
+///
+/// Without this line the tool is not merely useless, it is reassuring. `-A`
+/// succeeds silently, exactly as the real thing does, and `-L` in the same
+/// `iptables-restore` stream lists the rule back. A reader concludes packets
+/// are being dropped. Nothing is filtering anything.
+///
+/// It names `fw` because a notice saying only "not applied" would be true and
+/// would route the reader nowhere -- their packets *can* be filtered, by the
+/// tool that drives the real kernel firewall syscalls (860-864). It says the
+/// ruleset dies with the process because otherwise a reader may conclude a
+/// later `-L` will show their rules.
+///
+/// Decided by the operator as open-questions Q21, 2026-07-14: option C of
+/// three -- keep these as an explicit parser and pretty-printer, fix the docs,
+/// steer users to `fw`. The documentation half landed then; this is the half
+/// that did not.
+const NOT_APPLIED: &str = "iptables: parsed, NOT applied -- this ruleset is not installed anywhere.\n\
+     iptables on SlateOS is a parser and pretty-printer; it does not reach \
+     the kernel,\n     and the ruleset is discarded when this process exits. \
+     To change the running\n     firewall, use `fw`.";
+
 #[derive(Clone, Debug)]
 struct Firewall {
     tables: HashMap<TableName, Table>,
     ipv6: bool,
+    /// Whether [`NOT_APPLIED`] has been printed, so it prints at most once.
+    ///
+    /// An `iptables-restore` stream carries hundreds of rules; a notice per
+    /// rule would be noise that teaches the reader to ignore it, and the
+    /// hundredth says nothing the first did not.
+    warned_not_applied: bool,
 }
 
 impl Firewall {
@@ -962,7 +995,11 @@ impl Firewall {
         ] {
             tables.insert(tn.clone(), Table::new(tn.clone()));
         }
-        Self { tables, ipv6 }
+        Self {
+            tables,
+            ipv6,
+            warned_not_applied: false,
+        }
     }
 
     fn get_table(&self, name: &TableName) -> &Table {
@@ -1099,6 +1136,35 @@ enum Command {
 }
 
 impl Command {
+    /// Does this command change the ruleset, rather than read it?
+    ///
+    /// An exhaustive match rather than a list of names, and that is the whole
+    /// point: a variant added to [`Command`] will not compile until somebody
+    /// decides which side it belongs on. `nft`'s equivalent is a list of
+    /// command strings that *can* drift out of step with its dispatch, and
+    /// needs a test to catch it; here the compiler is the test, so there is
+    /// nothing to keep in step by hand.
+    ///
+    /// `Check` reads: `-C` asks whether a rule exists and answers. `Zero`
+    /// counts as a change -- it resets counters, which is state a reader can
+    /// observe, and reporting it as read-only would be the same class of
+    /// quiet lie this notice exists to remove.
+    const fn mutates(&self) -> bool {
+        match self {
+            Self::Append { .. }
+            | Self::Insert { .. }
+            | Self::Delete { .. }
+            | Self::Replace { .. }
+            | Self::Flush { .. }
+            | Self::Zero { .. }
+            | Self::NewChain { .. }
+            | Self::DeleteChain { .. }
+            | Self::Policy { .. }
+            | Self::RenameChain { .. } => true,
+            Self::List { .. } | Self::Check { .. } => false,
+        }
+    }
+
     /// Mutable access to the command's target table. Every variant carries a
     /// `table`; this lets the `iptables-restore` parser override the table with
     /// the current `*table` block context (restore-format rule lines never
@@ -1595,6 +1661,21 @@ impl ArgParser {
 // ---------------------------------------------------------------------------
 
 fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
+    // AT THE MUTATION, not at the end of `run`, and the difference is not
+    // stylistic. `run` is a match over five personalities with early returns
+    // inside it, and `nft` -- which took the other approach an hour before
+    // this was written -- ended up with the notice wired into two of its three
+    // execution paths, missing `-f`, the one invocation people actually use.
+    //
+    // Here there is exactly one place a command is executed, it is this
+    // function, and the notice is emitted before the work rather than after.
+    // No exit path can skip it, including ones added later by someone who has
+    // never read this comment.
+    if cmd.mutates() && !fw.warned_not_applied {
+        fw.warned_not_applied = true;
+        eprintln!("{NOT_APPLIED}");
+    }
+
     match cmd {
         Command::Append { table, chain, rule } => {
             let tbl = fw.get_table_mut(&table);
@@ -2322,6 +2403,100 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // "parsed, NOT applied" (open-questions Q21, operator-chosen option C)
+    // -----------------------------------------------------------------------
+
+    /// Listing and checking are reads, and must not arm the notice.
+    ///
+    /// This is the control, and it is the one that keeps the notice worth
+    /// reading. `iptables -L` is the most common invocation there is; if it
+    /// printed "NOT applied", the line would appear on nearly every run
+    /// including the ones where nothing was claimed, and a warning that is
+    /// always present is one nobody reads -- leaving the mutating case no
+    /// better off than before the change.
+    #[test]
+    fn reading_the_ruleset_does_not_arm_the_notice() {
+        let listing = Command::List {
+            table: TableName::Filter,
+            chain: None,
+            numeric: true,
+            verbose: false,
+            line_numbers: false,
+        };
+        assert!(!listing.mutates(), "-L armed the not-applied notice");
+
+        let check = Command::Check {
+            table: TableName::Filter,
+            chain: "INPUT".to_string(),
+            rule: Rule::new(),
+        };
+        assert!(!check.mutates(), "-C armed the not-applied notice");
+    }
+
+    /// The commands that change the ruleset arm it.
+    ///
+    /// `mutates` is an exhaustive match, so the compiler already refuses a new
+    /// `Command` variant that nobody has classified -- which is the failure
+    /// `nft`'s string list needs a test to catch. What is left for a test is
+    /// the other direction: a variant classified on the WRONG side, which
+    /// compiles perfectly.
+    ///
+    /// `Zero` is here deliberately. It resets counters rather than rules, and
+    /// calling that a read would be the same quiet lie the notice exists to
+    /// remove: the counters are state, and a reader who zeroes them and sees
+    /// no notice has been told the reset took effect.
+    #[test]
+    fn changing_the_ruleset_arms_the_notice() {
+        let cases = vec![
+            Command::Append {
+                table: TableName::Filter,
+                chain: "INPUT".to_string(),
+                rule: Rule::new(),
+            },
+            Command::Flush {
+                table: TableName::Filter,
+                chain: None,
+            },
+            Command::Zero {
+                table: TableName::Filter,
+                chain: None,
+            },
+            Command::Policy {
+                table: TableName::Filter,
+                chain: "INPUT".to_string(),
+                policy: ChainPolicy::Drop,
+            },
+            Command::NewChain {
+                table: TableName::Filter,
+                chain: "mine".to_string(),
+            },
+        ];
+        for cmd in cases {
+            assert!(
+                cmd.mutates(),
+                "{cmd:?} changes the ruleset but does not arm the notice"
+            );
+        }
+    }
+
+    /// The notice routes the reader somewhere, and says the state is not kept.
+    ///
+    /// Substrings rather than equality with the constant, which would pass
+    /// against any text at all -- including an empty one.
+    #[test]
+    fn the_notice_routes_the_reader_somewhere() {
+        assert!(NOT_APPLIED.contains("NOT applied"), "{NOT_APPLIED}");
+        assert!(
+            NOT_APPLIED.contains("`fw`"),
+            "does not name the working tool"
+        );
+        assert!(
+            NOT_APPLIED.contains("discarded when this process exits"),
+            "does not say the ruleset dies with the process"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // IPv4 CIDR parsing and matching

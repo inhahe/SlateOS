@@ -741,6 +741,26 @@ fi
 skip_toi=0
 toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 [ -f "$toi" ] || skip_toi=1
+# And a cargo workspace to run them in. This gate's whole action is
+# `cargo test -p <pkg>` over three named crates, and its self-test asserts
+# those crate directories exist -- both of which need a workspace manifest at
+# the root. Without one the gate cannot run BY CONSTRUCTION, and its self-test
+# fails for the tree rather than for the checker.
+#
+# Added 2026-09-15 for a real regression: the synthetic repositories in
+# `test-checkers-honour-head.py` skipped this gate only because
+# `check-test-order-independence.py` was ABSENT from them. When that file
+# started being staged -- it has to be, `raced-globals.py` reads its CRATES
+# list at runtime -- gate 42 began running in fixtures that have no crates,
+# failed its own self-test, and refused 8 gate-3 pushes that the cases expect
+# to succeed.
+#
+# Deliberately NOT keyed on the graded crates existing: the fixture creates
+# `posix/src/race.rs`, so "posix/ is here" is true there and would not
+# discriminate. And a guard that skipped when one graded crate went missing
+# would silently disable the gate on the day somebody deleted one, which is
+# exactly when it should be shouting.
+[ -f "${repo_root:-.}/Cargo.toml" ] || skip_toi=1
 # No `pushed_shas` guard here, unlike the gates above, and its absence is the
 # point: those loop `for sha in $pushed_shas` and would run their checker zero
 # times on an empty list while `note_gate` recorded them as having run. This

@@ -554,6 +554,29 @@ def refuses_honestly(body: str) -> bool:
     non-zero exit is what keeps a crate with no exits at all -- the
     falls-off-the-end case -- out.
 
+    **What it cannot see: `pub extern "C" fn main(..) -> i32`.** 23 crates
+    under `userspace/` are written that way and refuse with `return 1` rather
+    than `process::exit(1)` -- acpi, blkid, chpasswd, ctags, dbus, fdisk,
+    finger, ftpd, gdb, getty, inetd, journalctl, lex, login, logind, lp, mesg,
+    polkit, rsync, ss, udevd, wpa, yacc. Neither `_EXIT_OK` nor `_EXIT_ERR`
+    matches a `return`, so for all 23 this predicate answers False and the
+    crate is accused rather than cleared.
+
+    **That is the designed direction and is deliberately left alone.** This
+    rule is pointed at suppression: a false clear hides a defect, a false
+    accusation retires a working program, and the two are not to be traded
+    evenly. A shape the predicate cannot see, and therefore declines to
+    exonerate, is behaving as built. Teaching it `return <int>` would move it
+    toward false clears, which is the failure it was shaped to avoid.
+
+    It is also latent rather than live: rule 2 only reaches crates that do no
+    I/O at all, and all 23 of these do some. The hazard needs a crate that is
+    no-I/O *and* `extern "C"` main *and* refusing by return, which does not
+    exist yet. If one appears, this gate will go red naming it, and that is
+    the moment to decide -- not now, and not by loosening the rule in advance.
+    This paragraph exists so whoever meets that red gate does not spend an
+    afternoon discovering the predicate could not see their program.
+
     **And the clears are printed, not swallowed.** A checker that quietly drops
     what it decides not to report under-reports exactly as invisibly as one
     scanning the wrong directory; `find-unpinned-picker-routing.py` learned

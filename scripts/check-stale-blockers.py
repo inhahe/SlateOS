@@ -317,6 +317,8 @@ PLACEHOLDER_REF = re.compile(r'^scripts/(?:X|Y|N|FOO|NAME|SOMETHING)\.', re.I)
 FLOOR_ENTRIES = 100
 FLOOR_REQUESTS = 50
 FLOOR_DOCUMENTS = 50
+# Far below the real figure, so it fires on a broken scan, not a shrinking tree.
+FLOOR_RUST = 500
 
 NOTE_BEFORE = 3
 NOTE_AFTER = 12
@@ -665,6 +667,7 @@ def selftest():
     bad += dangling_selftest()
     bad += floors_selftest()
     bad += moved_selftest()
+    bad += disabled_selftest()
     total = (
         len(SELFTEST)
         + len(QUESTION_SELFTEST)
@@ -673,6 +676,8 @@ def selftest():
         + len(DANGLING_SELFTEST)
         + 3
         + len(MOVED_SELFTEST)
+        + len(DISABLED_SELFTEST)
+        + 2
     )
     print()
     print("check-stale-blockers selftest: %d case(s), %d failed" % (total, bad))
@@ -908,6 +913,315 @@ MOVED_SELFTEST = [
 ]
 
 
+# --- Fourth pass: a test that has been switched off -------------------------
+#
+# The three passes above read DOCUMENTS. This one reads CODE, because the most
+# expensive stale blocker this gate has seen was not in a document at all.
+#
+# `kernel/src/main.rs:2710` carried a commented-out call to
+# `self_test_ctest_pty`, and the note above the function said it was off
+# "while Lane B routes PtySlave reads through 872/873". Lane B did that on
+# 2026-09-09 (`f83bcb2ed`). The only test at any level able to execute the pty
+# line discipline's `VINTR` -> `SIGINT` -> foreground-group path stayed off for
+# six days after its condition was met, and was found by accident while
+# chasing an unrelated stale sentence. No gate looked, which is exactly why it
+# could sit there.
+#
+# WHAT THIS PASS DELIBERATELY DOES NOT DO: decide whether the stated reason is
+# still true. That needs prose understanding, and a checker guessing at it
+# would either miss the real ones or cry wolf until it was ignored. Instead it
+# reports the WHOLE POPULATION of switched-off tests, unconditionally, with the
+# reason the code gives, and lets a human spend ten seconds per entry.
+#
+# That is only defensible because the population is tiny -- one, across the
+# whole tree, the day this was written, with zero `#[ignore]`s. A report of one
+# line is cheap to read every push; a report of two hundred would be noise and
+# this pass would be the wrong design. If it ever grows past REPORT_CEILING the
+# gate says so, because at that point the right answer is a triage list with
+# owners rather than a printout nobody reads.
+DISABLED_FORMS = (
+    # A call to a `self_test_*` rung, commented out. The rungs are the boot
+    # test's whole content, so a commented-out call is a test that does not run.
+    # No `[ \t]*` before the paren: a CALL has none, and allowing it matched
+    # prose -- `... Extracted to self_test_get_mempolicy (TD4).` read as a
+    # commented-out call to a rung that is in fact invoked on the next line.
+    (re.compile(r"^[ \t]*//[ \t]*[\w:]*\bself_test_(\w+)\("), "call commented out"),
+    # A BARE `#[ignore]`. Not `#[ignore = "..."]` -- see IGNORE_WITH_REASON.
+    (re.compile(r"^[ \t]*#\[ignore\][ \t]*$"), "#[ignore] with no reason"),
+)
+
+# `#[ignore = "why"]` is a different thing and must not be reported with the
+# others. It is cargo's idiomatic way to keep a slow or environment-sensitive
+# test in the tree and out of the default run, and this tree uses it exactly
+# that way: 41 sites, every one carrying a reason, overwhelmingly
+# "measurement benchmark; run explicitly with --release --ignored".
+#
+# My first version printed all 41 and labelled them "NO REASON GIVEN" -- while
+# the reason sat in the attribute it had just matched. Two mistakes at once:
+# the population was measured over seven directories out of ten, and the
+# reason-reader looked only at preceding `//` lines. Both were caught by
+# running the thing, which is the argument for running a new gate against the
+# real tree before believing its design.
+#
+# They are COUNTED, not listed. A count moving is worth noticing; 41 lines of
+# "this benchmark is still a benchmark" every push is how a report gets
+# skipped, and the five real findings underneath it with them.
+IGNORE_WITH_REASON = re.compile(r'^[ \t]*#\[ignore[ \t]*=[ \t]*"([^"]*)"[ \t]*\]')
+
+# A `self_test_*` fn kept compiling by an explicit dead-code waiver. Distinct
+# from the two above: nothing is commented out, the function is simply not
+# called from anywhere, and the attribute is what stops the compiler saying so.
+DEAD_SELFTEST = re.compile(r"^[ \t]*#\[allow\(dead_code\)\]")
+SELFTEST_FN = re.compile(r"^[ \t]*(?:pub )?fn[ \t]+(self_test_\w+)")
+# A CALL to a self_test rung, on a line that is not a comment. Used to decide
+# whether a `#[allow(dead_code)]` waiver is hiding a disabled test or is merely
+# defensive -- `kernel/src/sync.rs` has one on `self_test_stall`, which is
+# called 33 lines above it as Test 7 of a live self-test. Reporting that was a
+# false positive, found by checking the gate's own output rather than trusting
+# the design.
+CALL_SITE = re.compile(r"\bself_test_(\w+)[ \t]*\(")
+DEFINITION = re.compile(r"^[ \t]*(?:pub )?fn[ \t]")
+
+REPORT_CEILING = 12
+
+
+def disabled_tests(sources):
+    """Every switched-off test, with the nearest preceding comment as its reason.
+
+    `sources` is an iterable of `(name, text)`. Returns a pair: a list of
+    `(name, lineno, form, line, reason)` tuples, and a COUNT of the
+    `#[ignore = "why"]` sites, which are deliberate and are not findings.
+
+    The reason is the run of `//` comment lines immediately above, which is
+    where this tree puts them -- and where the pty one was. An empty reason is
+    itself a finding: a test switched off with no note is one nobody can
+    evaluate at all.
+    """
+    sources = list(sources)
+
+    # First pass: which rungs are actually called from live code anywhere?
+    # A definition line matches `self_test_x(` too, so it is excluded
+    # explicitly -- otherwise every rung would look like its own caller and the
+    # waiver check could never fire.
+    called = set()
+    for _name, text in sources:
+        for line in text.split(chr(10)):
+            bare = line.lstrip()
+            if bare.startswith("//") or DEFINITION.match(line):
+                continue
+            called.update(CALL_SITE.findall(line))
+
+    found = []
+    deliberate = 0
+    for name, text in sources:
+        lines = text.split(chr(10))
+        for i, line in enumerate(lines):
+            if IGNORE_WITH_REASON.match(line):
+                deliberate += 1
+                continue
+            form = None
+            for pat, label in DISABLED_FORMS:
+                m = pat.match(line)
+                if not m:
+                    continue
+                # A commented-out call names a rung. If that rung is called
+                # live ANYWHERE, the comment is documentation and not a
+                # disabled test -- the same rule the dead-code waiver uses,
+                # and for the same reason. `#[ignore]` captures no name, so
+                # `m.groups()` is empty and it is always a finding.
+                if m.groups() and m.group(1) in called:
+                    continue
+                form = label
+                break
+            if form is None and DEAD_SELFTEST.match(line):
+                # Look past any further attributes to the item itself, so
+                # `#[allow(dead_code)]` on an unrelated struct is not a hit.
+                j = i + 1
+                while j < len(lines) and lines[j].lstrip().startswith("#["):
+                    j += 1
+                m = SELFTEST_FN.match(lines[j]) if j < len(lines) else None
+                # ...and only when nothing calls it. A waiver on a rung that IS
+                # called is defensive, not disabling.
+                if m and m.group(1)[len("self_test_"):] not in called:
+                    form = "dead_code waiver, and nothing calls it"
+            if form is None:
+                continue
+            reason = []
+            k = i - 1
+            while k >= 0 and lines[k].lstrip().startswith("//"):
+                reason.insert(0, lines[k].lstrip()[2:].strip())
+                k -= 1
+            found.append((name, i + 1, form, line.strip(), " ".join(reason).strip()))
+    return found, deliberate
+
+
+DISABLED_SELFTEST = [
+    (
+        "a commented-out self_test call is found",
+        "kernel/src/main.rs",
+        [
+            "    // Wired but off while Lane B routes reads through 872/873.",
+            "    //             proc::spawn::self_test_ctest_pty(),",
+            "    proc::spawn::self_test_other()?,",
+        ],
+        1,
+    ),
+    (
+        "...and the live call beside it is NOT a hit",
+        "kernel/src/main.rs",
+        ["    proc::spawn::self_test_ctest_pty(),"],
+        0,
+    ),
+    (
+        "a comment naming a rung CALLED on the next line is documentation",
+        "kernel/src/syscall/linux.rs",
+        [
+            "    //      ... Extracted to self_test_get_mempolicy (TD4).",
+            "    self_test_get_mempolicy()?;",
+        ],
+        0,
+    ),
+    (
+        "...and the parenthetical alone was never call syntax",
+        "kernel/src/syscall/linux.rs",
+        ["    // Extracted to self_test_nothing_calls_me (TD4)."],
+        0,
+    ),
+    (
+        "prose naming a self_test is not a call",
+        "kernel/src/proc/spawn.rs",
+        ["// self_test_ctest_pty is the rung that drives it, see the request."],
+        0,
+    ),
+    (
+        "a dead_code waiver on a self_test fn is found",
+        "kernel/src/proc/spawn.rs",
+        ["#[allow(dead_code)]", "pub fn self_test_ctest_pty() -> KernelResult<()> {"],
+        1,
+    ),
+    (
+        "...but NOT when something actually calls it",
+        "kernel/src/sync.rs",
+        [
+            "    self_test_stall();",
+            "#[allow(dead_code)]",
+            "fn self_test_stall() {",
+        ],
+        0,
+    ),
+    (
+        # TWO hits, and that is right rather than a duplicate: the commented-out
+        # call is one finding and the now-uncallable function is another. In the
+        # real tree they are in different files 7000 lines apart (main.rs and
+        # spawn.rs), and a reader chasing this needs both -- the call site says
+        # what stopped running, the definition says what is now unreachable.
+        # I first wrote `1` here and the self-test corrected me.
+        "...and a commented-out call does not count as calling it",
+        "kernel/src/sync.rs",
+        [
+            "    // self_test_stall();",
+            "#[allow(dead_code)]",
+            "fn self_test_stall() {",
+        ],
+        2,
+    ),
+    (
+        "...but the same waiver on anything else is not",
+        "kernel/src/proc/spawn.rs",
+        ["#[allow(dead_code)]", "struct SpawnStats {"],
+        0,
+    ),
+    (
+        "...and it sees past an intervening attribute",
+        "kernel/src/proc/spawn.rs",
+        ["#[allow(dead_code)]", "#[inline(never)]", "fn self_test_x() -> u32 {"],
+        1,
+    ),
+    (
+        "a BARE #[ignore] is found -- nobody can evaluate it",
+        "posix/src/lib.rs",
+        ["    #[ignore]", "    fn slow_case() {}"],
+        1,
+    ),
+    (
+        "...but #[ignore = \"why\"] is deliberate and is NOT a finding",
+        "gui/compositor/src/lib.rs",
+        ['    #[ignore = "measurement benchmark; run explicitly"]', "    fn bench() {}"],
+        0,
+    ),
+    (
+        "a doc comment mentioning ignore is not one",
+        "posix/src/lib.rs",
+        ["    /// We #[ignore] nothing in this tree.", "    fn ok() {}"],
+        0,
+    ),
+]
+
+
+def disabled_selftest():
+    bad = 0
+    for name, fname, body, want in DISABLED_SELFTEST:
+        got = len(disabled_tests([(fname, chr(10).join(body) + chr(10))])[0])
+        ok = got == want
+        bad += 0 if ok else 1
+        print("%-4s %s" % ("ok" if ok else "FAIL", name))
+        if not ok:
+            print("       wanted %d hit(s), got %d" % (want, got))
+    # The reason is the point of the report, so assert it is actually captured.
+    hits, _ = disabled_tests([("m.rs", chr(10).join([
+        "// off while Lane B routes reads",
+        "// through 872/873.",
+        "//   self_test_ctest_pty(),",
+    ]) + chr(10))])
+    ok = len(hits) == 1 and "872/873" in hits[0][4]
+    bad += 0 if ok else 1
+    print("%-4s the reason above it is carried into the report"
+          % ("ok" if ok else "FAIL"))
+    if not ok:
+        print("       got %r" % (hits,))
+    # Skipping a deliberate ignore and COUNTING it are different, and only the
+    # count can show the number moving. A version that just `continue`d would
+    # pass every case above.
+    hits2, n = disabled_tests([("g.rs", chr(10).join([
+        '#[ignore = "slow"]',
+        "fn a() {}",
+        '#[ignore = "flaky on CI"]',
+        "fn b() {}",
+    ]) + chr(10))])
+    ok = not hits2 and n == 2
+    bad += 0 if ok else 1
+    print("%-4s deliberate ignores are counted, not just skipped"
+          % ("ok" if ok else "FAIL"))
+    if not ok:
+        print("       wanted 0 hits and n==2, got %d hits and n==%d" % (len(hits2), n))
+    return bad
+
+
+def rust_sources():
+    """Every tracked `.rs` file, read once.
+
+    Tracked rather than globbed: a `target/` directory holds generated `.rs`,
+    and scanning those would report a disabled test in code nobody wrote.
+    """
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "ls-files", "*.rs"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env=gitenv.clean_env(),
+    ).stdout.splitlines()
+    got = []
+    for rel in out:
+        p = ROOT / rel
+        try:
+            got.append((rel, p.read_text(encoding="utf-8", errors="surrogateescape")))
+        except OSError:
+            continue
+    return got
+
+
 def moved_selftest():
     bad = 0
     for name, body, hist, want in MOVED_SELFTEST:
@@ -991,6 +1305,12 @@ def main(argv=None):
     hist = file_history(cited, HISTORY_WINDOW)
     moved = moved_ground(text, hist, lambda rel: (ROOT / rel).exists())
 
+    # Fourth pass: a test that is in the tree and not in the run. Reads code
+    # rather than documents -- see DISABLED_FORMS for why that turned out to
+    # matter more than any of the three above.
+    sources = rust_sources()
+    disabled, deliberate = disabled_tests(sources)
+
     for lineno, title, request in hits:
         print("known-issues.md:%d: %s" % (lineno, title.strip()))
         print("    cites requests/%s, which reports itself finished." % request)
@@ -1012,6 +1332,21 @@ def main(argv=None):
             print("        %s -- %d commit(s), latest %s" % (path, n, last))
         print("    Re-read it: it may be describing a tree that no longer"
               " exists.")
+        print()
+
+    for name, lineno, form, line, reason in disabled:
+        print("%s:%d: a test is switched off (%s)" % (name, lineno, form))
+        print("    %s" % line)
+        if reason:
+            # Elided rather than wrapped: the point is to show whether a reason
+            # exists and roughly what it names, not to reproduce the comment.
+            short = reason if len(reason) <= 200 else reason[:197] + "..."
+            print("    reason given: %s" % short)
+        else:
+            print("    NO REASON GIVEN -- nobody can evaluate whether this is"
+                  " still needed.")
+        print("    Check whether that is still true. This is the one pass that"
+              " cannot check it for you.")
         print()
 
     # Grouped by the missing file rather than by citation. One retired script is
@@ -1093,6 +1428,21 @@ def main(argv=None):
         % (len(cited), len(hist), HISTORY_WINDOW, len(moved))
     )
 
+    print(
+        "check-stale-blockers: %d tracked .rs file(s) scanned, %d test(s) "
+        "switched off with no way to tell whether they should be, %d "
+        'deliberate `#[ignore = "..."]` (counted, not listed).'
+        % (len(sources), len(disabled), deliberate)
+    )
+    if len(disabled) > REPORT_CEILING:
+        print(
+            "check-stale-blockers: %d switched-off tests is past the %d this "
+            "pass was designed to print. It reports the whole population "
+            "because the population was one; at this size it needs a triage "
+            "list with owners instead." % (len(disabled), REPORT_CEILING),
+            file=sys.stderr,
+        )
+
     thin = []
     if total < FLOOR_ENTRIES:
         thin.append("known-issues entries: %d < %d" % (total, FLOOR_ENTRIES))
@@ -1100,6 +1450,11 @@ def main(argv=None):
         thin.append("request files: %d < %d" % (len(resolved), FLOOR_REQUESTS))
     if len(doc_texts) < FLOOR_DOCUMENTS:
         thin.append("documents: %d < %d" % (len(doc_texts), FLOOR_DOCUMENTS))
+    # `git ls-files` under a foreign GIT_DIR lists another repository's files,
+    # or none. Either way a zero here means the scan broke: this tree holds
+    # over three thousand tracked .rs files.
+    if len(sources) < FLOOR_RUST:
+        thin.append("tracked .rs files: %d < %d" % (len(sources), FLOOR_RUST))
     if thin:
         print(
             "check-stale-blockers: REFUSING a verdict -- this scan read far less "

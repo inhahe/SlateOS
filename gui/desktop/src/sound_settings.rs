@@ -66,6 +66,25 @@ pub enum DeviceKind {
     Input,
 }
 
+/// What the Input tab says beside the two levels it reads back to you.
+///
+/// `gain` and `monitor_volume` are set by setters, clamped to 0-100, and read
+/// in exactly one place each: the `format!` that draws them. Found by
+/// `scripts/find-echoed-settings.py`.
+///
+/// **There is no audio anywhere in this operating system.** That is not a
+/// guess about this page -- it is recorded in `known-issues.md` against
+/// `TD-C-THE-MUSIC-PLAYER-PLAYS-NOTHING-AND-DRAWS-A-VISUALISER-OF-IT`, which
+/// established that nothing in the tree produces or captures sound. So there
+/// is no microphone to have a gain, and monitoring it would have nothing to
+/// play through.
+///
+/// Worth stating rather than implying: the reason this page cannot work is
+/// one layer further down than the page, and a reader who only sees the
+/// slider will reasonably assume the opposite.
+const NO_AUDIO: &str = "Not applied: this system has no audio. Nothing \
+captures from a microphone, so there is no input level to set.";
+
 /// Audio endpoint device (speaker, headphones, microphone, etc.).
 #[derive(Clone, Debug)]
 pub struct AudioDevice {
@@ -914,6 +933,21 @@ impl SoundSettingsUI {
             );
         }
 
+        y += 8.0;
+        // Beneath the levels, not at the top of the tab: the percentages
+        // above are what read as confirmation.
+        cmds.push(RenderCommand::Text {
+            x,
+            y,
+            text: NO_AUDIO.to_owned(),
+            font_size: 11.0,
+            color: p.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        y += 28.0;
+
         y
     }
 
@@ -1229,6 +1263,46 @@ mod tests {
     use super::*;
     use appearance::palette_check::assert_drawn_from;
     use guitk::color::Color;
+
+    /// The input levels are drawn with the fact that this system has no audio.
+    ///
+    /// `gain` and `monitor_volume` are set by setters, clamped to 0-100, and
+    /// read in exactly one place each: the `format!` that draws them. Found
+    /// by `scripts/find-echoed-settings.py`.
+    ///
+    /// There is no audio anywhere in this operating system -- recorded in
+    /// `known-issues.md` against the music player, which established that
+    /// nothing in the tree produces or captures sound. So there is no
+    /// microphone to have a gain. The reason this page cannot work is a layer
+    /// below the page, and a reader who sees only the slider will reasonably
+    /// assume the opposite.
+    #[test]
+    fn the_input_levels_are_drawn_with_the_fact_that_there_is_no_audio() {
+        let mut ui = SoundSettingsUI::default();
+        // "Input".
+        ui.set_active_tab(1);
+
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 500.0);
+        let texts: Vec<String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t == "Gain"),
+            "control: the tab must be drawing the input levels for this test to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("no audio")),
+            "the page drew an input level and did not say there is no audio"
+        );
+    }
 
     #[test]
     fn audio_device_format_string() {

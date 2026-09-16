@@ -5,6 +5,7 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -36,6 +37,11 @@ enum Facility {
     Local5 = 21,
     Local6 = 22,
     Local7 = 23,
+    /// `mark`, which is `LOG_NFACILITIES << 3` (192) in `syslog.h` and sits in
+    /// util-linux's facility table like any other name. Kept because the
+    /// reference accepts both `-p mark.1` and `-p 192.1`, and inventing a
+    /// refusal for a value upstream defines would be our divergence, not its.
+    Mark = 24,
 }
 
 impl Facility {
@@ -61,6 +67,48 @@ impl Facility {
             "local5" => Some(Self::Local5),
             "local6" => Some(Self::Local6),
             "local7" => Some(Self::Local7),
+            // In util-linux's table and not guessable from the others: the
+            // internal pseudo-facility. (`security`, the deprecated spelling
+            // of `auth`, is already an alias on the `auth` arm above.)
+            "mark" => Some(Self::Mark),
+            _ => None,
+        }
+    }
+
+    /// The facility whose *wire* value is `n`, or `None`.
+    ///
+    /// util-linux's table stores values already shifted -- `LOG_USER` is 8, not
+    /// 1 -- and its numeric lookup compares against those, so `-p 8.5` is
+    /// `user.notice`. The table is not contiguous: it runs 0..=88 in steps of
+    /// eight, then jumps to 128 (`local0`) and ends at 184 (`local7`), plus 192
+    /// for `mark`. `-p 96.1` is refused by the reference for exactly that
+    /// reason, and so is refused here.
+    fn from_value(n: u32) -> Option<Self> {
+        if !n.is_multiple_of(8) {
+            return None;
+        }
+        match n / 8 {
+            0 => Some(Self::Kern),
+            1 => Some(Self::User),
+            2 => Some(Self::Mail),
+            3 => Some(Self::Daemon),
+            4 => Some(Self::Auth),
+            5 => Some(Self::Syslog),
+            6 => Some(Self::Lpr),
+            7 => Some(Self::News),
+            8 => Some(Self::Uucp),
+            9 => Some(Self::Cron),
+            10 => Some(Self::Authpriv),
+            11 => Some(Self::Ftp),
+            16 => Some(Self::Local0),
+            17 => Some(Self::Local1),
+            18 => Some(Self::Local2),
+            19 => Some(Self::Local3),
+            20 => Some(Self::Local4),
+            21 => Some(Self::Local5),
+            22 => Some(Self::Local6),
+            23 => Some(Self::Local7),
+            24 => Some(Self::Mark),
             _ => None,
         }
     }
@@ -87,6 +135,7 @@ impl Facility {
             Self::Local5 => "local5",
             Self::Local6 => "local6",
             Self::Local7 => "local7",
+            Self::Mark => "mark",
         }
     }
 }
@@ -121,6 +170,25 @@ impl Severity {
         }
     }
 
+    /// The severity whose value is `n`, or `None`.
+    ///
+    /// Unlike the facility table these are unshifted and contiguous, 0..=7, so
+    /// `-p 5` is `notice` and `-p 8` is refused -- 8 is a facility value, and
+    /// a bare number is looked up in the PRIORITY table only.
+    fn from_value(n: u32) -> Option<Self> {
+        match n {
+            0 => Some(Self::Emerg),
+            1 => Some(Self::Alert),
+            2 => Some(Self::Crit),
+            3 => Some(Self::Err),
+            4 => Some(Self::Warning),
+            5 => Some(Self::Notice),
+            6 => Some(Self::Info),
+            7 => Some(Self::Debug),
+            _ => None,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Emerg => "emerg",
@@ -137,64 +205,74 @@ impl Severity {
 
 // ── Priority parsing ─────────────────────────────────────────────
 
-/// Parse a priority string like "user.info" or numeric priority
-fn parse_priority(s: &str) -> Option<(Facility, Severity)> {
-    // Try numeric first
-    if let Ok(n) = s.parse::<u32>() {
-        let facility_num = (n >> 3) as u8;
-        let severity_num = (n & 7) as u8;
-        let facility = match facility_num {
-            0 => Facility::Kern,
-            1 => Facility::User,
-            2 => Facility::Mail,
-            3 => Facility::Daemon,
-            4 => Facility::Auth,
-            5 => Facility::Syslog,
-            6 => Facility::Lpr,
-            7 => Facility::News,
-            8 => Facility::Uucp,
-            9 => Facility::Cron,
-            10 => Facility::Authpriv,
-            11 => Facility::Ftp,
-            16 => Facility::Local0,
-            17 => Facility::Local1,
-            18 => Facility::Local2,
-            19 => Facility::Local3,
-            20 => Facility::Local4,
-            21 => Facility::Local5,
-            22 => Facility::Local6,
-            23 => Facility::Local7,
-            _ => return None,
-        };
-        let severity = match severity_num {
-            0 => Severity::Emerg,
-            1 => Severity::Alert,
-            2 => Severity::Crit,
-            3 => Severity::Err,
-            4 => Severity::Warning,
-            5 => Severity::Notice,
-            6 => Severity::Info,
-            7 => Severity::Debug,
-            _ => return None,
-        };
-        return Some((facility, severity));
-    }
+/// Why a `-p` argument was refused, worded as util-linux 2.39.3 words it.
+///
+/// An `Option` cannot carry this and that is the whole reason this type
+/// exists: the reference names the FACILITY for `-p nosuch.zz`
+/// ("unknown facility name: nosuch") and the PRIORITY for `-p user.nosuch`
+/// ("unknown priority name: nosuch"). A caller holding only "it did not parse"
+/// has no choice but to echo the whole argument, which is what this program
+/// used to do -- `logger: unknown priority: 'nosuch.zz'` names the wrong half
+/// and quotes a string the reference does not quote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PriorityError {
+    UnknownFacility(String),
+    UnknownPriority(String),
+}
 
-    // Try facility.severity
-    if let Some(dot_pos) = s.find('.') {
-        let fac_name = &s[..dot_pos];
-        let sev_name = &s[dot_pos + 1..];
-        let facility = Facility::from_name(fac_name)?;
-        let severity = Severity::from_name(sev_name)?;
-        return Some((facility, severity));
+impl fmt::Display for PriorityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownFacility(name) => write!(f, "unknown facility name: {name}"),
+            Self::UnknownPriority(name) => write!(f, "unknown priority name: {name}"),
+        }
     }
+}
 
-    // Try just severity (assume user facility)
-    if let Some(severity) = Severity::from_name(s) {
-        return Some((Facility::User, severity));
+/// Look a token up in a table the way util-linux's `decode()` does.
+///
+/// A token that STARTS with a digit is a number and only a number: it is
+/// parsed whole (a trailing non-digit is a refusal, not a prefix match) and
+/// then accepted only if it is a value the table actually contains. Anything
+/// else is a case-insensitive name.
+///
+/// The "only if the table contains it" half is the part that is easy to miss
+/// and that this program got wrong: it used to read a bare `-p 34` as a packed
+/// wire value, `facility << 3 | severity`, and answer `auth.crit`. The
+/// reference refuses it -- a bare number is looked up in the PRIORITY table,
+/// where the values are 0..=7, so 34 is not there. `-p 32.2` is how you ask
+/// for `auth.crit`, and it is accepted by both.
+fn decode<T>(
+    token: &str,
+    by_value: fn(u32) -> Option<T>,
+    by_name: fn(&str) -> Option<T>,
+) -> Option<T> {
+    if token.starts_with(|c: char| c.is_ascii_digit()) {
+        // `str::parse` already refuses a trailing non-digit, which is the
+        // behaviour wanted: util-linux checks `*end` and rejects `12x`.
+        return token.parse::<u32>().ok().and_then(by_value);
     }
+    by_name(token)
+}
 
-    None
+/// Parse a `-p` argument as util-linux 2.39.3 parses it.
+///
+/// `facility.priority` splits on the first dot; without a dot the whole token
+/// is a PRIORITY and the facility defaults to `user`. That default is why
+/// `-p user` is an error rather than a facility selection -- measured, not
+/// assumed: the reference answers `unknown priority name: user`.
+fn parse_priority(s: &str) -> Result<(Facility, Severity), PriorityError> {
+    let (facility, level) = match s.split_once('.') {
+        Some((fac, rest)) => {
+            let facility = decode(fac, Facility::from_value, Facility::from_name)
+                .ok_or_else(|| PriorityError::UnknownFacility(fac.to_string()))?;
+            (facility, rest)
+        }
+        None => (Facility::User, s),
+    };
+    let severity = decode(level, Severity::from_value, Severity::from_name)
+        .ok_or_else(|| PriorityError::UnknownPriority(level.to_string()))?;
+    Ok((facility, severity))
 }
 
 // ── Timestamp formatting ─────────────────────────────────────────
@@ -402,12 +480,9 @@ fn parse_args(args: &[OsString]) -> Options {
                 i += 1;
                 if i < args.len() {
                     match parse_priority(args[i].to_str().unwrap_or("")) {
-                        Some(p) => opts.priority = p,
-                        None => {
-                            eprintln!(
-                                "logger: unknown priority: {}",
-                                quoting::quoteaf_os(&args[i])
-                            );
+                        Ok(p) => opts.priority = p,
+                        Err(err) => {
+                            eprintln!("logger: {err}");
                             process::exit(1);
                         }
                     }
@@ -479,9 +554,9 @@ fn parse_args(args: &[OsString]) -> Options {
             _ if s.starts_with("--priority=") => {
                 let val = s.strip_prefix("--priority=").unwrap_or("");
                 match parse_priority(val) {
-                    Some(p) => opts.priority = p,
-                    None => {
-                        eprintln!("logger: unknown priority: {}", val);
+                    Ok(p) => opts.priority = p,
+                    Err(err) => {
+                        eprintln!("logger: {err}");
                         process::exit(1);
                     }
                 }
@@ -519,12 +594,9 @@ fn parse_args(args: &[OsString]) -> Options {
                             i += 1;
                             if i < args.len() {
                                 match parse_priority(args[i].to_str().unwrap_or("")) {
-                                    Some(p) => opts.priority = p,
-                                    None => {
-                                        eprintln!(
-                                            "logger: unknown priority: {}",
-                                            quoting::quoteaf_os(&args[i])
-                                        );
+                                    Ok(p) => opts.priority = p,
+                                    Err(err) => {
+                                        eprintln!("logger: {err}");
                                         process::exit(1);
                                     }
                                 }
@@ -820,11 +892,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_priority_numeric() {
-        // user (1) * 8 + info (6) = 14
-        let (fac, sev) = parse_priority("14").unwrap();
-        assert_eq!(fac, Facility::User);
-        assert_eq!(sev, Severity::Info);
+    fn a_bare_number_is_a_priority_not_a_packed_wire_value() {
+        // This program used to read `-p 14` as `facility << 3 | severity` and
+        // answer `user.info`. util-linux 2.39.3 looks a bare number up in the
+        // PRIORITY table, whose values are 0..=7, so 14 is simply not in it:
+        //     $ logger -p 14 hi
+        //     logger: unknown priority name: 14
+        assert_eq!(
+            parse_priority("14"),
+            Err(PriorityError::UnknownPriority("14".to_string()))
+        );
+        // The way to ask for `auth.crit` is the facility's own wire value, and
+        // the reference does accept that spelling -- measured, not assumed:
+        //     $ logger -s -p 32.2 hi
+        //     <34>Sep 16 07:24:19 inhahe: hi
+        assert_eq!(parse_priority("32.2"), Ok((Facility::Auth, Severity::Crit)));
     }
 
     #[test]
@@ -857,22 +939,113 @@ mod tests {
 
     #[test]
     fn test_parse_priority_invalid() {
-        assert!(parse_priority("invalid.bogus").is_none());
+        assert!(parse_priority("invalid.bogus").is_err());
     }
 
     #[test]
-    fn test_parse_priority_numeric_zero() {
-        let (fac, sev) = parse_priority("0").unwrap();
-        assert_eq!(fac, Facility::Kern);
-        assert_eq!(sev, Severity::Emerg);
+    fn the_diagnostic_names_the_half_that_was_actually_wrong() {
+        // The whole reason `parse_priority` returns a `Result` and not an
+        // `Option`: these two arguments are wrong in different halves, and the
+        // reference says so.
+        assert_eq!(
+            parse_priority("nosuch.zz"),
+            Err(PriorityError::UnknownFacility("nosuch".to_string()))
+        );
+        assert_eq!(
+            parse_priority("user.nosuch"),
+            Err(PriorityError::UnknownPriority("nosuch".to_string()))
+        );
+        // Worded as the reference words it, and UNQUOTED as the reference
+        // leaves it -- this program used to print `unknown priority: 'x'`,
+        // which names the wrong half and adds quotes of its own.
+        assert_eq!(
+            PriorityError::UnknownFacility("nosuch".to_string()).to_string(),
+            "unknown facility name: nosuch"
+        );
+        assert_eq!(
+            PriorityError::UnknownPriority("nosuch".to_string()).to_string(),
+            "unknown priority name: nosuch"
+        );
     }
 
     #[test]
-    fn test_parse_priority_auth_crit() {
-        // auth (4) * 8 + crit (2) = 34
-        let (fac, sev) = parse_priority("34").unwrap();
-        assert_eq!(fac, Facility::Auth);
-        assert_eq!(sev, Severity::Crit);
+    fn a_bare_number_takes_the_default_user_facility() {
+        // 0 is a valid priority (emerg) so this parses -- but the facility is
+        // the default `user`, NOT `kern`. The old packed reading made `0` mean
+        // `kern.emerg`; the reference emits <8>, which is user(1)<<3 | 0:
+        //     $ logger -s -p 0 hi
+        //     <8>Sep 16 07:24:18 inhahe: hi
+        assert_eq!(parse_priority("0"), Ok((Facility::User, Severity::Emerg)));
+        // <13> = user<<3 | notice.
+        assert_eq!(parse_priority("5"), Ok((Facility::User, Severity::Notice)));
+        // 8 is a FACILITY value, so it is not a priority and there is no
+        // second table to fall back to.
+        assert_eq!(
+            parse_priority("8"),
+            Err(PriorityError::UnknownPriority("8".to_string()))
+        );
+        // A bare FACILITY name is an error for the same reason: without a dot
+        // the token is looked up as a priority only.
+        assert_eq!(
+            parse_priority("user"),
+            Err(PriorityError::UnknownPriority("user".to_string()))
+        );
+    }
+
+    #[test]
+    fn numeric_facilities_are_shifted_and_their_table_has_a_hole_in_it() {
+        assert_eq!(
+            parse_priority("8.5"),
+            Ok((Facility::User, Severity::Notice))
+        );
+        assert_eq!(
+            parse_priority("16.5"),
+            Ok((Facility::Mail, Severity::Notice))
+        );
+        assert_eq!(parse_priority("88.1"), Ok((Facility::Ftp, Severity::Alert)));
+        assert_eq!(
+            parse_priority("128.1"),
+            Ok((Facility::Local0, Severity::Alert))
+        );
+        assert_eq!(
+            parse_priority("184.1"),
+            Ok((Facility::Local7, Severity::Alert))
+        );
+        // `mark` is LOG_NFACILITIES << 3, and both spellings reach it:
+        //     $ logger -s -p mark.1 hi
+        //     <193>Sep 16 07:24:19 inhahe: hi
+        assert_eq!(
+            parse_priority("192.1"),
+            Ok((Facility::Mark, Severity::Alert))
+        );
+        assert_eq!(
+            parse_priority("mark.1"),
+            Ok((Facility::Mark, Severity::Alert))
+        );
+        // Between ftp (88) and local0 (128) the table is EMPTY, so 96 is not a
+        // facility even though it is a tidy multiple of eight...
+        assert_eq!(
+            parse_priority("96.1"),
+            Err(PriorityError::UnknownFacility("96".to_string()))
+        );
+        // ...and a value that is not a multiple of eight is not one either.
+        assert_eq!(
+            parse_priority("9.1"),
+            Err(PriorityError::UnknownFacility("9".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_number_with_a_trailing_non_digit_is_not_a_name_either() {
+        // util-linux checks `*end` after `strtol` and refuses outright; it does
+        // not fall back to a name lookup. So `5x` is an error, and crucially it
+        // is the NUMERIC refusal -- a fallback would have reported it as an
+        // unknown name after trying both, which reads the same but is a
+        // different code path and would accept `5x` if a name ever matched.
+        assert_eq!(
+            parse_priority("5x"),
+            Err(PriorityError::UnknownPriority("5x".to_string()))
+        );
     }
 
     // Facility names

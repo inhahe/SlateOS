@@ -4918,6 +4918,20 @@ pub struct Compositor {
     /// clock adjusted underneath them would silence a key for the length of
     /// the adjustment.
     started_at: Instant,
+    /// When input was last seen, for an idle watch.
+    ///
+    /// Here and not in the shell because this is the only place that sees
+    /// *every* input event. A shell measuring its own idleness would be
+    /// counting the time since it was last typed at, not since the user was
+    /// last active, and would lock the screen out from under somebody working
+    /// in a terminal.
+    ///
+    /// Starts at `started_at`: a session nobody has touched yet has been idle
+    /// since it began, which is the answer a lock timeout wants. `None` would
+    /// mean "no reading", and there is one -- see
+    /// `gui/desktop/src/widgets.rs`, where a meter that had never been sampled
+    /// had to stop reporting zero for the same reason.
+    last_input: Instant,
     cursor_x: i32,
     /// Current mouse cursor position.
     cursor_y: i32,
@@ -5235,6 +5249,7 @@ impl Compositor {
             damage: DamageRegion::new(),
             frame_stats: FrameStats::new(frame_interval),
             started_at: Instant::now(),
+            last_input: Instant::now(),
             cursor_x: width as i32 / 2,
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
@@ -7042,8 +7057,26 @@ impl Compositor {
     // Input routing
     // -----------------------------------------------------------------------
 
+    /// When input was last seen.
+    ///
+    /// The reading an idle watch is built on. Exposed as the instant rather
+    /// than as a duration so a caller can compare it against its own deadline
+    /// without this type having to know what the deadline is -- and so a test
+    /// can assert on it by comparison instead of by sleeping, which is what
+    /// design-decisions 855 asks for: count the thing if you can, and time it
+    /// only when you cannot.
+    #[must_use]
+    pub const fn last_input(&self) -> Instant {
+        self.last_input
+    }
+
     /// Process an input event and route it to the appropriate window.
     pub fn handle_input(&mut self, event: InputEvent) {
+        // Every input event passes through here, which is why the reading is
+        // taken here rather than in each of the handlers below: a new event
+        // kind cannot forget to be counted as activity.
+        self.last_input = Instant::now();
+
         // Hit testing derives from `frame_insets`, which is scaled, so input
         // needs the same refresh compositing does — and needs it more often.
         // A drag delivers pointer motion far faster than frames are composed,
@@ -21919,6 +21952,51 @@ mod tests {
             "the edge behind a blurring surface is as sharp as it was \
              ({before} distinct colours before, {after} after) -- the pass did \
              not reach the framebuffer"
+        );
+    }
+
+    /// Input moves the idle reading; anything else leaves it alone.
+    ///
+    /// The second half is the control, and it is the half that makes the first
+    /// mean something: an implementation that stamped `last_input` from a
+    /// timer, or on every pass of the loop, would satisfy "it advanced after a
+    /// click" and report a session as active while nobody touched it -- which
+    /// is the failure a lock timeout exists to avoid.
+    ///
+    /// Compared rather than timed. A test that slept and asserted on the
+    /// elapsed duration would fail on a busy machine and pass on a broken
+    /// implementation that stamped the field constantly.
+    #[test]
+    fn input_moves_the_idle_reading_and_nothing_else_does() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+
+        let before = c.last_input();
+        c.handle_input(InputEvent::MouseMove { x: 4, y: 4 });
+        let after_move = c.last_input();
+        // Strictly greater, not `>=`: `>=` holds when the field is never
+        // touched at all, so it would pass against an implementation that
+        // recorded nothing. `Instant` here is QPC-backed and two readings
+        // either side of a call differ.
+        assert!(
+            after_move > before,
+            "input did not move the idle reading forward"
+        );
+
+        // A repaint is not activity.
+        c.set_appearance(appearance::AppearanceSettings::default());
+        assert_eq!(
+            c.last_input(),
+            after_move,
+            "something that is not input was counted as activity"
+        );
+
+        c.handle_input(InputEvent::KeyDown {
+            scancode: 30,
+            character: Some('a'),
+        });
+        assert!(
+            c.last_input() > after_move,
+            "a key press did not count as activity"
         );
     }
 

@@ -153847,7 +153847,7 @@ the day that lands, `/proc/battery` starts carrying real readings and a
 works.
 
 
-## TD-C-A-GAUGE-NOBODY-MEASURED -- PARTLY FIXED 2026-09-15
+## TD-C-A-GAUGE-NOBODY-MEASURED -- FIXED 2026-09-16
 
 **In short:** the desktop's system-monitor widget drew a CPU bar at 45%, a
 memory bar at 62% and a disk bar at 38%. Those were three constants in the
@@ -153905,7 +153905,21 @@ quieter version of the same defect. The trough is still drawn when there is no
 reading, because an empty gauge is the honest shape of a gauge with no needle,
 and a line says which it is.
 
-**Still open:** nothing supplies the three. `gui/desktop` has no `procinfo`
+**Closed 2026-09-16: two of the three are supplied, and the third says it is
+not.** Re-read rather than assumed. `ShellState::sample_system` builds a
+`procinfo::ProcFs`, reads `memory()` and `cpu_stats()`, and fills
+`memory_fraction` and `cpu_fraction` from them; `prev_cpu` holds the previous
+sample because a processor fraction is a ratio over an interval, so the first
+call after start-up is `None` and the meter reads "CPU (not measured)" for that
+one second -- which the code documents as the honest answer rather than a gap.
+`disk_fraction` stays `None` with the reason written at the assignment: nothing
+in the tree reports how much of a disk is *in use*, only its capacity, so the
+meter says so instead of showing a plausible fraction of a number it does have.
+
+The paragraph below is what was true on 2026-09-15, kept because it records why
+the seam was typed as three `Option`s before anything could fill them:
+
+**Was open:** nothing supplies the three. `gui/desktop` has no `procinfo`
 dependency, so the shell cannot read `/proc/stat` or `/proc/meminfo` today.
 Wiring it is a contained job -- `apps/sysinfo`, `apps/procexplorer` and
 `apps/sysmonitor` all read through `procinfo` already -- and the seam is now

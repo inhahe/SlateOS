@@ -8469,6 +8469,163 @@ pub fn self_test_cfortify() -> KernelResult<()> {
 ///
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-pgroup/main.c`).
+/// Does ANY of our Rust userland execute on SlateOS?
+///
+/// `create-ext4-rootfs.sh` puts 71 binaries from `userspace/coreutils` into
+/// `/bin`. Before this rung, not one had ever been executed under SlateOS by
+/// anything. Compiling, linking, being staged and *running* are four separate
+/// claims and only the first three had evidence -- so "SlateOS has 89
+/// commands" meant "89 files are present".
+///
+/// **This runs before every other ring-3 rung**, and the reason is a property
+/// of the tests rather than a ranking of their subjects: a rung that can
+/// invalidate its siblings goes first. If `/bin/true` cannot exec then
+/// `ctest-pty`, `ctest-zombiewait` and `ctest-keylayout` were never testing
+/// what their names say; they would be exercising the same broken loader from
+/// further away, and passing would be worse than failing because it would
+/// look like evidence.
+///
+/// Four subjects, each adding one capability to the one before:
+///
+/// | | proves |
+/// |---|---|
+/// | `/bin/true` | exec, run, exit 0 |
+/// | `/bin/false` | the same, exiting 1 -- with `true`, that the exit status is *carried* |
+/// | `/bin/echo hi` | argv reaches the program, stdout reaches a pipe |
+/// | `/bin/basename /usr/lib/x.so` | the first that computes |
+///
+/// The `true`/`false` pair is the part worth understanding. `true` alone
+/// passes against a `wait()` that always reports 0, and every shell script in
+/// the system reads that value. Two shipped programs differing in exactly one
+/// bit of observable behaviour is a positive-and-negative control pair that
+/// cost nobody a fixture to write -- the negative control is a program whose
+/// entire specification is "fail", so there is nothing to misconstruct.
+/// Cheap controls get used; expensive ones get skipped.
+///
+/// Exit 42 means all four ran and answered correctly. Codes 1, 2, 9 and 10
+/// are the fixture's OWN plumbing (`pipe`, `fork`, `wait`, `read`) and are
+/// deliberately disjoint from 3-8, which are findings about the utilities: a
+/// broken pipe here must never read as a broken userland.
+pub fn self_test_coreutils_runs() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-coreutils-runs", "ctest-coreutils-runs")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running /bin/true,false,echo,basename (ring 3, C, native ABI) \
+         integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only when all four ran and answered.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-coreutils-runs"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-coreutils-runs",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: ctest-coreutils-runs spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    // Four fork+exec+wait cycles, each needing its child scheduled through a
+    // full exec and an exit, so quadruple ctest-zombiewait's budget rather
+    // than reusing it: that one reaps two children and execs nothing.
+    let mut became_zombie = false;
+    for _ in 0..48000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-coreutils-runs (ring 3) did not finish -- state \
+             {:?}. It execs four /bin programs in sequence; a hang here is most \
+             likely the FIRST exec rather than the fourth, so look for whether any \
+             /bin/* output appeared at all. Nothing else in this suite is \
+             interpretable until this rung completes",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        // The two halves of the legend say different things to the reader, and
+        // conflating them is what this fixture's author specifically avoided.
+        let meaning = match exit_code {
+            Some(1) => "pipe() failed -- THIS FIXTURE'S OWN PLUMBING, not a finding",
+            Some(2) => "fork() failed -- this fixture's own plumbing",
+            Some(3) => {
+                "/bin/true did not exit 0. Nothing below this is interpretable: our \
+                 own ELFs do not exec, run or exit cleanly, which would explain \
+                 every other ring-3 rung and is the cheapest thing here to diagnose"
+            }
+            Some(4) => {
+                "/bin/false did not exit 1 -- THE EXIT STATUS IS NOT BEING CARRIED. \
+                 `true` passed and `false` did not, so exec and run work and the \
+                 status is lost between _exit and wait. Every shell script in the \
+                 system reads that value"
+            }
+            Some(5) => "/bin/echo printed something other than \"hi\" -- argv or stdout",
+            Some(6) => "/bin/echo did not exit 0",
+            Some(7) => "/bin/basename computed the wrong answer -- the first real computation",
+            Some(8) => "/bin/basename did not exit 0",
+            Some(9) => {
+                "a wait() failed or returned the wrong pid -- this fixture's own \
+                 plumbing, NOT a finding about the utilities"
+            }
+            Some(10) => {
+                "a read of a child's output failed or never finished -- this \
+                 fixture's own plumbing"
+            }
+            Some(127) => "a child could not exec -- 127 is the shell's convention",
+            _ => "an unexpected code; see the legend at the top of main.c",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ctest-coreutils-runs (ring 3) exit code was {:?}, \
+             expected {}: {}",
+            exit_code,
+            EXPECTED,
+            meaning
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   /bin/true, /bin/false, /bin/echo and /bin/basename all ran \
+         under SlateOS (ring 3, native ABI): exec works, the exit status is \
+         carried, argv and stdout reach the program, and it computes: OK"
+    );
+    Ok(())
+}
+
 /// Reach zombie-with-a-waiter twice, to split B-FORKEXEC-BOOT-HANG in half.
 ///
 /// The hang tracked in `known-issues.md` as `B-FORKEXEC-BOOT-HANG` has been

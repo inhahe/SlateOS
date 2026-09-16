@@ -2463,6 +2463,18 @@ extern "C" fn kernel_main() -> ! {
     // connected. The fixture forks, moves the child into a new group, and
     // checks that the *parent* can see it: the seam the whole bug lived in.
     // Bounded yield loop; can never hang the boot.
+    // FIRST of the ring-3 rungs, and the ordering is a property of the tests
+    // rather than a ranking of their subjects: a rung that can invalidate its
+    // siblings runs before them. If /bin/true cannot exec, none of the rungs
+    // below is testing what its name says -- they would all be exercising the
+    // same broken loader from further away, and passing would be worse than
+    // failing because it would look like evidence.
+    selftest::dispatch_debug(
+        "our own userland runs at all (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_coreutils_runs(),
+    );
+
     // The smallest reachable form of B-FORKEXEC-BOOT-HANG: two
     // fork-and-reap cycles, no exec and no loader. Placed before the
     // pgroup rung so the cheaper fixture reaches the state first.

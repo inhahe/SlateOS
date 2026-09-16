@@ -84847,7 +84847,7 @@ complained about everything.
 
 ---
 
-## TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR (lane B, 2026-09-16) — **open**
+## TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR (lane B, 2026-09-16) -- **Status: FIXED** 2026-09-16
 
 **In short:** our `bc` accepts two statements written side by side with nothing
 between them. `1 2` on one line prints `1` and then `2`; GNU calls it
@@ -84898,6 +84898,53 @@ gets a first one, and a wrong answer only for programs containing `1 2`, which
 no one writes deliberately. It is recorded because the reporting work above
 referred to it, and a reference to an entry that does not exist is how a known
 gap becomes an unknown one.
+
+### Fixed 2026-09-16
+
+`Parser::require_terminator` replaces `skip_terminator` at every statement end,
+refusing anything that cannot legally follow one.
+
+**The followers were measured before a line was written**, exactly as this
+entry asked, because the failure mode of an over-strict rule is refusing valid
+programs — worse than the over-acceptance being fixed, and invisible to a suite
+that only feeds it malformed input:
+
+| after a statement | GNU |
+|---|---|
+| `;` or newline | the separators themselves |
+| `}` | accepted — `{ print "a" }` |
+| `else` | accepted — `if (1) print "a" else print "b"` |
+| end of input | accepted |
+| anything else | `syntax error` |
+
+**Two results were not what reasoning would have produced.** A closing brace
+ends a statement but does **not** license a following one: `{ 1 } 2`,
+`if (1) { … } 2`, `while (0) { } 2` and `for (…) { } 2` are all refused. And a
+**function definition is not a statement** in this sense — `define f() {
+return (1) } f()` is accepted — because GNU's grammar makes a definition its
+own input item. Guessing either way round would have produced a `bc` that
+rejected real programs.
+
+There is a third, learned from a failing test rather than from GNU: a
+*braceless* body needs nothing extra, because `parse_stmt` has already consumed
+a terminator for the statement it read, and that terminator is the enclosing
+`if`'s as well. Requiring a second one rejected `if (1) print "a"` followed by
+any next line at all. The braced case is the one that needs it, and it is
+applied in `parse_block_or_stmt` where the `}` is consumed.
+
+**This closes the gap the reporting work left.** `1 $ 2` now produces both of
+GNU's diagnostics — `illegal character: $` from the scanner and `syntax error`
+from the parser, because with the `$` dropped the parser really is looking at
+`1 2`. Neither stage can produce the other's finding, which is what the
+scanner/parser split was built for.
+
+**Evidence.** `bc-diff.sh` 147 -> 159 passed, 0 differed, known bugs 3 -> 1.
+The `bad character` row came back `KFIXED`. Five new rows carry both halves —
+the refusals *and* the acceptances — so an over-strict rule cannot pass. The
+147 pre-existing rows are themselves the control that no valid program was
+refused: they are real `bc` programs and all of them still agree with GNU. 98
+unit tests, including a `requiring_a_separator_does_not_reject_valid_programs`
+case listing fifteen accepted forms.
 
 ---
 

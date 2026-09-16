@@ -425,9 +425,24 @@ prog 'unterminated string'     'print "abc\n'
 # Measured both ways round before claiming it; see the entry.
 differs_by_design 'GNU misnames the source and line for an at-EOF error; ours are right'
 prog 'unbalanced brace'        'if (1) {\nprint "A"\n'
-known_bug TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR
 prog 'bad character'           '1 $ 2\n'
 prog 'error then more input'   'print )\nprint "after\\n"\n'
+
+# Statements need a separator, and the interesting part is which tokens count
+# as one. Both halves are here on purpose: the refusals are the bug that was
+# fixed, and the acceptances are the control, because the failure mode of an
+# over-strict rule is REFUSING VALID PROGRAMS -- worse than the over-acceptance
+# it replaces, and invisible to a suite that only tests malformed input.
+#
+# `{ 1 } 2` being refused is the row that is not obvious: a closing brace ends
+# a statement but does not license the next one. `define f() { … } f()` being
+# accepted is the other: a definition is its own input item in GNU's grammar,
+# which is why the separator rule is not applied after one.
+prog 'two statements, no separator'  '1 2\n'
+prog 'block then statement'          '{ 1 } 2\n'
+prog 'if-block then statement'       'if (1) { print "a" } 2\n'
+prog 'separators that are accepted'  '1; 2\n{ print "a" }\nif (1) print "b" else print "c"\n'
+prog 'define then call, no separator' 'define f() { return (1) } f()\n'
 
 known_bug TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE
 prog_file 'a file that is not there' '' nosuch.bc

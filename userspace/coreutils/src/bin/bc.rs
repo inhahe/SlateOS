@@ -912,13 +912,13 @@ impl Parser {
             // error would be a wrong answer with a diagnostic attached.
             Token::Quit | Token::Halt => {
                 self.advance();
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Halt)
             }
             Token::Print => {
                 self.advance();
                 let items = self.parse_print_list();
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Print(items))
             }
             Token::If => Some(self.parse_if()),
@@ -932,29 +932,30 @@ impl Parser {
                 } else {
                     None
                 };
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Return(expr))
             }
             Token::Break => {
                 self.advance();
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Break)
             }
             Token::Continue => {
                 self.advance();
-                self.skip_terminator();
+                self.require_terminator();
                 Some(Stmt::Continue)
             }
             Token::LBrace => {
                 self.advance();
                 let body = self.parse_stmt_list();
                 self.expect(&Token::RBrace);
+                self.require_terminator();
                 Some(Stmt::Block(body))
             }
             _ => {
                 if self.is_expr_start() {
                     let expr = self.parse_expr();
-                    self.skip_terminator();
+                    self.require_terminator();
                     Some(Stmt::Expr(expr))
                 } else {
                     // Skip unexpected token — but say so first. Skipping in
@@ -971,6 +972,48 @@ impl Parser {
     fn skip_terminator(&mut self) {
         if *self.peek() == Token::Newline || *self.peek() == Token::Semicolon {
             self.advance();
+        }
+    }
+
+    /// End a statement, refusing whatever cannot legally come next.
+    ///
+    /// bc separates statements with `;` or a newline, and until this existed
+    /// ours did not insist: `1 2` printed `1` and `2` where GNU calls it a
+    /// syntax error. That is mostly harmless on its own — nobody writes
+    /// `1 2` — but it is what stopped a *typo* from being reported, because a
+    /// stray character removed by the scanner turns `1 $ 2` into exactly that.
+    ///
+    /// # What may follow a statement, measured rather than reasoned
+    ///
+    /// The failure mode of getting this wrong is rejecting valid programs,
+    /// which is worse than the over-acceptance being fixed, so every row below
+    /// was run against GNU bc 1.07.1 before a line of this was written:
+    ///
+    /// | after a statement | GNU |
+    /// |---|---|
+    /// | `;` or newline | the separators themselves |
+    /// | `}` | accepted — `{ print "a" }` |
+    /// | `else` | accepted — `if (1) print "a" else print "b"` |
+    /// | end of input | accepted |
+    /// | anything else | `syntax error` |
+    ///
+    /// Two results are worth keeping because they are not what one would
+    /// guess. **A closing brace does not license a following statement**:
+    /// `{ 1 } 2` is refused, as are `if (1) { … } 2` and `while (0) { } 2`, so
+    /// a block ends a statement and still needs a separator after it. And a
+    /// **function definition is not a statement** in this sense — `define f()
+    /// { return (1) } f()` is accepted — because GNU's grammar makes a
+    /// definition its own input item. That is why [`Self::parse_define`] does
+    /// not call this.
+    fn require_terminator(&mut self) {
+        match *self.peek() {
+            Token::Newline | Token::Semicolon => {
+                self.advance();
+            }
+            // Legal followers that are NOT terminators, so they stay put for
+            // whoever is parsing the construct around this one.
+            Token::RBrace | Token::Else | Token::Eof => {}
+            _ => self.record_error(),
         }
     }
 
@@ -1113,6 +1156,18 @@ impl Parser {
             self.advance();
             let stmts = self.parse_stmt_list();
             self.expect(&Token::RBrace);
+            // The braced body ends the enclosing `if`/`while`/`for`, so the
+            // statement-separator rule applies here as much as after a bare
+            // one: measured, `if (1) { print "a" } 2` is a syntax error on
+            // GNU. `else` is among the legal followers, so the `else` half of
+            // an `if` still parses.
+            //
+            // The braceless branch below needs nothing: `parse_stmt` has
+            // already required a terminator for whatever statement it read,
+            // and that terminator is the enclosing construct's too. Requiring
+            // a second one there would reject `if (1) print "a"` followed by
+            // any next line at all.
+            self.require_terminator();
             stmts
         } else if let Some(stmt) = self.parse_stmt() {
             vec![stmt]
@@ -3739,20 +3794,91 @@ mod tests {
 
     #[test]
     fn an_illegal_character_is_named_and_then_dropped() {
-        // Dropped, not carried: with the `$` gone the parser sees `1 2`, and
-        // what it says about that is its own business. Both diagnostics appear
-        // for `1 $ 2` on GNU; ours currently reports only the first, because
-        // our grammar accepts two expressions with no separator between them.
-        // That gap is `TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR`, not this test's
-        // subject, and is asserted here as it actually behaves so the entry
-        // and the code cannot drift apart.
-        assert_eq!(diagnostics("1 $ 2\n"), ["1: illegal character: $"]);
+        // Dropped, not carried: with the `$` gone the parser sees `1 2`, which
+        // is itself a syntax error, so BOTH diagnostics appear -- exactly as
+        // GNU prints them. This is the pair that made the scanner/parser split
+        // worth building: the illegal character is the scanner's finding and
+        // the syntax error is the parser's, and neither can produce the other.
+        assert_eq!(
+            diagnostics("1 $ 2\n"),
+            ["1: illegal character: $", "1: syntax error"]
+        );
         // With a separator there is nothing for the parser to object to, and
         // GNU agrees: `1; $ 2` is `illegal character: $` and nothing else.
         assert_eq!(diagnostics("1; $ 2\n"), ["1: illegal character: $"]);
         // Still fatal to the unit, though -- measured, GNU prints neither the
         // `1` nor the `2`.
         assert_eq!(feed_lines("1; $ 2\n"), ["failed"]);
+    }
+
+    #[test]
+    fn two_statements_need_something_between_them() {
+        // GNU refuses all of these. Ours used to run them, printing answers to
+        // a program GNU calls malformed.
+        for bad in [
+            "1 2\n",
+            "print \"a\" print \"b\"\n",
+            "1 x=2\n",
+            // A closing brace ends a statement but does NOT license a
+            // following one -- measured, and the opposite of what one would
+            // guess from most languages.
+            "{ 1 } 2\n",
+            "if (1) { print \"a\" } 2\n",
+            "while (0) { } 2\n",
+            "for (i=0;i<1;i++) { } 2\n",
+            // A braceless body is a statement like any other.
+            "if (1) print \"a\" 2\n",
+            // And inside a block the rule is the same.
+            "{ 1 2 }\n",
+            "1 halt\n",
+        ] {
+            assert_eq!(
+                diagnostics(bad),
+                ["1: syntax error"],
+                "expected a syntax error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn requiring_a_separator_does_not_reject_valid_programs() {
+        // The control for the test above, and the reason the followers were
+        // MEASURED rather than reasoned about: the failure mode of getting
+        // this rule too strict is refusing programs people actually write,
+        // which is worse than the over-acceptance it fixes. Every line here is
+        // accepted by GNU.
+        for good in [
+            "1; 2\n",
+            "1\n2\n",
+            // `}` may follow a statement.
+            "{ print \"a\" }\n",
+            "if (1) { print \"a\" }\n",
+            "define f() {\n  return (1)\n}\n",
+            // `else` may follow one, braced or not.
+            "if (1) print \"a\" else print \"b\"\n",
+            "if (0) { print \"a\" } else { print \"b\" }\n",
+            // A function DEFINITION is its own input item in GNU's grammar,
+            // so something may follow it with no separator at all. This is the
+            // row that stops `require_terminator` being bolted onto
+            // `parse_define` as well.
+            "define f() { return (1) } f()\n",
+            // End of input is a legal follower, which is what lets a file
+            // without a trailing newline run.
+            "1",
+            "print \"a\"",
+            // Trailing separators, empty statements and blank lines.
+            "1;\n",
+            "1;;\n",
+            "\n\n1\n\n",
+            "for (i=0;i<2;i++) { print i }\n",
+            "while (0) { }\n",
+        ] {
+            assert_eq!(
+                diagnostics(good),
+                Vec::<String>::new(),
+                "valid program refused: {good:?}"
+            );
+        }
     }
 
     #[test]
@@ -3782,7 +3908,10 @@ mod tests {
         // mistake on line 40 is worse than no line number, since the reader
         // goes and stares at a line that is fine.
         assert_eq!(diagnostics("1\n2\nprint )\n"), ["3: syntax error"]);
-        assert_eq!(diagnostics("1\n2\n3 $ 4\n"), ["3: illegal character: $"]);
+        assert_eq!(
+            diagnostics("1\n2\n3 $ 4\n"),
+            ["3: illegal character: $", "3: syntax error"]
+        );
         assert_eq!(
             diagnostics("print )\n1\nprint )\n"),
             ["1: syntax error", "3: syntax error"]

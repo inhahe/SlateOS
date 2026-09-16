@@ -515,11 +515,24 @@ def floors_selftest():
     entries_n = sum(1 for _ in entries(text))
     requests_n = len(list(requests_dir.glob("*.md")))
     docs_n = len(tracked_documents())
+    # FLOOR_RUST was added with the switched-off-test pass and was the one
+    # floor this case did not cover -- the gate refused thin scans of three
+    # populations and checked the calibration of those three, while the fourth
+    # could have been raised past what it measures and nothing would have said
+    # so. That is the ratchet this function's own docstring warns about,
+    # present in the function that warns about it.
+    #
+    # Found by applying lane A's probe to my own gate: ask what the check would
+    # print if the answer were no. For the three floors above, a miscalibration
+    # prints a FAIL here. For the fourth it printed nothing, because nothing
+    # asked.
+    rust_n = len(rust_sources())
     bad = 0
     for name, actual, floor in (
         ("known-issues entries", entries_n, FLOOR_ENTRIES),
         ("request files", requests_n, FLOOR_REQUESTS),
         ("documents", docs_n, FLOOR_DOCUMENTS),
+        ("tracked .rs files", rust_n, FLOOR_RUST),
     ):
         ok = actual > floor
         bad += 0 if ok else 1
@@ -674,7 +687,7 @@ def selftest():
         + 1
         + 7
         + len(DANGLING_SELFTEST)
-        + 3
+        + 4
         + len(MOVED_SELFTEST)
         + len(DISABLED_SELFTEST)
         + 2

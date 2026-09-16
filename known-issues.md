@@ -154399,6 +154399,10 @@ usefully, a gate that refuses a test binary containing both
 
 ## TD-C-THREE-MORE-SHELL-SETTINGS-MODULES-ARE-REACHED-BY-NOTHING
 
+**Status 2026-09-16: one of three resolved** (`default_apps.rs`, deleted after
+its model was ported to `gui/associations`; see below). `backup_settings.rs`
+and `power_settings.rs` remain.
+
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `gui/desktop/src/{power_settings,backup_settings,default_apps}.rs`.
 
@@ -154427,13 +154431,38 @@ design that is recorded nowhere else, so deleting it would lose knowledge
 rather than remove duplication". The same question has to be asked of each of
 these three, and at least one clearly holds something:
 
-* `default_apps.rs` models **categories** -- which application opens web
-  links, mail, music, video, images, documents. The Default Apps page built in
-  `apps/settings` on this date lists *extension to program* associations read
-  from the `fileassoc` group, which is a different fact. Porting the category
-  model is the precondition for deleting this, exactly as `associations.rs`
-  was deleted only after its fallback-handler logic moved into
-  `apps/fileassoc` -- where it fixed a real bug on the way.
+* `default_apps.rs` -- **DONE 2026-09-16, precondition met first.** The rule
+  above was that porting the category model came before deleting it. It did.
+  The model now lives in `gui/associations` as design-decisions 857, and it is
+  not a port so much as a grounding: the shell's version carried a
+  hand-written list of "the music extensions", and `guitk::filetypes` already
+  held `FILE_TYPE_TABLE`, 133 entries of extension to `FileCategory`, which
+  `apps/explorer` was already importing. So a category is now a *view* on that
+  table, and the toolkit gained `extensions_in()` -- the reverse of the
+  `category_from_extension()` it already had -- with a round-trip test that the
+  two directions agree.
+
+  Three of the six categories did not survive the move, and their absence is
+  the useful part. "Web browser" and "email" have no consumer anywhere in the
+  tree -- there is no browser in `apps/` at all, and the only mentions of
+  `mailto` were this dead module and `apps/qrcode`, which encodes the string
+  into a QR image. "Documents" was dropped because `txt` and `pdf` are both
+  filed under `Document` and do not share a program, so the row could only
+  impose a wrong association; that is now a test against the table rather than
+  a claim in prose.
+
+  Porting also found something the shell module could never have revealed:
+  there is **no write side**, and there cannot be one outside
+  `apps/fileassoc`. Its `write_into` prunes every entry its registry no longer
+  holds, so a second writer's associations are deleted at the next save with no
+  error anywhere. A `set_category` was written, compiled, tested against a
+  document, and deleted for that reason. What moved is the read side, which now
+  has a real consumer: the Settings page reports each kind as Agreed, Mixed or
+  Not set.
+
+  Removed: 2,325 lines, 35 public items, 35 tests -- a suite proving the
+  behaviour of a panel nobody could open. The shell's test count went 2,907 ->
+  2,872, exactly the 35, which is the check that nothing else went with it.
 * `power_settings.rs` models screen-off and sleep timeouts in minutes with
   "0 = never". Nothing persists them and nothing honours them, so they are an
   echoed setting in waiting.

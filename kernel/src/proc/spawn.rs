@@ -8469,6 +8469,112 @@ pub fn self_test_cfortify() -> KernelResult<()> {
 ///
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-pgroup/main.c`).
+/// Reach zombie-with-a-waiter twice, to split B-FORKEXEC-BOOT-HANG in half.
+///
+/// The hang tracked in `known-issues.md` as `B-FORKEXEC-BOOT-HANG` has been
+/// seen on `forkexec` and on `dash-statpath`, which share no code but do share
+/// a state: a process going zombie while something waits for it. This fixture
+/// reaches that state twice and does nothing else -- no exec, no loader, no
+/// shell -- so a hang here says the fault is in reap or wakeup, and a hang
+/// only in the larger tests says it is not.
+///
+/// **A hang is the finding.** The yield budget expiring is a result, not a
+/// malfunction of this rung, and the serial markers are what make it useful:
+/// each `[zw]` line is emitted BEFORE the work it names, so the last one is
+/// the segment that did not finish.
+///
+/// Exit 42 means both orderings reaped; any other code names the first failed
+/// check (legend at the top of `services/ctest-zombiewait/main.c`).
+pub fn self_test_zombiewait() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-zombiewait", "ctest-zombiewait")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running zombie-with-a-waiter, both orderings (ring 3, C, native ABI) \
+         integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after both orderings reap.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-zombiewait"];
+    let envp: &[&[u8]] = &[];
+    // No capabilities: it forks, writes markers to fd 1, and reaps. Spawning
+    // with `parent: 0` keeps the expectations exact, as ctest-pgroup does.
+    let options = SpawnOptions {
+        name: "ctest-zombiewait",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-zombiewait spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Two fork-and-reap cycles, each needing the child scheduled at least
+    // twice, so double ctest-pgroup's headroom rather than reusing it.
+    let mut became_zombie = false;
+    for _ in 0..12000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-zombiewait (ring 3) did not finish -- state {:?}. THIS IS \
+             THE HANG, and the last `[zw]` line above names the segment that did not \
+             complete, because each marker is emitted BEFORE its work. If it is `B wait`, \
+             check whether `B child released` appeared: present means the child ran and \
+             exited so a corpse exists and no wakeup was delivered; absent means the child \
+             never returned from its pipe read, so reaping is exonerated and the fault is \
+             in the pipe or the scheduler. See known-issues B-FORKEXEC-BOOT-HANG",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-zombiewait (ring 3) reached Zombie but exit code was \
+             {:?}, expected {}. It exits non-42 only when a check FAILED rather than \
+             hung, so this is a wrong answer and not a lost wakeup -- the code names the \
+             first failed check, legend at the top of services/ctest-zombiewait/main.c",
+            exit_code,
+            EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   zombie-with-a-waiter (ring 3, native ABI: a corpse reaped after the \
+         fact, and a waiter already blocked when the child exits) -- both orderings \
+         reaped, no exec and no loader involved: OK"
+    );
+    Ok(())
+}
+
 pub fn self_test_cpgroup() -> KernelResult<()> {
     let Some(ctest_elf) = pathz_test_elf("ctest-pgroup", "ctest-pgroup")? else {
         return Ok(());

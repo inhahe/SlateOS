@@ -2463,6 +2463,14 @@ extern "C" fn kernel_main() -> ! {
     // connected. The fixture forks, moves the child into a new group, and
     // checks that the *parent* can see it: the seam the whole bug lived in.
     // Bounded yield loop; can never hang the boot.
+    // The smallest reachable form of B-FORKEXEC-BOOT-HANG: two
+    // fork-and-reap cycles, no exec and no loader. Placed before the
+    // pgroup rung so the cheaper fixture reaches the state first.
+    selftest::dispatch_debug(
+        "zombie with a waiter (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_zombiewait(),
+    );
     selftest::dispatch_debug(
         "process groups (ring 3)",
         selftest::Severity::Diagnostic,

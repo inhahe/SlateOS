@@ -608,6 +608,11 @@ pub struct SettingsState {
     /// file somewhere, which is not something this application can be
     /// notified about -- unlike the settings file, which has a watcher.
     font_families: Vec<String>,
+    /// The fixed-pitch families, for the terminal font picker. A subset of
+    /// `font_families`, kept separately because the filter is the whole point:
+    /// offering the unfiltered list under "Terminal Font" is what breaks a
+    /// terminal's grid.
+    mono_families: Vec<String>,
 }
 
 /// Where an open dropdown's popup is, and which of its items are on screen.
@@ -710,15 +715,17 @@ pub enum DropdownId {
     /// How the desktop picture is placed on the screen.
     WallpaperFit,
     /// The family all interface text is drawn in.
-    ///
-    /// No `MonoFont` beside it yet, deliberately. The setting exists and is
-    /// applied, but nothing in this tree can tell a fixed-pitch family from a
-    /// proportional one -- `guitk::text::set_mono_family`'s own note says a
-    /// caller that points it at a proportional face "gets a terminal with a
-    /// broken grid". A picker listing every installed family under the words
-    /// "Terminal Font" would be an invitation to do exactly that, so it waits
-    /// on reading `post.isFixedPitch`.
     UiFont,
+    /// The family fixed-pitch text is drawn in.
+    ///
+    /// Offered only because `guitk::text::available_mono_families` can now
+    /// answer it. `set_mono_family` installs whatever it is handed and says
+    /// so -- a caller pointing it at a proportional face "gets a terminal with
+    /// a broken grid, and that is the caller's decision to have made" -- so
+    /// this picker is built on the filtered list rather than on
+    /// `available_families`, which is how it declines to make that decision on
+    /// the user's behalf.
+    MonoFont,
 }
 
 impl DropdownId {
@@ -792,6 +799,7 @@ impl SettingsState {
     /// I/O, and so out of [`new`](Self::new) with the rest of it.
     pub fn load_font_families(&mut self) {
         self.font_families = guitk::text::available_families();
+        self.mono_families = guitk::text::available_mono_families();
     }
 
     /// Re-read the file associations the File Associations program writes.
@@ -1132,6 +1140,7 @@ impl SettingsState {
             // Empty for the same reason as `default_apps`: enumerating
             // installed fonts is I/O, and this constructor does none.
             font_families: Vec::new(),
+            mono_families: Vec::new(),
         }
     }
 }
@@ -4061,9 +4070,43 @@ impl SettingsState {
         }
 
         s.gap();
+        s.section("Terminal Font");
+        let mono_chosen = self.appearance.settings.fonts.mono_font.clone();
+        if self.mono_families.is_empty() {
+            s.note(
+                "No fixed-pitch font families were found on this system, so there is nothing a terminal can safely be set to. Fixed-pitch text is drawn in the built-in face.",
+                40.0,
+            );
+        } else {
+            s.dropdown_row("Font", DropdownId::MonoFont, &mono_chosen);
+        }
+
+        match guitk::text::mono_family() {
+            Some(family) if family == mono_chosen => s.value_row("In use", &family, pal.text),
+            Some(family) => s.value_row("In use", &family, pal.peach),
+            None => s.value_row("In use", "Built-in face", pal.peach),
+        }
+
+        // A configured family missing from the *filtered* list is two
+        // different complaints, and they are worth telling apart: not
+        // installed at all, or installed and proportional. The second is what
+        // a hand-edited `appearance.yaml` produces, and it is the one that
+        // breaks the grid.
+        if !mono_chosen.is_empty() && !self.mono_families.contains(&mono_chosen) {
+            let why = if self.font_families.contains(&mono_chosen) {
+                format!(
+                    "\"{mono_chosen}\" is installed but is not fixed-pitch, so it is not offered here: a proportional font in a terminal breaks the character grid."
+                )
+            } else {
+                format!("\"{mono_chosen}\" is not installed on this machine.")
+            };
+            s.note(&why, 40.0);
+        }
+
+        s.gap();
         s.note(
-            "Terminal text has a separate font setting, which this page does not offer yet: nothing here can yet tell a fixed-pitch family from a proportional one, and choosing a proportional one would break the terminal's character grid.",
-            56.0,
+            "Only fixed-pitch families are listed for the terminal. The setting will accept any family that is written into the configuration file by hand, which is why the row above reports what is actually in use.",
+            44.0,
         );
     }
 
@@ -4391,6 +4434,14 @@ impl SettingsState {
                     .position(|f| *f == self.appearance.settings.fonts.ui_font)
                     .unwrap_or(0);
                 (self.font_families.clone(), current)
+            }
+            DropdownId::MonoFont => {
+                let current = self
+                    .mono_families
+                    .iter()
+                    .position(|f| *f == self.appearance.settings.fonts.mono_font)
+                    .unwrap_or(0);
+                (self.mono_families.clone(), current)
             }
             DropdownId::ColorFilter => {
                 let items: Vec<String> = ColorFilter::ALL
@@ -5210,6 +5261,11 @@ impl SettingsState {
                     self.appearance.settings.fonts.ui_font = family.clone();
                 }
             }
+            DropdownId::MonoFont => {
+                if let Some(family) = self.mono_families.get(index) {
+                    self.appearance.settings.fonts.mono_font = family.clone();
+                }
+            }
             DropdownId::ColorFilter => {
                 if let Some(filter) = ColorFilter::ALL.get(index) {
                     self.appearance.settings.color_filter = *filter;
@@ -5632,6 +5688,22 @@ mod tests {
         assert!(
             text.contains(&in_use),
             "the page does not name the font the toolkit is drawing with ({in_use})"
+        );
+
+        assert!(
+            text.contains("Terminal Font"),
+            "the terminal font section is missing"
+        );
+        // The filter is the whole reason this section waited on
+        // `post.isFixedPitch`: everything offered for the terminal must be a
+        // family this machine actually has, and a subset of what the interface
+        // picker offers. A `monospaced_families` that returned names from some
+        // other source would satisfy "the section renders" and fail here.
+        assert!(
+            app.mono_families
+                .iter()
+                .all(|f| app.font_families.contains(f)),
+            "a family offered for the terminal is not among the installed families"
         );
     }
 

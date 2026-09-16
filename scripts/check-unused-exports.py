@@ -46,6 +46,14 @@ WHAT IT CANNOT SEE, and these are not small
 * **Items reached through a re-export** under a different name.
 * **Trait methods called through the trait**, and impls generally.
 * **Macro-generated calls.**
+* **Types that are only ever a return value.** A function's result type is
+  never named by a caller that writes `let _ = f()` or `let x = f()`, so it is
+  reported. On the first real run this caught `appearance::FontOutcome` and
+  `FontsApplied`, written the same day: both call sites of `FontSettings::apply`
+  discard the result. That is a true reading -- the three states really are
+  detail nobody consumes -- and it is also the shape most likely to be a
+  deliberate, harmless design. Read the doc comment before believing the
+  finding, which is the rule for every entry here.
 
 It also cannot tell "nobody has written the caller yet" from "this is a
 deliberate part of a published API". That judgement is the reader's, which is

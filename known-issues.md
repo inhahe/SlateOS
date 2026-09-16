@@ -127864,7 +127864,45 @@ prompt. For an encrypted key that is currently right — there is no passphrase
 prompt to offer — but it stops being right the moment there is one. Revisit §778
 together with this entry.
 
-## TD-B-SSHD-ACCEPTS-ONLY-ONE-AUTHORIZEDKEYSFILE-PATH-WHERE-OPENSSH-ACCEPTS-A-LIST (lane B, 2026-09-05)
+## TD-B-SSHD-ACCEPTS-ONLY-ONE-AUTHORIZEDKEYSFILE-PATH-WHERE-OPENSSH-ACCEPTS-A-LIST (lane B, 2026-09-05) -- FIXED 2026-09-16
+
+`AuthorizedKeysFile` now takes a list. `authorized_keys_paths` splits the
+setting on whitespace and resolves each pattern independently;
+`pubkey_auth_for_account` reads every named file and a key in any of them
+authorises, which is what OpenSSH does. 235 -> 240 tests, clippy clean.
+
+**Two decisions inside it that are not obvious.**
+
+*The discard-on-error rule moved from the setting to each file.* An unreadable
+file authorising nothing -- indistinguishable from an empty one, so an
+unauthenticated peer cannot probe which accounts exist -- was right and stays.
+Applied to the whole SETTING it would have made a missing first file hide a
+present second one, which is precisely the `authorized_keys` +
+`authorized_keys2` case this entry is about.
+
+*The contents are joined with a newline, not concatenated.* A file whose last
+line lacks a trailing newline would otherwise be spliced onto the first line of
+the next, destroying one key from each and producing a single corrupt entry out
+of two valid ones -- a failure nobody would trace back to a missing byte.
+
+**Fail-closed on an empty setting:** zero patterns resolve to zero paths, so
+nothing is authorised. Resolving an empty setting to the home directory would
+have the daemon read a directory as a key list on every login.
+
+**Probed by restoring the defect** -- `vec![authorized_keys_path(setting, user)]`,
+the whole setting as one filename. Four of the five new tests fail; the fifth,
+`a_single_pattern_is_unchanged_by_list_support`, correctly still passes, because
+it pins the behaviour that was always right. A control that failed under the
+sabotage would have meant it was testing the bug rather than the invariant.
+
+**Not implemented, and named so nobody assumes it:** `AuthorizedKeysFile none`,
+which OpenSSH accepts to disable publickey auth entirely. Today `none` resolves
+as a relative filename (`~/none`), which almost certainly does not exist, so the
+effect is the same by accident. Worth doing properly if anyone relies on it.
+
+The description below is kept in the tense it was written in.
+
+**The original entry, 2026-09-05, follows.**
 
 **In short:** `sshd_config` has a setting, `AuthorizedKeysFile`, naming the file
 that lists which keys may log into an account. Real OpenSSH lets an

@@ -1768,6 +1768,110 @@ impl ExplorerState {
         self.menu = Some(menu);
     }
 
+    /// Whether `(x, y)` is over the detail view's header row.
+    ///
+    /// Only in Details: the other views draw no header, and a menu offering to
+    /// choose columns from a view that has none would be a control that cannot
+    /// act.
+    fn over_column_header(&self, x: f32, y: f32) -> bool {
+        if self.view_mode != ViewMode::Details {
+            return false;
+        }
+        let pane = self.pane_rect();
+        x >= pane.x && x < pane.x + pane.width && y >= pane.y && y < pane.y + HEADER_H
+    }
+
+    /// The column picker: every column, ticked when shown, and the two saves.
+    fn open_column_menu(&mut self, x: f32, y: f32) {
+        let mut items = self.column_menu_items();
+        items.push(MenuItem::Separator);
+        items.push(Self::menu_action(
+            MENU_COLUMNS_SAVE_FOLDER,
+            "Save as default for this folder",
+            true,
+        ));
+        items.push(Self::menu_action(
+            MENU_COLUMNS_SAVE_GLOBAL,
+            "Save as default for all folders",
+            true,
+        ));
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
+        self.menu = Some(menu);
+    }
+
+    /// One row per column, ticked when it is currently shown.
+    ///
+    /// Every column the manager knows, not only the ones on screen -- a picker
+    /// that listed only what is already visible could never add anything.
+    fn column_menu_items(&self) -> Vec<MenuItem> {
+        self.columns
+            .all_column_defs()
+            .iter()
+            .map(|def| MenuItem::Action {
+                id: MENU_COLUMN_BASE.saturating_add(u64::from(def.id.0)),
+                label: def.label.clone(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: Some(self.columns.is_visible(def.id)),
+            })
+            .collect()
+    }
+
+    /// Toggle a column, or save the current set. Answers whether it was ours.
+    fn column_menu_action(&mut self, id: u64) -> bool {
+        match id {
+            MENU_COLUMNS_SAVE_FOLDER => {
+                let keys = self.columns.visible_keys();
+                let saved =
+                    columnprefs::set_for_folder(&mut self.column_prefs, &self.current_path, &keys);
+                self.status_message = if saved {
+                    match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                        Ok(()) => format!("{} columns saved for this folder", keys.len()),
+                        Err(e) => format!("Could not save the columns: {e}"),
+                    }
+                } else {
+                    // The path has no text form, so there is no key to save it
+                    // under. Said plainly rather than failing silently.
+                    String::from(
+                        "This folder's name cannot be written to the settings file, so its columns cannot be saved",
+                    )
+                };
+                true
+            }
+            MENU_COLUMNS_SAVE_GLOBAL => {
+                let keys = self.columns.visible_keys();
+                columnprefs::set_global(&mut self.column_prefs, &keys);
+                self.status_message =
+                    match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                        Ok(()) => format!("{} columns saved as the default", keys.len()),
+                        Err(e) => format!("Could not save the columns: {e}"),
+                    };
+                true
+            }
+            _ if id >= MENU_COLUMN_BASE => {
+                let Ok(raw) = u32::try_from(id.saturating_sub(MENU_COLUMN_BASE)) else {
+                    return false;
+                };
+                let column = ColumnId(raw);
+                if self.columns.is_visible(column) {
+                    // The last column is not removable: a header row with
+                    // nothing in it shows a list the user cannot read.
+                    if self.columns.active_columns().len() > 1 {
+                        self.columns.remove_column(column);
+                    } else {
+                        self.status_message = String::from("At least one column has to stay");
+                    }
+                } else {
+                    self.columns.add_column(column);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// What can be done to the file under the pointer.
     fn file_menu_items(&self) -> Vec<MenuItem> {
         vec![
@@ -1825,6 +1929,12 @@ impl ExplorerState {
 
     /// Carry out a menu row.
     fn activate_menu_item(&mut self, id: u64) {
+        // The column picker first: its per-column ids are allocated above
+        // every action below, so asking it first costs one comparison and
+        // keeps the two id spaces from having to be interleaved here.
+        if self.column_menu_action(id) {
+            return;
+        }
         match id {
             MENU_OPEN => {
                 if let Some(&index) = self.selected_indices.first() {
@@ -3659,6 +3769,13 @@ const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16)
 // Context menu row ids. Numbered rather than positional, so inserting a row
 // cannot silently reassign what the ones below it do.
 const MENU_OPEN: u64 = 1;
+/// Save the visible columns for the folder being shown.
+const MENU_COLUMNS_SAVE_FOLDER: u64 = 100;
+/// Save them as the default for folders with no preference of their own.
+const MENU_COLUMNS_SAVE_GLOBAL: u64 = 101;
+/// One id per column, offset so it cannot collide with an action above.
+/// `ColumnId` is a small integer, and 1000 is far above every action here.
+const MENU_COLUMN_BASE: u64 = 1000;
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -3927,7 +4044,11 @@ impl ExplorerState {
                 self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
             }
             MouseEventKind::Press(MouseButton::Right) => {
-                self.open_context_menu(m.x, m.y);
+                if self.over_column_header(m.x, m.y) {
+                    self.open_column_menu(m.x, m.y);
+                } else {
+                    self.open_context_menu(m.x, m.y);
+                }
                 true
             }
             MouseEventKind::Release(MouseButton::Left) => {
@@ -5248,6 +5369,90 @@ mod tests {
             "the address bar still shows the old folder: {:?}",
             state.pathbar.current_path()
         );
+    }
+
+    /// Ticking a column in the picker shows it; ticking it again hides it.
+    #[test]
+    fn the_picker_toggles_a_column() {
+        let scratch = temp_dir("picker_toggle");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+
+        let target = ColumnId::DATE_CREATED;
+        let id = MENU_COLUMN_BASE + u64::from(target.0);
+        let before = state.columns.is_visible(target);
+
+        state.activate_menu_item(id);
+        assert_ne!(
+            state.columns.is_visible(target),
+            before,
+            "the picker did not change the column"
+        );
+        state.activate_menu_item(id);
+        assert_eq!(
+            state.columns.is_visible(target),
+            before,
+            "ticking twice did not return to where it started"
+        );
+    }
+
+    /// The last column cannot be turned off.
+    ///
+    /// A header row with nothing in it leaves a list nobody can read, and the
+    /// picker is the only way to reach that state.
+    #[test]
+    fn the_picker_will_not_empty_the_header_row() {
+        let scratch = temp_dir("picker_last");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+
+        state.columns.set_columns(vec![ColumnId::NAME]);
+        state.activate_menu_item(MENU_COLUMN_BASE + u64::from(ColumnId::NAME.0));
+        assert_eq!(
+            state.columns.visible_keys(),
+            vec!["name"],
+            "the last column was removed"
+        );
+        assert!(
+            state.status_message.contains("at least one")
+                || state.status_message.contains("At least one"),
+            "no reason was given: {}",
+            state.status_message
+        );
+    }
+
+    /// Choose columns, save them for the folder, come back: they are there.
+    ///
+    /// The loop the feature exists for. Each half is tested on its own above,
+    /// and neither proves the picker's save is the thing the next visit reads.
+    #[test]
+    fn columns_saved_from_the_picker_come_back_on_the_next_visit() {
+        settingsfile::testing::with_scratch_config("explorer-picker-save", |_root| {
+            let scratch = temp_dir("picker_save");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            let mut state = state_at(&root);
+            state
+                .columns
+                .set_columns(vec![ColumnId::NAME, ColumnId::SIZE]);
+            state.activate_menu_item(MENU_COLUMNS_SAVE_FOLDER);
+            assert!(
+                state.status_message.contains("saved"),
+                "the save said nothing: {}",
+                state.status_message
+            );
+
+            // A fresh window, which re-reads the settings file.
+            let again = state_at(&root);
+            assert_eq!(
+                again.columns.visible_keys(),
+                vec!["name", "size"],
+                "the saved columns did not come back"
+            );
+        });
     }
 
     /// A column set saved for a folder is what that folder shows.

@@ -71,8 +71,13 @@ from pathlib import Path
 
 # `pub` items worth asking about. Methods are excluded deliberately -- see the
 # module docstring.
+# Bare `pub` only. `pub(crate)`, `pub(super)` and `pub(in path)` all restrict
+# visibility to below the crate boundary, so none of them is an export and an
+# absent external caller says nothing about them. The first version of this
+# pattern treated the parenthesised form as optional and counted them all --
+# caught by this file's own self-test before the number was quoted anywhere.
 ITEM_RE = re.compile(
-    r"^pub(?:\s*\([^)]*\))?\s+(?:async\s+)?(?:const\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+)*"
+    r"^pub\s+(?:async\s+)?(?:const\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+)*"
     r"(fn|struct|enum|trait)\s+([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
@@ -173,7 +178,9 @@ def strip_test_modules(text: str) -> str:
         i = j + 1
 
 
-PUB_MOD_RE = re.compile(r"^pub(?:\s*\([^)]*\))?\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", re.MULTILINE)
+# Bare `pub mod` only, for ITEM_RE's reason: a `pub(crate) mod` is not a way
+# out of the crate.
+PUB_MOD_RE = re.compile(r"^pub\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", re.MULTILINE)
 
 
 def reachable_sources(crate: Path) -> list[Path]:
@@ -231,8 +238,72 @@ def exports(root: Path) -> tuple[dict[str, list[tuple[str, str]]], int]:
     return found, libs
 
 
+SELFTEST_SOURCE = """
+pub fn wanted(x: u8) -> u8 { x }
+pub(crate) fn not_exported() {}
+pub struct Kept;
+pub enum Shape { A }
+pub trait Sink {}
+pub mod visible;
+mod hidden;
+fn private() {}
+
+#[cfg(test)]
+mod tests {
+    pub fn test_only_export() {}
+    fn nested() { if true { } }
+}
+"""
+
+
+def selftest() -> int:
+    """The cases this has to get right, including the ones that were wrong."""
+    cases: list[tuple[str, bool]] = []
+
+    def case(name: str, ok: bool) -> None:
+        cases.append((name, ok))
+        print(f"{'ok  ' if ok else 'FAIL'}  {name}")
+
+    stripped = strip_test_modules(SELFTEST_SOURCE)
+    case("a cfg(test) module is removed", "test_only_export" not in stripped)
+    case(
+        "...and its nested braces do not end the cut early",
+        "nested" not in stripped and "pub fn wanted" in stripped,
+    )
+
+    items = dict((name, kind) for kind, name in ITEM_RE.findall(stripped))
+    case("a pub fn is an export", items.get("wanted") == "fn")
+    case("a pub struct is an export", items.get("Kept") == "struct")
+    case("a pub enum is an export", items.get("Shape") == "enum")
+    case("a pub trait is an export", items.get("Sink") == "trait")
+    case("pub(crate) is not an export", "not_exported" not in items)
+    case("a private fn is not an export", "private" not in items)
+    case(
+        "a test-only export is not reported",
+        "test_only_export" not in items,
+    )
+
+    mods = PUB_MOD_RE.findall(SELFTEST_SOURCE)
+    case("pub mod is followed", mods == ["visible"])
+    case("a private mod is not", "hidden" not in mods)
+
+    case("the noise list is applied", "new" in TOO_COMMON and "parse" in TOO_COMMON)
+
+    failed = sum(1 for _, ok in cases if not ok)
+    print()
+    print(f"selftest: {len(cases) - failed}/{len(cases)} cases pass")
+    return 1 if failed else 0
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
+    if any(flag in sys.argv for flag in ("--selftest", "--self-test")):
+        return selftest()
+    if selftest():
+        print("check-unused-exports: SELFTEST FAILED -- not scanning", file=sys.stderr)
+        return 2
+    print()
+
     by_crate, libs = exports(root)
 
     if libs < FLOOR_CRATES:

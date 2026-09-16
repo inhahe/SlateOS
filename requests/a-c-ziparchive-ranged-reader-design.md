@@ -1,5 +1,24 @@
 # A -> C: `ziparchive` ranged-reader + streaming-writer design
 
+**Status:** PARTIAL as of 2026-09-16, checked by lane C. The design landed in the
+crate and has no caller, which is the half that does not save any memory.
+
+`ziparchive` has `ReadAt` (lib.rs:649), `WriteStream` (1219) and the ranged
+entry points, spelled `_at` rather than the `_from` sketched here: `parse_at`,
+`extract_entry_at`, `extract_entry_at_limited`, `entry_data_at`.
+
+`apps/archivemanager` uses none of them. `backend::parse_zip` still takes
+`bytes: Vec<u8>` and calls `ziparchive::parse(&bytes)`, so the application holds
+the whole archive in memory -- the exact cost the original request measured and
+this design exists to remove. The remaining work is on this lane: give the app a
+`ReadAt` over its file handle and move `parse_zip` and the extraction path onto
+`parse_at` / `entry_data_at`, so it keeps a handle and a `Vec<ZipEntry>` instead
+of the file.
+
+Marked PARTIAL rather than LANDED deliberately: an API with no caller is the
+defect this lane spent 2026-09-16 removing elsewhere, and calling it done because
+the crate compiles is how it stays that way.
+
 **From:** Lane A. **Date:** 2026-09-08.
 **In response to:**
 `c-a-ziparchive-wants-a-ranged-reader-and-a-streaming-writer.md`.

@@ -1284,6 +1284,44 @@ impl ProcFs {
     pub fn monitors(&self) -> io::Result<Option<Monitors>> {
         Ok(self.read_optional("monitors")?.map(|c| Monitors::parse(&c)))
     }
+
+    /// `/proc/ioport`, parsed.
+    ///
+    /// Requested by lane C in
+    /// `requests/c-b-procinfo-could-parse-ioport-kmod-and-autostart.md`, for
+    /// `apps/sysinfo`'s I/O Ports category, which said "cannot read".
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)`.
+    pub fn io_ports(&self) -> io::Result<Option<IoPorts>> {
+        Ok(self.read_optional("ioport")?.map(|c| IoPorts::parse(&c)))
+    }
+
+    /// `/proc/kmod`, parsed.
+    ///
+    /// For the Drivers category, and for whatever writes `lsmod` later --
+    /// which is the reason this is here rather than inside `apps/sysinfo`.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)`.
+    pub fn modules(&self) -> io::Result<Option<Modules>> {
+        Ok(self.read_optional("kmod")?.map(|c| Modules::parse(&c)))
+    }
+
+    /// `/proc/autostart`, parsed.
+    ///
+    /// For the Startup Items category.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)`.
+    pub fn autostart(&self) -> io::Result<Option<Autostart>> {
+        Ok(self
+            .read_optional("autostart")?
+            .map(|c| Autostart::parse(&c)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2325,6 +2363,415 @@ fn parse_paren_pair(tok: &[u8]) -> Option<(i32, i32)> {
     let a = parse_i64(inner.get(..comma)?)?;
     let b = parse_i64(inner.get(comma.saturating_add(1)..)?)?;
     Some((i32::try_from(a).ok()?, i32::try_from(b).ok()?))
+}
+
+// ---------------------------------------------------------------------------
+// /proc/ioport, /proc/kmod and /proc/autostart
+// ---------------------------------------------------------------------------
+
+/// Split a line of `Key: value` pairs separated by runs of two or more spaces.
+///
+/// `/proc/ioport`'s summary is one line carrying six of them:
+///
+/// ```text
+/// Regions: 5  Reads: 12  Writes: 48  Untracked R: 0  Untracked W: 0  Ops: 60
+/// ```
+///
+/// [`key_value`] cannot read it -- it takes everything after the first colon to
+/// end of line, so `Regions` would come back as `5  Reads: 12  Writes: ...`.
+/// The double space is the separator the kernel actually writes, and a single
+/// space cannot be used instead because two of the keys contain one
+/// (`Untracked R`).
+fn packed_pairs(line: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut out = Vec::new();
+    for chunk in line.split(|&b| b == b'\n') {
+        let mut start = 0usize;
+        let mut i = 0usize;
+        let mut pieces: Vec<&[u8]> = Vec::new();
+        while let Some(&b) = chunk.get(i) {
+            if b == b' ' && matches!(chunk.get(i.saturating_add(1)), Some(b' ')) {
+                if let Some(p) = chunk.get(start..i) {
+                    pieces.push(p);
+                }
+                while matches!(chunk.get(i), Some(b' ')) {
+                    i = i.saturating_add(1);
+                }
+                start = i;
+                continue;
+            }
+            i = i.saturating_add(1);
+        }
+        if let Some(p) = chunk.get(start..) {
+            pieces.push(p);
+        }
+        for p in pieces {
+            let p = trim(p);
+            if let Some(c) = p.iter().position(|&b| b == b':') {
+                let (Some(k), Some(v)) = (p.get(..c), p.get(c.saturating_add(1)..)) else {
+                    continue;
+                };
+                out.push((trim(k).to_vec(), trim(v).to_vec()));
+            }
+        }
+    }
+    out
+}
+
+/// One row of `/proc/ioport`'s per-region table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IoPortRegion {
+    /// The kernel's label for the region, e.g. `COM1`.
+    pub name: Vec<u8>,
+    /// First port in the range.
+    pub start: u32,
+    /// Last port in the range, inclusive. The kernel prints
+    /// `base + length - 1`, so a one-port region has `start == end`.
+    pub end: u32,
+    /// Port reads counted against this region.
+    pub reads: u64,
+    /// Port writes counted against this region.
+    pub writes: u64,
+    /// Bytes read.
+    pub read_bytes: u64,
+    /// Bytes written.
+    pub write_bytes: u64,
+}
+
+/// `/proc/ioport`: the port-region table and its summary counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IoPorts {
+    /// `Regions:` from the summary line. Compare against `regions.len()`
+    /// rather than assuming they agree -- they are two different statements,
+    /// one the kernel's count and one this parser's.
+    pub regions_total: Option<u64>,
+    /// `Reads:` -- every tracked port read, across all regions.
+    pub reads: Option<u64>,
+    /// `Writes:`.
+    pub writes: Option<u64>,
+    /// `Untracked R:` -- reads against a port in no registered region.
+    pub untracked_reads: Option<u64>,
+    /// `Untracked W:`.
+    pub untracked_writes: Option<u64>,
+    /// `Ops:`.
+    pub ops: Option<u64>,
+    /// One entry per row of the per-region table.
+    pub regions: Vec<IoPortRegion>,
+}
+
+impl IoPorts {
+    /// Parse `/proc/ioport`.
+    ///
+    /// Total rather than fallible, for the reason [`Interrupts::parse`] is: a
+    /// file truncated after its summary still answers how many ports were
+    /// touched.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let mut out = Self::default();
+        for line in content.split(|&b| b == b'\n') {
+            if let Some(region) = IoPortRegion::parse_line(line) {
+                out.regions.push(region);
+                continue;
+            }
+            for (k, v) in packed_pairs(line) {
+                let value = parse_u64(&v);
+                match k.as_slice() {
+                    b"Regions" => out.regions_total = value,
+                    b"Reads" => out.reads = value,
+                    b"Writes" => out.writes = value,
+                    b"Untracked R" => out.untracked_reads = value,
+                    b"Untracked W" => out.untracked_writes = value,
+                    b"Ops" => out.ops = value,
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// The region containing `port`, if any is listed.
+    #[must_use]
+    pub fn region_for(&self, port: u32) -> Option<&IoPortRegion> {
+        self.regions
+            .iter()
+            .find(|r| port >= r.start && port <= r.end)
+    }
+}
+
+impl IoPortRegion {
+    /// Parse one per-region row, or `None` if this line is not one.
+    ///
+    /// Anchored on the `0x….-0x….` range rather than on a field index,
+    /// because it is the token with a shape no summary line has. Keying on
+    /// "the second token" would accept `Untracked R: 0` as a region named
+    /// `Untracked`.
+    #[must_use]
+    pub fn parse_line(line: &[u8]) -> Option<Self> {
+        let tokens = split_ws(line);
+        let range_at = tokens.iter().position(|t| parse_port_range(t).is_some())?;
+        let (start, end) = parse_port_range(tokens.get(range_at)?)?;
+        // The name is everything before the range. A region name with a space
+        // in it would be ambiguous in this format, and the kernel's labels are
+        // single words.
+        let name = tokens.get(..range_at)?.first().copied().unwrap_or_default();
+
+        let mut reads = None;
+        let mut writes = None;
+        let mut read_bytes = None;
+        let mut write_bytes = None;
+        for tok in tokens.get(range_at.saturating_add(1)..)? {
+            if let Some(v) = tok.strip_prefix(b"reads=") {
+                reads = parse_u64(v);
+            } else if let Some(v) = tok.strip_prefix(b"writes=") {
+                writes = parse_u64(v);
+            } else if let Some(v) = tok.strip_prefix(b"rbytes=") {
+                read_bytes = parse_u64(v);
+            } else if let Some(v) = tok.strip_prefix(b"wbytes=") {
+                write_bytes = parse_u64(v);
+            }
+        }
+        Some(Self {
+            name: name.to_vec(),
+            start,
+            end,
+            reads: reads?,
+            writes: writes?,
+            read_bytes: read_bytes?,
+            write_bytes: write_bytes?,
+        })
+    }
+}
+
+/// `0xNNNN-0xNNNN` as a pair of ports.
+fn parse_port_range(tok: &[u8]) -> Option<(u32, u32)> {
+    let body = tok.strip_prefix(b"0x")?;
+    let dash = body.iter().position(|&b| b == b'-')?;
+    let lo = parse_hex_u32(body.get(..dash)?)?;
+    let hi = parse_hex_u32(body.get(dash.saturating_add(1)..)?.strip_prefix(b"0x")?)?;
+    Some((lo, hi))
+}
+
+/// Hexadecimal digits as a `u32`, with no prefix and no sign.
+fn parse_hex_u32(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut acc: u32 = 0;
+    for &b in bytes {
+        // The match arm is the proof that each subtraction is in range, and
+        // `checked_sub` is that proof written where the compiler and the next
+        // reader can both see it. Not a hot path -- this parses a handful of
+        // port ranges once per read of /proc/ioport.
+        let d = match b {
+            b'0'..=b'9' => u32::from(b.checked_sub(b'0')?),
+            b'a'..=b'f' => u32::from(b.checked_sub(b'a')?).checked_add(10)?,
+            b'A'..=b'F' => u32::from(b.checked_sub(b'A')?).checked_add(10)?,
+            _ => return None,
+        };
+        acc = acc.checked_mul(16)?.checked_add(d)?;
+    }
+    Some(acc)
+}
+
+/// One row of `/proc/kmod`'s module table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Module {
+    /// Module name, e.g. `ext4`.
+    pub name: Vec<u8>,
+    /// Version string as the module declares it.
+    pub version: Vec<u8>,
+    /// Load state, the text between the brackets: `live`, `loading`, …
+    pub state: Vec<u8>,
+    /// What kind of module, e.g. `filesystem`.
+    pub kind: Vec<u8>,
+    /// Size in bytes. The kernel writes it with a `B` suffix.
+    pub size_bytes: u64,
+    /// How many things hold a reference. A module with references cannot be
+    /// unloaded, which is the field a `rmmod` would need.
+    pub ref_count: u64,
+}
+
+/// `/proc/kmod`: loaded modules and the load/unload counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Modules {
+    /// `live_modules:`.
+    pub live: Option<u64>,
+    /// `total_loads:` since boot.
+    pub total_loads: Option<u64>,
+    /// `total_unloads:`.
+    pub total_unloads: Option<u64>,
+    /// `total_errors:` -- failed loads. Worth showing beside the others: a
+    /// machine with a driver missing usually has a non-zero count here and no
+    /// other sign of it.
+    pub total_errors: Option<u64>,
+    /// `ops:`.
+    pub ops: Option<u64>,
+    /// One entry per module row.
+    pub modules: Vec<Module>,
+}
+
+impl Modules {
+    /// Parse `/proc/kmod`.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let mut out = Self::default();
+        for line in content.split(|&b| b == b'\n') {
+            if let Some(m) = Module::parse_line(line) {
+                out.modules.push(m);
+                continue;
+            }
+            if let Some(v) = key_value(line, "live_modules") {
+                out.live = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "total_loads") {
+                out.total_loads = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "total_unloads") {
+                out.total_unloads = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "total_errors") {
+                out.total_errors = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "ops") {
+                out.ops = parse_u64(trim(&v));
+            }
+        }
+        out
+    }
+
+    /// The named module, if it is loaded.
+    #[must_use]
+    pub fn get(&self, name: &[u8]) -> Option<&Module> {
+        self.modules.iter().find(|m| m.name == name)
+    }
+}
+
+impl Module {
+    /// Parse one module row, or `None` if this line is not one.
+    ///
+    /// Anchored on the bracketed state, which is the token no header line
+    /// has. Six tokens in a fixed order would also work today and would break
+    /// the day a module name gains a space or a field is inserted.
+    #[must_use]
+    pub fn parse_line(line: &[u8]) -> Option<Self> {
+        let tokens = split_ws(line);
+        let state_at = tokens
+            .iter()
+            .position(|t| t.starts_with(b"[") && t.ends_with(b"]"))?;
+        let state = tokens
+            .get(state_at)?
+            .strip_prefix(b"[")?
+            .strip_suffix(b"]")?;
+        // name version [state] kind sizeB refs=n
+        let name = tokens.first()?;
+        let version = tokens.get(1)?;
+        if state_at != 2 {
+            return None;
+        }
+        let kind = tokens.get(3)?;
+        let size = parse_u64(tokens.get(4)?.strip_suffix(b"B")?)?;
+        let refs = parse_u64(tokens.get(5)?.strip_prefix(b"refs=")?)?;
+        Some(Self {
+            name: name.to_vec(),
+            version: version.to_vec(),
+            state: state.to_vec(),
+            kind: kind.to_vec(),
+            size_bytes: size,
+            ref_count: refs,
+        })
+    }
+}
+
+/// One row of `/proc/autostart`'s item table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutostartItem {
+    /// Kernel-assigned id.
+    pub id: u64,
+    /// Item name.
+    ///
+    /// A name containing a space cannot be represented unambiguously by this
+    /// file: the column is `{:<20}`-padded, so a reader cannot tell a padded
+    /// short name from a long one with a space in it. That is the format's
+    /// limit rather than this parser's, and the parser takes the first token
+    /// so its behaviour is at least predictable.
+    pub name: Vec<u8>,
+    /// Boot phase, e.g. `Session`.
+    pub phase: Vec<u8>,
+    /// The condition under which it runs, e.g. `Always`.
+    pub condition: Vec<u8>,
+    /// Whether it is enabled.
+    pub enabled: bool,
+    /// Ordering within the phase; lower runs first.
+    pub order: u64,
+    /// The command, which is the rest of the line and may contain spaces.
+    pub command: Vec<u8>,
+}
+
+/// `/proc/autostart`: startup items and their counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Autostart {
+    /// `Total items:`.
+    pub total: Option<u64>,
+    /// `Enabled:`.
+    pub enabled: Option<u64>,
+    /// `System:` -- items the system owns rather than the user.
+    pub system: Option<u64>,
+    /// `Operations:`.
+    pub ops: Option<u64>,
+    /// One entry per item row.
+    pub items: Vec<AutostartItem>,
+}
+
+impl Autostart {
+    /// Parse `/proc/autostart`.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let mut out = Self::default();
+        for line in content.split(|&b| b == b'\n') {
+            if let Some(item) = AutostartItem::parse_line(line) {
+                out.items.push(item);
+                continue;
+            }
+            if let Some(v) = key_value(line, "Total items") {
+                out.total = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "Enabled") {
+                out.enabled = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "System") {
+                out.system = parse_u64(trim(&v));
+            } else if let Some(v) = key_value(line, "Operations") {
+                out.ops = parse_u64(trim(&v));
+            }
+        }
+        out
+    }
+}
+
+impl AutostartItem {
+    /// Parse one item row, or `None` if this line is not one.
+    ///
+    /// Six fields then the command, which is the remainder. The `ENABLED`
+    /// column is `true` or `false` and nothing else, and requiring it is what
+    /// keeps the header row out: `ID NAME PHASE CONDITION ENABLED ORDER
+    /// COMMAND` has seven tokens in the right places and is not an item.
+    #[must_use]
+    pub fn parse_line(line: &[u8]) -> Option<Self> {
+        let (id, rest) = split_first_token(line)?;
+        let id = parse_u64(id)?;
+        let (name, rest) = split_first_token(rest)?;
+        let (phase, rest) = split_first_token(rest)?;
+        let (condition, rest) = split_first_token(rest)?;
+        let (enabled, rest) = split_first_token(rest)?;
+        let enabled = match enabled {
+            b"true" => true,
+            b"false" => false,
+            _ => return None,
+        };
+        let (order, command) = split_first_token(rest)?;
+        Some(Self {
+            id,
+            name: name.to_vec(),
+            phase: phase.to_vec(),
+            condition: condition.to_vec(),
+            enabled,
+            order: parse_u64(order)?,
+            command: trim(command).to_vec(),
+        })
+    }
 }
 
 #[cfg(test)]

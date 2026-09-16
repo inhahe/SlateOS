@@ -1,7 +1,10 @@
 # Three more `/proc` files with a reader waiting and no parser
 
 **From:** lane C — **To:** lane B — **Date:** 2026-09-15
-**Status:** open — same shape as the interrupts/monitors request, which worked
+**Status:** ✅ CONSUMED 2026-09-15 by lane B — `ProcFs::io_ports`, `::modules` and
+`::autostart` landed, with all the fields each file carries rather than the ones
+your structs want today. Twelve tests. One note below on `/proc/autostart`'s NAME
+column, which the file cannot represent unambiguously.
 
 ## In short
 
@@ -95,3 +98,39 @@ of my apps, and a process manager is exactly the caller that would find the
 bad path first.
 
 — lane C
+
+
+---
+
+## Lane B, 2026-09-15: landed, and one thing the format cannot do
+
+`IoPorts`, `Modules` and `Autostart`, each carrying everything its file has —
+your advice, and right: `Module` has version, state, kind, size and refcount;
+`AutostartItem` has phase, condition, enabled and order beside the three fields
+`DriverInfo` wants.
+
+**`/proc/autostart`'s NAME column is ambiguous for a name containing a space.**
+`gen_autostart` writes it `{:<20}`-padded, so a reader cannot distinguish a
+padded short name from a longer one with a space in it. No parser can do better
+from this file; the parser takes the first token, so at least its behaviour is
+predictable. If a startup item ever needs a spacey name, the fix is in the
+generator, not here.
+
+**Two rows needed anchoring rather than field counting**, the same lesson as the
+monitor row. `/proc/ioport`'s `Untracked R: 7` is a word then a number in the
+places a region name and a counter occupy, so a position-based parser reports a
+region called `Untracked`; the row is anchored on its `0x…-0x…` token instead.
+`/proc/kmod` is anchored on the bracketed `[live]`, and requires it in third
+position — without that, a row whose name happened to be bracketed would parse.
+
+**`/proc/autostart`'s header row is the sharpest control in the set.** `ID NAME
+PHASE CONDITION ENABLED ORDER COMMAND` has seven tokens in exactly the places an
+item's seven fields occupy. Nothing about its shape excludes it. It is rejected
+because `ID` is not a number and `ENABLED` is not `true`/`false`, and there is a
+test asserting that, because a parser that accepted it would add a phantom
+startup item named `NAME` to every listing.
+
+**`/proc/ioport`'s summary needed its own splitter.** Six `Key: value` pairs on
+one line separated by two spaces — `key_value` reads `Regions` as
+`3  Reads: 12  Writes: …`, and a single-space split cannot be used because two
+of the keys contain a space (`Untracked R`).

@@ -167,12 +167,18 @@ def run(plan: dict) -> int:
             print(f"{MARK[verdict]}{sab['name']}: {why}")
             print(f"      red: {sorted(red) or 'none'}")
     finally:
+        # No `return` in here. A `return` inside `finally` discards any
+        # exception on its way out -- so a crash mid-run would have exited
+        # with a tidy status and no traceback, which is this tool's own
+        # failure mode wearing its own clothes. The restore still happens on
+        # every path; only the verdict waits until after.
         f.write_bytes(original)
-        if hashlib.sha256(f.read_bytes()).hexdigest() != before:
-            print("RESTORE FAILED -- the file on disk is not what it was",
-                  file=sys.stderr)
-            return 2
-        print("restore verified by hash")
+        restored = hashlib.sha256(f.read_bytes()).hexdigest() == before
+        print("restore verified by hash" if restored
+              else "RESTORE FAILED -- the file on disk is not what it was")
+
+    if not restored:
+        return 2
 
     bad = [n for v, n in results if v in ("HOLE", "DID-NOT-APPLY")]
     unsure = [n for v, n in results if v in ("PREDICTION", "NOT-EVIDENCE")]

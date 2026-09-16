@@ -131,8 +131,9 @@ const SYSFS_USB: &str = sysfs!("/usb");
 const SYSFS_SOUND: &str = sysfs!("/sound");
 // No `/sys/hardware/irqs` constant: interrupt lines come from
 // `/proc/interrupts`, for the same reason.
-/// I/O port ranges.
-const SYSFS_IOPORTS: &str = sysfs!("/ioports");
+// No `/sys/hardware/ioports` constant: port ranges come from
+// `/proc/ioport`, which publishes a row per region with the name and
+// both ends -- every field `IoPortInfo` has.
 /// Memory map from firmware.
 const SYSFS_MEMMAP: &str = sysfs!("/memmap");
 /// DMA channels.
@@ -142,10 +143,8 @@ const SYSFS_SERVICES: &str = "/sys/services";
 // No constant for the process list: it comes from `/proc`, which is where
 // processes have always been. This named `/sys/proc`, a path with no producer
 // and no precedent -- Linux has never put a process list under `/sys`.
-/// Loaded drivers.
-const SYSFS_DRIVERS: &str = "/sys/drivers";
-/// Startup programs.
-const SYSFS_STARTUP: &str = "/sys/startup";
+// No `/sys/drivers` constant: loaded modules come from `/proc/kmod`.
+// No `/sys/startup` constant: startup items come from `/proc/autostart`.
 
 // ============================================================================
 // Provider trait
@@ -780,25 +779,35 @@ impl HardwareProvider for SyscallProvider {
             .collect())
     }
 
+    /// Read the port ranges from `/proc/ioport`.
+    ///
+    /// This read `/sys/hardware/ioports`, which this kernel has never served.
+    /// `/proc/ioport` publishes a row per region with the name and both ends,
+    /// which is every field `IoPortInfo` has.
     fn query_io_ports(&self) -> Result<Vec<IoPortInfo>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_IOPORTS)?;
-        let mut ports = Vec::new();
+        let ports =
+            self.procfs()
+                .io_ports()
+                .ok()
+                .flatten()
+                .ok_or_else(|| HwQueryError::NotAvailable {
+                    path: self.rooted("/proc/ioport"),
+                })?;
 
-        for entry in &entries {
-            ports.push(IoPortInfo {
-                start: entry
-                    .get("start")
-                    .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-                    .unwrap_or(0),
-                end: entry
-                    .get("end")
-                    .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-                    .unwrap_or(0),
-                device: entry.get("device").cloned().unwrap_or_default(),
-            });
-        }
-
-        Ok(ports)
+        Ok(ports
+            .regions
+            .iter()
+            .map(|r| IoPortInfo {
+                // `u16::try_from`, not `as`. An x86 port address is 16 bits
+                // and the file's are `u32`; a wider value is not a port, and
+                // `as` would truncate 0x1_0060 to 0x0060 -- a plausible
+                // address, silently wrong, next to a real one.
+                start: u16::try_from(r.start).unwrap_or(u16::MAX),
+                end: u16::try_from(r.end).unwrap_or(u16::MAX),
+                // Bytes in the file; text only here, where it becomes glyphs.
+                device: String::from_utf8_lossy(&r.name).into_owned(),
+            })
+            .collect())
     }
 
     fn query_memory_map(&self) -> Result<Vec<MemoryMapEntry>, HwQueryError> {
@@ -903,19 +912,35 @@ impl HardwareProvider for SyscallProvider {
         Ok(procs)
     }
 
+    /// Read the loaded modules from `/proc/kmod`.
+    ///
+    /// This read `/sys/drivers`, which this kernel has never served.
+    ///
+    /// **`path` stays empty.** `/proc/kmod` publishes a name, a version, a
+    /// state, a kind, a size and a refcount, and no path -- and on a machine
+    /// with no module files on disk there is no path for it to publish. Two
+    /// of `DriverInfo`'s three fields have a source and the third does not, so
+    /// the third is left empty rather than filled with something that would
+    /// look like a location.
     fn query_drivers(&self) -> Result<Vec<DriverInfo>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_DRIVERS)?;
-        let mut drivers = Vec::new();
+        let mods =
+            self.procfs()
+                .modules()
+                .ok()
+                .flatten()
+                .ok_or_else(|| HwQueryError::NotAvailable {
+                    path: self.rooted("/proc/kmod"),
+                })?;
 
-        for entry in &entries {
-            drivers.push(DriverInfo {
-                name: entry.get("name").cloned().unwrap_or_default(),
-                path: entry.get("path").cloned().unwrap_or_default(),
-                status: entry.get("status").cloned().unwrap_or_default(),
-            });
-        }
-
-        Ok(drivers)
+        Ok(mods
+            .modules
+            .iter()
+            .map(|m| DriverInfo {
+                name: String::from_utf8_lossy(&m.name).into_owned(),
+                path: String::new(),
+                status: String::from_utf8_lossy(&m.state).into_owned(),
+            })
+            .collect())
     }
 
     fn query_env_vars(&self) -> Result<Vec<(String, String)>, HwQueryError> {
@@ -923,19 +948,35 @@ impl HardwareProvider for SyscallProvider {
         Ok(std::env::vars().collect())
     }
 
+    /// Read the startup items from `/proc/autostart`.
+    ///
+    /// This read `/sys/startup`, which this kernel has never served.
+    ///
+    /// **One thing the file cannot say.** Its NAME column is padded to a fixed
+    /// width and unquoted, so a name containing a space is indistinguishable
+    /// from a padded short one -- `Backup Agent` arrives as `Backup`. No
+    /// reader can do better from this format; the fix is in the generator and
+    /// is filed with lane A. Nothing registers such a name today.
     fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_STARTUP)?;
-        let mut programs = Vec::new();
+        let auto =
+            self.procfs()
+                .autostart()
+                .ok()
+                .flatten()
+                .ok_or_else(|| HwQueryError::NotAvailable {
+                    path: self.rooted("/proc/autostart"),
+                })?;
 
-        for entry in &entries {
-            programs.push(StartupEntry {
-                name: entry.get("name").cloned().unwrap_or_default(),
-                path: entry.get("path").cloned().unwrap_or_default(),
-                source: entry.get("source").cloned().unwrap_or_default(),
-            });
-        }
-
-        Ok(programs)
+        Ok(auto
+            .items
+            .iter()
+            .map(|it| StartupEntry {
+                name: String::from_utf8_lossy(&it.name).into_owned(),
+                path: String::from_utf8_lossy(&it.command).into_owned(),
+                phase: String::from_utf8_lossy(&it.phase).into_owned(),
+                enabled: it.enabled,
+            })
+            .collect())
     }
 
     fn provider_name(&self) -> &'static str {
@@ -1266,11 +1307,23 @@ impl HardwareProvider for StubProvider {
     }
 
     fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError> {
-        Ok(vec![StartupEntry {
-            name: "Network Manager".to_string(),
-            path: "/usr/bin/network-manager".to_string(),
-            source: "System".to_string(),
-        }])
+        Ok(vec![
+            StartupEntry {
+                name: "Network Manager".to_string(),
+                path: "/usr/bin/network-manager".to_string(),
+                phase: "Boot".to_string(),
+                enabled: true,
+            },
+            // A disabled item, because the stub is what the window is drawn
+            // against during development and a stub in which every item is
+            // enabled makes the disabled rendering unreachable by eye.
+            StartupEntry {
+                name: "Backup".to_string(),
+                path: "/usr/bin/backup --daily".to_string(),
+                phase: "Login".to_string(),
+                enabled: false,
+            },
+        ])
     }
 
     fn provider_name(&self) -> &'static str {

@@ -1936,3 +1936,69 @@ fn all_three_read_through_procfs_and_absent_is_not_an_error() {
     assert!(absent.modules().unwrap().is_none());
     assert!(absent.autostart().unwrap().is_none());
 }
+
+/// A real `/proc/keylayout` body, including the traps in its format.
+///
+/// The stat lines contain colons and would parse as layout rows but for the
+/// first-byte rule, so `Layouts` and `Active` appearing as layout names is
+/// exactly what this checks does NOT happen.
+#[test]
+fn keylayout_parses_rows_and_not_the_stat_lines() {
+    let body = b"Keyboard Layouts
+================
+
+Layouts:     3
+Remaps:      2
+Translates:  4096
+Switches:    1
+Active:      dvorak
+
+ us: US QWERTY [built-in]
+*dvorak: Dvorak [built-in]
+ mine: hand rolled
+";
+    let k = KeyLayouts::parse(body);
+    assert_eq!(k.count, Some(3));
+    assert_eq!(k.remaps, Some(2));
+    assert_eq!(k.translates, Some(4096));
+    assert_eq!(k.switches, Some(1));
+    assert_eq!(k.active, b"dvorak".to_vec());
+    assert_eq!(k.layouts.len(), 3, "{:?}", k.layouts);
+
+    assert_eq!(k.layouts[0].name, b"us".to_vec());
+    assert_eq!(k.layouts[0].description, b"US QWERTY".to_vec());
+    assert!(k.layouts[0].builtin);
+    assert!(!k.layouts[0].active);
+
+    assert!(k.layouts[1].active, "the starred row is the active one");
+    assert_eq!(k.layouts[1].name, b"dvorak".to_vec());
+
+    // A runtime layout has no [built-in] suffix and keeps its whole
+    // description -- stripping a suffix that is not there would eat the last
+    // ten bytes of the description instead.
+    assert!(!k.layouts[2].builtin);
+    assert_eq!(k.layouts[2].description, b"hand rolled".to_vec());
+}
+
+/// `(none)` is a rendering of "no layout", not a layout called `(none)`.
+#[test]
+fn keylayout_active_none_is_empty_not_the_literal() {
+    let k = KeyLayouts::parse(
+        b"Layouts:     0
+Active:      (none)
+",
+    );
+    assert!(
+        k.active.is_empty(),
+        "the kernel's word for absence became a layout name: {:?}",
+        k.active
+    );
+    assert!(k.layouts.is_empty());
+}
+
+/// An empty node is empty, not a parse that invents rows.
+#[test]
+fn keylayout_empty_input_yields_nothing() {
+    let k = KeyLayouts::parse(b"");
+    assert_eq!(k, KeyLayouts::default());
+}

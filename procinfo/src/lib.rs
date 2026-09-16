@@ -1310,6 +1310,22 @@ impl ProcFs {
         Ok(self.read_optional("kmod")?.map(|c| Modules::parse(&c)))
     }
 
+    /// `/proc/keylayout`, parsed.
+    ///
+    /// The kernel's ACTIVE keyboard layout, which is a different fact from
+    /// whatever `/etc/vconsole.conf` says. `localectl` used to report the
+    /// latter and call it the system's keymap; nothing but `localectl` reads
+    /// that file, so it was reporting its own writes back to itself.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)`.
+    pub fn keylayout(&self) -> io::Result<Option<KeyLayouts>> {
+        Ok(self
+            .read_optional("keylayout")?
+            .map(|c| KeyLayouts::parse(&c)))
+    }
+
     /// `/proc/autostart`, parsed.
     ///
     /// For the Startup Items category.
@@ -2588,6 +2604,106 @@ pub struct Module {
     /// How many things hold a reference. A module with references cannot be
     /// unloaded, which is the field a `rmmod` would need.
     pub ref_count: u64,
+}
+
+/// One keyboard layout the kernel knows about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyLayout {
+    /// Short name, e.g. `us`, `dvorak`.
+    pub name: Vec<u8>,
+    /// Human description, e.g. `US QWERTY`.
+    pub description: Vec<u8>,
+    /// Shipped with the kernel rather than created at runtime.
+    pub builtin: bool,
+    /// Whether this is the layout currently translating keycodes.
+    pub active: bool,
+}
+
+/// `/proc/keylayout`: the kernel's keyboard layouts and which one is live.
+///
+/// The node is generated and read-only. There is no write path and no
+/// syscall, so a userspace tool can learn the active layout and cannot change
+/// it -- which is the whole reason this parser exists: `localectl` needs to
+/// report the truth even while it cannot set it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyLayouts {
+    /// `Layouts:` -- how many are defined.
+    pub count: Option<u64>,
+    /// `Remaps:` -- individual key remappings applied.
+    pub remaps: Option<u64>,
+    /// `Translates:` -- keycodes translated since boot.
+    pub translates: Option<u64>,
+    /// `Switches:` -- how many times the active layout changed.
+    pub switches: Option<u64>,
+    /// `Active:` as written, or empty when the kernel reports `(none)`.
+    ///
+    /// `(none)` is normalised away deliberately. It is the kernel's rendering
+    /// of "no layout is active", and a caller that compared against the
+    /// literal string would be matching a presentation choice rather than a
+    /// state.
+    pub active: Vec<u8>,
+    /// One entry per layout row.
+    pub layouts: Vec<KeyLayout>,
+}
+
+impl KeyLayouts {
+    /// Parse `/proc/keylayout`.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let mut out = Self::default();
+        out.count = key_value(content, "Layouts").as_deref().and_then(parse_u64);
+        out.remaps = key_value(content, "Remaps").as_deref().and_then(parse_u64);
+        out.translates = key_value(content, "Translates")
+            .as_deref()
+            .and_then(parse_u64);
+        out.switches = key_value(content, "Switches")
+            .as_deref()
+            .and_then(parse_u64);
+        if let Some(a) = key_value(content, "Active") {
+            let a = trim(&a);
+            if a != b"(none)" {
+                out.active = a.to_vec();
+            }
+        }
+        for line in content.split(|&b| b == b'\n') {
+            if let Some(l) = KeyLayout::parse_row(line) {
+                out.layouts.push(l);
+            }
+        }
+        out
+    }
+}
+
+impl KeyLayout {
+    /// One `*name: description [built-in]` row, or `None` for anything else.
+    ///
+    /// A row is recognised by its FIRST BYTE being `*` or a space, which is
+    /// how the generator marks the active one. That is load-bearing rather
+    /// than incidental: `Layouts:     2` also contains a colon and would
+    /// otherwise parse as a layout named `Layouts` described as `2`. The stat
+    /// lines start at column zero and the rows never do.
+    fn parse_row(line: &[u8]) -> Option<Self> {
+        let (&first, rest) = line.split_first()?;
+        if first != b'*' && first != b' ' {
+            return None;
+        }
+        let colon = rest.iter().position(|&b| b == b':')?;
+        let name = trim(rest.get(..colon)?);
+        if name.is_empty() {
+            return None;
+        }
+        let mut description = trim(rest.get(colon.checked_add(1)?..)?);
+        let builtin = description.ends_with(b"[built-in]");
+        if builtin {
+            description = trim(description.get(..description.len().saturating_sub(10))?);
+        }
+        Some(Self {
+            name: name.to_vec(),
+            description: description.to_vec(),
+            builtin,
+            active: first == b'*',
+        })
+    }
 }
 
 /// `/proc/kmod`: loaded modules and the load/unload counters.

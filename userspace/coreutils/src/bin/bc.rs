@@ -160,7 +160,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-
     fn peek_byte(&self) -> Option<u8> {
         self.input.get(self.pos).copied()
     }
@@ -197,7 +196,9 @@ impl<'a> Lexer<'a> {
             .input
             .get(self.pos..end)
             .map_or(0, |seg| seg.iter().filter(|&&b| b == b'\n').count());
-        self.line = self.line.saturating_add(u32::try_from(crossed).unwrap_or(u32::MAX));
+        self.line = self
+            .line
+            .saturating_add(u32::try_from(crossed).unwrap_or(u32::MAX));
         self.pos = end;
     }
 
@@ -2571,9 +2572,7 @@ impl Chunker {
         for e in &mut errors {
             // `line` is 1-based within the unit and `line_base` is the unit's
             // own line, so the two 1s are the same 1 and one of them comes off.
-            e.line = self
-                .line_base
-                .saturating_add(e.line.saturating_sub(1));
+            e.line = self.line_base.saturating_add(e.line.saturating_sub(1));
         }
         errors
     }
@@ -3467,10 +3466,7 @@ mod tests {
         // quote that opened a string nothing closed is the illegal character,
         // and there is exactly ONE diagnostic for it -- the truncation is
         // explained by the illegal character and does not earn a second.
-        assert_eq!(
-            diagnostics("print \"abc\n"),
-            ["1: illegal character: \""]
-        );
+        assert_eq!(diagnostics("print \"abc\n"), ["1: illegal character: \""]);
     }
 
     // --- Saying so: the diagnostics themselves -------------------------------
@@ -3523,7 +3519,10 @@ mod tests {
             diagnostics("print )\nprint \"after\"\n"),
             ["1: syntax error"]
         );
-        assert_eq!(feed_lines("print )\nprint \"after\"\n"), ["failed", "ready"]);
+        assert_eq!(
+            feed_lines("print )\nprint \"after\"\n"),
+            ["failed", "ready"]
+        );
     }
 
     #[test]
@@ -3581,9 +3580,15 @@ mod tests {
         // `Newline` token, which is why the count lives in `bump` and not
         // there: miss this and every diagnostic after the first long comment
         // points somewhere plausible and wrong.
-        assert_eq!(diagnostics("/* one\ntwo\nthree */ print )\n"), ["3: syntax error"]);
+        assert_eq!(
+            diagnostics("/* one\ntwo\nthree */ print )\n"),
+            ["3: syntax error"]
+        );
         // ...and so are the ones inside a multi-line string.
-        assert_eq!(diagnostics("s = \"one\ntwo\"\nprint )\n"), ["3: syntax error"]);
+        assert_eq!(
+            diagnostics("s = \"one\ntwo\"\nprint )\n"),
+            ["3: syntax error"]
+        );
     }
 
     #[test]
@@ -3592,7 +3597,10 @@ mod tests {
         // what lets an `if` body sit on the next line. When the input stops it
         // becomes the syntax error GNU calls it -- ours used to run the body
         // anyway and print `A`.
-        assert_eq!(feed_lines("if (1) {\nprint \"A\"\n"), ["incomplete", "incomplete"]);
+        assert_eq!(
+            feed_lines("if (1) {\nprint \"A\"\n"),
+            ["incomplete", "incomplete"]
+        );
         assert_eq!(diagnostics("if (1) {\nprint \"A\"\n"), ["3: syntax error"]);
         // The same fact one line earlier: still open, still nothing said yet.
         assert_eq!(diagnostics("if (1) {\n"), ["2: syntax error"]);

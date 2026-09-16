@@ -2889,7 +2889,40 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
 /// wanted the former and `/proc/<pid>/exe` the latter.  Now that a path is a
 /// byte string end to end they are the same value, so there is one parameter
 /// and no way for the two to disagree.
+/// ROUND-5 DISCRIMINATOR for `ctest-coreutils-runs` exit 11.
+///
+/// The fixture can only report *that* exec failed. The kernel knows the
+/// errno and had never been asked -- so three rounds were spent testing
+/// theories (not staged; wrong path; no capability) that were each plausible,
+/// each cost a boot, and were each wrong. `/mnt/bin/true` is present at mode
+/// 0755 and the caller now holds `(File, READ | EXECUTE)`.
+///
+/// Wrapped rather than instrumented site-by-site: there are eight or more
+/// `return -i64::from(..)` paths inside, so a probe per site is eight chances
+/// to miss the one that fires -- the same lesson as `sig_for` needing all
+/// three classification sites rather than the two found first. A wrapper
+/// cannot miss a path, including one added later.
+///
+/// Silent on success.
 fn linux_exec_common(
+    frame: &mut crate::syscall::entry::SyscallFrame,
+    filename: &Path,
+    argv_user: u64,
+    envp_user: u64,
+) -> i64 {
+    let rc = linux_exec_common_inner(frame, filename, argv_user, envp_user);
+    if rc < 0 {
+        crate::serial_println!(
+            "[exec] execve({:?}) FAILED -> errno {} -- see known-issues \
+             A-CTEST-COREUTILS-RUNS-EXIT-3-WAS-A-MISSING-BINARY-NOT-A-BROKEN-ONE",
+            filename,
+            -rc
+        );
+    }
+    rc
+}
+
+fn linux_exec_common_inner(
     frame: &mut crate::syscall::entry::SyscallFrame,
     filename: &Path,
     argv_user: u64,

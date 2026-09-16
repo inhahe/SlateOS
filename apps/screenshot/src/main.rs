@@ -202,6 +202,33 @@ fn preview_undo_rect() -> (f32, f32, f32, f32) {
     (10.0 + 4.0 * 90.0 + 20.0, TOOLBAR_HEIGHT + 4.0, 60.0, 28.0)
 }
 
+/// What the window says instead of taking a screenshot.
+///
+/// **This program used to write the picture it could not take.**
+/// `capture_full_screen` built a `Capture::solid(w, h, 0xFF336699)` -- a plain
+/// blue rectangle the size of the window -- `capture_active_window` built a
+/// brown one, `capture_region` a green one, and all three went to
+/// `finish_capture`, which **wrote a real BMP to the user's save directory**
+/// under a real screenshot filename and reported it saved.
+///
+/// That is the most expensive shape this defect takes, and it is worth
+/// separating from the others cleared out of this tree today. An inert setting
+/// does nothing. A fabricated display is wrong only while the window is open.
+/// **A fabricated file outlives the program**: it sits in the screenshots
+/// folder with a plausible name and a plausible timestamp, and the person who
+/// took it to send to somebody else finds out what it is at the far end, if at
+/// all.
+///
+/// There is no capture route. `gui/compositor` can `capture_stream` for screen
+/// sharing, but an application is a separate process and has no call that asks
+/// the compositor for the framebuffer; nothing in `oswindow` or `guiremote`
+/// offers one. So the honest act is to refuse and name what was refused --
+/// lane B's `lp` is the model, which parses a printer it never uses so its
+/// refusal can say which printer it refused.
+const CANNOT_CAPTURE: &str = "Cannot take a screenshot: no program on this \
+system can read the screen's pixels, so nothing was captured and nothing was \
+saved.";
+
 /// A single annotation drawn on top of a captured screenshot.
 #[derive(Clone, Debug)]
 pub struct Annotation {
@@ -887,27 +914,40 @@ impl ScreenshotApp {
     /// In the real OS, this issues a compositor syscall to grab the framebuffer.
     /// Here we create a placeholder capture for development.
     fn capture_full_screen(&mut self) {
-        // Placeholder: compositor would provide the actual framebuffer data.
-        let w = self.window_width as u32;
-        let h = self.window_height as u32;
-        let capture = Capture::solid(w, h, 0xFF336699);
-        self.finish_capture(capture);
+        self.refuse_capture();
     }
 
     /// Capture the currently active/focused window.
     fn capture_active_window(&mut self) {
-        // Placeholder: compositor would provide the window's pixel data.
-        let w = (self.window_width * 0.6) as u32;
-        let h = (self.window_height * 0.6) as u32;
-        let capture = Capture::solid(w, h, 0xFF996633);
-        self.finish_capture(capture);
+        self.refuse_capture();
     }
 
     /// Capture a rectangular region of the screen.
     pub fn capture_region(&mut self, x: u32, y: u32, width: u32, height: u32) {
-        let _ = (x, y); // Region offset used by compositor in real implementation.
-        let capture = Capture::solid(width, height, 0xFF669933);
-        self.finish_capture(capture);
+        let _ = (x, y, width, height);
+        self.refuse_capture();
+    }
+
+    /// Say that no screenshot was taken, and take none.
+    ///
+    /// **No `Capture` is built and `finish_capture` is not called**, which is
+    /// the whole of the fix. Producing a capture and then declining to save it
+    /// would leave the preview, the annotation tools and the clipboard action
+    /// all operating on a rectangle of one colour -- a refusal that still hands
+    /// the user the thing it refused.
+    fn refuse_capture(&mut self) {
+        self.current_saved_path = None;
+        // Through the same notification the save path uses, so the refusal
+        // arrives where the user is already looking for the outcome -- and
+        // unconditionally, not behind `settings.show_notification`. That flag
+        // governs whether a *success* is announced; a refusal that a setting
+        // can silence is a program that quietly does nothing.
+        self.notification = Some(Notification {
+            message: String::from(CANNOT_CAPTURE),
+            file_path: None,
+            remaining_ms: 6000,
+        });
+        self.view = AppView::Menu;
     }
 
     /// Turn the outcome of a save into the notification the user sees.
@@ -940,6 +980,28 @@ impl ScreenshotApp {
     }
 
     /// Process a completed capture: store it, save if needed, show notification.
+    /// Save, notify and route a capture that has been taken.
+    ///
+    /// **Unused since the captures stopped being invented**, and kept rather
+    /// than deleted, which is the opposite call from `apps/terminal`'s
+    /// `ChildProcess` an hour ago. The difference is what the code *is*:
+    /// `ChildProcess` simulated a process and would have misled whoever wired
+    /// it up. This is real, correct machinery -- it writes a BMP, names it,
+    /// avoids overwriting, and reports the outcome -- stranded only because
+    /// nothing upstream can produce a `Capture`. A caller handing it a genuine
+    /// screenshot gets genuine behaviour.
+    ///
+    /// The day a capture route exists, this is what it calls.
+    // `not(test)`: the tests still call this, handing it a `Capture` they
+    // build themselves, which is the right way to test a save path. Only the
+    // shipped binary has no caller.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the save path for a capture; nothing can produce one until the compositor offers a framebuffer read -- see CANNOT_CAPTURE"
+        )
+    )]
     fn finish_capture(&mut self, capture: Capture) {
         // A new capture has not been saved anywhere yet, so it must not inherit
         // the previous one's file — that is precisely the file it would
@@ -2399,7 +2461,7 @@ mod tests {
     }
 
     #[test]
-    fn the_countdown_reaches_zero_and_takes_the_picture() {
+    fn the_countdown_reaches_zero_and_refuses_there() {
         // With `tick_interval` returning `None` this app would count down to
         // five forever and never capture, with every existing test passing.
         let mut app = ScreenshotApp::new(800.0, 600.0);
@@ -3518,13 +3580,33 @@ mod tests {
     }
 
     #[test]
-    fn test_app_fullscreen_capture() {
+    fn the_fullscreen_shortcut_refuses_rather_than_inventing_a_picture() {
         let mut app = ScreenshotApp::new(800.0, 600.0);
         app.settings.default_action = PostCaptureAction::Annotate;
         app.mode = CaptureMode::FullScreen;
         app.start_capture();
-        assert!(app.current_capture.is_some());
-        assert_eq!(app.view, AppView::Preview);
+        // **This asserted the opposite until 2026-09-15, and passed.** The
+        // capture it was asserting the existence of was a rectangle of one
+        // colour, which `finish_capture` then wrote to the user's save
+        // directory as a BMP under a real screenshot filename.
+        assert!(
+            app.current_capture.is_none(),
+            "a capture was produced that this system cannot take"
+        );
+        assert!(
+            app.notification
+                .as_ref()
+                .is_some_and(|n| n.message.contains("Cannot take a screenshot")),
+            "nothing was captured and nothing was said"
+        );
+        assert!(
+            app.current_saved_path.is_none(),
+            "a file was recorded as saved for a screenshot that was never taken"
+        );
+        // Menu, not Preview. There is nothing to preview, and routing to a
+        // preview of nothing would be the refusal still handing the user the
+        // thing it refused.
+        assert_eq!(app.view, AppView::Menu);
     }
 
     #[test]
@@ -3558,8 +3640,24 @@ mod tests {
 
         app.handle_tick(1000);
         assert_eq!(app.countdown_remaining, 0);
-        // Should have captured after countdown reaches zero.
-        assert!(app.current_capture.is_some());
+        // **This asserted the opposite until 2026-09-15, and passed.** The
+        // capture it was asserting the existence of was a rectangle of one
+        // colour, which `finish_capture` then wrote to the user's save
+        // directory as a BMP under a real screenshot filename.
+        assert!(
+            app.current_capture.is_none(),
+            "a capture was produced that this system cannot take"
+        );
+        assert!(
+            app.notification
+                .as_ref()
+                .is_some_and(|n| n.message.contains("Cannot take a screenshot")),
+            "nothing was captured and nothing was said"
+        );
+        assert!(
+            app.current_saved_path.is_none(),
+            "a file was recorded as saved for a screenshot that was never taken"
+        );
     }
 
     #[test]
@@ -3658,7 +3756,24 @@ mod tests {
             text: String::new(),
         });
         app.handle_event(&event);
-        assert!(app.current_capture.is_some());
+        // **This asserted the opposite until 2026-09-15, and passed.** The
+        // capture it was asserting the existence of was a rectangle of one
+        // colour, which `finish_capture` then wrote to the user's save
+        // directory as a BMP under a real screenshot filename.
+        assert!(
+            app.current_capture.is_none(),
+            "a capture was produced that this system cannot take"
+        );
+        assert!(
+            app.notification
+                .as_ref()
+                .is_some_and(|n| n.message.contains("Cannot take a screenshot")),
+            "nothing was captured and nothing was said"
+        );
+        assert!(
+            app.current_saved_path.is_none(),
+            "a file was recorded as saved for a screenshot that was never taken"
+        );
     }
 
     #[test]
@@ -3674,7 +3789,24 @@ mod tests {
         });
         app.handle_event(&event);
         assert_eq!(app.mode, CaptureMode::Window);
-        assert!(app.current_capture.is_some());
+        // **This asserted the opposite until 2026-09-15, and passed.** The
+        // capture it was asserting the existence of was a rectangle of one
+        // colour, which `finish_capture` then wrote to the user's save
+        // directory as a BMP under a real screenshot filename.
+        assert!(
+            app.current_capture.is_none(),
+            "a capture was produced that this system cannot take"
+        );
+        assert!(
+            app.notification
+                .as_ref()
+                .is_some_and(|n| n.message.contains("Cannot take a screenshot")),
+            "nothing was captured and nothing was said"
+        );
+        assert!(
+            app.current_saved_path.is_none(),
+            "a file was recorded as saved for a screenshot that was never taken"
+        );
     }
 
     #[test]

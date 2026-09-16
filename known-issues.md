@@ -155116,7 +155116,23 @@ not the API, it is whether the value is a path or a number.** A sweep that
 replaced every `var` with `var_os` would be churn in both places and would
 teach the next reader that the rule is mechanical.
 
-## TD-C-THE-THUMBNAIL-CACHE-HAS-NO-CEILING
+## TD-C-THE-THUMBNAIL-CACHE-HAS-NO-CEILING -- FIXED 2026-09-16
+
+**Fixed the same day.** `DiskCache::enforce_cap` deletes oldest-first until the
+directory is under a byte budget, run once when the generator takes its default
+cache. The budget is a *parameter*; `DEFAULT_DISK_CACHE_BYTES` (256 MiB) only
+supplies it, so the install-time sizing §4.1 wants can pass a number later
+without touching the eviction.
+
+**What is still not done, and is not this entry's:** the sizing itself, which
+needs a filesystem-capacity reading nothing here can make, and the
+pressure-aware shrinking, which is lane A's kernel shrinker. Unbounded growth
+is what got fixed; "the right bound, adjusted under pressure" is what remains.
+
+Eviction is oldest-*written*, not least-recently-*used*, because a true LRU
+needs a last-read time that is not reliably available and would cost a write
+per thumbnail served. Recorded here because it is the first thing someone will
+want to change, and the reason is not obvious from the code.
 
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `apps/explorer/src/thumbs.rs` — `DiskCache`.

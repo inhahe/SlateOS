@@ -123,12 +123,14 @@ const SYSDEV_BLOCK: &str = "/sys/devices/block";
 const SYSFS_PCI: &str = sysfs!("/pci");
 /// USB devices directory.
 const SYSFS_USB: &str = sysfs!("/usb");
-/// Display/GPU info.
-const SYSFS_DISPLAY: &str = sysfs!("/display");
+// No `/sys/hardware/display` constant: outputs come from
+// `/proc/monitors`. Lane A has recorded that the sysfs node will never
+// be served, because /proc already answers the question and a second
+// kernel answer to one question is what design-decisions 850 prevents.
 /// Sound devices.
 const SYSFS_SOUND: &str = sysfs!("/sound");
-/// IRQ assignments.
-const SYSFS_IRQS: &str = sysfs!("/irqs");
+// No `/sys/hardware/irqs` constant: interrupt lines come from
+// `/proc/interrupts`, for the same reason.
 /// I/O port ranges.
 const SYSFS_IOPORTS: &str = sysfs!("/ioports");
 /// Memory map from firmware.
@@ -330,23 +332,6 @@ impl SyscallProvider {
             Ok(content) => Ok(content),
             Err(_) => Err(HwQueryError::NotAvailable { path: opened }),
         }
-    }
-
-    /// Parse a key=value file into a HashMap.
-    fn parse_kv_file(content: &str) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once('=') {
-                map.insert(key.trim().to_string(), value.trim().to_string());
-            } else if let Some((key, value)) = line.split_once(':') {
-                map.insert(key.trim().to_string(), value.trim().to_string());
-            }
-        }
-        map
     }
 
     /// One numeric field of a hardware file.
@@ -662,30 +647,44 @@ impl HardwareProvider for SyscallProvider {
             .collect())
     }
 
+    /// Read the outputs from `/proc/monitors`.
+    ///
+    /// Four fields stay empty. The GPU's name, vendor, VRAM and driver version
+    /// are published by nothing here -- `/proc/monitors` describes *outputs*,
+    /// not the adapter driving them -- and a plausible "16384 MB" beside real
+    /// resolutions would be the one figure on the page nobody could check.
     fn query_display(&self) -> Result<DisplayInfo, HwQueryError> {
-        let content = self.read_sysfs(SYSFS_DISPLAY)?;
-        let kv = Self::parse_kv_file(&content);
+        let mons =
+            self.procfs()
+                .monitors()
+                .ok()
+                .flatten()
+                .ok_or_else(|| HwQueryError::NotAvailable {
+                    path: self.rooted("/proc/monitors"),
+                })?;
 
-        let mut outputs = Vec::new();
-        for i in 0..8 {
-            let key = format!("output{i}");
-            if let Some(name) = kv.get(&key) {
-                let connected = kv
-                    .get(&format!("{key}_connected"))
-                    .map(|v| v == "true" || v == "1")
-                    .unwrap_or(false);
-                outputs.push((name.clone(), connected));
-            }
-        }
-
+        // The primary output's mode is what "the resolution" means to a
+        // reader. With no primary there is no single answer, and the field is
+        // left empty rather than filled from whichever row happens to be
+        // first.
+        let primary = mons.primary();
         Ok(DisplayInfo {
-            gpu_name: kv.get("gpu_name").cloned().unwrap_or_default(),
-            vendor: kv.get("vendor").cloned().unwrap_or_default(),
-            vram_mb: Self::field(&kv, "vram_mb", 0)?,
-            resolution: kv.get("resolution").cloned().unwrap_or_default(),
-            refresh_rate_hz: Self::field(&kv, "refresh_rate_hz", 0)?,
-            outputs,
-            driver_version: kv.get("driver_version").cloned().unwrap_or_default(),
+            gpu_name: String::new(),
+            vendor: String::new(),
+            vram_mb: 0,
+            resolution: primary
+                .map_or_else(String::new, |mon| format!("{}x{}", mon.width, mon.height)),
+            refresh_rate_hz: primary.map_or(0, |mon| mon.refresh_hz),
+            // `enabled` defaults to true in the parser because the kernel
+            // writes only a ` [disabled]` marker and never an ` [enabled]`
+            // one, so a disabled output is still listed and still reports the
+            // mode it would use.
+            outputs: mons
+                .outputs
+                .iter()
+                .map(|mon| (String::from_utf8_lossy(&mon.name).into_owned(), mon.enabled))
+                .collect(),
+            driver_version: String::new(),
         })
     }
 
@@ -754,22 +753,31 @@ impl HardwareProvider for SyscallProvider {
         Ok(devices)
     }
 
+    /// Read the interrupt lines from `/proc/interrupts`.
+    ///
+    /// This read `/sys/hardware/irqs`, which this kernel has never served and
+    /// which lane A has recorded it will never serve: `/proc` already
+    /// publishes the data, and a second kernel answer to one question is what
+    /// §850 exists to prevent.
     fn query_irqs(&self) -> Result<Vec<IrqInfo>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_IRQS)?;
-        let mut irqs = Vec::new();
+        let table = self.procfs().interrupts().ok().flatten().ok_or_else(|| {
+            HwQueryError::NotAvailable {
+                path: self.rooted("/proc/interrupts"),
+            }
+        })?;
 
-        for entry in &entries {
-            irqs.push(IrqInfo {
-                irq_number: Self::field(entry, "irq", 0)?,
-                device: entry.get("device").cloned().unwrap_or_default(),
-                irq_type: entry
-                    .get("type")
-                    .cloned()
-                    .unwrap_or_else(|| "Edge".to_string()),
-            });
-        }
-
-        Ok(irqs)
+        Ok(table
+            .irqs
+            .iter()
+            .map(|irq| IrqInfo {
+                irq_number: irq.number,
+                // Bytes in the file, because nothing guarantees the label is
+                // UTF-8; text only here, where it becomes glyphs.
+                device: String::from_utf8_lossy(&irq.description).into_owned(),
+                irq_type: String::new(),
+                asserted: irq.pending,
+            })
+            .collect())
     }
 
     fn query_io_ports(&self) -> Result<Vec<IoPortInfo>, HwQueryError> {
@@ -1143,15 +1151,21 @@ impl HardwareProvider for StubProvider {
 
     fn query_irqs(&self) -> Result<Vec<IrqInfo>, HwQueryError> {
         Ok(vec![
+            // `irq_type` is empty and `asserted` is false, matching what a
+            // real read produces: this kernel publishes neither a trigger mode
+            // nor a count, and a stub that invents richer data than the real
+            // provider can return is a fixture that tests the wrong shape.
             IrqInfo {
                 irq_number: 0,
                 device: "Timer".to_string(),
-                irq_type: "Edge".to_string(),
+                irq_type: String::new(),
+                asserted: false,
             },
             IrqInfo {
                 irq_number: 1,
                 device: "Keyboard".to_string(),
-                irq_type: "Edge".to_string(),
+                irq_type: String::new(),
+                asserted: true,
             },
         ])
     }
@@ -2108,33 +2122,6 @@ mod tests {
     }
 
     // -- Key-value file parsing --
-
-    #[test]
-    fn test_parse_kv_equals() {
-        let kv = SyscallProvider::parse_kv_file("brand=Intel i7\nmodel=158\n");
-        assert_eq!(kv.get("brand").map(|s| s.as_str()), Some("Intel i7"));
-        assert_eq!(kv.get("model").map(|s| s.as_str()), Some("158"));
-    }
-
-    #[test]
-    fn test_parse_kv_colon() {
-        let kv = SyscallProvider::parse_kv_file("vendor: Intel\nfamily: 6\n");
-        assert_eq!(kv.get("vendor").map(|s| s.as_str()), Some("Intel"));
-        assert_eq!(kv.get("family").map(|s| s.as_str()), Some("6"));
-    }
-
-    #[test]
-    fn test_parse_kv_skips_comments_and_blanks() {
-        let kv = SyscallProvider::parse_kv_file("# comment\n\nbrand=test\n");
-        assert_eq!(kv.len(), 1);
-        assert_eq!(kv.get("brand").map(|s| s.as_str()), Some("test"));
-    }
-
-    #[test]
-    fn test_parse_kv_whitespace_trimming() {
-        let kv = SyscallProvider::parse_kv_file("  key  =  value  \n");
-        assert_eq!(kv.get("key").map(|s| s.as_str()), Some("value"));
-    }
 
     // -- Reading one field --
 

@@ -57317,6 +57317,29 @@ They now check the subject exists (which is real work, and most of the value:
 not implemented, exiting non-zero. A script that checks the exit status is no
 longer told it worked.
 
+**Correction, 2026-09-15: that was true of the session, user and seat
+commands and NOT of the five power ones**, which went on printing
+"Requesting poweroff..." and exiting 0 until today. The paragraph above said
+"and the five power ones" in its list and then described a fix that had not
+reached them.
+
+The reason the two halves diverged is worth keeping, because it is why
+reading the file did not show it. `run_loginctl` builds a fresh local
+`Daemon` and runs the command against that. An empty table makes every
+LOOKUP fail -- so `terminate-session` really does exit non-zero, and looks
+fixed -- and makes every POLICY QUESTION pass, because nothing inhibits and
+the default config allows. `request_power_action` therefore returned
+`Allowed` every time, and the `Allowed` arm was the one that claimed
+success. The same emptiness that made one half safe made the other half
+lie.
+
+Fixed now: the `Allowed` arm says the action is permitted and that this
+build cannot perform it, and exits non-zero. Both halves are stated because
+both are true and they have different remedies -- policy allows it, and
+there is no transport. A regression test asserts the exit status for all
+four actions and for `--force`, which was the likelier spelling to be
+trusted.
+
 **What each would need.**
 
 *The session, user and seat commands* need something to act on. `logind` keeps

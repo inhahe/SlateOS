@@ -1937,9 +1937,27 @@ fn parse_loginctl_args(args: &[String]) -> LoginctlCommand {
 
 /// Execute a loginctl command.
 ///
-/// In a real implementation, these would communicate with the logind daemon
-/// via D-Bus. Here we operate on a local `Daemon` instance to demonstrate
-/// the logic and enable thorough testing.
+/// # This operates on a LOCAL `Daemon`, not the running one
+///
+/// `run_loginctl` constructs a fresh `Daemon` and passes it here, so every
+/// answer below is about an object created microseconds earlier and not about
+/// the daemon holding the machine's sessions. `login` registers real sessions
+/// over the bus (`CreateSession`, src/bus.rs), and none of them are visible
+/// here.
+///
+/// That has opposite effects on the two kinds of subcommand, which is why the
+/// state of this file is easy to misread:
+///
+/// * Anything that LOOKS SOMETHING UP fails, because the local table is
+///   empty. `terminate-session 5` reports "no such session" and exits
+///   non-zero. Safe, and safe by accident rather than by design.
+/// * Anything that asks a POLICY QUESTION passes, because an empty table
+///   inhibits nothing and the default config allows everything. That is what
+///   let the power commands report success for an action nobody attempted.
+///
+/// See known-issues.md -> "loginctl is nominally logind's client and never
+/// speaks to it", and todo.txt -> "loginctl can inspect sessions and cannot
+/// change them".
 fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -2167,16 +2185,14 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
             }
         }
         LoginctlCommand::PowerOff(force) => {
-            handle_power_command(&mut out, daemon, PowerAction::PowerOff, *force)
+            handle_power_command(daemon, PowerAction::PowerOff, *force)
         }
-        LoginctlCommand::Reboot(force) => {
-            handle_power_command(&mut out, daemon, PowerAction::Reboot, *force)
-        }
+        LoginctlCommand::Reboot(force) => handle_power_command(daemon, PowerAction::Reboot, *force),
         LoginctlCommand::Suspend(force) => {
-            handle_power_command(&mut out, daemon, PowerAction::Suspend, *force)
+            handle_power_command(daemon, PowerAction::Suspend, *force)
         }
         LoginctlCommand::Hibernate(force) => {
-            handle_power_command(&mut out, daemon, PowerAction::Hibernate, *force)
+            handle_power_command(daemon, PowerAction::Hibernate, *force)
         }
         LoginctlCommand::Help => {
             let _ = writeln!(
@@ -2214,18 +2230,30 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
 }
 
 /// Handle power action commands (poweroff/reboot/suspend/hibernate).
-fn handle_power_command(
-    out: &mut io::StdoutLock<'_>,
-    daemon: &Daemon,
-    action: PowerAction,
-    force: bool,
-) -> i32 {
+fn handle_power_command(daemon: &Daemon, action: PowerAction, force: bool) -> i32 {
     match daemon.request_power_action(action, force) {
         PowerActionResult::Allowed => {
-            let _ = writeln!(out, "Requesting {}...", action.as_str());
-            // In a real system, this would issue the syscall or send a D-Bus
-            // message to the daemon.
-            0
+            // Permitted, and not performed. It used to print "Requesting
+            // poweroff..." and exit 0, which is indistinguishable to a script
+            // or a person from a machine that is going down -- and nothing
+            // was sent anywhere. The comment where this stood said "in a real
+            // system, this would issue the syscall or send a D-Bus message to
+            // the daemon", which is an accurate description of what was
+            // missing sitting directly above a line that claimed it was not.
+            //
+            // Both halves are said because both are true and they have
+            // different remedies: policy allows it, and there is no transport.
+            // `userspace/powerctl` already reaches the service manager over
+            // IPC and is the destination to wire this to; todo.txt's
+            // "loginctl can inspect sessions and cannot change them" has the
+            // detail.
+            let _ = writeln!(
+                io::stderr(),
+                "loginctl: {} is permitted, but this build cannot perform it: \
+                 loginctl is not connected to the service manager",
+                action.as_str()
+            );
+            1
         }
         PowerActionResult::Inhibited => {
             let _ = writeln!(
@@ -3201,6 +3229,36 @@ mod tests {
     }
 
     // --- Power action requests ---
+
+    /// `loginctl poweroff` must not report a shutdown it did not request.
+    ///
+    /// It printed "Requesting poweroff..." and exited 0 while sending nothing
+    /// anywhere -- the exact shape lane C filed 2,288 of, in logind's own
+    /// client. A script testing the exit status was told the machine was
+    /// going down.
+    ///
+    /// The exit status is what this asserts, not the wording: a caller that
+    /// reads stdout is unusual, and a caller that reads `$?` is every shell
+    /// script ever written.
+    #[test]
+    fn a_power_command_does_not_report_success_for_an_action_it_cannot_perform() {
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
+        for cmd in [
+            LoginctlCommand::PowerOff(false),
+            LoginctlCommand::Reboot(false),
+            LoginctlCommand::Suspend(false),
+            LoginctlCommand::Hibernate(false),
+            // --force too: overriding an inhibitor does not conjure a
+            // transport, and this was the likelier spelling to be trusted.
+            LoginctlCommand::PowerOff(true),
+        ] {
+            assert_ne!(
+                run_loginctl_command(&mut d, &cmd),
+                0,
+                "{cmd:?} reported success for an action nothing performed"
+            );
+        }
+    }
 
     #[test]
     fn test_power_action_allowed() {

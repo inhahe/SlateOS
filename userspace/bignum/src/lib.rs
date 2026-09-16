@@ -467,22 +467,42 @@ impl BigInt {
             }
 
             // Multiply the divisor by the estimate and subtract it out.
-            let mut borrow: i64 = 0;
+            //
+            // The borrow is folded INTO the next product rather than
+            // subtracted from the next limb, which is Knuth's own arrangement
+            // and is load-bearing arithmetic rather than a rewrite for taste.
+            //
+            // Subtracting it separately -- `slot - product_lo - borrow`, which
+            // is what this did -- leaves a value as low as `-2*LIMB_BASE`,
+            // because `product_lo` and `borrow` are each free to approach the
+            // base. The code then added the base back exactly ONCE and cast to
+            // `u32`, so whenever both happened to be large the cast wrapped a
+            // still-negative number and the limb became garbage. Folding it in
+            // first bounds the product by `(B-1)^2 + B < B^2`, so `p_lo < B`
+            // and `slot - p_lo >= -(B-1)`: one base is then always enough.
+            //
+            // It stayed hidden because it needs a divisor of several limbs AND
+            // limb values that collide in that way, so it was invisible for
+            // small divisors and erratic for large ones -- `(10^90)/d` was
+            // wrong for `d` of 27, 36, 40, 42, 45 and 54 digits and right for
+            // 9, 18, 28 and 37. That is `/` on any sufficiently large divisor,
+            // in `bc` and `dc` both.
+            let mut borrow: u64 = 0;
             for i in 0..n {
-                let product = q_hat.saturating_mul(limb(&v.limbs, i));
+                let product = q_hat
+                    .saturating_mul(limb(&v.limbs, i))
+                    .saturating_add(borrow);
                 let (product_hi, product_lo) = split(product);
                 let Some(slot) = j.checked_add(i).and_then(|k| u_limbs.get_mut(k)) else {
                     continue;
                 };
-                let cur = i64::from(*slot)
-                    .saturating_sub(i64::from(product_lo))
-                    .saturating_sub(borrow);
+                let cur = i64::from(*slot).saturating_sub(i64::from(product_lo));
                 if cur < 0 {
                     *slot = cur.saturating_add(LIMB_BASE as i64) as u32;
-                    borrow = (product_hi as i64).saturating_add(1);
+                    borrow = product_hi.saturating_add(1);
                 } else {
                     *slot = cur as u32;
-                    borrow = product_hi as i64;
+                    borrow = product_hi;
                 }
             }
 
@@ -490,7 +510,10 @@ impl BigInt {
             // give a unit back and add the divisor in again.
             let top = j.saturating_add(n);
             if let Some(slot) = u_limbs.get_mut(top) {
-                let cur = i64::from(*slot).saturating_sub(borrow);
+                // `borrow <= LIMB_BASE` now that it is folded into the product
+                // above, so one base back is enough here too.
+                let cur =
+                    i64::from(*slot).saturating_sub(i64::try_from(borrow).unwrap_or(i64::MAX));
                 if cur < 0 {
                     *slot = cur.saturating_add(LIMB_BASE as i64) as u32;
                     q_hat = q_hat.saturating_sub(1);
@@ -730,6 +753,40 @@ impl BigInt {
                 break;
             }
             guess = new_guess;
+        }
+
+        // Settle the last place by DEFINITION rather than by trusting the
+        // iteration to have converged.
+        //
+        // Newton's method for an integer root is only correct when it runs to
+        // the very end, and "the iterate stopped decreasing" is not the same
+        // statement: with a starting guess as coarse as `10^ceil(digits/2)` --
+        // up to about three times the true root -- the sequence can settle one
+        // above the floor and stop, because the next iterate is then equal
+        // rather than smaller. It returned `…2097` for `sqrt(2*10^62)` where
+        // the floor is `…2096`, and through `Decimal::sqrt` that one unit
+        // became every digit past the thirtieth: `sqrt(2)` at `scale=40` was
+        // right for 30 places and wrong after.
+        //
+        // These two loops make the postcondition true by construction --
+        // `guess^2 <= self < (guess+1)^2`, which is what "integer square root"
+        // MEANS -- so the answer no longer depends on how good the starting
+        // point was. Each runs at most a couple of times from a converged
+        // iterate; they are a correction, not a search. Both are needed:
+        // the first fixes an overshoot, and the second exists so that a future
+        // change to the initial guess (a cheaper one that starts BELOW the
+        // root) cannot silently return a value that is too small.
+        let one = Self::one();
+        while guess.mul(&guess).cmp_mag(self) > 0 {
+            guess = guess.sub(&one);
+        }
+        loop {
+            let next = guess.add(&one);
+            if next.mul(&next).cmp_mag(self) <= 0 {
+                guess = next;
+            } else {
+                break;
+            }
         }
         guess
     }

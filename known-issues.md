@@ -84847,7 +84847,7 @@ complained about everything.
 
 ---
 
-## TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR (lane B, 2026-09-16) — **open**
+## TD-B-BC-STATEMENTS-NEED-NO-SEPARATOR (lane B, 2026-09-16) -- **Status: FIXED** 2026-09-16
 
 **In short:** our `bc` accepts two statements written side by side with nothing
 between them. `1 2` on one line prints `1` and then `2`; GNU calls it
@@ -84898,6 +84898,53 @@ gets a first one, and a wrong answer only for programs containing `1 2`, which
 no one writes deliberately. It is recorded because the reporting work above
 referred to it, and a reference to an entry that does not exist is how a known
 gap becomes an unknown one.
+
+### Fixed 2026-09-16
+
+`Parser::require_terminator` replaces `skip_terminator` at every statement end,
+refusing anything that cannot legally follow one.
+
+**The followers were measured before a line was written**, exactly as this
+entry asked, because the failure mode of an over-strict rule is refusing valid
+programs — worse than the over-acceptance being fixed, and invisible to a suite
+that only feeds it malformed input:
+
+| after a statement | GNU |
+|---|---|
+| `;` or newline | the separators themselves |
+| `}` | accepted — `{ print "a" }` |
+| `else` | accepted — `if (1) print "a" else print "b"` |
+| end of input | accepted |
+| anything else | `syntax error` |
+
+**Two results were not what reasoning would have produced.** A closing brace
+ends a statement but does **not** license a following one: `{ 1 } 2`,
+`if (1) { … } 2`, `while (0) { } 2` and `for (…) { } 2` are all refused. And a
+**function definition is not a statement** in this sense — `define f() {
+return (1) } f()` is accepted — because GNU's grammar makes a definition its
+own input item. Guessing either way round would have produced a `bc` that
+rejected real programs.
+
+There is a third, learned from a failing test rather than from GNU: a
+*braceless* body needs nothing extra, because `parse_stmt` has already consumed
+a terminator for the statement it read, and that terminator is the enclosing
+`if`'s as well. Requiring a second one rejected `if (1) print "a"` followed by
+any next line at all. The braced case is the one that needs it, and it is
+applied in `parse_block_or_stmt` where the `}` is consumed.
+
+**This closes the gap the reporting work left.** `1 $ 2` now produces both of
+GNU's diagnostics — `illegal character: $` from the scanner and `syntax error`
+from the parser, because with the `$` dropped the parser really is looking at
+`1 2`. Neither stage can produce the other's finding, which is what the
+scanner/parser split was built for.
+
+**Evidence.** `bc-diff.sh` 147 -> 159 passed, 0 differed, known bugs 3 -> 1.
+The `bad character` row came back `KFIXED`. Five new rows carry both halves —
+the refusals *and* the acceptances — so an over-strict rule cannot pass. The
+147 pre-existing rows are themselves the control that no valid program was
+refused: they are real `bc` programs and all of them still agree with GNU. 98
+unit tests, including a `requiring_a_separator_does_not_reject_valid_programs`
+case listing fifteen accepted forms.
 
 ---
 
@@ -85000,7 +85047,7 @@ remaining known bugs into `KFIXED` and all 14 deliberate differences into
 
 ---
 
-## TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE (lane B, 2026-08-24) — **open**
+## TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE (lane B, 2026-08-24) -- **Status: FIXED** 2026-09-16
 
 **In short:** `bc -l` provides a small library of maths functions. Ours gets
 the arctangent wrong — not by a rounding error in the last digit, but in the
@@ -85041,7 +85088,225 @@ next, which is exactly why one call was enough to miss this.
 
 ---
 
-## TD-B-BC-MATHLIB-LOG-ERRORS-WHERE-GNU-SATURATES (lane B, 2026-08-24) — **open**
+### Fixed 2026-09-16
+
+The diagnosis in this entry was right and is now confirmed against the code:
+`atan_series` summed a **fixed 100 terms**, and its `is_negligible` guard could
+never fire at `x = 1` because `x^2 = 1` leaves the numerator at ±1 for ever.
+The arithmetic identifies it rather than merely fitting it: an alternating
+series truncated after N terms sits within half the first omitted term, here
+`1/(2*100+1)/2 = 0.00248…`, and the measured error was
+`.7853981633 - .7828982258 = .0024999`.
+
+Fixed as prescribed — `atan(x) = 2*atan(x / (1 + sqrt(1 + x^2)))` applied until
+`|x| < 1/16`, then the series summed until the term falls below the working
+precision, with the term cap now derived from `scale` and serving only as a
+non-termination guard. `a(1)` needs five reductions and then gains ~2.4 digits
+per term. The entry's warning to extend the harness was taken: `a(0)`, `a(0.5)`,
+`a(1)`, `a(2)`, `a(-1)`, `a(1.0001)`, `a(100)`, `a(0.07)` and `4*a(1)` all now
+match GNU exactly at scale 10, and `a(0.6)` matches to all 30 places at
+scale 30.
+
+**Two things the entry did not anticipate.**
+
+The `|x| > 1` inversion was never the fix people assume it is: it maps
+`x = 1.0001` to `0.9999`, which is just as slow to sum as what it came from. So
+the reduction has to run on *both* branches, not just the small one.
+
+And the first version of the fix made things **worse** — `a(1)` came back as
+`53.18` — because the reduction calls `sqrt`, and `sqrt` turned out to have a
+bug of its own that nothing had hit before:
+`TD-B-BIGNUM-SQRT-IGNORED-THE-PARITY-OF-ITS-INPUT-SCALE`. That is why this
+entry could not be closed on its own.
+
+**What still limits it.** `a(1)` at `scale=30` is exact to 24 places rather
+than 30, capped by `TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES`,
+which is older than this change and bounds every square root the reduction
+takes. The test asserts the 24 as a prefix rather than asserting the wrong
+digits, and says to raise it when that entry closes.
+
+---
+
+## TD-B-BIGNUM-SQRT-IGNORED-THE-PARITY-OF-ITS-INPUT-SCALE (lane B, 2026-09-16) -- **Status: FIXED** 2026-09-16
+
+**In short:** `sqrt(4)` was `2`, and `sqrt(4.0)` was `.632…`. Writing a
+trailing zero — which changes nothing about a number's value — changed the
+answer, by a factor of the square root of ten. It affected **`bc` and `dc`
+both**, since they share the number type, and any value with an odd count of
+decimal places was hit: `sqrt(2.0)` gave `.4472…`, which is the square root of
+0.2.
+
+**Where:** `userspace/bignum/src/decimal.rs`, `Decimal::sqrt`.
+
+**Why.** A `Decimal` is `digits / 10^scale`, so its root is
+`sqrt(digits) / 10^(scale/2)` — and `scale/2` is only a whole number of decimal
+places when `scale` is **even**. The code computed the working scale as
+`self.scale + 2*result_scale + 2` and then halved it with `div_ceil(2)`. The
+added part is always even, so the parity was the *input's*: an odd one rounded
+the halving up and shifted the point half a place too far.
+
+That is what made it depend on how the number was written rather than on what
+it was — the defect's whole signature. It is also why it went unnoticed: every
+literal anyone tests with (`2`, `4`, `0.25`, `1.0049`) has an even count of
+decimal places, and so does every intermediate in the old `bc` math library.
+It surfaced only when the new arctangent reduction started feeding `sqrt` a
+value carried at the full working scale, which was odd.
+
+**Found by:** the first attempt at
+`TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE`, which returned `a(1) = 53.18`. The
+trace showed `sqrt(1.0049)` answering `.317…` instead of `1.0024…` — a factor
+of exactly `sqrt(10)`, which is what named the cause.
+
+**Fixed** by rounding the working scale *up to even* before the halving, and
+halving that same number rather than re-reading it from the rescaled value.
+Two tests: one asserting that a trailing zero cannot change a root (six pairs
+across six scales), and one pinning the known digits of `sqrt(2)`, `sqrt(4)`
+and `sqrt(0.25)` so the pair test cannot pass by both sides being wrong the
+same way. `dc` verified at the command line against GNU as well as `bc`.
+
+---
+
+## TD-B-BIGNUM-SQRT-LOSES-DIGITS-PAST-ABOUT-THIRTY-PLACES (lane B, 2026-09-16) -- **Status: FIXED** 2026-09-16
+
+**In short:** ask for a square root to more than about thirty decimal places
+and the last ones are wrong. `sqrt(2)` at `scale=40` gives
+`1.4142135623730950488016887242097601756851` where the true value is
+`…2096980785696`: correct for 30 places, then drifting. It is not a rounding
+difference in the final digit — the tail is simply wrong.
+
+**Where:** `userspace/bignum/src/lib.rs`, `BigNat::isqrt`, reached through
+`Decimal::sqrt`. Affects `bc` and `dc` alike, and through the arctangent
+reduction it caps `a(x)` as well: `a(1)` at `scale=30` is exact to 24 places.
+
+**Measured**, against GNU bc 1.07.1:
+
+| Call | GNU | Ours |
+|---|---|---|
+| `scale=30; sqrt(2)` | `1.414213562373095048801688724209` | agrees |
+| `scale=40; sqrt(2)` | `…242096980785696` | `…242097601756851` |
+| `scale=70; sqrt(2)` | `…2096980785696718…` | diverges at ~33 places |
+| `scale=0; sqrt(2*10^62)` | `…2096` | `…2097` (one too large) |
+
+**Not caused by the parity fix above** — measured on the commit before it and
+the same wrong digits come out. The two are independent.
+
+**Diagnosis, not yet confirmed.** `isqrt` is Newton's method from an initial
+guess of `10^ceil(digits/2)`, terminating when the iterate stops decreasing.
+That shape is correct when the guess is at or above the true root, and it
+returns exact answers for large perfect squares — `sqrt(x*x) == x` was checked
+at 32, 40 and 41 digits. So the integer arithmetic is sound and the fault is
+more likely in the *termination*: the last iteration is skipped, leaving a
+value one too large, which then propagates into every digit the rescale keeps.
+The `sqrt(2*10^62)` row is the cleanest handle on it — a single `isqrt` call,
+no scaling, answer off by exactly one.
+
+**The proper fix:** after the loop, correct the result downward while
+`guess*guess > n` and upward while `(guess+1)^2 <= n`. Two multiplications
+settle it and make the answer exact by construction rather than by trusting the
+iteration to have converged. Then assert the known digits of `sqrt(2)` at
+scale 40 and 70 (the test in `decimal.rs` deliberately stops at 30 and says
+so), and raise the `a(1)` prefix assertion in `bc.rs` from 24 places to 30.
+
+### Fixed 2026-09-16 — and the diagnosis above was WRONG
+
+It was not `isqrt`. `isqrt` was doing the best it could with a division that
+was lying to it: the real fault was
+`TD-B-BIGNUM-LONG-DIVISION-DROPS-A-BORROW-BIGGER-THAN-ONE-LIMB`, filed below,
+in which `BigInt::divmod` returned wrong quotients for multi-limb divisors.
+Newton's method is nothing but repeated division, so every iterate was
+computed from a wrong value and the sequence settled wherever that left it.
+
+The write-up above said the integer arithmetic was "sound" because
+`sqrt(x*x) == x` held at 32, 40 and 41 digits. That evidence was real and the
+inference from it was wrong: those are *perfect squares*, where the iteration
+lands on an exact value early and the division never has to produce the
+awkward quotient that triggers the bug. **A check that passes tells you what it
+covers, not what it implies.** The right next step was the one that found it —
+divide two large numbers and compare against GNU, rather than reason about
+which component "must" be at fault.
+
+Both halves were done anyway, and the exactness correction is kept: after the
+Newton loop, `isqrt` now walks the result down while `guess^2 > n` and up while
+`(guess+1)^2 <= n`, so the answer satisfies the definition of an integer square
+root by construction instead of by trusting convergence. With the division
+fixed those loops run once or not at all. It is also what made the division bug
+*visible*: with the old `divmod` the correction had to walk roughly `6*10^29`
+steps, so `sqrt(2)` at `scale=40` stopped returning a wrong answer quickly and
+started hanging instead — which is how a silent wrong number became something
+that demanded an explanation.
+
+Now exact: `sqrt(2)` at scale 40 and 70, `sqrt(2*10^62)`, `sqrt(4)` at scale
+50, and `a(1)` at scale 30 and 50 all match GNU bc 1.07.1 digit for digit. The
+tests that said "stops at 30 because of a separate defect" now go to 70, and
+the `a(1)` prefix assertion in `bc.rs` is a full equality.
+
+---
+
+## TD-B-BIGNUM-LONG-DIVISION-DROPS-A-BORROW-BIGGER-THAN-ONE-LIMB (lane B, 2026-09-16) -- **Status: FIXED** 2026-09-16
+
+**In short:** dividing by a large enough number gave the wrong answer. Not the
+last digit — a quotient with the wrong number of digits in it.
+`(10^90)/144444444444444444444444444` was wrong, and so were the 36-, 40-, 42-,
+45- and 54-digit divisors, while 9, 18, 28 and 37 were right. It is the `/`
+operator, so it affected **`bc` and `dc` both**, and everything built on them:
+`sqrt` is Newton's method, which is repeated division, and the `bc` math
+library's arctangent is built on `sqrt`.
+
+**Where:** `userspace/bignum/src/lib.rs`, `BigInt::divmod`, the
+multiply-and-subtract step of Knuth's Algorithm D.
+
+**Why.** The step subtracted the running borrow from the next *limb*:
+
+    cur = slot - product_lo - borrow
+
+`product_lo` and `borrow` are each free to approach the base, so `cur` could
+reach about `-2*LIMB_BASE`. The code added one base back and cast to `u32`, so
+whenever both happened to be large the cast wrapped a still-negative number and
+that limb became garbage. Knuth folds the borrow into the next *product*
+instead — `p = q_hat*v[i] + borrow` — which bounds `p` by `(B-1)^2 + B < B^2`
+and therefore `slot - p_lo` by `-(B-1)`, where one base back is always enough.
+
+**Why it hid for so long.** It needs a divisor of several limbs *and* limb
+values that collide in that particular way, so it is invisible for small
+divisors and erratic for large ones. Nothing in the suite divided by a number
+that big, and the calculators' own tests use human-sized operands. The sizes
+that failed and the sizes that passed are both recorded in the new test, so a
+future fix that repairs one and breaks the other cannot look like progress.
+
+**Found by:** chasing `sqrt` precision, three layers up. The chain is worth
+keeping: a wrong arctangent led to a wrong `sqrt`, which led to a wrong
+`isqrt`, which turned out to be a wrong `divmod`. Each layer's diagnosis was
+confidently stated and two of the three were wrong about the layer beneath.
+
+**Fixed** by folding the borrow into the product. Verified against GNU bc
+1.07.1 for divisors of 9 to 54 digits, and the new test checks the defining
+identity `q*d <= n < (q+1)*d` rather than a table of expected digits — it needs
+no oracle and cannot be satisfied by a wrong quotient. Confirmed to fail
+against the previous commit, reporting `27-digit divisor: quotient too large`.
+
+**The rest of the arithmetic was then audited, and is clean.** A wrong `/` in
+a shipped calculator is the kind of finding that should not be trusted to be
+alone, so 1197 generated cases — `*`, `/`, `%`, `+`, `-`, `^`, `sqrt` and the
+division identity, at operand sizes from 1 to 90 digits chosen to straddle the
+9-digit limb boundary, plus fractional work at `scale=60` — were run through
+both our `bc` and GNU's and compared. **All 1197 agree.** So the borrow was the
+whole of it, and the other operators' limb carries are sound at sizes nothing
+had previously reached.
+
+That audit is a one-off and is not checked in: it needs WSL and a GNU
+reference, which most runs of this tree do not have. What *is* checked in is
+the part that needs neither —
+`large_operand_arithmetic_obeys_its_own_definitions` in `decimal.rs`, which
+asserts the same operators against their own definitions over the same size
+grid with a fixed seed. That is the check whose absence let this bug live:
+**nothing in the suite divided by a number that big.** It now does, on every
+`cargo test`, with no external oracle to go stale.
+
+---
+
+---
+
+## TD-B-BC-MATHLIB-LOG-ERRORS-WHERE-GNU-SATURATES (lane B, 2026-08-24) -- **Status: FIXED** 2026-09-16
 
 **In short:** `l(0)` — the natural logarithm of zero — has no answer as a real
 number. GNU `bc` returns a very large negative number rather than complaining;
@@ -85075,9 +85340,52 @@ it turns out GNU does error for negatives and only saturates at zero, then
 `LogOfNonPositive` stays and only its zero case changes — in which case its
 wording also falls under `TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU`.
 
+### Fixed 2026-09-16
+
+The sweep this entry demanded was done first, and it earned its keep: the
+value is **`-(10^scale - 1)`** rendered at the current scale, not a constant.
+
+| scale | GNU |
+|---|---|
+| 0 | `0` |
+| 1 | `-9.0` |
+| 5 | `-99999.00000` |
+| 10 | `-9999999999.0000000000` |
+| 20 | twenty nines |
+| 50 | fifty nines |
+
+`scale=0` answering `0` rather than a signed zero is the formula agreeing with
+itself, `10^0 - 1` being zero. The entry's warning was exactly right: a
+hard-coded `-9999999999` matches at `scale=10` and nowhere else, and would have
+passed the single harness row that existed. That row is now three, at scales 1,
+10 and 20, because one sample cannot tell a formula from a constant.
+
+**The unmeasured question is answered: negatives saturate too.** `l(-1)`,
+`l(-100)` and `l(-0.5)` all return what `l(0)` returns, so GNU has no error
+path here at all. That settles the entry's conditional — `LogOfNonPositive`
+does not stay. It had exactly one raise site, is now unreachable, and is
+deleted along with its `Display` arm rather than left as a variant nothing
+constructs.
+
+**Why match GNU rather than keep erroring** is `design-decisions.md` §1026,
+which also answers the obvious objection that this contradicts §1025's refusal
+to invent a value. The distinction is who defines it: `adr=` had no meaning
+outside GNU's own internals, while `-(10^scale - 1)` is reproducible and
+scripts can already depend on it — an underflow guard like
+`if (l(x) < -1000000)` works on GNU and would break against a `bc` that
+errored.
+
+**Evidence.** All six scales × four non-positive arguments match GNU exactly.
+`bc-diff.sh` 141 -> 147 passed, known bugs 5 -> 3. The unit test carries a
+control — `l(1)`, `l(2)`, `l(7)`, `l(0.5)` and the round trip `e(l(7))` — so
+that an `l` returning the sentinel for *every* argument could not pass. That
+round trip is asserted as `6.9999999996`, which is what GNU answers and what we
+answer; the first draft asserted `7.0000000000`, which is a claim about
+arithmetic nobody had performed.
+
 ---
 
-## TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE (lane B, 2026-08-24) — **open; a decision more than a bug**
+## TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE (lane B, 2026-08-24) -- **Status: FIXED** 2026-09-16
 
 **In short:** ask `bc` to run a file that does not exist and both programs
 complain and exit 1. GNU writes `File nosuch.bc is unavailable.`; we write
@@ -85119,6 +85427,35 @@ harness row stays yellow. Recommendation: **(c)** — it makes the common case
 match GNU exactly and keeps the protection for the case that motivated the
 policy. It is a user-visible message, so it is written down here rather than
 quietly changed.
+
+### Fixed 2026-09-16 — option (c)
+
+Taken, and recorded as `design-decisions.md` §1027.
+
+**What decided it was not in the options above.** Since the syntax-error prefix
+started naming its source file, `bc` printed the same name two ways in one
+program — `File 'prog.bc' is unavailable.` beside `prog.bc 1: syntax error`.
+That inconsistency post-dates this entry and is what turned a matter of taste
+into an obvious call: of the two spellings, the eliding one also matches
+upstream.
+
+**The forgery protection is intact**, which matters because it is the only
+reason the quoting existed. `quotef_os` quotes a name containing a newline,
+space or control character and leaves an ordinary one bare, so
+`x⏎b c: /etc/shadow: Permission denied` still cannot forge a line. Verified
+rather than asserted: `nosuch.bc` prints bare and matches GNU byte for byte,
+and a newline-bearing name prints as `'a'$'
+''bc: forged'`. Both are harness
+rows, the second `differs_by_design`.
+
+**Not put to the operator**, though the entry said it was written down rather
+than quietly changed. The reasoning is in §1027: the new inconsistency makes
+one option strictly better rather than leaving a fork, and the operator's queue
+already holds nine unanswered lane-B questions. One function call to reverse.
+
+**Evidence.** `bc-diff.sh` now reports **0 known bugs** — 159 -> 160 passed,
+15 differ on purpose. This was the last tracked differential difference in the
+shipped surface.
 
 ---
 
@@ -148587,6 +148924,115 @@ would have made the pipeline quieter rather than better.
 The round trip is the case to reach for when either file is touched again. It
 exercises both halves through their real entry points and its assertion is
 `cmp`, not a transcript, so it cannot pass on a right-looking message.
+
+## TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU (lane B, 2026-09-16) — **open**
+
+**In short:** `date -d '2021-06-15 12:00:00 +1 day'` works on GNU and is
+refused by ours. The `+1` there is not "plus one" — GNU reads a signed number
+straight after a time-of-day as a **time-zone offset in hours**, and the bare
+word `day` as one day. So the answer is one day later *at UTC+1*, and
+`-1 day` in the same position is also one day **later**, at UTC−1. The sign
+belongs to the zone and never to the displacement.
+
+**Measured**, GNU date 9.4, base `2021-06-15 12:00:00`:
+
+| operand | GNU | note |
+|---|---|---|
+| `12:00:00 +1 day` | Jun 16 **11:00** UTC | +1 day, zone +01:00 |
+| `12:00:00 -1 day` | Jun 16 **13:00** UTC | +1 day, zone −01:00 — later, not earlier |
+| `12:00:00 1 day` | Jun 16 12:00 UTC | unsigned: an ordinary relative |
+| `12:00:00 UTC +1 day` | Jun 16 12:00 UTC | zone already given, so `+1` is a relative again |
+| `12:00:00 -90 seconds` | *refused* | and ours refuses it too |
+| `2021-06-15 +1 day` | Jun 16 00:00 UTC | no time, so an ordinary relative |
+
+**Where:** `userspace/coreutils/src/bin/date.rs`, `take_relative_terms`. It
+extracts relative terms in a pass *before* the date/zone parser runs, so it
+cannot know whether a zone has already been seen. A signed number after a bare
+time is therefore left alone and the operand is refused.
+
+**Why refused rather than approximated.** Before relative forms existed at all
+this operand was refused too, so refusing is not a regression; answering would
+be. Our reading gives Jun 16 **12:00**, which is a day and an hour from GNU's
+— a plausible number, silently wrong, for an operand shaped exactly like the
+common `date -d "$stamp +1 day"` idiom. A visible refusal is the better of the
+two failures, and it is the one a caller can act on.
+
+**The proper fix:** interleave zone and relative parsing instead of running
+them in two passes — decide each token in order, so "has a zone been seen yet"
+is available when a signed number is reached. Then `12:00:00 +1 day` takes the
+zone branch and `12:00:00 UTC +1 day` takes the relative one. The harness row
+`known_bug_case TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU`
+turns green when it is right, and the four neighbouring rows beside it are the
+control that the fix did not disturb the forms that already work.
+
+**Severity: low.** One operand shape, refused rather than mis-answered, with
+three spellings that do work (`1 day` unsigned, `UTC +1 day`, and any relative
+on a date with no time).
+
+---
+
+## TD-B-DIFF-SIDE-BY-SIDE-PADS-WITH-SPACES-WHERE-GNU-USES-TABS (lane B, 2026-09-16) — **open**
+
+**In short:** `diff -y` prints two columns with the differing lines marked
+between them. Ours lines the columns up with spaces; GNU lines them up with
+tab characters. The output *looks* the same in a terminal and is byte-for-byte
+different, so anything comparing our output to GNU's — a test, a script, a
+`diff` of two `diff` runs — sees every line as changed.
+
+**Where:** `userspace/coreutils/src/bin/diff.rs`, `print_side_by_side`.
+
+**Scale:** the last 5 differing rows in `scripts/diff-diff.sh` (110 passed, 5
+differed), all of them this one feature: `-y`, `--side-by-side`, `-y -W 40`,
+`--width=40 -y`, `-y --suppress-common-lines`.
+
+### What was measured, so the next attempt does not start from zero
+
+**1. `--expand-tabs` is not a rendering of the tab layout. It is a different
+layout.** This is the trap, and it cost the first hour: measuring GNU with
+`-t` to get "the real columns" answers a question about a *different* output.
+At width 130 the gutter sits at column 64 with `-t` and at column 62 without.
+Any arithmetic derived from the `-t` form is therefore wrong for the form the
+harness compares.
+
+**2. The right-hand column always begins at the next tab stop strictly after
+`gutter + 1`.** Confirmed at all twelve widths measured — 20, 21, 30, 31, 40,
+41, 60, 61, 80, 100, 130, 131, 200 — with no exceptions:
+
+| width | gutter col | right col |
+|---|---|---|
+| 20 | 6 | 8 |
+| 21 | 10 | 16 |
+| 30 | 14 | 16 |
+| 40 | 19 | 24 |
+| 100 | 46 | 48 |
+| 130 | 62 | 64 |
+| 200 | 99 | 104 |
+
+**3. The gutter column is NOT `(width-1)/2`,** which is what the `-t` form
+suggests. Against that formula the tab form is short by 0, 1, 2 or 3 columns
+depending on width, with no pattern I could fit. That is the unsolved part.
+
+**4. A common line takes a different path from a changed one.** With no
+gutter character, GNU tabs straight to the right column — `same` at width 130
+is eight tabs and no spaces — rather than padding to the gutter, writing a
+space, and tabbing on.
+
+### Why it is filed rather than implemented
+
+Everything above is the behaviour of a formatter, and none of it is a wrong
+answer: `diff -y` on ours is correct, readable, aligned output that does not
+match GNU byte for byte. Guessing the remaining arithmetic would produce a
+third layout matching neither, and the cost of being wrong is silently
+re-breaking the five rows in a way that still looks plausible in a terminal.
+
+**The proper fix:** read GNU's `print_half_line`/`print_1_2_line` in
+`diffutils/src/util.c` rather than inferring the rule from samples — the
+sample space is (width × left-length × tab-stop phase) and twelve points in it
+were not enough. Then keep every row above as a regression case, and add one
+with a left-hand line whose length is a multiple of 8, since that is where
+tab packing and column arithmetic disagree most.
+
+---
 
 ## B-DIFF-CANNOT-SEE-A-MISSING-FINAL-NEWLINE (lane B, 2026-09-14)
 

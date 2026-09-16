@@ -478,15 +478,12 @@ fn kill_session(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>
     if let Err(e) = authorize(daemon, id, caller, Required::Owner) {
         return Reply::Error(e);
     }
+    // `KillError::bus_name` rather than a match here: the same list lives in
+    // `loginctl`, which now reads these names back off the wire, and two
+    // copies would be free to disagree about which failure is which.
     match daemon.kill_session(id, signal) {
         Ok(pid) => Reply::Return(fields::encode(&[pid.to_string().as_bytes()])),
-        Err(crate::KillError::NoSuchSession) => Reply::Error(ERR_NO_SUCH_SESSION),
-        Err(crate::KillError::NoLeaderPid) => Reply::Error(ERR_NO_SESSION_LEADER),
-        Err(crate::KillError::NotPermitted) => Reply::Error(ERR_ACCESS_DENIED),
-        Err(crate::KillError::LeaderGone) => Reply::Error(ERR_NO_SUCH_PROCESS),
-        Err(crate::KillError::Unsupported | crate::KillError::Failed) => {
-            Reply::Error(ERR_CANNOT_SIGNAL)
-        }
+        Err(e) => Reply::Error(e.bus_name()),
     }
 }
 

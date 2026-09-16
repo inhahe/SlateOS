@@ -701,6 +701,42 @@ enum KillError {
 }
 
 impl KillError {
+    /// The `system.logind.Error.*` name this failure travels as.
+    ///
+    /// Here rather than in `bus.rs` so that the wire name and the sentence a
+    /// person reads come from one place. `loginctl` now reaches the daemon
+    /// over the bus and gets a name back; if it mapped names to sentences on
+    /// its own, there would be two lists of these failures that could disagree
+    /// about which is which -- the shape this crate already has once, in
+    /// `loginctl`'s `SESSION_DIR` and `logind`'s pointing at different
+    /// directories.
+    fn bus_name(self) -> &'static str {
+        match self {
+            Self::NoSuchSession => crate::bus::ERR_NO_SUCH_SESSION,
+            Self::NoLeaderPid => crate::bus::ERR_NO_SESSION_LEADER,
+            Self::NotPermitted => crate::bus::ERR_ACCESS_DENIED,
+            Self::LeaderGone => crate::bus::ERR_NO_SUCH_PROCESS,
+            Self::Unsupported | Self::Failed => crate::bus::ERR_CANNOT_SIGNAL,
+        }
+    }
+
+    /// Recover the failure from a wire name, if it is one of ours.
+    ///
+    /// `Unsupported` and `Failed` share a name, so this returns the first --
+    /// which is right for a reader, since the sentence for both is about the
+    /// build being unable rather than about the session.
+    fn from_bus_name(name: &str) -> Option<Self> {
+        [
+            Self::NoSuchSession,
+            Self::NoLeaderPid,
+            Self::NotPermitted,
+            Self::LeaderGone,
+            Self::Unsupported,
+        ]
+        .into_iter()
+        .find(|e| e.bus_name() == name)
+    }
+
     /// A sentence for a person.
     fn message(self) -> &'static str {
         match self {
@@ -2038,6 +2074,68 @@ fn print_session_list(out: &mut impl Write, lines: &[String]) {
     let _ = writeln!(out, "\n{} sessions listed.", lines.len());
 }
 
+/// One call to the daemon, or a sentence saying why not.
+///
+/// Connect, call, check for an error reply, decode. Shared because three
+/// things went wrong in the same four lines when `list_sessions_via_bus` was
+/// the only caller, and a second copy is how they start disagreeing about
+/// which of them counts as a failure.
+///
+/// An ERROR REPLY is a failure here, not a value. `conn.call` returns `Ok` for
+/// one -- the daemon answered, and what it answered was "no" -- so a caller
+/// that only checked the `Result` would decode an error message's payload as
+/// a session list and print whatever fell out.
+fn call_logind(member: &str, args: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
+    // `bus::SERVICE_NAME`, not a second copy of the string. `userspace/login`
+    // keeps its own `LOGIND_SERVICE` because `bus` is a module of this binary
+    // and not a crate it can import; the two agree today, and todo.txt already
+    // records this pair drifting apart once -- `loginctl`'s `SESSION_DIR` was
+    // `/run/sessions` while `logind`'s was `/run/systemd/sessions`. Inside this
+    // binary there is no excuse for a second copy.
+    let mut conn = libservicebus::Connection::connect(bus::SERVICE_NAME)
+        .map_err(|e| format!("cannot reach {}: {e:?}", bus::SERVICE_NAME))?;
+    let reply = conn
+        .call(member, &libservicebus::fields::encode(args))
+        .map_err(|e| format!("{member} failed: {e:?}"))?;
+    if reply.is_error() {
+        // `Message::error` puts the `system.logind.Error.*` name in `member`.
+        return Err(KillError::from_bus_name(&reply.member)
+            .map_or_else(|| reply.member.clone(), |e| e.message().to_string()));
+    }
+    libservicebus::fields::decode(&reply.payload)
+        .map(|fields| fields.iter().map(|b| b.to_vec()).collect())
+        .ok_or_else(|| format!("{member} returned a reply this build cannot decode"))
+}
+
+/// `loginctl kill-session <id> [--signal=SIG]`, asking the daemon.
+///
+/// The local path printed "Sent signal 15 to session 3 (leader PID 412)." from
+/// a `Daemon` built in this process, which had no sessions, so it never got
+/// that far -- but `Daemon::kill_session` returned the pid without signalling,
+/// so on a populated daemon it would have said exactly that and sent nothing.
+/// Both halves are fixed: the daemon signals, and this asks the daemon.
+fn kill_session_via_bus(id: &str, signal: i32) -> i32 {
+    if id.is_empty() {
+        let _ = writeln!(io::stderr(), "loginctl: session ID required");
+        return 1;
+    }
+    let sig = signal.to_string();
+    match call_logind("KillSession", &[id.as_bytes(), sig.as_bytes()]) {
+        Ok(fields) => {
+            let pid = fields.first().map_or_else(
+                || "?".to_string(),
+                |b| String::from_utf8_lossy(b).into_owned(),
+            );
+            println!("Sent signal {signal} to session {id} (leader PID {pid}).");
+            0
+        }
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: cannot kill session {id}: {why}");
+            1
+        }
+    }
+}
+
 /// `loginctl list-sessions`, asking the daemon.
 ///
 /// # Why this does not go through `run_loginctl_command`
@@ -2053,36 +2151,12 @@ fn print_session_list(out: &mut impl Write, lines: &[String]) {
 /// opposite in meaning, and the previous behaviour picked the wrong one
 /// silently. Exiting non-zero is what lets a script tell them apart.
 fn list_sessions_via_bus() -> i32 {
-    // `bus::SERVICE_NAME`, not a second copy of the string. `userspace/login`
-    // keeps its own `LOGIND_SERVICE` because `bus` is a module of this binary
-    // and not a crate it can import; the two agree today, and todo.txt already
-    // records this pair drifting apart once -- `loginctl`'s `SESSION_DIR` was
-    // `/run/sessions` while `logind`'s was `/run/systemd/sessions`. Inside this
-    // binary there is no excuse for a second copy.
-    let mut conn = match libservicebus::Connection::connect(bus::SERVICE_NAME) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = writeln!(
-                io::stderr(),
-                "loginctl: cannot reach {}: {e:?}",
-                bus::SERVICE_NAME
-            );
+    let fields = match call_logind("ListSessions", &[]) {
+        Ok(f) => f,
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "loginctl: {why}");
             return 1;
         }
-    };
-    let reply = match conn.call("ListSessions", &libservicebus::fields::encode(&[])) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = writeln!(io::stderr(), "loginctl: ListSessions failed: {e:?}");
-            return 1;
-        }
-    };
-    let Some(fields) = libservicebus::fields::decode(&reply.payload) else {
-        let _ = writeln!(
-            io::stderr(),
-            "loginctl: ListSessions returned a reply this build cannot decode"
-        );
-        return 1;
     };
     // Lossy is wrong for a path and right for a listing that is about to be
     // printed: these lines are logind's own rendering of its own ids, uids and
@@ -2445,8 +2519,10 @@ fn run_loginctl(args: &[String]) -> i32 {
     // The commands that have a bus method go to the daemon. The rest still run
     // against a local `Daemon` -- see `run_loginctl_command`'s doc comment for
     // what that costs and why the two halves behave differently.
-    if matches!(cmd, LoginctlCommand::ListSessions) {
-        return list_sessions_via_bus();
+    match &cmd {
+        LoginctlCommand::ListSessions => return list_sessions_via_bus(),
+        LoginctlCommand::KillSession(id, sig) => return kill_session_via_bus(id, *sig),
+        _ => {}
     }
     let config = DaemonConfig::default();
     let mut daemon = Daemon::new(config, authlib::Authenticator::new());
@@ -3602,6 +3678,62 @@ mod tests {
     fn killing_a_session_says_it_cannot_rather_than_reporting_a_signal() {
         let d = test_daemon();
         assert_eq!(d.kill_session("1", 15), Err(KillError::Unsupported));
+    }
+
+    /// Every wire name maps back to the failure it came from.
+    ///
+    /// The round trip is the assertion. `bus::dispatch` sends
+    /// `KillError::bus_name()` and `loginctl` reads it back through
+    /// `from_bus_name` -- if those two ever disagreed, the daemon would report
+    /// "the session leader is gone" and the terminal would print "no such
+    /// session", which sends a reader after a bookkeeping bug that is not
+    /// there.
+    ///
+    /// `Unsupported` and `Failed` deliberately share a name, so the round trip
+    /// returns `Unsupported` for both; the sentence for either is about the
+    /// build being unable, which is true of both.
+    #[test]
+    fn every_kill_failure_survives_the_round_trip_through_its_wire_name() {
+        for e in [
+            KillError::NoSuchSession,
+            KillError::NoLeaderPid,
+            KillError::NotPermitted,
+            KillError::LeaderGone,
+            KillError::Unsupported,
+        ] {
+            assert_eq!(
+                KillError::from_bus_name(e.bus_name()),
+                Some(e),
+                "{e:?} did not survive its own wire name"
+            );
+        }
+        assert_eq!(
+            KillError::from_bus_name(KillError::Failed.bus_name()),
+            Some(KillError::Unsupported),
+            "Failed shares CannotSignal, and Unsupported is the right sentence"
+        );
+
+        // The control: a name that is not one of ours is not silently turned
+        // into a failure we know. `call_logind` falls back to printing the raw
+        // name, which is the honest answer for a daemon speaking a dialect
+        // this build does not.
+        assert_eq!(
+            KillError::from_bus_name("system.logind.Error.Whatever"),
+            None
+        );
+        assert_eq!(KillError::from_bus_name(""), None);
+
+        // And every name is distinct, or two failures would be one on the
+        // wire. CannotSignal is shared by exactly two and counted once.
+        let names = [
+            KillError::NoSuchSession.bus_name(),
+            KillError::NoLeaderPid.bus_name(),
+            KillError::NotPermitted.bus_name(),
+            KillError::LeaderGone.bus_name(),
+            KillError::Unsupported.bus_name(),
+        ];
+        let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(unique.len(), 5, "two failures share a wire name: {names:?}");
     }
 
     /// A session whose leader pid is 0 is refused, and for the right reason.

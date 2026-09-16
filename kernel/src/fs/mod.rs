@@ -332,6 +332,7 @@ pub mod readdir_plus;
 pub mod recent;
 pub mod recentsearch;
 pub mod reclaim;
+pub mod reclock;
 pub mod recoverypart;
 pub mod remoteassist;
 pub mod remotedesktop;

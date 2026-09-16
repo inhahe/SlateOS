@@ -46,6 +46,15 @@ WHAT IT CANNOT SEE, and these are not small
 * **Items reached through a re-export** under a different name.
 * **Trait methods called through the trait**, and impls generally.
 * **Macro-generated calls.**
+* **Prose.** The scan counts identifiers anywhere in another crate's Rust,
+  comments included, so *writing about* a function hides it. Found by
+  dogfooding on 2026-09-16: `gui/desktop`'s `idle_lock::lock_after` has no
+  caller outside its own crate and is not reported, because
+  `apps/settings/src/lockscreen.rs` names it in a doc comment explaining why
+  the two agree. That is the deliberate direction to err -- the aim is
+  confidence that a *reported* item really has no caller -- but it means a
+  well-documented dead export is exactly the kind this cannot see, and those
+  are not rare in a tree that explains itself as much as this one.
 * **Types that are only ever a return value.** A function's result type is
   never named by a caller that writes `let _ = f()` or `let x = f()`, so it is
   reported. On the first real run this caught `appearance::FontOutcome` and

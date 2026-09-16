@@ -2229,10 +2229,10 @@ filesystem-capacity reading that does not exist) and pressure-aware shrinking
 
 _Custom Python (fastpy) text editor. Editing engine is a toolkit widget (Phase 3.5 TextEdit). App is a thin wrapper. All apps get the engine for free via the widget._
 
-- [ ] Text editor app: tab bar for multiple open files
+- [x] Text editor app: tab bar for multiple open files *Verified 2026-09-16: `Tabs<Document>` holds the open files, `active_document` reads the current one, and `render_tabs` draws the bar at `TAB_BAR_HEIGHT`. The index is private and clamped — a stale one used to index the vector directly and take every unsaved buffer down with it.*
 - [ ] Text editor app: file open/save with encoding detection
-- [ ] Text editor app: split panes (horizontal/vertical)
-- [ ] Text editor app: minimap
+- [ ] Text editor app: split panes (horizontal/vertical) *Checked 2026-09-16: genuinely unstarted — no pane type, no pane collection, no split direction anywhere in `apps/editor`.*
+- [ ] Text editor app: minimap *Checked 2026-09-16: genuinely unstarted — the word appears nowhere in `apps/editor`.*
 - [ ] Text editor app: session restore (remember open tabs, cursor positions)
 - [ ] Text editor app: plugin system (Python scripts)
 - [ ] Text editor app: status bar (line/col, encoding, language, indentation mode)

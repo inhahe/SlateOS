@@ -1,0 +1,48 @@
+find-echoed-settings: a value bound to a {} is echoed; one handed to a function is not
+
+Lane B triaged twelve of this checker's userspace hits by reading them:
+one real, eleven correct code. Four of the eleven were one shape, and it
+is the shape this rule removes.
+
+    format!("idle_timeout={}s", cfg.idle_timeout)   // 600 reaches the
+                                                   // operator -- ECHO
+    format_temp(read_temp(), cfg.fahrenheit)       // nothing prints
+                                                   // "true"
+
+Both are reads inside a print, and a span check cannot tell them apart.
+Only the first is a setting confirming itself. The second is what a
+CORRECT display flag looks like: its whole job is to change output, so
+"read only into output" is not evidence against it.
+
+The test is whether the field sits in a top-level macro argument that
+hands nothing to a function. So cfg.idle_timeout qualifies,
+o.path.display() qualifies -- empty parens, still verbatim -- and
+format_nm_value(sym.st_value, opts.radix) does not.
+
+Per-use, and it composes with the per-struct rule rather than replacing
+it: a struct still needs an acting sibling before any of this is
+consulted. Cleared rather than ranked, because unlike the
+format!/println! split this is not a confidence question. It is a
+different thing.
+
+Measured: 78 -> 72 overall, 35 -> 30 in userspace. acpi's fahrenheit,
+arp's numeric and both of objdump's radix are gone; logind's
+idle_timeout -- the one real hit, and the case whose docstring gave me
+the idea -- remains. Lane B's triage reproduced from the outside.
+
+**A bug caught while writing the cases, not by reading the code.** The
+first version returned on the first containing span. Macros nest: a GUI
+app writes println!("{}", format!("q={}", cfg.quality)), and the outer
+macro's top-level argument is the whole inner call, which hands
+something to a function. So a plain interpolation would have been
+cleared as a rendering selector -- in exactly the half of the tree this
+lane owns. It now checks every containing span.
+
+Four cases, including that one and the display() chain.
+
+Still uncleared and known: losetup's five options are format!-ed into a
+string handed to fs::write, which is a FUNCTION -- so the
+[shown]/[format] split cannot see the destination and no macro-keyed
+rule will. Recorded rather than papered over.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

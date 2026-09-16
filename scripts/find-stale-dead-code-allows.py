@@ -21,9 +21,16 @@ rebuilding a JSON parser that already existed.
 ## How it decides
 
 For one crate: strip every `#[allow(dead_code, …)]` and `#[expect(dead_code,
-…)]`, build with `--all-targets`, and read which items the compiler then
-reports as never used. An allow whose item is **not** in that list was
-suppressing nothing.
+…)]`, build, and read which items the compiler then reports as never used. An
+allow whose item is **not** in that list was suppressing nothing.
+
+**Without `--all-targets`, deliberately**, and this was wrong in the first
+version. `dead_code` is about the shipped binary. `--all-targets` compiles the
+tests too, so an item used only by tests is not dead *in that build* -- and its
+allow, which is genuinely needed for the ordinary build, would have been
+reported as suppressing nothing. In a tree with as many test-only helpers as
+this one that is not an edge case; it is most of the output. The plain build is
+the configuration the lint is about.
 
 One build per crate rather than one per allow -- the compiler reports every
 dead item at once, so stripping them all together is both faster and more
@@ -38,11 +45,10 @@ caller that is itself dead, hiding the warning).
   * **Items dead only under a different `--cfg`.** This builds one
     configuration. An allow covering a `cfg(unix)`-only item will look stale
     on a Windows host and is not.
-  * **`--all-targets` includes tests**, so an item used only by tests is not
-    reported dead and its allow will look stale. That is usually right -- the
-    tree's convention is that test-only items say so with `#[cfg(test)]` --
-    but it is a judgement, not a fact, which is why this reports and does not
-    gate.
+  * **An item a test uses and nothing else** is correctly reported as still
+    needing its allow, because the build here excludes tests. Whether it
+    *should* exist at all is a different question, and one
+    `find-stranded-serialisers.py` asks.
 
 Every file is restored from the bytes read at the start and the restore is
 verified by SHA-256.
@@ -173,7 +179,7 @@ def check_crate(crate: Path) -> int:
             return 0
 
         r = subprocess.run(
-            ["cargo", "check", "-p", name, "--target", TARGET, "--all-targets"],
+            ["cargo", "check", "-p", name, "--target", TARGET],
             capture_output=True, text=True, errors="replace", cwd=ROOT,
         )
         out = r.stdout + r.stderr

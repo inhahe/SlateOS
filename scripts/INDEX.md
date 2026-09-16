@@ -59,6 +59,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-env-identity.py` | Refuse a new read of the caller's identity from the environment. |
 | `scripts/check-eol.py` | Assert that tracked text files really do have LF endings *on disk*. |
 | `scripts/check-evdev-elf-asm.py` | Disassemble the hand-assembled ring-3 evdev test payload, and prove it is the one that ships. |
+| `scripts/check-excluded-crate-tests.py` | Run the tests of crates the workspace excludes, which nothing else runs. |
 | `scripts/check-fields-written-never-read.py` | Struct fields a program computes in production and only its tests ever read. |
 | `scripts/check-foreign-worktree-paths.py` | Refuse a hardcoded absolute path to a lane worktree in executable code. |
 | `scripts/check-frame-needles.py` | Lesson 91's mechanical check: whole-frame text assertions that name a band. |
@@ -172,6 +173,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/find-stale-admissions.py` | Which programs still deny a capability they have since acquired? |
 | `scripts/find-stranded-serialisers.py` | Which finished serialisers can nobody reach? |
 | `scripts/find-swallowed-ticks.py` | Which event dispatchers can return before reaching their own Tick arm? |
+| `scripts/find-unpinned-picker-routing.py` | Whose tests would notice if the file picker stopped receiving events? |
 | `scripts/flake-hunt.sh` | flake-hunt.sh — run a crate's test suite N times and report only the runs |
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
@@ -379,4 +381,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_369 scripts._
+_371 scripts._

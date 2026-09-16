@@ -6399,6 +6399,11 @@ fn destroy_process_resources(
     // Locks are owner-keyed by PID; without this a crashed lock holder
     // would block every other waiter on that path until reboot.
     crate::fs::Vfs::funlock_all(pid);
+    // And the byte-range record locks (fcntl F_SETLK), which are a separate
+    // table from flock because POSIX makes them separate lock spaces. Same
+    // reason, same moment: a dead owner's write lock on a range would refuse
+    // every live process that overlaps it, and nothing else clears one.
+    crate::fs::reclock::release_all(pid);
 
     // Close all IPC handles owned by this process.  In the normal exit
     // path these were already drained and closed at the zombie

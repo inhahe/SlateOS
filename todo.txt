@@ -4527,6 +4527,29 @@
 
 ## Judgment Calls
 
+MacAddress is declared twice (lane A, 2026-09-15). Small, real, not urgent.
+
+  kernel/src/wol.rs:59        pub struct MacAddress(pub [u8; 6])   1 use
+  kernel/src/virtio/net.rs:151 pub struct MacAddress(pub [u8; 6])  13 uses
+
+  Identical definitions, each with its own Display impl. `net::interface`
+  imports the virtio one, which is why `InterfaceInfo::mac` is
+  `virtio::net::MacAddress` and the wol Display is not the one that formats
+  it -- a thing I had to check before writing /sys/devices/net's generator,
+  because picking the wrong type compiles into a different Display.
+
+  Same shape as the ICMP wire format written twice, which lane C filed and
+  which was worth consolidating: two declarations of one format drift, and
+  the drift is invisible until something reads both. Here the asymmetry
+  makes it cheap -- wol has one use, so it can adopt virtio's type and the
+  duplicate goes.
+
+  Not done because it is a type move across two driver modules for no
+  behavioural gain today, and the boot queue is busy. Trigger: anything that
+  needs to pass a MAC between wol and the interface layer, at which point
+  the conversion would have to be written and consolidating is strictly
+  less work.
+
 "Fixed" means fixed ON MAIN, and say which when telling another lane
 (lane A, 2026-09-15). Lane C's correction, adopted here because the same
 ambiguity is in everything I have said today.
@@ -4787,6 +4810,34 @@ the next person to run these will see the same rows.
   care about heap availability at that point. That is the work; serving the
   file afterwards is trivial.
 
+  ALL NINE CATEGORIES NOW RESOLVED, and only two are work:
+
+    served      block, memmap (plus cpu/cpuid and system/memory earlier)
+    duplicate   irqs    -> /proc/interrupts (procfs::gen_interrupts)
+                display -> procfs, via fs::monitors
+                usb     -> procfs, via devhotplug::procfs_content()
+    no source   dma     -- nothing in kernel/src mentions a DMA channel at
+                           all, so a node would be invented outright
+    blocked     net     -- InterfaceInfo has no name field; eth0 would be
+                           fabricated. Operator decision, unchanged.
+    open        sound   -- ac97::is_available/status_info is real but covers
+                           ONE device; enumerating cards needs a registry
+                           that does not exist yet
+                drivers -- two files mention anything resembling a registry;
+                           check for a real source before building
+
+  CHECKED AND CLEARED: devhotplug seeds NO devices, unlike dmevent whose
+  init_defaults shipped three invented ones. It is event-driven only
+  (device_arrived_usb / device_removed_usb) and its procfs content is
+  therefore empty until something reports. Same family, opposite verdict --
+  worth recording because the family is what made it worth checking.
+
+  The pattern across the six non-work categories: three were already answered
+  by /proc, which is where Linux puts them too. The useful question for a new
+  /sys node turned out not to be "is there data" but "is this already
+  answered somewhere", and asking it second cost nothing while asking it
+  first would have saved the memmap detour entirely.
+
   display is DELIBERATELY NOT SERVED, for the same reason as irqs below.
   `fs::monitors` already backs a procfs file -- `procfs.rs:8223` reads
   `monitors::stats()`, `desktop_bounds()` and `list_monitors()` -- and the
@@ -4820,7 +4871,38 @@ the next person to run these will see the same rows.
   For lane C's tree-walker: irqs will never appear under /sys/devices. Read
   /proc/interrupts.
 
-  net stays blocked on a naming decision, unchanged: InterfaceInfo has no name
+  net is NO LONGER BLOCKED, and the question dissolved rather than being
+  answered (lane A, 2026-09-15).
+
+  The blocker was "InterfaceInfo has no name field, so eth0 would be
+  invented". True, and it only matters if a NAME is needed. It is not:
+  `net::interface` exposes `info()` and `ns_info(ns_id)` and nothing else --
+  no enumeration, no count, no iterator. The kernel models exactly ONE
+  interface per namespace, so there is no interface N to name. `eth0` was
+  required only by the assumption that the tree must mirror Linux's
+  multi-interface `/sys/class/net/<name>/` shape.
+
+  Layout that invents nothing: `/sys/devices/net/{up,mac,ip,subnet_mask,
+  gateway,dns}` with no per-interface level, because a level that always has
+  exactly one entry is a structure the kernel does not have.
+
+  Emit-or-omit falls out cleanly from the default state,
+  `up: false, mac: [0;6], everything UNSPECIFIED`:
+
+    mac == 0                 no NIC        -> the directory is ABSENT
+    mac != 0, up == false    NIC, link down -> served, with up: 0
+
+  That second row matters: `up: 0` is a real measurement the kernel holds,
+  not a substituted zero, so serving it is honest where serving an all-zero
+  interface would not be. The distinction is the same one that made
+  `devices: 0` in dmevent a lie and `read_only: 0` on a real disk a fact.
+
+  If the kernel ever gains multiple interfaces, adding a level is a visible
+  intentional change at the moment the structure becomes real -- which is
+  the right time for it, rather than inventing the level now against a
+  future that may not arrive.
+
+  ORIGINAL, now moot: InterfaceInfo has no name
   field, so eth0 would be invented. dma and sound have no evident real source
   and should be checked for one before being built, not built and then
   sourced.

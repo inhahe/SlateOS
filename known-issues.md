@@ -532,6 +532,20 @@ So the choice is between changing the pass scheme and buffering per chunk, and
 that is a design decision with a security dimension. It should be made
 deliberately, not as a side effect of clearing an unread field.
 
+**Put to the operator as B-Q20, 2026-09-16.** Until then this entry recorded a
+decision needing the operator and sat in `known-issues.md`, which is the bug
+tracker rather than the decision queue -- so it was never actually in front of
+them. `open-questions.md` is the queue; an entry that is not in it is not
+waiting on the operator, it is just waiting.
+
+The options there are A (overwrite in pairs, one chunk at a time -- bounded
+memory, different partial-wipe pattern after a power cut), B (buffer a whole
+pass -- nothing observable changes, and a 4 GB file needs 4 GB of memory) and C
+(leave it refused). A fourth -- seeding the PRNG from the file rather than
+consuming it as the byte stream -- is named there and explicitly NOT taken
+without an answer, because it silently diverges from GNU on a data-destruction
+tool.
+
 **Where it lives:** `userspace/pv/src/main.rs` — `parse_shred_args`'s
 `--random-source=` arm, `generate_shred_pattern`, `XorShift64`.
 
@@ -124404,9 +124418,30 @@ were pending as of this entry.
 ## TD-B-SYSINFOS-PROC-MOUNTS-PARSER-CAN-PANIC-DROPS-THE-WHOLE-TABLE-ON-ONE-ODD-BYTE-AND-MISREADS-ESCAPED-PATHS
 
 **Filed:** 2026-09-04 by lane B. **Where:** `userspace/sysinfo/src/main.rs`,
-`show_disk()` (lines 176-200) and `read_proc()` (line 30). **Status:** open;
-to be fixed as part of the `procinfo` extraction requested by lane C in
-`requests/c-b-the-proc-readers-in-userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md`.
+`show_disk()` (lines 176-200) and `read_proc()` (line 30).
+
+**Status: FIXED — closed 2026-09-16, and it had been fixed for some time.** The
+condition this entry parked on was "to be fixed as part of the `procinfo`
+extraction requested by lane C". That extraction landed: `userspace/sysinfo`
+depends on `procinfo`, and `show_disk` reads `proc.mounts()`. Nothing re-read
+this header afterwards, so it went on advertising work that no longer existed
+-- the same shape as the "look elsewhere" sentence in
+`B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`, which stood for five days after
+its question was answered.
+
+All four checked individually rather than inferred from the dependency:
+
+| defect | state |
+|---|---|
+| 1. `&parts[3][..20]` byte-slice panic | **gone.** The only surviving mention is the historical note at `main.rs:284` explaining what it used to do. |
+| 2. escaped paths misread | **gone.** `procinfo::unescape_octal` undoes ` `, `	`, `
+` and `\`, so `/mnt/my backup` no longer displays or compares as `/mnt/my backup`. |
+| 3. whole table lost behind "(mount info not available)" | **gone.** `status.take("/proc/mounts", proc.mounts())` reports the individual read rather than collapsing the table. |
+| 4. clippy never saw any of it | **gone.** `userspace/sysinfo/Cargo.toml` now carries `[lints] workspace = true`, so `indexing_slicing` reaches it -- which is what would have caught defect 1 as a lint rather than as a crash. |
+
+Item 4 is the one worth keeping in mind: the panic was a `clippy::indexing_slicing`
+finding that clippy had never been pointed at. The fix that matters long-term
+is not the slice, it is the crate joining the lint policy.
 
 **In short:** `sysinfo disk` — and the no-argument summary, which calls it —
 reads `/proc/mounts` in three ways that are each wrong for a file whose fields
@@ -148044,7 +148079,17 @@ judgement call.
 
 ## TD-B-TWENTY-NINE-OF-THE-SEVENTY-TWO-BINS-ON-THE-IMAGE-DECODE-LOSSILY (lane B, 2026-09-14)
 
-**Status:** OPEN — a candidate list, deliberately not a defect list
+**Status: RESOLVED 2026-09-14** — see the resolution section below. One real
+defect on the whole image (`diff`), fixed the same day; `scripts/lossy-decode.py`
+is the standing instrument.
+
+*Header corrected 2026-09-16.* It read `OPEN — a candidate list, deliberately
+not a defect list`, which was true when written and stopped being true in the
+same entry, four sections down. Anyone triaging by grepping for OPEN picked
+this up as work: I did, today, and read the whole entry before reaching the
+answer. That is the cost of a status line that disagrees with its own body --
+the body was right the whole time, and nothing re-read the header after the
+section that superseded it was appended.
 
 Cross-referencing `scripts/rootfs-bin-manifest.txt` against a grep for
 `from_utf8_lossy` in each binary's own source: **29 of the 72** Rust utilities

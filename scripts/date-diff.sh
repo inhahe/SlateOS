@@ -260,6 +260,17 @@ run_case -d '2021-06-15 12:00:00 Monday' +%s
 run_case -d '2021-06-15 12:00:00 next Friday' +%s
 run_case -d '2021-06-15 Sunday' +%s
 run_case -d '2021-06-15 12:00:00 Blursday' +%s
+# Twelve-hour clock. `12 am` is midnight and `12 pm` is noon, so the rule is
+# not "add twelve for pm" -- a version that just adds twelve is right for ten
+# hours in twelve, which is why both twelves are rows and not just one.
+run_case -d '2021-06-15 12 am' +%s
+run_case -d '2021-06-15 12 pm' +%s
+run_case -d '2021-06-15 1 pm' +%s
+run_case -d '2021-06-15 11 am' +%s
+run_case -d '2021-06-15 12:30 pm' +%s
+run_case -d '2021-06-15 13 pm' +%s
+run_case -d '2021-06-15 0 am' +%s
+run_case -d 'noon' +%s
 
 run_case -d '@0 + 1 day'
 run_case -d 'not a date at all'

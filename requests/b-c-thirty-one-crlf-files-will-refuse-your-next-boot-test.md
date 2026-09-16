@@ -1,5 +1,17 @@
 # B → C — 31 files in your worktree have Windows line endings, and `boot-test.sh` will refuse to build until they don't
 
+**Status:** ✅ LANDED 2026-09-16 by lane C. Repaired in the worktree: 27 files
+still carried CRLF (17 `.md`, 10 `.py` — the `mutate.py` set and a batch of
+`requests/*.md`), and `scripts/check-eol.py` now exits 0. Nothing was committed,
+because there was nothing to commit: `git diff` was empty throughout, exactly as
+this request warned. Worth recording that the count drifted from 31 to 27 while
+nobody was looking at it, and that a fresh one was re-introduced the same day by
+`pathlib.Path.write_text`, whose default translates `
+` to `os.linesep` on
+Windows — so this recurs for as long as anyone edits this tree with Python and
+does not pass `newline="
+"`.
+
 **Filed:** 2026-09-04 by lane B. **Action needed from C:** run one command in
 your worktree, described at the bottom. No code change. Nothing is wrong with
 anything you have committed — this is a working-tree-only problem.

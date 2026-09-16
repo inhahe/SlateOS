@@ -3733,7 +3733,15 @@ fn a_press_beside_the_box_closes_it_without_starting_anything() {
 /// The hash is *computed*, not pasted: a literal `$6$…` copied from somewhere
 /// is a test that keeps passing after the hasher it was copied from has
 /// changed. Same reason `apps/lockscreen`'s end-to-end test computes one.
-fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir) {
+/// Holds a [`settingsfile::testing::ConfigTurn`] for `session()`'s reason, and
+/// since 2026-09-16 it needs it more: `ShellSession::start` also reads the
+/// screen-lock delay now, so this helper builds a session that reads the
+/// configuration directory three times before a test touches it. This file
+/// calls `with_scratch_config` 28 times, and `cargo test` runs them as threads
+/// of one process, so without the turn a login built here can read a scratch
+/// directory a neighbouring test installed.
+fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir, settingsfile::testing::ConfigTurn) {
+    let turn = settingsfile::testing::config_turn();
     let dir = scratchdir::ScratchDir::new("shell-login");
     let path = dir.path("users.yaml");
     let mut setting_buf = posix::crypt::buf();
@@ -3760,7 +3768,7 @@ fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir) {
     let (events, desktop) = wired();
     let session =
         ShellSession::start_with_stores(events, &path).expect("the harness refused a surface");
-    (session, desktop, dir)
+    (session, desktop, dir, turn)
 }
 
 /// A login screen backed by an account with **no** password.
@@ -3768,7 +3776,15 @@ fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir) {
 /// The other half of `session_with_login`: same shape, no `password_hash`
 /// line, which is what an administrator leaving an account open looks like on
 /// disk.
-fn session_with_passwordless_login() -> (Session, Desktop, scratchdir::ScratchDir) {
+/// Holds a [`settingsfile::testing::ConfigTurn`] for `session()`'s reason, and
+/// since 2026-09-16 it needs it more: `ShellSession::start` also reads the
+/// screen-lock delay now, so this helper builds a session that reads the
+/// configuration directory three times before a test touches it. This file
+/// calls `with_scratch_config` 28 times, and `cargo test` runs them as threads
+/// of one process, so without the turn a login built here can read a scratch
+/// directory a neighbouring test installed.
+fn session_with_passwordless_login() -> (Session, Desktop, scratchdir::ScratchDir, settingsfile::testing::ConfigTurn) {
+    let turn = settingsfile::testing::config_turn();
     let dir = scratchdir::ScratchDir::new("shell-login-open");
     let path = dir.path("users.yaml");
     std::fs::write(
@@ -3783,7 +3799,7 @@ fn session_with_passwordless_login() -> (Session, Desktop, scratchdir::ScratchDi
     let (events, desktop) = wired();
     let session =
         ShellSession::start_with_stores(events, &path).expect("the harness refused a surface");
-    (session, desktop, dir)
+    (session, desktop, dir, turn)
 }
 
 /// 818: an account with no password is never locked.
@@ -3797,7 +3813,7 @@ fn session_with_passwordless_login() -> (Session, Desktop, scratchdir::ScratchDi
 /// standing at the machine that it is protected.
 #[test]
 fn a_session_with_no_password_does_not_lock() {
-    let (mut session, desktop, _dir) = session_with_passwordless_login();
+    let (mut session, desktop, _dir, _turn) = session_with_passwordless_login();
     // Enter on an account with no password: `authlib` answers `NoPassword`,
     // the screen opens, and the session records that this one cannot lock.
     type_password(&desktop, &mut session, "");
@@ -3819,7 +3835,7 @@ fn a_session_with_no_password_does_not_lock() {
 /// still passes.
 #[test]
 fn an_idle_session_locks_itself() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     type_password(&desktop, &mut session, "password");
     assert!(session.login().is_none(), "the desktop should be open");
     drop(session.take_launches());
@@ -3842,7 +3858,7 @@ fn an_idle_session_locks_itself() {
 /// which tells the person standing at the machine it is protected.
 #[test]
 fn an_idle_session_with_no_password_does_not_lock() {
-    let (mut session, desktop, _dir) = session_with_passwordless_login();
+    let (mut session, desktop, _dir, _turn) = session_with_passwordless_login();
     type_password(&desktop, &mut session, "");
     assert!(session.login().is_none(), "the desktop should be open");
     drop(session.take_launches());
@@ -3871,7 +3887,7 @@ fn send_session_idle(desktop: &Desktop, session: &mut Session) {
 /// pass.
 #[test]
 fn a_session_with_a_password_still_locks() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     type_password(&desktop, &mut session, "password");
     assert!(session.login().is_none(), "the desktop should be open");
 
@@ -3931,7 +3947,7 @@ fn type_password(desktop: &Desktop, session: &mut Session, password: &str) {
 /// you are, not showing you the desktop.
 #[test]
 fn a_machine_with_accounts_comes_up_locked() {
-    let (session, _desktop, _dir) = session_with_login();
+    let (session, _desktop, _dir, _turn) = session_with_login();
     assert!(session.is_locked());
     assert_eq!(
         session.login().unwrap().current_user().unwrap().username,
@@ -3946,6 +3962,7 @@ fn a_machine_with_accounts_comes_up_locked() {
 /// See design-decisions.md 824.
 #[test]
 fn a_machine_with_no_account_database_comes_up_unlocked() {
+    let _turn = settingsfile::testing::config_turn();
     let dir = scratchdir::ScratchDir::new("shell-nologin");
     let (events, _desktop) = wired();
     let session = ShellSession::start_with_stores(events, &dir.path("absent.yaml"))
@@ -3957,7 +3974,7 @@ fn a_machine_with_no_account_database_comes_up_unlocked() {
 /// password opens the machine.
 #[test]
 fn the_right_password_unlocks_the_desktop() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     type_password(&desktop, &mut session, "password");
     assert!(
         !session.is_locked(),
@@ -3968,7 +3985,7 @@ fn the_right_password_unlocks_the_desktop() {
 /// The wrong one does not, and says so without saying *which* part was wrong.
 #[test]
 fn the_wrong_password_is_refused_and_the_machine_stays_locked() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     type_password(&desktop, &mut session, "wrong");
     assert!(session.is_locked());
     let screen = session.login().unwrap();
@@ -3986,7 +4003,7 @@ fn the_wrong_password_is_refused_and_the_machine_stays_locked() {
 /// switch windows for somebody who has not logged in.
 #[test]
 fn the_desktops_shortcuts_do_nothing_while_the_machine_is_locked() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     // Two windows, because Alt+Tab with fewer is consumed *without* opening
     // the switcher — so a version of this test with an empty desktop passes
     // whether or not the login screen gates anything, which is a test that
@@ -4037,7 +4054,7 @@ fn the_desktops_shortcuts_do_nothing_while_the_machine_is_locked() {
 /// `Layer::Overlay` the only thing that says so is creation order.
 #[test]
 fn the_login_surface_is_created_last_and_accepts_the_mouse() {
-    let (_session, desktop, _dir) = session_with_login();
+    let (_session, desktop, _dir, _turn) = session_with_login();
     let specs = created(&desktop);
     let login = specs.last().expect("five surfaces");
     assert_eq!(login.title, "Login");
@@ -4053,7 +4070,7 @@ fn the_login_surface_is_created_last_and_accepts_the_mouse() {
 /// `take_launches` follows.
 #[test]
 fn a_power_choice_is_reported_rather_than_acted_on() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     let (button, row) = {
         let screen = session.login().expect("locked");
         (screen.power_button_rect(), screen.power_menu_row_rect(0))

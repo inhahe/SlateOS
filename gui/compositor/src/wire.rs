@@ -631,6 +631,19 @@ fn to_compositor_request(
         // Same two gates as `GrabKey`, in the same order and for the same
         // reasons: a modifier chord is a global shortcut, so claiming one is
         // privileged, and the window named is the sender's own.
+        RequestBody::WatchIdle { window, after_ms } => {
+            let window_id = link.resolve(window)?;
+            // Through the same seam as a chord grab: whether the user is
+            // present is a fact about the session, not about the asking
+            // window. It permits everything today -- see `require_shell` --
+            // and the point of naming it here is that the day it checks, this
+            // request is already covered.
+            link.require_shell()?;
+            CompositorRequest::WatchIdle {
+                window_id,
+                after: std::time::Duration::from_millis(u64::from(after_ms)),
+            }
+        }
         RequestBody::GrabModifierChord { window, modifiers } => {
             let window_id = link.resolve(window)?;
             link.require_shell()?;

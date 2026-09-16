@@ -3262,6 +3262,15 @@ pub enum CompositorRequest {
     /// [`GrabKey`](Self::GrabKey), and a separate request from it because it
     /// is a separate predicate — see
     /// [`guiremote::control::RequestBody::GrabModifierChord`].
+    /// Ask to be told when the session has been idle this long.
+    ///
+    /// A delay of nought stops the watch, which is how a client withdraws
+    /// without a second message: the state is "how long, or not at all", and
+    /// two requests for one setting is a way for them to disagree.
+    WatchIdle {
+        window_id: WindowId,
+        after: Duration,
+    },
     GrabModifierChord {
         window_id: WindowId,
         modifiers: Modifiers,
@@ -9681,6 +9690,19 @@ impl Compositor {
                     message: e.to_string(),
                 },
             },
+            CompositorRequest::WatchIdle { window_id, after } => {
+                if after.is_zero() {
+                    self.unwatch_idle(window_id);
+                    CompositorResponse::Ok
+                } else {
+                    match self.watch_idle(window_id, after) {
+                        Ok(()) => CompositorResponse::Ok,
+                        Err(e) => CompositorResponse::Error {
+                            message: e.to_string(),
+                        },
+                    }
+                }
+            }
             CompositorRequest::GrabModifierChord {
                 window_id,
                 modifiers,

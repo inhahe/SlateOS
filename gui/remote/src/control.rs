@@ -102,7 +102,12 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// Alt+Shift shape that cycles keyboard layouts. Incompatible on exactly the
 /// terms 2 set out: no existing message moves a byte, but an unknown tag stops
 /// the decoder, so a version-10 compositor handed one fails the whole frame.
-pub const CONTROL_VERSION: u8 = 14;
+/// **15** — the request vocabulary gained [`RequestBody::WatchIdle`] (tag
+/// `0x26`), by which a window asks to be told the session has gone quiet.
+/// Incompatible on exactly the terms 2 set out: no existing message moves a
+/// byte, but an unknown tag stops the decoder, so a version-14 compositor
+/// handed one fails the whole frame.
+pub const CONTROL_VERSION: u8 = 15;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1320,6 +1325,18 @@ pub enum RequestBody {
     ///
     /// Answered with [`ResponseBody::Ok`], or an error naming the conflict.
     GrabModifierChord { window: u64, modifiers: Modifiers },
+    /// Ask to be told when the session has been idle for `after_ms`.
+    ///
+    /// Answered with [`ResponseBody::Ok`], and thereafter with
+    /// `Event::SessionIdle` each time the session goes quiet for that long --
+    /// once per quiet stretch, not once per frame. Asking again replaces the
+    /// delay and arms it afresh; `after_ms` of nought stops the watch.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`, on the same argument
+    /// as [`GrabModifierChord`](Self::GrabModifierChord): whether the *user*
+    /// is present is a fact about the session rather than about the window
+    /// that asks, so it is a shell's to know and not an application's.
+    WatchIdle { window: u64, after_ms: u32 },
     /// Release a claim made by
     /// [`GrabModifierChord`](Self::GrabModifierChord).
     ///
@@ -1373,6 +1390,7 @@ enum RequestTag {
     ShellSetWindowPolicy = 0x1E,
     GrabModifierChord = 0x1F,
     UngrabModifierChord = 0x20,
+    WatchIdle = 0x26,
 }
 
 impl RequestTag {
@@ -1414,6 +1432,7 @@ impl RequestTag {
             0x1D => Self::ShellSetSizeLimits,
             0x1E => Self::ShellSetWindowPolicy,
             0x1F => Self::GrabModifierChord,
+            0x26 => Self::WatchIdle,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1792,6 +1811,11 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::GrabModifierChord as u8);
             write_u64(out, *window);
             out.push(crate::input::encode_modifiers(*modifiers));
+        }
+        RequestBody::WatchIdle { window, after_ms } => {
+            out.push(RequestTag::WatchIdle as u8);
+            write_u64(out, *window);
+            write_u32(out, *after_ms);
         }
         RequestBody::UngrabModifierChord { window, modifiers } => {
             out.push(RequestTag::UngrabModifierChord as u8);
@@ -2190,6 +2214,10 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 modifiers,
             }
         }
+        RequestTag::WatchIdle => RequestBody::WatchIdle {
+            window: r.read_u64()?,
+            after_ms: r.read_u32()?,
+        },
         RequestTag::GrabModifierChord => RequestBody::GrabModifierChord {
             window: r.read_u64()?,
             modifiers: crate::input::decode_modifiers(r.read_u8()?)?,
@@ -2434,6 +2462,24 @@ mod tests {
                     image_id: 1,
                 },
             ),
+            Request::new(
+                22,
+                RequestBody::WatchIdle {
+                    window: 7,
+                    after_ms: 300_000,
+                },
+            ),
+            // Nought is the withdrawal, so it is a value the encoder has to
+            // carry rather than a gap: a round trip that only ever sent a
+            // non-zero delay would not notice a `write_u32` that had been
+            // dropped for the zero case.
+            Request::new(
+                23,
+                RequestBody::WatchIdle {
+                    window: 7,
+                    after_ms: 0,
+                },
+            ),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
     }
@@ -2614,8 +2660,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x26),
+            Some(RequestTag::WatchIdle),
+            "0x26 was taken by WatchIdle in control version 15"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x27),
             None,
-            "0x26 is the next free tag"
+            "0x27 is the next free tag"
         );
     }
 

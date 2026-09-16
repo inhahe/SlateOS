@@ -530,6 +530,7 @@ fn to_compositor_request(
         RequestBody::ReloadAppearance => CompositorRequest::ReloadAppearance,
         RequestBody::ReloadInput => CompositorRequest::ReloadInput,
         RequestBody::ReloadNotifications => CompositorRequest::ReloadNotifications,
+        RequestBody::ReloadSession => CompositorRequest::ReloadSession,
         // Handled by `answer_requests` before it reaches here, because it
         // changes the *link*, not the compositor: nothing about a subscription
         // belongs in the window/display state a `CompositorRequest` describes,

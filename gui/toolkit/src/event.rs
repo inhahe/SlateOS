@@ -123,6 +123,15 @@ pub enum SettingsGroup {
     Notifications,
     /// `input.yaml` — pointer speed, double-click window, key repeat.
     Input,
+    /// `session.yaml` — how long the session waits before locking itself.
+    ///
+    /// Relayed and not read, exactly as [`Self::Notifications`] is: the
+    /// compositor carries the announcement and the desktop shell is the
+    /// reader, because the shell is what holds the idle claim and what runs
+    /// the lock screen. Without the announcement a changed delay would not
+    /// take effect until the next sign-in -- the claim is made once, at
+    /// startup, and nothing else would tell the shell to make it again.
+    Session,
 }
 
 /// Mouse button identifier.

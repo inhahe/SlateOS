@@ -1998,6 +1998,7 @@ pub mod testing {
             match body {
                 RequestBody::CreateWindow(_) => "CreateWindow",
                 RequestBody::WatchIdle { .. } => "WatchIdle",
+                RequestBody::ReloadSession => "ReloadSession",
                 RequestBody::DestroyWindow { .. } => "DestroyWindow",
                 RequestBody::SetTitle { .. } => "SetTitle",
                 RequestBody::Move { .. } => "Move",

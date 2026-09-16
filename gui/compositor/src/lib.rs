@@ -3166,6 +3166,10 @@ pub enum CompositorRequest {
     /// `notifications.yaml` and holds nothing from it. The shell is the reader.
     /// See [`guiremote::control::RequestBody::ReloadNotifications`].
     ReloadNotifications,
+    /// Announce that the session settings changed.
+    ///
+    /// See [`guiremote::control::RequestBody::ReloadSession`].
+    ReloadSession,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
@@ -9556,6 +9560,13 @@ impl Compositor {
                 // this compositor keeps no copy of the notification rules to
                 // refresh. It is announcing, not adopting.
                 self.announce_settings_change(SettingsGroup::Notifications);
+                CompositorResponse::Ok
+            }
+            CompositorRequest::ReloadSession => {
+                // Announcing, not adopting -- as with the notification rules,
+                // this compositor keeps no copy of the lock delay. The shell
+                // holds the idle claim and is the only thing that acts on it.
+                self.announce_settings_change(SettingsGroup::Session);
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadInput => {

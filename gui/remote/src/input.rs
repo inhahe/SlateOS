@@ -196,6 +196,7 @@ impl EventTag {
 const GROUP_APPEARANCE: u8 = 0x01;
 const GROUP_INPUT: u8 = 0x02;
 const GROUP_NOTIFICATIONS: u8 = 0x03;
+const GROUP_SESSION: u8 = 0x04;
 
 const MOUSE_PRESS: u8 = 0x01;
 const MOUSE_RELEASE: u8 = 0x02;
@@ -394,6 +395,7 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
                 SettingsGroup::Appearance => GROUP_APPEARANCE,
                 SettingsGroup::Input => GROUP_INPUT,
                 SettingsGroup::Notifications => GROUP_NOTIFICATIONS,
+                SettingsGroup::Session => GROUP_SESSION,
             });
         }
         Event::ModifierChord { modifiers } => {
@@ -620,6 +622,7 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
                 GROUP_APPEARANCE => SettingsGroup::Appearance,
                 GROUP_INPUT => SettingsGroup::Input,
                 GROUP_NOTIFICATIONS => SettingsGroup::Notifications,
+                GROUP_SESSION => SettingsGroup::Session,
                 other => return Err(DecodeError::BadSettingsGroup(other)),
             };
             (Event::SettingsChanged { group }, None)
@@ -805,6 +808,9 @@ mod tests {
             },
             Event::SettingsChanged {
                 group: SettingsGroup::Input,
+            },
+            Event::SettingsChanged {
+                group: SettingsGroup::Session,
             },
             Event::ModifierChord {
                 modifiers: Modifiers {

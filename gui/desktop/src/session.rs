@@ -1823,6 +1823,20 @@ impl<T: Transport> ShellSession<T> {
             // announcement to each window and the shell has four. The second
             // and later ones are free: `poll_appearance` re-reads, finds the
             // settings identical to what it just applied, and answers `false`.
+            // The lock delay changed. Re-claim rather than adjust: the
+            // compositor's watch holds a delay, so the honest way to change it
+            // is to say what it is now. Nought withdraws, which is what a user
+            // choosing "Never" means and why the withdrawal is the same call.
+            //
+            // Arrives once per surface like the arm below, and re-claiming is
+            // idempotent, so the repeats cost a request each and change
+            // nothing.
+            Event::SettingsChanged {
+                group: SettingsGroup::Session,
+            } => {
+                let after = crate::idle_lock::lock_after().unwrap_or_default();
+                self.events.watch_idle(self.panel.window, after)?;
+            }
             Event::SettingsChanged {
                 group: SettingsGroup::Notifications,
             } => {

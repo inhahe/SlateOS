@@ -107,7 +107,11 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// Incompatible on exactly the terms 2 set out: no existing message moves a
 /// byte, but an unknown tag stops the decoder, so a version-14 compositor
 /// handed one fails the whole frame.
-pub const CONTROL_VERSION: u8 = 15;
+/// **16** — [`RequestBody::ReloadSession`] (tag `0x27`) and the
+/// `SettingsGroup::Session` code `0x04` it announces, by which a changed
+/// screen-lock delay reaches the shell without a sign-in. Incompatible on 2's
+/// terms: an unknown tag stops the decoder.
+pub const CONTROL_VERSION: u8 = 16;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1181,6 +1185,17 @@ pub enum RequestBody {
     ///
     /// Answered with [`ResponseBody::Ok`], including when nothing changed.
     ReloadNotifications,
+    /// Tell everyone the session settings changed, so the shell re-reads the
+    /// screen-lock delay.
+    ///
+    /// Carries no data, for `ReloadNotifications`' reason: a request that
+    /// *set* the delay would let any process able to open this socket decide
+    /// when the machine locks. One that says "go and read the user's file"
+    /// cannot.
+    ///
+    /// The compositor keeps no copy of this setting either -- it announces,
+    /// the shell reads. Answered with [`ResponseBody::Ok`].
+    ReloadSession,
     /// Hand the compositor a block of pixels and give it a name, so that this
     /// window's [`RenderCommand::Image`](guitk::render::RenderCommand::Image)
     /// commands naming that name have something to draw.
@@ -1391,6 +1406,7 @@ enum RequestTag {
     GrabModifierChord = 0x1F,
     UngrabModifierChord = 0x20,
     WatchIdle = 0x26,
+    ReloadSession = 0x27,
 }
 
 impl RequestTag {
@@ -1433,6 +1449,7 @@ impl RequestTag {
             0x1E => Self::ShellSetWindowPolicy,
             0x1F => Self::GrabModifierChord,
             0x26 => Self::WatchIdle,
+            0x27 => Self::ReloadSession,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1746,6 +1763,9 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         RequestBody::ReloadInput => out.push(RequestTag::ReloadInput as u8),
         RequestBody::ReloadNotifications => {
             out.push(RequestTag::ReloadNotifications as u8);
+        }
+        RequestBody::ReloadSession => {
+            out.push(RequestTag::ReloadSession as u8);
         }
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -2139,6 +2159,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::ReloadAppearance => RequestBody::ReloadAppearance,
         RequestTag::ReloadInput => RequestBody::ReloadInput,
         RequestTag::ReloadNotifications => RequestBody::ReloadNotifications,
+        RequestTag::ReloadSession => RequestBody::ReloadSession,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
             let b = r.read_u8()?;
@@ -2665,8 +2686,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x27),
+            Some(RequestTag::ReloadSession),
+            "0x27 was taken by ReloadSession in control version 16"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x28),
             None,
-            "0x27 is the next free tag"
+            "0x28 is the next free tag"
         );
     }
 

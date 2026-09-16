@@ -155,6 +155,43 @@ def test_wrapped_status_reads_the_same_as_unwrapped(mod):
           verdict(mod, wrapped), verdict(mod, unwrapped))
 
 
+def test_every_typesetting_of_the_marker_reads_the_same(mod):
+    """Bold, colon, verdict -- however the asterisks fall around them.
+
+    Markdown renders all three identically: bold "Status", a colon, a verdict.
+    A writer cannot tell from the rendered page which one they typed, so the
+    parser has to accept each. It did not accept the third until 2026-09-15,
+    and five of the six files using it carried a FINISHED word that went
+    unread -- including one saying "Nothing needed from you" in plain words,
+    which had been listed as work outstanding against lane B for eleven days.
+    """
+    forms = {
+        "colon outside the bold": "**Status:** landed in eb2003eb7.",
+        "colon after the bold": "**Status**: landed in eb2003eb7.",
+        "verdict inside the bold": "**Status: landed** in eb2003eb7.",
+    }
+    for label, text in forms.items():
+        check(f"typesetting, {label}: reads as done", verdict(mod, text), "done")
+
+    # The control, and the half that matters. Accepting a looser marker is
+    # only correct if it still reads the WORDS: a parser that returned "done"
+    # for anything shaped like a status would pass the loop above and quietly
+    # clear every open request in the dropbox.
+    for label, text in {
+        "colon outside the bold": "**Status:** open, waiting on lane A.",
+        "colon after the bold": "**Status**: open, waiting on lane A.",
+        "verdict inside the bold": "**Status: open, waiting on lane A.**",
+    }.items():
+        check(f"typesetting, {label}: an open verdict stays open",
+              verdict(mod, text), "open")
+
+    # ...and a file that never stamped anything is still unstamped. The loose
+    # alternative matches `**Status` followed by a colon, so a line merely
+    # DISCUSSING the convention must not be mistaken for one.
+    check("typesetting: no marker is still no marker",
+          verdict(mod, "This file has no stamp of any kind.\n"), "none")
+
+
 def test_open_outranks_done_in_the_same_block(mod):
     """A partial status names both outcomes; the unfinished half must win."""
     text = (f"**Status:** {HOURGLASS} ask 1 landed 2026-08-29 by lane A; "

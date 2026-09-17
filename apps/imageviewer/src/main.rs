@@ -607,6 +607,17 @@ impl ViewerState {
     /// old dimensions, format and EXIF. "This picture is `holiday.jpg`" is the
     /// one claim an image viewer makes, and it was false in exactly the case
     /// the user most needed to be told about.
+    /// The most bytes of picture file to read.
+    ///
+    /// Generous: a lossless photograph at the largest size the compositor can
+    /// store runs to tens of megabytes, and a caller has no way to ask for
+    /// more. The point is not the number but that there is one --
+    /// `std::fs::read` had no bound at all, so a file larger than memory was
+    /// read whole before `imagecodec::Limits` was consulted, and those limits
+    /// exist precisely to be checked "before any buffer the header describes
+    /// is allocated".
+    const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
+
     fn display_image(&mut self, path: &Path) -> bool {
         let filename = path
             .file_name()
@@ -619,8 +630,22 @@ impl ViewerState {
             ..ImageInfo::default()
         };
 
-        let data = match std::fs::read(path) {
-            Ok(data) => data,
+        let data = match safeio::read_capped(path, Self::MAX_PICTURE_BYTES) {
+            Ok(read) if read.truncated => {
+                // Refused rather than decoded: the tail of a picture is not
+                // optional. A JPEG's scan runs to the end of the file and a
+                // PNG's `IEND` is the last chunk, so a cut file decodes to
+                // something that is not what the photographer took -- and
+                // would be shown without a word about it.
+                self.image_info = info;
+                self.fail_with(format!(
+                    "{} is larger than {} MiB",
+                    path.display(),
+                    Self::MAX_PICTURE_BYTES / (1024 * 1024)
+                ));
+                return false;
+            }
+            Ok(read) => read.bytes,
             Err(e) => {
                 // Committed anyway: the user asked for *this* file, so the UI
                 // must name this file — but with no image and no borrowed
@@ -1848,10 +1873,16 @@ fn toolbar_buttons() -> Vec<ToolbarButton> {
 fn decode_failure(format: ImageFormat, why: &imagecodec::ImageError) -> String {
     match (format, why) {
         // A named format that no decoder claimed: not the file's fault.
-        (
-            ImageFormat::Bmp | ImageFormat::Jpeg | ImageFormat::Gif,
-            imagecodec::ImageError::UnknownFormat,
-        ) => format!("{} images cannot be displayed yet", format.name()),
+        //
+        // JPEG left this list when `imagecodec` learned to decode it. Leaving
+        // it would have told someone whose file begins `FF D8` but is not a
+        // JPEG that "JPEG images cannot be displayed yet" -- a sentence about
+        // this program that stopped being true, pointed at a file that is
+        // genuinely wrong. The two diagnoses this function exists to keep
+        // apart had swapped places.
+        (ImageFormat::Bmp | ImageFormat::Gif, imagecodec::ImageError::UnknownFormat) => {
+            format!("{} images cannot be displayed yet", format.name())
+        }
         _ => why.to_string(),
     }
 }
@@ -2559,26 +2590,73 @@ mod tests {
         assert!(queued(&state).is_empty());
     }
 
+    /// A picture larger than the cap is refused, not read whole.
+    ///
+    /// `imagecodec::Limits` documents that its bounds are checked against a
+    /// file's header, "before any buffer the header describes is allocated --
+    /// a limit applied afterwards is not a limit, it is a post-mortem". This
+    /// viewer used to read the file with `std::fs::read` and consult those
+    /// limits afterwards, so a file larger than memory was already in memory
+    /// before anything could object.
+    ///
+    /// The cap is deliberately far below the real one here, because a test
+    /// that had to write 256 MiB to prove a bound is a test nobody runs.
+    #[test]
+    fn a_picture_past_the_cap_is_refused_before_it_is_decoded() {
+        let guard = scratch("capped-read");
+        let dir = guard.dir().to_path_buf();
+        let path = dir.join("huge.png");
+        // Bigger than the cap this test uses, and a valid PNG besides, so the
+        // refusal cannot be mistaken for "not a picture".
+        let picture = imagecodec::testing::png_gradient(8, 8);
+        std::fs::write(&path, &picture).expect("write picture");
+
+        let read = safeio::read_capped(&path, 8).expect("the read itself succeeds");
+        assert!(
+            read.truncated,
+            "the cap did not bite, so this test proves nothing"
+        );
+        assert!(read.bytes.len() <= 8, "and it stopped where it said");
+    }
+
     /// A format this system recognises but cannot decode must not be reported
     /// as "not a picture". Those are opposite diagnoses — one blames the file,
     /// the other the viewer — and telling a user their photograph is not a
     /// picture sends them looking for a corrupt disk.
+    ///
+    /// This used to use a JPEG, and had to move when `imagecodec` learned to
+    /// decode one: the stub it wrote is not a valid JPEG, so the honest
+    /// diagnosis became "file ends mid-structure" -- which blames the file,
+    /// correctly. GIF is still recognised and still undecodable, so it carries
+    /// the property the test is about.
     #[test]
     fn an_undecodable_but_recognised_format_says_which_it_is() {
         let guard = scratch("unsupported-format");
         let dir = guard.dir().to_path_buf();
-        let jpeg = dir.join("holiday.jpg");
-        // A real JPEG signature, then a plausible APP0 segment: enough for
+        let gif = dir.join("holiday.gif");
+        // A real GIF signature and a logical screen descriptor: enough for
         // `ImageFormat::detect`, and nothing this system can decode.
-        std::fs::write(&jpeg, [0xFF, 0xD8, 0xFF, 0xE0, 0, 16, b'J', b'F']).expect("write jpeg");
+        std::fs::write(&gif, b"GIF89a\x10\x00\x10\x00\x00\x00\x00").expect("write gif");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(!state.open_file(&jpeg));
+        assert!(!state.open_file(&gif));
         let reason = state.load_error.as_deref().expect("a reason");
         assert!(
-            reason.contains("JPEG images cannot be displayed yet"),
+            reason.contains("GIF images cannot be displayed yet"),
             "the reason must name the format, not blame the file: {reason}"
         );
+    }
+
+    /// A real JPEG now opens, where it used to be named as undecodable.
+    #[test]
+    fn a_jpeg_opens() {
+        let guard = scratch("jpeg-opens");
+        let dir = guard.dir().to_path_buf();
+        let path = dir.join("photo.jpg");
+        std::fs::write(&path, imagecodec::testing::SMALL_JPEG).expect("write jpeg");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&path), "{:?}", state.load_error);
     }
 
     /// A truncated PNG used to report a size: `parse_png_dimensions` read

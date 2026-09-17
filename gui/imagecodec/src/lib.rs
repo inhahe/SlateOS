@@ -66,8 +66,18 @@
 //! to its first frame, which is what its own specification says a decoder that
 //! does not animate must show.
 //!
-//! JPEG is not here yet. It is the other format a wallpaper is likely to be in
-//! and is the next thing this crate should grow.
+//! JPEG (JFIF), baseline sequential: the format a photograph is almost always
+//! in, and the one a wallpaper is likely to be. Huffman-coded, any sampling
+//! factors, restart intervals, greyscale or YCbCr. Checked against a reference
+//! decoder pixel for pixel -- no channel differs by more than 2 and the mean
+//! difference is 0.03 of a level, which is the difference between rounding the
+//! inverse DCT differently and decoding differently.
+//!
+//! **Progressive** JPEG is refused by name rather than half-read: its image
+//! arrives in successive approximations, and decoding only the first would
+//! give a recognisable and wrong picture, which is worse than refusing because
+//! nobody checks a thumbnail. Arithmetic coding and 12-bit samples are named
+//! the same way. See [`jpeg`].
 //!
 //! # Picture files for *other* crates' tests
 //!
@@ -84,6 +94,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod jpeg;
 pub mod png;
 pub mod testing;
 
@@ -277,6 +288,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if png::is_png(bytes) {
         return png::decode(bytes, limits);
     }
+    if jpeg::is_jpeg(bytes) {
+        return jpeg::decode(bytes, limits);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -299,6 +313,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     if png::is_png(bytes) {
         return png::decode_scaled(bytes, limits, max_w, max_h);
     }
+    if jpeg::is_jpeg(bytes) {
+        return jpeg::decode_scaled(bytes, limits, max_w, max_h);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -315,6 +332,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
 pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     if png::is_png(bytes) {
         return png::dimensions(bytes);
+    }
+    if jpeg::is_jpeg(bytes) {
+        return jpeg::dimensions(bytes);
     }
     Err(ImageError::UnknownFormat)
 }

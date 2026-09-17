@@ -4878,6 +4878,133 @@ mod tests {
         assert_eq!(doc.path, path, "the document remembers where it came from");
     }
 
+    /// A PDF on disk becomes text in the window, end to end.
+    ///
+    /// Every other test here checks one link: the parser reads a page, a run
+    /// becomes a span, the renderer draws spans. This one checks the chain,
+    /// because a chain of individually-tested links is exactly the shape that
+    /// fails at a join -- and the join that matters is the one where a page's
+    /// bottom-up coordinates become the window's top-down ones.
+    #[test]
+    fn a_pdf_on_disk_becomes_text_on_screen() {
+        let dir = pdf_scratch("e2e");
+        let path = dir.join("hello.pdf");
+        std::fs::write(&path, pdf_with_text("Hello there")).expect("write fixture");
+
+        let mut app = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(app.open_path(&path), "the fixture should open");
+
+        let texts: Vec<String> = app
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Hello there")),
+            "the page's text never reached the frame: {texts:?}"
+        );
+    }
+
+    /// And the search finds it, at a rectangle inside the page.
+    ///
+    /// The span's rectangle is what a highlight is drawn in, so a search that
+    /// reports a match outside the page has found the text and lost it again.
+    #[test]
+    fn the_search_finds_text_from_the_file_inside_the_page() {
+        let dir = pdf_scratch("e2e-find");
+        let path = dir.join("hello.pdf");
+        std::fs::write(&path, pdf_with_text("Hello there")).expect("write fixture");
+
+        let mut app = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(app.open_path(&path));
+        let doc = app
+            .active_tab()
+            .and_then(|t| t.document.as_ref())
+            .expect("a document");
+
+        let results = doc.search("hello");
+        let first = results.first().expect("a match, case-insensitively");
+        let page = doc.pages.first().expect("a page");
+        assert!(
+            first.rect.x >= 0.0 && first.rect.x < page.width,
+            "the highlight is off the page horizontally: {:?}",
+            first.rect
+        );
+        assert!(
+            first.rect.y >= 0.0 && first.rect.y < page.height,
+            "the highlight is off the page vertically: {:?}",
+            first.rect
+        );
+    }
+
+    /// A one-page PDF drawing `text` at a known place.
+    fn pdf_with_text(text: &str) -> Vec<u8> {
+        const NL: u8 = 10;
+        let content = format!("BT /F1 14 Tf 1 0 0 1 72 700 Tm ({text}) Tj ET");
+        let content = content.as_bytes();
+        let mut out: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        out.extend_from_slice(b"%PDF-1.4");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"2 0 obj << /Type /Pages /Count 1 /Kids [3 0 R] >> endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >> endobj",
+        );
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(format!("4 0 obj << /Length {} >>", content.len()).as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"stream");
+        out.push(NL);
+        out.extend_from_slice(content);
+        out.push(NL);
+        out.extend_from_slice(b"endstream endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
+        );
+        out.push(NL);
+
+        let xref_at = out.len();
+        out.extend_from_slice(b"xref");
+        out.push(NL);
+        out.extend_from_slice(format!("0 {}", offsets.len() + 1).as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"0000000000 65535 f");
+        out.push(NL);
+        for off in &offsets {
+            out.extend_from_slice(format!("{off:010} 00000 n").as_bytes());
+            out.push(NL);
+        }
+        out.extend_from_slice(
+            format!("trailer << /Size {} /Root 1 0 R >>", offsets.len() + 1).as_bytes(),
+        );
+        out.push(NL);
+        out.extend_from_slice(b"startxref");
+        out.push(NL);
+        out.extend_from_slice(format!("{xref_at}").as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"%%EOF");
+        out
+    }
+
     /// A file that is not a PDF is refused, and the window says so.
     ///
     /// Silence is the failure being guarded against here: the window would

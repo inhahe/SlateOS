@@ -157059,6 +157059,33 @@ theory.** It performs real file I/O (19 `std::fs` references) and still has
 10 candidates, so absent I/O does not explain everything. Whatever its ten
 are, they are a different cause and want looking at on their own.
 
+**CORRECTION 2026-09-17: `photomanager` was measured wrong and does read
+files.** Its row above says it cannot open one. It can: `import_from_disk`
+reads through `std::fs::read`, parses the EXIF, and adds the photo to the
+library, reached from a file picker by `open_import_dialog`. The crate's own
+comment records the repair that put it there — "the whole of this
+application used to be a window over a library that was never read from
+anywhere".
+
+**How the measurement went wrong, which is the transferable part.** Two errors
+compounded. The survey inferred file access from a crate's *dependencies*, and
+`std::fs` needs none, so a crate reading files with the standard library looked
+inert. And the command that should have caught that was
+
+    grep -rcE "std::fs|..." apps/$c/src/*.rs | awk -F: '{s+=$2} END {print s+0}'
+
+which reports a bare count with no filename when the glob matches exactly one
+file — so `awk -F:` reads an empty second field and sums zero. Every
+single-file crate came back as zero regardless of what it contained. **I had
+identified that exact `grep -c` behaviour hours earlier, in this same session,
+and then reused the shape without thinking.** The corrected form is
+`grep -rHoE ... | wc -l`.
+
+Re-measured, production code only: `videoplayer`, `mediaconvert`, `email` and
+`ircclient` do open no files, so those rows stand. `undelete`'s row stands too,
+though by luck — its one apparent match is inside a doc comment.
+`photomanager`'s does not.
+
 **What this changes about the triage.** Work it crate by crate, and for each
 crate establish what it can do *before* judging its fields. Where the field
 is the state of an I/O the app never performs, the entry belongs in the

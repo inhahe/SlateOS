@@ -3,7 +3,8 @@
 //! A photo library management application with:
 //! - Photo library with albums, collections, and smart albums
 //! - EXIF metadata parsing and display (camera, exposure, GPS, etc.)
-//! - Thumbnail grid view
+//! - Thumbnail grid view at four card sizes (80/120/160/200 px),
+//!   cycled from the toolbar
 //! - Single-photo view: the photograph itself, decoded through `imagecodec`
 //!   and drawn at its own proportions
 //! - Per-photograph adjustment values: brightness, contrast, saturation,
@@ -35,9 +36,13 @@
 //!   photograph and listed in the info panel, and no pixel has ever been
 //!   changed by one. A settings page is built when something obeys it, not
 //!   when something stores it.
-//! - **There is no zoom or pan.** The list claimed both, in two separate
-//!   entries. The only `Zoom` in this file is the name of a slideshow
-//!   transition.
+//! - **The single-photo view has no zoom and no pan.** The list claimed
+//!   both. The only `Zoom` in this file is the name of a slideshow
+//!   transition. The grid's four card sizes, listed above, are a different
+//!   thing and are real -- I deleted that entry too on the first pass, having
+//!   judged it by the company it kept rather than by reading
+//!   `cycle_thumb_size`. A feature list is corrected one claim at a time or
+//!   not at all.
 //!
 //! Uses the guitk library for UI rendering.
 

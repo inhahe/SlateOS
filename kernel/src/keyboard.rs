@@ -1839,6 +1839,88 @@ fn wake_keyboard_waiters() {
 // ---------------------------------------------------------------------------
 
 /// Verify keyboard initialization by checking state.
+/// Check that an active layout actually changes what a key types.
+///
+/// The property whose absence *was* the bug (design-decisions 946):
+/// `SYS_KEYLAYOUT_SET` was capability-gated, validated, single-publisher,
+/// published through `/proc/keylayout` and confirmed by a ring-3 fixture --
+/// and no key typed differently, because [`scancode_to_ascii`] was a
+/// hardcoded US QWERTY table that never consulted `fs::keylayout` at all.
+///
+/// `keylayout::self_test` cannot see that and never could: its seven cases
+/// exercise `translate`, which is the pure function and was always correct.
+/// Nor can `ctest-keylayout`, which confirms the *setting* and its
+/// publication. Without this guard, `translate_try` could be reverted to
+/// return `Mapped(key)` unconditionally and every test would still pass.
+///
+/// Lane C hit the identical shape the same day in the wallpaper fitter --
+/// six fit modes, six passing unit tests, one caller passing the display
+/// size where the image size belonged, and all six drawing the same thing
+/// (`TD-C-A-PURE-FUNCTIONS-TESTS-SAY-NOTHING-ABOUT-ITS-CALLER`). The rule
+/// they drew is the one this is built to: drive the setting two different
+/// ways through the **real entry point** and require the answers to differ.
+fn layout_consumer_self_test() -> Result<(), &'static str> {
+    use crate::fs::keylayout::{self, keys};
+
+    const LAYOUT: &str = "kbd-consumer-selftest";
+    // Scan-code set 1 for `A`, which is what this function is handed.
+    const SC_A: u8 = 0x1E;
+
+    // 946 turned on the two spaces coinciding: keylayout's `KeyCode` space
+    // IS scan-code set 1, which is why the consumer is a lookup in front of
+    // the existing table rather than a mapping layer. Checked, not trusted
+    // to a comment -- if the spaces ever diverge, this guard would silently
+    // start testing a different key than the one it remaps.
+    if u16::from(SC_A) != keys::KEY_A {
+        return Err("keylayout KeyCode space is no longer scan-code set 1");
+    }
+
+    let saved = keylayout::active();
+    keylayout::set_active("").map_err(|_| "keylayout: could not clear active")?;
+
+    // Baseline, through the real consumer, with no layout in force.
+    if scancode_to_ascii(SC_A) != Some(b'a') {
+        return Err("scancode 0x1E did not type 'a' with no active layout");
+    }
+
+    keylayout::create_layout(LAYOUT, "946 consumer regression guard")
+        .map_err(|_| "keylayout: create_layout failed")?;
+    keylayout::remap(LAYOUT, keys::KEY_A, keys::KEY_B)
+        .map_err(|_| "keylayout: remap failed")?;
+    keylayout::set_active(LAYOUT).map_err(|_| "keylayout: set_active failed")?;
+
+    // The assertion that fails if the consumer goes away. Stated as a
+    // difference, not just an expected value: an implementation that always
+    // returned `b` would satisfy `== Some(b'b')` while being just as broken
+    // as one that always returned `a`.
+    let remapped = scancode_to_ascii(SC_A);
+    if remapped == Some(b'a') {
+        return Err("an active remap did not change what the key types");
+    }
+    if remapped != Some(b'b') {
+        return Err("A remapped to B did not type 'b'");
+    }
+
+    // And the disable path, which is the other outcome the consumer routes:
+    // `TranslateTry::Disabled` must produce no character at all.
+    keylayout::disable_key(LAYOUT, keys::KEY_A)
+        .map_err(|_| "keylayout: disable_key failed")?;
+    if scancode_to_ascii(SC_A).is_some() {
+        return Err("a disabled key still typed a character");
+    }
+
+    // Restore before removing, so `active` never names a deleted layout.
+    keylayout::set_active(&saved).map_err(|_| "keylayout: could not restore")?;
+    keylayout::remove_layout(LAYOUT).map_err(|_| "keylayout: cleanup failed")?;
+
+    crate::serial_println!(
+        concat!(
+            "[keyboard]   an active layout changes what a key types, ",
+            "and a disabled key types nothing: OK"
+        )
+    );
+    Ok(())
+}
 pub fn self_test() -> Result<(), &'static str> {
     crate::serial_println!("[keyboard] Running self-test...");
 
@@ -1863,6 +1945,7 @@ pub fn self_test() -> Result<(), &'static str> {
     echo_ring_self_test()?;
     read_outcome_self_test()?;
     usb_hid_poller_self_test()?;
+    layout_consumer_self_test()?;
 
     crate::serial_println!("[keyboard] Self-test PASSED");
     Ok(())

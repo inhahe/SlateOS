@@ -6488,20 +6488,11 @@ fn bench_lock_primitives() {
         crate::lockdep::edge_count()
     );
 
-    // The lock-context check reports each offending class once, as it
-    // happens, so a real violation is already loud. This line exists for the
-    // ZERO case: with no report and no number, a rule nothing violated and a
-    // check that never ran look identical in the log. The class count is the
-    // corpus -- if it is zero, a clean verdict is vacuous, not reassuring.
-    serial_println!(
-        concat!(
-            "[bench]   lock-context check: {} violation(s), {} suspect(s), ",
-            "over {} class(es) seen in interrupt context"
-        ),
-        crate::lockdep::context_violation_count(),
-        crate::lockdep::context_suspect_count(),
-        crate::lockdep::context_irq_class_count()
-    );
+    // The lock-context numbers deliberately do NOT live here. This function
+    // runs in the deferred bench task, and a boot that fails a self-test is
+    // torn down before it reaches this line -- so the verdict went missing on
+    // exactly the runs that needed it. It is printed by
+    // `lockdep::report_lock_context()` just before BOOT_OK instead.
 
     // Differences, and then the check that the differences and the direct
     // measurements tell the same story. `lockdep_delta` is the only component

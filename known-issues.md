@@ -157149,17 +157149,45 @@ of a real violation minus the blocking acquire.
 
 ### Still open after the fix
 
-Two reports had no name to give -- class 47 (`0xffffffff81720b38`, the
-suspect) and class 50 (`0xffffffff81727538`, a violation) -- because
-`class_name` refuses a slot that is reserved but not yet published, which is
-right: a plausible wrong name is worse than an admitted unknown. But `?` is
-also a dead end for a reader.
+Two reports had no name to give: class 47 (`0xffffffff81720b38`, the
+suspect) and class 50 (`0xffffffff81727538`, a violation).
+
+**My first explanation for that was wrong, and checking took one minute.** I
+wrote that `class_name` had refused a slot reserved but not yet published.
+It had not. `sync::Mutex::new` sets `name: b"?"` as its *default* --
+`Mutex::named` is the one that takes a diagnostic name -- and there are
+**563** `Mutex::new(` instances in `kernel/src`. So those two locks are not
+unnameable; they were simply never named, along with 561 others.
+
+Worth keeping because it is a diagnostic ambiguity, not just my error: `?`
+in a lockdep report has **two** independent causes -- an unnamed lock, and
+`class_name` declining a half-written slot -- and nothing in the output
+distinguishes them. A reader who assumes either one is right half the time.
+
+It also raises the value of printing the acquisition site from what I
+thought it was. I added it as a convenience for a rare unnameable class. It
+is in fact the *only* way to identify an unnamed lock at all, because 563 of
+them answer to the same name.
 
 Both reports now print the acquisition site from `CLASS_SITE`, which
 `lock_acquire` already records via `Location::caller()`, so an unnamed class
-still yields a file and a line. Whether those two are real is **unknown**
-until the next boot; three of the four named ones dissolved, so these should
-not be assumed real either.
+still yields a file and a line.
+
+### Resolved on the next boot (`e8a2c179c`): all five were the one bug
+
+With `Acquire::Try` excluded from the interrupt side, the real tree reports
+**nothing**. `sysctl-reg`, `SWAP`, `CGROUP`, class 47 and class 50 are all
+silent; the only surviving report is the self-test's own deliberate
+`ctx-control`, and it now carries its site
+(`First acquired at kernel/src/lockdep.rs:1493`). So every one of the four
+violations and the single suspect was the same omission -- counting a
+successful `try_lock` as the interrupt-side hazard.
+
+That is the good outcome and it is also the uncomfortable one. A check whose
+first run produces five findings, all false, is a check that would have been
+believed: three of the five named locks whose try_lock path is the
+*documented fix* for this exact hazard. The thing that caught it was reading
+`sysctl.rs`'s prose before acting on the report, not the report itself.
 
 ### [A] Operational, for all three lanes: stopping a backgrounded shell script does not stop the script -- 2026-09-17
 

@@ -68537,6 +68537,50 @@ The `disable_key` caveat is now stated at that function's own signature, not
 only here. The reader who would misread it as a security control is reading
 the signature.
 
+### The closure was not finished: the subscriber had no guard
+
+Recorded the same day, from lane C's work rather than my own. When I wrote
+the closure above I had built the consumer and *not* built anything that
+would notice if it went away. `translate_try` could be reverted to return
+`Mapped(key)` unconditionally and every signal would stay green:
+`keylayout::self_test`'s seven cases exercise `translate`, which is the pure
+function and was always correct, and `ctest-keylayout` confirms the setting
+and its publication through `/proc`. Neither touches
+`keyboard::scancode_to_ascii`, which is private and, until now, called only
+from the two real input paths and from no test at all.
+
+So this entry was one step short of its own point. It says a publisher with
+no subscriber is indistinguishable from a working feature; a subscriber with
+no guard is indistinguishable from a working feature *the day after someone
+simplifies it*.
+
+Lane C hit the identical shape the same day and stated the rule better than
+I had
+(`known-issues.md` -> `TD-C-A-PURE-FUNCTIONS-TESTS-SAY-NOTHING-ABOUT-ITS-CALLER`):
+`compute_image_rect` was correct and had six passing unit tests, its one
+production caller passed the display size where the image size belonged, and
+under that single wrong argument all six wallpaper fit modes collapse to the
+same rectangle. Six ways to fit a picture, all drawing the same thing,
+feature marked done.
+
+> A unit test of a pure function proves the function. It says nothing
+> whatever about whether anybody calls it correctly.
+
+And their prescription, which is what a closure of this entry actually
+requires: drive the setting **two different ways through the real entry
+point** and assert the results differ.
+
+`keyboard::layout_consumer_self_test` now does that -- baseline types `a`,
+an A->B remap types `b`, a disabled key types nothing. Two details are
+deliberate. It asserts the *difference* rather than only the expected value,
+because an implementation that always returned `b` would satisfy
+`== Some(b'b')` while being exactly as broken as one that always returned
+`a`. And it checks `u16::from(0x1E) == keys::KEY_A` rather than trusting the
+paragraph above where this entry asserts the two spaces coincide: if they
+ever diverge, the guard would silently test a different key than the one it
+remaps, and would keep passing.
+
+
 
 ## 947. A probe needs identity and coverage, and they fail independently
 

@@ -9572,6 +9572,20 @@ extern "C" fn kernel_main() -> ! {
             // needs to see, not a reason to refuse to boot.
             sched::report_stack_census();
 
+            // The lock-context check's verdict AND the corpus it was computed
+            // over, here rather than in `bench_lock_primitives` where it
+            // started. That runs in the deferred bench task, and a boot that
+            // fails a self-test is torn down before the task gets there -- so
+            // the number went missing on exactly the runs that most needed it.
+            // This site is synchronous, is past the whole ring-3 battery, and
+            // is reached by every boot that reaches BOOT_OK at all.
+            //
+            // Both numbers, never just the verdict: with no reports and no
+            // count, `nothing violated the rule` and `the check saw nothing`
+            // are the same silence. See design-decisions 942 and 948.
+            lockdep::report_lock_context();
+
+
             // Boot success marker — the boot test script greps for this.
             // Printed synchronously so it appears within seconds of power-on,
             // regardless of how long deferred benchmarks take.

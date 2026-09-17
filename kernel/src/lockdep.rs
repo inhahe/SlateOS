@@ -1410,6 +1410,42 @@ pub fn context_suspect_count() -> u32 {
     CTX_SUSPECTS.load(Ordering::Relaxed)
 }
 
+/// Print the lock-context check's verdict **and** the corpus it was computed
+/// over, as one line.
+///
+/// Called from `main.rs` just before `BOOT_OK`, which is synchronous, is past
+/// the whole ring-3 battery, and is reached by every boot that reaches
+/// `BOOT_OK` at all. It started life inside `bench_lock_primitives`, which
+/// was wrong twice over: that runs in the deferred bench task, so a boot that
+/// fails a self-test is torn down before it prints -- losing the number on
+/// exactly the runs that needed it most.
+///
+/// The line says out loud when it is vacuous. A verdict of zero violations
+/// over zero classes is not a clean bill of health, it is a check that saw
+/// nothing, and the two are the same silence unless the corpus is printed
+/// next to the verdict (942).
+pub fn report_lock_context() {
+    let violations = context_violation_count();
+    let suspects = context_suspect_count();
+    let classes = context_irq_class_count();
+    let verdict = if classes == 0 {
+        "VACUOUS: no interrupt-context acquisition was seen all boot"
+    } else if violations == 0 {
+        "clean"
+    } else {
+        "NOT clean -- see the LOCK CONTEXT reports above"
+    };
+    serial_println!(
+        concat!(
+            "[lockdep] lock-context: {} violation(s), {} suspect(s), over {} ",
+            "class(es) seen in interrupt context -- {}"
+        ),
+        violations,
+        suspects,
+        classes,
+        verdict
+    );
+}
 /// How many classes have been acquired in interrupt context at all.
 ///
 /// The corpus behind the two counters above, and the reason it is published

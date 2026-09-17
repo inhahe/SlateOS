@@ -1892,17 +1892,17 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 - [ ] Signal/slot mechanism (maps to Rust channels or callback registration)
 
 #### Core Widgets
-- [ ] Buttons (text, graphic)
-- [ ] Labels
-- [ ] Menus
-- [ ] Checkboxes
-- [ ] Tristate checkboxes (yes/no/default — useful for cascading option overrides)
-- [ ] Radio buttons (grouped, only one selected)
-- [ ] Treeview
+- [x] Buttons (text, graphic)
+- [x] Labels
+- [x] Menus — *`menu.rs` and `menubar.rs`.*
+- [x] Checkboxes
+- [x] Tristate checkboxes (yes/no/default — useful for cascading option overrides) — *`CheckState::{Unchecked, Checked, Indeterminate}`.*
+- [x] Radio buttons (grouped, only one selected)
+- [-] Treeview — *not in `gui/toolkit`. The first four rows of this section are widgets; this one is a gap, and the bullet below it (a tristate-checkbox treeview populated from a directory) rests on it.*
 - [ ] Tristate checkbox treeview (with function to populate from directory)
-- [ ] Tabs view
-- [ ] Grid view
-- [ ] Color picker (like qtpyrc's)
+- [x] Tabs view — *`gui/toolkit/src/tabs.rs`.*
+- [x] Grid view — *`gui/toolkit/src/grid.rs`.*
+- [x] Color picker (like qtpyrc's) — *`gui/toolkit/src/colorpicker.rs`: HSV square and hue bar, RGB/HSV sliders, hex entry, alpha, presets, eyedropper and a recent-colours history, as `ColorPicker` (inline) and `ColorPickerDialog`. Consumers: `apps/paint`, `apps/colorpicker`, and `apps/settings` since 2026-09-17.*
 - [ ] **Font picker dialog** (family, style/weight, size, and other font attributes).
   - [ ] **Live "tentative selection" events.** The picker fires an event *whenever
     the user tentatively/temporarily changes any font attribute* (hovers or

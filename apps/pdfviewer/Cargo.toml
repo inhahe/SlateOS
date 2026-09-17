@@ -10,6 +10,11 @@ appearance = { path = "../../gui/appearance" }
 # lives there was lifted out of this file.
 printjob = { path = "../../gui/printjob" }
 guitk = { path = "../../gui/toolkit" }
+
+# Ctrl+O reads through `safeio::read_capped`, the byte-oriented one: a PDF is
+# binary and the text reader would refuse it at the first byte that is not
+# UTF-8. Capped, because the size is whoever-wrote-the-file's claim.
+safeio = { path = "../safeio" }
 # The window itself: `app::launch` is what turns the renderer below into a
 # program the desktop can open, rather than a struct with a `main` that returns.
 oswindow = { path = "../../gui/window" }

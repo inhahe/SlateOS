@@ -58523,3 +58523,45 @@ minutes each to clear by reading, and it produced five real defects of which
 two (`sshd`, `grub2`) were serious. A scanner reporting 28 where 5 are real is
 emphatically worth running; the cost is that a future reader re-clears the 23
 unless the triage is written down, which is what this entry is for.
+
+## Judgment Call: pushed lane-a with ALLOW_STALE_RELEASE=1 rather than
+advancing the release-boot marker off a FAILED boot (lane A, 2026-09-17).
+
+  The pre-push release-staleness gate refused at 137 kernel-touching commits
+  against a threshold of 100. It offers two ways out: update
+  bench/last-release-boot.json with a fresh release boot's SHA, or override
+  with ALLOW_STALE_RELEASE=1. I took the override.
+
+  I had in fact just run a release boot, on 26a90aadf: it built release,
+  reached BOOT_OK in 133s, and ran the whole self-test battery. But it
+  returned 1, because three ring-3 fixtures failed -- `our own userland runs
+  at all`, `pty ^C signal delivery`, and `CPython REPL over a pty`. All three
+  are lane B's, all three are already filed in requests/, and none is
+  release-specific; they fail on debug too.
+
+  Why not update the marker anyway. That file's `note` is a curated
+  judgement, and the note already there sets the standard it is read at:
+  "Set from an actual release-profile boot test ... '=== Boot test PASSED
+  ==='". It also says READ THIS BEFORE TRUSTING THE SHA. Writing a baseline
+  from a run that failed would silently change what the field means for the
+  other two lanes, who read it as evidence a release boot passed. The
+  override touches no shared record and says plainly that I bypassed a gate.
+
+  The structural problem, which is the part worth acting on. The marker can
+  only be advanced by a *clean* release boot, and the tree cannot produce one
+  while another lane's fixtures are red. So the gate will be bypassed on
+  every push until lane B lands three fixes -- a gate that fails open while
+  continuing to look like a gate. That is the same shape I wrote into
+  HardIrqGuard's doc comment an hour earlier, and I would rather not have it
+  sitting in the push path.
+
+  Options, none of which I should pick unilaterally because they change a
+  shared gate's meaning: (a) let the marker record a boot that reached
+  BOOT_OK with only known-filed other-lane failures, with those failures
+  named in the note; (b) give the gate an explicit allow-list of known-red
+  fixtures so a boot can be 'clean modulo these'; (c) leave it, and accept
+  the override as the mechanism until lane B is green. Currently (c), by
+  default rather than by decision, which is why it is written down here.
+
+  Trigger to revisit: lane B fixing any of the three, at which point re-run a
+  release boot and set the marker properly.

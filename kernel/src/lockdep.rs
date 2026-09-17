@@ -446,6 +446,64 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// ever inverted a lock order", so it must be zero on a healthy boot.
 static VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 
+// ---------------------------------------------------------------------------
+// Lock-context check: an IRQ-reachable lock must never be held with
+// interrupts enabled
+// ---------------------------------------------------------------------------
+
+/// Per-class record of which interrupt context each acquisition ran in.
+///
+/// Three buckets rather than two, because "acquired in interrupt context"
+/// is not one thing. `dispatch_vector`'s window includes
+/// `softirq::process_pending`, which deliberately re-enables interrupts, so
+/// a lock taken there is taken by a context that *can* be preempted by a
+/// hard IRQ -- unlike one taken with IF clear, which cannot. Conflating the
+/// two would report the softirq/task overlap with the same confidence as
+/// the hard-IRQ/task overlap, and only the latter is a certain deadlock.
+static CLASS_HARDIRQ_OFF: [AtomicBool; MAX_CLASSES] =
+    [const { AtomicBool::new(false) }; MAX_CLASSES];
+/// Acquired inside the interrupt-dispatch window but with interrupts on
+/// (the softirq tail).
+static CLASS_HARDIRQ_ON: [AtomicBool; MAX_CLASSES] =
+    [const { AtomicBool::new(false) }; MAX_CLASSES];
+/// Acquired outside interrupt context with interrupts enabled -- i.e. by a
+/// task that an interrupt can land on mid-hold. This is the bit that makes
+/// any of the others dangerous.
+static CLASS_TASK_IRQS_ON: [AtomicBool; MAX_CLASSES] =
+    [const { AtomicBool::new(false) }; MAX_CLASSES];
+/// One report per class, not per acquisition: these fire on hot paths.
+static CLASS_CTX_REPORTED: [AtomicBool; MAX_CLASSES] =
+    [const { AtomicBool::new(false) }; MAX_CLASSES];
+
+/// Classes acquired both from a true hard IRQ and from a task with
+/// interrupts enabled. A single-CPU deadlock is possible by construction.
+static CTX_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+/// Classes acquired both from the softirq tail and from a task with
+/// interrupts enabled. Weaker: it needs a hard IRQ that also takes the lock
+/// before it can wedge, which this check cannot see on its own.
+static CTX_SUSPECTS: AtomicU32 = AtomicU32::new(0);
+
+/// Lock-context reports provoked on purpose by [`self_test`].
+///
+/// Separate for the same reason [`SELF_TEST_VIOLATIONS`] is: the live
+/// counters answer "has this kernel ever taken an IRQ-reachable lock with
+/// interrupts on", and a planted one is not an answer to that. Without the
+/// split, the negative control would leave the gate permanently non-zero --
+/// so the only way to keep the gate meaningful would be to never test it,
+/// which is how a checker ends up never having been shown to fire.
+static CTX_SELF_TEST_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+
+/// Count a lock-context report against whichever tally this context owns.
+fn count_ctx_report(hard_off: bool) {
+    if IN_SELF_TEST.load(Ordering::Relaxed) {
+        CTX_SELF_TEST_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    } else if hard_off {
+        CTX_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        CTX_SUSPECTS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Violations provoked on purpose by [`self_test`], tallied separately.
 ///
 /// The self-test's whole job is to make the detector fire: it inverts A→B,
@@ -589,6 +647,8 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8], how: Acquire) {
     // Record where this acquisition came from, before any report can be
     // emitted below — a violation involving this class should describe the
     // acquisition that provoked it, not the one before.
+    note_lock_context(class_idx);
+
     let site: &'static Location<'static> = Location::caller();
     if let Some(slot) = CLASS_SITE.get(class_idx as usize) {
         // `Location::caller()` hands back a `&'static` into read-only data, so
@@ -1229,6 +1289,117 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
 /// `serial_println!` here cannot recurse back into lockdep.
 #[cold]
 #[inline(never)]
+/// Record which context this acquisition ran in, and report a class that
+/// has now been seen in two that cannot safely overlap.
+///
+/// The rule enforced here is the one `console.rs` states in prose and calls
+/// load-bearing: if a lock is reachable from an interrupt handler, every
+/// *other* acquisition of it must disable interrupts first. Otherwise a task
+/// can be holding it when the interrupt arrives, and the handler spins for a
+/// lock only that task can release -- on one CPU, forever, and silently,
+/// because a spin loop reports nothing.
+///
+/// `console` is the positive control. It is acquired from the IRQ 1 keyboard
+/// path, and all 45 of its acquisitions go through `lock_irqsave`, so it sets
+/// `CLASS_HARDIRQ_OFF` and never `CLASS_TASK_IRQS_ON`. **A check that reports
+/// `console` is a broken check, not a finding.**
+///
+/// Called with the caller's `IN_LOCKDEP` re-entrancy flag already set, so the
+/// `serial_println!` below cannot recurse back in through the serial lock.
+fn note_lock_context(class_idx: u16) {
+    let idx = class_idx as usize;
+
+    let bucket = match (crate::idt::in_hardirq(), crate::cpu::interrupts_enabled()) {
+        (true, false) => &CLASS_HARDIRQ_OFF,
+        (true, true) => &CLASS_HARDIRQ_ON,
+        (false, true) => &CLASS_TASK_IRQS_ON,
+        // Task context with interrupts already masked: `lock_irqsave`, or
+        // inside `without_interrupts`. That is the safe case and the entire
+        // point of the pattern, so it is deliberately not recorded.
+        (false, false) => return,
+    };
+    let Some(slot) = bucket.get(idx) else {
+        return;
+    };
+    slot.store(true, Ordering::Relaxed);
+
+    let seen = |b: &[AtomicBool; MAX_CLASSES]| {
+        b.get(idx).is_some_and(|f| f.load(Ordering::Relaxed))
+    };
+    let task_on = seen(&CLASS_TASK_IRQS_ON);
+    let hard_off = seen(&CLASS_HARDIRQ_OFF);
+    let hard_on = seen(&CLASS_HARDIRQ_ON);
+    if !task_on || !(hard_off || hard_on) {
+        return;
+    }
+
+    // Once per class. `swap` returning true means somebody already did it.
+    if CLASS_CTX_REPORTED
+        .get(idx)
+        .is_some_and(|f| f.swap(true, Ordering::Relaxed))
+    {
+        return;
+    }
+
+    if hard_off {
+        count_ctx_report(true);
+        serial_println!(
+            "[lockdep] *** LOCK CONTEXT *** {} @ {:#x} (class {}) is acquired \
+             from a hard IRQ with interrupts off, and also by a task with \
+             interrupts ENABLED. An interrupt landing on that task mid-hold \
+             wedges this CPU forever, silently. Use lock_irqsave() at the task \
+             side, as console.rs does.",
+            class_name(class_idx),
+            class_addr(class_idx),
+            class_idx
+        );
+    } else {
+        count_ctx_report(false);
+        serial_println!(
+            "[lockdep] lock-context SUSPECT: {} @ {:#x} (class {}) is acquired \
+             in the softirq tail with interrupts on, and also by a task with \
+             interrupts on. Not a deadlock by itself; it becomes one the day a \
+             hard IRQ takes this lock. This is the 2026-09-15 writeback shape.",
+            class_name(class_idx),
+            class_addr(class_idx),
+            class_idx
+        );
+    }
+}
+
+/// Number of classes acquired from a hard IRQ *and* from a task with
+/// interrupts enabled. Must be zero on a healthy boot.
+pub fn context_violation_count() -> u32 {
+    CTX_VIOLATIONS.load(Ordering::Relaxed)
+}
+
+/// Number of softirq/task overlaps. Informational, not a pass/fail verdict.
+pub fn context_suspect_count() -> u32 {
+    CTX_SUSPECTS.load(Ordering::Relaxed)
+}
+
+/// How many classes have been acquired in interrupt context at all.
+///
+/// The corpus behind the two counters above, and the reason it is published
+/// next to them: a verdict of zero violations means nothing without it. If
+/// this is also zero, the check saw no interrupt-context acquisition all
+/// boot and its clean result is vacuous rather than reassuring -- which is
+/// the shape 942 is about, and which a pass/fail number alone cannot show.
+pub fn context_irq_class_count() -> u32 {
+    let mut n: u32 = 0;
+    for idx in 0..MAX_CLASSES {
+        let off = CLASS_HARDIRQ_OFF
+            .get(idx)
+            .is_some_and(|f| f.load(Ordering::Relaxed));
+        let on = CLASS_HARDIRQ_ON
+            .get(idx)
+            .is_some_and(|f| f.load(Ordering::Relaxed));
+        if off || on {
+            n = n.saturating_add(1);
+        }
+    }
+    n
+}
 fn report_recursive(class_idx: u16, cpu: usize) {
     count_violation();
     let n = RECURSIVE_REPORTS.fetch_add(1, Ordering::Relaxed);
@@ -1771,6 +1942,79 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     EDGE_COUNT.store(edges_before_chain, Ordering::Relaxed);
     serial_println!("[lockdep]   BFS completeness (chain of {CHAIN} > old bound 32): OK");
 
+    // --- lock-context check: the negative control ------------------------
+    //
+    // Provoke exactly the pair the check reports -- one acquisition from a
+    // task with interrupts ENABLED, one from interrupt context with them
+    // OFF -- and require that it fires. A checker that has never been shown
+    // to fire is indistinguishable from one that cannot, and this gate's
+    // whole value is the report it makes on a boot years from now.
+    let ctx_lock: usize = 0xDEAD_00C7;
+    let ctx_before = CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
+
+    // Precondition, checked rather than assumed. The task half needs
+    // interrupts genuinely enabled; with them masked this test would take
+    // the (false, false) path, record nothing, report nothing, and pass --
+    // vacuously, which is the failure mode it exists to rule out.
+    assert!(
+        crate::cpu::interrupts_enabled(),
+        "lock-context control needs interrupts enabled to establish the task \
+         side; masked, it would pass without testing anything"
+    );
+    lock_acquire(ctx_lock, b"ctx-control", Acquire::Blocking);
+    lock_release(ctx_lock);
+
+    // The interrupt side, which completes the pair.
+    crate::cpu::without_interrupts(|| {
+        let _irq = crate::idt::enter_hardirq_for_test();
+        lock_acquire(ctx_lock, b"ctx-control", Acquire::Blocking);
+        lock_release(ctx_lock);
+    });
+    assert_eq!(
+        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
+        ctx_before.wrapping_add(1),
+        "lock-context check did not fire on a class acquired from a task with \
+         interrupts on and then from interrupt context with them off"
+    );
+
+    // ...and exactly once. These sit on the hottest paths in the kernel, so
+    // a per-acquisition report would drown the serial log in the one
+    // situation where the log is what you have.
+    crate::cpu::without_interrupts(|| {
+        let _irq = crate::idt::enter_hardirq_for_test();
+        lock_acquire(ctx_lock, b"ctx-control", Acquire::Blocking);
+        lock_release(ctx_lock);
+    });
+    assert_eq!(
+        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
+        ctx_before.wrapping_add(1),
+        "lock-context check reported the same class twice"
+    );
+
+    // Positive control: a lock only ever taken with interrupts masked is the
+    // CORRECT pattern (this is what console.rs does 45 times) and must NOT
+    // be reported. Without this arm the check could be a function that
+    // reports everything and the test above would still pass.
+    let safe_lock: usize = 0xDEAD_00C8;
+    crate::cpu::without_interrupts(|| {
+        let _irq = crate::idt::enter_hardirq_for_test();
+        lock_acquire(safe_lock, b"ctx-safe", Acquire::Blocking);
+        lock_release(safe_lock);
+    });
+    crate::cpu::without_interrupts(|| {
+        lock_acquire(safe_lock, b"ctx-safe", Acquire::Blocking);
+        lock_release(safe_lock);
+    });
+    assert_eq!(
+        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
+        ctx_before.wrapping_add(1),
+        "lock-context check reported a lock that is only ever taken with \
+         interrupts masked -- that is the safe pattern, not a defect"
+    );
+    serial_println!(
+        "[lockdep]   lock-context: fires once on a real overlap, silent on \
+         the irqsave pattern: OK"
+    );
     // Restore state. The self-test routing goes off here and nowhere else:
     // every assertion above panics on failure, so there is no early return that
     // could leave real violations being tallied as deliberate ones.

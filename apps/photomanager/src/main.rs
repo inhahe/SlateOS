@@ -1,7 +1,9 @@
 //! Slate OS Photo Manager
 //!
 //! A photo library management application with:
-//! - Photo library with albums, collections, and smart albums
+//! - Photo library with albums: made from the sidebar, filled by
+//!   right-clicking a photograph, and browsable as a view; smart albums
+//!   exist as a model only
 //! - EXIF metadata parsing and display (camera, exposure, GPS, etc.)
 //! - Thumbnail grid view at four card sizes (80/120/160/200 px), cycled from
 //!   the toolbar, each card showing the photograph itself
@@ -45,6 +47,14 @@
 //!   way to record one.)
 //! - **Face regions are never detected.** `Photo::faces` is constructed empty
 //!   and nothing ever pushes to it.
+//! - **Only one photograph can be selected.** `selected_photos` is a `Vec`
+//!   that production code never pushes to, so the batch operations --
+//!   `batch_add_to_album`, batch rate, batch tag -- are written, tested and
+//!   unreachable. The grid already draws a card as selected if it is in that
+//!   list, so the drawing is ready and the selecting is not.
+//! - **Smart albums cannot be made either.** `create_smart_album` and the
+//!   rule matching behind it are tested and unreachable, exactly as ordinary
+//!   albums were until now.
 //! - **Nothing is exported.** `ExportOptions` records a format, a quality and
 //!   a size, has a `Default` and a test, and is read by nothing: no function
 //!   in this crate writes a picture anywhere. The feature list offered
@@ -94,6 +104,7 @@ use guitk::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::menu::{ContextMenu, MenuItem};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -143,6 +154,16 @@ enum SidebarRow {
     Header(&'static str),
     /// Air between sections.
     Gap(f32),
+    /// A row that does something rather than going somewhere.
+    ///
+    /// Separate from `Item` because `SidebarItem` answers "which collection am
+    /// I looking at", and an action is not a collection. Folding one in would
+    /// mean every `match` over a selection -- `visible_photos`, the title, the
+    /// filter -- growing an arm for something that can never be selected.
+    Action {
+        label: String,
+        action: SidebarAction,
+    },
     /// A row that goes somewhere.
     Item {
         label: String,
@@ -161,9 +182,16 @@ impl SidebarRow {
         match self {
             Self::Header(_) => Self::HEADER_H,
             Self::Gap(h) => *h,
-            Self::Item { .. } => ITEM_HEIGHT,
+            Self::Item { .. } | Self::Action { .. } => ITEM_HEIGHT,
         }
     }
+}
+
+/// Something a sidebar row does, rather than somewhere it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarAction {
+    /// Begin naming a new album.
+    NewAlbum,
 }
 
 /// A control in the toolbar.
@@ -1722,7 +1750,10 @@ pub struct PhotoApp {
     /// Carries the failure too. An import that silently does nothing is the
     /// defect this whole application was an instance of, so a file that cannot
     /// be read says so rather than leaving the grid unchanged and unexplained.
-    pub last_import: Option<String>,
+    /// The line the status bar shows, when there is something to say.
+    ///
+    /// Called `last_import` until it carried anything but an import.
+    pub status_message: Option<String>,
     photo_id_gen: IdGen,
     album_id_gen: IdGen,
     timestamp_counter: u64,
@@ -1793,6 +1824,24 @@ pub struct PhotoApp {
     /// `f` would still flag it, so searching for "flag5" would silently change
     /// the library while the user thought they were typing.
     search_focused: bool,
+    /// The name being typed for a new album, when one is being made.
+    ///
+    /// `None` when nothing is being named. An empty `Some` is a row waiting
+    /// for its first character, which is why this is not just a `String`.
+    naming_album: Option<String>,
+    /// The album menu, while it is open.
+    ///
+    /// Rebuilt on every opening rather than kept and updated, because its
+    /// items are the albums and those change underneath it. A menu holding a
+    /// name the library no longer has is worse than one that costs a few
+    /// allocations to raise.
+    photo_menu: Option<ContextMenu>,
+    /// The photograph the open menu is about.
+    ///
+    /// Remembered rather than read from the selection when the menu is
+    /// clicked: a menu is a question about the thing you opened it on, and
+    /// nothing should be able to move the answer while it is up.
+    menu_photo: Option<PhotoId>,
 }
 
 impl Default for PhotoApp {
@@ -1820,6 +1869,9 @@ impl PhotoApp {
             library_note: None,
             library_unread: 0,
             search_focused: false,
+            naming_album: None,
+            photo_menu: None,
+            menu_photo: None,
             photos: Vec::new(),
             albums: Vec::new(),
             smart_albums: Vec::new(),
@@ -1839,7 +1891,7 @@ impl PhotoApp {
             window_width: 1400.0,
             window_height: 900.0,
             picker: FilePicker::new(),
-            last_import: None,
+            status_message: None,
             photo_id_gen: IdGen::new(1),
             album_id_gen: IdGen::new(1),
             timestamp_counter: 1000,
@@ -2733,6 +2785,16 @@ impl PhotoApp {
                 accent: self.palette.blue,
             });
         }
+        rows.push(SidebarRow::Action {
+            // The row is the input while a name is being typed, rather than a
+            // dialog over the top: the album will appear in this list, so this
+            // is where it should be born.
+            label: self
+                .naming_album
+                .as_ref()
+                .map_or_else(|| "+  New Album".to_owned(), |typed| format!("{typed}|")),
+            action: SidebarAction::NewAlbum,
+        });
         rows.push(SidebarRow::Gap(12.0));
         if !self.smart_albums.is_empty() {
             rows.push(SidebarRow::Header("SMART ALBUMS"));
@@ -2769,8 +2831,32 @@ impl PhotoApp {
             if y < next {
                 return match row {
                     SidebarRow::Item { target, .. } => Some(target),
-                    // A heading or the air around it is not a control.
-                    SidebarRow::Header(_) | SidebarRow::Gap(_) => None,
+                    // A heading, the air around it, and an action are not
+                    // places to go. `sidebar_action_at` answers for the last.
+                    SidebarRow::Header(_) | SidebarRow::Gap(_) | SidebarRow::Action { .. } => None,
+                };
+            }
+            row_y = next;
+        }
+        None
+    }
+
+    /// Which sidebar action a point is on, if any.
+    ///
+    /// A separate walk from [`Self::sidebar_item_at`] rather than one function
+    /// answering both, because the two have different answers for the same
+    /// point and every caller wants exactly one of them.
+    pub fn sidebar_action_at(&self, x: f32, y: f32) -> Option<SidebarAction> {
+        if x < 0.0 || x >= SIDEBAR_WIDTH {
+            return None;
+        }
+        let mut row_y = TOOLBAR_HEIGHT;
+        for row in self.sidebar_rows() {
+            let next = row_y + row.height();
+            if y < next {
+                return match row {
+                    SidebarRow::Action { action, .. } => Some(action),
+                    SidebarRow::Header(_) | SidebarRow::Gap(_) | SidebarRow::Item { .. } => None,
                 };
             }
             row_y = next;
@@ -2952,7 +3038,7 @@ impl PhotoApp {
             .handle(event, self.window_width, self.window_height)
         {
             Picked::Chose(path) => {
-                self.last_import = Some(self.import_from_disk(&path));
+                self.status_message = Some(self.import_from_disk(&path));
                 return true;
             }
             // Cancelled grouped with Handled: this caller keeps no dialog
@@ -3034,6 +3120,31 @@ impl PhotoApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // An open menu takes the click before anything under it does --
+        // that is what being over everything means.
+        if self.photo_menu.is_some() {
+            if let MouseEventKind::Press(_) = event.kind {
+                let chosen = self
+                    .photo_menu
+                    .as_mut()
+                    .and_then(|m| m.handle_click(event.x, event.y));
+                self.photo_menu = None;
+                if let Some(id) = chosen {
+                    self.choose_album_from_menu(id);
+                }
+                // Consumed either way: a click that dismisses a menu should
+                // not also land on whatever was behind it.
+                return true;
+            }
+        }
+        if matches!(event.kind, MouseEventKind::Press(MouseButton::Right))
+            && self.view_mode == ViewMode::Grid
+            && let Some(pid) = self.photo_at(event.x, event.y)
+        {
+            self.selected_photo = Some(pid);
+            self.open_photo_menu(pid, event.x, event.y);
+            return true;
+        }
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             return false;
         }
@@ -3042,11 +3153,24 @@ impl PhotoApp {
         // branches below so that a control added later cannot forget it.
         let pressed = self.toolbar_control_at(event.x, event.y);
         self.search_focused = pressed == Some(ToolbarControl::Search);
+        if self.search_focused {
+            // One text field at a time.
+            self.naming_album = None;
+        }
         if let Some(control) = pressed {
             self.press_toolbar(control);
             return true;
         }
+        if let Some(action) = self.sidebar_action_at(event.x, event.y) {
+            match action {
+                SidebarAction::NewAlbum => self.begin_naming_album(),
+            }
+            return true;
+        }
         if let Some(target) = self.sidebar_item_at(event.x, event.y) {
+            // Clicking somewhere else abandons a half-typed name, the same way
+            // clicking away from the search box abandons the search.
+            self.naming_album = None;
             self.select_sidebar(target);
             return true;
         }
@@ -3141,7 +3265,123 @@ impl PhotoApp {
         }
     }
 
+    /// Raise the album menu over a photograph.
+    ///
+    /// With no albums the menu still opens, carrying one disabled row saying
+    /// so. A menu that refuses to appear leaves the user with no way to find
+    /// out *why* nothing happened, and the answer -- there is nowhere to put
+    /// it yet -- is exactly what they need to know.
+    fn open_photo_menu(&mut self, pid: PhotoId, x: f32, y: f32) {
+        let items: Vec<MenuItem> = if self.albums.is_empty() {
+            vec![MenuItem::Action {
+                id: 0,
+                label: "No albums yet - make one in the sidebar".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: false,
+                checked: None,
+            }]
+        } else {
+            self.albums
+                .iter()
+                .map(|album| MenuItem::Action {
+                    // The album's own id *is* the menu item's id, so nothing
+                    // has to map between two numbering schemes and get it
+                    // wrong when an album is deleted.
+                    id: album.id,
+                    label: format!("Add to {}", album.name),
+                    shortcut: None,
+                    icon: None,
+                    enabled: !album.photo_ids.contains(&pid),
+                    checked: None,
+                })
+                .collect()
+        };
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width, self.window_height));
+        self.photo_menu = Some(menu);
+        self.menu_photo = Some(pid);
+    }
+
+    /// Put the menu's photograph into the album that was chosen.
+    fn choose_album_from_menu(&mut self, album_id: AlbumId) {
+        let Some(pid) = self.menu_photo else {
+            return;
+        };
+        let name = self
+            .albums
+            .iter()
+            .find(|a| a.id == album_id)
+            .map(|a| a.name.clone());
+        if self.add_to_album(album_id, pid) {
+            self.status_message = name.map(|n| format!("Added to {n}"));
+        }
+    }
+
+    /// Start naming a new album.
+    fn begin_naming_album(&mut self) {
+        // One text field at a time: two rows both showing a caret would leave
+        // no way to tell where the next character is going.
+        self.search_focused = false;
+        self.naming_album = Some(String::new());
+    }
+
+    /// Typing while a new album is being named.
+    ///
+    /// Consumes every key for the same reason the search box does: the digits
+    /// rate the selected photograph and `f` flags it, so an album called
+    /// "5 star" would otherwise rewrite the library as it was typed.
+    fn handle_album_name_key(&mut self, event: &KeyEvent) -> bool {
+        match event.key {
+            Key::Escape => {
+                self.naming_album = None;
+                true
+            }
+            Key::Enter => {
+                self.commit_album_name();
+                true
+            }
+            Key::Backspace => {
+                if let Some(name) = self.naming_album.as_mut() {
+                    name.pop();
+                }
+                true
+            }
+            _ => {
+                let typed: String = event.typed().collect();
+                if let Some(name) = self.naming_album.as_mut() {
+                    name.push_str(&typed);
+                }
+                true
+            }
+        }
+    }
+
+    /// Turn the typed name into an album, and show it.
+    ///
+    /// An empty name cancels rather than making an album called nothing --
+    /// pressing Enter on a row you have not typed into is much more likely to
+    /// be a change of mind than a request for a nameless album.
+    fn commit_album_name(&mut self) {
+        let Some(name) = self.naming_album.take() else {
+            return;
+        };
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        let id = self.create_album(&name);
+        // Show it. A new album that did not become the view would leave the
+        // user looking at the same screen, with the only evidence of success
+        // one more row in a list.
+        self.sidebar_selection = SidebarItem::Album(id);
+        self.grid_scroll = 0;
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        if self.naming_album.is_some() {
+            return self.handle_album_name_key(event);
+        }
         if self.search_focused {
             return self.handle_search_key(event);
         }
@@ -3367,6 +3607,12 @@ impl PhotoApp {
 
         // The picker goes last so it sits over everything, which is the same
         // order in which `handle_event` gives it the click.
+        // Over the window, under the picker: the picker is modal, and a
+        // menu raised before it opened has no business on top of it.
+        if let Some(menu) = &self.photo_menu {
+            cmds.extend(menu.render(&self.palette));
+        }
+
         cmds.extend(self.picker.render(&self.palette, width, height));
 
         cmds
@@ -3634,7 +3880,7 @@ impl PhotoApp {
 
         let stats = self.library_stats();
         let visible = self.visible_photos().len();
-        let status_text = self.last_import.as_ref().map_or_else(
+        let status_text = self.status_message.as_ref().map_or_else(
             || {
                 format!(
                     "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
@@ -3712,6 +3958,27 @@ impl PhotoApp {
                     max_width: Some(SIDEBAR_WIDTH - 24.0),
                     overflow: TextOverflow::Ellipsis,
                 }),
+                SidebarRow::Action { label, .. } => {
+                    // Blue while it is taking typing, for the same reason the
+                    // search box is: an empty row waiting for a name and an
+                    // idle row offering to take one are otherwise the same
+                    // picture.
+                    let color = if self.naming_album.is_some() {
+                        self.palette.blue
+                    } else {
+                        self.palette.subtext0
+                    };
+                    cmds.push(RenderCommand::Text {
+                        x: 20.0,
+                        y: cy + 8.0,
+                        text: label.clone(),
+                        color,
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(SIDEBAR_WIDTH - 36.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
                 SidebarRow::Item {
                     label,
                     target,
@@ -5406,6 +5673,277 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         })
+    }
+
+    fn right_click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        })
+    }
+
+    /// Where the first grid card is drawn.
+    fn first_card_point(app: &PhotoApp) -> (f32, f32) {
+        let cell = app.thumb_rect(0).expect("a first card");
+        (cell.x + 4.0, cell.y + 4.0)
+    }
+
+    /// Right-clicking a photograph offers the albums it could go into.
+    #[test]
+    fn right_clicking_a_photograph_offers_the_albums() {
+        let mut app = app_with_n_pictures("menu", 1);
+        app.set_window_size(900.0, 700.0);
+        app.create_album("Holiday");
+        let (x, y) = first_card_point(&app);
+
+        app.handle_event(&right_click(x, y));
+
+        assert!(app.photo_menu.is_some(), "no menu appeared");
+        assert_eq!(
+            app.menu_photo,
+            app.photos.first().map(|p| p.id),
+            "the menu is about the wrong photograph"
+        );
+    }
+
+    /// Choosing an album puts the photograph in it.
+    ///
+    /// The point of the whole feature: `add_to_album` has been written and
+    /// tested since this crate existed and had no caller outside the test
+    /// module, so an album stayed empty however many photographs you had.
+    #[test]
+    fn choosing_an_album_puts_the_photograph_in_it() {
+        let mut app = app_with_n_pictures("addto", 1);
+        app.set_window_size(900.0, 700.0);
+        let album = app.create_album("Holiday");
+        let pid = app.photos.first().expect("one").id;
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+
+        app.choose_album_from_menu(album);
+
+        let in_album = app
+            .albums
+            .iter()
+            .find(|a| a.id == album)
+            .expect("the album")
+            .photo_ids
+            .clone();
+        assert_eq!(in_album, vec![pid], "the photograph did not go in");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Added to Holiday"),
+            "nothing on screen said it worked"
+        );
+    }
+
+    /// With no albums the menu still opens and says why it is empty.
+    ///
+    /// A menu that refused to appear would leave no way to find out *why*
+    /// nothing happened.
+    #[test]
+    fn with_no_albums_the_menu_still_opens_and_says_so() {
+        let mut app = app_with_n_pictures("noalbums", 1);
+        app.set_window_size(900.0, 700.0);
+        assert!(app.albums.is_empty(), "the control failed");
+        let (x, y) = first_card_point(&app);
+
+        app.handle_event(&right_click(x, y));
+
+        assert!(app.photo_menu.is_some(), "the menu refused to appear");
+    }
+
+    /// A click while the menu is up dismisses it and does not fall through.
+    ///
+    /// Without that, dismissing a menu over the grid would also select
+    /// whatever card was underneath it.
+    #[test]
+    fn a_click_dismisses_the_menu_without_falling_through() {
+        let mut app = app_with_n_pictures("dismiss", 2);
+        app.set_window_size(900.0, 700.0);
+        app.create_album("Holiday");
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+        let before = app.selected_photo;
+
+        // Far from the menu, over the grid.
+        let elsewhere = app.thumb_rect(1).expect("a second card");
+        assert!(
+            app.handle_event(&click(elsewhere.x + 4.0, elsewhere.y + 4.0)),
+            "the click was not consumed"
+        );
+
+        assert!(app.photo_menu.is_none(), "the menu is still up");
+        assert_eq!(
+            app.selected_photo, before,
+            "the dismissing click also selected the card behind it"
+        );
+    }
+
+    /// A photograph already in an album is not offered it again.
+    #[test]
+    fn a_photograph_already_in_an_album_is_not_offered_it_twice() {
+        let mut app = app_with_n_pictures("twice", 1);
+        app.set_window_size(900.0, 700.0);
+        let album = app.create_album("Holiday");
+        let pid = app.photos.first().expect("one").id;
+        assert!(app.add_to_album(album, pid), "the control failed");
+
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+
+        // Choosing it anyway must not duplicate the entry.
+        app.choose_album_from_menu(album);
+        let in_album = app
+            .albums
+            .iter()
+            .find(|a| a.id == album)
+            .expect("the album")
+            .photo_ids
+            .clone();
+        assert_eq!(in_album, vec![pid], "the photograph was added twice");
+    }
+
+    /// Where the "New Album" row is drawn, so a click can land on it.
+    fn new_album_row_y(app: &PhotoApp) -> f32 {
+        let mut y = TOOLBAR_HEIGHT;
+        for row in app.sidebar_rows() {
+            let h = row.height();
+            if matches!(row, SidebarRow::Action { .. }) {
+                return y + h / 2.0;
+            }
+            y += h;
+        }
+        panic!("the sidebar has no New Album row");
+    }
+
+    fn start_naming(app: &mut PhotoApp) {
+        app.set_window_size(900.0, 700.0);
+        let y = new_album_row_y(app);
+        app.handle_event(&click(20.0, y));
+        assert!(
+            app.naming_album.is_some(),
+            "the click did not start naming an album"
+        );
+    }
+
+    /// The sidebar offers a way to make an album.
+    ///
+    /// `create_album` has been written and tested since this crate existed,
+    /// and every caller was in the test module -- so the ALBUMS heading has
+    /// never had anything under it that a user put there.
+    #[test]
+    fn the_sidebar_offers_a_way_to_make_an_album() {
+        let mut app = PhotoApp::new();
+        app.set_window_size(900.0, 700.0);
+        let y = new_album_row_y(&app);
+
+        assert_eq!(
+            app.sidebar_action_at(20.0, y),
+            Some(SidebarAction::NewAlbum),
+            "the row is drawn but is not a control"
+        );
+        assert_eq!(
+            app.sidebar_item_at(20.0, y),
+            None,
+            "an action is not somewhere to go"
+        );
+    }
+
+    /// Typing a name and pressing Enter makes the album.
+    #[test]
+    fn typing_a_name_and_pressing_enter_creates_the_album() {
+        let mut app = PhotoApp::new();
+        assert!(app.albums.is_empty(), "the control failed");
+        start_naming(&mut app);
+
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+        app.handle_event(&key(Key::Enter));
+
+        assert_eq!(app.albums.len(), 1, "no album was made");
+        let album = app.albums.first().expect("one");
+        assert_eq!(album.name, "pier");
+        assert_eq!(
+            app.sidebar_selection,
+            SidebarItem::Album(album.id),
+            "the new album did not become the view"
+        );
+        assert!(app.naming_album.is_none(), "the row is still taking typing");
+    }
+
+    /// A digit typed into an album name does not rate a photograph.
+    ///
+    /// The same hazard as the search box: `0`-`5` rate the selection and `f`
+    /// flags it, so an album called "5 star" would rewrite the library as it
+    /// was typed.
+    #[test]
+    fn a_digit_typed_into_an_album_name_does_not_rate_a_photograph() {
+        let mut app = app_with_n_pictures("albumdigit", 1);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+
+        // Control: unfocused, the digit really does rate.
+        app.handle_event(&typed(Key::Num5, '5'));
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "the control failed: digits do not rate, so this proves nothing"
+        );
+
+        start_naming(&mut app);
+        app.handle_event(&typed(Key::Num3, '3'));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "typing an album name changed a photograph's rating"
+        );
+        assert_eq!(app.naming_album.as_deref(), Some("3"));
+    }
+
+    /// Escape abandons a half-typed name.
+    #[test]
+    fn escape_abandons_a_half_typed_album_name() {
+        let mut app = PhotoApp::new();
+        start_naming(&mut app);
+        app.handle_event(&typed(Key::P, 'p'));
+
+        app.handle_event(&key(Key::Escape));
+
+        assert!(app.naming_album.is_none(), "still naming");
+        assert!(app.albums.is_empty(), "escape made an album anyway");
+    }
+
+    /// Enter on a row nobody typed into makes nothing.
+    ///
+    /// Much more likely a change of mind than a request for a nameless album.
+    #[test]
+    fn enter_on_an_empty_name_makes_no_album() {
+        let mut app = PhotoApp::new();
+        start_naming(&mut app);
+
+        app.handle_event(&key(Key::Enter));
+
+        assert!(app.albums.is_empty(), "an album with no name was made");
+        assert!(app.naming_album.is_none(), "the row is still taking typing");
+    }
+
+    /// Only one text field takes the keyboard at a time.
+    #[test]
+    fn focusing_the_search_box_abandons_an_album_name() {
+        let mut app = PhotoApp::new();
+        start_naming(&mut app);
+        app.handle_event(&typed(Key::P, 'p'));
+
+        focus_search(&mut app);
+
+        assert!(
+            app.naming_album.is_none(),
+            "two rows would both have been showing a caret"
+        );
     }
 
     /// The search box is a control the click handler knows about.

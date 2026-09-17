@@ -11,7 +11,6 @@
 //!   exposure, temperature
 //! - Star ratings (0-5) and color labels
 //! - Tagging and keyword system
-//! - Face region detection placeholders
 //! - Timeline view grouping photos by date
 //! - Slideshow mode with configurable interval and transitions
 //! - Import of a single file through a picker, with its EXIF read
@@ -29,10 +28,18 @@
 //! `imagecodec`, and the grid generates thumbnails through `thumbs`. What
 //! follows is what is still owed.
 //!
-//! - **The adjustments are recorded, not applied.** They are stored per
-//!   photograph and listed in the info panel, and no pixel has ever been
-//!   changed by one. A settings page is built when something obeys it, not
-//!   when something stores it.
+//! - **The adjustments cannot be set, let alone applied.** Each photograph
+//!   carries brightness, contrast, saturation, exposure, temperature,
+//!   highlights, shadows, sharpness, vignette and rotation; the info panel
+//!   lists them when they differ from the default, and nothing in this
+//!   application can make them differ. `ImageAdjustments::rotate_cw` and
+//!   `rotate_ccw` exist and are called from tests only. So the panel's
+//!   "adjusted" section has never been drawn outside a test, and no pixel has
+//!   ever been changed by one. (An earlier revision of this list said they
+//!   were "recorded, not applied", which is still too generous: there is no
+//!   way to record one.)
+//! - **Face regions are never detected.** `Photo::faces` is constructed empty
+//!   and nothing ever pushes to it.
 //! - **Nothing is exported.** `ExportOptions` records a format, a quality and
 //!   a size, has a `Default` and a test, and is read by nothing: no function
 //!   in this crate writes a picture anywhere. The feature list offered

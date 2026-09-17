@@ -33,8 +33,37 @@
 //!    text and 19% narrow on another's display type, which is the box a
 //!    search highlight is drawn in.
 //!
-//! **What is deliberately not here yet.** A simple font's `/Encoding` is not
-//! read, so `WinAnsiEncoding` is assumed. A composite font *without* a
+//! 9. **`/Encoding` differences**, the codes a font remaps. Eleven fonts in
+//!    one measured document use them; 500 of its runs carry a ligature and 92
+//!    a curly quote that previously decoded as whatever `WinAnsi` had at that
+//!    code.
+//!
+//! **What is deliberately not here yet.** A named base encoding other than
+//! `WinAnsiEncoding` -- `MacRomanEncoding`, `StandardEncoding` -- is treated
+//! as WinAnsi, so a font declaring one has the wrong characters where the two
+//! differ.
+//!
+//! **Words separated by pen movement get their spaces back**, which they
+//! need: a PDF may separate words by *moving the pen* rather than drawing a
+//! space, and a line that lost those reads "Definingandassigningmaterials"
+//! and matches no search for two words. A jump wider than
+//! [`WORD_GAP_THOUSANDTHS`] becomes one space. The cutoff is measured rather
+//! than chosen -- the distribution of 7919 real adjustments is bimodal with
+//! only seven of them in the band the threshold sits in.
+//!
+//! Three documents, three spacing mechanisms, which is why this is stated
+//! narrowly: one kerns its gaps and gained spaces on 3164 of its runs; one
+//! draws real spaces and has no adjustment anywhere near the threshold, so it
+//! is untouched; one puts every word in its own run.
+//!
+//! **That third case is handled by joining, not by spacing.** A run is one
+//! show operator, which is as fine-grained as a file happens to be, and a
+//! search runs *inside* a run -- so [`join_lines`] gathers the runs on one
+//! baseline into one. The document that drew a word at a time went from 16922
+//! runs to 1603, and a search for "user guide" that matched nothing now
+//! matches 48 of them. Position decides, not draw order: runs are sorted down
+//! the page and across it first, because the order a file draws in is not the
+//! order anyone reads. A composite font *without* a
 //! `/ToUnicode` map still yields nothing -- its codes are glyph indices into a
 //! subset font and relate to no character -- and such a page is counted in
 //! [`Document::unreadable_pages`], so "no results" from a search can be told
@@ -932,6 +961,71 @@ fn walk_pages(
     Ok(())
 }
 
+/// How far two runs' baselines may differ and still be one line.
+///
+/// A fraction of the size, so it scales with the text. Superscripts and
+/// subscripts sit further off than this and stay separate, which is right:
+/// joining a footnote marker into the word before it puts a digit inside it.
+const SAME_LINE_TOLERANCE: f32 = 0.3;
+
+/// The widest gap between two runs that still joins them, as a fraction of
+/// the size.
+///
+/// Wide enough for a space and the slack a justified line adds to it, narrow
+/// enough that two columns never join: a gutter is several times the point
+/// size, and at that distance the runs are different lines of different
+/// paragraphs that happen to share a baseline.
+const JOIN_GAP: f32 = 1.2;
+
+/// Join runs that sit on one baseline into one run each.
+///
+/// Extraction produces a run per show operator, which is as fine-grained as
+/// the file happens to be: one document gives a whole line at a time, another
+/// a word. **A search runs inside a run**, so in the second the viewer could
+/// not match "user guide" across the two runs holding it -- the words are
+/// there and the query never matches, which reads as a document that does not
+/// contain them.
+///
+/// Joining is by position rather than by order, because the order a file
+/// draws in is not the order anyone reads: runs are sorted down the page and
+/// then across it, and only then joined.
+fn join_lines(mut runs: Vec<TextRun>) -> Vec<TextRun> {
+    if runs.len() < 2 {
+        return runs;
+    }
+    // Down the page, then across. `total_cmp` rather than `partial_cmp`
+    // because a NaN coordinate would otherwise make the sort's ordering
+    // inconsistent, which can panic.
+    runs.sort_by(|a, b| b.y.total_cmp(&a.y).then(a.x.total_cmp(&b.x)));
+
+    let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
+    for run in runs {
+        let Some(last) = out.last_mut() else {
+            out.push(run);
+            continue;
+        };
+        let size = last.size.max(run.size);
+        let same_line = (last.y - run.y).abs() <= size * SAME_LINE_TOLERANCE;
+        let gap = run.x - (last.x + last.width);
+        let adjacent = gap <= size * JOIN_GAP && gap > -size;
+        if !same_line || !adjacent || (last.size - run.size).abs() > 0.01 {
+            out.push(run);
+            continue;
+        }
+        // A gap wide enough to be a space becomes one, on the same reasoning
+        // as the kerning threshold: the file separated the words by moving the
+        // pen, and the text has to say so.
+        let needs_space =
+            gap > size * 0.1 && !last.text.ends_with(' ') && !run.text.starts_with(' ');
+        if needs_space {
+            last.text.push(' ');
+        }
+        last.text.push_str(&run.text);
+        last.width = (run.x + run.width) - last.x;
+    }
+    out
+}
+
 /// The text on one page, and whether everything on it could be read.
 ///
 /// The second half of the answer is the point. A page whose content stream
@@ -976,7 +1070,7 @@ fn page_text(
             Err(_) => readable = false,
         }
     }
-    let runs = extract_text(&joined, &fonts);
+    let runs = join_lines(extract_text(&joined, &fonts));
     // A page that drew nothing this could decode is unreadable, not empty.
     // Composite fonts are the case that matters: one of the three documents
     // this was measured against uses them throughout, so every page came back
@@ -990,6 +1084,168 @@ fn page_text(
             .values()
             .any(|font| font.kind == FontKind::Composite && font.to_unicode.is_none());
     (runs, readable && !blocked)
+}
+
+/// What a glyph name stands for, where this can say.
+///
+/// Two forms are algorithmic and exact: `uniXXXX` and `uXXXX` name a codepoint
+/// outright. The rest is a table of the names that actually turn up -- 28
+/// distinct ones across the eleven `/Differences` arrays in one measured
+/// document, and they are the usual suspects: the `ff`/`fi`/`fl` ligatures,
+/// curly quotes, dashes, bullets.
+///
+/// **A name this does not know decodes to nothing**, which is the same rule
+/// the CID decoder follows. Guessing at an unknown glyph name puts a character
+/// on the page that the document does not contain, and into every search over
+/// it.
+fn glyph_name_char(name: &str) -> Option<char> {
+    // `uniXXXX`, and `uXXXX` with four to six digits.
+    if let Some(hex) = name.strip_prefix("uni").filter(|h| h.len() == 4) {
+        return u32::from_str_radix(hex, 16).ok().and_then(char::from_u32);
+    }
+    if let Some(hex) = name
+        .strip_prefix('u')
+        .filter(|h| (4..=6).contains(&h.len()))
+    {
+        if hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return u32::from_str_radix(hex, 16).ok().and_then(char::from_u32);
+        }
+    }
+    let found = match name {
+        // Ligatures, which is what most `/Differences` arrays are for.
+        "ff" => '\u{fb00}',
+        "fi" => '\u{fb01}',
+        "fl" => '\u{fb02}',
+        "ffi" => '\u{fb03}',
+        "ffl" => '\u{fb04}',
+        // Quotes and dashes, the other common reason.
+        "quoteright" => '\u{2019}',
+        "quoteleft" => '\u{2018}',
+        "quotedblleft" => '\u{201c}',
+        "quotedblright" => '\u{201d}',
+        "quotesinglbase" => '\u{201a}',
+        "quotedblbase" => '\u{201e}',
+        "quotesingle" => '\'',
+        "quotedbl" => '"',
+        "endash" => '\u{2013}',
+        "emdash" => '\u{2014}',
+        "minus" => '\u{2212}',
+        "hyphen" => '-',
+        "bullet" => '\u{2022}',
+        "openbullet" => '\u{25e6}',
+        "ellipsis" => '\u{2026}',
+        "dagger" => '\u{2020}',
+        "daggerdbl" => '\u{2021}',
+        "perthousand" => '\u{2030}',
+        "trademark" => '\u{2122}',
+        "copyright" => '\u{a9}',
+        "registered" => '\u{ae}',
+        "degree" => '\u{b0}',
+        "section" => '\u{a7}',
+        "paragraph" => '\u{b6}',
+        "periodcentered" => '\u{b7}',
+        "fraction" => '\u{2044}',
+        "guilsinglleft" => '\u{2039}',
+        "guilsinglright" => '\u{203a}',
+        "guillemotleft" => '\u{ab}',
+        "guillemotright" => '\u{bb}',
+        // Named punctuation that a `/Differences` array may restate.
+        "space" => ' ',
+        "period" => '.',
+        "comma" => ',',
+        "colon" => ':',
+        "semicolon" => ';',
+        "exclam" => '!',
+        "question" => '?',
+        "bar" => '|',
+        "slash" => '/',
+        "backslash" => '\\',
+        "asterisk" => '*',
+        "numbersign" => '#',
+        "percent" => '%',
+        "ampersand" => '&',
+        "at" => '@',
+        "underscore" => '_',
+        "parenleft" => '(',
+        "parenright" => ')',
+        "braceleft" => '{',
+        "braceright" => '}',
+        "bracketleft" => '[',
+        "bracketright" => ']',
+        // TeX builds a tall bracket out of pieces. The top, bottom and `Big`
+        // forms are brackets and read as one; the `ex` *extension* segment is
+        // the middle of a drawn shape and is no character at all, so it is
+        // deliberately absent -- mapping it would insert a bracket per row of
+        // height.
+        "bracketlefttp" | "bracketleftbt" | "bracketleftBig" | "bracketleftbig" => '[',
+        "bracketrighttp" | "bracketrightbt" | "bracketrightBig" | "bracketrightbig" => ']',
+        // A few accented names that turn up in re-encoded text fonts.
+        "adieresis" => '\u{e4}',
+        "odieresis" => '\u{f6}',
+        "udieresis" => '\u{fc}',
+        "germandbls" => '\u{df}',
+        "eacute" => '\u{e9}',
+        "egrave" => '\u{e8}',
+        "agrave" => '\u{e0}',
+        "ccedilla" => '\u{e7}',
+        "ntilde" => '\u{f1}',
+        _ => return None,
+    };
+    Some(found)
+}
+
+/// A font's `/Encoding`, as the codes it moves.
+///
+/// A plain name -- `/WinAnsiEncoding` -- moves nothing, because WinAnsi is
+/// what this assumes anyway. A dictionary may carry `/Differences`, which is
+/// the part that matters: an array where a number sets the next code and each
+/// name that follows takes the next one along.
+fn encoding_overrides(
+    data: &[u8],
+    offsets: &Xref,
+    dict: &BTreeMap<String, Object>,
+) -> BTreeMap<u32, char> {
+    let mut out = BTreeMap::new();
+    let Some(encoding) = dict.get("Encoding") else {
+        return out;
+    };
+    let Ok(encoding) = resolve(data, offsets, encoding, 0) else {
+        return out;
+    };
+    let Some(encoding) = encoding.as_dict() else {
+        return out;
+    };
+    let Some(differences) = encoding.get("Differences") else {
+        return out;
+    };
+    let Ok(Object::Array(items)) = resolve(data, offsets, differences, 0) else {
+        return out;
+    };
+    let mut code = 0u32;
+    for item in &items {
+        match item {
+            Object::Int(_) | Object::Real(_) => {
+                let Some(value) = item.as_f64().filter(|v| *v >= 0.0 && *v < 65_536.0) else {
+                    continue;
+                };
+                #[allow(clippy::cast_possible_truncation, reason = "bounded above")]
+                #[allow(clippy::cast_sign_loss, reason = "filtered non-negative")]
+                {
+                    code = value as u32;
+                }
+            }
+            Object::Name(name) => {
+                if let Some(ch) = glyph_name_char(name) {
+                    out.insert(code, ch);
+                }
+                // The counter advances whether or not the name was known, or
+                // every name after an unknown one would land on the wrong code.
+                code = code.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// A simple font's `/FirstChar` + `/Widths`, into a code-to-width map.
@@ -1127,6 +1383,7 @@ fn font_map(data: &[u8], offsets: &Xref, resources: Option<&Object>) -> FontMap 
         if !composite {
             let mut simple = Font::simple();
             if let Some(dict) = dict {
+                simple.overrides = encoding_overrides(data, offsets, dict);
                 simple.widths = simple_widths(data, offsets, dict);
                 // `/MissingWidth` lives in the descriptor, not the font.
                 simple.default_width = dict
@@ -1715,6 +1972,13 @@ pub enum FontKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Font {
     pub kind: FontKind,
+    /// Codes this font remaps, from its `/Encoding`'s `/Differences`.
+    ///
+    /// Applied over the base encoding rather than replacing it: a
+    /// `/Differences` array names the handful of codes that move and says
+    /// nothing about the rest, so a font that remaps three codes still reads
+    /// its other 250 the ordinary way.
+    pub overrides: BTreeMap<u32, char>,
     /// Glyph widths in thousandths of an em, by character code.
     ///
     /// From `/FirstChar` + `/Widths` for a simple font, and from the
@@ -1743,6 +2007,7 @@ impl Font {
     pub fn simple() -> Self {
         Self {
             kind: FontKind::Simple,
+            overrides: BTreeMap::new(),
             widths: BTreeMap::new(),
             default_width: 0.0,
             to_unicode: None,
@@ -1754,6 +2019,7 @@ impl Font {
     pub fn composite(to_unicode: Option<CMap>) -> Self {
         Self {
             kind: FontKind::Composite,
+            overrides: BTreeMap::new(),
             widths: BTreeMap::new(),
             default_width: 0.0,
             to_unicode,
@@ -1791,6 +2057,30 @@ impl Font {
 
 /// The fonts a page's `/Resources` declares, by the name `Tf` uses.
 pub type FontMap = BTreeMap<String, Font>;
+
+/// How far the pen must jump backwards inside a `TJ` array to mean a space.
+///
+/// In thousandths of an em, negative because `TJ`'s numbers *subtract* from
+/// the pen. **Measured, not chosen.** Across 7919 adjustments in one document
+/// the distribution is sharply bimodal:
+///
+/// | band | count |
+/// |---|---|
+/// | <= -400 | 4212 |
+/// | -400..-200 | 1410 |
+/// | **-200..-100** | **7** |
+/// | -100..-10 | 160 |
+/// | > -10 | 2130 |
+///
+/// Seven values in 7919 fall between -200 and -100, so the threshold is not a
+/// judgement call: it sits in a valley the data already has. Anywhere in that
+/// band separates word gaps from the kerning inside a word.
+///
+/// It is safe for documents that space differently. The other two measured
+/// here never cross it -- one writes real space characters and has nothing
+/// below -100, the other puts every word in its own run -- so this changes
+/// their text not at all.
+const WORD_GAP_THOUSANDTHS: f32 = -150.0;
 
 /// The identity matrix, which `BT` resets both text matrices to.
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -1925,10 +2215,32 @@ pub fn extract_text(content: &[u8], fonts: &FontMap) -> Vec<TextRun> {
                     // The numbers between the strings are kerning, in
                     // thousandths of an em. They move the pen; they are not
                     // text. Concatenating them would put "-3" inside a word.
+                    //
+                    // But a big enough jump *is* a space: a PDF may separate
+                    // words by moving the pen rather than by drawing one, and
+                    // a run that lost those reads "Definingandassigning" and
+                    // matches no search for two words. See
+                    // [`WORD_GAP_THOUSANDTHS`] for where the cutoff comes
+                    // from.
                     let mut joined: Vec<u8> = Vec::new();
+                    let mut pending_space = false;
                     for item in items {
-                        if let Object::Str(bytes) = item {
-                            joined.extend_from_slice(bytes);
+                        match item {
+                            Object::Str(bytes) => {
+                                if pending_space && !joined.is_empty() && !bytes.is_empty() {
+                                    joined.push(b' ');
+                                }
+                                pending_space = false;
+                                joined.extend_from_slice(bytes);
+                            }
+                            other => {
+                                if other
+                                    .as_f64()
+                                    .is_some_and(|v| v <= f64::from(WORD_GAP_THOUSANDTHS))
+                                {
+                                    pending_space = true;
+                                }
+                            }
                         }
                     }
                     push_run(&mut runs, &joined, text_matrix, font_size, font);
@@ -1976,7 +2288,16 @@ fn push_run(
             to_unicode: None,
             ..
         }) => return,
-        _ => bytes.iter().filter_map(|b| win_ansi(*b)).collect(),
+        Some(font) => bytes
+            .iter()
+            .filter_map(|b| {
+                font.overrides
+                    .get(&u32::from(*b))
+                    .copied()
+                    .or_else(|| win_ansi(*b))
+            })
+            .collect(),
+        None => bytes.iter().filter_map(|b| win_ansi(*b)).collect(),
     };
     if text.trim().is_empty() {
         return;
@@ -3120,6 +3441,213 @@ begincmap\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
             _ => panic!("not a dictionary"),
         };
         assert!(composite_widths(b"", &Xref::default(), &dict).is_empty());
+    }
+
+    /// A `/Differences` array remaps the codes it names, and only those.
+    #[test]
+    fn differences_remap_the_codes_they_name() {
+        let mut font = Font::simple();
+        font.overrides.insert(1, '\u{fb01}');
+        font.overrides.insert(2, '\u{2019}');
+        let mut fonts = FontMap::new();
+        fonts.insert("F1".to_owned(), font);
+
+        // Codes 1 and 2 are remapped; 'A' is not and reads the ordinary way.
+        let runs = extract_text(b"BT /F1 10 Tf 1 0 0 1 0 0 Tm (\x01A\x02) Tj ET", &fonts);
+        assert_eq!(runs.first().expect("a run").text, "\u{fb01}A\u{2019}");
+    }
+
+    /// The `/Differences` walk: a number sets the code, names take the next.
+    #[test]
+    fn a_differences_array_counts_from_each_number() {
+        let dict = match Lexer::new(b"<< /Encoding << /Differences [1 /fi /fl 10 /bullet] >> >>")
+            .object()
+            .expect("parses")
+        {
+            Object::Dict(d) => d,
+            _ => panic!("not a dictionary"),
+        };
+        let map = encoding_overrides(b"", &Xref::default(), &dict);
+        assert_eq!(map.get(&1), Some(&'\u{fb01}'));
+        assert_eq!(map.get(&2), Some(&'\u{fb02}'), "the second name follows on");
+        assert_eq!(
+            map.get(&10),
+            Some(&'\u{2022}'),
+            "and the number restarts it"
+        );
+        assert_eq!(map.get(&11), None);
+    }
+
+    /// An unknown glyph name advances the counter without inventing a letter.
+    ///
+    /// Both halves matter. Skipping the advance would land every name after it
+    /// on the wrong code; inventing a character would put one on the page that
+    /// the document does not contain.
+    #[test]
+    fn an_unknown_glyph_name_is_skipped_but_still_counted() {
+        let dict = match Lexer::new(b"<< /Encoding << /Differences [5 /nosuchglyph /fi] >> >>")
+            .object()
+            .expect("parses")
+        {
+            Object::Dict(d) => d,
+            _ => panic!("not a dictionary"),
+        };
+        let map = encoding_overrides(b"", &Xref::default(), &dict);
+        assert_eq!(map.get(&5), None, "nothing invented for the unknown name");
+        assert_eq!(
+            map.get(&6),
+            Some(&'\u{fb01}'),
+            "and the next name is not shifted"
+        );
+    }
+
+    /// `uniXXXX` names a codepoint outright.
+    #[test]
+    fn a_uni_name_is_its_codepoint() {
+        assert_eq!(glyph_name_char("uni00E9"), Some('\u{e9}'));
+        assert_eq!(glyph_name_char("u20AC"), Some('\u{20ac}'));
+        assert_eq!(glyph_name_char("uniZZZZ"), None);
+    }
+
+    /// A bracket piece that is a bracket reads as one; an extension does not.
+    ///
+    /// TeX draws a tall bracket from stacked pieces. The top, bottom and `Big`
+    /// forms each stand for the bracket; the `ex` segment is the middle of a
+    /// drawn shape and is no character, so mapping it would insert one bracket
+    /// per row of height.
+    #[test]
+    fn a_bracket_extension_is_not_a_bracket() {
+        assert_eq!(glyph_name_char("bracketleftBig"), Some('['));
+        assert_eq!(glyph_name_char("bracketlefttp"), Some('['));
+        assert_eq!(glyph_name_char("bracketleftex"), None);
+    }
+
+    /// A wide kerning jump inside a `TJ` array becomes a space.
+    ///
+    /// -313 is taken from a real document, where it separates "User" from
+    /// "Manual". Without this the run reads "UserManual" and matches no
+    /// search for the two words.
+    #[test]
+    fn a_wide_kerning_gap_becomes_a_space() {
+        let content = b"BT /T1_0 10 Tf 1 0 0 1 0 0 Tm [(Use)0.048(r)-313.004(M)-0.98(anual)]TJ ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.first().expect("a run").text, "User Manual");
+    }
+
+    /// Kerning inside a word does not become a space.
+    ///
+    /// The other half, and the one that would be silently wrong: the same
+    /// array carries small adjustments between letters, and a threshold set
+    /// too near zero would spell "U s e r".
+    #[test]
+    fn kerning_within_a_word_is_not_a_space() {
+        let content = b"BT /T1_0 10 Tf 1 0 0 1 0 0 Tm [(Q)-3(uick S)3(tar)-24(t)]TJ ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.first().expect("a run").text, "Quick Start");
+    }
+
+    /// A gap at the very start of an array does not indent the run.
+    #[test]
+    fn a_leading_gap_adds_no_space() {
+        let content = b"BT /T1_0 10 Tf 1 0 0 1 0 0 Tm [-500(Word)]TJ ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.first().expect("a run").text, "Word");
+    }
+
+    /// Two gaps in a row add one space, not two.
+    #[test]
+    fn consecutive_gaps_collapse() {
+        let content = b"BT /T1_0 10 Tf 1 0 0 1 0 0 Tm [(a)-400 -400(b)]TJ ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.first().expect("a run").text, "a b");
+    }
+
+    fn run_at(text: &str, x: f32, y: f32, width: f32, size: f32) -> TextRun {
+        TextRun {
+            text: text.to_owned(),
+            x,
+            y,
+            width,
+            width_is_measured: true,
+            size,
+        }
+    }
+
+    /// Runs on one baseline join, and a gap between them becomes a space.
+    #[test]
+    fn runs_on_one_baseline_become_one_run() {
+        let runs = join_lines(vec![
+            run_at("User", 100.0, 700.0, 24.0, 10.0),
+            run_at("Guide", 127.0, 700.0, 28.0, 10.0),
+        ]);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs.first().expect("a run").text, "User Guide");
+    }
+
+    /// Two columns sharing a baseline do not join.
+    ///
+    /// The gutter is several times the point size, which is what tells a
+    /// column break from a word break. Joining them would put the right
+    /// column's first word inside the left column's last sentence.
+    #[test]
+    fn two_columns_do_not_join() {
+        let runs = join_lines(vec![
+            run_at("left", 72.0, 700.0, 20.0, 10.0),
+            run_at("right", 320.0, 700.0, 22.0, 10.0),
+        ]);
+        assert_eq!(runs.len(), 2, "a gutter is not a space");
+    }
+
+    /// Different baselines stay apart.
+    #[test]
+    fn different_lines_stay_apart() {
+        let runs = join_lines(vec![
+            run_at("first", 72.0, 700.0, 20.0, 10.0),
+            run_at("second", 72.0, 686.0, 24.0, 10.0),
+        ]);
+        assert_eq!(runs.len(), 2);
+    }
+
+    /// A superscript is not joined into the word it marks.
+    ///
+    /// It sits off the baseline and is set smaller, and either alone keeps it
+    /// separate -- joining would put a footnote digit inside a word.
+    #[test]
+    fn a_superscript_is_not_part_of_the_word() {
+        let runs = join_lines(vec![
+            run_at("footnote", 72.0, 700.0, 40.0, 10.0),
+            run_at("3", 112.0, 704.0, 3.0, 6.0),
+        ]);
+        assert_eq!(runs.len(), 2);
+    }
+
+    /// Joining is by position, not by the order the file draws in.
+    #[test]
+    fn runs_are_ordered_before_they_are_joined() {
+        // Given bottom-up and right-to-left, which a content stream may do.
+        let runs = join_lines(vec![
+            run_at("second", 72.0, 686.0, 30.0, 10.0),
+            run_at("World", 105.0, 700.0, 30.0, 10.0),
+            run_at("Hello", 72.0, 700.0, 30.0, 10.0),
+        ]);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs.first().expect("a run").text, "Hello World");
+        assert_eq!(runs.get(1).expect("a run").text, "second");
+    }
+
+    /// The joined run spans from the first run's start to the last one's end.
+    #[test]
+    fn a_joined_run_is_as_wide_as_its_parts() {
+        let runs = join_lines(vec![
+            run_at("ab", 100.0, 700.0, 20.0, 10.0),
+            run_at("cd", 124.0, 700.0, 20.0, 10.0),
+        ]);
+        let run = runs.first().expect("a run");
+        assert!((run.x - 100.0).abs() < 0.01);
+        assert!(
+            (run.width - 44.0).abs() < 0.01,
+            "to the far edge of the last"
+        );
     }
 
     fn obj(src: &[u8]) -> Object {

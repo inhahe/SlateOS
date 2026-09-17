@@ -968,13 +968,11 @@ extern "C" fn kernel_main() -> ! {
             // rather than installing pluggable format handlers, so there is
             // no loader to do it at install time as binfmt's doc expects.
             fs::binfmt::init_defaults();
-            // AlreadyExists is the idempotent case and is not a failure;
-            // anything else means the table is unusable and is worth saying.
-            if let Err(e) = fs::binfmt::register_format(fs::binfmt::BinFormat::Elf64) {
-                if e != error::KernelError::AlreadyExists {
-                    serial_println!("[boot] WARNING: binfmt Elf64 register failed: {:?}", e);
-                }
-            }
+            // Elf64 is NOT registered here. `binfmt::self_test()` ends with
+            // `*STATE.lock() = None; init_defaults();` on purpose -- so its
+            // fixtures cannot leak into the live table -- and it runs later
+            // in the battery, so a registration made here is wiped before
+            // anything executes. Registered after that dispatch instead.
 
             // Step 12: Initialize futex subsystem.
             // Futexes enable fast userspace synchronization: the uncontended
@@ -5561,6 +5559,15 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::binfmt::self_test(),
             );
+            // AFTER the self-test, which resets the table to empty by design.
+            // Registering before it left 0 formats at BOOT_OK, which the new
+            // [binfmt] report caught and a /proc byte count could not: the
+            // format row is the same size whether anything records into it.
+            if let Err(e) = fs::binfmt::register_format(fs::binfmt::BinFormat::Elf64) {
+                if e != error::KernelError::AlreadyExists {
+                    serial_println!("[boot] WARNING: binfmt Elf64 register failed: {:?}", e);
+                }
+            }
             // Recovery-partition self-test.  recoverypart previously seeded a fabricated
             // 500 MB "Healthy" recovery partition (85 MB used) with four pre-installed
             // tools — System Repair, Boot Repair, Memory Test, Command Shell — into
@@ -9623,7 +9630,14 @@ extern "C" fn kernel_main() -> ! {
                     loads,
                     errors,
                     if fmts == 0 {
-                        " -- UNINITIALISED, not idle: stats() cannot tell those apart"
+                        // Deliberately does NOT say "uninitialised". `stats()`
+                        // returns 0 formats for both `None` and an initialised
+                        // empty table, so naming either would assert a
+                        // distinction this accessor cannot make -- which is the
+                        // exact conflation this line was added to expose, and
+                        // which its first version reproduced.
+                        " -- no format registered; uninitialised and empty are \
+                         indistinguishable through stats()"
                     } else if loads == 0 {
                         " -- registered but nothing has reported a load"
                     } else {

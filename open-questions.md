@@ -2828,11 +2828,36 @@ confirms the order holds.
 | (c) Convert only the cross-module pairs | the five cross-module orderings get watched; the same-module init-guard idiom (the bulk) stays as it is. |
 
 **My recommendation: (a), scoped by measurement rather than all at once.**
-The cost objection has never actually been measured for this type -- there
-was no `PreemptSpinMutex` benchmark arm in `bench_lock_primitives` until
-today, so "the per-acquire tracking cost would matter" is itself an
-unmeasured claim. Convert, measure the arm, and revert any conversion that
-costs more than it is worth.
+
+**Measured after this question was filed, so the cost is no longer a
+guess.** There was no `PreemptSpinMutex` arm in `bench_lock_primitives`
+until 2026-09-17; there is now, and five boots agree:
+
+| | bare `spin::Mutex` | `PreemptSpinMutex` | `crate::sync::Mutex` |
+|---|---|---|---|
+| typical | 26ns | **160ns** | **395ns** |
+
+So converting one of these locks costs roughly **235ns per acquire**, and
+that 235ns is identifiable work -- lockdep, contention statistics, and two
+`rdtsc` reads -- rather than a general penalty for touching the acquire
+path. Which means the decision is per-lock and answerable: a lock taken
+once per boot costs nothing worth discussing, and one on a syscall path
+might.
+
+Two caveats on those numbers. They are QEMU TCG figures, so the *ratios*
+transfer and the nanoseconds do not. And one of the five boots reads
+28/268/719 -- uniformly higher across all three arms, so it is a slow boot
+rather than a slow lock, and is excluded rather than averaged in.
+
+A related measurement, because it bears on whether instrumenting these
+locks is inherently costly: the §949 leaf check adds three atomic
+operations to that same acquire path, and its cost is **below the noise
+floor** -- 166ns without it against 159/162/159 with it, the instrumented
+runs being the faster ones. So the 235ns is not "what it costs to touch
+this path"; it is what lockdep and statistics specifically cost.
+
+So: convert, read the arm, and revert any conversion that costs more than
+it is worth. The arm now exists to read.
 
 **If never answered:** the current behaviour is safe as far as anyone can
 tell and has been for months, so nothing breaks tomorrow. What degrades is

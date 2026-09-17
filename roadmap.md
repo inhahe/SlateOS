@@ -719,15 +719,28 @@ What lane A actually has left:
 
 | work | state |
 |---|---|
-| head-of-line witness dispatch fix | ready; needs `kernel/src`, staged |
+| head-of-line witness dispatch fix | **landed**: the witness now declines with a reason rather than failing, and points at A-Q15 |
 | `/sys/devices` producer (A->C ask 1, option c) | served: `system/cpu/cpuid/`, `system/memory/`, and `block/<name>/{sector_count,sector_size,read_only}` from `blkdev::list_devices()` (2026-09-15, dd-939). No `cpufreq/` and no `net/` -- no frequency source, and `InterfaceInfo` has no name field, so both would be invented |
 | A-Q10 half 2 (defer the read-back) | **blocked on A-Q14** — operator |
 | `scripts/` ownership | **blocked on A-Q11** — operator |
 | whether pushing should be gated | **blocked on A-Q13** — operator |
 | bare-metal USB boot, then §263's iGPU half | **blocked on the operator being physically at the machine** |
+| A-Q16: convert the non-leaf `PreemptSpinMutex`es? | **blocked on A-Q16** — operator. Cost now measured: ~235ns/acquire (26 / 160 / 395ns for raw / preempt-spin / tracked) |
+| A-Q17: DRM atomic accepts plane rectangles it never applies | **blocked on A-Q17** — operator. Recommend refusing the commit (dd-945) |
+| the `fs/` wiring backlog: 340 of 430 modules have no consumer but `/proc` | **not operator-gated, but not a bug either.** dd-950: the unread fields are the shape of a missing userspace consumer. One worked example exists (`gui/desktop/src/power_settings.rs` reads `/proc/brightness`); the other ~339 are a documentation pattern (`provides` where `records` is true) plus real wiring. Sweeping 337 docs on one lane's reading of the architecture is what dd-951 warns against |
+| ~100 remaining unread kernel fields | triage framework recorded (dd-950); the two big clusters are done (power family 12, DRM plane 6). Remaining value is low per-field and the rule matters more than the count |
 
-So once the two staged items land, lane A is genuinely out of unblocked roadmap
-work, and the four open questions are what unblock it. Recorded here rather than
+**Updated 2026-09-17.** The two staged items landed, so the first half of that
+sentence is spent: lane A is out of unblocked *roadmap* work. It is not out of
+work -- a day of instrument auditing generated the four lower rows above, none
+of which existed in the roadmap on 2026-09-14. And it is now **six** open
+questions rather than four (A-Q11, A-Q13, A-Q14, A-Q15, A-Q16, A-Q17), which
+is the number that matters here: this table said "four" and would have kept
+saying it.
+
+The original note is kept below because its *method* is the useful part --
+counting unchecked boxes two ways and naming the five false positives, rather
+than asserting a status. Recorded here rather than
 filed as a new question because it is a status fact, not a decision -- and
 because a lane quietly running out of work while reporting progress is the thing
 worth making visible.

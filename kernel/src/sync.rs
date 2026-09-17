@@ -1299,7 +1299,11 @@ pub fn leaf_nesting_count() -> u64 {
 /// site pair, so a large total against a small pair count means one idiom
 /// repeating, not many distinct defects.
 pub fn report_leaf_claims() {
-    let total = LEAF_NESTINGS.load(Ordering::Relaxed);
+    // Through the accessor, not a second direct load of the same atomic.
+    // Two readers of one counter drift; and removing that function's
+    // `#[allow(dead_code)]` was a claim that it had a caller, which it did
+    // not until this line.
+    let total = leaf_nesting_count();
     let named = LEAF_SEEN
         .iter()
         .filter(|s| s.0.load(Ordering::Relaxed) != 0)

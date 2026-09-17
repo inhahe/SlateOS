@@ -58565,3 +58565,28 @@ advancing the release-boot marker off a FAILED boot (lane A, 2026-09-17).
 
   Trigger to revisit: lane B fixing any of the three, at which point re-run a
   release boot and set the marker properly.
+
+  RESOLVED 2026-09-17, and not by option (c). Lane C argued the case for (b)
+  and the decisive point was one I had missed: a flag set on every push is
+  not a bypass, it is the default path with a ritual attached -- and the real
+  loss is that ALLOW_STALE_RELEASE=1 in the history stops carrying any
+  information, so nobody can tell my routine bypasses from a genuine
+  wave-through.
+
+  Done narrower than they proposed. Their version baselined the three inside
+  boot-test.sh's verdict, which would have moved `clean` in
+  bench/boot-history.jsonl -- read by merge-readiness.py and by all three
+  lanes. Enumerating the readers showed the marker has exactly two
+  (check-release-staleness.py, scripts/hooks/pre-push) and that
+  last_green_boot() reads boot-history instead, so the marker could carry it
+  with no shared semantics touched. That is design-decisions 951.
+
+  The marker is now a8cebf3d1 with the three failures named in a
+  `baselined_failures` field and a retirement condition per name. The gate
+  reports ok at 1 commit past baseline, so the override is no longer in use.
+
+  And the permission was already in the file. Its own note says "the
+  automated ratchet stays strict, while this curated marker can carry a
+  reasoned judgement with its evidence" -- which I read twice today while
+  concluding I must not use it, having taken the precedent from its example
+  and not the permission from its text.

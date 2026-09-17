@@ -155233,6 +155233,23 @@ twenty-two was code I nearly broke by applying the pattern without reading
 around it.** A batch pass over 131 sites by someone confident in the pattern is
 the most likely way this tree acquires a real bug from this entry.
 
+**The dangerous category is exhausted, searched 2026-09-16.** Taking that
+order and running it across all of `apps/` and `gui/`: no production site
+outside the two already handled turns flattened text into a **filename or a map
+key**. The searches were for a lossy value reaching `join`, `insert`, a map
+lookup, a `format!` that builds a name, or a `File::create`/`fs::write`. What
+came back was test fixtures, the two extension formatters already cleared, and
+`apps/indexer`, which compares an extension against `config.exclude_extensions`
+— a list the user writes as *text*, so a textual comparison is the only kind
+available and flattening is right there for the same reason it is right in the
+run dialog.
+
+So the remaining ~109 sites are display and text comparison, and the two that
+mattered are fixed. That is the useful shape of this entry now: **not 131 things
+to do, but a rule to apply when writing new code**, plus three recorded cases
+(`IconAction::OpenPath`, `guitk::pathbar`, and the icon layout's key format)
+where the type is wrong and the fix is scoped.
+
 The order worth taking, cheapest signal first: anything whose flattened text is
 used as a **map key or a filename** (that is where both real defects were),
 then anything compared for equality, then everything else, which is almost

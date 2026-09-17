@@ -831,14 +831,10 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
             //
             // With all three labelled, silence from all three is the real
             // negative: the byte never reached the discipline at all.
-            crate::serial_println!(
-                concat!(
-                    "[tty] canonical: line discipline saw VINTR (0x{:02x}) ",
-                    "isig=true -- known-issues ",
-                    "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
-                ),
-                ch
-            );
+            // ROUND 9: no probe here. `step()` takes (line, raw, t) and has no
+            // tty id, and threading one through for a probe would change a
+            // signature for instrumentation. The identity-carrying probe sits
+            // at the CALLER instead, which already holds `id`.
             return signal(2); // SIGINT
         }
         if ch == vquit {
@@ -1279,7 +1275,20 @@ fn canonical_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) 
         match step {
             LineStep::Pending => {}
             LineStep::Line | LineStep::Eof => return deliver_line(id, out),
-            LineStep::Signal(sig) => return ConsoleRead::Signal(sig),
+            LineStep::Signal(sig) => {
+                // ROUND-9 identity probe. Round 3 printed a VINTR sighting with
+                // no tty id; its three hits turned out to be the kernel's own
+                // tty/pty self-tests 43,000 serial lines after ctest-pty had
+                // finished, and I read them as ctest-pty's. Correlating by
+                // existence rather than identity is what made a real
+                // measurement mean nothing.
+                crate::serial_println!(
+                    "[tty] tty={:?}: line discipline decided signal {}",
+                    id,
+                    sig
+                );
+                return ConsoleRead::Signal(sig);
+            }
         }
     }
 }
@@ -1408,7 +1417,20 @@ fn canonical_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> C
             // A signal char (^C/^\) flushed the in-progress line: abandon the
             // read and let the syscall layer deliver the signal to the
             // foreground process group, returning EINTR/ERESTARTSYS to us.
-            LineStep::Signal(sig) => return ConsoleRead::Signal(sig),
+            LineStep::Signal(sig) => {
+                // ROUND-9 identity probe. Round 3 printed a VINTR sighting with
+                // no tty id; its three hits turned out to be the kernel's own
+                // tty/pty self-tests 43,000 serial lines after ctest-pty had
+                // finished, and I read them as ctest-pty's. Correlating by
+                // existence rather than identity is what made a real
+                // measurement mean nothing.
+                crate::serial_println!(
+                    "[tty] tty={:?}: line discipline decided signal {}",
+                    id,
+                    sig
+                );
+                return ConsoleRead::Signal(sig);
+            }
         }
     }
 }

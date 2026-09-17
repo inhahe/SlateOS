@@ -153170,6 +153170,65 @@ the member count, and the member pids, on every terminal-signal delivery.
 Terminal signals are rare, so it stays quiet. If the pgid is not 205, that is
 the bug and it has been hiding behind three successful-looking measurements.
 
+### 2026-09-16 round 8: it never fires — and that retracts rounds 1, 3 and 4
+
+Round 8 printed the target group unconditionally on entry and fired **zero**
+times. `signal_foreground_group` is never called for `ctest-pty` at all.
+
+Rounds 1 and 4 both lived inside that function, so their silence never meant
+what I read it as. And round 3's three VINTR sightings are at serial lines
+**46834-46842** while the pty rung runs at **3316-3337** — they belong to
+`[tty] Running self-test...` and `[pty] Running self-test...`, the kernel's
+own line-discipline suites, 43,000 lines later.
+
+| round | what I claimed | what was true |
+|---|---|---|
+| 1 | `pgid != 0`, so delivery proceeded | the function is never called |
+| 3 | the discipline saw the `^C` | a *different* terminal did, much later |
+| 4 | deliveries succeeded | the function is never called |
+| 7 | the SIGINT handler ran | it was SIGHUP, after the parent died |
+| 8 | — | confirms: never called |
+
+**Every positive in this investigation was the same error: I correlated by
+existence instead of by identity.** The probes answered *did this fire* and I
+read them as answering *did this fire for the subject under test*. A probe
+with no subject in its output cannot distinguish the two, and three of them
+did not carry one.
+
+That is worse than the silence problems recorded above it, and differently
+shaped. A silent probe at least announces nothing; a probe that fires for the
+wrong subject **manufactures a positive**, and a positive ends an
+investigation where a silence only stalls it. Rounds 1, 4 and 8 cost me
+boots. Round 3 cost me a conclusion.
+
+**The rule, which is cheap and I was not following it:** a probe must print
+the identity of the thing it is about — tty id, pid, handle, path — and a
+reading must be correlated by position in the log, not by count. `grep -c`
+answers *how many*, never *whose*. Both checks are one command.
+
+**Where the trail actually stands.** For `ctest-pty`, nothing downstream of
+the input ring has been observed at all: the discipline never classifies the
+byte, so no signal is decided, so no group is looked up. The master write
+succeeds (the fixture returns 45, not 44), so the byte reaches the ring.
+Between those two facts is the whole remaining search space, and the most
+likely occupant is that the child never performs the read that would drain
+it.
+
+**Round 9 instruments all three steps at once, each carrying an identity:**
+`master_write` (which pty received the `0x03`), the slave read (did that
+pty's child consume it), and the discipline's decision (on which tty). All
+three gate on VINTR, so ordinary traffic stays silent, and together they
+cannot produce an ambiguous quiet — whichever speaks last names the step that
+failed.
+
+The identity probe sits at `canonical_try_read`'s `LineStep::Signal` arm
+rather than inside `step()`, and the compiler is why: `step()` takes
+`(line, raw, t)` and has no tty id in scope. **That is the mechanical reason
+round 3 could not name a terminal** — the information was never there. The
+caller already holds `id`, so the probe moved rather than a signature
+changing to carry instrumentation.
+
+
 
 
 ## A-CTEST-KEYLAYOUT-PASSES-THE-GRANTED-ARM-OF-1074-EXISTS (lane A, 2026-09-16) — **Status: PASSED**

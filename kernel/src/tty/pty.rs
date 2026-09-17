@@ -475,6 +475,20 @@ pub fn close(handle: PtyHandle) -> Hangup {
 /// * `Interrupted` — a deliverable signal arrived before any byte was written.
 /// * `InvalidArgument` — `data` is empty.
 pub fn master_write(handle: PtyHandle, data: &[u8]) -> KernelResult<usize> {
+    // ROUND-9 probe: a VINTR byte entering a pty's input ring, named by
+    // handle. Gated on the byte so ordinary traffic stays silent.
+    //
+    // A `//` comment inside the body, not `///` above the fn: it documents
+    // the probe rather than the API, and appending it to a doc comment that
+    // ends in an `# Errors` bullet list made it a lazy continuation of the
+    // last bullet, which clippy denies. Appending without reading what
+    // precedes is the same error as every other one today, in a doc block.
+    if data.contains(&3u8) {
+        crate::serial_println!(
+            "[pty] master_write handle={:?}: VINTR (0x03) entering the input ring",
+            handle
+        );
+    }
     if handle.end() != PtyEnd::Master {
         return Err(KernelError::InvalidHandle);
     }
@@ -759,6 +773,14 @@ pub(crate) fn slave_read_input_blocking(id: TtyId) -> Input {
             pty.input_waiters.remove(task);
 
             if let Some(b) = pty.input.read_byte() {
+                // ROUND-9 probe: the slave actually consuming the VINTR, named
+                // by tty. If master_write speaks and this does not, the child
+                // never reads and the discipline never gets the chance to
+                // classify anything -- which is where the trail currently
+                // ends.
+                if b == 3u8 {
+                    crate::serial_println!("[pty] slave_read tty={:?}: consumed VINTR (0x03)", id);
+                }
                 // Draining the input ring frees space, so wake that ring's set
                 // (which holds masters blocked on a full input ring).
                 let woken = pty.input_waiters.take_all();

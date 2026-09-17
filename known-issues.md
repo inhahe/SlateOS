@@ -155219,6 +155219,25 @@ because it decides whether someone starts.
 
 
 
+**The real extent, counted 2026-09-16 and larger than this entry first said.**
+The "45 sites" figure above covered `apps/explorer` and `gui/desktop` only.
+Across lane C it is **131 sites in 42 files**. Twenty-two are triaged: two
+defects fixed, one measured and recorded (`IconAction::OpenPath`), one
+withdrawn after reading the design around it (the run dialog, which already
+keeps exact bytes), and the rest cleared with reasons.
+
+So this is not a sweep to finish in a sitting, and it should not be attempted
+as one. The triaged files show why: the rate of genuine defects is roughly one
+in ten, the other nine each have a reason on the spot, and **one of the
+twenty-two was code I nearly broke by applying the pattern without reading
+around it.** A batch pass over 131 sites by someone confident in the pattern is
+the most likely way this tree acquires a real bug from this entry.
+
+The order worth taking, cheapest signal first: anything whose flattened text is
+used as a **map key or a filename** (that is where both real defects were),
+then anything compared for equality, then everything else, which is almost
+always display.
+
 **Do not sweep this blindly.** Two `env::var` calls in this lane are correct
 and must stay: `gui/compositor`'s `SLATE_DRM_CARD` parses to a `u32`, so a
 non-UTF-8 value is invalid input and is already refused with a message, and

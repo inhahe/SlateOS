@@ -313,6 +313,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     if png::is_png(bytes) {
         return png::decode_scaled(bytes, limits, max_w, max_h);
     }
+    if jpeg::is_jpeg(bytes) {
+        return jpeg::decode_scaled(bytes, limits, max_w, max_h);
+    }
     Err(ImageError::UnknownFormat)
 }
 

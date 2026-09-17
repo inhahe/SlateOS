@@ -910,6 +910,92 @@ fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> u32 {
     0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
+/// Decode, then shrink to fit `max_w` x `max_h`.
+///
+/// A JPEG *can* be scaled during reconstruction -- taking only the top-left
+/// corner of each block's coefficients yields a half, quarter or eighth-size
+/// image nearly free -- and that is worth doing one day. This does the plain
+/// thing instead: decode, then average. The crate's own contract allows it
+/// ("falls back to a full decode for formats that cannot be scaled during
+/// reconstruction"), and a thumbnailer that gets the right pixels slowly beats
+/// one that refuses the format.
+///
+/// # Errors
+///
+/// As [`decode`].
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "div_ceil and max keep the factor >= 1"
+)]
+pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> ImageResult<Image> {
+    let full = decode(bytes, limits)?;
+    if max_w == 0 || max_h == 0 || (full.width <= max_w && full.height <= max_h) {
+        // Already small enough. Inventing pixels is not what this is for.
+        return Ok(full);
+    }
+    // The larger of the two ratios, so the result fits inside both bounds.
+    let factor_w = full.width.div_ceil(max_w).max(1);
+    let factor_h = full.height.div_ceil(max_h).max(1);
+    let factor = factor_w.max(factor_h) as usize;
+    Ok(box_filter(&full, factor))
+}
+
+/// Average each `factor` x `factor` square down to one pixel.
+///
+/// Averaging rather than picking one pixel per square: dropping pixels turns a
+/// fine texture into moire, which in a thumbnail grid looks like a picture of
+/// something else. The cost is one pass over the image.
+// The sums are of four bytes at a time into a `u32` and the divisor is at least
+// one, so neither can overflow; the index arithmetic is `saturating_` and every
+// access through it is a `get`.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "byte sums into u32, divisor >= 1"
+)]
+fn box_filter(image: &Image, factor: usize) -> Image {
+    let factor = factor.max(1);
+    let src_w = image.width as usize;
+    let src_h = image.height as usize;
+    let out_w = src_w.div_ceil(factor).max(1);
+    let out_h = src_h.div_ceil(factor).max(1);
+    let mut pixels = vec![0u32; out_w.saturating_mul(out_h)];
+
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for dy in 0..factor {
+                for dx in 0..factor {
+                    let sx = ox.saturating_mul(factor).saturating_add(dx);
+                    let sy = oy.saturating_mul(factor).saturating_add(dy);
+                    if sx >= src_w || sy >= src_h {
+                        continue;
+                    }
+                    let Some(pixel) = image
+                        .pixels
+                        .get(sy.saturating_mul(src_w).saturating_add(sx))
+                    else {
+                        continue;
+                    };
+                    r = r.saturating_add((pixel >> 16) & 0xFF);
+                    g = g.saturating_add((pixel >> 8) & 0xFF);
+                    b = b.saturating_add(pixel & 0xFF);
+                    n = n.saturating_add(1);
+                }
+            }
+            let n = n.max(1);
+            let pixel = 0xFF00_0000 | ((r / n) << 16) | ((g / n) << 8) | (b / n);
+            if let Some(slot) = pixels.get_mut(oy.saturating_mul(out_w).saturating_add(ox)) {
+                *slot = pixel;
+            }
+        }
+    }
+    Image {
+        width: u32::try_from(out_w).unwrap_or(1),
+        height: u32::try_from(out_h).unwrap_or(1),
+        pixels,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // The same reasoning the crate's other test modules give: a test that
@@ -1075,6 +1161,64 @@ mod tests {
             "mean channel error {mean:.3} is a systematic bias, not rounding"
         );
         let _ = worst;
+    }
+
+    /// A thumbnail request gets a smaller picture, not a refusal.
+    ///
+    /// `decode_scaled` is what a thumbnailer calls -- `apps/explorer` reaches
+    /// the crate through it -- so a format wired into `decode` alone is a
+    /// format the file browser still cannot show.
+    #[test]
+    fn a_scaled_decode_shrinks_rather_than_refusing() {
+        let small = decode_scaled(FIXTURE, Limits::default(), 8, 8).expect("decodes");
+        assert!(
+            small.width <= 8 && small.height <= 8,
+            "got {}x{}",
+            small.width,
+            small.height
+        );
+        assert_eq!(small.pixels.len(), (small.width * small.height) as usize);
+        assert!(
+            small.pixels.iter().all(|p| p >> 24 == 0xFF),
+            "every pixel opaque"
+        );
+    }
+
+    /// A picture already smaller than the bounds comes back at its own size.
+    #[test]
+    fn a_small_picture_is_not_enlarged() {
+        let same = decode_scaled(FIXTURE, Limits::default(), 512, 512).expect("decodes");
+        assert_eq!((same.width, same.height), (24, 16), "no pixels invented");
+    }
+
+    /// Shrinking averages rather than dropping pixels.
+    ///
+    /// The factor has to straddle the fixture's 4-pixel checker squares for
+    /// this to mean anything: at a factor of exactly 4 each box lands inside
+    /// one square and averaging gives the same answer as sampling, which is
+    /// how the first version of this test managed to fail against correct
+    /// code. A factor of 5 crosses the boundaries, so a true average produces
+    /// mid-tones that no dropped-pixel scaler can.
+    #[test]
+    fn shrinking_averages_rather_than_sampling() {
+        let small = decode_scaled(FIXTURE, Limits::default(), 5, 4).expect("decodes");
+        let mid_tones = small
+            .pixels
+            .iter()
+            .filter(|p| {
+                let blue = *p & 0xFF;
+                (40..=215).contains(&blue)
+            })
+            .count();
+        assert!(
+            mid_tones > 0,
+            "every pixel is at one extreme, which is what sampling gives: {:?}",
+            small
+                .pixels
+                .iter()
+                .map(|p| p & 0xFF)
+                .collect::<alloc::vec::Vec<_>>()
+        );
     }
 
     /// A progressive JPEG is refused by name, not half-decoded.

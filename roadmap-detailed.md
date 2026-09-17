@@ -2302,11 +2302,11 @@ below and read the same kernel views, so the two can never disagree._
 ### 4.4 Other Core Applications
 
 - [ ] Photo/video viewer (not a separate app — file explorer's thumbnail view + preview panel)
-- [ ] Music player (custom Python/fastpy — see decision below)
+- [-] Music player (custom Python/fastpy — see decision below) *Exists as `apps/musicplayer` (4530 lines), verified 2026-09-16 — marked in progress rather than done because the bullet names a whole application and only its existence was checked, not its completeness.*
 - [ ] Settings/configuration UI (comprehensive — see Settings section below)
-- [ ] System information explorer (hardware + OS info + tuning params + mounted drives)
-- [ ] Backup program (snapshot-based, all common backup types)
-- [ ] Background file indexer (configurable paths/extensions, OFF by default)
+- [-] System information explorer (hardware + OS info + tuning params + mounted drives) *Exists as `apps/sysinfo` (4108 lines), verified 2026-09-16 — marked in progress rather than done because the bullet names a whole application and only its existence was checked, not its completeness.*
+- [-] Backup program (snapshot-based, all common backup types) *Exists as `apps/backup` (5116 lines), verified 2026-09-16 — marked in progress rather than done because the bullet names a whole application and only its existence was checked, not its completeness.*
+- [-] Background file indexer (configurable paths/extensions, OFF by default) *Exists as `apps/indexer` (3434 lines), verified 2026-09-16 — marked in progress rather than done because the bullet names a whole application and only its existence was checked, not its completeness.*
   - [ ] Full-text content indexing for searchable file types
   - [ ] Optional ML features (OFF by default, separate toggle from indexer itself):
     - [ ] Image captioning via BLIP (same model/approach as thumbsup2)
@@ -2316,7 +2316,7 @@ below and read the same kernel views, so the two can never disagree._
   - [ ] Search ranking: hybrid BM25 full-text + semantic cosine similarity, fused via Reciprocal Rank Fusion (same algorithm as thumbsup2)
   - [ ] Results cached by file content hash (re-index only changed files)
   - [ ] Exception to "no AI" rule — user must explicitly opt in, clearly labeled as ML feature
-- [ ] Event Viewer (custom Python/fastpy — replaces Windows Event Viewer with better UX)
+- [ ] Event Viewer (custom Python/fastpy — replaces Windows Event Viewer with better UX) *Checked 2026-09-16: there is no `apps/eventviewer`. `apps/logviewer` exists and is a different thing — a viewer for log files, not a structured event store — so it should not be mistaken for this bullet by the next reader grepping for "log".*
   - [ ] Hierarchical namespace browser (tree view, collapsible):
     - Top-level: system, process, security, network, storage, filesystem, service, driver, application
     - Expandable sub-namespaces (e.g., security → login, capability, user, auth)

@@ -607,6 +607,17 @@ impl ViewerState {
     /// old dimensions, format and EXIF. "This picture is `holiday.jpg`" is the
     /// one claim an image viewer makes, and it was false in exactly the case
     /// the user most needed to be told about.
+    /// The most bytes of picture file to read.
+    ///
+    /// Generous: a lossless photograph at the largest size the compositor can
+    /// store runs to tens of megabytes, and a caller has no way to ask for
+    /// more. The point is not the number but that there is one --
+    /// `std::fs::read` had no bound at all, so a file larger than memory was
+    /// read whole before `imagecodec::Limits` was consulted, and those limits
+    /// exist precisely to be checked "before any buffer the header describes
+    /// is allocated".
+    const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
+
     fn display_image(&mut self, path: &Path) -> bool {
         let filename = path
             .file_name()
@@ -619,8 +630,22 @@ impl ViewerState {
             ..ImageInfo::default()
         };
 
-        let data = match std::fs::read(path) {
-            Ok(data) => data,
+        let data = match safeio::read_capped(path, Self::MAX_PICTURE_BYTES) {
+            Ok(read) if read.truncated => {
+                // Refused rather than decoded: the tail of a picture is not
+                // optional. A JPEG's scan runs to the end of the file and a
+                // PNG's `IEND` is the last chunk, so a cut file decodes to
+                // something that is not what the photographer took -- and
+                // would be shown without a word about it.
+                self.image_info = info;
+                self.fail_with(format!(
+                    "{} is larger than {} MiB",
+                    path.display(),
+                    Self::MAX_PICTURE_BYTES / (1024 * 1024)
+                ));
+                return false;
+            }
+            Ok(read) => read.bytes,
             Err(e) => {
                 // Committed anyway: the user asked for *this* file, so the UI
                 // must name this file — but with no image and no borrowed
@@ -2563,6 +2588,35 @@ mod tests {
         let mut state = ViewerState::new(800.0, 600.0);
         assert!(!state.open_file(&dir.join("never-existed.png")));
         assert!(queued(&state).is_empty());
+    }
+
+    /// A picture larger than the cap is refused, not read whole.
+    ///
+    /// `imagecodec::Limits` documents that its bounds are checked against a
+    /// file's header, "before any buffer the header describes is allocated --
+    /// a limit applied afterwards is not a limit, it is a post-mortem". This
+    /// viewer used to read the file with `std::fs::read` and consult those
+    /// limits afterwards, so a file larger than memory was already in memory
+    /// before anything could object.
+    ///
+    /// The cap is deliberately far below the real one here, because a test
+    /// that had to write 256 MiB to prove a bound is a test nobody runs.
+    #[test]
+    fn a_picture_past_the_cap_is_refused_before_it_is_decoded() {
+        let guard = scratch("capped-read");
+        let dir = guard.dir().to_path_buf();
+        let path = dir.join("huge.png");
+        // Bigger than the cap this test uses, and a valid PNG besides, so the
+        // refusal cannot be mistaken for "not a picture".
+        let picture = imagecodec::testing::png_gradient(8, 8);
+        std::fs::write(&path, &picture).expect("write picture");
+
+        let read = safeio::read_capped(&path, 8).expect("the read itself succeeds");
+        assert!(
+            read.truncated,
+            "the cap did not bite, so this test proves nothing"
+        );
+        assert!(read.bytes.len() <= 8, "and it stopped where it said");
     }
 
     /// A format this system recognises but cannot decode must not be reported

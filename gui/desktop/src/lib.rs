@@ -194,38 +194,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// The file the pinned applications live in.
 const TASKBAR_CONFIG_NAME: &str = "taskbar";
 
-/// An axis-aligned rectangle in screen pixels.
-///
-/// Every clickable part of the shell is described by exactly one `*_rect`
-/// accessor, which both the renderer and the mouse handler call. The
-/// alternative — a literal in the draw call and a matching literal in the hit
-/// test — produces a button that is clickable somewhere other than where it is
-/// drawn as soon as one of the two is edited, and nothing about the code makes
-/// the second one obviously wrong.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Rect {
-    #[must_use]
-    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
-        Self { x, y, w, h }
-    }
-
-    /// Whether a point is inside.
-    ///
-    /// The left and top edges count as inside and the right and bottom edges as
-    /// outside, so two rectangles that share an edge cannot both claim the same
-    /// pixel — which is how a row of adjacent buttons must behave.
-    #[must_use]
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
-    }
-}
+/// The toolkit's rectangle, re-exported so the shell and its widgets share
+/// one. This crate declared an identical copy -- same four floats, same
+/// half-open `contains`, documented with the same reasoning -- until
+/// 2026-09-17. See `known-issues.md`
+/// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
+pub use guitk::frame::Rect;
 
 /// Paint a rectangle. A thin wrapper so a rect can be passed as one value
 /// rather than unpacked into four arguments at every call site.

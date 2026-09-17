@@ -155145,9 +155145,20 @@ useful content.
 
 | Group | Fields | Where |
 |---|---|---|
-| **A** | `x, y, w, h` (`f32`) | `gui/toolkit/src/frame.rs`, `gui/desktop/src/lib.rs` |
-| **B** | `x, y, width, height` (`f32`) | `apps/explorer/src/dropzone.rs`, `apps/ircclient`, `apps/photomanager`, `apps/podcast`, `apps/radio`, `apps/videoplayer`, `apps/whiteboard` |
-| **C** | `x, y: i32`, `width, height: u32` | `gui/compositor/src/lib.rs` |
+| **A** | `x, y, w, h` (`f32`) | `gui/toolkit/src/frame.rs`; ~~`gui/desktop/src/lib.rs`~~ **done 2026-09-17** |
+| **B** | `x, y, width, height` (`f32`) | ~~`apps/explorer/src/dropzone.rs`~~ **done 2026-09-17**; `apps/ircclient`, `apps/photomanager`, `apps/podcast`, `apps/radio`, `apps/videoplayer`, `apps/whiteboard` |
+| **C** | `x, y: i32`, `width, height: u32` | `gui/compositor/src/lib.rs` — **correct as it is, do not sweep** |
+
+**Two down, six to go, and the two were different jobs.** `apps/explorer` was
+group B: 73 field accesses renamed, each at the line and column the compiler
+named, because a regex would also have caught `.width` on thumbnails and
+surfaces. `gui/desktop` was group A: the same spelling already, so a pure type
+swap with no renames at all -- and worth checking rather than assuming, because
+its `contains` carried documented half-open semantics. The toolkit's turned out
+to document the identical rule in almost the same words, so the swap was
+behaviour-preserving. Had they disagreed on which edge belongs to which
+rectangle, an identical-looking signature would have silently moved every
+button's hit region by one pixel.
 
 **Group C is not a duplicate and must not be swept in.** A compositor rectangle
 is device pixels -- integers, and an extent that cannot be negative. A layout

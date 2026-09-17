@@ -485,11 +485,20 @@ pub struct SettingsState {
     ///
     /// A second modal rather than a variant of the first: the two share no
     /// state, answer different events and are never open together. What they
-    /// do share is the rule at the top of `dispatch_event` DASH a modal answers
+    /// do share is the rule at the top of `dispatch_event` — a modal answers
     /// first, because on this window every stray keystroke is a setting.
     pub color_dialog: Option<ColorPickerDialog>,
     /// Where the colour picker's answer goes.
     color_is_for: ColorPurpose,
+    /// The glob being typed into the exclusion field, before it is added.
+    ///
+    /// Held separately from the saved list so that typing is not a change to
+    /// the settings: a draft that wrote itself into `wallpaper.exclude` on
+    /// every keystroke would leave `holiday`, `holiday-`, `holiday-2` and the
+    /// rest behind in the file, each of them a pattern the user never meant.
+    pub exclusion_draft: String,
+    /// Which place on the page typing goes to, if any.
+    focused_field: Option<FieldId>,
     /// What the open picker is being used for.
     ///
     /// `DialogAction::Selected` arrives with a path and nothing else, so the
@@ -957,6 +966,32 @@ impl SettingsState {
     }
 
     /// Give the picker an event; `None` when there is no picker up.
+    /// Add what has been typed to the exclusion list, if it is worth adding.
+    ///
+    /// Trimmed, because a pattern with a space at one end matches nothing and
+    /// looks in the list exactly like one that would. Refused when empty for
+    /// the same reason the reader drops empty lines, and when already present:
+    /// a list holding one pattern twice excludes nothing extra and gives the
+    /// user two rows to remove before the picture comes back.
+    fn add_exclusion(&mut self) {
+        let pattern = self.exclusion_draft.trim().to_string();
+        if pattern.is_empty() {
+            return;
+        }
+        if !self
+            .appearance
+            .settings
+            .wallpaper_exclusions
+            .contains(&pattern)
+        {
+            self.appearance.settings.wallpaper_exclusions.push(pattern);
+        }
+        // Cleared either way. The draft is gone from the field, which is what
+        // says the press was received; leaving a duplicate sitting there would
+        // read as a press that did not land.
+        self.exclusion_draft.clear();
+    }
+
     /// Give the colour picker an event, and act on what comes back.
     ///
     /// A confirmed colour is two settings, not one: the colour itself, and
@@ -1239,6 +1274,8 @@ impl SettingsState {
             dialog: None,
             color_dialog: None,
             color_is_for: ColorPurpose::Accent,
+            exclusion_draft: String::new(),
+            focused_field: None,
             picker_is_for: PickerPurpose::Wallpaper,
 
             // Display defaults
@@ -1961,6 +1998,12 @@ const SECTION_HEADER_HEIGHT: f32 = 36.0;
 /// Height of a button drawn by [`render_button`].
 const BUTTON_HEIGHT: f32 = 32.0;
 
+/// How wide a text field is. Wider than a button, because what goes in one is
+/// a phrase rather than a word: a glob like `holiday-2019-*.jpg` is the point
+/// of the exclusion list, and a field that clips it while typing hides the
+/// mistake the user is about to make.
+const FIELD_WIDTH: f32 = 260.0;
+
 /// How far below a row's top edge a button inside that row is drawn.
 const BUTTON_ROW_INSET_Y: f32 = 6.0;
 
@@ -2166,6 +2209,20 @@ enum SelectId {
     Account,
     PointerSize,
     AccountPicture,
+    /// One saved exclusion pattern, by position. Selecting it removes it.
+    ExclusionPattern,
+}
+
+/// A place on a page where typing goes.
+///
+/// The sidebar's search box predates this and keeps its own `search_focused`
+/// flag; it is not a page row and cannot be one, since it is drawn outside the
+/// scrolling content. Everything on a *page* that accepts typing goes through
+/// here, so that "what has the keyboard" is one question with one answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldId {
+    /// The glob being typed, before it is added to the exclusion list.
+    ExclusionDraft,
 }
 
 /// A continuously-valued setting the pointer can drag along a track.
@@ -2273,6 +2330,7 @@ enum ButtonId {
     /// Open the picker and choose a folder to rotate wallpapers from.
     ChooseRotationFolder,
     ChooseLoginImage,
+    AddExclusion,
     /// Stop rotating and go back to a single picture.
     ClearRotation,
 }
@@ -2355,6 +2413,8 @@ enum PickerPurpose {
 /// What a click on a page landed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowHit {
+    /// A click on a place where typing goes.
+    Focus(FieldId),
     Dropdown(DropdownId),
     Toggle(ToggleId),
     Pill(PillId, usize),
@@ -2599,6 +2659,90 @@ trait PageSink {
             render_setting_row(tree, pal, x, y, label, 0.0);
         });
         self.button_at(CONTROL_COLUMN_DX, BUTTON_ROW_INSET_Y, button, color, what);
+        self.advance(ITEM_HEIGHT);
+    }
+
+    /// A row whose control is a place to type.
+    ///
+    /// Drawn like the other controls — label on the left, control in the
+    /// same column — so it reads as one of them rather than as a form dropped
+    /// into the page. The caret is drawn only when focused, because a caret in
+    /// an unfocused field promises that typing will land there.
+    fn text_field_row(
+        &mut self,
+        label: &str,
+        id: FieldId,
+        value: &str,
+        placeholder: &str,
+        focused: bool,
+    ) {
+        let pal = &self.palette();
+        self.draw(|tree, x, y| {
+            render_setting_row(tree, pal, x, y, label, 0.0);
+        });
+        let (x, y) = (self.x(), self.y());
+        self.hit_rect(
+            x + CONTROL_COLUMN_DX,
+            y + BUTTON_ROW_INSET_Y,
+            FIELD_WIDTH,
+            BUTTON_HEIGHT,
+            RowHit::Focus(id),
+        );
+        let text = value.to_string();
+        let hint = placeholder.to_string();
+        self.draw(move |tree, x, y| {
+            let fx = x + CONTROL_COLUMN_DX;
+            let fy = y + BUTTON_ROW_INSET_Y;
+            fill_rounded(tree, fx, fy, FIELD_WIDTH, BUTTON_HEIGHT, pal.surface0, 6.0);
+            if focused {
+                // An underline and a caret rather than a different fill, so the
+                // text reads identically whether or not the field has the
+                // keyboard -- a field that changes colour when focused makes
+                // the *text* look like it changed.
+                fill_rounded(
+                    tree,
+                    fx,
+                    fy + BUTTON_HEIGHT - 2.0,
+                    FIELD_WIDTH,
+                    2.0,
+                    pal.accent,
+                    1.0,
+                );
+                // Clamped to the field: a caret past the right edge would sit
+                // on the page beside a field whose text is being clipped.
+                let caret = (fx + 8.0 + text::width(&text, 13.0)).min(fx + FIELD_WIDTH - 10.0);
+                fill_rounded(
+                    tree,
+                    caret,
+                    fy + 6.0,
+                    1.5,
+                    BUTTON_HEIGHT - 12.0,
+                    pal.accent,
+                    0.5,
+                );
+            }
+            if text.is_empty() {
+                text_clipped(
+                    tree,
+                    fx + 8.0,
+                    fy + 7.0,
+                    &hint,
+                    pal.subtext0,
+                    13.0,
+                    FIELD_WIDTH - 16.0,
+                );
+            } else {
+                text_clipped(
+                    tree,
+                    fx + 8.0,
+                    fy + 7.0,
+                    &text,
+                    pal.text,
+                    13.0,
+                    FIELD_WIDTH - 16.0,
+                );
+            }
+        });
         self.advance(ITEM_HEIGHT);
     }
 
@@ -3425,6 +3569,41 @@ impl SettingsState {
                 ToggleId::RotationShuffle,
                 self.appearance.settings.wallpaper_shuffle,
             );
+            // The patterns already saved, each with a way to take it back.
+            // `design.txt` line 1246 asks that the user "exclude certain
+            // desktops if they want"; matched against the file name, since a
+            // rotation reads one folder.
+            for (idx, pattern) in self
+                .appearance
+                .settings
+                .wallpaper_exclusions
+                .iter()
+                .enumerate()
+            {
+                s.button_row(
+                    pattern,
+                    "Remove",
+                    pal.surface1,
+                    Some(RowHit::Select(SelectId::ExclusionPattern, idx)),
+                );
+            }
+            s.text_field_row(
+                "Skip pictures named",
+                FieldId::ExclusionDraft,
+                &self.exclusion_draft,
+                "*.gif",
+                self.focused_field == Some(FieldId::ExclusionDraft),
+            );
+            // Offered only with something to add: a button that does nothing
+            // for an empty field is one a user reads as broken.
+            if !self.exclusion_draft.trim().is_empty() {
+                s.button_row(
+                    "",
+                    "Add",
+                    pal.accent,
+                    Some(RowHit::Press(ButtonId::AddExclusion)),
+                );
+            }
             s.button_row(
                 "Stop rotating",
                 "Clear",
@@ -5195,6 +5374,38 @@ impl SettingsState {
             return EventResult::Ignored;
         }
 
+        // A focused field takes the keyboard before the page does, for the
+        // reason the modals do: on this window an unclaimed keystroke is a
+        // setting. Ordered before the sidebar's search box because that one
+        // is reached with Ctrl+F, which still works — `types_text` is false
+        // for a chord.
+        if self.focused_field == Some(FieldId::ExclusionDraft) {
+            match evt.key {
+                Key::Backspace => {
+                    self.exclusion_draft.pop();
+                    return EventResult::Consumed;
+                }
+                Key::Escape => {
+                    // Escape abandons the draft rather than merely unfocusing:
+                    // a half-typed glob left in the field would be added by the
+                    // next press of a button the user thought was unrelated.
+                    self.exclusion_draft.clear();
+                    self.focused_field = None;
+                    return EventResult::Consumed;
+                }
+                Key::Enter => {
+                    self.add_exclusion();
+                    return EventResult::Consumed;
+                }
+                _ => {
+                    if evt.types_text() {
+                        self.exclusion_draft.extend(evt.typed());
+                        return EventResult::Consumed;
+                    }
+                }
+            }
+        }
+
         // Close dropdown on Escape
         if evt.key == Key::Escape {
             if self.open_dropdown.is_some() {
@@ -5379,7 +5590,15 @@ impl SettingsState {
     /// not say what the press meant. Even they do not do their own arithmetic —
     /// the track is asked of the page, in [`drag_slider_to`](Self::drag_slider_to).
     fn apply_row_hit(&mut self, hit: RowHit, mx: f32) {
+        // Clicking a field aims the keyboard at it; clicking any other control
+        // takes it away again. Without this the field keeps the keyboard for
+        // ever, and a user who focused it, clicked a switch and carried on
+        // typing would be filling in a glob they could no longer see.
+        if !matches!(hit, RowHit::Focus(_)) {
+            self.focused_field = None;
+        }
         match hit {
+            RowHit::Focus(id) => self.focused_field = Some(id),
             RowHit::Dropdown(id) => self.show_dropdown(id),
             RowHit::Slider(id) => {
                 // A press both jumps the handle to the pointer and takes hold
@@ -5456,6 +5675,12 @@ impl SettingsState {
             }
             RowHit::Press(ButtonId::ChooseRotationFolder) => self.open_rotation_folder_dialog(),
             RowHit::Press(ButtonId::ChooseLoginImage) => self.open_login_image_dialog(),
+            RowHit::Press(ButtonId::AddExclusion) => self.add_exclusion(),
+            RowHit::Select(SelectId::ExclusionPattern, idx) => {
+                if idx < self.appearance.settings.wallpaper_exclusions.len() {
+                    self.appearance.settings.wallpaper_exclusions.remove(idx);
+                }
+            }
             RowHit::Press(ButtonId::ClearRotation) => {
                 self.appearance.settings.wallpaper_folder = None;
             }
@@ -7250,6 +7475,182 @@ mod tests {
                 "picking a colour for the greeter changed the desktop's accent"
             );
         });
+    }
+
+    /// A page showing the rotation controls, with a folder already chosen.
+    fn rotation_page() -> SettingsState {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.appearance.settings.wallpaper_folder =
+            Some(std::path::PathBuf::from("/home/u/Pictures"));
+        state
+    }
+
+    /// Type `text` into whatever field has the keyboard.
+    fn type_text(state: &mut SettingsState, text: &str) {
+        for ch in text.chars() {
+            state.handle_event(&Event::Key(KeyEvent {
+                // The virtual key code is not what a text field reads --
+                // `typed()` yields the characters in `text`, so that a layout
+                // this build has never heard of still types. `Unknown` is
+                // therefore the honest code for "some key produced this
+                // character", and using `Key::A` for every letter would be
+                // asserting something about the keyboard that is not true.
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: ch.to_string(),
+            }));
+        }
+    }
+
+    /// **A pattern typed into the field reaches the setting the shell reads.**
+    ///
+    /// `wallpaper.exclude` has been read by the shell and applied by
+    /// `Session::is_excluded` since 2026-09-17; until this control existed the
+    /// only way to put a pattern there was to edit the file by hand.
+    #[test]
+    fn a_typed_pattern_joins_the_exclusion_list() {
+        with_scratch_config("settings-exclusion-add", |_root| {
+            let mut state = rotation_page();
+            let (x, y) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft))
+                .expect("no field to type a pattern into");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            type_text(&mut state, "*.gif");
+            state.handle_event(&Event::Key(KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }));
+
+            assert_eq!(
+                state.appearance.settings.wallpaper_exclusions,
+                vec!["*.gif".to_string()],
+                "the pattern never reached the setting the shell reads"
+            );
+            assert!(
+                state.exclusion_draft.is_empty(),
+                "the field still holds the pattern it just added"
+            );
+        });
+    }
+
+    /// The same pattern twice is one pattern.
+    ///
+    /// A list holding it twice excludes nothing extra and gives the user two
+    /// rows to remove before the picture comes back.
+    #[test]
+    fn adding_a_pattern_twice_adds_it_once() {
+        with_scratch_config("settings-exclusion-dup", |_root| {
+            let mut state = rotation_page();
+            state.exclusion_draft = "*.gif".to_string();
+            state.add_exclusion();
+            state.exclusion_draft = "  *.gif  ".to_string();
+            state.add_exclusion();
+
+            assert_eq!(
+                state.appearance.settings.wallpaper_exclusions,
+                vec!["*.gif".to_string()],
+                "a trimmed duplicate was stored as a second pattern"
+            );
+        });
+    }
+
+    /// An empty field adds nothing, and offers no button that would.
+    #[test]
+    fn an_empty_pattern_is_not_a_pattern() {
+        with_scratch_config("settings-exclusion-empty", |_root| {
+            let mut state = rotation_page();
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::AddExclusion)).is_none(),
+                "an Add button was drawn with nothing to add"
+            );
+
+            state.exclusion_draft = "   ".to_string();
+            state.add_exclusion();
+            assert!(
+                state.appearance.settings.wallpaper_exclusions.is_empty(),
+                "whitespace was stored as a pattern"
+            );
+        });
+    }
+
+    /// A saved pattern can be taken back.
+    #[test]
+    fn a_saved_pattern_can_be_removed() {
+        with_scratch_config("settings-exclusion-remove", |_root| {
+            let mut state = rotation_page();
+            state.appearance.settings.wallpaper_exclusions =
+                vec!["*.gif".to_string(), "draft-*".to_string()];
+
+            let (x, y) = center_of(&state, RowHit::Select(SelectId::ExclusionPattern, 0))
+                .expect("no way to remove the first pattern");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            assert_eq!(
+                state.appearance.settings.wallpaper_exclusions,
+                vec!["draft-*".to_string()],
+                "removing the first pattern removed the wrong one, or none"
+            );
+        });
+    }
+
+    /// **Clicking another control takes the keyboard back from the field.**
+    ///
+    /// Without this the field keeps it for ever: a user who typed a glob,
+    /// clicked the shuffle switch and carried on typing would be filling in a
+    /// pattern they could no longer see. Worth its own test because the first
+    /// version of this editor had the comment describing the behaviour and not
+    /// the line implementing it.
+    #[test]
+    fn clicking_another_control_takes_the_keyboard_back() {
+        with_scratch_config("settings-exclusion-focus", |_root| {
+            let mut state = rotation_page();
+            let (x, y) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            type_text(&mut state, "ab");
+            assert_eq!(state.exclusion_draft, "ab", "the field did not take typing");
+
+            let (tx, ty) = center_of(&state, RowHit::Toggle(ToggleId::RotationShuffle))
+                .expect("no shuffle switch to click");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: tx,
+                y: ty,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            type_text(&mut state, "cd");
+            assert_eq!(
+                state.exclusion_draft, "ab",
+                "typing went on landing in a field the user had clicked away from"
+            );
+        });
+    }
+
+    /// The exclusion controls wait for a folder, like the rest of the section.
+    #[test]
+    fn the_exclusion_field_waits_for_a_folder() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.appearance.settings.wallpaper_folder = None;
+        assert!(
+            center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).is_none(),
+            "a field for excluding pictures from a rotation that is not running"
+        );
     }
 
     /// The Choose button appears with a picture to choose, and not otherwise.

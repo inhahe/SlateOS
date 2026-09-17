@@ -1671,7 +1671,7 @@ impl<T: Transport> ShellSession<T> {
 
         let pictures = Self::pictures_in(folder);
         self.wallpaper.set_slideshow(
-            &folder.to_string_lossy(),
+            folder,
             self.shell.appearance.wallpaper_interval_secs,
             self.shell.appearance.wallpaper_shuffle,
         );
@@ -1690,16 +1690,15 @@ impl<T: Transport> ShellSession<T> {
     /// wallpaper is not the place to report a missing directory, and an empty
     /// slideshow leaves the desktop on its plain background, which is the
     /// honest picture of "there is nothing to show".
-    fn pictures_in(folder: &Path) -> Vec<String> {
+    fn pictures_in(folder: &Path) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(folder) else {
             return Vec::new();
         };
-        let mut out: Vec<String> = entries
+        let mut out: Vec<PathBuf> = entries
             .flatten()
             .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
             .map(|e| e.path())
             .filter(|p| crate::wallpaper::is_picture(p))
-            .map(|p| p.to_string_lossy().into_owned())
             .collect();
         out.sort_unstable();
         out

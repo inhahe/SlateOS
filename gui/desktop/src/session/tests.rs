@@ -2903,11 +2903,12 @@ fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
     // wallpaper would refuse every slide after the first.
     let (mut session, desktop, _turn) = session();
     let background = session.background().window();
-    session.wallpaper_mut().set_slideshow("/pics", 60, false);
-    session.wallpaper_mut().populate_slideshow_paths(vec![
-        fixture("rgb8").display().to_string(),
-        fixture("gray8").display().to_string(),
-    ]);
+    session
+        .wallpaper_mut()
+        .set_slideshow(std::path::Path::new("/pics"), 60, false);
+    session
+        .wallpaper_mut()
+        .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
     let first = session.wallpaper_mut().current_image_id();
     session.paint_background().expect("the harness refused");
 

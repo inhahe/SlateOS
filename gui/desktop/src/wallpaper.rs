@@ -9,7 +9,7 @@
 //!
 //! ```ignore
 //! let mut wp = WallpaperManager::new();
-//! wp.set_slideshow("/wallpapers", 300, true);
+//! wp.set_slideshow(Path::new("/wallpapers"), 300, true);
 //!
 //! // Each frame:
 //! let changed = wp.tick(current_time_secs);
@@ -313,7 +313,15 @@ const HISTORY_CAPACITY: usize = 20;
 #[derive(Clone, Debug)]
 pub struct SlideshowState {
     /// Ordered list of image paths in the slideshow directory.
-    paths: Vec<String>,
+    /// The pictures, as paths.
+    ///
+    /// These were `String` while nothing outside the tests could reach a
+    /// slideshow, and converting unreachable code would have been making dead
+    /// code byte-correct. Wiring rotation to `appearance.yaml` on 2026-09-17
+    /// gave it a consumer, and the shell had to flatten every path with
+    /// `to_string_lossy` to call in -- which the lossy-decode gate refused, on
+    /// the same day and for the same reason it exists.
+    paths: Vec<PathBuf>,
     /// A permutation of `0..paths.len()`: the order images are shown in.
     /// The identity permutation until `shuffle_with_seed` is called.
     order: Vec<usize>,
@@ -325,7 +333,7 @@ pub struct SlideshowState {
 
 impl SlideshowState {
     /// Create a new slideshow state from a list of image paths.
-    pub fn new(paths: Vec<String>) -> Self {
+    pub fn new(paths: Vec<PathBuf>) -> Self {
         let order = (0..paths.len()).collect();
         Self {
             paths,
@@ -336,7 +344,7 @@ impl SlideshowState {
     }
 
     /// The image paths, in directory order.
-    pub fn paths(&self) -> &[String] {
+    pub fn paths(&self) -> &[PathBuf] {
         &self.paths
     }
 
@@ -376,7 +384,7 @@ impl SlideshowState {
         // compiling beside a caller that now speaks in paths.
         self.paths
             .get(self.effective_index()?)
-            .map(|p| Path::new(p.as_str()))
+            .map(PathBuf::as_path)
     }
 
     /// Advance to the next image. Returns `true` if the image changed.
@@ -610,7 +618,7 @@ pub struct WallpaperConfig {
     /// became an `Option` for exactly this reason.
     pub color: Option<Color>,
     /// Slideshow directory path.
-    pub slideshow_dir: String,
+    pub slideshow_dir: PathBuf,
     /// Slideshow interval in seconds.
     pub slideshow_interval_secs: u64,
     /// Whether slideshow order is shuffled.
@@ -631,7 +639,7 @@ impl Default for WallpaperConfig {
             // field must be able to say "ask one later" rather than name a
             // value now.
             color: None,
-            slideshow_dir: String::new(),
+            slideshow_dir: PathBuf::new(),
             slideshow_interval_secs: 300,
             slideshow_shuffle: false,
             fit: ImageFit::Fill,
@@ -771,9 +779,9 @@ impl WallpaperManager {
         self.config.fit = fit;
     }
 
-    pub fn set_slideshow(&mut self, directory: &str, interval_secs: u64, shuffle: bool) {
+    pub fn set_slideshow(&mut self, directory: &Path, interval_secs: u64, shuffle: bool) {
         self.config.mode = WallpaperMode::Slideshow;
-        self.config.slideshow_dir = directory.to_string();
+        self.config.slideshow_dir = directory.to_path_buf();
         self.config.slideshow_interval_secs = interval_secs.max(1);
         self.config.slideshow_shuffle = shuffle;
         // Start with an empty slideshow -- the caller populates paths.
@@ -800,7 +808,7 @@ impl WallpaperManager {
     /// Replaying a rotation the user liked is still possible and is still one
     /// decision rather than two: construct with [`Self::with_seed`] and the
     /// shuffle follows from it.
-    pub fn populate_slideshow_paths(&mut self, paths: Vec<String>) {
+    pub fn populate_slideshow_paths(&mut self, paths: Vec<PathBuf>) {
         let mut state = SlideshowState::new(paths);
         if self.config.slideshow_shuffle {
             // Drawn inside the branch so populating an explicitly-unshuffled
@@ -1135,8 +1143,11 @@ impl WallpaperManager {
             ));
         }
 
-        if !self.config.slideshow_dir.is_empty() {
-            out.push_str(&format!("slideshow_dir={}\n", self.config.slideshow_dir));
+        if !self.config.slideshow_dir.as_os_str().is_empty() {
+            out.push_str(&format!(
+                "slideshow_dir={}\n",
+                pathcodec::encode_path(&self.config.slideshow_dir)
+            ));
         }
         out.push_str(&format!(
             "slideshow_interval={}\n",
@@ -1179,7 +1190,7 @@ impl WallpaperManager {
         let mut fit: Option<ImageFit> = None;
         let mut color: Option<Color> = None;
         let mut image_path = PathBuf::new();
-        let mut slideshow_dir = String::new();
+        let mut slideshow_dir = PathBuf::new();
         let mut slideshow_interval: Option<u64> = None;
         let mut slideshow_shuffle: Option<bool> = None;
         let mut dt_dawn: Option<Color> = None;
@@ -1210,7 +1221,7 @@ impl WallpaperManager {
                 }
                 "color" => color = Some(parse_hex_color(val)?),
                 "image_path" => image_path = pathcodec::decode_path(val),
-                "slideshow_dir" => slideshow_dir = val.to_string(),
+                "slideshow_dir" => slideshow_dir = pathcodec::decode_path(val),
                 "slideshow_interval" => {
                     slideshow_interval = Some(val.parse::<u64>().map_err(|_| {
                         ConfigError::InvalidValue(format!("slideshow_interval: {val}"))
@@ -1757,7 +1768,7 @@ mod tests {
             assert_eq!(state.effective_index(), Some(image));
             assert_eq!(
                 state.current_path(),
-                state.paths().get(image).map(|p| Path::new(p.as_str()))
+                state.paths().get(image).map(PathBuf::as_path)
             );
             state.advance();
         }
@@ -1769,7 +1780,7 @@ mod tests {
     fn a_shuffle_is_a_permutation_so_every_image_is_shown_exactly_once() {
         // A "shuffle" that repeated or dropped an image would still pass the
         // old `assert_ne!(shuffle_order, sequential)` test.
-        let paths: Vec<String> = (0..24).map(|i| format!("{i}.png")).collect();
+        let paths: Vec<PathBuf> = (0..24).map(|i| PathBuf::from(format!("{i}.png"))).collect();
         for seed in 0..16u64 {
             let mut state = SlideshowState::new(paths.clone());
             state.shuffle_with_seed(seed);
@@ -1786,7 +1797,7 @@ mod tests {
     }
 
     /// Walk a shuffled slideshow once and report the order it showed.
-    fn shown_order(paths: &[String], seed: u64) -> Vec<usize> {
+    fn shown_order(paths: &[PathBuf], seed: u64) -> Vec<usize> {
         let mut state = SlideshowState::new(paths.to_vec());
         state.shuffle_with_seed(seed);
         (0..paths.len())
@@ -1804,7 +1815,7 @@ mod tests {
         // system generator: a rotation the user liked is one they can get
         // back. If the shuffle ever picked up ambient state — a clock, an
         // address, a global counter — this is the test that would notice.
-        let paths: Vec<String> = (0..20).map(|i| format!("{i}.png")).collect();
+        let paths: Vec<PathBuf> = (0..20).map(|i| PathBuf::from(format!("{i}.png"))).collect();
         for seed in [0, 1, 42, u64::MAX] {
             assert_eq!(
                 shown_order(&paths, seed),
@@ -1825,7 +1836,9 @@ mod tests {
         // test cannot flake.
         const IMAGES: usize = 10;
         const SEEDS: u64 = 2000;
-        let paths: Vec<String> = (0..IMAGES).map(|i| format!("{i}.png")).collect();
+        let paths: Vec<PathBuf> = (0..IMAGES)
+            .map(|i| PathBuf::from(format!("{i}.png")))
+            .collect();
 
         let mut firsts = [0u32; IMAGES];
         for seed in 0..SEEDS {
@@ -2056,9 +2069,9 @@ mod tests {
     #[test]
     fn manager_set_slideshow() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/wallpapers", 60, true);
+        mgr.set_slideshow(Path::new("/wallpapers"), 60, true);
         assert_eq!(*mgr.mode(), WallpaperMode::Slideshow);
-        assert_eq!(mgr.config.slideshow_dir, "/wallpapers");
+        assert_eq!(mgr.config.slideshow_dir, Path::new("/wallpapers"));
         assert_eq!(mgr.config.slideshow_interval_secs, 60);
         assert!(mgr.config.slideshow_shuffle);
         assert!(mgr.slideshow.is_some());
@@ -2122,7 +2135,7 @@ mod tests {
     #[test]
     fn a_rotation_advances_when_time_passes() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/pics", 30, false);
+        mgr.set_slideshow(Path::new("/pics"), 30, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
 
         let first = mgr.current_image_path().map(Path::to_path_buf);
@@ -2149,7 +2162,7 @@ mod tests {
     #[test]
     fn a_zero_interval_is_clamped() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/pics", 0, false);
+        mgr.set_slideshow(Path::new("/pics"), 0, false);
         assert!(
             mgr.config.slideshow_interval_secs >= 1,
             "a zero interval would decode a new picture every frame"
@@ -2170,7 +2183,7 @@ mod tests {
         mgr.set_solid_color(Color::from_hex(0x102030));
         let after_choice = mgr.history.len();
 
-        mgr.set_slideshow("/wp", 10, false);
+        mgr.set_slideshow(Path::new("/wp"), 10, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
         assert_eq!(
             mgr.history.len(),
@@ -2203,7 +2216,7 @@ mod tests {
     #[test]
     fn stepping_by_hand_does_enter_the_history() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/wp", 10, false);
+        mgr.set_slideshow(Path::new("/wp"), 10, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into()]);
         let before = mgr.history.len();
 
@@ -2217,7 +2230,7 @@ mod tests {
     #[test]
     fn tick_slideshow_advances_on_interval() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/wp", 10, false);
+        mgr.set_slideshow(Path::new("/wp"), 10, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
 
         // First tick initialises the timestamp.
@@ -2241,7 +2254,7 @@ mod tests {
     #[test]
     fn next_previous_wallpaper() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/wp", 300, false);
+        mgr.set_slideshow(Path::new("/wp"), 300, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
 
         assert_eq!(mgr.current_image_path(), Some(Path::new("a.png")));
@@ -2259,7 +2272,7 @@ mod tests {
     #[test]
     fn random_wallpaper_changes_image() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/wp", 300, false);
+        mgr.set_slideshow(Path::new("/wp"), 300, false);
         mgr.populate_slideshow_paths(vec![
             "a.png".into(),
             "b.png".into(),
@@ -2281,8 +2294,8 @@ mod tests {
         // not divide the generator's range. With five wallpapers and forty
         // jumps off one generator, every one of them should come up.
         let mut mgr = WallpaperManager::with_seed(0x9E37_79B9_7F4A_7C15);
-        mgr.set_slideshow("/wp", 300, false);
-        let paths: Vec<String> = (0..5).map(|i| format!("{i}.png")).collect();
+        mgr.set_slideshow(Path::new("/wp"), 300, false);
+        let paths: Vec<PathBuf> = (0..5).map(|i| PathBuf::from(format!("{i}.png"))).collect();
         mgr.populate_slideshow_paths(paths.clone());
 
         let mut seen: Vec<String> = Vec::new();
@@ -2299,7 +2312,10 @@ mod tests {
                 seen.push(showing);
             }
         }
-        let missing: Vec<&String> = paths.iter().filter(|p| !seen.contains(p)).collect();
+        let missing: Vec<&PathBuf> = paths
+            .iter()
+            .filter(|p| !seen.contains(&p.display().to_string()))
+            .collect();
         assert!(
             missing.is_empty(),
             "40 random jumps never landed on {missing:?}"
@@ -2317,9 +2333,9 @@ mod tests {
         let mut from_system = WallpaperManager::new();
         let mut from_fallback = WallpaperManager::with_seed(FALLBACK_SEED);
         let mut from_literal = WallpaperManager::with_seed(42);
-        let paths: Vec<String> = (0..7).map(|i| format!("{i}.png")).collect();
+        let paths: Vec<PathBuf> = (0..7).map(|i| PathBuf::from(format!("{i}.png"))).collect();
         for mgr in [&mut from_system, &mut from_fallback, &mut from_literal] {
-            mgr.set_slideshow("/wp", 300, false);
+            mgr.set_slideshow(Path::new("/wp"), 300, false);
             mgr.populate_slideshow_paths(paths.clone());
         }
 
@@ -2354,9 +2370,11 @@ mod tests {
         // seven of the eight call sites passed, so "two managers differ"
         // would not have failed on it. `with_seed(0)` stands in for the
         // desktop shell that had not been written yet.
-        let order = |mgr: &mut WallpaperManager| -> Vec<String> {
-            mgr.set_slideshow("/wp", 300, true);
-            mgr.populate_slideshow_paths((0..12).map(|i| format!("{i}.png")).collect());
+        let order = |mgr: &mut WallpaperManager| -> Vec<PathBuf> {
+            mgr.set_slideshow(Path::new("/wp"), 300, true);
+            mgr.populate_slideshow_paths(
+                (0..12).map(|i| PathBuf::from(format!("{i}.png"))).collect(),
+            );
             let Some(state) = mgr.slideshow.as_ref() else {
                 panic!("a populated slideshow is always present");
             };
@@ -2392,8 +2410,10 @@ mod tests {
         // would silently consume one draw.
         let jumps = |shuffle: bool| -> Vec<usize> {
             let mut mgr = WallpaperManager::with_seed(0xA11C_E5EE_D123_4567);
-            mgr.set_slideshow("/wp", 300, shuffle);
-            mgr.populate_slideshow_paths((0..9).map(|i| format!("{i}.png")).collect());
+            mgr.set_slideshow(Path::new("/wp"), 300, shuffle);
+            mgr.populate_slideshow_paths(
+                (0..9).map(|i| PathBuf::from(format!("{i}.png"))).collect(),
+            );
             (0..10)
                 .map(|_| {
                     mgr.random_wallpaper();
@@ -2414,10 +2434,10 @@ mod tests {
         // `random_wallpaper` used to re-derive "which image is showing"
         // inline, with a different fallback from `effective_index`, so the
         // history could name an image other than the one on screen.
-        let paths: Vec<String> = (0..7).map(|i| format!("{i}.png")).collect();
+        let paths: Vec<PathBuf> = (0..7).map(|i| PathBuf::from(format!("{i}.png"))).collect();
         for seed in 0..24u64 {
             let mut mgr = WallpaperManager::with_seed(seed);
-            mgr.set_slideshow("/wp", 300, true);
+            mgr.set_slideshow(Path::new("/wp"), 300, true);
             mgr.populate_slideshow_paths(paths.clone());
             mgr.random_wallpaper();
 
@@ -2437,7 +2457,7 @@ mod tests {
     #[test]
     fn a_random_jump_on_an_empty_slideshow_changes_nothing() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/wp", 300, false);
+        mgr.set_slideshow(Path::new("/wp"), 300, false);
         mgr.populate_slideshow_paths(Vec::new());
         let id_before = mgr.current_image_id();
         let history_before = mgr.history.len();
@@ -2516,7 +2536,7 @@ mod tests {
     #[test]
     fn render_slideshow_without_images_still_renders() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/empty", 300, false);
+        mgr.set_slideshow(Path::new("/empty"), 300, false);
         // No paths populated -- should still render a background color.
         let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         assert!(!cmds.is_empty());
@@ -2531,8 +2551,8 @@ mod tests {
         // slideshow renders pictures at all. This is the other half: with a
         // path populated, the underlay must be followed by the image.
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/walls", 300, false);
-        mgr.populate_slideshow_paths(vec!["/walls/one.png".to_string()]);
+        mgr.set_slideshow(Path::new("/walls"), 300, false);
+        mgr.populate_slideshow_paths(vec![PathBuf::from("/walls/one.png")]);
         let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         assert_eq!(
             cmds.len(),
@@ -2560,7 +2580,7 @@ mod tests {
         image.set_image(Path::new("/wall.png"), ImageFit::Fill);
 
         let mut slideshow = WallpaperManager::new();
-        slideshow.set_slideshow("/walls", 300, false);
+        slideshow.set_slideshow(Path::new("/walls"), 300, false);
 
         // Left on whatever `DynamicTheme::default()` supplies rather than
         // handed the pinned table, so that the sweep sees the module's own
@@ -2816,14 +2836,14 @@ mod tests {
     #[test]
     fn config_save_load_roundtrip_slideshow() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/pictures/wallpapers", 120, true);
+        mgr.set_slideshow(Path::new("/pictures/wallpapers"), 120, true);
         mgr.config.fit = ImageFit::Fill;
 
         let text = mgr.save_config();
         let loaded = WallpaperManager::load_config(&text).expect("should parse");
 
         assert_eq!(loaded.mode, WallpaperMode::Slideshow);
-        assert_eq!(loaded.slideshow_dir, "/pictures/wallpapers");
+        assert_eq!(loaded.slideshow_dir, Path::new("/pictures/wallpapers"));
         assert_eq!(loaded.slideshow_interval_secs, 120);
         assert!(loaded.slideshow_shuffle);
         assert_eq!(loaded.fit, ImageFit::Fill);
@@ -3017,7 +3037,7 @@ mod tests {
     #[test]
     fn slideshow_interval_minimum_is_one() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow("/wp", 0, false);
+        mgr.set_slideshow(Path::new("/wp"), 0, false);
         assert_eq!(mgr.config.slideshow_interval_secs, 1);
     }
 

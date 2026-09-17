@@ -1937,7 +1937,7 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 - [ ] Emoji display without oversizing or resizing the line (unlike Qt)
 
 #### Input Fields
-- [ ] Single-line and multiline
+- [-] Single-line and multiline — *single-line is done and shared: `guitk::textinput::TextInput` (state) over `guitk::textedit` (the editing primitives and the `SingleLine` renderer, which draws caret, selection and the horizontal scroll that keeps a long string's caret visible). Multiline is not — `WidgetKind::TextArea` holds a value and a placeholder and has none of this. Twenty-two files still hand-roll typing against `KeyEvent::types_text`; `apps/settings` was the first converted, on 2026-09-17.*
 - [ ] Word wrap option
 - [ ] Placeholder text ("ghost text" showing field purpose)
 - [ ] Rich input with formatting and image paste (optional formatting toolbar)

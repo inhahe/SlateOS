@@ -155248,7 +155248,7 @@ file something calls, and most of this one is not called at all:
 
 | Mechanism | Writers | Readers |
 |---|---|---|
-| `WallpaperHistory` | **9 production sites** push to it | **none.** Its doc says "tracks recent wallpapers for back-navigation" and there is no `back` or `forward` method in the type. `current()` exists and every caller is a test. |
+| `WallpaperHistory` | **9 production sites** push to it | **none in production.** `go_back`, `go_forward` and `current` all exist and work; every caller of them is a test. |
 | `SlideshowState` / `set_slideshow` | — | already recorded in `roadmap-detailed.md` §3.4: *"exists, takes a directory, an interval and a shuffle flag, and nothing outside the shell's tests calls it"* |
 | `save_config` / `load_config` | — | a whole `key=value` persistence format whose only callers are its own tests. The real persistence is `appearance.yaml`, through `gui/appearance`. |
 
@@ -155268,10 +155268,30 @@ three items rather than a subsystem.
 **A separate finding, not to be folded into the fix:** a 2,823-line module
 whose live surface is three functions is worth a look in its own right. The
 history is the sharpest case -- nine production sites faithfully recording into
-a structure nothing can read, with a doc comment describing the navigation
-feature that was never built. Recording without replaying is not a half-built
-feature, it is a cost with no benefit: every wallpaper change pays for an entry
-nobody will ever see.
+a structure nothing in production ever reads.
+
+**Corrected 2026-09-17, because the first version of this line was wrong and
+wrong in the expensive direction.** It said there was "no `back` or `forward`
+method in the type" and that the navigation "was never built". Both false:
+`WallpaperHistory::go_back` and `go_forward` are there, they are implemented,
+and they are tested. I had grepped for `pub fn back` and `pub fn forward`; they
+are called `go_back` and `go_forward`.
+
+That mistake is worse than having filed nothing, because it points the next
+reader at the wrong work -- writing methods that already exist -- and they
+would find that out only after starting. The true gap is narrower and
+different: **nothing invokes them.** No keybinding, no menu item, no shell
+command reaches `go_back`.
+
+Two consequences for whoever picks this up:
+
+* The work is a *caller*, not an implementation. The type is complete.
+* A caller needs one thing that genuinely does not exist: the entries are
+  tagged strings -- `image:<path>`, `slideshow:<path>`, `solid:theme`,
+  `dynamic` -- and **nothing anywhere parses them back**. Going back requires
+  turning an entry into a wallpaper again, and that reader has never been
+  written. A typed enum would be the better shape, and would also settle what
+  `image:` does with a path containing a colon.
 
 **A version marker is required, not optional.** Existing files hold the path
 raw under `["wallpaper", "image"]`. Writing encoded text into the same key

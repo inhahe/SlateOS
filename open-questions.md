@@ -3295,3 +3295,55 @@ These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
   option C** (Claude recommended C): keep `nft`/`iptables` as an explicit
   parser/pretty-printer only, fix the docs, steer users to `fw`; defer full/minimal
   kernel wiring (§62).
+
+## A-Q16: Two kinds of lock in the kernel. One skips the deadlock checker, for a reason that turns out not to be true. Which way should that be settled?
+
+**In short:** the kernel has a cheap lock and an expensive lock. The
+expensive one is watched by a deadlock detector; the cheap one is not, and
+the stated reason it does not need watching is that nothing is ever locked
+*inside* it. A new check measured that: it happens **1256 times per boot**,
+in at least 24 places. Nothing has actually deadlocked, and the code is
+probably fine -- but the reason we believed it was fine was wrong, and the
+choice is whether to pay to find out properly.
+
+**Glossary, because none of this is guessable.** A *lock* stops two pieces
+of code touching the same data at once. A *deadlock* is two pieces of code
+each holding what the other needs, so both stop forever -- the classic cause
+is taking two locks in opposite orders. *lockdep* is the built-in detector
+that watches lock orders and complains about a possible deadlock even when
+one has not happened yet. A *leaf* lock is one that never takes another lock
+while held; leaf locks cannot participate in an ordering deadlock, which is
+why skipping the detector for them is sound.
+
+**Where it bites.** `design-decisions.md` §70 split the kernel's locks in
+two: `PreemptSpinMutex` (cheap, no detector, 489 uses, for "hot leaf
+locks") and `crate::sync::Mutex` (detector + statistics). The §70 text says
+ordering checks "add no value" for the cheap type *because* nothing nests
+inside it. §949's new check measured 1256 nested acquisitions per boot
+across ≥24 site pairs, including cross-module ones
+(`ipc/completion` -> `proc/thread`, `fs/cgroupfs` -> `cgroup`).
+
+One real instance was already fixed today: `INOTIFY_TABLE` documented its
+own lock order in prose *and* used the untracked type, so the order it
+documented could not be enforced. It is now the tracked type and lockdep
+confirms the order holds.
+
+| option | *What changes:* |
+|---|---|
+| **(a) Convert the non-leaf ones** (recommended) | the detector watches ~12-15 more lock orderings; a real inversion becomes a loud boot failure instead of a hang. Costs per-acquire tracking on those paths. |
+| (b) Restate §70 honestly, accept the risk | nothing changes at runtime; §70 stops claiming a reason that is false and says the type is chosen for cost with ordering unchecked. The 1256 stay unwatched. |
+| (c) Convert only the cross-module pairs | the five cross-module orderings get watched; the same-module init-guard idiom (the bulk) stays as it is. |
+
+**My recommendation: (a), scoped by measurement rather than all at once.**
+The cost objection has never actually been measured for this type -- there
+was no `PreemptSpinMutex` benchmark arm in `bench_lock_primitives` until
+today, so "the per-acquire tracking cost would matter" is itself an
+unmeasured claim. Convert, measure the arm, and revert any conversion that
+costs more than it is worth.
+
+**If never answered:** the current behaviour is safe as far as anyone can
+tell and has been for months, so nothing breaks tomorrow. What degrades is
+that every new nesting added inside one of these 489 locks is equally
+unwatched, and the check now reports 24 of them at its cap on every boot --
+so the noise grows and the signal for a genuinely new one gets harder to
+see.

@@ -31,12 +31,27 @@
 //! - Wake on device activity (interrupt, I/O request).
 //! - Per-device policy: always-on, auto-suspend, or manual.
 //!
-//! ## Integration
+//! ## What this module does NOT do yet
 //!
-//! - [`crate::power`] coordinates system-level sleep/wake.
-//! - [`crate::udriver`] tracks driver bindings for suspend/resume notification.
-//! - [`crate::devhotplug`] emits events on power state changes.
-//! - PCI config space Power Management Capability (PM cap) for hardware control.
+//! Everything above describes the intended subsystem. What exists today is
+//! the bookkeeping half: an in-memory table of per-device states, a
+//! `/proc` view of it, and `system_suspend`/`system_resume` reachable from
+//! `kshell`. **No device's power state is actually changed.** `set_state`
+//! records the transition and returns success; the PMCSR write-and-settle
+//! sequence it documents inline is not implemented.
+//!
+//! The integrations below are the *design*, and none of them is wired:
+//!
+//! | intended | today |
+//! |---|---|
+//! | [`crate::power`] coordinates system sleep/wake | `power.rs` never calls into this module |
+//! | [`crate::udriver`] notified to save/restore state | only `DeviceAddr` is imported, as a type |
+//! | [`crate::devhotplug`] emits power-change events | never called |
+//! | PCI PM capability drives the hardware | no PCI, MMIO or port access anywhere in this file |
+//!
+//! Tracked in `known-issues.md`. Stated here rather than only there because
+//! a module doc that lists integrations reads as a claim that they exist --
+//! and this one is the first thing anybody extending the module will read.
 //!
 //! ## References
 //!
@@ -706,7 +721,17 @@ pub fn procfs_content() -> String {
     let state = STATE.lock();
     let mut out = String::with_capacity(4096);
 
-    out.push_str("=== Device Power Management ===\n\n");
+    out.push_str("=== Device Power Management ===\n");
+    // dd-945: a simulated action is disclosed where its result is READ, and
+    // this is that place. Every state below is this module's bookkeeping,
+    // not a device's actual power state: nothing here touches PCI config
+    // space, so a row saying D3hot describes a device that is still in D0
+    // and drawing full power. Without this line the file is indistinguishable
+    // from a working power manager.
+    out.push_str(
+        "NOTE: modelled state only -- no PCI power register is written yet, \
+         so these are requested states, not measured ones.\n\n",
+    );
 
     let active = state
         .devices

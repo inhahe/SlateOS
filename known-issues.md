@@ -158106,3 +158106,122 @@ initialised 269, assigned 654, read nowhere.
 
 Triaging those 130 is ordinary lane A work and needs no gate. Recorded here
 so the number is not rediscovered from scratch.
+
+### [A] dd-70's "leaf" premise is not occasionally wrong, it is systematically wrong: 1256 nested acquisitions per boot -- 2026-09-17
+
+Boot `eb764a380`, with the reports deduped by site pair:
+
+```
+[sync] leaf-claim check: 1256 acquisition(s) inside a PreemptSpinMutex, 24 distinct site pair(s) named above (AT THE CAP -- there may be more)
+```
+
+dd-70 chose `PreemptSpinMutex` for "locks that never nest another lock
+inside their critical section, so lockdep ordering checks add no value".
+That sentence is the justification for the type not registering with
+lockdep. It is false **1256 times per boot** across at least 24 distinct
+site pairs, and the count is a floor: the pair table is full, which is why
+the summary says so rather than going quiet.
+
+The pairs split into two kinds.
+
+**Cross-module, which are the ones worth reading:**
+
+| outer | inner |
+|---|---|
+| `sockact.rs:202`, `:265`, `:419` | `eventlog.rs:746` |
+| `fs/startmenu.rs:340`, `:414` | `fs/appregistry.rs:336` |
+| `ipc/completion.rs:312`, `:364` | `ipc/io_ring.rs:744` |
+| `ipc/completion.rs:312`, `:364` | `proc/thread.rs:853` (`THRDOWN`) |
+| `fs/cgroupfs.rs:122` | `cgroup.rs:421`, `:676` (`CGROUP`) |
+
+**Same-module**, dominated by one idiom: a one-time-init guard held across
+the store it initialises -- `bookmarks.rs` (`INITIALIZED` -> `BOOKMARKS`),
+`templates.rs`, `columnview.rs` (`INITIALIZED` -> `COLUMN_DEFS`) -- plus
+adjacent-line pairs in `filetype.rs`, `openwith.rs`, `clipboard.rs`
+(`CURRENT` -> `HISTORY`), `dragdrop.rs` (`ACTIVE_SESSION` -> `DROP_ZONES`)
+and `findex.rs` (`INDEX` -> `FIELD_NAMES`).
+
+**What this does and does not mean.** It is not a deadlock report. Nothing
+here has been shown to form a cycle, and the ones inspected (`bookmarks`,
+`templates`) are init-only with a single order. What it means is narrower and
+worse: **the reason dd-70 gives for these locks being safe to leave out of
+the validator is not the reason they are safe.** They are safe because no
+pair happens to be taken in both orders -- which is precisely the property
+lockdep exists to check, and which nothing checks for any of them.
+
+That is `INOTIFY_TABLE` (fixed earlier today) at ~24x the scale, and it is
+the same sentence `sync.rs` already wrote about the recursion case: "opting
+out of one silently opted out of the other".
+
+**A refinement the data exposes.** The dedup keys on (outer site, inner
+site), but the interesting unit is the *lock* pair. `eventlog.rs:746` appears
+with three different `sockact` outer sites: one lock pair, three site pairs.
+So 24 site pairs is perhaps 12-15 distinct lock pairs, and the site view
+inflates the apparent spread while being the more actionable one for a fix.
+Keying on lock addresses as well would separate "how many orderings exist"
+from "how many places create them"; not done.
+
+**Why this goes to the operator rather than being fixed here.** Converting
+the non-leaf ones to `crate::sync::Mutex` is the mechanical fix and it costs
+per-acquire tracking on paths dd-70 specifically chose the cheap type for --
+on measurements that, as recorded above, were never taken for this type until
+today. 489 instances, a cost/correctness trade, and a decision that is
+already written down: that is `open-questions.md`, not a unilateral sweep.
+
+### [A] `devpower` reports device power states it never applies, and `/proc` published them undisclosed -- 2026-09-17
+
+**In short:** a kernel module says it manages the power state of PCI
+devices. It keeps a table of which device is in which power state, shows
+that table in `/proc`, and never writes a single power register. So a reader
+is told a device is asleep while it is awake and drawing full power. Nothing
+said the numbers were make-believe.
+
+**How it was found: one dead field.** `target_state` (devpower.rs:187) is
+assigned at 397 and 479 and read nowhere -- one of the 130 flagged when lane
+C's field gate was pointed at `kernel/` for the first time (entry above).
+The field turned out to be the least of it.
+
+**The measurement.** `devpower.rs` contains **zero** hardware accesses: no
+`outl`/`outb`/`inl`/`inb`, no `write_volatile`/`read_volatile`, no `pci::`.
+Its module doc describes a working subsystem, and all four of its stated
+integrations are absent:
+
+| the doc claims | the tree says |
+|---|---|
+| `crate::power` coordinates system sleep/wake | `power.rs` never calls `devpower::` at all |
+| `crate::udriver` notified to save/restore state | only `DeviceAddr` is imported, as a type |
+| `crate::devhotplug` emits power-change events | never called |
+| PCI config space PM capability drives hardware | no PCI, MMIO or port access anywhere |
+
+The entire caller set is `fs/procfs.rs` (`procfs_content`), `kshell.rs`
+(`procfs_content`, `stats`, `all_devices`, `system_suspend`,
+`system_resume`, `self_test`) and `main.rs` (`self_test`). So
+`system_suspend`/`system_resume` are reachable only from an interactive
+debug shell, never from the real system power path.
+
+**The author knew, and nothing tracked it.** `set_state` carries "For now,
+record the state transition immediately" above an inline comment listing the
+PMCSR write-and-settle sequence that is not implemented. `devpower` appeared
+in neither `todo.txt` nor `known-issues.md` -- a knowingly incomplete
+subsystem with no tracking entry, which `CLAUDE.md` asks for explicitly.
+
+**Why this is dd-945 and not merely unfinished.** `procfs_content` is wired
+into `/proc`. dd-945's rule is that a simulated action must be disclosed
+*where its result is read*, not where the code is written -- and the read is
+a `/proc` file that disclosed nothing. A fabricated action, per dd-945's own
+distinction, cannot be un-said by deleting the fabrication later; what it
+needs is the disclosure at the point of consumption.
+
+**Fixed.** The `/proc` header now says the states are modelled and no power
+register is written, so the file cannot be mistaken for a working power
+manager. The module doc's "Integration" list is replaced by an
+intended-vs-today table, because a doc listing integrations reads as a claim
+that they exist, and it is the first thing anyone extending the module sees.
+
+**Deliberately NOT done: `target_state` stays.** It is scaffolding for the
+asynchronous transition the PMCSR sequence needs, where `current != target`
+while a transition is in flight. Removing it would delete the shape of the
+real fix, which is the opposite of useful. The field was the thread, not the
+defect -- worth recording as a correction to "130 presumptively dead": some
+of that 130 is scaffolding whose real problem is untracked incompleteness,
+not dead state.

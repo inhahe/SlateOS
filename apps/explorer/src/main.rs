@@ -431,6 +431,12 @@ struct RowDrag {
     insert_at: usize,
 }
 
+/// How thick the line marking a pending drop is.
+///
+/// Centred on the boundary rather than drawn below it, so it reads as "between
+/// these two rows" rather than "on this row" -- which is a different drop.
+const INSERTION_LINE_H: f32 = 2.0;
+
 /// How far the pointer must travel before a press becomes a rearrangement.
 ///
 /// A file manager where a slightly unsteady click reorders the folder is worse
@@ -1081,6 +1087,29 @@ impl ExplorerState {
     // ======================================================================
     // Directory loading
     // ======================================================================
+
+    /// Where the insertion line goes, as (y, x, width), or `None`.
+    ///
+    /// The top edge of the row the drop would land before; the bottom edge of
+    /// the last row when it would land at the end. `None` when nothing is
+    /// being dragged, and when the frame holds no rows to measure against --
+    /// which is every headless test, so this is the one part of the drag that
+    /// the suite can only check the negative of.
+    fn insertion_line(&self) -> Option<(f32, f32, f32)> {
+        let drag = self.row_drag.as_ref()?;
+        if !drag.active {
+            return None;
+        }
+        if let Some(rect) = self.dropzone.file_row_rect(drag.insert_at) {
+            return Some((rect.y, rect.x, rect.width));
+        }
+        // Past the last row: sit on its bottom edge rather than vanishing,
+        // because "drop at the end" is a real target and a user aiming at it
+        // should see the same feedback as any other.
+        let last = self.entries.len().checked_sub(1)?;
+        let rect = self.dropzone.file_row_rect(last)?;
+        Some((rect.y + rect.height, rect.x, rect.width))
+    }
 
     /// Track a press that is turning into a rearrangement.
     fn drag_row(&mut self, x: f32, y: f32) -> bool {
@@ -3526,6 +3555,18 @@ impl ExplorerState {
             ViewMode::Details => self.render_details(tree, zones, list_x, list_y, list_w, list_h),
             ViewMode::Icons => self.render_icons(tree, zones, list_x, list_y, list_w, list_h),
             ViewMode::List => self.render_list(tree, zones, list_x, list_y, list_w, list_h),
+        }
+        // Over the rows, under the scrollbar: the line marks a place
+        // between two rows, so it has to be visible above them, but it is not
+        // furniture and should not sit over the bar the user may be holding.
+        if let Some((line_y, line_x, line_w)) = self.insertion_line() {
+            tree.fill_rect(
+                line_x,
+                line_y - INSERTION_LINE_H / 2.0,
+                line_w,
+                INSERTION_LINE_H,
+                self.palette.blue,
+            );
         }
         // After the view, so the bar sits over the rows rather than under them.
         self.render_scrollbar(tree);
@@ -10189,6 +10230,108 @@ mod tests {
             let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
             assert_eq!(names, vec!["b.txt", "c.txt", "a.txt", "d.txt"]);
         });
+    }
+
+    /// The line sits on the top edge of the row a drop would land before.
+    #[test]
+    fn the_insertion_line_marks_the_row_it_would_drop_before() {
+        let scratch = temp_dir("manual_line");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write(&root.join(name), "x");
+        }
+
+        let mut state = state_at(&root);
+        // Stand in for a frame having been drawn: the indicator reads the
+        // rectangles the last render registered, which is the same source the
+        // hit-testing uses.
+        for (i, entry) in state.entries.iter().enumerate() {
+            let y = 100.0 + (i as f32) * 20.0;
+            state.dropzone.register_file_row(
+                i,
+                &entry.path,
+                Rect::new(10.0, y, 200.0, 20.0),
+                entry.is_dir,
+            );
+        }
+
+        state.row_drag = Some(RowDrag {
+            start_x: 10.0,
+            start_y: 10.0,
+            rows: vec![2],
+            active: true,
+            insert_at: 1,
+        });
+        let (y, x, w) = state.insertion_line().expect("a line while dragging");
+        assert!(
+            (y - 120.0).abs() < 0.01,
+            "line at {y}, expected the top of row 1"
+        );
+        assert!((x - 10.0).abs() < 0.01);
+        assert!((w - 200.0).abs() < 0.01);
+    }
+
+    /// Dropping past the end marks the bottom of the last row.
+    ///
+    /// "At the end" is a real target, so it gets the same feedback as any
+    /// other rather than the line disappearing when the user aims there.
+    #[test]
+    fn the_insertion_line_marks_the_end_when_the_drop_is_past_it() {
+        let scratch = temp_dir("manual_line_end");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt"] {
+            write(&root.join(name), "x");
+        }
+
+        let mut state = state_at(&root);
+        for (i, entry) in state.entries.iter().enumerate() {
+            let y = 100.0 + (i as f32) * 20.0;
+            state.dropzone.register_file_row(
+                i,
+                &entry.path,
+                Rect::new(10.0, y, 200.0, 20.0),
+                entry.is_dir,
+            );
+        }
+
+        state.row_drag = Some(RowDrag {
+            start_x: 10.0,
+            start_y: 10.0,
+            rows: vec![0],
+            active: true,
+            insert_at: 2,
+        });
+        let (y, _, _) = state.insertion_line().expect("a line while dragging");
+        assert!(
+            (y - 140.0).abs() < 0.01,
+            "line at {y}, expected the bottom of row 1"
+        );
+    }
+
+    /// Nothing is drawn for a press that has not become a drag.
+    ///
+    /// The visible half of the threshold: a line that flickered on every click
+    /// would make the folder look like it was about to rearrange itself.
+    #[test]
+    fn no_insertion_line_before_the_threshold() {
+        let scratch = temp_dir("manual_line_none");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        assert!(state.insertion_line().is_none(), "a line with no drag");
+
+        state.row_drag = Some(RowDrag {
+            start_x: 10.0,
+            start_y: 10.0,
+            rows: vec![0],
+            active: false,
+            insert_at: 0,
+        });
+        assert!(
+            state.insertion_line().is_none(),
+            "a line for a press that is still just a click"
+        );
     }
 
     /// An out-of-range target is refused rather than clamped.

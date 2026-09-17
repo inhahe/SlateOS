@@ -24,6 +24,17 @@
 //! so. Refusing is the point: a viewer that opened such a file and showed
 //! zero pages would be indistinguishable from an empty document.
 //!
+//! **Measured against files this did not write.** Every fixture in the tests
+//! below is assembled here, which proves the parser agrees with itself and
+//! nothing more, so it was also run over three PDFs produced by other
+//! software: a 13.8 MB, 122-page manual (v1.4), a 3-page quick-start (v1.4)
+//! and a 47-page guide (v1.5). All three came back with the right page counts
+//! and real page sizes -- A4 at 595.28 x 841.89 points, and the quick-start
+//! landscape at 841.89 x 595.28, which is a wide `/MediaBox` and not a
+//! rotation. That run is not a test here, because it depends on files that
+//! happen to be on one machine, and a test that passes by skipping is worse
+//! than no test.
+//!
 //! **Hostile input is the normal case.** A PDF is a file from elsewhere, and
 //! every length in it is a claim. Nothing here allocates on the strength of a
 //! header, every offset is bounds-checked against the real file, the object

@@ -156672,3 +156672,57 @@ script, so every glyph in the run is already a box. The reason to fix it is
 that the USE corpus is otherwise at `differ` 0 and would become a clean
 instrument, the way the default corpus now is.
 
+
+## TD-C-A-FIELD-ONLY-EVER-INITIALISED-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE -- METHOD 2026-09-17
+
+**In short:** a struct field that is set once when the struct is built and
+never read again is dead state, and it usually means a half-built feature
+that a reader will believe in. Neither of the two things that should catch it
+does: our gate needs an *assignment* to notice a field, and the compiler's
+own check is silenced by `pub`. A crude scan of `gui/` and `apps/` finds 347
+candidates.
+
+**Date:** 2026-09-17. **Lane:** C.
+
+**How it was found.** `apps/explorer` carried
+`pub tree_expanded: Vec<PathBuf>`, doc-commented "Tree sidebar expanded
+paths" and initialised to `vec!["/"]`. It occurred exactly twice in the
+crate: that line and the initialiser. The module's own feature list opened
+with "Directory tree sidebar"; the sidebar is five fixed quick-access rows.
+Removed, along with the claim.
+
+**Why nothing caught it.**
+
+| check | why it is silent |
+|---|---|
+| `scripts/check-fields-written-never-read.py` | it looks for a field that is *assigned* and never read. A field only ever initialised in a struct literal has no assignment. |
+| `dead_code` | the field is `pub`. On a binary crate `pub` buys nothing and costs this. |
+
+**The measurement.** `build/never_read_probe.py` asks the cruder question --
+is `.name` ever written anywhere in the crate -- over `gui/` and `apps/`:
+**347** fields. The regex is rough and some of those will be read through
+destructuring or a derive, so that is an upper bound. Two picked at random
+were both real:
+
+* `apps/dbviewer` `pub expanded: bool` — set in three struct literals, read
+  nowhere.
+* `apps/camera` `pub view_mode: GalleryViewMode` — initialised to `Grid`,
+  read nowhere, so the gallery cannot switch view. There *is* a test,
+  `test_gallery_view_modes`, and it asserts `GalleryViewMode::Grid.label()`
+  and that `all()` has three entries: it proves the enum exists and says
+  nothing about whether anything uses it.
+
+**Why the gate was not simply extended.** It runs over every lane's crates,
+and a gate that turns red on a false positive blocks lane A's and lane B's
+pushes as well as ours. At an upper bound of 347 it would not be a gate, it
+would be a wall. The order has to be triage first, then a baseline of what
+survives, then the check — which is how
+`fields-written-never-read-baseline.txt` itself describes its own 46: "a
+triage queue, not an amnesty".
+
+**Proper fix.** Work the list down in batches, per crate, deciding for each
+field whether it is a feature to finish or state to delete. When it is small
+enough to enumerate, add the "declared and never read" arm to the gate with
+the survivors baselined. Deleting is usually right: a field nobody reads has
+never worked, so nothing can depend on it.
+

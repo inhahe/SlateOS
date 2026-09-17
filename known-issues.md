@@ -155168,6 +155168,20 @@ storing the label too would be a second copy of it, stale the first time the
 thing is renamed". That is the correct instinct about identity; the flaw is
 only that the identity is held as text that cannot represent every path.
 
+**The fix for the widget cases already exists in the same toolkit.**
+`gui/toolkit/src/dialog.rs` keeps *both*: `fill_filename` sets
+`filename_input` (the lossy string, for drawing) and `filename_exact`
+(the `OsString`, for the operation), with a doc comment saying why the display
+copy cannot be the one that acts. Every widget case recorded above -- the
+address bar's `set_path`, `IconAction::OpenPath`, the run dialog's comparisons
+-- is the same problem with the same answer: **draw the flattened text, act on
+the kept bytes.** None of them needs a new idea, only the pattern from the file
+dialog applied a second time.
+
+That also settles what "needs an API change" meant in those entries. It is not
+a redesign; it is one extra field beside the display string, which
+`guitk::pathbar` and `IconAction` each lack.
+
 **Do not sweep this blindly.** Two `env::var` calls in this lane are correct
 and must stay: `gui/compositor`'s `SLATE_DRM_CARD` parses to a `u32`, so a
 non-UTF-8 value is invalid input and is already refused with a message, and

@@ -438,6 +438,14 @@ struct RowDrag {
 /// Wide enough for a name and a size: a listing narrower than this is not a
 /// listing, and a user who drags that far has overshot rather than asked for
 /// it.
+/// How many lines of a text file the preview pane reads.
+///
+/// More than the twenty a thumbnail uses, because this one is read rather
+/// than glanced at, and bounded because a preview that reads a gigabyte to
+/// show the top of it is a preview that stalls the window. `read_text_lines`
+/// caps the bytes as well, so a file of one enormous line cannot beat this.
+const PREVIEW_MAX_LINES: usize = 200;
+
 const LIST_MIN_W: f32 = 240.0;
 
 /// The narrowest the preview may be squeezed to.
@@ -759,6 +767,14 @@ pub struct ExplorerState {
     preview_split: f32,
     /// Which side of the listing the preview sits on.
     preview_side: columnprefs::PreviewSide,
+    /// The lines of the file the preview pane is showing, and which file they
+    /// came from.
+    ///
+    /// Keyed by path *and* mtime so that editing a file while it is selected
+    /// re-reads it -- the same key the thumbnail cache uses, for the same
+    /// reason. `None` when the pane is shut, nothing is selected, or the
+    /// selection is not a text file.
+    preview_text: Option<(PathBuf, u64, Vec<String>)>,
     /// Where inside the divider a pointer grabbed it, while dragging.
     ///
     /// The offset is kept rather than just a flag so the divider does not jump
@@ -874,6 +890,7 @@ impl ExplorerState {
             preview_open: columnprefs::preview_open(&prefs),
             preview_split: columnprefs::preview_split(&prefs),
             preview_side: columnprefs::preview_side(&prefs),
+            preview_text: None,
             divider_grab: None,
             search_showing: None,
             search_origin: None,
@@ -3308,6 +3325,7 @@ impl ExplorerState {
     /// which a freshly-constructed manager would drop — making the highlight
     /// flicker off on every frame of a stationary hover.
     pub fn render(&mut self) -> RenderTree {
+        self.refresh_preview_text();
         let mut tree = RenderTree::new();
         let w = self.window_width as f32;
         let h = self.window_height as f32;
@@ -3869,6 +3887,34 @@ impl ExplorerState {
     /// fill it would stall the window on every arrow-key press. A larger
     /// thumbnail size is the lever if the preview looks soft, and that is a
     /// setting the user already has.
+    /// Re-read the previewed file when the selection moves to another one.
+    ///
+    /// Here rather than at each of the eight places the selection changes: a
+    /// refresh every one of those has to remember is a refresh one of them
+    /// forgets. `render` already takes `&mut self`, so this costs a path
+    /// comparison per frame and a read only when the answer changed.
+    fn refresh_preview_text(&mut self) {
+        if !self.preview_open {
+            self.preview_text = None;
+            return;
+        }
+        let selected = self
+            .selected_indices
+            .first()
+            .and_then(|i| self.entries.get(*i))
+            .map(|e| (e.path.clone(), mtime_secs(e.modified)));
+        let Some((path, mtime)) = selected else {
+            self.preview_text = None;
+            return;
+        };
+        if matches!(&self.preview_text, Some((p, m, _)) if *p == path && *m == mtime) {
+            return;
+        }
+        self.preview_text = thumbs::read_text_lines(&path, PREVIEW_MAX_LINES)
+            .filter(|lines| !lines.is_empty())
+            .map(|lines| (path, mtime, lines));
+    }
+
     fn render_preview(&self, tree: &mut RenderTree, area: Rect) {
         tree.fill_rect(area.x, area.y, area.w, area.h, self.palette.surface0);
 
@@ -3881,6 +3927,28 @@ impl ExplorerState {
             self.preview_note(tree, area, "Select a file to preview it");
             return;
         };
+
+        // Text before pictures, because a text file has both: the thumbnailer
+        // draws its first lines as a 96-pixel minimap, and centred unscaled in
+        // a pane this wide that is a picture *of* writing rather than writing.
+        // The same lines, at a size a person can read.
+        if let Some((path, _, lines)) = &self.preview_text
+            && *path == entry.path
+        {
+            let pad = 12.0;
+            let mut view = guitk::textview::SimpleTextView::new(
+                (area.w - pad * 2.0).max(0.0),
+                (area.h - pad * 2.0).max(0.0),
+            );
+            view.set_text(&lines.join(
+                "
+",
+            ));
+            tree.translate(area.x + pad, area.y + pad);
+            view.render(&self.palette, tree);
+            tree.untranslate();
+            return;
+        }
 
         let Some((id, thumb)) = self.drawable_thumb(entry) else {
             // Said plainly rather than left blank: a blank panel beside a
@@ -10368,6 +10436,88 @@ mod tests {
     }
 
     /// Opening it splits the pane, and the two halves tile it exactly.
+    /// **A text file previews as text, not as a picture of text.**
+    ///
+    /// The thumbnailer draws a text file's first lines as a 96-pixel minimap,
+    /// and `render_preview` never enlarges a thumbnail past its own pixels --
+    /// deliberately, since a blown-up thumbnail reads as a fault. Together
+    /// those meant selecting a text file put a tiny picture of writing in the
+    /// middle of a wide pane. The same lines are now drawn as text.
+    ///
+    /// Asserted on the drawn commands: a `Text` command carrying a line of the
+    /// file, and no `Image`. Checking only that `preview_text` was populated
+    /// would pass against a renderer that still drew the minimap.
+    #[test]
+    fn a_text_file_previews_as_readable_text() {
+        settingsfile::testing::with_scratch_config("preview-text", |_root| {
+            let scratch = temp_dir("preview_text");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("notes.txt"), "alpha line\nbeta line\n");
+
+            let mut state = state_at(&root);
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+            let at = state
+                .entries
+                .iter()
+                .position(|e| e.name == "notes.txt")
+                .expect("the file is listed");
+            state.selected_indices = vec![at];
+
+            let tree = state.render();
+            let texts: Vec<&str> = tree
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    guitk::render::RenderCommand::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                texts.iter().any(|t| t.contains("alpha line")),
+                "the preview drew no line of the file: {texts:?}"
+            );
+            assert!(
+                !tree
+                    .commands
+                    .iter()
+                    .any(|c| matches!(c, guitk::render::RenderCommand::Image { .. })),
+                "the preview drew the thumbnail as well as the text"
+            );
+        });
+    }
+
+    /// Closing the pane forgets the file it was showing.
+    ///
+    /// The cache is keyed by path, so a stale entry would be shown again the
+    /// next time the pane opened on a different selection.
+    #[test]
+    fn closing_the_preview_drops_what_it_was_reading() {
+        settingsfile::testing::with_scratch_config("preview-text-drop", |_root| {
+            let scratch = temp_dir("preview_text_drop");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("notes.txt"), "alpha line\n");
+
+            let mut state = state_at(&root);
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+            let at = state
+                .entries
+                .iter()
+                .position(|e| e.name == "notes.txt")
+                .expect("the file is listed");
+            state.selected_indices = vec![at];
+            drop(state.render());
+            assert!(state.preview_text.is_some(), "nothing was read");
+
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+            assert!(!state.preview_open);
+            drop(state.render());
+            assert!(
+                state.preview_text.is_none(),
+                "the shut pane is still holding a file open in memory"
+            );
+        });
+    }
+
     #[test]
     #[allow(
         clippy::float_cmp,

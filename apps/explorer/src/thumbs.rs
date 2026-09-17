@@ -1813,7 +1813,20 @@ fn read_file_header(path: &Path, n: usize) -> Option<Vec<u8>> {
 }
 
 /// Read the first `max_lines` lines of a text file.
-fn read_text_lines(path: &Path, max_lines: usize) -> Option<Vec<String>> {
+///
+/// `pub(crate)` for the preview pane, which shows the same lines this reads
+/// for a thumbnail — at a readable size instead of a 96-pixel minimap. One
+/// reader, so the panel and the icon cannot disagree about what is in a file.
+///
+/// **A line that is not UTF-8 is dropped**, because `BufRead::lines` yields an
+/// error for it and this filters errors out. That is tolerable in a minimap,
+/// where a missing line among twenty is invisible; in a readable preview it
+/// means a Latin-1 log quietly shows the wrong lines rather than showing
+/// something marked as undecodable. Replacement characters would be the
+/// honest rendering, and `String::from_utf8_lossy` is what draws them, which
+/// `scripts/lossy-decode.py` governs — so it is a change with a gate to
+/// answer to and not one to slip in here.
+pub(crate) fn read_text_lines(path: &Path, max_lines: usize) -> Option<Vec<String>> {
     let file = fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file.take(TEXT_PREVIEW_MAX_BYTES as u64));
     let lines: Vec<String> = reader

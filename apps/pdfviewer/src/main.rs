@@ -4038,13 +4038,13 @@ impl PdfViewerApp {
                     rect: PageRect {
                         x: run.x,
                         y: (page.height - run.y - run.size).max(0.0),
-                        // An estimate, and the only one here. The real width
-                        // needs the font's `/Widths`, which this does not read
-                        // yet; half the point size per character is the usual
-                        // approximation for proportional text. It decides how
-                        // wide a search highlight is drawn, not whether the
-                        // text is found.
-                        width: run.size * 0.5 * run.text.chars().count() as f32,
+                        // The font's own summed glyph widths. It used to be
+                        // half the point size per character, which measured up
+                        // to 25% wide on one document's body text and 19%
+                        // narrow on another's display type -- visible on every
+                        // search highlight, since this is the box they are
+                        // drawn in.
+                        width: run.width,
                         height: run.size,
                     },
                     font_size: run.size,

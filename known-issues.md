@@ -155230,13 +155230,35 @@ corrected here after checking rather than asserting twice in a row:
   behave differently on the host than on the target, and the tests only see the
   host — a green suite proving nothing about the system this ships on.
 
-  So the real choice is narrower than it looked, and it is a decision rather
-  than a keystroke: either split the bytes on `b'/'` and rebuild segments with
-  `OsStr::from_encoded_bytes_unchecked` (which is `unsafe`, and this project
-  requires a `// SAFETY:` argument for it), or keep the split target-specific
-  and accept that the widget is POSIX-shaped by design. The second is probably
-  right — this is an OS with one path syntax — but it should be written down as
-  a decision instead of arrived at by accident.
+  **FIXED 2026-09-16.** And the "decision" I thought this needed turned out not
+  to be one. `design.txt` already fixes the separator, so the widget is
+  POSIX-shaped by specification rather than by preference; and
+  `dialog::parent_path` had *already* written the host-versus-target argument
+  down, months of reading ago, for exactly the same reason. I rediscovered a
+  conclusion the codebase had reached without me. Checking for the precedent
+  first would have been cheaper than deriving it twice.
+
+  Two things came out of doing it that the design had not predicted:
+
+  * **The obvious byte implementation is unsound in a way the ASCII argument
+    hides.** Splitting `as_encoded_bytes()` at `/` is sanctioned — `/` is
+    ASCII, the encoding is self-synchronising, so a cut can never land inside a
+    character. But *joining* the pieces back into a `Vec<u8>` is not covered:
+    on Windows a trailing unpaired high surrogate meeting a leading low
+    surrogate has to be recomposed into a single four-byte sequence, and a raw
+    concatenation would silently produce ill-formed WTF-8. So the rule is
+    asymmetric, and only half of it is the half everyone quotes: **narrowing to
+    a sub-slice is safe; splicing two runs together is not.** All joining here
+    goes through `OsString::push`, the safe API that knows about recomposition.
+  * **The crate already had this `unsafe`, once.** `dialog.rs` carried a
+    private `os_str_from_bytes` with the same contract. Adding a second copy
+    would have made `gui/toolkit` a crate where the same proof is stated twice
+    and can be weakened in one place only — the shape of
+    `TD-C-FOUR-PLACES-DECIDE-WHAT-KIND-OF-FILE-SOMETHING-IS`. Both now use
+    `gui/toolkit/src/osbytes.rs`, which holds the single obligation and exposes
+    a *safe* `split_on_slash` above it. `pathbar.rs` ends up with no `unsafe`
+    at all, which is the better outcome: the count of unsafe blocks in the
+    crate went **down** while the number of byte-correct call sites went up.
 
   * `path: PathBuf` instead of `String`; `segments` keeps display strings for
     drawing, and a breadcrumb click joins components up to the clicked one.

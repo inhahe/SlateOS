@@ -752,7 +752,7 @@ impl ExplorerState {
             show_hidden: false,
             clipboard: None,
             selected_indices: Vec::new(),
-            pathbar: PathBar::new(&start_path.to_string_lossy()),
+            pathbar: PathBar::new(start_path),
             address_editing: false,
             status_message: String::new(),
             hover_hint: String::new(),
@@ -810,7 +810,7 @@ impl ExplorerState {
         }
         self.history_forward.clear();
         self.current_path = path.to_path_buf();
-        self.pathbar.set_path(&self.current_path.to_string_lossy());
+        self.pathbar.set_path(&self.current_path);
         self.selected_indices.clear();
         // The previous directory's operation result no longer applies here.
         self.status_message.clear();
@@ -822,7 +822,7 @@ impl ExplorerState {
         if let Some(prev) = self.history_back.pop_back() {
             self.history_forward.push_back(self.current_path.clone());
             self.current_path = prev;
-            self.pathbar.set_path(&self.current_path.to_string_lossy());
+            self.pathbar.set_path(&self.current_path);
             self.selected_indices.clear();
             self.status_message.clear();
             self.load_directory();
@@ -834,7 +834,7 @@ impl ExplorerState {
         if let Some(next) = self.history_forward.pop_back() {
             self.history_back.push_back(self.current_path.clone());
             self.current_path = next;
-            self.pathbar.set_path(&self.current_path.to_string_lossy());
+            self.pathbar.set_path(&self.current_path);
             self.selected_indices.clear();
             self.status_message.clear();
             self.load_directory();
@@ -3088,8 +3088,7 @@ impl ExplorerState {
         let events = self.pathbar.drain_events();
         for event in events {
             match event {
-                PathBarEvent::Navigate(path) => {
-                    let target = PathBuf::from(&path);
+                PathBarEvent::Navigate(target) => {
                     if target.is_dir() {
                         self.navigate_to(&target);
                     } else {
@@ -3098,7 +3097,10 @@ impl ExplorerState {
                         // there, so a mistyped path can be corrected instead
                         // of retyped.
                         self.pathbar.set_path_valid(false);
-                        self.status_message = format!("No such folder: {path}");
+                        // `display()` only because this is a sentence for a
+                        // human; the path itself was carried here as bytes and
+                        // is never rebuilt from this string.
+                        self.status_message = format!("No such folder: {}", target.display());
                     }
                 }
                 PathBarEvent::RequestAutoComplete { prefix } => {
@@ -5558,8 +5560,11 @@ mod tests {
 
         state.navigate_to(&root.join("sub"));
 
+        // `ends_with` on a `Path` matches a whole final component, so this is
+        // stricter than the substring test it replaced: a folder named
+        // `subterranean` no longer satisfies it.
         assert!(
-            state.pathbar.current_path().contains("sub"),
+            state.pathbar.current_path().ends_with("sub"),
             "the address bar still shows the old folder: {:?}",
             state.pathbar.current_path()
         );

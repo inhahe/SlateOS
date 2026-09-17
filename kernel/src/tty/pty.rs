@@ -641,6 +641,23 @@ pub fn master_try_read(handle: PtyHandle, out: &mut [u8]) -> KernelResult<usize>
 ///   the one state the blocking form waits out, and the whole point of this
 ///   call is to surface it instead.
 pub fn master_try_write(handle: PtyHandle, data: &[u8]) -> KernelResult<usize> {
+    // ROUND-10 probe, and the reason it exists is a mistake worth naming.
+    // Round 9 instrumented `master_write` only, saw nothing in ctest-pty's
+    // window, and I was about to conclude the byte never reaches a pty. There
+    // are TWO master-write paths: posix/src/file.rs routes an O_NONBLOCK
+    // master to SYS_PTY_MASTER_TRY_WRITE (1065), which lands here, not in
+    // master_write. A comment in main.rs had already recorded that routing.
+    //
+    // Third time in this investigation that instrumenting a subset of the
+    // paths produced a silence I read as absence -- after sig_for covering
+    // two of four classification sites, and linux_exec_common being wrapped
+    // while the failure was upstream of it.
+    if data.contains(&3u8) {
+        crate::serial_println!(
+            "[pty] master_TRY_write handle={:?}: VINTR (0x03) entering the input ring",
+            handle
+        );
+    }
     if handle.end() != PtyEnd::Master {
         return Err(KernelError::InvalidHandle);
     }

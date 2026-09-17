@@ -27,6 +27,7 @@
 use crate::render::FontWeightHint;
 use crate::text;
 use crate::text::TextCursor;
+use crate::textedit;
 
 /// Single-line text input state with cursor, selection, and clipboard.
 #[derive(Clone, Debug, Default)]
@@ -129,11 +130,12 @@ impl TextInput {
 
     /// Returns (start, end) byte offsets of the selection, or (cursor, cursor).
     pub fn selection_range(&self) -> (usize, usize) {
+        // The empty answer is the caret twice over rather than `None`: every
+        // caller here goes on to splice at that range, and an empty range is
+        // the right splice. `textedit::selected_range` answers `None`, which
+        // is the right shape for its own callers; this line is the conversion.
         let at = self.cursor.byte();
-        match self.selection_anchor {
-            Some(anchor) => (anchor.min(at), anchor.max(at)),
-            None => (at, at),
-        }
+        textedit::selected_range(self.cursor, self.selection_anchor).unwrap_or((at, at))
     }
 
     pub fn has_selection(&self) -> bool {
@@ -191,11 +193,16 @@ impl TextInput {
 
     /// Remove whatever is selected, leaving the caret where it was.
     pub fn delete_selection(&mut self) {
-        if !self.has_selection() {
-            return;
-        }
-        let (start, end) = self.selection_range();
-        self.replace_range(start, end, "");
+        // The shared one, which also refuses a range that is not on character
+        // boundaries rather than panicking inside `drain`.
+        // The answer -- whether anything was deleted -- is not needed here.
+        // This method's contract is "afterwards nothing is selected", and that
+        // holds whether or not there was a selection to begin with.
+        let _deleted = textedit::delete_selection(
+            &mut self.text,
+            &mut self.cursor,
+            &mut self.selection_anchor,
+        );
     }
 
     pub fn select_all(&mut self) {
@@ -206,11 +213,11 @@ impl TextInput {
     /// Update the selection anchor for a cursor move: holding shift starts (or
     /// keeps) a selection, releasing it drops one.
     fn anchor_for_move(&mut self, shift: bool) {
-        if shift {
-            self.selection_anchor.get_or_insert(self.cursor.byte());
-        } else {
-            self.selection_anchor = None;
-        }
+        // Delegated rather than written out. This type arrived in the toolkit
+        // from `run_dialog`, where it predated `textedit` and carried its own
+        // copies of three of these primitives; `modal` and `widget` were
+        // already calling the shared ones, which made *this* the odd one out.
+        textedit::begin_or_end_selection(shift, self.cursor, &mut self.selection_anchor);
     }
 
     /// Move the caret one place `left`/`right` **on screen**.

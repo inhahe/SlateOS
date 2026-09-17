@@ -68755,6 +68755,34 @@ nothing, report nothing, and pass -- vacuously. That is 942's own row, and it
 would have been easy to write by accident.
 
 
+### Amended the same day: a `try_lock` in interrupt context is not the hazard
+
+The invariant above is stated over *acquisitions*, and that is one word too
+broad. `lockdep::lock_acquire` fires for a **successful `try_lock`** too,
+with `Acquire::Try`, and such a caller would have walked away had the lock
+been held -- so it can never spin on a holder it preempted. Only a blocking
+acquire from interrupt context is the hazard.
+
+This was not hypothetical for a single run. On the check's first real boot
+it reported four violations, and **three were this bug**: `sysctl-reg`,
+`SWAP` and `CGROUP`. In all three the try_lock path exists precisely because
+a blocking acquire from an ISR was a known hazard -- `sysctl::try_get` was
+added after B-SYSCTL-IRQ-DEADLOCK wedged a boot -- so the check's first act
+was to report three deliberate fixes as the defect they fix.
+
+The task side still records both kinds, and that asymmetry is deliberate:
+the danger there is *holding* the lock with interrupts enabled, and how the
+holder acquired it makes no difference to an interrupt that lands mid-hold.
+
+**What the run says about the method.** I predicted zero violations and
+wrote the prediction down before looking, reasoning from `grep
+lock_irqsave` and dd-70's ISR list. The check found 8 classes acquired in
+interrupt context, several of which I had no idea were reachable from one.
+Both halves of that are the point: the runtime check's coverage beat my
+static reasoning, which is the trade recorded above landing the way the
+entry said it would, and its precision was worse than I assumed, which is
+why the corpus number is printed next to the verdict.
+
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 
 **Lane:** B

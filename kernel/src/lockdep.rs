@@ -455,15 +455,16 @@ static VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 ///
 /// Three buckets rather than two, because "acquired in interrupt context"
 /// is not one thing. `dispatch_vector`'s window includes
-/// `softirq::process_pending`, which deliberately re-enables interrupts, so
+/// `softirq::process_pending`, which re-enables interrupts explicitly, so
 /// a lock taken there is taken by a context that *can* be preempted by a
 /// hard IRQ -- unlike one taken with IF clear, which cannot. Conflating the
 /// two would report the softirq/task overlap with the same confidence as
 /// the hard-IRQ/task overlap, and only the latter is a certain deadlock.
 static CLASS_HARDIRQ_OFF: [AtomicBool; MAX_CLASSES] =
     [const { AtomicBool::new(false) }; MAX_CLASSES];
-/// Acquired inside the interrupt-dispatch window but with interrupts on
-/// (the softirq tail).
+/// Acquired in interrupt context with interrupts ON, so the holder can be
+/// preempted. The softirq tail is the only thing that does this today, but
+/// the bucket is defined by the interrupt flag, not by the mechanism.
 static CLASS_HARDIRQ_ON: [AtomicBool; MAX_CLASSES] =
     [const { AtomicBool::new(false) }; MAX_CLASSES];
 /// Acquired outside interrupt context with interrupts enabled -- i.e. by a
@@ -647,7 +648,7 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8], how: Acquire) {
     // Record where this acquisition came from, before any report can be
     // emitted below — a violation involving this class should describe the
     // acquisition that provoked it, not the one before.
-    note_lock_context(class_idx);
+    note_lock_context(class_idx, how);
 
     let site: &'static Location<'static> = Location::caller();
     if let Some(slot) = CLASS_SITE.get(class_idx as usize) {
@@ -1306,10 +1307,22 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
 ///
 /// Called with the caller's `IN_LOCKDEP` re-entrancy flag already set, so the
 /// `serial_println!` below cannot recurse back in through the serial lock.
-fn note_lock_context(class_idx: u16) {
+fn note_lock_context(class_idx: u16, how: Acquire) {
     let idx = class_idx as usize;
 
-    let bucket = match (crate::idt::in_hardirq(), crate::cpu::interrupts_enabled()) {
+    // A successful `try_lock` in interrupt context is NOT the hazard: the
+    // caller would have walked away had the lock been held, so it cannot spin
+    // on a holder it has preempted. Recording it would flag `sysctl-reg`,
+    // whose ISR readers go through `sysctl::try_get` precisely BECAUSE a
+    // blocking read from the timer IRQ once wedged the boot
+    // (B-SYSCTL-IRQ-DEADLOCK). That is the documented fix, and a check that
+    // reports the fix as the defect is worse than no check.
+    let irq_side = crate::idt::in_hardirq() && matches!(how, Acquire::Blocking);
+
+    // The task side still records both kinds. The danger there is *holding*
+    // the lock with interrupts enabled, and how the holder got it makes no
+    // difference to an interrupt that lands mid-hold.
+    let bucket = match (irq_side, crate::cpu::interrupts_enabled()) {
         (true, false) => &CLASS_HARDIRQ_OFF,
         (true, true) => &CLASS_HARDIRQ_ON,
         (false, true) => &CLASS_TASK_IRQS_ON,
@@ -1341,28 +1354,47 @@ fn note_lock_context(class_idx: u16) {
         return;
     }
 
+    // Two of the five reports on this check's first real boot printed `?`
+    // for the lock name, because `class_name` refuses a slot that is
+    // reserved but not yet published -- correctly, since a plausible wrong
+    // name is worse than an admitted unknown. The acquisition site is
+    // already recorded and is the thing a reader can actually act on, so
+    // print it too: an unnamed class then still names a file and line.
+    let site = class_site(class_idx).map_or(("<unknown>", 0u32), |l| (l.file(), l.line()));
+
     if hard_off {
         count_ctx_report(true);
         serial_println!(
-            "[lockdep] *** LOCK CONTEXT *** {} @ {:#x} (class {}) is acquired \
-             from a hard IRQ with interrupts off, and also by a task with \
-             interrupts ENABLED. An interrupt landing on that task mid-hold \
-             wedges this CPU forever, silently. Use lock_irqsave() at the task \
-             side, as console.rs does.",
+            concat!(
+                "[lockdep] *** LOCK CONTEXT *** {} @ {:#x} (class {}) is ",
+                "acquired from a hard IRQ with interrupts off, and also ",
+                "with interrupts ENABLED by a context that can therefore ",
+                "be preempted. An interrupt landing on that holder wedges ",
+                "this CPU forever, silently. Use lock_irqsave() there, as ",
+                "console.rs does. First acquired at {}:{}."
+            ),
             class_name(class_idx),
             class_addr(class_idx),
-            class_idx
+            class_idx,
+            site.0,
+            site.1
         );
     } else {
         count_ctx_report(false);
         serial_println!(
-            "[lockdep] lock-context SUSPECT: {} @ {:#x} (class {}) is acquired \
-             in the softirq tail with interrupts on, and also by a task with \
-             interrupts on. Not a deadlock by itself; it becomes one the day a \
-             hard IRQ takes this lock. This is the 2026-09-15 writeback shape.",
+            concat!(
+                "[lockdep] lock-context SUSPECT: {} @ {:#x} (class {}) is ",
+                "acquired in interrupt context with interrupts ON, and also ",
+                "with interrupts on outside it. Not a deadlock by itself; it ",
+                "becomes one the day a hard IRQ takes this lock with a ",
+                "blocking acquire. This is the 2026-09-15 writeback shape. ",
+                "First acquired at {}:{}."
+            ),
             class_name(class_idx),
             class_addr(class_idx),
-            class_idx
+            class_idx,
+            site.0,
+            site.1
         );
     }
 }
@@ -1486,6 +1518,29 @@ pub fn self_test_lock_context() -> crate::error::KernelResult<()> {
         CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
         ctx_before.wrapping_add(1),
         "lock-context check reported the same class twice"
+    );
+
+    // Positive control 2: the `sysctl::try_get` shape. A lock read with
+    // try_lock from interrupt context and taken with plain lock() by a task
+    // with interrupts ON must NOT be reported -- that is the documented fix
+    // for B-SYSCTL-IRQ-DEADLOCK, and it is the single most likely thing for
+    // this check to get wrong, because it is the exact bit pattern of a real
+    // violation minus the blocking acquire.
+    let try_lock: usize = 0xDEAD_00C9;
+    lock_acquire(try_lock, b"ctx-try", Acquire::Blocking);
+    lock_release(try_lock);
+    crate::cpu::without_interrupts(|| {
+        let _irq = crate::idt::enter_hardirq_for_test();
+        lock_acquire(try_lock, b"ctx-try", Acquire::Try);
+        lock_release(try_lock);
+    });
+    assert_eq!(
+        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
+        ctx_before.wrapping_add(1),
+        concat!(
+            "lock-context check reported a try_lock in interrupt context; ",
+            "that is the B-SYSCTL-IRQ-DEADLOCK fix, not the defect"
+        )
     );
 
     // Positive control: a lock only ever taken with interrupts masked is the

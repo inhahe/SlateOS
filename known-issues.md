@@ -156919,3 +156919,102 @@ be derived from the interrupt flag: an IDT interrupt gate clears IF on entry,
 so *inside* an ISR `cpu::interrupts_enabled()` is false -- indistinguishable
 from a `lock_irqsave` caller in task context. That is a reason the marker is
 necessary, not merely tidier.
+
+### First real run, 2026-09-17: 4 violations, 1 suspect, 8 classes -- and 3 of the 4 were one bug in the check
+
+Boot `b1ebbda65`, release, BOOT_OK after 581s. The control fired correctly
+(`fires once on a real overlap, silent on the irqsave pattern: OK`), and the
+banner read:
+
+```
+[bench]   lock-context check: 4 violation(s), 1 suspect(s), over 8 class(es) seen in interrupt context
+```
+
+**I had predicted zero violations, and written the prediction down first.**
+It was wrong, and the way it was wrong is the argument for the whole
+approach. I reasoned from `grep lock_irqsave` (3 files) plus dd-70's
+ISR-reachable list, concluded the corpus was console + sysctl + accounting +
+rtl8139, and checked that each was correct. The runtime check found **8**
+classes acquired in interrupt context, including locks I had no idea were
+reachable from one. Static reasoning over the call sites I could think to
+grep for is exactly what dd-947 calls a coverage failure.
+
+### The false positive, three independent instances of it
+
+`sysctl-reg`, `SWAP` and `CGROUP` were all reported as violations, and none
+is one. `lockdep::lock_acquire` is called for a **successful `try_lock`**
+too, with `Acquire::Try`, and `note_lock_context` ignored the kind. A
+try_lock in interrupt context cannot be the hazard: the caller walks away if
+the lock is held, so it can never spin on a holder it preempted.
+
+What makes this worse than an ordinary bug is *which* locks it hit. In every
+one of the three, the try_lock path exists **specifically because** a
+blocking acquire from interrupt context was a known hazard, and somebody
+wrote the non-blocking path and documented it:
+
+| lock | the documented ISR path |
+|---|---|
+| `sysctl-reg` | `sysctl::try_get` -- added after B-SYSCTL-IRQ-DEADLOCK, a real boot wedge: the timer IRQ's `sched::check_starvation` blocked on `REGISTRY` behind a task in `sysctl::set()` holding it across a slow `serial_println!` |
+| `SWAP` | `swap.rs:1153`, "Non-blocking variant of `summary()` for interrupt/softirq context" |
+| `CGROUP` | `cgroup.rs:598`, "try_lock: called from scheduler timer tick (interrupt context)"; also 1037 for the I/O scheduler |
+
+So the check's first act was to report three deliberate fixes as the defect
+they fix. My own commit message had said "a check that reports the fix as the
+defect is worse than no check" -- written about `sysctl` while the same bug
+was live for the other two, because I found `sysctl` by reading and never
+asked whether anything else had the same shape.
+
+Fixed: the interrupt-side buckets now require `matches!(how,
+Acquire::Blocking)`. The task-side bucket deliberately still records both
+kinds -- the hazard there is *holding* the lock with interrupts enabled, and
+how the holder acquired it makes no difference to an interrupt landing
+mid-hold. A third control covers exactly this shape, which is the bit pattern
+of a real violation minus the blocking acquire.
+
+### Still open after the fix
+
+Two reports had no name to give -- class 47 (`0xffffffff81720b38`, the
+suspect) and class 50 (`0xffffffff81727538`, a violation) -- because
+`class_name` refuses a slot that is reserved but not yet published, which is
+right: a plausible wrong name is worse than an admitted unknown. But `?` is
+also a dead end for a reader.
+
+Both reports now print the acquisition site from `CLASS_SITE`, which
+`lock_acquire` already records via `Location::caller()`, so an unnamed class
+still yields a file and a line. Whether those two are real is **unknown**
+until the next boot; three of the four named ones dissolved, so these should
+not be assumed real either.
+
+### [A] Operational, for all three lanes: stopping a backgrounded shell script does not stop the script -- 2026-09-17
+
+**In short:** if you background a shell script that runs long jobs and then
+stop it, the tool reports success and the job keeps running. Start a
+replacement and you now have two, racing each other in the same worktree.
+This cost a boot cycle today, and the first symptom looked like a flaky test.
+
+What happened: `TaskStop` returned `Successfully stopped task`, the harness
+stopped tracking the job, and the script's descendants ran to completion
+anyway. The replacement run overlapped it. Both wrote the same two log
+files, which is how it eventually became visible -- a log that is truncated
+at every start (`: > "$L"`) contained **two** `BOOT done` lines, and the
+boot log two `BOOT_REAL_EXIT=1` lines.
+
+The damage was not subtle once understood: two concurrent `boot-test.sh`
+pre-flights ran the git-heavy `scripts/test-*.py` suites against the same
+worktree and failed *each other*. `test-checkers-honour-head.py` and
+`test-selftests-are-repo-safe.py` both reported failures that do not
+reproduce standalone. I read the first as a flake.
+
+**The fix is the tool the project already has.** Run anything long under
+`scripts/run-timeout.py`, which puts the child in a Windows Job Object with
+`KILL_ON_JOB_CLOSE` (POSIX: a process group it SIGKILLs), so a stop tears
+down the whole tree, grandchildren included. `CLAUDE.md` says this about
+orphans and coreutils `timeout`; it is equally true of a stopped background
+task. Pick the bound from the whole run, not the inner step: a release boot
+on 2026-09-17 took 4417s end to end, of which only 581s was QEMU.
+
+**A second, smaller one from the same hour.** I also concluded a healthy run
+had died, from a two-minute silence in its log plus `ps | grep -c cargo`
+returning 0 -- during the release build, which is legitimately silent for
+~10 minutes. It wrote again after I stopped it. A quiet log is not a dead
+process, and on this project the quietest phase is also among the longest.

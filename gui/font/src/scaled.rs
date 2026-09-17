@@ -931,6 +931,9 @@ impl ScaledFont {
                 // marks. A face with a `GDEF` to class the glyph and a `GPOS`
                 // to place it needs neither.
                 mark: (owned || (by_category && !tab)) && norm::is_mark(ch),
+                // Derived under the same condition and for the second of the
+                // two decisions above: which glyphs the fallback places.
+                any_mark: (owned || (by_category && !tab)) && norm::is_any_mark(ch),
                 // Answered here for the reason the two below are: it is a
                 // property of the character, and after substitution there may
                 // be no character left to ask. Unlike them it does not survive
@@ -1046,14 +1049,7 @@ impl ScaledFont {
             if !self.places_marks(segment.script) {
                 continue;
             }
-            for at in segment.start..segment.end {
-                let Some(glyph) = glyphs.get(at) else { break };
-                if glyph.mark
-                    && let Some(slot) = roles.get_mut(at)
-                {
-                    *slot = Role::Mark(glyph.klass);
-                }
-            }
+            mark_roles(&glyphs, &mut roles, segment.start, segment.end);
         }
 
         // Which glyphs are combining marks, and what each one's nominal width
@@ -2103,6 +2099,31 @@ fn collapse_variation_sequences(
     }
 }
 
+/// Give every combining mark in `start..end` the role that makes the measuring
+/// fallback place it against the base before it.
+///
+/// The predicate is [`SubGlyph::any_mark`] -- `Mn`, `Mc` and `Me` -- and not
+/// the narrower [`SubGlyph::mark`], which is `Mn` alone. The two are easy to
+/// confuse and the difference is not cosmetic: HarfBuzz clusters a run for
+/// `_hb_ot_shape_fallback_mark_position` with
+/// `HB_UNICODE_GENERAL_CATEGORY_IS_MARK`, which counts all three, and it is
+/// only the *zeroing* inside that pass that narrows to `Mn`. Asking the narrow
+/// question here leaves every spacing combining mark out of the cluster
+/// entirely, so nothing places it and nothing zeroes it -- which is how a
+/// Javanese pangkon ended up a full advance to the right of the letter it
+/// hangs on. Measured: `misplaced` 40 -> 15 on the supplementary corpus, with
+/// the default corpus unmoved.
+fn mark_roles(glyphs: &[SubGlyph], roles: &mut [Role], start: usize, end: usize) {
+    for at in start..end {
+        let Some(glyph) = glyphs.get(at) else { break };
+        if glyph.any_mark
+            && let Some(slot) = roles.get_mut(at)
+        {
+            *slot = Role::Mark(glyph.klass);
+        }
+    }
+}
+
 /// Erase the glyphs still standing for characters that are never drawn.
 ///
 /// HarfBuzz's `hb_ot_hide_default_ignorables`, plus the zeroing that
@@ -2549,6 +2570,41 @@ mod tests {
     /// The vertical offset is deliberately *not* zeroed, which is HarfBuzz's
     /// behaviour: with no advance and nothing drawn there is nothing for it to
     /// move, and matching the reference exactly is worth more than tidying it.
+    /// A *spacing* combining mark is still a mark the fallback places.
+    ///
+    /// The distinction the two predicates draw, at the one place that wants
+    /// the wide one. `mark` is `Mn`, and asking it here drops every `Mc` out
+    /// of the cluster: nothing places the mark and nothing zeroes it, so it
+    /// sits a whole advance to the right of its base. Both glyphs below are
+    /// marks; only one of them is `Mn`, and both must come back as marks.
+    ///
+    /// Swap `any_mark` for `mark` in [`mark_roles`] and the middle assertion
+    /// fails -- which is the point of testing the loop rather than the
+    /// predicates it is built from.
+    #[test]
+    fn the_fallback_places_spacing_marks_not_just_nonspacing_ones() {
+        let base = SubGlyph::new(10, 0);
+        // `Mc`, a Javanese pangkon or a Devanagari matra: it occupies width,
+        // which is why `mark` -- the zeroing question -- says no.
+        let mut spacing = SubGlyph::new(11, 0);
+        spacing.any_mark = true;
+        spacing.mark = false;
+        spacing.klass = 9;
+        // `Mn`, an ordinary accent: both questions say yes.
+        let mut nonspacing = SubGlyph::new(12, 0);
+        nonspacing.any_mark = true;
+        nonspacing.mark = true;
+        nonspacing.klass = 230;
+        let glyphs = alloc::vec![base, spacing, nonspacing];
+        let mut roles = alloc::vec![Role::Base; 3];
+        mark_roles(&glyphs, &mut roles, 0, glyphs.len());
+        assert_eq!(
+            roles,
+            alloc::vec![Role::Base, Role::Mark(9), Role::Mark(230)],
+            "a spacing combining mark belongs in the cluster too"
+        );
+    }
+
     #[test]
     fn a_face_with_a_space_empties_the_glyph_rather_than_removing_it() {
         let ignorable = |yes: Ignorable| {

@@ -156690,6 +156690,80 @@ script, so every glyph in the run is already a box. The reason to fix it is
 that the USE corpus is otherwise at `differ` 0 and would become a clean
 instrument, the way the default corpus now is.
 
+### MOSTLY FIXED 2026-09-17 — and the mechanism above was wrong
+
+**In short:** the five refuted hypotheses were all aimed at the wrong pass.
+HarfBuzz is not zeroing these marks in the routine this entry names; it is
+doing it inside its *fallback mark positioning*, the very pass this entry
+argued was not involved. Asking HarfBuzz directly settled in one run what
+guessing had not in five. `misplaced` on the supplementary corpus is
+**40 -> 15**, with the default corpus unmoved at 1 and `differ` still 0.
+
+**How it was settled.** `uharfbuzz` exposes `hb_buffer_set_message_func`,
+which reports each shaping stage as it happens. Printing the buffer's
+advances and offsets at every stage for Javanese `U+A98F U+A9C0` on Hack-Bold
+(`gui/font/tools/hb_trace.py`, added with this fix):
+
+    start table GSUB script tag 'DFLT'   (unchanged)
+    start fallback mark   [(0, 1233, 0, 0), (0, 1233, 0, 0)]
+    end   fallback mark   [(0, 1233, 0, 0), (0, 0, -1233, 0)]
+
+Both halves of the divergence appear in one stage, and it is not
+`zero_mark_widths_by_gdef`. Two further measurements explain *why* that stage
+runs at all, when this entry had reasoned it could not:
+
+* `hb.ot_layout_has_glyph_classes(face)` is **0** for Hack-Bold. The face has
+  no `GlyphClassDef`, so the entry's "on any face that classifies its glyphs
+  at all" never applied to the face the divergence was measured on.
+* The trace line above says `script tag 'DFLT'`. A face with no Javanese
+  script table sends HarfBuzz to the **default** shaper, not USE — and the
+  default shaper's `fallback_position` is `true`. The entry's "HarfBuzz's
+  Thai, Myanmar and USE shapers all set `fallback_position = false`" is
+  correct and irrelevant: none of them is the shaper that ran.
+
+  This tree already models that, in `fallback::positions_marks`'s `simple`
+  argument, fed from `face.shapes_as_default(script)`. It was working.
+
+**The sixth hypothesis, which held.** The pass ran; the run had no marks in
+it to place. Our role assignment asked `SubGlyph::mark`, which is `Mn` alone,
+and `U+A9C0` JAVANESE PANGKON is `Mc`. HarfBuzz clusters a run for
+`_hb_ot_shape_fallback_mark_position` with
+`HB_UNICODE_GENERAL_CATEGORY_IS_MARK`, which counts `Mn`, `Mc` and `Me`. So
+the mark was never in a cluster, nothing placed it and nothing zeroed it.
+
+`SubGlyph` now carries **both** questions — `mark` for zeroing, `any_mark`
+for clustering — and `mark_roles` asks the wide one. The narrow predicate
+stays exactly where it was: a spacing combining mark occupies width, and
+zeroing it would pile a Devanagari matra onto its consonant, which is what
+`norm::is_mark`'s own doc warns about.
+
+| corpus | before | after |
+|---|---|---|
+| default | `misplaced` 1 | `misplaced` **1** |
+| supplementary USE | `misplaced` 40 | `misplaced` **15** |
+
+**What the remaining 15 are.** Three strings on five faces each, and two
+distinct shapes — neither of them the one fixed here:
+
+* Tibetan `U+0F40 U+0F72 U+0F74` and `U+0F56 U+0F40 U+0FB2 U+0F0B U+0F64
+  U+0F72 U+0F66`: the advance is now zeroed and agrees, and the *vertical*
+  placement does not. We put the mark at `y` 0; HarfBuzz stacks it at
+  -1934 and +1934, which are its combining classes 130 (above) and 132
+  (below) resolved against the base's extents. So the next question is what
+  our extents for a `.notdef` base come back as, since a zero-height base
+  would place every mark at 0 exactly as observed.
+* Sinhala `U+0D9A U+200D U+0DCA U+0DBB`: glyph 2 at 1233 against 0. A ZWJ
+  sits between the letter and the virama, so this is likely about whether a
+  default-ignorable breaks the cluster — `hide_ignorables` deliberately
+  keeps a hidden mark's role, and the mirror question here is whether it
+  keeps its place in the cluster the fallback walks.
+
+**Lesson, and it is the same one as the fifth refutation.** Five hypotheses
+were spent guessing which predicate HarfBuzz used, when HarfBuzz was
+available the whole time to be asked which *pass* it used. The instrument
+that settled it was fifteen lines of Python. Reach for the oracle's own
+introspection before the next predicate.
+
 
 ## TD-C-A-FIELD-ONLY-EVER-INITIALISED-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE -- METHOD 2026-09-17
 

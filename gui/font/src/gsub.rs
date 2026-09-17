@@ -434,6 +434,20 @@ pub struct SubGlyph {
     /// because it is about the glyph substitution actually produced rather
     /// than about the character it started as.
     pub(crate) mark: bool,
+    /// Whether the character was a combining mark of *any* kind -- `Mn`, `Mc`
+    /// or `Me`.
+    ///
+    /// The wider of the two questions [`mark`](Self::mark) answers narrowly,
+    /// and they are wanted by different callers. Zeroing an advance asks the
+    /// narrow one, because a spacing combining mark genuinely occupies width.
+    /// Deciding which glyphs the measuring fallback *places* asks this one,
+    /// because a mark that takes room still has to be put somewhere relative
+    /// to its base -- and because HarfBuzz's own fallback clusters a run with
+    /// `HB_UNICODE_GENERAL_CATEGORY_IS_MARK`, which counts all three.
+    ///
+    /// Carried through substitution exactly as `mark` is, and left `false`
+    /// under the same condition.
+    pub(crate) any_mark: bool,
     /// Where this glyph sits inside a ligature, once one has swallowed it or
     /// the glyphs around it. Written by ligature substitution and read by
     /// `GPOS`'s mark-to-ligature attachment, which is the only thing that
@@ -751,6 +765,7 @@ impl SubGlyph {
             mask: ALWAYS,
             klass: 0,
             mark: false,
+            any_mark: false,
             lig: Lig::default(),
             indic: Char::DEFAULT,
             universal: crate::universal::Char::DEFAULT,
@@ -773,6 +788,7 @@ impl SubGlyph {
             mask: form_mask(form),
             klass: 0,
             mark: false,
+            any_mark: false,
             lig: Lig::default(),
             indic: Char::DEFAULT,
             universal: crate::universal::Char::DEFAULT,
@@ -815,6 +831,7 @@ impl SubGlyph {
             mask: (ALWAYS & !CALT) | bit,
             klass: 0,
             mark: false,
+            any_mark: false,
             lig: Lig::default(),
             indic: Char::DEFAULT,
             universal: crate::universal::Char::DEFAULT,
@@ -840,6 +857,7 @@ impl SubGlyph {
             mask,
             klass: 0,
             mark: false,
+            any_mark: false,
             lig: Lig::default(),
             indic: Char::DEFAULT,
             universal: crate::universal::Char::DEFAULT,

@@ -155749,7 +155749,7 @@ dialog applied a second time.
 That settles the scope for two of the three, and **not** for the pathbar --
 corrected here after checking rather than asserting twice in a row:
 
-* `IconAction::OpenPath` is a real defect, measured 2026-09-16. Half the
+* `IconAction::OpenPath` -- **FIXED 2026-09-16**, and the measurement is what made it safe to do: the variant holds a `PathBuf`, `storage_key` answers `Option<String>` and skips a path with no text form, and an existing layout is untouched because a representable path yields the key it always did. Was a real defect, measured first: Half the
   byte-safety is already there -- `icons.rs` reads `HOME` with `var_os` and
   builds a `PathBuf` -- and the `String`-typed variant throws the bytes away,
   after which activation does `PathBuf::from(path)` on the flattened text. So a
@@ -155780,6 +155780,50 @@ corrected here after checking rather than asserting twice in a row:
   user types into. Carrying exact bytes means the segment split and the
   `Navigate(String)` event change with it. That is a contained refactor of one
   widget and its one consumer, not a redesign and not a one-liner.
+
+  **Blast radius confirmed 2026-09-16:** `apps/explorer` is the *only* crate
+  that constructs a `PathBar` or matches `PathBarEvent`. `apps/editor` and
+  `apps/fileassoc` mention the word in prose and nothing else. So the change
+  touches exactly two files, which is the fact that decides whether this is
+  an evening's work or a week's.
+
+  **Worked design, 2026-09-16 — with one part corrected before any code was
+  written, and the correction is the important half.**
+
+  My first plan was "`Path::components()` does the breadcrumb split, so no byte
+  surgery is needed". **That is wrong for this widget.** It splits on `/`
+  because SlateOS paths use forward slashes, and `Path::components()` is
+  *host-dependent*: on the Windows machine the tests run on it also treats `\`
+  as a separator and `C:\` as a prefix. Converting to it would make the widget
+  behave differently on the host than on the target, and the tests only see the
+  host — a green suite proving nothing about the system this ships on.
+
+  So the real choice is narrower than it looked, and it is a decision rather
+  than a keystroke: either split the bytes on `b'/'` and rebuild segments with
+  `OsStr::from_encoded_bytes_unchecked` (which is `unsafe`, and this project
+  requires a `// SAFETY:` argument for it), or keep the split target-specific
+  and accept that the widget is POSIX-shaped by design. The second is probably
+  right — this is an OS with one path syntax — but it should be written down as
+  a decision instead of arrived at by accident.
+
+  * `path: PathBuf` instead of `String`; `segments` keeps display strings for
+    drawing, and a breadcrumb click joins components up to the clicked one.
+  * `Navigate(String)` becomes `Navigate(PathBuf)`. `apps/explorer` is the only
+    matcher.
+  * `edit_text` **stays a `String`** — it is a text field with a caret, and the
+    cursor handling there is BiDi-aware byte offsets that should not be
+    disturbed. Typing produces text, and text is what `PathBuf::from` takes.
+  * The exactness is kept the way `RunDialog` already keeps it: on entering
+    edit mode, store `edit_exact: Option<PathBuf>` beside the lossy
+    `edit_text`; on confirm, if `edit_text` still equals the lossy rendering,
+    navigate to `edit_exact`, otherwise to `PathBuf::from(edit_text)`. That is
+    `command_exact`'s logic, which is already proven in this tree and was
+    nearly "fixed" out of it this evening by someone who did not read around
+    the line.
+
+  What this buys: a directory whose name is not UTF-8 displays and navigates
+  correctly unless the user edits the text, which is the same guarantee the
+  file dialog and the run dialog give.
 
 Saying "one extra field" for all three was the same error as the entries it was
 correcting: a scope stated without being measured. The difference matters
@@ -156027,7 +156071,19 @@ missing. They were *finished work pointing the wrong way*, and no checkbox
 state can express that.
 
 **What made the check cheap.** Look for the type and the entry point, not the
-word. Grepping "tab" in `apps/editor` returns 260 hits, nearly all tab
+word. **Four cases this evening, and the count pointed the wrong way in every
+one:**
+
+| word | hits | what they actually were |
+|---|---|---|
+| `tab` in `apps/editor` | 260 | tab characters and indentation; the feature was real but the count proved nothing |
+| `priority` in `apps/procexplorer` | 9 | all display — no setter exists |
+| `history` in `apps/terminal` | 5 | the scrollback buffer; input history does not exist |
+| `dmi` in `apps/` | several | matched inside "admin" |
+
+The pattern is not that counting is imprecise. It is that **a word appears in a
+file because the domain is adjacent**, which is exactly the situation where the
+answer is least obvious and the count most tempting. Grepping "tab" in `apps/editor` returns 260 hits, nearly all tab
 characters; the answer came from finding `Tabs<Document>` and a `render_tabs`
 that the frame calls. A count measures vocabulary, not behaviour -- the same
 error that matched `dmi` inside "admin" earlier the same day.
@@ -156036,6 +156092,20 @@ error that matched `dmi` inside "admin" earlier the same day.
 of today's fifteen had working code behind no caller, no menu row and no key.
 `[x]` on those would be the fabrication design-decisions 856 is about, moved
 into the planning file.
+
+**A third failure of the checkbox, found later the same evening: the compound
+bullet.** `roadmap-detailed.md` §4.3 has "Pause, resume, kill, change priority,
+restart" on one line. That is five requirements in three states — kill is real
+and reachable, pause and resume are present, changing priority is not
+implemented anywhere reachable, and restart does not exist. A checkbox can only
+report the weakest of the five, so the bullet sat unticked while most of it was
+built, and a reader learned nothing about the four that work.
+
+The same shape appears in §4.1's metadata labels (three toggles, a date-field
+choice, a per-folder scope and a line-count setting — one box) and §4.4's whole
+applications (a program of five thousand lines behind a single line of spec).
+**Where a bullet lists capabilities, the honest state is a sentence, not a
+mark** — which is why several items now carry one.
 
 **Recommendation for the next sweep:** record "checked and absent" explicitly,
 because after this the empty box no longer implies it. Five of the fifteen now

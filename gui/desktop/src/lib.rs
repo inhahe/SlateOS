@@ -7224,7 +7224,11 @@ impl DesktopShell {
         }
         match self.icons.handle_double_click(x, y) {
             icons::IconEvent::Activate(_, icons::IconAction::OpenPath(path)) => {
-                ShellAction::Launch(PathBuf::from(path))
+                // Launched as the path the icon holds. This was
+                // `PathBuf::from(path)` over a `String`, which re-parsed text
+                // that had already lost any byte the home directory's name
+                // could not spell.
+                ShellAction::Launch(path)
             }
             // `LaunchSystem` and `Custom` name a thing this shell has no way to
             // start yet: there is no registry mapping "recycle-bin" to anything

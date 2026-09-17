@@ -1580,13 +1580,13 @@ honest one — and the native ones deliberately do **not** shadow the POSIX name
 on `$PATH`, so a script that says `ps` gets `ps`._
 
 #### Terminal Emulator
-- [ ] Persistent input history (searchable)
+- [ ] Persistent input history (searchable) *Checked 2026-09-16: genuinely unstarted. The five "history" hits in `apps/terminal` are all the **scrollback** buffer, which is a different thing — there is no record of what was typed and nothing persists one.*
 - [ ] Arrow keys and insert work in input
-- [ ] Tab autocomplete for file/directory names
-- [ ] Find text in backscroll (Ctrl+F)
+- [ ] Tab autocomplete for file/directory names *Checked 2026-09-16: genuinely unstarted — no completion of any kind in `apps/terminal`. Note for whoever starts it: `apps/explorer`'s `completions_for` is the working example, including why a name with no text form is skipped rather than offered.*
+- [ ] Find text in backscroll (Ctrl+F) *Checked 2026-09-16: genuinely unstarted — no search over the scrollback and no Ctrl+F binding.*
 - [ ] Configurable colors and font
 - [ ] Ability to log all output
-- [ ] Unicode and ANSI support
+- [x] Unicode and ANSI support *Verified 2026-09-16: `apps/terminal` carries a VT100/xterm escape-sequence parser with its own state machine, a 256-colour table, and CSI handling for cursor movement, erase, scroll and modes.*
 - [ ] Resizable, remembers last size and location
 - [ ] Word wrap option (if off, horizontal scroll to longest line)
 - [ ] tmux-like session detach/reattach
@@ -2273,9 +2273,9 @@ below and read the same kernel views, so the two can never disagree._
 
 - [~] Identify process by clicking window, kill it *Written and unreachable, 2026-09-16: the window picker lives in `apps/procexplorer/src/features.rs`, which `main.rs` declares and never calls — one of the five features in open-questions **C-Q17**, whose answer decides whether this is wired or deleted. Not `[x]`: no user can reach it. Not `[ ]`: the code is written and tested.*
 - [x] Find process by name *Verified 2026-09-16: `filter_text` on the main state, focusable, lower-cased and matched against the process list in `main.rs` — reachable, unlike the window picker above it.*
-- [ ] Pause, resume, kill, change priority, restart
-- [ ] Show all libraries loaded by process
-- [ ] Show all subprocesses and threads
+- [-] Pause, resume, kill, change priority, restart *Verified 2026-09-16: kill is real and reachable — `kill_selected` goes through `libcall::kill`, with the pid-widening and broadcast refusal documented at the call. Pause and resume are present. **Changing priority is not**: nothing calls a setter, and the priority code in `features.rs` is in the module `main.rs` never invokes (C-Q17). Restart is absent.*
+- [ ] Show all libraries loaded by process *Checked 2026-09-16: genuinely absent — no loaded-module list anywhere in `apps/procexplorer`, reachable or otherwise.*
+- [x] Show all subprocesses and threads *Verified 2026-09-16: the details pane draws `proc.threads` rows directly.*
 - [ ] Show: capabilities, running user, priority levels, app name, what launched it, is it a service, what's blocking it, what's waiting on its locks, running/paused status, full path
 - [ ] **Launch provenance (command line + who/when started it).** Each process row must surface the full launch context: (a) the *command line* it was launched with — the executable path plus every argument (argv), and if any, the parameters/flags it was passed — shown verbatim when available, and clearly marked "(no arguments)" or "(command line unavailable)" when the process was spawned without a recorded argv or has since cleared it; (b) the *originating process or thread* that launched it — the parent process (and specific thread, when the kernel records launcher thread id) resolved to a clickable identity so the user can jump straight to the launcher's row, with graceful "(launcher exited)" / "(launched by init)" fallbacks; and (c) the *launch timestamp* (wall-clock time the process was created), shown both absolutely and as an elapsed "started N ago" so the user can correlate a process with something they just did. This is read-only informational metadata; the command line is captured by the kernel at `exec`/spawn time (the same argv/envp the loader already stores) and exposed through the `proc.inspect` process-query capability (§1.5), never self-declared by the process (so it can't lie about how it was invoked). Long command lines are truncated in the row with full text on hover / in the detail pane, and are copyable.
 - [ ] **Self-declared process description (the "which one is this?" field).** A process can attach a short human-meaningful description to its own metadata — "GitHub · Pull Request #123 (renderer)", "compiling net/tcp.rs", "worker 3 of 8", "backing up D:\\Photos" — which Process Explorer shows as a column and in the detail pane, and which the `pslist`/`psinfo` CLI tools print. It is settable at any time and updatable in place, because the thing that makes a process identifiable usually changes during its life (the tab navigates, the worker moves to the next file). Without this, a fleet of eight identical worker processes is eight identical rows, and the user's only recourse is reading command lines.
@@ -2302,11 +2302,11 @@ below and read the same kernel views, so the two can never disagree._
 ### 4.4 Other Core Applications
 
 - [ ] Photo/video viewer (not a separate app — file explorer's thumbnail view + preview panel)
-- [ ] Music player (custom Python/fastpy — see decision below)
+- [-] Music player (custom Python/fastpy — see decision below) *Exists as `apps/musicplayer` (4530 lines), verified 2026-09-16 — marked in progress rather than done because the bullet names a whole application and only its existence was checked, not its completeness.*
 - [ ] Settings/configuration UI (comprehensive — see Settings section below)
-- [ ] System information explorer (hardware + OS info + tuning params + mounted drives)
-- [ ] Backup program (snapshot-based, all common backup types)
-- [ ] Background file indexer (configurable paths/extensions, OFF by default)
+- [-] System information explorer (hardware + OS info + tuning params + mounted drives) *Exists as `apps/sysinfo` (4108 lines), verified 2026-09-16 — marked in progress rather than done because the bullet names a whole application and only its existence was checked, not its completeness.*
+- [-] Backup program (snapshot-based, all common backup types) *Exists as `apps/backup` (5116 lines), verified 2026-09-16 — marked in progress rather than done because the bullet names a whole application and only its existence was checked, not its completeness.*
+- [-] Background file indexer (configurable paths/extensions, OFF by default) *Exists as `apps/indexer` (3434 lines), verified 2026-09-16 — marked in progress rather than done because the bullet names a whole application and only its existence was checked, not its completeness.*
   - [ ] Full-text content indexing for searchable file types
   - [ ] Optional ML features (OFF by default, separate toggle from indexer itself):
     - [ ] Image captioning via BLIP (same model/approach as thumbsup2)
@@ -2316,7 +2316,7 @@ below and read the same kernel views, so the two can never disagree._
   - [ ] Search ranking: hybrid BM25 full-text + semantic cosine similarity, fused via Reciprocal Rank Fusion (same algorithm as thumbsup2)
   - [ ] Results cached by file content hash (re-index only changed files)
   - [ ] Exception to "no AI" rule — user must explicitly opt in, clearly labeled as ML feature
-- [ ] Event Viewer (custom Python/fastpy — replaces Windows Event Viewer with better UX)
+- [ ] Event Viewer (custom Python/fastpy — replaces Windows Event Viewer with better UX) *Checked 2026-09-16: there is no `apps/eventviewer`. `apps/logviewer` exists and is a different thing — a viewer for log files, not a structured event store — so it should not be mistaken for this bullet by the next reader grepping for "log".*
   - [ ] Hierarchical namespace browser (tree view, collapsible):
     - Top-level: system, process, security, network, storage, filesystem, service, driver, application
     - Expandable sub-namespaces (e.g., security → login, capability, user, auth)

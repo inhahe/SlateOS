@@ -1848,10 +1848,16 @@ fn toolbar_buttons() -> Vec<ToolbarButton> {
 fn decode_failure(format: ImageFormat, why: &imagecodec::ImageError) -> String {
     match (format, why) {
         // A named format that no decoder claimed: not the file's fault.
-        (
-            ImageFormat::Bmp | ImageFormat::Jpeg | ImageFormat::Gif,
-            imagecodec::ImageError::UnknownFormat,
-        ) => format!("{} images cannot be displayed yet", format.name()),
+        //
+        // JPEG left this list when `imagecodec` learned to decode it. Leaving
+        // it would have told someone whose file begins `FF D8` but is not a
+        // JPEG that "JPEG images cannot be displayed yet" -- a sentence about
+        // this program that stopped being true, pointed at a file that is
+        // genuinely wrong. The two diagnoses this function exists to keep
+        // apart had swapped places.
+        (ImageFormat::Bmp | ImageFormat::Gif, imagecodec::ImageError::UnknownFormat) => {
+            format!("{} images cannot be displayed yet", format.name())
+        }
         _ => why.to_string(),
     }
 }
@@ -2563,22 +2569,40 @@ mod tests {
     /// as "not a picture". Those are opposite diagnoses — one blames the file,
     /// the other the viewer — and telling a user their photograph is not a
     /// picture sends them looking for a corrupt disk.
+    ///
+    /// This used to use a JPEG, and had to move when `imagecodec` learned to
+    /// decode one: the stub it wrote is not a valid JPEG, so the honest
+    /// diagnosis became "file ends mid-structure" -- which blames the file,
+    /// correctly. GIF is still recognised and still undecodable, so it carries
+    /// the property the test is about.
     #[test]
     fn an_undecodable_but_recognised_format_says_which_it_is() {
         let guard = scratch("unsupported-format");
         let dir = guard.dir().to_path_buf();
-        let jpeg = dir.join("holiday.jpg");
-        // A real JPEG signature, then a plausible APP0 segment: enough for
+        let gif = dir.join("holiday.gif");
+        // A real GIF signature and a logical screen descriptor: enough for
         // `ImageFormat::detect`, and nothing this system can decode.
-        std::fs::write(&jpeg, [0xFF, 0xD8, 0xFF, 0xE0, 0, 16, b'J', b'F']).expect("write jpeg");
+        std::fs::write(&gif, b"GIF89a\x10\x00\x10\x00\x00\x00\x00").expect("write gif");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(!state.open_file(&jpeg));
+        assert!(!state.open_file(&gif));
         let reason = state.load_error.as_deref().expect("a reason");
         assert!(
-            reason.contains("JPEG images cannot be displayed yet"),
+            reason.contains("GIF images cannot be displayed yet"),
             "the reason must name the format, not blame the file: {reason}"
         );
+    }
+
+    /// A real JPEG now opens, where it used to be named as undecodable.
+    #[test]
+    fn a_jpeg_opens() {
+        let guard = scratch("jpeg-opens");
+        let dir = guard.dir().to_path_buf();
+        let path = dir.join("photo.jpg");
+        std::fs::write(&path, imagecodec::testing::SMALL_JPEG).expect("write jpeg");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&path), "{:?}", state.load_error);
     }
 
     /// A truncated PNG used to report a size: `parse_png_dimensions` read

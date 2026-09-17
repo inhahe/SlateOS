@@ -705,6 +705,13 @@ pub struct PdfDocument {
     pub pages: Vec<PdfPage>,
     pub metadata: PdfMetadata,
     pub bookmarks: Vec<Bookmark>,
+    /// Pages whose text this build could not read.
+    ///
+    /// A page with no text and a page whose text could not be extracted look
+    /// identical once loaded, and a search across them answers "no results"
+    /// either way. One of those answers is about the document and the other is
+    /// about this program, so the count is kept and the status bar says it.
+    pub unreadable_pages: usize,
 }
 
 impl PdfDocument {
@@ -715,6 +722,7 @@ impl PdfDocument {
             pages: Vec::new(),
             metadata: PdfMetadata::default(),
             bookmarks: Vec::new(),
+            unreadable_pages: 0,
         }
     }
 
@@ -3445,6 +3453,25 @@ impl PdfViewerApp {
             });
             sx += 110.0;
 
+            // Pages whose text could not be read. Only when there are some:
+            // the common case is zero and a permanent "0 unreadable" would be
+            // noise that teaches the eye to skip this part of the bar.
+            if let Some(doc) = &tab.document {
+                if doc.unreadable_pages > 0 {
+                    frame.push(RenderCommand::Text {
+                        x: sx,
+                        y: y + 7.0,
+                        text: format!("{} page(s) unread", doc.unreadable_pages),
+                        color: self.palette.peach,
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(140.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    sx += 150.0;
+                }
+            }
+
             // Rotation
             if tab.rotation != Rotation::Deg0 {
                 frame.push(RenderCommand::Text {
@@ -3982,8 +4009,31 @@ impl PdfViewerApp {
                 270 => Rotation::Deg270,
                 _ => Rotation::Deg0,
             };
+            // PDF user space measures up from the page's bottom-left; a
+            // `PageRect` measures down from its top-left, so `y` is flipped.
+            // One `size` is taken off as well, because the run's `y` is its
+            // *baseline* and the rect wants the box's top.
+            for run in &page.text {
+                made.text_spans.push(TextSpan {
+                    text: run.text.clone(),
+                    rect: PageRect {
+                        x: run.x,
+                        y: (page.height - run.y - run.size).max(0.0),
+                        // An estimate, and the only one here. The real width
+                        // needs the font's `/Widths`, which this does not read
+                        // yet; half the point size per character is the usual
+                        // approximation for proportional text. It decides how
+                        // wide a search highlight is drawn, not whether the
+                        // text is found.
+                        width: run.size * 0.5 * run.text.chars().count() as f32,
+                        height: run.size,
+                    },
+                    font_size: run.size,
+                });
+            }
             document.pages.push(made);
         }
+        document.unreadable_pages = parsed.unreadable_pages;
         // Through `load_document`, which is also what the recent-files path
         // uses: one way in, so a document opened either way lands in the tab
         // and in the recent list identically.

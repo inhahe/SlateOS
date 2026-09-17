@@ -7,7 +7,12 @@
 //! - Find & replace (with regex support)
 //! - Undo/redo (unlimited history)
 //! - Word wrap or horizontal scroll
-//! - Status bar (line, column, encoding, line ending)
+//! - Status bar (line, column, language, line ending, line count)
+//!
+//!   This listed "encoding" until 2026-09-16 and there is none to show: a
+//!   `Document` has no encoding field, and nothing detects one. The rest of
+//!   the old list was accurate -- the line ending really is drawn -- and the
+//!   language and line count were missing from it.
 //! - Menu bar (File / Edit / Search) reaching the same commands with a pointer
 //! - Keyboard shortcuts (Ctrl+S save, Ctrl+Z undo, Ctrl+F find, etc.)
 //! - Auto-indent
@@ -2432,6 +2437,17 @@ impl EditorState {
             self.palette.subtext0,
             11.0,
         );
+
+        // Indentation mode. The document already knows both halves --
+        // `use_spaces` and `tab_width` are set when a file is read -- and
+        // `roadmap-detailed.md` §4.4 asks for it in this bar; it was simply
+        // never drawn.
+        let indent = if doc.use_spaces {
+            format!("Spaces: {}", doc.tab_width)
+        } else {
+            format!("Tab width: {}", doc.tab_width)
+        };
+        tree.text(450.0, bar_y + 5.0, &indent, self.palette.subtext0, 11.0);
 
         // Line count
         let lc = format!("{} lines", doc.line_count());
@@ -5285,6 +5301,41 @@ mod tab_tests {
         tabs.close_active();
         assert_eq!(names(&tabs), ["Untitled", "c"]);
         assert_eq!(tabs.active().name, "c");
+    }
+
+    /// The status bar names the indentation the document is actually using.
+    ///
+    /// Both halves come from the document rather than from a default, so a
+    /// file read as tab-indented does not get told it is using spaces. The
+    /// fields existed before this was drawn; nothing showed them.
+    #[test]
+    fn the_status_bar_names_the_indentation_in_force() {
+        let mut app = EditorState::new();
+        {
+            let doc = app.active_document_mut();
+            doc.use_spaces = true;
+            doc.tab_width = 2;
+        }
+        let drawn = format!("{:?}", app.render_tree());
+        assert!(
+            drawn.contains("Spaces: 2"),
+            "spaces not named: {drawn:.400}"
+        );
+
+        {
+            let doc = app.active_document_mut();
+            doc.use_spaces = false;
+            doc.tab_width = 8;
+        }
+        let drawn = format!("{:?}", app.render_tree());
+        assert!(
+            drawn.contains("Tab width: 8"),
+            "a tab-indented file was not named: {drawn:.400}"
+        );
+        assert!(
+            !drawn.contains("Spaces:"),
+            "the bar claims spaces for a tab-indented file"
+        );
     }
 
     #[test]

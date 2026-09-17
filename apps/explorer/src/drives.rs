@@ -194,10 +194,19 @@ fn device_of(path: &Path) -> Option<u64> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     // Case-insensitively: `C:\x` and `c:\x` are one volume on Windows, and a
     // drag between the two must not look like a drag between two drives.
+    // Folded as *bytes*, ASCII-only, and this is defensive rather than a fix
+    // for anything observed. What is hashed is the volume *prefix* -- a drive
+    // letter, a UNC share, or `/` -- which is ASCII in every case anyone has
+    // hit, so the previous `to_string_lossy().to_lowercase()` was not wrong in
+    // practice. It was wrong in two ways that cost nothing to remove: every
+    // undecodable byte became the same U+FFFD, which would merge two prefixes
+    // that differ only there, and Unicode lowercasing folds far more than the
+    // drive letters this is for. ASCII folding over bytes is exactly the
+    // `C:` / `c:` case Windows needs and leaves everything else alone.
     prefix
         .as_os_str()
-        .to_string_lossy()
-        .to_lowercase()
+        .as_encoded_bytes()
+        .to_ascii_lowercase()
         .hash(&mut hasher);
     Some(hasher.finish())
 }
@@ -324,5 +333,13 @@ mod tests {
             same_drive(&root.join("real.txt"), Path::new("no-such-dir-xyzzy/f")),
             None
         );
+    }
+
+    /// A drive letter still folds case, which is what the folding is for.
+    #[test]
+    fn a_drive_letter_is_case_insensitive() {
+        let upper = device_of(Path::new(r"C:\x"));
+        let lower = device_of(Path::new(r"c:\x"));
+        assert_eq!(upper, lower, "C: and c: are one volume on Windows");
     }
 }

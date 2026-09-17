@@ -27,8 +27,6 @@
 //! | [`CodeColumns`] | rs, c, cpp, py, js, ts, ... | Line Count, Language |
 //! | [`ArchiveColumns`] | zip, tar, gz | Compressed Size, Compression Ratio, File Count Inside |
 
-#![allow(dead_code)]
-
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1202,11 +1200,6 @@ struct ColumnColors {
     cell_text: Color,
     cell_dim: Color,
     separator: Color,
-    chooser_bg: Color,
-    chooser_border: Color,
-    chooser_hover: Color,
-    check_on: Color,
-    check_off: Color,
 }
 
 impl ColumnColors {
@@ -1218,22 +1211,13 @@ impl ColumnColors {
             cell_text: p.text,
             cell_dim: p.subtext0,
             separator: p.surface1,
-            chooser_bg: p.base,
-            chooser_border: p.surface1,
-            chooser_hover: p.surface0,
-            check_on: p.accent,
-            check_off: p.overlay0,
         }
     }
 }
 
 const HEADER_HEIGHT: f32 = 22.0;
-const ROW_HEIGHT: f32 = 22.0;
 const HEADER_FONT_SIZE: f32 = 11.0;
 const CELL_FONT_SIZE: f32 = 11.0;
-const CHOOSER_ROW_HEIGHT: f32 = 24.0;
-const CHOOSER_FONT_SIZE: f32 = 12.0;
-const CHOOSER_PAD: f32 = 4.0;
 
 /// Render the column header row.
 ///
@@ -1339,25 +1323,15 @@ pub fn render_column_header(
 
 /// Render one row of column values for a file.
 ///
-/// `y` is the top of the row.  Returns render commands for each cell.
-///
-/// Every cell is resolved through [`ColumnManager::get_value`], which walks
-/// the provider list and — for the standard Size and Date columns — stats the
-/// file. That is fine for a caller that has nothing but a path, but a caller
-/// rendering a directory listing already knows those facts and would be
-/// paying a syscall per cell per frame to be told them again. Such callers
-/// should build the values themselves and call [`render_column_values_from`].
-pub fn render_column_values(
-    manager: &ColumnManager,
-    path: &str,
-    y: f32,
-    total_width: f32,
-    p: &Palette,
-) -> Vec<RenderCommand> {
-    render_column_values_from(manager, &manager.row_values(path), y, total_width, None, p)
-}
-
 /// Render one row from values the caller already has.
+///
+/// **Why the caller brings the values.** Resolving each cell through
+/// [`ColumnManager::get_value`] walks the provider list and, for the standard
+/// Size and Date columns, stats the file — fine for a caller holding nothing
+/// but a path, and a syscall per cell per frame for one rendering a directory
+/// listing, which already knows those facts. A wrapper that took a path and
+/// did the fetching lived here until 2026-09-16 and had no callers: the view
+/// always has the values, because it read them to sort by them.
 ///
 /// `values` is parallel to [`ColumnManager::active_columns`]: element `i` is
 /// the cell for active column `i`. A short slice is not an error — the
@@ -1441,122 +1415,6 @@ pub fn render_column_values_from(
         }
 
         x += w;
-    }
-
-    cmds
-}
-
-/// Render a column chooser dropdown menu.
-///
-/// Shows all known columns with checkboxes indicating visibility.
-/// `x`, `y` is the top-left corner of the dropdown.
-pub fn render_column_chooser(
-    manager: &ColumnManager,
-    x: f32,
-    y: f32,
-    p: &Palette,
-) -> Vec<RenderCommand> {
-    let c = ColumnColors::new(p);
-    let mut cmds = Vec::new();
-
-    let all_defs = {
-        let mut defs: Vec<&ColumnDef> = manager.all_column_defs();
-        defs.sort_by_key(|d| d.id);
-        defs
-    };
-
-    let row_count = all_defs.len();
-    let menu_w = 200.0_f32;
-    let menu_h = row_count as f32 * CHOOSER_ROW_HEIGHT + CHOOSER_PAD * 2.0;
-
-    // Background + border.
-    cmds.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: menu_w,
-        height: menu_h,
-        color: c.chooser_bg,
-        corner_radii: CornerRadii::all(4.0),
-    });
-    cmds.push(RenderCommand::StrokeRect {
-        x,
-        y,
-        width: menu_w,
-        height: menu_h,
-        color: c.chooser_border,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(4.0),
-    });
-
-    // Shadow.
-    cmds.push(RenderCommand::BoxShadow {
-        x,
-        y,
-        width: menu_w,
-        height: menu_h,
-        offset_x: 0.0,
-        offset_y: 2.0,
-        blur: 6.0,
-        spread: 0.0,
-        color: Color::rgba(0, 0, 0, 40),
-        corner_radii: CornerRadii::all(4.0),
-    });
-
-    let mut row_y = y + CHOOSER_PAD;
-    for def in &all_defs {
-        let is_active = manager.is_visible(def.id);
-
-        // Checkbox.
-        let cb_x = x + 8.0;
-        let cb_y = row_y + 4.0;
-        let cb_size = 14.0;
-        cmds.push(RenderCommand::StrokeRect {
-            x: cb_x,
-            y: cb_y,
-            width: cb_size,
-            height: cb_size,
-            color: if is_active { c.check_on } else { c.check_off },
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(2.0),
-        });
-        if is_active {
-            // Fill checkbox.
-            cmds.push(RenderCommand::FillRect {
-                x: cb_x + 2.0,
-                y: cb_y + 2.0,
-                width: cb_size - 4.0,
-                height: cb_size - 4.0,
-                color: c.check_on,
-                corner_radii: CornerRadii::all(1.0),
-            });
-        }
-
-        // Label.
-        cmds.push(RenderCommand::Text {
-            x: cb_x + cb_size + 8.0,
-            y: row_y + 5.0,
-            text: def.label.clone(),
-            color: c.header_text,
-            font_size: CHOOSER_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(menu_w - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Category badge (dim, right-aligned).
-        let cat_text = def.category.label();
-        cmds.push(RenderCommand::Text {
-            x: text::right_x(cat_text, x + menu_w - 8.0, 9.0, FontWeightHint::Regular),
-            y: row_y + 7.0,
-            text: cat_text.to_string(),
-            color: c.cell_dim,
-            font_size: 9.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        row_y += CHOOSER_ROW_HEIGHT;
     }
 
     cmds
@@ -2395,19 +2253,6 @@ mod tests {
         assert!(!cmds.is_empty(), "header should produce render commands");
     }
 
-    #[test]
-    fn test_render_column_values_nonempty() {
-        let mgr = ColumnManager::with_defaults();
-        let cmds = render_column_values(
-            &mgr,
-            "/test/file.txt",
-            0.0,
-            800.0,
-            &Palette::for_mode(false),
-        );
-        assert!(!cmds.is_empty(), "row should produce render commands");
-    }
-
     /// `render_column_values` and `render_column_values_from` are one
     /// renderer, so the path-based wrapper must not drift from the
     /// values-based one it delegates to.
@@ -2417,25 +2262,6 @@ mod tests {
     /// putting that operator on the type.
     fn same_commands(a: &[RenderCommand], b: &[RenderCommand]) -> bool {
         format!("{a:?}") == format!("{b:?}")
-    }
-
-    #[test]
-    fn the_two_row_renderers_agree() {
-        let mgr = ColumnManager::with_defaults();
-        let path = "/test/file.txt";
-        let via_path = render_column_values(&mgr, path, 0.0, 800.0, &Palette::for_mode(false));
-        let via_values = render_column_values_from(
-            &mgr,
-            &mgr.row_values(path),
-            0.0,
-            800.0,
-            None,
-            &Palette::for_mode(false),
-        );
-        assert!(
-            same_commands(&via_path, &via_values),
-            "the path wrapper must draw exactly what it delegates to"
-        );
     }
 
     #[test]
@@ -2614,13 +2440,6 @@ mod tests {
             mgr.column_def(ColumnId::SIZE).expect("size def").sort_order,
             SortOrder::Descending
         );
-    }
-
-    #[test]
-    fn test_render_column_chooser_nonempty() {
-        let mgr = ColumnManager::with_defaults();
-        let cmds = render_column_chooser(&mgr, 10.0, 30.0, &Palette::for_mode(false));
-        assert!(!cmds.is_empty(), "chooser should produce render commands");
     }
 
     // ------------------------------------------------------------------

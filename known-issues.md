@@ -155676,6 +155676,153 @@ generalise across a function boundary unless somebody goes looking.**
 produce *absence*: a feature that silently does not exist, with no bad data to
 notice. The second is harder to find, because there is nothing to see.
 
+**Triaged 2026-09-16: `apps/explorer/src/fileops.rs`, all eight sites.** One
+was a defect and is fixed (the copy's scratch name, which collided for two
+names differing only in undecodable bytes). The other seven are legitimate and
+should be left alone:
+
+* `progress.current_file` and the two extension/name formatters feed status
+  text. Display, not identity.
+* `make_id` builds a recycle entry's directory name from a lossy filename plus
+  a hash — and the name is *opaque*. The authoritative original path is stored
+  losslessly in `meta.txt` beside it (see `send_to_bin`), and collisions are
+  settled by the filesystem in `create_entry_dir`'s retry loop rather than
+  trusted from the string. A lossy component is safe precisely because nothing
+  reads it back as a path.
+* The id read back in `list` matches that: our own ids are always UTF-8 because
+  we generate them, and a *foreign* directory in the bin is not ours to act on.
+
+So the rate in this file was one in eight, and the seven were not near misses —
+each had a reason on the spot. Recorded so the next reader spends the minute on
+the other thirty-seven sites in `apps/explorer` and `gui/desktop`, not these.
+
+**Triaged 2026-09-16: `apps/explorer/src/main.rs`, the eight sites there.**
+Four are a real but bounded defect and four are fine.
+
+The defect: `PathBar::new` and `set_path` take a `&str`, so the address bar is
+handed `current_path.to_string_lossy()`. For a directory whose path is not
+UTF-8 the bar therefore *shows* a path that does not exist, and pressing Enter
+on what it shows navigates nowhere — the same shape as the completion defect
+fixed the same day, one layer up. Not fixed here because the honest repair is
+for the widget to hold bytes, which is a change to `guitk::pathbar`'s API and
+to every caller, not a call-site swap. The user can still reach such a folder
+by clicking; only the typed route is broken.
+
+The four that are fine: a listing entry's `name` is display text while
+`entry.path` carries identity — the same split that makes `make_id` safe — and
+the extension sites feed sorting and type lookup, where a name with no text
+form sorts oddly and classifies as unknown, which is what it is.
+
+**Triaged 2026-09-16: `gui/desktop`, the ten sites outside tests.** Three are
+identifier-shaped and are recorded here rather than fixed, because each needs a
+type to change rather than a call:
+
+* `icons.rs` builds `IconAction::OpenPath(String)` from the Documents and home
+  paths. The variant holds a `String`, and `storage_key` writes it into the
+  saved icon layout as `path:{path}` — so for a home directory that is not
+  UTF-8 the desktop icon both opens the wrong place and is *saved* under a
+  mangled key. The fix is `OpenPath(PathBuf)` and a byte-safe storage key, not
+  a call-site change.
+* `run_dialog.rs` compares a candidate path to typed text through
+  `to_string_lossy().trim()` in two places, so a command whose path is not
+  UTF-8 can fail to match itself, or match the wrong entry.
+
+The rest are display: a program's file name for a label, and test helpers.
+
+**A note on `icons.rs`' own reasoning, which is right and worth borrowing.**
+`storage_key`'s doc explains that an icon stores the *path* and looks its label
+up when drawn, "for the same reason the taskbar's pinned apps already follow --
+storing the label too would be a second copy of it, stale the first time the
+thing is renamed". That is the correct instinct about identity; the flaw is
+only that the identity is held as text that cannot represent every path.
+
+**The fix for the widget cases already exists in the same toolkit.**
+`gui/toolkit/src/dialog.rs` keeps *both*: `fill_filename` sets
+`filename_input` (the lossy string, for drawing) and `filename_exact`
+(the `OsString`, for the operation), with a doc comment saying why the display
+copy cannot be the one that acts. Every widget case recorded above -- the
+address bar's `set_path`, `IconAction::OpenPath`, the run dialog's comparisons
+-- is the same problem with the same answer: **draw the flattened text, act on
+the kept bytes.** None of them needs a new idea, only the pattern from the file
+dialog applied a second time.
+
+That settles the scope for two of the three, and **not** for the pathbar --
+corrected here after checking rather than asserting twice in a row:
+
+* `IconAction::OpenPath` is a real defect, measured 2026-09-16. Half the
+  byte-safety is already there -- `icons.rs` reads `HOME` with `var_os` and
+  builds a `PathBuf` -- and the `String`-typed variant throws the bytes away,
+  after which activation does `PathBuf::from(path)` on the flattened text. So a
+  home directory that is not UTF-8 gives a desktop icon that launches a path
+  which does not exist.
+
+  The fix is `OpenPath(PathBuf)` **plus a decision**, because `storage_key`
+  writes `path:{…}` into the saved icon layout and that document's keys are
+  text. A path with no text form cannot be a key there at all. The precedent is
+  already in this tree: `columnprefs::set_for_folder` answers `false` for such a
+  path and lets the caller say so, rather than inventing a key that would save
+  the position against a different folder. Applying that here means an icon on
+  an unrepresentable path keeps working and simply does not remember where it
+  was put.
+* **The run dialog is not a defect at all** -- corrected after reading around
+  the line rather than at it. `RunDialog` already holds `command_exact:
+  Option<PathBuf>`, which is the kept-bytes half of the pattern. The lossy
+  comparison is not an attempt at identity; it asks *whether the user left the
+  displayed text alone*, and only then does it act on the exact path. Its own
+  comment says so: "exact glyphs on screen gets the file those glyphs came
+  from, which is the only file they could have meant." Changing it to compare
+  `OsStr` to `OsStr` would have broken a correct design -- the comparison must
+  be against what is *shown*, because that is what the user either edited or
+  did not.
+* **`guitk::pathbar` is more than a field.** It holds `path: String` and
+  `edit_text: String` and touches them in sixty-four places; breadcrumb mode
+  *splits the path into clickable segments*, and edit mode is a text field the
+  user types into. Carrying exact bytes means the segment split and the
+  `Navigate(String)` event change with it. That is a contained refactor of one
+  widget and its one consumer, not a redesign and not a one-liner.
+
+Saying "one extra field" for all three was the same error as the entries it was
+correcting: a scope stated without being measured. The difference matters
+because it decides whether someone starts.
+
+
+
+**The real extent, counted 2026-09-16 and larger than this entry first said.**
+The "45 sites" figure above covered `apps/explorer` and `gui/desktop` only.
+Across lane C it is **131 sites in 42 files**. Twenty-two are triaged: two
+defects fixed, one measured and recorded (`IconAction::OpenPath`), one
+withdrawn after reading the design around it (the run dialog, which already
+keeps exact bytes), and the rest cleared with reasons.
+
+So this is not a sweep to finish in a sitting, and it should not be attempted
+as one. The triaged files show why: the rate of genuine defects is roughly one
+in ten, the other nine each have a reason on the spot, and **one of the
+twenty-two was code I nearly broke by applying the pattern without reading
+around it.** A batch pass over 131 sites by someone confident in the pattern is
+the most likely way this tree acquires a real bug from this entry.
+
+**The dangerous category is exhausted, searched 2026-09-16.** Taking that
+order and running it across all of `apps/` and `gui/`: no production site
+outside the two already handled turns flattened text into a **filename or a map
+key**. The searches were for a lossy value reaching `join`, `insert`, a map
+lookup, a `format!` that builds a name, or a `File::create`/`fs::write`. What
+came back was test fixtures, the two extension formatters already cleared, and
+`apps/indexer`, which compares an extension against `config.exclude_extensions`
+— a list the user writes as *text*, so a textual comparison is the only kind
+available and flattening is right there for the same reason it is right in the
+run dialog.
+
+So the remaining ~109 sites are display and text comparison, and the two that
+mattered are fixed. That is the useful shape of this entry now: **not 131 things
+to do, but a rule to apply when writing new code**, plus three recorded cases
+(`IconAction::OpenPath`, `guitk::pathbar`, and the icon layout's key format)
+where the type is wrong and the fix is scoped.
+
+The order worth taking, cheapest signal first: anything whose flattened text is
+used as a **map key or a filename** (that is where both real defects were),
+then anything compared for equality, then everything else, which is almost
+always display.
+
 **Do not sweep this blindly.** Two `env::var` calls in this lane are correct
 and must stay: `gui/compositor`'s `SLATE_DRM_CARD` parses to a `u32`, so a
 non-UTF-8 value is invalid input and is already refused with a message, and
@@ -155760,3 +155907,178 @@ constant is the shipped value and a test reaches the branch honestly.
 **Worth stating plainly:** the project's own operating instructions single out
 disk space as a real, finite constraint that build output has already filled
 once. A cache with no ceiling is the same failure with a slower fuse.
+
+## TD-C-THE-FILE-OPERATIONS-MODULE-ADVERTISES-POLICIES-NOTHING-SELECTS
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** `apps/explorer/src/fileops.rs` — the module doc, `ConflictPolicy`,
+`ErrorPolicy`, `ExecutorConfig`.
+
+**In short:** the file-operations module lists what it offers at the top of the
+file: conflict resolution policies, per-file error handling (skip, retry,
+stop). Several of those settings exist as code and can never be chosen — no
+part of the program ever selects them. The list is a promise the file does not
+keep, and a blanket `#![allow(dead_code)]` at the top is why nobody noticed.
+
+**Measured** by deleting the suppression and building: ten findings. The ones
+that matter:
+
+| never constructed | advertised as |
+|---|---|
+| `ConflictPolicy::Overwrite`, `::OverwriteIfNewer`, `::Ask` | "Conflict resolution policies" |
+| `ErrorPolicy::StopOnFirst`, `::RetryN` | "Per-file error handling (skip, retry, stop)" |
+| `ExecutorConfig` | — |
+| `OperationEvent::UndoAvailable` | — |
+
+So a copy that hits an existing file cannot be told to overwrite it, and a
+failing batch cannot be told to stop on the first error, though both read as
+supported from the module's own summary.
+
+**The suppression is the finding as much as the variants are.**
+`#![allow(dead_code)]` covers three thousand lines, so the compiler has been
+unable to say any of this since the day it was added. It is left in place for
+now -- removing it means deciding, variant by variant, between wiring and
+deleting -- but it now carries a comment saying what it hides and pointing
+here. A silent suppression and a documented one cost the same at runtime and
+are not at all the same thing to read.
+
+**Do not simply delete the unused variants.** The pattern today is that a
+capability with no caller is either wired or removed, and which one depends on
+whether anything should be calling it. A conflict dialog that offers
+"overwrite" is a reasonable thing for a file manager to have, and `Ask` exists
+because someone expected one. Deleting them decides that question by acting,
+which is the trap `TD-C-A-CLEANUP-THAT-REMOVES-A-DISTINCTION` records five
+times over.
+
+**Also corrected here:** the module doc claimed a crashed operation could be
+resumed from the journal. It cannot -- the journal holds a plan id and finished
+indices, not the plan -- and the doc now says so. See `roadmap-detailed.md`
+§4.1 under durable bulk operations.
+
+## TD-C-TEN-FILES-SWITCH-OFF-THE-DEAD-CODE-WARNING-FOR-THEMSELVES
+
+**Date:** 2026-09-16. **Lane:** C.
+**Where:** a blanket `#![allow(dead_code)]` at the top of, among others:
+`apps/explorer/src/{columns,fileops,thumbs}.rs`, `apps/imageviewer/src/video.rs`,
+`apps/procexplorer/src/features.rs`, `apps/settings/src/remote.rs`,
+`apps/match3`, `apps/pinball`, `apps/screenrecorder`, `apps/soundrecorder`.
+
+**In short:** ten files tell the compiler not to mention code nothing uses.
+Each suppression covers the whole file — thousands of lines in several cases —
+so anything inside that loses its last caller goes quiet permanently. Three of
+these files were measured on this date by deleting the line and building, and
+all three were hiding something real.
+
+**Measured:**
+
+| file | what the allow was hiding |
+|---|---|
+| `fileops.rs` | 10 findings, including three `ConflictPolicy` and two `ErrorPolicy` variants **nothing can select**, while the module doc advertises "conflict resolution policies" and "per-file error handling (skip, retry, stop)" |
+| `columns.rs` | a whole unreachable column-chooser renderer with its own palette entries and constants, plus a duplicate row renderer whose test existed to keep the two copies agreeing |
+| `thumbs.rs` | two methods, both **legitimate** — documented deliberate keeps, now carrying a targeted allow instead |
+
+**The method, which is cheap:** delete the line, `cargo check -p <crate>`, read
+the warnings, restore or narrow. Fifteen minutes per file, and two of the three
+turned up things worth acting on.
+
+**Two cautions, learned from doing it.**
+
+Not every finding is a defect. `thumbs.rs`'s `is_valid` exists because
+`pixels`, `width` and `height` are public and a `Thumbnail` can be built
+outside the module; its doc said so before I looked. **A targeted
+`#[allow(dead_code, reason = "...")]` is the right home for those** — same
+runtime cost as the blanket line, and it says which items are deliberate.
+
+Three of these files are the unreachable features in `open-questions.md`
+**C-Q17**, which is the operator's to answer. Measuring them is useful; acting
+on them is not, until it is answered.
+
+**Why this matters beyond tidiness.** Six unused capabilities were found by
+hand today, and the compiler found two instantly the moment they appeared in a
+binary crate with no suppression. The lint works. These ten files are where it
+has been switched off, and `fileops.rs` shows what accumulates behind one: an
+advertised feature list with two entries nothing can choose.
+
+## TD-C-THE-FEATURE-INVENTORY-WAS-WRONG-IN-BOTH-DIRECTIONS -- METHOD 2026-09-16
+
+**In short:** fifteen items in `roadmap-detailed.md` were checked against the
+code in one evening. Six were built and marked unstarted, two contradicted the
+design while looking finished, one was built and unreachable, and four were
+partly done with no sign of which part. Five were genuinely unstarted. **An
+unticked box in that file carried almost no information**, and the errors ran
+in both directions, which is what made them expensive.
+
+**Date:** 2026-09-16. **Lane:** C.
+
+| what the box said | what the code said | count |
+|---|---|---|
+| unstarted | built and working | 6 |
+| unstarted | built, unreachable by any user | 1 |
+| unstarted | partly built, no record of which part | 4 |
+| unstarted | genuinely unstarted | 5 |
+| (not flagged at all) | **built and contradicting the design** | 2 |
+
+**The two that contradicted the design are the ones to remember.** The file
+list auto-selected columns from a folder's contents, which §4.1 forbids in bold
+with four reasons; and a folder's Size cell was blank, justified in a comment
+as "what every file manager does" -- which is the convention §4.1 considered
+and rejected. Neither showed up as a missing feature, because nothing is
+missing. They were *finished work pointing the wrong way*, and no checkbox
+state can express that.
+
+**What made the check cheap.** Look for the type and the entry point, not the
+word. Grepping "tab" in `apps/editor` returns 260 hits, nearly all tab
+characters; the answer came from finding `Tabs<Document>` and a `render_tabs`
+that the frame calls. A count measures vocabulary, not behaviour -- the same
+error that matched `dmi` inside "admin" earlier the same day.
+
+**And what to check after finding the code:** whether anything reaches it. Four
+of today's fifteen had working code behind no caller, no menu row and no key.
+`[x]` on those would be the fabrication design-decisions 856 is about, moved
+into the planning file.
+
+**Recommendation for the next sweep:** record "checked and absent" explicitly,
+because after this the empty box no longer implies it. Five of the fifteen now
+say so, and that is the only way the next reader can tell a searched shelf from
+an unsearched one.
+
+## TD-C-FOUR-CLAIMS-WALKED-BACK-IN-ONE-SESSION -- METHOD 2026-09-16
+
+**In short:** four times in one evening I wrote a confident, specific statement
+about this codebase into a file, and four times it was wrong and had to be
+corrected within the hour. Three I caught by reading further. One was caught by
+a test. The difference between those two is the whole entry.
+
+**Date:** 2026-09-16. **Lane:** C.
+
+| the claim | what was actually true |
+|---|---|
+| "the thumbnail cache has no eviction" | `purge_stale` exists, is careful and is tested — it simply has no caller |
+| "crash recovery needs only a start-up scan" | the journal holds a plan *id* and finished indices, not the plan; it is a format gap |
+| "the editor's status bar shows neither encoding nor line ending" | the line ending is drawn, a few lines below where I stopped reading |
+| "two distinct volumes could share a device id" | what is hashed is the volume *prefix*, which is ASCII in every real case |
+
+**The common cause is one habit**: describing a thing after reading part of it.
+Each claim came from a grep hit or the first screen of a function, generalised
+into a sentence that sounded like the result of an investigation. A vague
+sentence would have been harmless. **A specific wrong sentence is expensive
+precisely because it is actionable** — "add a start-up scan" sends the next
+person to write a scan, find journals, and discover there is nothing to do with
+them.
+
+**The remedy that worked, found by accident.** The fourth claim went into a
+*test* as well as a comment, and the test failed immediately. Writing the
+assertion forced the claim to be checkable, and checkable claims get checked by
+the machine rather than by the next reader's goodwill. The three that stood
+longest were the three that lived only in prose.
+
+So: **when a finding is worth writing down in a file, it is worth writing as an
+assertion first if it can be one.** Not everything can — "nothing calls this"
+is awkward to assert — but "these two inputs must not collide" and "this field
+holds X" usually can, and those are exactly the claims that read as authority
+later.
+
+**A second, smaller rule from the same four:** a doc comment that lists what a
+module does is a claim about *every* item on the list. Three of today's
+corrections were to such lists, and in each case the list was right about most
+of its entries and wrong about one, which is the hardest shape to notice.

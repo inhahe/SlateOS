@@ -261,6 +261,53 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q25 — [C] The password manager can write your passwords to a plain file, or write a "backup" that restores nothing. Which? — Status: OPEN (raised 2026-09-17)
+
+**In short:** the credential manager holds logins you have typed in, and
+today there is no way to get them out of it at all — no save button, no
+export, nothing. Two ways out are already written and sitting unused. One
+writes every password as readable text anyone who opens the file can read.
+The other writes a file it calls a *backup* that contains the names of your
+logins but none of the passwords, so restoring from it would give you back a
+list of empty entries. I need you to say which of these the program should
+offer before I connect either one to a button.
+
+**Why you are being asked.** Both choices are about your data leaving the
+program in a form you cannot take back. A plain-text file of passwords is the
+normal way every password manager lets you move to a different one, and it is
+also a file that is exactly as secret as wherever it lands. That is a policy
+call, not a technical one.
+
+| Option | What changes |
+|---|---|
+| **A. Plain-text export, with a warning** | "Export" writes a `.csv` containing every password as readable text; the program warns you first and the file is yours to protect or delete |
+| **B. Encrypted backup** | "Backup" writes a file only this program can read, using the password you unlock the vault with. It restores everything, and it is useless to anyone who takes it |
+| **C. Ship neither yet** | The two unused writers are deleted, and credentials stay inside the program until B is built properly |
+
+*What changes, in one line each:*
+- **A** — you can move your logins to another program today, and a file on your disk holds every password in the clear.
+- **B** — you can restore your vault onto a new machine, and nobody who copies the file learns anything; it needs the encryption work first, so it is not available today.
+- **C** — nothing leaves the program, and there is no way to move or restore your logins at all.
+
+**My recommendation: B, and A only if you want it.** Every password manager
+worth using offers the encrypted backup; the plain-text export is the
+migration escape hatch, and it is a real feature, but it should be a
+deliberate choice you make rather than the only thing on offer.
+
+**What I will not do either way:** connect the existing "backup" writer as it
+stands. It omits the passwords, so a file named like a backup would restore a
+vault of empty logins — and someone who had it would believe their
+credentials were safe. That is the failure this lane keeps finding: a name
+that claims more than the thing behind it does.
+
+**If this is never answered:** nothing gets worse. There is no way to export
+today and there will continue to be none, so no credential can leak through a
+door that does not exist. What stays broken is that a vault cannot be moved
+or restored, which makes the program a place to lose data rather than keep
+it. The two unused writers are `export_csv` and `serialize_backup` in
+`apps/credmanager/src/main.rs`, both carrying a `dead_code` allow that says
+outright they have no caller.
+
 ## C-Q24 — [C] The design says to ship almost no keyboard shortcuts. We ship 31. Which ones stay? — Status: OPEN (raised 2026-09-17)
 
 **In short:** you wrote that SlateOS should come with very few keyboard

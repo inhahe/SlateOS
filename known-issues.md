@@ -155108,6 +155108,26 @@ generalise across a function boundary unless somebody goes looking.**
 produce *absence*: a feature that silently does not exist, with no bad data to
 notice. The second is harder to find, because there is nothing to see.
 
+**Triaged 2026-09-16: `apps/explorer/src/fileops.rs`, all eight sites.** One
+was a defect and is fixed (the copy's scratch name, which collided for two
+names differing only in undecodable bytes). The other seven are legitimate and
+should be left alone:
+
+* `progress.current_file` and the two extension/name formatters feed status
+  text. Display, not identity.
+* `make_id` builds a recycle entry's directory name from a lossy filename plus
+  a hash — and the name is *opaque*. The authoritative original path is stored
+  losslessly in `meta.txt` beside it (see `send_to_bin`), and collisions are
+  settled by the filesystem in `create_entry_dir`'s retry loop rather than
+  trusted from the string. A lossy component is safe precisely because nothing
+  reads it back as a path.
+* The id read back in `list` matches that: our own ids are always UTF-8 because
+  we generate them, and a *foreign* directory in the bin is not ours to act on.
+
+So the rate in this file was one in eight, and the seven were not near misses —
+each had a reason on the spot. Recorded so the next reader spends the minute on
+the other thirty-seven sites in `apps/explorer` and `gui/desktop`, not these.
+
 **Do not sweep this blindly.** Two `env::var` calls in this lane are correct
 and must stay: `gui/compositor`'s `SLATE_DRM_CARD` parses to a `u32`, so a
 non-UTF-8 value is invalid input and is already refused with a message, and

@@ -3937,25 +3937,45 @@ impl PhotoApp {
 
         let stats = self.library_stats();
         let visible = self.visible_photos().len();
-        let status_text = self.status_message.as_ref().map_or_else(
-            || {
-                format!(
-                    "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
-                    visible, stats.total_photos, stats.total_albums, stats.trash_count,
-                )
-            },
-            // The import result takes the bar until something else happens.
-            // A read that failed has to be visible somewhere, and the counts
-            // it replaces are the thing that would otherwise be read as the
-            // answer -- an unchanged total looks like a refusal nobody
-            // explained.
-            Clone::clone,
-        );
+        // The library note outranks the transient one. A failed load or a
+        // refused save is a standing condition -- it is still true after the
+        // next import reports success -- so it must not be pushed off the bar
+        // by something that happened afterwards.
+        //
+        // This field was written and never read until 2026-09-17, which lane
+        // A's sweep caught through `check-fields-written-never-read`: the
+        // application recorded why it could not read the library and then
+        // showed nobody. A test asserted the field was set and called that
+        // "the user is told", which is the exact mistake design-decisions 856
+        // names -- a thing is built when something obeys it, not when
+        // something stores it.
+        let status_text = self
+            .library_note
+            .as_ref()
+            .or(self.status_message.as_ref())
+            .map_or_else(
+                || {
+                    format!(
+                        "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
+                        visible, stats.total_photos, stats.total_albums, stats.trash_count,
+                    )
+                },
+                // The import result takes the bar until something else
+                // happens. A read that failed has to be visible somewhere, and
+                // the counts it replaces are the thing that would otherwise be
+                // read as the answer -- an unchanged total looks like a
+                // refusal nobody explained.
+                Clone::clone,
+            );
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: bar_y + 6.0,
             text: status_text,
-            color: self.palette.subtext0,
+            color: if self.library_note.is_some() {
+                self.palette.red
+            } else {
+                self.palette.subtext0
+            },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -7139,7 +7159,14 @@ mod tests {
             app.library_unread, 1,
             "the control failed: nothing was skipped"
         );
-        assert!(app.library_note.is_some(), "the user is not told");
+        // Not `library_note.is_some()`: that asserts a field was written,
+        // which is what let this ship with nothing displaying it. Assert the
+        // words reach the screen.
+        let tree = app.render(900.0, 700.0);
+        let told = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::Text { text, .. } if text.contains("could not be read"))
+        });
+        assert!(told, "the reason was recorded but never put on screen");
 
         // Change something, then try to save.
         assert!(app.rate_photo(1, 5));

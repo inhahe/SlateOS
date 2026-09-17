@@ -807,6 +807,7 @@ dependencies = [
  "scratchdir",
  "settingsfile",
  "textfind",
+ "thumbs",
  "yamldoc",
 ]
 
@@ -3032,6 +3033,16 @@ name = "thermald"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "thumbs"
+version = "0.1.0"
+dependencies = [
+ "byteread",
+ "guitk",
+ "imagecodec",
+ "scratchdir",
 ]
 
 [[package]]

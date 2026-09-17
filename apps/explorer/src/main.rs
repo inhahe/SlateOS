@@ -31,7 +31,6 @@ mod dropzone;
 mod fileops;
 mod manualorder;
 mod search;
-mod thumbs;
 
 use appearance::Palette;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};

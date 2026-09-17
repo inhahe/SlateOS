@@ -41,6 +41,11 @@ imagecodec = { path = "../../gui/imagecodec" }
 # could lay out a frame but had nowhere to put it and no way to be clicked.
 oswindow = { path = "../../gui/window" }
 
+# Was `mod thumbs` in this binary until the photo library needed the same
+# machinery. The call sites did not move: `use thumbs::{...}` resolves to the
+# crate exactly as it resolved to the module.
+thumbs = { path = "../../gui/thumbs" }
+
 [dev-dependencies]
 # Test fixtures only: a private temp directory per test, removed on drop.
 scratchdir = { path = "../../userspace/scratchdir" }

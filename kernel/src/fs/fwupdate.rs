@@ -148,47 +148,101 @@ pub fn init_defaults() {
     if guard.is_some() {
         return;
     }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        devices: alloc::vec![
-            FirmwareDevice {
-                id: 1,
-                name: String::from("System UEFI"),
-                fw_type: FirmwareType::Uefi,
-                current_version: String::from("1.20"),
-                available_version: Some(String::from("1.22")),
-                status: UpdateStatus::UpdateAvailable,
-                vendor: String::from("SystemVendor"),
-                last_updated_ns: now,
-            },
-            FirmwareDevice {
-                id: 2,
-                name: String::from("TPM 2.0"),
-                fw_type: FirmwareType::Tpm,
-                current_version: String::from("7.85"),
-                available_version: None,
-                status: UpdateStatus::UpToDate,
-                vendor: String::from("TPMVendor"),
-                last_updated_ns: now,
-            },
-            FirmwareDevice {
-                id: 3,
-                name: String::from("Intel I225-V"),
-                fw_type: FirmwareType::NetworkCard,
-                current_version: String::from("1.68"),
-                available_version: Some(String::from("1.70")),
-                status: UpdateStatus::UpdateAvailable,
-                vendor: String::from("Intel"),
-                last_updated_ns: now,
-            },
-        ],
+        // No devices. This list used to hold three: a "System UEFI" with an
+        // update available, a "TPM 2.0", and an "Intel I225-V" -- a real
+        // 2.5GbE product -- each with a version and a vendor. The kernel
+        // enumerates no firmware at all, so all of it was invented, and
+        // `cmd_fwupdate` calls this function before listing: an operator
+        // asking what firmware is present caused three devices to exist and
+        // was shown them, two of them offering updates.
+        //
+        // A device appears here when something calls `register_device`. There
+        // is no firmware enumeration yet, so nothing does, and the honest
+        // answer to what firmware this machine has is: not known.
+        devices: Vec::new(),
         history: Vec::new(),
-        next_id: 4,
+        next_id: 1,
         total_updates: 0,
         total_failures: 0,
         total_checks: 0,
         ops: 0,
     });
+}
+
+/// Register a firmware device. **Private on purpose.**
+///
+/// Nothing outside this module calls it, because the kernel enumerates no
+/// firmware, so nothing outside has anything to register. It exists
+/// because the list it appends to previously had no way to be filled
+/// except a seeded constant, and a registry whose only contents are
+/// invented is worse than an empty one: `/proc` cannot tell them apart.
+///
+/// It is `fn` and not `pub fn` because
+/// `scripts/check-unreachable-mutators.py` is right to refuse a public
+/// mutator with no caller -- "a counter that cannot fall does not look
+/// like a gap, it looks like data". Deliberately *not* wired to a shell
+/// command to make it reachable: a `fwupdate register` subcommand would be
+/// a way to invent firmware entries by hand, which is what the seeded
+/// devices did and what removing them was for.
+///
+/// When real firmware enumeration exists, make this `pub` and wire the
+/// caller in the same commit.
+///
+/// `available` is the version an update would move this device to, or
+/// `None` when none is offered.
+///
+/// # Errors
+///
+/// `ResourceExhausted` past `MAX_DEVICES`; `NotSupported` before
+/// `init_defaults`.
+fn register_device(
+    name: &str,
+    fw_type: FirmwareType,
+    current_version: &str,
+    vendor: &str,
+    available: Option<&str>,
+) -> KernelResult<u32> {
+    with_state(|state| {
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        let id = state.next_id;
+        state.next_id += 1;
+        state.devices.push(FirmwareDevice {
+            id,
+            name: String::from(name),
+            fw_type,
+            current_version: String::from(current_version),
+            available_version: available.map(String::from),
+            status: if available.is_some() {
+                UpdateStatus::UpdateAvailable
+            } else {
+                UpdateStatus::UpToDate
+            },
+            vendor: String::from(vendor),
+            last_updated_ns: crate::hpet::elapsed_ns(),
+        });
+        Ok(id)
+    })
+}
+
+/// Remove a firmware device from the registry. Private, as
+/// [`register_device`] is and for the same reason.
+///
+/// # Errors
+///
+/// `NotFound` if no device carries `id`; `NotSupported` before
+/// `init_defaults`.
+fn unregister_device(id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        let before = state.devices.len();
+        state.devices.retain(|d| d.id != id);
+        if state.devices.len() == before {
+            return Err(KernelError::NotFound);
+        }
+        Ok(())
+    })
 }
 
 /// List all firmware devices.
@@ -220,7 +274,22 @@ pub fn check_updates() -> KernelResult<u32> {
     })
 }
 
-/// Apply firmware update (simulated).
+/// Record a firmware update. **Writes no firmware.**
+///
+/// There is no firmware writer in this kernel. This moves the device's
+/// reported version to `available_version`, sets `PendingReboot`, and
+/// pushes an `UpdateRecord` whose `success` field means *the record was
+/// written*, not *the flash succeeded*. Every caller that shows the result
+/// to a human must say so: `kshell` does.
+///
+/// The distinction matters more here than anywhere else in this module,
+/// because `PendingReboot` is an instruction. An operator who believes it
+/// reboots to complete a flash that never began.
+///
+/// # Errors
+///
+/// `NotFound` for an unknown id; `InvalidArgument` if the device is not
+/// offering an update.
 pub fn apply_update(device_id: u32) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
@@ -309,43 +378,67 @@ fn self_test_inner() {
     crate::serial_println!("fwupdate::self_test() — running tests...");
     init_defaults();
 
-    // 1: Default devices.
+    // The fixture is built HERE rather than shipped. These three used to
+    // be seeded by `init_defaults`, and one of them named a real product
+    // (Intel I225-V) on a machine that had enumerated nothing. This test
+    // asserting `len() == 3` is what made them look required. Step 9
+    // removes them again.
+    let uefi = register_device(
+        "Test UEFI",
+        FirmwareType::Uefi,
+        "1.20",
+        "Test Vendor",
+        Some("1.22"),
+    )
+    .expect("register uefi");
+    let _tpm = register_device("Test TPM", FirmwareType::Tpm, "7.85", "Test Vendor", None)
+        .expect("register tpm");
+    let nic = register_device(
+        "Test NIC",
+        FirmwareType::NetworkCard,
+        "1.68",
+        "Test Vendor",
+        Some("1.70"),
+    )
+    .expect("register nic");
+
+    // 1: Registered devices.
     assert_eq!(list_devices().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    crate::serial_println!("  [1/9] registered: OK");
 
     // 2: Get device.
-    let dev = get_device(1).expect("get");
+    let dev = get_device(uefi).expect("get");
     assert_eq!(dev.fw_type, FirmwareType::Uefi);
     assert_eq!(dev.current_version, "1.20");
-    crate::serial_println!("  [2/8] get device: OK");
+    crate::serial_println!("  [2/9] get device: OK");
 
     // 3: Check updates.
     let available = check_updates().expect("check");
     assert_eq!(available, 2); // UEFI and NIC.
-    crate::serial_println!("  [3/8] check updates: OK");
+    crate::serial_println!("  [3/9] check updates: OK");
 
     // 4: Apply update.
-    apply_update(1).expect("apply");
-    let dev = get_device(1).expect("get2");
+    apply_update(uefi).expect("apply");
+    let dev = get_device(uefi).expect("get2");
     assert_eq!(dev.current_version, "1.22");
     assert_eq!(dev.status, UpdateStatus::PendingReboot);
-    crate::serial_println!("  [4/8] apply: OK");
+    crate::serial_println!("  [4/9] apply: OK");
 
     // 5: Can't re-apply.
-    assert!(apply_update(1).is_err());
-    crate::serial_println!("  [5/8] no re-apply: OK");
+    assert!(apply_update(uefi).is_err());
+    crate::serial_println!("  [5/9] no re-apply: OK");
 
     // 6: Apply another.
-    apply_update(3).expect("apply2");
-    let dev = get_device(3).expect("get3");
+    apply_update(nic).expect("apply2");
+    let dev = get_device(nic).expect("get3");
     assert_eq!(dev.current_version, "1.70");
-    crate::serial_println!("  [6/8] apply nic: OK");
+    crate::serial_println!("  [6/9] apply nic: OK");
 
     // 7: History.
     let hist = update_history();
     assert_eq!(hist.len(), 2);
     assert!(hist[0].success);
-    crate::serial_println!("  [7/8] history: OK");
+    crate::serial_println!("  [7/9] history: OK");
 
     // 8: Stats.
     let (devs, updates, failures, checks, ops) = stats();
@@ -354,7 +447,17 @@ fn self_test_inner() {
     assert_eq!(failures, 0);
     assert!(checks >= 1);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/9] stats: OK");
 
-    crate::serial_println!("fwupdate::self_test() — all 8 tests passed");
+    // 9: Residue. `with_pristine` would restore the table anyway, so this
+    // is not what keeps the fixture out of /proc -- it is what proves
+    // `unregister_device` works, which nothing else would.
+    for d in list_devices() {
+        unregister_device(d.id).expect("unregister");
+    }
+    let (residue, _, _, _, _) = stats();
+    assert_eq!(residue, 0);
+    crate::serial_println!("  [9/9] residue-free: OK");
+
+    crate::serial_println!("fwupdate::self_test() — all 9 tests passed");
 }

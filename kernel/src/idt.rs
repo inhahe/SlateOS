@@ -484,6 +484,92 @@ static IRQ_STACK_BOTTOM: [AtomicU64; crate::smp::MAX_CPUS] = {
     [ZERO; crate::smp::MAX_CPUS]
 };
 
+// ---------------------------------------------------------------------------
+// Hard-IRQ context marker
+// ---------------------------------------------------------------------------
+
+/// Per-CPU interrupt-dispatch nesting depth; non-zero means this CPU is
+/// inside `dispatch_vector`.
+///
+/// Why this exists when `cputime::irq_depth()` looks like the same number:
+/// that one is bumped in `apic::handle_timer_irq` and
+/// `ioapic::handle_device_irq` only, which is two of the five arms below.
+/// Vectors 251, 252 and 255 never touch it, nor does the `_` arm, nor will
+/// whatever arm is added next. This counter is maintained in
+/// `dispatch_vector` itself for exactly the reason the comment above
+/// `count_vector` gives for counting there: an arm added later is covered
+/// without its author having to know this exists.
+///
+/// It cannot be replaced by reading the interrupt flag. An IDT interrupt
+/// gate clears IF on entry, so inside a handler `cpu::interrupts_enabled()`
+/// is false -- indistinguishable from an ordinary task that took a lock via
+/// `lock_irqsave`. Telling those two apart is the entire point.
+///
+/// Note it stays set across `softirq::process_pending()`, which runs inside
+/// this window and re-enables interrupts. That is deliberate and
+/// conservative: the 2026-09-15 writeback self-deadlock was a softirq
+/// re-entering a lock, so softirq context is worth covering. It does mean
+/// `in_hardirq()` means *interrupt context*, not strictly *hard IRQ*.
+static HARDIRQ_DEPTH: [AtomicU64; crate::smp::MAX_CPUS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; crate::smp::MAX_CPUS]
+};
+
+/// Is this CPU currently inside an interrupt handler?
+pub fn in_hardirq() -> bool {
+    HARDIRQ_DEPTH
+        .get(crate::smp::current_cpu_index())
+        .is_some_and(|d| d.load(Ordering::Relaxed) != 0)
+}
+
+/// RAII bracket for [`HARDIRQ_DEPTH`].
+///
+/// A guard rather than a matched pair of calls so that every return path out
+/// of `dispatch_vector` decrements, including one some future arm adds. A
+/// leaked increment would mark this CPU as permanently in interrupt context
+/// and silence the lock-context check for the rest of the boot -- a gate
+/// that fails open and says nothing, which is the failure mode worth
+/// designing out rather than remembering.
+pub(crate) struct HardIrqGuard(Option<usize>);
+
+impl HardIrqGuard {
+    fn enter() -> Self {
+        let cpu = crate::smp::current_cpu_index();
+        let Some(slot) = HARDIRQ_DEPTH.get(cpu) else {
+            return Self(None);
+        };
+        slot.fetch_add(1, Ordering::Relaxed);
+        Self(Some(cpu))
+    }
+}
+
+/// Enter interrupt context deliberately, for `lockdep`'s negative control.
+///
+/// The lock-context check can only fire when one acquisition happens in
+/// interrupt context, which a self-test running in task context cannot
+/// otherwise produce. Without this the check could never be shown to fire,
+/// and a checker that has never fired is indistinguishable from one that
+/// cannot.
+pub(crate) fn enter_hardirq_for_test() -> HardIrqGuard {
+    HardIrqGuard::enter()
+}
+
+impl Drop for HardIrqGuard {
+    fn drop(&mut self) {
+        let Some(cpu) = self.0 else { return };
+        let Some(slot) = HARDIRQ_DEPTH.get(cpu) else {
+            return;
+        };
+        // `saturating_sub` so an unbalanced decrement can never wrap to
+        // u64::MAX and pin this CPU in interrupt context forever. The
+        // closure never returns None, so `fetch_update` cannot report Err;
+        // discarding it is safe for that reason and no other.
+        let _ = slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| {
+            Some(d.saturating_sub(1))
+        });
+    }
+}
+
 /// Allocate and install this CPU's dedicated hardware-IRQ stack.
 ///
 /// Idempotent per CPU: a second call for an already-initialized CPU is a
@@ -562,6 +648,10 @@ extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
     //    event a per-handler count can never see.
     #[allow(clippy::cast_possible_truncation)] // Vectors are 0–255 by hardware.
     count_vector(vector as usize);
+
+    // Mark interrupt context for the whole dispatch, the `_` arm included.
+    // Held by an RAII guard so it is released on every path out.
+    let _hardirq = HardIrqGuard::enter();
 
     match vector {
         32 => crate::apic::handle_timer_irq(frame_ref, 0),

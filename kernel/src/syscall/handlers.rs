@@ -5680,8 +5680,70 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
 
     let pgid = crate::tty::foreground_pgid(tty);
     if pgid == 0 {
+        // A terminal signal was DUE and nobody is registered to receive
+        // it, so it is dropped. Announced rather than returned silently,
+        // because the caller's very next move is
+        // `restart_result(ERESTARTSYS)`: the reader restarts, the byte
+        // that caused this is already consumed, and nothing will ever
+        // arrive. That is an unbounded restart loop with no signal, no
+        // data and no EOF -- and until this line existed it left no
+        // trace anywhere.
+        //
+        // Suspected cause of `ctest-pty` exit 45 on 2026-09-16, the
+        // rung's first real run, where the child never returned from its
+        // read on the pty slave. `foreground_pgid` is
+        // `pcb::ctty_fg_pgrp(id).unwrap_or(0)`, so 0 means no session
+        // holds this terminal -- which for a `forkpty` child means
+        // `login_tty`'s TIOCSCTTY/tcsetpgrp did not take effect.
+        //
+        // This print is the discriminator, and that is the whole point of
+        // adding it before changing any behaviour: if it appears naming
+        // the pty's id, the fault is in acquiring the terminal and NOT in
+        // the line discipline, which had already decided correctly that a
+        // signal was due. If it does not appear, the hypothesis is wrong
+        // and the child is blocked somewhere else entirely.
+        crate::serial_println!(
+            concat!(
+                "[tty] signal {} due on tty {:?} but NO foreground group ",
+                "is registered: DROPPED, and the reader will now restart. ",
+                "See known-issues ",
+                "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
+            ),
+            sig,
+            tty
+        );
         return;
     }
+    // ROUND-4 DISCRIMINATOR for ctest-pty exit 45. Rounds 1 and 3 settled
+    // that the byte reaches the discipline, that ISIG is on, that a signal is
+    // decided (at `canonical_try_read`/`step()`), and that `pgid != 0` so
+    // delivery is attempted. The child still never returns from its read.
+    //
+    // These counters exist because the per-member `let _ =` below cannot tell
+    // the benign case its own comment describes -- one member exited -- from
+    // the case that would explain the hang, which is NOT ONE send succeeding.
+    // A tolerated per-item failure hides a total failure, and a discarded
+    // Result reports both as silence.
+    // ROUND-8. Rounds 3 and 4 established that a signal is decided and that
+    // delivery SUCCEEDS -- and the ctest-pty trace shows the child never got
+    // it. Both are consistent: `delivered > 0` only says somebody received
+    // it, not that the right group did. The pty child is its own group leader
+    // (login_tty/setsid), and the serial shows its group is 205 while the
+    // parent gave up and exited BEFORE any SIGINT arrived.
+    //
+    // So the target is the thing to print, not the count. Terminal signals are
+    // rare, so this is quiet.
+    let members = pcb::pids_in_group(pgid);
+    crate::serial_println!(
+        "[tty] signal {} -> fg pgid {} on tty {:?}: {} member(s) {:?}",
+        sig,
+        pgid,
+        tty,
+        members.len(),
+        members
+    );
+    let mut delivered = 0usize;
+    let mut failed = 0usize;
     for target in pcb::pids_in_group(pgid) {
         let send_args = SyscallArgs {
             arg0: target,
@@ -5691,9 +5753,35 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
             arg4: 0,
             arg5: 0,
         };
-        // Best-effort: a member that exited between the membership snapshot
-        // and delivery just fails its own send; the rest still receive it.
-        let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
+        // Best-effort, per member: a member that exited between the membership
+        // snapshot and delivery just fails its own send and the rest still
+        // receive it. Counted rather than discarded so the aggregate can be
+        // judged even though no individual failure is worth reporting.
+        // `SyscallResult` is not a `Result`: it carries an i64 `value` whose
+        // negative range is the error code. Assuming the API from the name
+        // cost a compile here, which is the cheapest place to be wrong.
+        if sys_signal_send_with_info(&send_args, SI_KERNEL, 0).value < 0 {
+            failed = failed.saturating_add(1);
+        } else {
+            delivered = delivered.saturating_add(1);
+        }
+    }
+    // Deliberately silent unless NOTHING was delivered to a non-empty group.
+    // Printing each failure would bury this case in noise on a busy system and
+    // tell a reader nothing the discarded Result did not already tell them.
+    if delivered == 0 && failed > 0 {
+        crate::serial_println!(
+            concat!(
+                "[tty] signal {} decided for pgid {} on tty {:?}: {} member(s) ",
+                "and NOT ONE delivery succeeded. The line discipline was ",
+                "right and the delivery is the fault -- known-issues ",
+                "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
+            ),
+            sig,
+            pgid,
+            tty,
+            failed
+        );
     }
 }
 
@@ -6996,18 +7084,33 @@ pub fn sys_signal_altstack(args: &SyscallArgs) -> SyscallResult {
 /// value. That is the class of defect this syscall pair was added to end.
 use crate::uname::NODENAME_MAX as UTS_NAME_MAX;
 
-/// Read a UTS name out of user memory and hand it to `apply`.
+/// Read a short name out of user memory, behind `right`, and hand it to
+/// `apply`.
 ///
-/// Shared by both setters rather than written twice. The two differ only in
-/// which field they write, and a capability check, a length bound, a null test,
-/// a user copy and a UTF-8 validation copied into two functions is five chances
-/// for the pair to drift apart -- which for a permission check means one of them
-/// silently stops having one.
-fn uts_name_set(
+/// Shared by all three setters rather than written three times. They differ
+/// only in which field they write and which right gates them, and a
+/// capability check, a length bound, a null test, a user copy and a UTF-8
+/// validation copied into three functions is five chances for them to drift
+/// apart -- which for a permission check means one of them silently stops
+/// having one.
+///
+/// The right is a **parameter**, not a constant, because the third caller
+/// sets the keyboard layout and must not be gated on permission to rename
+/// the machine. Hard-coding it is what made this worth generalising rather
+/// than copying.
+///
+/// The 64-byte bound is `NODENAME_MAX`, shared by all three. It is a UTS
+/// limit and a keyboard layout is not a UTS name; it is reused because a
+/// layout name is a short identifier (`us`, `dvorak`, `de`) for which 64 is
+/// not a constraint anyone will meet, and a second bound would be a second
+/// thing to keep in step for no gain. If a layout name ever needs to be
+/// longer, that is the moment to split them, not before.
+fn name_set_gated(
     args: &SyscallArgs,
+    right: crate::cap::Rights,
     apply: fn(&str) -> crate::error::KernelResult<()>,
 ) -> SyscallResult {
-    use crate::cap::{ResourceType, Rights};
+    use crate::cap::ResourceType;
     use crate::proc::thread;
 
     let task_id = sched::current_task_id();
@@ -7019,7 +7122,7 @@ fn uts_name_set(
     // about argument validity it was not entitled to ask. Same ordering as the
     // Linux-ABI handler and as Linux itself, where CAP_SYS_ADMIN precedes the
     // length check.
-    if !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_HOSTNAME) {
+    if !pcb::has_capability_type(pid, ResourceType::Process, right) {
         return SyscallResult::err(KernelError::PermissionDenied);
     }
 
@@ -7074,7 +7177,11 @@ fn uts_name_set(
 /// for why this exists and why no getter is paired with it.
 pub fn sys_hostname_set(args: &SyscallArgs) -> SyscallResult {
     crate::fs::nameservice::init_defaults();
-    uts_name_set(args, crate::fs::nameservice::set_hostname)
+    name_set_gated(
+        args,
+        crate::cap::Rights::SET_HOSTNAME,
+        crate::fs::nameservice::set_hostname,
+    )
 }
 
 /// `SYS_DOMAINNAME_SET` — set the system NIS/YP domain name.
@@ -7082,7 +7189,42 @@ pub fn sys_hostname_set(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: pointer to UTF-8 bytes. `arg1`: length, 0..=64; 0 clears the name.
 pub fn sys_domainname_set(args: &SyscallArgs) -> SyscallResult {
     crate::fs::nameservice::init_defaults();
-    uts_name_set(args, crate::fs::nameservice::set_domain)
+    name_set_gated(
+        args,
+        crate::cap::Rights::SET_HOSTNAME,
+        crate::fs::nameservice::set_domain,
+    )
+}
+
+/// `SYS_KEYLAYOUT_SET` — set the console keyboard layout.
+///
+/// `arg0`: pointer to UTF-8 bytes naming a registered layout. `arg1`:
+/// length, 0..=64; 0 clears the mapping and restores the identity layout.
+///
+/// Gated on `(Process, SET_KEYLAYOUT)` rather than `SET_HOSTNAME`: a layout
+/// decides what character every scancode produces for every reader of the
+/// console, including a password prompt, which is not the same authority as
+/// renaming the machine.
+///
+/// `NotFound` when no such layout is registered -- `keylayout::set_active`
+/// validates that, so an unknown name is refused rather than stored and
+/// silently ignored.
+///
+/// See `number.rs`'s
+/// [`SYS_KEYLAYOUT_SET`](crate::syscall::number::SYS_KEYLAYOUT_SET) for why
+/// this exists and why no getter is paired with it.
+pub fn sys_keylayout_set(args: &SyscallArgs) -> SyscallResult {
+    // The layout table has to exist before a name can be looked up in it. A
+    // failure here is a kernel-side problem rather than anything the caller
+    // did, so it is surfaced rather than swallowed.
+    if let Err(e) = crate::fs::keylayout::init_defaults() {
+        return SyscallResult::err(e);
+    }
+    name_set_gated(
+        args,
+        crate::cap::Rights::SET_KEYLAYOUT,
+        crate::fs::keylayout::set_active,
+    )
 }
 
 /// `SYS_SIGNAL_SEND` — post a signal to a target process.

@@ -294,6 +294,18 @@ pub fn unmap(layout_name: &str, from: KeyCode) -> KernelResult<()> {
 }
 
 /// Disable a key in a layout (key produces no output).
+/// Disable a key in a layout.
+///
+/// **Best-effort, and that is a property of the consumer rather than of
+/// this function.** The keystroke path reads the table from an interrupt
+/// handler via [`translate_try`], which passes a key through untranslated
+/// when the table is momentarily locked by a task. So a disabled key can
+/// get through while a layout is being edited.
+///
+/// That is acceptable for what this is -- someone disabling CapsLock -- and
+/// would not be if anything ever gated security on it. **It is ergonomics,
+/// not a control.** Stated here rather than only in design-decisions 946,
+/// because the reader who would misuse it is reading this signature.
 pub fn disable_key(layout_name: &str, key: KeyCode) -> KernelResult<()> {
     let mut state = STATE.lock();
     let layout = state
@@ -328,6 +340,53 @@ pub fn enable_key(layout_name: &str, key: KeyCode) -> KernelResult<()> {
 ///
 /// Returns `None` if the key is disabled, `Some(mapped_key)` otherwise.
 /// If no layout is active, returns the key unchanged.
+/// What a non-blocking translation found.
+///
+/// Three outcomes rather than `Option<Option<..>>`, because the caller is
+/// an interrupt handler and each case has a different correct action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslateTry {
+    /// The table was locked by a task. The caller must NOT wait.
+    Contended,
+    /// The key is disabled in the active layout: swallow it.
+    Disabled,
+    /// Use this keycode (equal to the input when unmapped).
+    Mapped(KeyCode),
+}
+
+/// [`translate`], but never blocks.
+///
+/// **This exists because the only consumer is an interrupt handler.**
+/// `ioapic.rs` calls `keyboard::handle_scancode()` from IRQ 1, which reaches
+/// `scancode_to_ascii` synchronously. A task inside [`set_active`] holds
+/// `STATE`, and an IRQ that blocked on it on the same CPU would deadlock
+/// with the keyboard as the thing that stops responding. design-decisions
+/// 940 is the same shape from the writeback softirq, and the rule it
+/// settles is that the IRQ backs off rather than the registry becoming
+/// IRQ-safe.
+///
+/// `Contended` is expected and harmless: a keystroke that races a layout
+/// change is translated by the old mapping, which is a sentence a user can
+/// understand. It is NOT an error and must not be reported as one.
+pub fn translate_try(key: KeyCode) -> TranslateTry {
+    TRANSLATE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let Some(state) = STATE.try_lock() else {
+        return TranslateTry::Contended;
+    };
+    if state.active.is_empty() {
+        return TranslateTry::Mapped(key);
+    }
+    match state.layouts.get(&state.active) {
+        Some(layout) => match layout.translate(key) {
+            Some(mapped) => TranslateTry::Mapped(mapped),
+            None => TranslateTry::Disabled,
+        },
+        // Active names a layout that is gone: passthrough, as `translate`
+        // does, rather than swallowing every key until it is set again.
+        None => TranslateTry::Mapped(key),
+    }
+}
+
 pub fn translate(key: KeyCode) -> Option<KeyCode> {
     TRANSLATE_COUNT.fetch_add(1, Ordering::Relaxed);
     let state = STATE.lock();

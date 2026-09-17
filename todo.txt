@@ -4527,6 +4527,84 @@
 
 ## Judgment Calls
 
+### 2026-09-16 — pushed with ALLOW_STALE_RELEASE=1, and did NOT update
+### bench/last-release-boot.json
+
+The release boot ran (BOOT_OK at 166s, first release profile in 101
+commits) and the boot test reported FAILED, because `ctest-pty` failed
+with exit 45. boot-test.sh treats any `self-test failed` marker as fatal
+even for a Diagnostic-severity rung, which is deliberate and correct --
+its own comment records that a naive `grep BOOT_OK` once hid a stale
+procfs readdir-count assertion.
+
+So three things are true at once and none of them is a clean outcome:
+
+  * the release profile WAS exercised, which is what the staleness gate
+    exists to ensure -- the bench scatter-scale check only runs there and
+    it produced a real finding;
+  * the boot test FAILED, so the baseline must not be stamped with it;
+    the existing baseline's own note records its predecessor as a
+    `=== Boot test PASSED ===` run, and writing a green marker over a red
+    run is the exact defect class I spent the previous day removing;
+  * the gate therefore keeps refusing every push, at 104 commits and
+    rising.
+
+**Decision: use the documented escape hatch, leave the baseline stale.**
+`ALLOW_STALE_RELEASE=1` exists for "you are about to run the release boot
+test", and I literally am: the commit being pushed adds instrumentation
+whose only purpose is to produce a discriminating line on the *next*
+release boot. Publishing it is the prerequisite for the measurement that
+would let the gate be cleared honestly.
+
+**Rejected: re-disable `ctest-pty` so the boot passes.** That is the
+"raise the CEILING" move `check-unreachable-mutators` warns about in as
+many words, and design-decisions 944 exists because this rung had already
+been switched off across four disable cycles while the reason rotted. A
+rung switched off to make a boot green is a rung that will not come back.
+
+**Rejected: stamp the baseline with a qualifying note.** The previous
+author did something adjacent -- recorded a `dirty=true` run with a long
+justification -- but that was a *passing* boot with uncommitted edits.
+A failing boot is a different claim and the field is read by
+`merge-readiness.py` as well as by humans.
+
+**What clears this properly:** the next release boot. If the new `[tty]`
+line appears naming the pty's id, the fault is in acquiring the terminal
+and the fix follows; if it does not appear, the hypothesis is wrong and
+the child is blocked elsewhere. Either way the boot after *that* is the
+one whose SHA belongs in the baseline.
+The post-merge sweep is now a SCRIPT, at build/sweep.sh (lane A, 2026-09-15).
+Three boots paid for the routine version.
+
+  Boot 1: skipped the sweep entirely -- stale INDEX.md, gate 53.
+  Boot 2: ran image-check and sysroot-check and forgot the sweep -- stale
+          INDEX.md again, gate 53.
+  Boot 3: typed SIX of the nine from memory and omitted three, one being
+          check-fields-written-never-read -- gate 52 failed on exactly that.
+
+  A routine typed from memory gets typed partially, and a partial sweep is
+  worse than none: it returns green over the checks that ran and says nothing
+  about the ones omitted. That is the corpus problem of 942 in its smallest
+  form, and I produced it three times in one day while writing the entry.
+
+  Scripting it also pins the thing most likely to go wrong by hand: THE
+  INVOCATIONS ARE NOT UNIFORM. Two checks REQUIRE --check (without it
+  gen-script-index rewrites INDEX.md and scan-orphan-modules reports and
+  exits 0 -- a check turned into a repair that reports success for having
+  acted) and seven REJECT it with rc=2 that reads like a finding. One flag
+  for all nine is wrong in both directions at once.
+
+  RUN IT WITHOUT A PIPE. `sh build/sweep.sh 2>&1 | tail -14` reports tail's
+  status, so the harness recorded exit 0 over a SWEEP FAILED -- which I did,
+  on the very run testing a script whose docstring is about that bug. Use
+  `sh build/sweep.sh > log 2>&1; echo rc=$?` and read the log.
+
+  Worth promoting to scripts/ if it survives: it is useful to all three lanes
+  and lane C has started sweeping after merges too. Left in build/ for now
+  because a new file in scripts/ has to satisfy check-gates-are-wired, and a
+  convenience runner is not a gate -- that needs checking before it lands
+  rather than discovering it in someone else's boot.
+
 MacAddress is declared twice (lane A, 2026-09-15). Small, real, not urgent.
 
   kernel/src/wol.rs:59        pub struct MacAddress(pub [u8; 6])   1 use
@@ -58445,3 +58523,70 @@ minutes each to clear by reading, and it produced five real defects of which
 two (`sshd`, `grub2`) were serious. A scanner reporting 28 where 5 are real is
 emphatically worth running; the cost is that a future reader re-clears the 23
 unless the triage is written down, which is what this entry is for.
+
+## Judgment Call: pushed lane-a with ALLOW_STALE_RELEASE=1 rather than
+advancing the release-boot marker off a FAILED boot (lane A, 2026-09-17).
+
+  The pre-push release-staleness gate refused at 137 kernel-touching commits
+  against a threshold of 100. It offers two ways out: update
+  bench/last-release-boot.json with a fresh release boot's SHA, or override
+  with ALLOW_STALE_RELEASE=1. I took the override.
+
+  I had in fact just run a release boot, on 26a90aadf: it built release,
+  reached BOOT_OK in 133s, and ran the whole self-test battery. But it
+  returned 1, because three ring-3 fixtures failed -- `our own userland runs
+  at all`, `pty ^C signal delivery`, and `CPython REPL over a pty`. All three
+  are lane B's, all three are already filed in requests/, and none is
+  release-specific; they fail on debug too.
+
+  Why not update the marker anyway. That file's `note` is a curated
+  judgement, and the note already there sets the standard it is read at:
+  "Set from an actual release-profile boot test ... '=== Boot test PASSED
+  ==='". It also says READ THIS BEFORE TRUSTING THE SHA. Writing a baseline
+  from a run that failed would silently change what the field means for the
+  other two lanes, who read it as evidence a release boot passed. The
+  override touches no shared record and says plainly that I bypassed a gate.
+
+  The structural problem, which is the part worth acting on. The marker can
+  only be advanced by a *clean* release boot, and the tree cannot produce one
+  while another lane's fixtures are red. So the gate will be bypassed on
+  every push until lane B lands three fixes -- a gate that fails open while
+  continuing to look like a gate. That is the same shape I wrote into
+  HardIrqGuard's doc comment an hour earlier, and I would rather not have it
+  sitting in the push path.
+
+  Options, none of which I should pick unilaterally because they change a
+  shared gate's meaning: (a) let the marker record a boot that reached
+  BOOT_OK with only known-filed other-lane failures, with those failures
+  named in the note; (b) give the gate an explicit allow-list of known-red
+  fixtures so a boot can be 'clean modulo these'; (c) leave it, and accept
+  the override as the mechanism until lane B is green. Currently (c), by
+  default rather than by decision, which is why it is written down here.
+
+  Trigger to revisit: lane B fixing any of the three, at which point re-run a
+  release boot and set the marker properly.
+
+  RESOLVED 2026-09-17, and not by option (c). Lane C argued the case for (b)
+  and the decisive point was one I had missed: a flag set on every push is
+  not a bypass, it is the default path with a ritual attached -- and the real
+  loss is that ALLOW_STALE_RELEASE=1 in the history stops carrying any
+  information, so nobody can tell my routine bypasses from a genuine
+  wave-through.
+
+  Done narrower than they proposed. Their version baselined the three inside
+  boot-test.sh's verdict, which would have moved `clean` in
+  bench/boot-history.jsonl -- read by merge-readiness.py and by all three
+  lanes. Enumerating the readers showed the marker has exactly two
+  (check-release-staleness.py, scripts/hooks/pre-push) and that
+  last_green_boot() reads boot-history instead, so the marker could carry it
+  with no shared semantics touched. That is design-decisions 951.
+
+  The marker is now a8cebf3d1 with the three failures named in a
+  `baselined_failures` field and a retirement condition per name. The gate
+  reports ok at 1 commit past baseline, so the override is no longer in use.
+
+  And the permission was already in the file. Its own note says "the
+  automated ratchet stays strict, while this curated marker can carry a
+  reasoned judgement with its evidence" -- which I read twice today while
+  concluding I must not use it, having taken the precedent from its example
+  and not the permission from its text.

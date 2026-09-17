@@ -15,7 +15,14 @@
 //! ## Integration
 //!
 //! - Called from [`crate::initproc::tick()`] once per second.
-//! - Emits events via [`crate::eventlog`] when thresholds are crossed.
+//! - **Does not** emit events via [`crate::eventlog`], though it should and
+//!   this line used to say it did. `eventlog` appears exactly once in this
+//!   file: in this sentence. A threshold crossing warns on serial and
+//!   nothing else, so nothing downstream of the event log ever learns of
+//!   it. Found 2026-09-17 by the probe in `known-issues.md` ->
+//!   "module docs that link a subsystem the file never calls"; kept as a
+//!   stated gap rather than deleted, per design-decisions 950 -- the line is
+//!   the shape of the missing wiring.
 //! - Reports to `/proc/syshealth` for monitoring tools.
 //! - Kshell `syshealth` command for real-time status.
 //!

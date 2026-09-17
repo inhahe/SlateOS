@@ -1063,7 +1063,7 @@ mod tests {
                 let difference = (mine - want).abs();
                 assert!(
                     difference <= 2,
-                    "pixel {index} ({got:08X}) differs by {difference}, which is a decode                      and not a rounding"
+                    "pixel {index} ({got:08X}) differs by {difference}, which is a decode and not a rounding"
                 );
                 worst = worst.max(difference);
                 total += i64::from(difference);

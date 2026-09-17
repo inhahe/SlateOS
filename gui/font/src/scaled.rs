@@ -569,16 +569,6 @@ impl ScaledFont {
         self.face.corrections(self.px_per_em, &self.coords)
     }
 
-    /// The same, read from the legacy `kern` table alone.
-    ///
-    /// What the shaper charges a pair in a run whose script reaches no `GPOS`
-    /// `kern` feature. Not public: a caller with no run behind it has no script
-    /// to decide with, and [`kern_across`](Self::kern_across) is the answer for
-    /// that caller.
-    fn legacy_kern_across(&self, left: u16, right: u16, between: &[u16]) -> f32 {
-        f32::from(self.face.legacy_kern_across(left, right, between)) * self.scale
-    }
-
     /// Font units to pixels.
     ///
     /// The cast is exact for anything a layout table can produce: font units
@@ -1145,6 +1135,10 @@ impl ScaledFont {
         // width, and a face that kerns after a space would quietly narrow it.
         let mut kern_left: Option<usize> = None;
         let mut between: Vec<u16> = Vec::new();
+        // The half of a split legacy kern that belongs to the *right* glyph of
+        // the pair, carried to the iteration that pushes it. See the split
+        // below for why a legacy kern has two halves at all.
+        let mut carry: f32 = 0.0;
         for (i, glyph) in glyphs.iter().enumerate() {
             let tab = tabs.get(i).copied().unwrap_or(false);
             let gid = glyph.gid;
@@ -1185,11 +1179,40 @@ impl ScaledFont {
                 && !erased
                 && let Some(last) = kern_left.and_then(|at| out.get_mut(at))
             {
-                let kern = self.legacy_kern_across(last.key.gid(), gid, &between);
+                // Split between the pair, in font units, the way HarfBuzz's
+                // `hb_kern_machine_t` does: half onto the left glyph's
+                // advance, the remainder onto the right glyph's advance *and*
+                // its offset.
+                //
+                // The ink lands in the same place either way, which is why
+                // charging the whole kern to the left glyph was not visibly
+                // wrong and survived this long. What differs is every question
+                // asked *between* the two glyphs: where a caret goes, what a
+                // hit test answers, how a run is cut for wrapping. Measured on
+                // Arial Rounded Bold, whose `a`/`b` kern is -27 font units:
+                // HarfBuzz reports advances 1203 and 1267 against natural 1217
+                // and 1280, so it charges -14 and -13. We charged -27 and 0.
+                //
+                // In font units and not in pixels, because the halving is an
+                // integer shift and rounding it twice at a scaled size does
+                // not land on HarfBuzz's answer. `>> 1` and not `/ 2`: the
+                // shift floors toward negative infinity, so -27 halves to -14
+                // and the remainder is -13, which is HarfBuzz's arithmetic
+                // exactly.
+                //
+                // Across every font on the host this took the sweep's
+                // `misplaced` bucket from 168 to 1.
+                let whole = self.face.legacy_kern_across(last.key.gid(), gid, &between);
+                let half = whole >> 1;
+                let rest = whole.saturating_sub(half);
+                let kern = f32::from(half) * self.scale;
                 last.advance += kern;
                 last.kern_next = kern;
+                carry = f32::from(rest) * self.scale;
             }
-            let advance = self.px(adjust.x_advance);
+            let advance = self.px(adjust.x_advance) + carry;
+            let carried = carry;
+            carry = 0.0;
             // How far back a zeroed mark has to be moved so that taking its
             // advance away does not also move its image.
             //
@@ -1255,7 +1278,10 @@ impl ScaledFont {
                 // fallback fills those in below. `y` points up, which is both
                 // `GPOS`'s convention and `ShapedGlyph`'s, so it passes through
                 // unflipped; the flip happens once, at the blit.
-                offset: (self.px(adjust.x_offset) - back, self.px(adjust.y_offset)),
+                offset: (
+                    self.px(adjust.x_offset) - back + carried,
+                    self.px(adjust.y_offset),
+                ),
             });
             if erased {
                 // Not in `between` and not a new left half: see above.

@@ -1717,6 +1717,23 @@ Roadmap:
   whole time, because it only ever asked about the **default** instance — a
   differential test proves only the questions it asks. Still out of scope:
   `CFF2`, which no installed face carries.
+  A legacy `kern` pair is now *split* between the two glyphs, which is what
+  HarfBuzz's `hb_kern_machine_t` does: `kern >> 1` onto the left glyph's
+  advance, the remainder onto the right glyph's advance and its offset. The
+  ink lands in the same place either way, which is why charging the whole
+  kern to the left glyph was never visibly wrong; what differs is every
+  question asked *between* the pair — a caret, a hit test, where a run may be
+  cut. `misplaced` 168 → **1**, `agree` 51427 → 51594
+  (`TD-FONT-LEGACY-KERNING-DISAGREES-ACROSS-AN-INVISIBLE-CHARACTER`, whose
+  own title records the wrong diagnosis: the invisible characters were a red
+  herring, and only looked like the cause because no corpus string tests a
+  bare kerning pair). The one survivor is a variable face on which HarfBuzz
+  offsets U+034F back onto its base, treating it as the mark its general
+  category says it is. The sweep also now reports our two *tested*
+  divergences — `SPLIT_KEEPS_THE_LETTER` and `NFC_BEFORE_FITTING` — in their
+  own buckets, matched on signature rather than by string so a regression
+  cannot hide inside an exemption; that is what took `differ` from 1178 to 2
+  and made the last two findable at all.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

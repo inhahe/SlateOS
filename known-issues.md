@@ -156523,3 +156523,41 @@ sweep is worth more when its remaining output is zero.
 no flags). `gui/font/src/kern.rs` `legacy_pair` correctly answers 0 when
 anything stands between.
 
+---
+
+**RESOLVED 2026-09-17, and the diagnosis above was wrong in an instructive
+way.** Moves to `known-issues-resolved.md` once the fix reaches `main`.
+
+**The invisible characters were a red herring.** Asked directly through
+`uharfbuzz`, HarfBuzz reports the same advance for `ab` and for `a<CGJ>b` on
+Arial Rounded Bold DASH 1203 either way DASH so it kerns straight across the
+joiner exactly as we do. The bucket only *looked* like an ignorable problem
+because the corpus contains no bare kerning pair, so a plain `a`/`b`
+disagreement could surface only on strings that happened to carry one.
+
+**The real cause is how a legacy kern is charged.** Natural advances agree
+(`a` 1217, `b` 1280). For `ab` HarfBuzz reports 1203 and 1267 DASH it reduces
+*both* glyphs DASH where we reported 1190 and 1280, the whole -27 on the left.
+The totals match, which is why nothing looked wrong: the ink lands in the same
+place. What differs is every question asked *between* the two glyphs, which is
+a caret position, a hit test, and where a run may be cut for wrapping.
+
+HarfBuzz's `hb_kern_machine_t` splits the pair kern: `kern >> 1` onto the left
+glyph's advance, the remainder onto the right glyph's advance *and* its
+offset. `-27 >> 1` is `-14` because the shift floors toward negative infinity,
+leaving `-13` DASH which is precisely the 13 and 14 unit gaps this entry
+recorded without recognising them. The split is done in font units; rounding
+twice at a scaled size does not reproduce it.
+
+**misplaced 168 -> 1**, agree 51427 -> 51594, with `differ` still 0 and osfont's
+885 tests unchanged. The survivor is `SegUIVar.ttf`, a variable font, where
+HarfBuzz gives the joiner `x_offset = -1042`, cancelling the preceding advance
+so the glyph sits on its base: it treats U+034F as the mark its general
+category says it is. Invisible either way, and not chased.
+
+**What the three failed experiments were worth.** They ruled out the reading
+the code's own comment invited, which is what forced the question to be asked
+of HarfBuzz directly rather than of our source. The lesson is narrower than
+"measure": *when a disagreement is about positions and the totals match, the
+disagreement is about apportionment, not about what was applied.*
+

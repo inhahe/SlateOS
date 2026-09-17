@@ -1057,10 +1057,17 @@ pub struct ImportKey {
 
 impl ImportKey {
     /// Hash the path and size. **Not** a function of the image's contents.
-    pub fn from_metadata(path: &str, file_size: u64) -> Self {
-        // Simple FNV-1a hash of the path + size
+    pub fn from_metadata(path: impl AsRef<std::path::Path>, file_size: u64) -> Self {
+        // Simple FNV-1a hash of the path + size.
+        //
+        // Over the path's *bytes*, through `as_encoded_bytes`, rather than
+        // over a UTF-8 rendering of it: two files whose names differ only in
+        // bytes that are not text would otherwise hash alike and the second
+        // would be refused as a duplicate of the first. For an ordinary
+        // ASCII path these are the same bytes, so nothing already imported
+        // changes its key.
         let mut hash: u64 = 0xcbf29ce484222325;
-        for byte in path.bytes() {
+        for byte in path.as_ref().as_os_str().as_encoded_bytes().iter().copied() {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
@@ -1121,7 +1128,16 @@ impl FaceRegion {
 #[derive(Clone, Debug)]
 pub struct Photo {
     pub id: PhotoId,
-    pub file_path: String,
+    /// Where the photograph is, as bytes rather than as text.
+    ///
+    /// A `PathBuf`, not a `String`. This was a `String` built through
+    /// `to_string_lossy`, which replaces any byte that is not UTF-8 with
+    /// U+FFFD -- and a name on this OS may hold every byte but `/` and NUL.
+    /// The result was a path nobody could open, saved into the library as
+    /// though it were the real one, so the photograph failed to decode while
+    /// pointing at a file that exists under a name this program had thrown
+    /// away.
+    pub file_path: std::path::PathBuf,
     pub file_name: String,
     pub file_size: u64,
     pub format: ImageFormat,
@@ -1142,7 +1158,7 @@ impl Photo {
     /// Create a new photo entry.
     pub fn new(
         id: PhotoId,
-        path: &str,
+        path: impl AsRef<std::path::Path>,
         name: &str,
         format: ImageFormat,
         size: u64,
@@ -1150,7 +1166,7 @@ impl Photo {
     ) -> Self {
         Self {
             id,
-            file_path: path.to_owned(),
+            file_path: path.as_ref().to_path_buf(),
             file_name: name.to_owned(),
             file_size: size,
             format,
@@ -1200,7 +1216,10 @@ impl Photo {
         if self.file_name.to_lowercase().contains(&q) {
             return true;
         }
-        if self.file_path.to_lowercase().contains(&q) {
+        // Lossy on purpose, and safe here in a way it is not elsewhere:
+        // this compares for a match and never opens anything, so a byte that
+        // is not text costs a search hit rather than a file.
+        if self.file_path.to_string_lossy().to_lowercase().contains(&q) {
             return true;
         }
         for tag in &self.tags {
@@ -1839,7 +1858,7 @@ impl PhotoApp {
     /// Import a photo into the library.
     pub fn import_photo(
         &mut self,
-        path: &str,
+        path: impl AsRef<std::path::Path>,
         name: &str,
         format: ImageFormat,
         size: u64,
@@ -1854,13 +1873,13 @@ impl PhotoApp {
     /// Import a photo with EXIF data.
     pub fn import_photo_with_exif(
         &mut self,
-        path: &str,
+        path: impl AsRef<std::path::Path>,
         name: &str,
         format: ImageFormat,
         size: u64,
         exif: ExifData,
     ) -> PhotoId {
-        let id = self.import_photo(path, name, format, size);
+        let id = self.import_photo(path.as_ref(), name, format, size);
         if let Some(photo) = self.find_photo_mut(id) {
             photo.exif = exif;
         }
@@ -2065,7 +2084,7 @@ impl PhotoApp {
             let Some(photo) = self.find_photo(pid) else {
                 continue;
             };
-            let path = std::path::PathBuf::from(&photo.file_path);
+            let path = photo.file_path.clone();
             let size = photo.file_size;
             // Read once here rather than per frame: this runs when the visible
             // set changes, which is a scroll or a filter, not a repaint.
@@ -2110,7 +2129,7 @@ impl PhotoApp {
             let owner = self
                 .photos
                 .iter()
-                .find(|p| std::path::Path::new(&p.file_path) == req.path)
+                .find(|p| p.file_path == req.path)
                 .map(|p| p.id);
             self.thumb_uploads.push((id, thumb.clone()));
             self.thumb_cache
@@ -2174,7 +2193,7 @@ impl PhotoApp {
             return;
         };
 
-        let read = match safeio::read_capped(std::path::Path::new(&path), Self::MAX_PICTURE_BYTES) {
+        let read = match safeio::read_capped(&path, Self::MAX_PICTURE_BYTES) {
             Ok(read) => read,
             Err(e) => {
                 self.picture_error = Some(format!("could not be read: {e}"));
@@ -2983,7 +3002,7 @@ impl PhotoApp {
         // The EXIF parser was written, tested and never given a real file.
         let exif = parse_exif_from_bytes(&bytes);
         let size = bytes.len() as u64;
-        self.import_photo_with_exif(&path.to_string_lossy(), &name, format, size, exif);
+        self.import_photo_with_exif(path, &name, format, size, exif);
         format!("Imported {name}")
     }
 
@@ -4094,11 +4113,9 @@ impl PhotoApp {
             // so a selected card keeps its outline over its own picture.
             if let Some(&(mtime, id)) = self.thumb_ready.get(&pid)
                 && let Some(photo) = self.find_photo(pid)
-                && let Some(picture) = self.thumb_cache.peek(
-                    std::path::Path::new(&photo.file_path),
-                    mtime,
-                    photo.file_size,
-                )
+                && let Some(picture) =
+                    self.thumb_cache
+                        .peek(&photo.file_path, mtime, photo.file_size)
             {
                 cmds.extend(thumbs::render_thumbnail(picture, id, cx, cy, thumb));
             }
@@ -5137,7 +5154,7 @@ mod tests {
         // Import several photos (they'll get sequential timestamps)
         for i in 0..5 {
             app.import_photo(
-                &format!("/photo_{i}.jpg"),
+                format!("/photo_{i}.jpg"),
                 &format!("photo_{i}.jpg"),
                 ImageFormat::Jpeg,
                 1000,
@@ -5262,7 +5279,7 @@ mod tests {
     fn a_thumbnail_name_is_bounded_by_width_not_pre_truncated() {
         let name = "Sommerferien_Österreich_2026_Abend_am_See.jpg";
         let mut app = PhotoApp::new();
-        app.import_photo(&format!("/photos/{name}"), name, ImageFormat::Jpeg, 1000);
+        app.import_photo(format!("/photos/{name}"), name, ImageFormat::Jpeg, 1000);
         let cmds = app.render_commands(1400.0, 900.0);
         let label = cmds
             .iter()
@@ -5562,7 +5579,7 @@ mod tests {
         app.set_window_size(WINDOW_WIDTH, WINDOW_HEIGHT);
         for i in 0..n {
             app.import_photo(
-                &format!("/photos/p{i:04}.jpg"),
+                format!("/photos/p{i:04}.jpg"),
                 &format!("p{i:04}.jpg"),
                 ImageFormat::Jpeg,
                 1_000_000,

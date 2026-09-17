@@ -20,6 +20,18 @@
 //! and adding a field later would shift every column after it. Keys are split
 //! on the *first* `=` only, so a value may contain one.
 //!
+//! # Paths are bytes
+//!
+//! The path field is written through `pathcodec::encode_path`, which
+//! percent-encodes every byte outside printable ASCII, and read back through
+//! `decode_path`. A name on this OS may hold any byte but `/` and NUL, so
+//! writing one with `Display` would substitute U+FFFD and the original would
+//! be gone -- the library would then hold a name nobody can open, and would
+//! look like a correct record of it.
+//!
+//! The escaping below is still applied on top, because percent-encoding
+//! leaves printable ASCII alone and `|` and `,` are printable.
+//!
 //! # Escaping
 //!
 //! `\` becomes `\\`, `|` becomes `\p`, `,` becomes `\c`, and a newline becomes
@@ -125,7 +137,7 @@ fn serialize_photo(photo: &Photo) -> String {
     format!(
         "PHOTO|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         photo.id,
-        esc(&photo.file_path),
+        esc(&pathcodec::encode_path(&photo.file_path)),
         esc(&photo.file_name),
         photo.file_size,
         format_token(photo.format),
@@ -204,7 +216,7 @@ fn parse_photo(rest: &str) -> Option<Photo> {
         return None;
     }
     let id: PhotoId = f.first()?.parse().ok()?;
-    let file_path = unesc(f.get(1)?);
+    let file_path = pathcodec::decode_path(&unesc(f.get(1)?));
     let file_name = unesc(f.get(2)?);
     let file_size: u64 = f.get(3)?.parse().ok()?;
     let format = format_from_token(f.get(4)?)?;
@@ -460,10 +472,11 @@ mod tests {
 
     use super::*;
 
-    fn a_photo(id: PhotoId, path: &str) -> Photo {
+    fn a_photo(id: PhotoId, path: impl AsRef<std::path::Path>) -> Photo {
+        let path = path.as_ref().to_path_buf();
         Photo {
             id,
-            file_path: path.to_owned(),
+            file_path: path.clone(),
             file_name: "IMG.jpg".to_owned(),
             file_size: 2412,
             format: ImageFormat::Jpeg,
@@ -475,10 +488,69 @@ mod tests {
             exif: ExifData::empty(),
             adjustments: crate::ImageAdjustments::default(),
             faces: Vec::new(),
-            import_key: ImportKey::from_metadata(path, 2412),
+            import_key: ImportKey::from_metadata(&path, 2412),
             flagged: true,
             hidden: false,
         }
+    }
+
+    /// A path is written encoded, so its bytes are not at the mercy of text.
+    ///
+    /// Portable, and deliberately not the interesting case: `\u{e9}` is valid
+    /// UTF-8, so this would survive even a `String` field. What it pins is
+    /// that the *encoding* is applied at all -- the byte goes into the file as
+    /// `%C3%A9` rather than raw -- which is the mechanism the case below
+    /// depends on, and which can be checked on any host.
+    #[test]
+    fn a_path_is_percent_encoded_in_the_file_and_comes_back_exact() {
+        let path = "/home/a/caf\u{e9}.jpg";
+        let photo = a_photo(1, path);
+        let text = serialize(&[photo]);
+
+        assert!(
+            text.contains("%C3%A9"),
+            "the path went in as raw text, not encoded: {text}"
+        );
+        let loaded = parse(&text).expect("round trip");
+        assert_eq!(
+            loaded.photos.first().expect("one").file_path,
+            std::path::Path::new(path),
+            "the path did not come back exactly"
+        );
+    }
+
+    /// A filename that is not UTF-8 survives the library file.
+    ///
+    /// **The case this whole change is about**, and it can only run on the
+    /// target. A name here may hold any byte but `/` and NUL; a Windows
+    /// `OsString` is WTF-8 and cannot hold one that is not valid UTF-8, so on
+    /// the development host the value cannot even be constructed to be tested.
+    /// `pathcodec` says so itself, and offers `decode_bytes` as the byte-level
+    /// check that does run everywhere -- which the test above exercises
+    /// through the format.
+    ///
+    /// Before this, `Photo::file_path` was a `String` built by
+    /// `to_string_lossy`, so this name became one with U+FFFD in it: a file
+    /// nobody could open, recorded in the library as though it were real.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_survives_the_library() {
+        use std::path::PathBuf;
+
+        // 0xFF is not valid UTF-8 anywhere in any sequence.
+        let raw = vec![b'/', b't', b'm', b'p', b'/', 0xFF, b'.', b'j', b'p', b'g'];
+        let path = PathBuf::from(pathcodec::os_string_from_bytes(raw.clone()));
+        let photo = a_photo(1, &path);
+
+        let loaded = parse(&serialize(&[photo])).expect("round trip");
+        let got = &loaded.photos.first().expect("one").file_path;
+
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            got.as_os_str().as_bytes(),
+            raw.as_slice(),
+            "the bytes of the name did not survive the library file"
+        );
     }
 
     /// Everything a user can produce survives a save and a load.
@@ -491,7 +563,7 @@ mod tests {
         assert_eq!(loaded.photos.len(), 2);
         let first = loaded.photos.first().expect("one");
         assert_eq!(first.id, 1);
-        assert_eq!(first.file_path, "/home/a/one.jpg");
+        assert_eq!(first.file_path, std::path::Path::new("/home/a/one.jpg"));
         assert_eq!(first.file_size, 2412);
         assert_eq!(first.format, ImageFormat::Jpeg);
         assert_eq!(first.date_taken, Some(1_725_000_000));

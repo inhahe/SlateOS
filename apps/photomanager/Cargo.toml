@@ -30,6 +30,11 @@ safeio = { path = "../safeio" }
 # one place, and this is where every other application asks.
 settingsfile = { path = "../../gui/settingsfile" }
 
+# Writing a path into a text file without destroying it. A name on this OS may
+# hold any byte but `/` and NUL, so `Display` is not an option -- it
+# substitutes U+FFFD and the bytes are gone.
+pathcodec = { path = "../../gui/pathcodec" }
+
 [dev-dependencies]
 # The same crate with its counters on, so a test can prove the save really
 # went through `safeio::write_atomically` rather than quietly regressing to

@@ -208,6 +208,16 @@ IGNORE = (
     # `thumbs` crate when the photo library needed the same machinery. The
     # code is unchanged; only its address is, and the exemption is anchored on
     # the line's text so it still describes exactly what was audited.
+    # Searching is not opening. This is the one place a photograph's path is
+    # rendered as text, and it is rendered to be compared against what the user
+    # typed -- the result is a yes/no, never a name anything tries to open. A
+    # byte that is not text therefore costs a search hit, not a file. The path
+    # is a `PathBuf` and stays one; it was a `String` built by `to_string_lossy`
+    # until 2026-09-17, and that is the defect this line is deliberately not.
+    ("apps/photomanager/src/main.rs",
+     "if self.file_path.to_string_lossy().to_lowercase().contains(&q) {",
+     "matching a search query against a path, never opening it; the path is "
+     "held as a `PathBuf` and is rendered only here"),
     ("gui/thumbs/src/lib.rs",
      "let text = String::from_utf8_lossy(&bytes);",
      "the first 4 KiB of a previewed file, drawn as text; a file's contents "

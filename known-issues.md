@@ -155213,6 +155213,12 @@ corrected here after checking rather than asserting twice in a row:
   `Navigate(String)` event change with it. That is a contained refactor of one
   widget and its one consumer, not a redesign and not a one-liner.
 
+  **Blast radius confirmed 2026-09-16:** `apps/explorer` is the *only* crate
+  that constructs a `PathBar` or matches `PathBarEvent`. `apps/editor` and
+  `apps/fileassoc` mention the word in prose and nothing else. So the change
+  touches exactly two files, which is the fact that decides whether this is
+  an evening's work or a week's.
+
 Saying "one extra field" for all three was the same error as the entries it was
 correcting: a scope stated without being measured. The difference matters
 because it decides whether someone starts.

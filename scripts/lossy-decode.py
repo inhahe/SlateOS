@@ -132,6 +132,9 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rustlex  # noqa: E402
+
 CALLS = ("from_utf8_lossy", "to_string_lossy", "to_str_lossy")
 
 # A decode whose result is going into one of these is producing text for a
@@ -208,6 +211,27 @@ IGNORE = (
     # `thumbs` crate when the photo library needed the same machinery. The
     # code is unchanged; only its address is, and the exemption is anchored on
     # the line's text so it still describes exactly what was audited.
+    # A file's name drawn as a label, three times in one viewer: the window
+    # title, a recent-files menu row, and a tab. In all three the `path` it was
+    # taken from is held in the same struct and is what anything opens -- these
+    # produce the text a person reads, and nothing is ever derived back from
+    # them. The three are listed separately rather than under one generic
+    # anchor because the anchor is the line's text: if one of them changes, its
+    # exemption should expire and be looked at again on its own.
+    ("apps/pdfviewer/src/main.rs",
+     ".map(|n| n.to_string_lossy().into_owned())",
+     "a document's file name drawn as the window title, a recent-files row "
+     "and a tab label; `path` beside it is what is opened"),
+
+    # The launcher's fallback label for a program it has no desktop entry for.
+    # The input is already a `&str`, so any byte that was not text stopped
+    # being one before this function was called -- there is nothing left here
+    # to lose. What it produces is a caption.
+    ("gui/desktop/src/lib.rs",
+     ".map_or_else(|| exec.to_string(), |n| n.to_string_lossy().into_owned())",
+     "a launcher caption for an executable with no desktop entry; the input "
+     "is already `&str`, and `executable_path` is what is run"),
+
     # Searching is not opening. This is the one place a photograph's path is
     # rendered as text, and it is rendered to be compared against what the user
     # typed -- the result is a yes/no, never a name anything tries to open. A
@@ -369,37 +393,38 @@ def production_part(text, rel=None):
     `rel` is the file's path, needed because a file can be test code without
     containing the attribute that says so -- see [`is_test_file`].
 
-    **The cut is the module-level attribute, not the first one in the file.**
-    It used to be `text.find("#[cfg(test)]")`, which finds an *item*-level one
-    too -- `#[cfg(test)]` indented inside an `impl`, marking one test-only
-    helper -- and then treated the whole rest of the file as test code. In
-    `apps/photomanager/src/main.rs` that attribute is on line 392 and the test
-    module is on line 4640, so 4,251 lines of a 6,100-line application were
-    invisible to this checker, which nonetheless reported a confident number
-    about the file. Fifty-seven files under `gui/` and `apps/` were cut early
-    that way, hiding seven lossy calls.
+    **Nothing is cut. Test items are blanked and the scan runs to the end.**
 
-    A test module is written at column 0; an item-level attribute inside an
-    `impl` is indented. That is the whole distinction, and it is a convention
-    rather than a rule -- so when no unindented one exists, nothing is cut and
-    the file is read whole. The cost of that choice is that a lossy call
-    inside an indented `#[cfg(test)]` helper is now reported; it belongs in
-    the IGNORE table with "test-only item" as its reason, which is a sentence
-    somebody has to write rather than a silence nobody can see.
+    This used to be `text.find("#[cfg(test)]")` followed by a truncation,
+    which is only right when the first such attribute is the test module. A
+    `#[cfg(test)]` on a single helper, indented inside an `impl`, is ordinary
+    -- and everything after it was discarded along with the tests. In
+    `apps/photomanager/src/main.rs` that attribute is on line 392 and the test
+    module is on line 4640, so **4,251 lines of a 6,100-line application were
+    invisible** while this checker reported a confident number about the file.
+    Fifty-seven files under `gui/` and `apps/` were cut that way, hiding seven
+    lossy calls.
+
+    The work is delegated to [`rustlex.live_code`], which brace-matches every
+    `#[cfg(test)]` item over `strip_noise` output -- so a brace inside a string
+    or a comment cannot close an item early -- and blanks rather than cuts, so
+    offsets still index the original and a reported line number is still the
+    line it was on.
+
+    **This was a solved problem before it was found here.** `rustlex`'s own
+    note records the same bug measured across `userspace/`: 35,706 lines, 7% of
+    that lane, with `oils/src/interp.rs` cut at line 3,348 of 109,742 by a
+    `#[cfg(test)] mod stderr_tee` helper. This checker simply never adopted the
+    fix. An intermediate version here cut at the first *column-0* attribute,
+    which is better and still a convention rather than a rule; it is gone.
+
+    The second return value is kept for the callers that unpack it, and is
+    always `None` now: there is no cut to report the line of.
     """
     if rel is not None and is_test_file(rel):
         return "", 1
-    # Column 0, i.e. at the very start or immediately after a newline.
-    at = -1
-    if text.startswith("#[cfg(test)]"):
-        at = 0
-    else:
-        found = text.find(NL + "#[cfg(test)]")
-        if found >= 0:
-            at = found + len(NL)
-    if at < 0:
-        return text, None
-    return text[:at], text[:at].count(NL) + 1
+    live, _ = rustlex.live_code(text)
+    return live, None
 
 
 def enclosing_fn(lines, at):

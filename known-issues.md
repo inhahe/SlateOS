@@ -158935,15 +158935,50 @@ to 36 files; the seven newly visible sites are pre-existing and are recorded in
 the baseline, because the alternative was every lane's push failing on a
 backlog none of them created.
 
-**Still unfixed, same idiom, not changed blind:**
+**CORRECTION, same day: only one script had this. My own entry was wrong.**
 
-| Script | Why it was left |
+The paragraph this replaces named three scripts as sharing the bug, on the
+evidence of `grep -l 'find("#[cfg(test)]")'`. Three files do contain that
+string. Only one of them was doing the thing the string suggests:
+
+| Script | What it actually does |
 |---|---|
-| `scripts/audit-cli-fabrication.py` | Has its own gate and its own notion of what it is counting; widening its eyes may surface findings that fail that gate, and the right response to each has to be read rather than assumed. |
-| `scripts/check-config-turn-guards.py` | Same. |
+| `scripts/lossy-decode.py` | Had the bug. Fixed. |
+| `scripts/audit-cli-fabrication.py` | **Already fixed, before I looked.** Its `strip_tests` brace-matches through `rustlex.live_code`; the match my grep found is in a docstring *describing* the old bug and why it was replaced. |
+| `scripts/check-config-turn-guards.py` | **Uses it in the opposite direction.** The offset marks where tests *begin* and the checker scans from there, so an early item-level attribute makes it read too much, not too little. That is a false-positive risk, not a blind spot, and the repair is a different one. |
 
-Both should get the same repair, each with its own look at what becomes
-visible. The fix itself is four lines; the work is the triage after it.
+This is the same mistake as the entries above it about a cheap proxy read as
+the answer: I grepped for a string and concluded something about how three
+programs behave. Reading how each used it took two minutes and would have
+saved filing a wrong claim.
+
+**And the fix I wrote is the second-best one available.** `scripts/rustlex.py`
+has `live_code`, which *blanks* every `#[cfg(test)]` item by brace matching
+over noise-stripped text and carries on to the end of the file -- exact, where
+my column-0 rule is a convention, and offset-preserving, so reported line
+numbers stay true. Its docstring records this bug class being found and
+measured in `userspace/` before I arrived: **35,706 lines, 7% of that lane,
+invisible to a checker**, with `oils/src/interp.rs` cut at line 3,348 of
+109,742 by a `#[cfg(test)] mod stderr_tee` helper.
+
+So this was never a new class of bug. It was a solved one that `lossy-decode.py`
+never adopted the solution to. What is new is only that it was still there, and
+the measurement for `gui/` and `apps/`.
+
+**Adopting it found four more.** Swapping `production_part` to `live_code`
+took VALUE from 60 to 64 over `gui/` and `apps/`: the column-0 rule still
+truncated at the *first* module-level attribute, so anything past a second one
+stayed hidden. All four are file names drawn as labels -- three in
+`apps/pdfviewer` (window title, recent-files row, tab) and one in
+`gui/desktop`'s launcher caption -- each with the real path held beside it and
+used for opening. They are exempted in the IGNORE table with that reason, not
+baselined, which is what the checker's own failure message tells you to do.
+The VALUE backlog is unchanged at 60.
+
+**The floors did not catch it, and the reason generalises.** `rustlex`'s note
+makes the point: losing 7% of a corpus still leaves far more findings than any
+aggregate floor demands, and every file is still *opened*, so the file count
+never moves. A floor on a total cannot see a hole in the middle of it.
 
 **How to tell if a checker has this class of fault.** Not by reading its
 output, which is the whole problem. Ask what it *skipped* and whether it says

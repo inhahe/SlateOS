@@ -2842,6 +2842,55 @@ so the noise grows and the signal for a genuinely new one gets harder to
 see.
 
 
+## A-Q17 — [A] Moving or scaling a video/cursor layer silently does nothing. Should the kernel refuse the request, or start honouring it? — Status: OPEN
+
+**In short:** the display hardware can draw a picture as a layer and place
+or stretch it anywhere on screen -- that is how a video overlay or a mouse
+cursor gets positioned without redrawing everything. A program asks for a
+rectangle, the kernel stores the numbers, replies success, and never uses
+them. So moving or resizing that layer does nothing at all, and the program
+is told it worked.
+
+**Glossary.** A *plane* is one such hardware layer. *Atomic modeset* is the
+interface a display program uses to change several display settings at once,
+so they either all take effect together or none do -- it is the modern way
+Linux programs talk to a graphics driver. *Scanout* is the hardware
+continuously reading a framebuffer to send pixels to the monitor.
+
+**The measurement.** `drm/plane.rs` declares `src_x/y/w/h` (the region of
+the picture to take) and `dst_x/y/w/h` (where to put it on screen). Every
+occurrence of `dst_w` in the whole kernel is the declaration or one of five
+writes; there are **zero reads**. One of those writes is
+`drm/atomic.rs:423`, the atomic commit handler storing what a client asked
+for. Nothing in the scanout path consults any of it.
+
+| option | *What changes:* |
+|---|---|
+| **(a) Refuse a commit that sets a non-default rectangle** (recommended) | a program that tries to move a layer gets a clear error instead of false success. Programs that only ever use the full-screen default are unaffected. |
+| (b) Honour the rectangle in the scanout path | layers can actually be placed and scaled -- the feature works. This is real driver work, per backend, and needs hardware to verify. |
+| (c) Leave it, and document it | nothing changes; `/proc` and the API keep reporting success for a no-op. |
+
+**Why this needs you and not me.** (a) is a user-visible behaviour change to
+an API that Linux programs use by construction. Anything currently setting a
+rectangle gets success today and an error afterwards -- and "currently
+works" is doing a lot of work in that sentence, because what it means is
+"currently appears to work while doing nothing". That is a trade between two
+kinds of wrong, and which one is worse depends on what you want the OS to
+be honest about.
+
+**My recommendation is (a)**, on design-decisions 945: a simulated action
+should be disclosed where its result is read, and an API return value is
+where this one is read. There is no `/proc` header to put a note in, so the
+only honest disclosure available is the error. (b) is the right end state
+and is not blocked by (a) -- refusing now does not make honouring it later
+harder.
+
+**If never answered:** nothing breaks today, because nothing in the tree
+sets a plane rectangle. It gets worse with time in a specific way: the first
+real compositor to try it will spend a while looking for a bug in its own
+code, since every call it makes returns success.
+
+
 
 # Resolved
 

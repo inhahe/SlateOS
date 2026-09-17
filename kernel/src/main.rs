@@ -9607,6 +9607,31 @@ extern "C" fn kernel_main() -> ! {
             // accumulate where nothing reads them.
             sync::report_leaf_claims();
 
+            // And binfmt's, for the reason its own accessor cannot give:
+            // `stats()` returns (0, 0, 0, 0) when STATE is None, which is
+            // byte-identical to an initialised table on a system that has
+            // executed nothing. /proc/binfmt growing 49 -> 104 bytes proved
+            // the format row was registered and said nothing about whether
+            // anything records into it -- the row exists either way. So the
+            // count is printed rather than inferred, and the uninitialised
+            // case is named (942).
+            {
+                let (fmts, loads, errors, _ops) = fs::binfmt::stats();
+                serial_println!(
+                    "[binfmt] {} format(s), {} load(s), {} error(s){}",
+                    fmts,
+                    loads,
+                    errors,
+                    if fmts == 0 {
+                        " -- UNINITIALISED, not idle: stats() cannot tell those apart"
+                    } else if loads == 0 {
+                        " -- registered but nothing has reported a load"
+                    } else {
+                        ""
+                    }
+                );
+            }
+
             // Boot success marker — the boot test script greps for this.
             // Printed synchronously so it appears within seconds of power-on,
             // regardless of how long deferred benchmarks take.

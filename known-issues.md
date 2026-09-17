@@ -157561,12 +157561,37 @@ unexplained 203ns`, two orders larger. These are QEMU TCG measurements, so
 the absolute nanoseconds are not hardware nanoseconds -- the 21x *ratio*
 between raw and tracked is the part that transfers, not the ns.
 
-**And the leaf check's own cost is still unmeasured.** It adds three atomic
-operations to `PreemptSpinMutex`'s acquire path. The bench runs in the
-deferred bench task, and every boot this session was torn down on lane B's
-three ring-3 failures before that task reached the lock arm -- the same
-teardown that hid the lock-context line. So the arm exists and the number
-does not yet. Stated rather than assumed cheap.
+**Measured 2026-09-17, and dd-70's premise holds.** The arm did print --
+the teardown-before-bench worry was wrong, four consecutive boots reached
+it:
+
+| boot | raw | preempt-spin | tracked |
+|---|---|---|---|
+| `134333Z` | 25ns | 166ns | 408ns |
+| `144018Z` | 26ns | 159ns | 392ns |
+| `170456Z` | 26ns | 162ns | 394ns |
+| `202155Z` | 26ns | 159ns | 400ns |
+| `182832Z` | 28ns | 268ns | 719ns |
+
+`182832Z` is uniformly higher across all three arms, so it is a slow boot
+rather than a slow lock; the ratio is what transfers under TCG, not the ns.
+**`PreemptSpinMutex` is ~2.5x cheaper than `crate::sync::Mutex`** (159 vs
+394) and ~6x dearer than a bare `spin::Mutex` (26). So dd-70 split the types
+on a real cost difference, which nobody had measured until the arm existed.
+
+**And the leaf check's own cost is below the noise floor.** `134333Z`
+predates the leaf check (`leaf-claim check:` absent) and already has the
+arm, so a genuine before/after exists: 166ns uninstrumented against 159,
+162, 159 instrumented. The instrumented runs are *faster*, which means the
+three added atomics are not resolvable at 2000 iterations on TCG -- variance
+between runs exceeds any effect. Not "cheap because it looks cheap": a
+measured non-result.
+
+That also narrows A-Q16's cost objection. The 159 -> 394 gap is lockdep plus
+contention stats plus two `rdtsc` reads, not a general penalty for touching
+the acquire path -- so "converting these locks costs per-acquire tracking"
+is about 235ns of specific work, and a conversion's real cost depends on how
+often the lock in question is taken.
 
 ## TD-FONT-LEGACY-KERNING-DISAGREES-ACROSS-AN-INVISIBLE-CHARACTER -- 2026-09-17
 

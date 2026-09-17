@@ -84,16 +84,52 @@ pub struct Found {
 /// from a filename search and is the same rule the rest of the toolkit uses.
 #[must_use]
 pub fn name_matches(name: &OsStr, query: &str) -> bool {
-    let needle = query.as_bytes();
+    bytes_contain(name.as_encoded_bytes(), query.as_bytes())
+}
+
+/// Whether `hay` contains `needle`, ignoring ASCII case.
+fn bytes_contain(hay: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return false;
     }
-    let hay = name.as_encoded_bytes();
     if needle.len() > hay.len() {
         return false;
     }
     hay.windows(needle.len())
         .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// Whether an entry matches, by name or by path.
+///
+/// A query with no `/` is a **name** query: `notes` finds `notes.txt` wherever
+/// it is, and does *not* return every file inside a folder called `notes`. A
+/// query containing `/` is a **path** query: `sub/notes` finds
+/// `sub/notes.txt`.
+///
+/// The split is what keeps a short query useful. Matching the whole relative
+/// path unconditionally would make `a` return every file under any ancestor
+/// whose name contains an `a` -- literally a path match, and useless. Requiring
+/// a separator before treating a query as a path is the rule a user can
+/// predict without being told, because typing one is already how they write a
+/// path.
+///
+/// `rel` is the path below the search root, built during the walk with `/`
+/// between components and never taken from the host. That matters: on the
+/// Windows machine these tests run on, `Path` joins with `\`, so a `sub/notes`
+/// query would match on SlateOS and fail here -- the same host-versus-target
+/// trap `gui/toolkit/src/pathbar.rs` and `dialog::parent_path` both document.
+/// Building the separator rather than asking for it removes the question.
+///
+/// `\` is *not* treated as a separator, on this OS or on the host, because
+/// `design.txt` permits it in a filename. A file genuinely called `a\b` is
+/// matched by a query for `a\b`.
+#[must_use]
+fn entry_matches(rel: &[u8], name: &OsStr, query: &str) -> bool {
+    if query.as_bytes().contains(&b'/') {
+        bytes_contain(rel, query.as_bytes())
+    } else {
+        name_matches(name, query)
+    }
 }
 
 /// Whether a name begins with `.`, tested as a byte.
@@ -121,10 +157,13 @@ pub fn find(root: &Path, query: &str, show_hidden: bool) -> Found {
         return found;
     }
 
-    let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
-    queue.push_back((root.to_path_buf(), 0));
+    // Each queued folder carries the path that reaches it from the root, as
+    // bytes, with `/` between components. Built here rather than derived with
+    // `strip_prefix` afterwards so the separator is ours and not the host's.
+    let mut queue: VecDeque<(PathBuf, Vec<u8>, usize)> = VecDeque::new();
+    queue.push_back((root.to_path_buf(), Vec::new(), 0));
 
-    while let Some((dir, depth)) = queue.pop_front() {
+    while let Some((dir, prefix, depth)) = queue.pop_front() {
         let read = match fs::read_dir(&dir) {
             Ok(read) => read,
             Err(_) => {
@@ -146,7 +185,13 @@ pub fn find(root: &Path, query: &str, show_hidden: bool) -> Found {
             // pointing at its own ancestor cannot turn this walk into a loop.
             let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
 
-            if name_matches(&name, query) {
+            let mut rel = prefix.clone();
+            if !rel.is_empty() {
+                rel.push(b'/');
+            }
+            rel.extend_from_slice(name.as_encoded_bytes());
+
+            if entry_matches(&rel, &name, query) {
                 if found.paths.len() >= MAX_RESULTS {
                     found.truncated = true;
                     return found;
@@ -156,7 +201,7 @@ pub fn find(root: &Path, query: &str, show_hidden: bool) -> Found {
 
             if is_dir {
                 if depth < MAX_DEPTH {
-                    queue.push_back((path, depth.saturating_add(1)));
+                    queue.push_back((path, rel, depth.saturating_add(1)));
                 } else {
                     found.truncated = true;
                 }
@@ -297,6 +342,60 @@ mod tests {
         let found = find(&scratch.dir().join("no-such-folder"), "x", false);
         assert_eq!(found.unreadable, 1);
         assert!(found.paths.is_empty());
+    }
+
+    /// A query with a separator matches the path, not just the name.
+    #[test]
+    fn a_path_query_finds_a_file_by_its_folder() {
+        let scratch = ScratchDir::new("explorer-search-pathquery");
+        let root = scratch.dir();
+        make(root, &["sub/notes.txt", "other/notes.txt"]);
+
+        let found = find(root, "sub/notes", false);
+        assert_eq!(found.paths.len(), 1, "{:?}", found.paths);
+        assert!(found.paths[0].ends_with("notes.txt"));
+        assert!(
+            found.paths[0].parent().is_some_and(|p| p.ends_with("sub")),
+            "matched the wrong folder: {:?}",
+            found.paths
+        );
+    }
+
+    /// A query without a separator stays a name query.
+    ///
+    /// The rule that keeps short queries useful: matching the whole relative
+    /// path unconditionally would make "sub" return everything underneath a
+    /// folder called `sub`, which is a path match and useless as a default.
+    #[test]
+    fn a_bare_query_does_not_match_a_parent_folders_name() {
+        let scratch = ScratchDir::new("explorer-search-barequery");
+        let root = scratch.dir();
+        make(root, &["sub/notes.txt", "sub/other.txt"]);
+
+        // `sub` finds the folder itself, and not the two files inside it.
+        let found = find(root, "sub", false);
+        assert_eq!(found.paths.len(), 1, "{:?}", found.paths);
+        assert!(found.paths[0].ends_with("sub"));
+    }
+
+    /// The separator in a path query is ours, not the host's.
+    ///
+    /// The whole reason the walk builds the relative path rather than deriving
+    /// it with `strip_prefix`: `Path` joins with a backslash on this host, so a
+    /// derived path would make this query match on SlateOS and fail here --
+    /// green suite, broken search, on the machine that matters.
+    #[test]
+    fn a_path_query_uses_a_forward_slash_on_every_host() {
+        let scratch = ScratchDir::new("explorer-search-sep");
+        let root = scratch.dir();
+        make(root, &["a/b/deep.txt"]);
+
+        assert_eq!(find(root, "a/b/deep", false).paths.len(), 1);
+        assert_eq!(
+            find(root, "b/deep", false).paths.len(),
+            1,
+            "a path query should match any run of components, not only from the root"
+        );
     }
 
     /// A plain substring, found.

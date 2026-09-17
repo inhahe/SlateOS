@@ -488,6 +488,65 @@ MIXED = frozenset(
 assert MIXED <= set(CORPUS), "MIXED names a string that is not in the corpus"
 
 
+# Strings where we split a composed character HarfBuzz keeps whole.
+#
+# Not a defect, and the difference is one tested rule: `norm::split_undrawable`
+# emits the decomposition when the *base* has a glyph and the mark does not, so
+# a face with `s` but no U+0326 draws Romanian as `s{box}` where HarfBuzz draws
+# `{box}`. `norm.rs` states the reason and
+# `a_face_missing_only_the_mark_still_shows_the_letter` holds it: an `e` with a
+# box over it is still an `e`, and refusing the split loses the letter too.
+#
+# HarfBuzz decomposes font-aware from the start (`hb-ot-shape-normalize.cc`
+# refuses when the second half has no glyph), so it cannot reach that state.
+# We do it in two layers on purpose — see this module's header on why a
+# font-conditional *composition* would be wrong — and take this consequence.
+#
+# Listed so the count is visible rather than hidden: 837 of these buried the
+# real disagreements underneath them, which is how a sweep stops being read.
+SPLIT_KEEPS_THE_LETTER = frozenset(
+    [
+        "\\u0219\\u021b \\u015f\\u0163",
+        "\\u1e09",
+        "\\u212b",
+        "\\u00e9t\\u00e9",
+        "e\\u0301te\\u0301",
+        "c\\u0327\\u0301",
+    ]
+)
+assert SPLIT_KEEPS_THE_LETTER <= {
+    string_of(entry) for entry in CORPUS
+}, "SPLIT_KEEPS_THE_LETTER names a string that is not in the corpus"
+
+
+# Strings where we fold to NFC before asking the face and HarfBuzz does not.
+#
+# The other tested divergence, and the one HarfBuzz loses on its own terms:
+# `canonically_equivalent_spellings_fit_the_same_way` holds that the two
+# spellings of one text must render identically, and HarfBuzz -- which fits
+# without normalizing -- renders `\u1e09` and `c\u0327\u0301` differently
+# from each other on the same face. U+212B is the clearest case: it is a
+# singleton for U+00C5, so we draw the `\u00c5` glyph and HarfBuzz draws the
+# face's separate angstrom glyph, and a document that used both spellings
+# would show two shapes for one character.
+#
+# The signature is ours being *no longer* than HarfBuzz's: composing can only
+# keep or reduce the count, and a singleton keeps it. Ours coming out longer on
+# one of these strings would be something else, so it falls through.
+NFC_BEFORE_FITTING = frozenset(
+    [
+        "\\u212b",
+        "\\u00e9t\\u00e9",
+        "e\\u0301te\\u0301",
+        "c\\u0327\\u0301",
+        "\\u1e09",
+    ]
+)
+assert NFC_BEFORE_FITTING <= {
+    string_of(entry) for entry in CORPUS
+}, "NFC_BEFORE_FITTING names a string that is not in the corpus"
+
+
 def unescape(line):
     """Expand `\\uXXXX` and `\\UXXXXXXXX`, matching `shape_dump.rs` exactly.
 
@@ -820,6 +879,8 @@ def main():
     order_only = Counter()
     placed = Counter()
     differ = Counter()
+    policy = Counter()
+    normalized = Counter()
     mixed = Counter()
     examples = {}
     placed_examples = {}
@@ -869,6 +930,21 @@ def main():
                 # *shaping* agreed exactly, so it is worth separating from a
                 # real disagreement rather than burying in the total.
                 order_only[corpus[i]] += 1
+            elif (
+                string_of(corpus[i]) in SPLIT_KEEPS_THE_LETTER
+                and len(ours_here) > len(expected)
+            ):
+                # The tested divergence, and only in the direction it predicts:
+                # more glyphs from us, because we split what HarfBuzz kept
+                # whole. Fewer or equal would be something else wearing the
+                # same string, so it falls through to `differ` and is counted
+                # as the disagreement it is.
+                policy[corpus[i]] += 1
+            elif (
+                string_of(corpus[i]) in NFC_BEFORE_FITTING
+                and len(ours_here) <= len(expected)
+            ):
+                normalized[corpus[i]] += 1
             else:
                 differ[corpus[i]] += 1
                 examples.setdefault(
@@ -880,6 +956,14 @@ def main():
     print(f"misplaced {sum(placed.values())}  (same glyphs, different positions)")
     print(f"differ   {sum(differ.values())}")
     print(f"mixed    {sum(mixed.values())}  (itemizer, not shaper — see MIXED)")
+    print(
+        f"split    {sum(policy.values())}"
+        "  (we split what HarfBuzz keeps whole -- see SPLIT_KEEPS_THE_LETTER)"
+    )
+    print(
+        f"nfc      {sum(normalized.values())}"
+        "  (we normalize before fitting -- see NFC_BEFORE_FITTING)"
+    )
     print(f"faces HarfBuzz would not open: {skipped}")
     if placed:
         print("\nsame glyphs in different places, by string:")

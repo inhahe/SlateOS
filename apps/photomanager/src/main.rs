@@ -11,10 +11,14 @@
 //!   exposure, temperature
 //! - Star ratings (0-5) and color labels
 //! - Tagging and keyword system
-//! - Face region detection placeholders
 //! - Timeline view grouping photos by date
 //! - Slideshow mode with configurable interval and transitions
 //! - Import of a single file through a picker, with its EXIF read
+//! - A search box that filters the library by name, path or tag as you
+//!   type
+//! - The library is saved to `photolibrary.txt` and read back at start:
+//!   photographs, ratings, flags, tags and colour labels survive closing
+//!   the window. See `library` for the format and what it omits.
 //! - Re-import detection by path and size, not by image content
 //! - Batch operations: tag, rate, move, delete
 //! - Multi-panel UI: sidebar, thumbnail grid, info panel
@@ -29,10 +33,18 @@
 //! `imagecodec`, and the grid generates thumbnails through `thumbs`. What
 //! follows is what is still owed.
 //!
-//! - **The adjustments are recorded, not applied.** They are stored per
-//!   photograph and listed in the info panel, and no pixel has ever been
-//!   changed by one. A settings page is built when something obeys it, not
-//!   when something stores it.
+//! - **The adjustments cannot be set, let alone applied.** Each photograph
+//!   carries brightness, contrast, saturation, exposure, temperature,
+//!   highlights, shadows, sharpness, vignette and rotation; the info panel
+//!   lists them when they differ from the default, and nothing in this
+//!   application can make them differ. `ImageAdjustments::rotate_cw` and
+//!   `rotate_ccw` exist and are called from tests only. So the panel's
+//!   "adjusted" section has never been drawn outside a test, and no pixel has
+//!   ever been changed by one. (An earlier revision of this list said they
+//!   were "recorded, not applied", which is still too generous: there is no
+//!   way to record one.)
+//! - **Face regions are never detected.** `Photo::faces` is constructed empty
+//!   and nothing ever pushes to it.
 //! - **Nothing is exported.** `ExportOptions` records a format, a quality and
 //!   a size, has a `Default` and a test, and is read by nothing: no function
 //!   in this crate writes a picture anywhere. The feature list offered
@@ -42,11 +54,6 @@
 //!   with date-based organization". There is no `read_dir` in this crate;
 //!   `import_from_disk` takes a single path from the picker, and nothing
 //!   organises anything by date.
-//! - **The library is not saved.** Every photograph imported in a session is
-//!   gone when the window closes: there is no file written anywhere, and no
-//!   code here reads one. Albums, ratings, tags and colour labels go with it.
-//!   This is the largest remaining gap and it is not a small one -- the whole
-//!   of what this application is *for* currently lasts until it is closed.
 //! - **The single-photo view has no zoom and no pan.** The list claimed
 //!   both. The only `Zoom` in this file is the name of a slideshow
 //!   transition. The grid's four card sizes, listed above, are a different
@@ -73,6 +80,8 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::doc_markdown)]
+
+mod library;
 
 use appearance::Edge;
 use appearance::Palette;
@@ -166,6 +175,13 @@ pub enum ToolbarControl {
     Sort,
     /// Step the thumbnail size along.
     ThumbSize,
+    /// The search box. Clicking it puts the keyboard there.
+    ///
+    /// It was drawn from the beginning and was not a control at all: its
+    /// rectangle existed in the layout only to position the button after it,
+    /// so the one thing in this toolbar that looks like it takes typing was
+    /// the one thing that could not be clicked.
+    Search,
     /// Start or stop the slideshow.
     Slideshow,
     /// Open the file picker and bring a photograph in.
@@ -1041,10 +1057,17 @@ pub struct ImportKey {
 
 impl ImportKey {
     /// Hash the path and size. **Not** a function of the image's contents.
-    pub fn from_metadata(path: &str, file_size: u64) -> Self {
-        // Simple FNV-1a hash of the path + size
+    pub fn from_metadata(path: impl AsRef<std::path::Path>, file_size: u64) -> Self {
+        // Simple FNV-1a hash of the path + size.
+        //
+        // Over the path's *bytes*, through `as_encoded_bytes`, rather than
+        // over a UTF-8 rendering of it: two files whose names differ only in
+        // bytes that are not text would otherwise hash alike and the second
+        // would be refused as a duplicate of the first. For an ordinary
+        // ASCII path these are the same bytes, so nothing already imported
+        // changes its key.
         let mut hash: u64 = 0xcbf29ce484222325;
-        for byte in path.bytes() {
+        for byte in path.as_ref().as_os_str().as_encoded_bytes().iter().copied() {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
@@ -1105,7 +1128,16 @@ impl FaceRegion {
 #[derive(Clone, Debug)]
 pub struct Photo {
     pub id: PhotoId,
-    pub file_path: String,
+    /// Where the photograph is, as bytes rather than as text.
+    ///
+    /// A `PathBuf`, not a `String`. This was a `String` built through
+    /// `to_string_lossy`, which replaces any byte that is not UTF-8 with
+    /// U+FFFD -- and a name on this OS may hold every byte but `/` and NUL.
+    /// The result was a path nobody could open, saved into the library as
+    /// though it were the real one, so the photograph failed to decode while
+    /// pointing at a file that exists under a name this program had thrown
+    /// away.
+    pub file_path: std::path::PathBuf,
     pub file_name: String,
     pub file_size: u64,
     pub format: ImageFormat,
@@ -1126,7 +1158,7 @@ impl Photo {
     /// Create a new photo entry.
     pub fn new(
         id: PhotoId,
-        path: &str,
+        path: impl AsRef<std::path::Path>,
         name: &str,
         format: ImageFormat,
         size: u64,
@@ -1134,7 +1166,7 @@ impl Photo {
     ) -> Self {
         Self {
             id,
-            file_path: path.to_owned(),
+            file_path: path.as_ref().to_path_buf(),
             file_name: name.to_owned(),
             file_size: size,
             format,
@@ -1184,7 +1216,10 @@ impl Photo {
         if self.file_name.to_lowercase().contains(&q) {
             return true;
         }
-        if self.file_path.to_lowercase().contains(&q) {
+        // Lossy on purpose, and safe here in a way it is not elsewhere:
+        // this compares for a match and never opens anything, so a byte that
+        // is not text costs a search hit rather than a file.
+        if self.file_path.to_string_lossy().to_lowercase().contains(&q) {
             return true;
         }
         for tag in &self.tags {
@@ -1732,6 +1767,32 @@ pub struct PhotoApp {
     /// pushing the same request sixty times a second would grow the queue
     /// without bound and starve the cards actually on screen behind it.
     thumb_queued_for: Option<u64>,
+    /// Where the library is saved, or `None` for a library that is not saved
+    /// at all -- which is what every test gets unless it asks otherwise.
+    library_path: Option<std::path::PathBuf>,
+    /// The exact text last written, so a save happens only when something
+    /// changed.
+    ///
+    /// The whole serialization rather than a hash of it: a hash would be
+    /// smaller and would make two different libraries compare equal once in a
+    /// very long while, and the cost of that coincidence is a save that never
+    /// happens. A few hundred kilobytes is the cheaper side of that trade.
+    last_written: Option<String>,
+    /// Why the library could not be loaded or saved, when it could not.
+    library_note: Option<String>,
+    /// Records the file held that this build could not read.
+    ///
+    /// **Saving is refused while this is non-zero.** A file with one corrupt
+    /// line loads every other photograph; writing that back would delete the
+    /// corrupt one permanently, turning a line somebody could still repair by
+    /// hand into nothing at all.
+    library_unread: usize,
+    /// Whether typing goes to the search box.
+    ///
+    /// Without this the digits would still rate the selected photograph and
+    /// `f` would still flag it, so searching for "flag5" would silently change
+    /// the library while the user thought they were typing.
+    search_focused: bool,
 }
 
 impl Default for PhotoApp {
@@ -1754,6 +1815,11 @@ impl PhotoApp {
             thumb_ready: HashMap::new(),
             thumb_uploads: Vec::new(),
             thumb_queued_for: None,
+            library_path: None,
+            last_written: None,
+            library_note: None,
+            library_unread: 0,
+            search_focused: false,
             photos: Vec::new(),
             albums: Vec::new(),
             smart_albums: Vec::new(),
@@ -1792,7 +1858,7 @@ impl PhotoApp {
     /// Import a photo into the library.
     pub fn import_photo(
         &mut self,
-        path: &str,
+        path: impl AsRef<std::path::Path>,
         name: &str,
         format: ImageFormat,
         size: u64,
@@ -1807,13 +1873,13 @@ impl PhotoApp {
     /// Import a photo with EXIF data.
     pub fn import_photo_with_exif(
         &mut self,
-        path: &str,
+        path: impl AsRef<std::path::Path>,
         name: &str,
         format: ImageFormat,
         size: u64,
         exif: ExifData,
     ) -> PhotoId {
-        let id = self.import_photo(path, name, format, size);
+        let id = self.import_photo(path.as_ref(), name, format, size);
         if let Some(photo) = self.find_photo_mut(id) {
             photo.exif = exif;
         }
@@ -1858,6 +1924,117 @@ impl PhotoApp {
     }
 
     /// Find a photo by ID.
+    /// An application whose library is saved to `path`, and loaded from it now.
+    #[must_use]
+    pub fn with_storage(path: std::path::PathBuf) -> Self {
+        let mut app = Self::new();
+        app.library_path = Some(path);
+        app.load_library();
+        app
+    }
+
+    /// Read the library file, if there is one to read.
+    ///
+    /// A missing file is not an error: it is what a first run looks like, and
+    /// saying so would be an alarm about the ordinary case.
+    fn load_library(&mut self) {
+        let Some(path) = self.library_path.clone() else {
+            return;
+        };
+        let text = match safeio::read_to_string_capped(&path, Self::MAX_LIBRARY_BYTES) {
+            Ok(read) if read.truncated => {
+                self.library_note = Some(format!(
+                    "the library file is larger than {} MiB and was not read",
+                    Self::MAX_LIBRARY_BYTES / (1024 * 1024)
+                ));
+                // Nothing was loaded, so everything is unread; refusing to save
+                // is exactly right.
+                self.library_unread = 1;
+                return;
+            }
+            Ok(read) => read.text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                self.library_note = Some(format!("could not read the library: {e}"));
+                self.library_unread = 1;
+                return;
+            }
+        };
+        match library::parse(&text) {
+            Ok(loaded) => {
+                self.library_unread = loaded.skipped;
+                if loaded.skipped > 0 {
+                    self.library_note = Some(format!(
+                        "{} record(s) in the library could not be read; \
+                         it will not be overwritten",
+                        loaded.skipped
+                    ));
+                }
+                self.photo_id_gen = IdGen::new(
+                    loaded
+                        .photos
+                        .iter()
+                        .map(|p| p.id)
+                        .max()
+                        .map_or(1, |m| m.saturating_add(1)),
+                );
+                self.photos = loaded.photos;
+                // What is on disk is what is in memory, so nothing is owed
+                // until the user changes something.
+                self.last_written = Some(library::serialize(&self.photos));
+            }
+            Err(e) => {
+                self.library_note = Some(format!("could not read the library: {e}"));
+                self.library_unread = 1;
+            }
+        }
+    }
+
+    /// Write the library, but only if it differs from what is already there.
+    ///
+    /// Called after every event rather than from each of the dozen places that
+    /// change something. A flag set at each call site is one `self.dirty =
+    /// true` away from losing a change silently, and the failure is invisible
+    /// until someone notices their ratings did not survive a restart; a
+    /// comparison against the bytes last written cannot be forgotten.
+    fn persist_if_changed(&mut self) {
+        let Some(path) = self.library_path.clone() else {
+            return;
+        };
+        if self.library_unread > 0 {
+            // See `library_unread`: never overwrite a file we could not read
+            // in full.
+            return;
+        }
+        let text = library::serialize(&self.photos);
+        if self.last_written.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        if let Some(dir) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            self.library_note = Some(format!("could not save the library: {e}"));
+            return;
+        }
+        match safeio::write_atomically(&path, text.as_bytes()) {
+            Ok(()) => {
+                self.last_written = Some(text);
+                self.library_note = None;
+            }
+            Err(e) => {
+                self.library_note = Some(format!("could not save the library: {e}"));
+            }
+        }
+    }
+
+    /// The most bytes of library file to read.
+    ///
+    /// A library of a hundred thousand photographs is a few tens of megabytes
+    /// of text, so this is generous; the point is that a file which has been
+    /// corrupted into something enormous cannot be read into memory whole
+    /// before anything objects.
+    const MAX_LIBRARY_BYTES: usize = 64 * 1024 * 1024;
+
     /// Thumbnails generated per frame.
     ///
     /// Generation is synchronous -- `thumbs` has no worker thread -- so this
@@ -1907,7 +2084,7 @@ impl PhotoApp {
             let Some(photo) = self.find_photo(pid) else {
                 continue;
             };
-            let path = std::path::PathBuf::from(&photo.file_path);
+            let path = photo.file_path.clone();
             let size = photo.file_size;
             // Read once here rather than per frame: this runs when the visible
             // set changes, which is a scroll or a filter, not a repaint.
@@ -1952,7 +2129,7 @@ impl PhotoApp {
             let owner = self
                 .photos
                 .iter()
-                .find(|p| std::path::Path::new(&p.file_path) == req.path)
+                .find(|p| p.file_path == req.path)
                 .map(|p| p.id);
             self.thumb_uploads.push((id, thumb.clone()));
             self.thumb_cache
@@ -2016,7 +2193,7 @@ impl PhotoApp {
             return;
         };
 
-        let read = match safeio::read_capped(std::path::Path::new(&path), Self::MAX_PICTURE_BYTES) {
+        let read = match safeio::read_capped(&path, Self::MAX_PICTURE_BYTES) {
             Ok(read) => read,
             Err(e) => {
                 self.picture_error = Some(format!("could not be read: {e}"));
@@ -2638,6 +2815,15 @@ impl PhotoApp {
         let search_x = sort_x + 124.0;
         let search_w = 200.0;
         out.push((
+            ToolbarControl::Search,
+            Rect {
+                x: search_x,
+                y: 8.0,
+                w: search_w,
+                h: 24.0,
+            },
+        ));
+        out.push((
             ToolbarControl::ThumbSize,
             Rect {
                 x: search_x + search_w + 16.0,
@@ -2816,7 +3002,7 @@ impl PhotoApp {
         // The EXIF parser was written, tested and never given a real file.
         let exif = parse_exif_from_bytes(&bytes);
         let size = bytes.len() as u64;
-        self.import_photo_with_exif(&path.to_string_lossy(), &name, format, size, exif);
+        self.import_photo_with_exif(path, &name, format, size, exif);
         format!("Imported {name}")
     }
 
@@ -2851,7 +3037,12 @@ impl PhotoApp {
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             return false;
         }
-        if let Some(control) = self.toolbar_control_at(event.x, event.y) {
+        // Any press moves the keyboard out of the search box unless it is
+        // the search box being pressed. Done here rather than in each of the
+        // branches below so that a control added later cannot forget it.
+        let pressed = self.toolbar_control_at(event.x, event.y);
+        self.search_focused = pressed == Some(ToolbarControl::Search);
+        if let Some(control) = pressed {
             self.press_toolbar(control);
             return true;
         }
@@ -2895,6 +3086,9 @@ impl PhotoApp {
                     self.start_slideshow();
                 }
             }
+            // The click already moved the keyboard here; there is nothing
+            // else for pressing it to do.
+            ToolbarControl::Search => {}
             ToolbarControl::Import => self.open_import_dialog(),
         }
     }
@@ -2909,7 +3103,48 @@ impl PhotoApp {
         self.selected_photos.clear();
     }
 
+    /// Typing while the search box has the keyboard.
+    ///
+    /// Returns whether the event was consumed. Everything is consumed while
+    /// the box is focused, including keys this does not act on: a shortcut
+    /// that fired mid-word would edit the library under a user who believed
+    /// they were typing a query.
+    fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
+        match event.key {
+            Key::Escape => {
+                // Escape abandons the search rather than merely leaving the
+                // box, because a filter left in place by an emptied box is a
+                // library that looks half-missing for no visible reason.
+                self.search_focused = false;
+                self.set_search("");
+                true
+            }
+            Key::Enter => {
+                self.search_focused = false;
+                true
+            }
+            Key::Backspace => {
+                let mut query = self.search_query.clone();
+                query.pop();
+                self.set_search(&query);
+                true
+            }
+            _ => {
+                let typed: String = event.typed().collect();
+                if !typed.is_empty() {
+                    let mut query = self.search_query.clone();
+                    query.push_str(&typed);
+                    self.set_search(&query);
+                }
+                true
+            }
+        }
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        if self.search_focused {
+            return self.handle_search_key(event);
+        }
         if self.view_mode == ViewMode::Slideshow {
             return self.handle_slideshow_key(event);
         }
@@ -3234,9 +3469,11 @@ impl PhotoApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search box
-        let search_x = sort_x + 124.0;
-        let search_w = 200.0;
+        // Search box. The rectangle comes from `toolbar_controls` rather
+        // than being computed again here: it is the same law the click reads,
+        // and two copies of a layout drift the first time one is adjusted.
+        let search = rect_of(ToolbarControl::Search);
+        let (search_x, search_w) = (search.x, search.w);
         self.palette.push_surface(
             cmds,
             search_x,
@@ -3246,8 +3483,31 @@ impl PhotoApp {
             CORNER_RADIUS,
             Surface::Card,
         );
+        if self.search_focused {
+            // Where the typing is going. Without it a focused empty box and an
+            // unfocused empty box are the same picture, and the only way to
+            // find out which one is in front of you is to type and see what
+            // happens to the library.
+            cmds.push(RenderCommand::StrokeRect {
+                x: search_x,
+                y: 8.0,
+                width: search_w,
+                height: 24.0,
+                color: self.palette.blue,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(CORNER_RADIUS),
+            });
+        }
         let search_text = if self.search_query.is_empty() {
-            "Search photos...".to_owned()
+            if self.search_focused {
+                // The placeholder would read as text already typed once a
+                // caret is beside it.
+                "|".to_owned()
+            } else {
+                "Search photos...".to_owned()
+            }
+        } else if self.search_focused {
+            format!("{}|", self.search_query)
         } else {
             self.search_query.clone()
         };
@@ -3853,11 +4113,9 @@ impl PhotoApp {
             // so a selected card keeps its outline over its own picture.
             if let Some(&(mtime, id)) = self.thumb_ready.get(&pid)
                 && let Some(photo) = self.find_photo(pid)
-                && let Some(picture) = self.thumb_cache.peek(
-                    std::path::Path::new(&photo.file_path),
-                    mtime,
-                    photo.file_size,
-                )
+                && let Some(picture) =
+                    self.thumb_cache
+                        .peek(&photo.file_path, mtime, photo.file_size)
             {
                 cmds.extend(thumbs::render_thumbnail(picture, id, cx, cy, thumb));
             }
@@ -4297,7 +4555,13 @@ impl App for PhotoApp {
                 }
             }
             other => {
-                if self.handle_event(other) {
+                let redraw = self.handle_event(other);
+                // After the handler, not inside it: every path that changes a
+                // rating, a flag or the photo list goes through here, and this
+                // is the one place that cannot be forgotten when a new one is
+                // added.
+                self.persist_if_changed();
+                if redraw {
                     Response::Redraw
                 } else {
                     Response::Idle
@@ -4380,7 +4644,13 @@ fn main() -> ExitCode {
     // that do not exist, taken on a camera you do not own, is a worse first
     // window than an empty one -- and it cannot be clicked through to anything
     // real, so the impression it makes is the only thing it ever does.
-    let mut app = PhotoApp::new();
+    // The library is read here rather than in `new()`, so that a test does
+    // not depend on the machine it runs on -- the same split as
+    // `load_appearance` elsewhere in the tree.
+    let mut app = match library::default_path() {
+        Some(path) => PhotoApp::with_storage(path),
+        None => PhotoApp::new(),
+    };
     app::launch("photomanager", &mut app)
 }
 
@@ -4393,6 +4663,8 @@ fn main() -> ExitCode {
     clippy::float_cmp
 )]
 mod tests {
+    use scratchdir::ScratchDir;
+
     use super::*;
 
     // --- ImageFormat tests ---
@@ -4882,7 +5154,7 @@ mod tests {
         // Import several photos (they'll get sequential timestamps)
         for i in 0..5 {
             app.import_photo(
-                &format!("/photo_{i}.jpg"),
+                format!("/photo_{i}.jpg"),
                 &format!("photo_{i}.jpg"),
                 ImageFormat::Jpeg,
                 1000,
@@ -5007,7 +5279,7 @@ mod tests {
     fn a_thumbnail_name_is_bounded_by_width_not_pre_truncated() {
         let name = "Sommerferien_Österreich_2026_Abend_am_See.jpg";
         let mut app = PhotoApp::new();
-        app.import_photo(&format!("/photos/{name}"), name, ImageFormat::Jpeg, 1000);
+        app.import_photo(format!("/photos/{name}"), name, ImageFormat::Jpeg, 1000);
         let cmds = app.render_commands(1400.0, 900.0);
         let label = cmds
             .iter()
@@ -5136,13 +5408,178 @@ mod tests {
         })
     }
 
+    /// The search box is a control the click handler knows about.
+    ///
+    /// It was drawn from the start and was never in the layout as anything
+    /// but a gap to position the next button past.
+    #[test]
+    fn the_search_box_is_a_control_that_can_be_clicked() {
+        let mut app = PhotoApp::new();
+        app.set_window_size(900.0, 700.0);
+        let hit = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Search)
+            .map(|(_, r)| r)
+            .expect("the search box is not a control");
+        assert_eq!(
+            app.toolbar_control_at(hit.x + 4.0, hit.y + 4.0),
+            Some(ToolbarControl::Search),
+            "a click inside the drawn box does not land on it"
+        );
+    }
+
+    /// Focus the search box, wherever the toolbar happens to put it.
+    fn focus_search(app: &mut PhotoApp) {
+        app.set_window_size(900.0, 700.0);
+        let hit = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Search)
+            .map(|(_, r)| r)
+            .expect("the search box is a control");
+        app.handle_event(&click(hit.x + 4.0, hit.y + 4.0));
+        assert!(app.search_focused, "the click did not take the keyboard");
+    }
+
+    /// Typing filters the library, which is what the box has always promised.
+    #[test]
+    fn typing_into_the_search_box_filters_the_library() {
+        let mut app = app_with_n_pictures("srch", 2);
+        let first = app.photos.first().expect("one").id;
+        app.add_tag(first, "pier");
+        assert_eq!(app.visible_photos().len(), 2, "the control failed");
+
+        focus_search(&mut app);
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+
+        assert_eq!(app.search_query, "pier");
+        assert_eq!(
+            app.visible_photos().len(),
+            1,
+            "the query was stored but nothing was filtered"
+        );
+    }
+
+    /// A digit typed into the search box does not rate a photograph.
+    ///
+    /// The reason focus has to consume everything. `0`-`5` rate the selected
+    /// photograph and `f` flags it, so without this, searching for a filename
+    /// with a digit in it would quietly edit the library while the user
+    /// believed they were typing a query.
+    #[test]
+    fn a_digit_typed_into_the_search_box_does_not_rate_a_photograph() {
+        let mut app = app_with_n_pictures("digits", 1);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+
+        // Control: with the box unfocused, the digit really does rate.
+        app.handle_event(&typed(Key::Num5, '5'));
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "the control failed: digits do not rate at all, so this proves nothing"
+        );
+
+        focus_search(&mut app);
+        app.handle_event(&typed(Key::Num3, '3'));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "typing into the search box changed a photograph's rating"
+        );
+        assert_eq!(app.search_query, "3", "and the digit went into the query");
+    }
+
+    /// `f` does not flag a photograph while the box has the keyboard either.
+    #[test]
+    fn a_letter_typed_into_the_search_box_does_not_flag_a_photograph() {
+        let mut app = app_with_n_pictures("flagging", 1);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        assert!(!app.find_photo(pid).expect("one").flagged);
+
+        focus_search(&mut app);
+        app.handle_event(&typed(Key::F, 'f'));
+
+        assert!(
+            !app.find_photo(pid).expect("one").flagged,
+            "typing into the search box flagged a photograph"
+        );
+        assert_eq!(app.search_query, "f");
+    }
+
+    /// Backspace removes the last character.
+    #[test]
+    fn backspace_removes_the_last_character() {
+        let mut app = app_with_n_pictures("backspace", 1);
+        focus_search(&mut app);
+        app.handle_event(&typed(Key::P, 'p'));
+        app.handle_event(&typed(Key::I, 'i'));
+        assert_eq!(app.search_query, "pi");
+
+        app.handle_event(&key(Key::Backspace));
+        assert_eq!(app.search_query, "p");
+    }
+
+    /// Escape abandons the search rather than merely leaving the box.
+    ///
+    /// A filter left in place by a box that no longer looks active is a
+    /// library that appears half-missing with nothing on screen explaining
+    /// why.
+    #[test]
+    fn escape_abandons_the_search_and_restores_the_library() {
+        let mut app = app_with_n_pictures("escape", 2);
+        let first = app.photos.first().expect("one").id;
+        app.add_tag(first, "pier");
+        focus_search(&mut app);
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+        assert_eq!(app.visible_photos().len(), 1, "the control failed");
+
+        app.handle_event(&key(Key::Escape));
+
+        assert!(!app.search_focused, "escape left the keyboard in the box");
+        assert!(
+            app.search_query.is_empty(),
+            "escape left the query in place"
+        );
+        assert_eq!(
+            app.visible_photos().len(),
+            2,
+            "the library did not come back"
+        );
+    }
+
+    /// Clicking anything else takes the keyboard out of the box.
+    #[test]
+    fn clicking_elsewhere_takes_the_keyboard_out_of_the_search_box() {
+        let mut app = app_with_n_pictures("unfocus", 1);
+        focus_search(&mut app);
+
+        // The sort button, which is a control and is not the search box.
+        let sort = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Sort)
+            .map(|(_, r)| r)
+            .expect("sort is a control");
+        app.handle_event(&click(sort.x + 4.0, sort.y + 4.0));
+
+        assert!(!app.search_focused, "the keyboard stayed in the search box");
+    }
+
     /// A library of `n` photos, all visible.
     fn library(n: usize) -> PhotoApp {
         let mut app = PhotoApp::new();
         app.set_window_size(WINDOW_WIDTH, WINDOW_HEIGHT);
         for i in 0..n {
             app.import_photo(
-                &format!("/photos/p{i:04}.jpg"),
+                format!("/photos/p{i:04}.jpg"),
                 &format!("p{i:04}.jpg"),
                 ImageFormat::Jpeg,
                 1_000_000,
@@ -5851,6 +6288,173 @@ mod tests {
         }
         assert_eq!(app.photos.len(), 2, "the fixture did not import its photos");
         app
+    }
+
+    /// A photograph, its rating and its flag survive closing the window.
+    ///
+    /// The whole point. Before this, every import, rating and flag lasted
+    /// exactly as long as the process.
+    #[test]
+    fn a_library_survives_a_restart() {
+        let scratch = ScratchDir::new("photomanager-restart");
+        let path = scratch.path("photolibrary.txt");
+        let picture = scratch.path("holiday.png");
+        std::fs::write(&picture, imagecodec::testing::png_gradient(4, 4)).expect("write");
+
+        let pid = {
+            let mut app = PhotoApp::with_storage(path.clone());
+            app.import_from_disk(&picture);
+            let pid = app.photos.first().expect("imported").id;
+            assert!(app.rate_photo(pid, 5), "the control failed: not rated");
+            assert!(app.toggle_flag(pid), "the control failed: not flagged");
+            app.add_tag(pid, "pier");
+            app.persist_if_changed();
+            pid
+        };
+
+        let reopened = PhotoApp::with_storage(path);
+        assert_eq!(reopened.photos.len(), 1, "the photograph did not come back");
+        let photo = reopened.photos.first().expect("one");
+        assert_eq!(photo.id, pid, "and it is the same one");
+        assert_eq!(photo.rating, 5, "the rating did not survive");
+        assert!(photo.flagged, "the flag did not survive");
+        assert_eq!(
+            photo.tags,
+            vec!["pier".to_owned()],
+            "the tag did not survive"
+        );
+        assert!(
+            reopened.library_note.is_none(),
+            "{:?}",
+            reopened.library_note
+        );
+    }
+
+    /// The save goes through `safeio`, not `fs::write`.
+    ///
+    /// The two leave identical bytes, so nothing else can tell them apart --
+    /// and `fs::write` truncates before it writes, so an interrupted save
+    /// would destroy the whole library rather than one photograph.
+    #[test]
+    fn the_save_is_atomic() {
+        let scratch = ScratchDir::new("photomanager-atomic");
+        let path = scratch.path("photolibrary.txt");
+        let picture = scratch.path("p.png");
+        std::fs::write(&picture, imagecodec::testing::png_gradient(4, 4)).expect("write");
+
+        let mut app = PhotoApp::with_storage(path);
+        app.import_from_disk(&picture);
+        let before = safeio::writes_performed();
+        app.persist_if_changed();
+        assert!(
+            safeio::writes_performed() > before,
+            "the library must be written through safeio::write_atomically"
+        );
+    }
+
+    /// Nothing is written when nothing changed.
+    #[test]
+    fn an_unchanged_library_is_not_rewritten() {
+        let scratch = ScratchDir::new("photomanager-unchanged");
+        let path = scratch.path("photolibrary.txt");
+        let picture = scratch.path("p.png");
+        std::fs::write(&picture, imagecodec::testing::png_gradient(4, 4)).expect("write");
+
+        let mut app = PhotoApp::with_storage(path);
+        app.import_from_disk(&picture);
+        app.persist_if_changed();
+
+        let before = safeio::writes_performed();
+        app.persist_if_changed();
+        app.persist_if_changed();
+        assert_eq!(
+            safeio::writes_performed(),
+            before,
+            "an unchanged library was written again"
+        );
+    }
+
+    /// A library file that could not be read in full is never overwritten.
+    ///
+    /// The dangerous case, and the reason `library_unread` exists. One corrupt
+    /// line still loads every other photograph -- and saving that back would
+    /// delete the corrupt one for good, turning something a person could still
+    /// repair in a text editor into nothing at all.
+    #[test]
+    fn a_library_that_did_not_fully_load_is_not_overwritten() {
+        let scratch = ScratchDir::new("photomanager-unread");
+        let path = scratch.path("photolibrary.txt");
+        // The second record is truncated: too few fields to be a photograph.
+        let original = "PHOTOLIBRARY|1\n\
+             PHOTO|1|/a.jpg|a.jpg|10|jpeg|100||3|none|0|0|\n\
+             PHOTO|2|/b.jpg\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut app = PhotoApp::with_storage(path.clone());
+        assert_eq!(app.photos.len(), 1, "the good record still loaded");
+        assert_eq!(
+            app.library_unread, 1,
+            "the control failed: nothing was skipped"
+        );
+        assert!(app.library_note.is_some(), "the user is not told");
+
+        // Change something, then try to save.
+        assert!(app.rate_photo(1, 5));
+        app.persist_if_changed();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            original,
+            "a file that could not be read in full was overwritten"
+        );
+    }
+
+    /// A first run has no library file, and that is not an error.
+    #[test]
+    fn a_missing_library_is_an_ordinary_first_run() {
+        let scratch = ScratchDir::new("photomanager-firstrun");
+        let path = scratch.path("nothing-here.txt");
+
+        let app = PhotoApp::with_storage(path);
+        assert!(app.photos.is_empty());
+        assert_eq!(app.library_unread, 0);
+        assert!(
+            app.library_note.is_none(),
+            "a first run was reported as a problem: {:?}",
+            app.library_note
+        );
+    }
+
+    /// Ids carry on from where the saved library left off.
+    ///
+    /// Without this the generator would restart at 1 and the next import
+    /// would be given an id a saved photograph already has -- so a rating
+    /// typed on one would land on the other.
+    #[test]
+    fn ids_do_not_restart_over_a_saved_library() {
+        let scratch = ScratchDir::new("photomanager-ids");
+        let path = scratch.path("photolibrary.txt");
+        let one = scratch.path("one.png");
+        let two = scratch.path("two.png");
+        std::fs::write(&one, imagecodec::testing::png_gradient(4, 4)).expect("write");
+        std::fs::write(&two, imagecodec::testing::png_gradient(5, 4)).expect("write");
+
+        let first_id = {
+            let mut app = PhotoApp::with_storage(path.clone());
+            app.import_from_disk(&one);
+            app.persist_if_changed();
+            app.photos.first().expect("one").id
+        };
+
+        let mut reopened = PhotoApp::with_storage(path);
+        reopened.import_from_disk(&two);
+        let ids: Vec<PhotoId> = reopened.photos.iter().map(|p| p.id).collect();
+        assert_eq!(ids.len(), 2, "both photographs are present");
+        assert_ne!(
+            ids.first(),
+            ids.get(1),
+            "the new import reused a saved photograph's id: {ids:?} (first was {first_id})"
+        );
     }
 
     /// A fixture whose files are real pictures, not merely real files.

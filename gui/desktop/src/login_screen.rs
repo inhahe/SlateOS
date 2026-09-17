@@ -23,6 +23,7 @@
 //! shell appear to support something a reader could not get, and a doc comment
 //! is the one place such a claim is never caught by a test.
 
+use appearance::ImageFit;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -186,31 +187,13 @@ impl LoginUser {
     }
 }
 
-/// Background style for the login screen.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub enum LoginBackground {
-    /// Whatever the theme's deepest surface is — resolved at render time.
-    ///
-    /// The default, and the only variant that names no colour. A variant was
-    /// needed because [`Default::default`] takes no arguments and so cannot be
-    /// handed a [`Palette`]: the previous default was `SolidColor(CRUST)` with
-    /// `CRUST` a Mocha literal in this file, which is why the greeter stayed
-    /// black for a user who had asked for the light theme. Deferring the
-    /// question to `render` is what makes the answer follow the mode.
-    #[default]
-    Theme,
-    /// Solid color, chosen by the user.
-    ///
-    /// Drawn exactly as given. This is not a theme role and is not re-themed:
-    /// a user who picked a colour picked *that* colour.
-    SolidColor(Color),
-    /// Same as desktop wallpaper (path to image).
-    SameAsDesktop(String),
-    /// Custom image path.
-    CustomImage(String),
-    /// Gradient between two colors, chosen by the user. Drawn as given.
-    Gradient { top: Color, bottom: Color },
-}
+// The greeter's background style is a *setting*, so it lives in the settings
+// crate with the wallpaper, the theme and the fit. It was defined here until
+// 2026-09-17, when it acquired something that could set it: a settings type
+// and a rendering type that must be kept isomorphic by hand are two models,
+// and design-decisions 857 is about what happens to the one without a
+// consumer.
+pub use appearance::LoginBackground;
 
 /// Power action from the login screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -550,9 +533,66 @@ pub struct LoginScreen {
     pub shake_offset: f32,
     /// Shake animation timer.
     pub shake_timer: f32,
+    /// The picture uploaded for this screen, or `0` for "none".
+    ///
+    /// An id, not a path, because that is what the renderer draws: images
+    /// belong to the *window* that uploaded them (`Window::images` in the
+    /// compositor), and this screen has its own surface, so it cannot borrow
+    /// the id the desktop uses for the very same file. Zero is reserved for
+    /// "no picture" by `WallpaperManager::alloc_image_id`, and means the
+    /// colour underlay is the whole background.
+    background_image_id: u64,
+    /// How that picture is fitted to the screen.
+    ///
+    /// Carried rather than assumed because `SameAsDesktop` has to *look* the
+    /// same as the desktop, and a picture cropped in one place and letterboxed
+    /// in the other is two different backgrounds however identical the file.
+    background_fit: ImageFit,
+    /// The picture's own pixel size.
+    ///
+    /// Carried for the reason `known-issues.md`
+    /// `TD-C-A-PURE-FUNCTIONS-TESTS-SAY-NOTHING-ABOUT-ITS-CALLER` gives at
+    /// length: `compute_image_rect` needs the *picture's* size, and handing it
+    /// the screen's instead makes every fit mode produce the same full-screen
+    /// rectangle. The desktop's wallpaper did precisely that for three days.
+    background_image_w: f32,
+    background_image_h: f32,
 }
 
 impl LoginScreen {
+    /// Adopt the picture uploaded to this screen's own surface under `id`.
+    ///
+    /// Takes the picture's size and fit alongside it because the three are one
+    /// decision: see [`LoginScreen::background_fit`]. Pass `0` to go back to the plain
+    /// colour, which is what the session does when the background names no
+    /// picture, when the file cannot be read, and when the compositor refuses
+    /// it -- in all three cases the underlay is the background, and the
+    /// greeter must still be usable.
+    pub fn set_background_image(&mut self, id: u64, width: f32, height: f32, fit: ImageFit) {
+        self.background_image_id = id;
+        self.background_image_w = width;
+        self.background_image_h = height;
+        self.background_fit = fit;
+    }
+
+    /// The picture this screen is drawing, or `0` for none.
+    #[must_use]
+    pub const fn background_image(&self) -> u64 {
+        self.background_image_id
+    }
+
+    /// Whether the background names a picture at all.
+    ///
+    /// Asked by the session, which only goes looking for a file when the
+    /// answer is yes.
+    #[must_use]
+    pub const fn background_wants_picture(&self) -> bool {
+        matches!(
+            self.config.background,
+            LoginBackground::SameAsDesktop | LoginBackground::CustomImage(_)
+        )
+    }
+
     pub fn new(screen_width: f32, screen_height: f32, users: Vec<LoginUser>) -> Self {
         // Default select last-login user or first.
         let selected = users.iter().position(|u| u.last_login).unwrap_or(0);
@@ -588,6 +628,10 @@ impl LoginScreen {
             date_string: "Sunday, May 18, 2026".to_string(),
             shake_offset: 0.0,
             shake_timer: 0.0,
+            background_image_id: 0,
+            background_fit: ImageFit::Fill,
+            background_image_w: 0.0,
+            background_image_h: 0.0,
         }
     }
 
@@ -1082,12 +1126,14 @@ impl LoginScreen {
             }
             // Named rather than `_` so that adding a variant is a compile
             // error here instead of a silent dark rectangle. `Theme` *is* this
-            // fill; the two image variants land on it as a placeholder until
-            // the greeter can load an image, and the theme's deepest surface is
-            // a better placeholder than a fixed near-black — that fixed value
-            // is what made a light session flash dark before the image arrived.
+            // fill; for the two picture variants it is the underlay the
+            // picture sits on, which shows through a letterbox and is the
+            // whole background until the file has been read. The theme's
+            // deepest surface is a better colour for that than a fixed
+            // near-black — that fixed value is what made a light session
+            // flash dark before the image arrived.
             LoginBackground::Theme
-            | LoginBackground::SameAsDesktop(_)
+            | LoginBackground::SameAsDesktop
             | LoginBackground::CustomImage(_) => {
                 // The greeter's whole screen, which is the page and not a box on it:
                 // outlined, it draws a border round the display and no background at
@@ -1100,6 +1146,30 @@ impl LoginScreen {
                     color: p.crust,
                     corner_radii: CornerRadii::ZERO,
                 });
+
+                // The picture, if the session has managed to put one on this
+                // screen's surface. Checked here rather than assumed from the
+                // variant: naming a file is not the same as having read it,
+                // and a greeter that cannot be logged into because the
+                // wallpaper is missing would be a machine lost to a deleted
+                // file. Zero means no picture, exactly as it does for the
+                // desktop.
+                if self.background_image_id != 0 {
+                    let (x, y, width, height) = crate::wallpaper::compute_image_rect(
+                        self.screen_width,
+                        self.screen_height,
+                        self.background_image_w,
+                        self.background_image_h,
+                        self.background_fit,
+                    );
+                    commands.push(RenderCommand::Image {
+                        x,
+                        y,
+                        width,
+                        height,
+                        image_id: self.background_image_id,
+                    });
+                }
             }
         }
     }
@@ -1572,7 +1642,10 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    // Only the tests name a path here; the greeter's background type
+    // itself lives in `appearance` now.
     use guitk::event::Modifiers;
+    use std::path::PathBuf;
 
     fn make_users() -> Vec<LoginUser> {
         vec![
@@ -2051,13 +2124,10 @@ mod tests {
         for (name, bg) in [
             ("bg theme", LoginBackground::Theme),
             ("bg solid", LoginBackground::SolidColor(p.mauve)),
-            (
-                "bg same as desktop",
-                LoginBackground::SameAsDesktop("/w.png".to_string()),
-            ),
+            ("bg same as desktop", LoginBackground::SameAsDesktop),
             (
                 "bg custom image",
-                LoginBackground::CustomImage("/w.png".to_string()),
+                LoginBackground::CustomImage(PathBuf::from("/w.png")),
             ),
             (
                 "bg gradient",
@@ -2639,8 +2709,8 @@ mod tests {
         for (mode, p) in table_palettes() {
             for bg in [
                 LoginBackground::Theme,
-                LoginBackground::SameAsDesktop("/w.png".to_string()),
-                LoginBackground::CustomImage("/w.png".to_string()),
+                LoginBackground::SameAsDesktop,
+                LoginBackground::CustomImage(PathBuf::from("/w.png")),
             ] {
                 let mut s = base();
                 s.config.background = bg.clone();

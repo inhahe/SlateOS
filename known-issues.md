@@ -155761,6 +155761,101 @@ look at whether the record is serialised anywhere first, and because the fix is
 a deletion whose value is in being done deliberately rather than as a
 by-product of a byte-safety sweep.
 
+## TD-C-A-TEST-NESTED-IN-ANOTHER-FUNCTION-COMPILES-AND-NEVER-RUNS -- METHOD 2026-09-17
+
+**In short:** a `#[test]` written inside another function's body compiles
+cleanly, is never collected by the test harness, and reports nothing. The suite
+stays green and the test simply does not exist. It took three attempts to
+notice, because every signal looked like success.
+
+**Date:** 2026-09-17. **Lane:** C.
+
+**What happened.** A patch appended a test to
+`gui/desktop/src/session/tests.rs` and landed it *inside* the last function in
+the file, four spaces deep. Rust allows nested items, so it built. Running it
+by name gave:
+
+    test result: ok. 0 passed; 0 failed; 2842 filtered out
+
+`ok` with zero passed. The count before the test was added was also 2842.
+
+**Why it survived two fixes.** The file is included with `#[cfg(test)] mod
+tests;`, so its top-level items sit at **column 0** -- there is no `mod tests {
+... }` wrapper. Two attempts to "move it to module level" inserted it before
+the file's final `}`, which closes the last *function*, not a module. Both
+attempts reported success and changed nothing, because the block moved from
+inside one function to inside the same one.
+
+**The signals, and which one was honest:**
+
+| Signal | What it said |
+|---|---|
+| `cargo build` / `clippy` | clean -- a nested item is legal |
+| `cargo test <name>` | `ok. 0 passed` |
+| **The total count** | **2842 before, 2842 after** |
+
+Only the third was informative, and only because the number happened to be in
+front of me from an earlier run. `ok. 0 passed` is the same shape as the
+filtered-run trap already recorded in
+`TD-C-THREE-TESTS-AND-TWO-CHECKS-THAT-PROVED-NOTHING-IN-ONE-DAY`: **a green
+result about nothing.**
+
+**The habit that catches it in one step:** after adding a test, check that the
+suite's total went up by the number of tests added. Not that it passed -- that
+it *exists*. A filtered run cannot tell "passed" from "absent"; the count can.
+
+**And before moving code in an unfamiliar file, read the indentation of its
+top-level items.** Four spaces meant "inside something" here, and the file's
+own structure -- a `mod` declared elsewhere -- is invisible from inside it.
+
+## TD-C-THE-TWO-GLOB-MATCHERS-ARE-NOT-DUPLICATES -- 2026-09-17
+
+**In short:** the tree has a shared glob-matching crate and a second matcher
+inside the backup program. That looks like exactly the duplication worth
+removing, and it is not: they answer different questions and unifying them
+would break the backup program's exclude patterns. Written down so the next
+person who notices the pair does not have to work that out again -- or worse,
+does not.
+
+**Date:** 2026-09-17. **Lane:** C.
+
+| | |
+|---|---|
+| `apps/globmatch/src/lib.rs` (511 lines) | used by `apps/filesearch` and `apps/indexer` |
+| `apps/backup/src/main.rs:100-330` (231 lines) | used by `is_excluded` |
+
+**Both implement `*`, `?` and `[...]`.** That is the whole of the resemblance
+and it is why the pair looks like an oversight.
+
+**They differ on the one thing that matters for their callers: whether a
+pattern knows about path separators.**
+
+* `apps/backup` is **path-aware**. `?` is written `Some(&b'?') if t != b'/'`,
+  so it will not match a separator, and `**` is recognised as a whole-segment
+  wildcard that crosses them. That is what an exclude line like `cache/**`
+  requires, and an exclude pattern that silently matched across directories
+  would leave files out of a backup.
+* `apps/globmatch` is **flat**. `?` is `Some('?') => true` -- any character,
+  separator included. That is right for matching a search term against a
+  filename, which is what its two callers do.
+
+**So this is the compositor's rectangle again**, from
+`TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`: two types with the same surface,
+different semantics, each correct where it sits. The tell in both cases was not
+the API -- it was one line of the implementation. Reading the signatures would
+have made them look identical.
+
+**Do not unify them.** If a third caller needs globbing, the question to ask
+first is whether it matches *names* or *paths*, and the answer picks the
+matcher. A wallpaper exclusion filter, for instance, matches filenames within
+one folder, so it wants the flat one.
+
+**One real obstacle, recorded for whoever needs the flat matcher from the
+shell:** `apps/globmatch` is under `apps/`, and 136 crates under `apps/` depend
+on `gui/` while none go the other way. Reaching it from `gui/desktop` needs the
+same relocation `gui/pathcodec` got, and that is a deliberate move rather than
+something to do as a side effect of wanting a filter.
+
 ## TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS -- 2026-09-17
 
 **In short:** ten different programs and libraries each declare their own
@@ -155792,9 +155887,26 @@ the other five use `<`. So a point exactly on the right or bottom edge is
 inside a whiteboard rectangle and outside every other kind. That is deliberate
 and pinned: `test_rect_contains` asserts `r.contains(110.0, 60.0)` for a
 100x50 rectangle at (10, 10), which is precisely the far corner. It also has an
-`intersects` the toolkit lacks. Converting it needs a decision about what a
-drawing canvas should do at its own boundary, which is a design question and
-not a cleanup -- left alone.
+`intersects` the toolkit lacks.
+
+**And on a second look it is not merely deliberate, it is right for this
+program** -- which matters, because "a test pins it" is a weak reason to leave
+something alone. A test can pin a bug. The argument is:
+
+* The toolkit's half-open rule exists to stop **two adjacent rectangles both
+  claiming a pixel**, where the winner would otherwise depend on the order they
+  were recorded in. Whiteboard cannot have that ambiguity: `hit_test_shapes`
+  walks the shapes in reverse and returns the first hit, so overlap is settled
+  by **z-order**, deterministically, before the rectangle is ever asked.
+* A drawing canvas *wants* its edges grabbable -- you draw a rectangle and then
+  reach for its border. The same function already widens the target for lines
+  and freehand strokes by half the stroke width with a four-pixel floor, which
+  is the same "generous hit-region" the roadmap asks for elsewhere.
+
+So the two rules answer different questions: the toolkit's disambiguates
+neighbours, whiteboard's makes a shape's own border part of it. Sweeping the
+second into the first would have traded a deliberate affordance for a guarantee
+this program does not need.
 
 **Two down, six to go, and the two were different jobs.** `apps/explorer` was
 group B: 73 field accesses renamed, each at the line and column the compiler
@@ -155920,12 +156032,25 @@ command reaches `go_back`.
 Two consequences for whoever picks this up:
 
 * The work is a *caller*, not an implementation. The type is complete.
-* A caller needs one thing that genuinely does not exist: the entries are
-  tagged strings -- `image:<path>`, `slideshow:<path>`, `solid:theme`,
-  `dynamic` -- and **nothing anywhere parses them back**. Going back requires
-  turning an entry into a wallpaper again, and that reader has never been
-  written. A typed enum would be the better shape, and would also settle what
-  `image:` does with a path containing a colon.
+* ~~A caller needs one thing that genuinely does not exist: the entries are
+  tagged strings and nothing parses them back.~~ **Done 2026-09-17:** the
+  entries are a `WallpaperChoice` enum -- `Solid(Color)`, `SolidTheme`,
+  `Image(PathBuf)`, `Slideshow(PathBuf)`, `Dynamic` -- so there is nothing to
+  parse, and what `image:` should do with a path containing a colon cannot
+  arise.
+* **§858 removed the other blocker.** The history was recording every automatic
+  slideshow advance, so at the default interval a twenty-entry buffer turned
+  over in ten minutes and a user's own choice was evicted by a slideshow they
+  left running. Only deliberate acts are recorded now.
+* **What remains is a caller, and it is deliberately not built.**
+  `roadmap-detailed.md`'s Desktop Background section has **no bullet for
+  history navigation**, so adding a menu item would be inventing a feature
+  rather than implementing one. The nearest thing to a specification is the
+  kernel-side `wallpaper` kshell command's `history` subcommand
+  (`roadmap.md` §2761, lane A), which is not this shell. If it is wanted, the
+  desktop's context menu is the obvious home -- with the wrinkle that the menu
+  is built once and reused, so items whose enabled state depends on there being
+  something to go back to need it rebuilt when shown.
 
 **A version marker is required, not optional.** Existing files hold the path
 raw under `["wallpaper", "image"]`. Writing encoded text into the same key
@@ -156104,6 +156229,57 @@ the evidence that it is the house pattern rather than an excuse.
 `to_string_lossy` for the undecodable names would turn a visible nothing-happens
 into an invisible wrong-file -- a drop that silently operates on a path the
 user never selected.
+
+## TD-C-THREE-TESTS-AND-TWO-CHECKS-THAT-PROVED-NOTHING-IN-ONE-DAY -- METHOD 2026-09-17
+
+**In short:** five times in one session a green result meant nothing. Three
+were tests that passed against code deliberately broken to make them fail; two
+were checks that reported success while the thing they were checking was still
+wrong. Every one was caught the same way -- by breaking the code on purpose and
+watching -- and none would have been caught by reading.
+
+**Date:** 2026-09-17. **Lane:** C.
+
+**The five.**
+
+| What | Why it passed anyway |
+|---|---|
+| `safeio`'s temp-name collision test | The name also carries the pid and an atomic counter, so it was unique whatever the lossy stem did. The bug it was written for could not happen. |
+| `splitter`'s `panes_tile_the_area_exactly` | Asserted with a `0.01` tolerance, which is far looser than the float error it existed to catch. Tightening it to exact equality was **still** not enough: `[0.2, 0.5, 0.3]` lands on the edge either way. It took thirds, sevenths and elevenths before the sabotage failed. |
+| `explorer`'s "sides hidden while the panel is closed" | Asked `column_menu_items`, which only ever returns columns. The sides are added by a different function, so the assertion was true regardless. |
+| The `\r` line-ending check | The shell escape collapsed to an empty pattern; `grep -c ''` matches every line, so it reported the file's own length as a count of CRs. Three files, all "entirely CRLF", all pure LF. |
+| The Rect rename loop | Searched for `E0609`, which is a field *access*. Struct *literals* are `E0560`, so it announced "clean after 1 pass" with six errors outstanding. |
+
+**The one thing that worked, every time.** Change the code so the test *must*
+fail, and run it. Not inspection -- all five survived being read, twice in some
+cases, by someone who had just written them and knew exactly what they were
+supposed to prove.
+
+**The shapes worth recognising, since the mechanism differed each time:**
+
+* **A tolerance wider than the effect.** A property about rounding needs a
+  fixture that *rounds*; exact equality on numbers that happen to divide
+  cleanly proves nothing either.
+* **A fixture that cannot exhibit the bug.** The `safeio` name was unique for
+  an unrelated reason, so no input could have failed it.
+* **Asking the wrong function.** The assertion was about the menu; the call was
+  to something that never contained the rows in question.
+* **A pattern that matches everything.** When a count equals the size of the
+  thing counted, suspect the predicate.
+* **A checker that knows one error shape.** "Clean" meant "clean of the errors
+  I know how to look for".
+
+**What this costs when it is missed.** A test that cannot fail is worse than no
+test: it occupies the place where a real check would go, and it is *evidence*
+to the next reader that the behaviour is pinned. Two of the five would have
+shipped a fix whose commit message explained a defect that does not exist --
+which is the same waste recorded in
+`TD-C-FOUR-CLAIMS-WALKED-BACK-IN-ONE-SESSION`, but wearing a green tick.
+
+**The habit to keep:** after writing a test that passes first time, break the
+thing it tests. It costs one command. Three of today's five were found in the
+minute after the test first went green, and the two that were not had already
+been committed.
 
 ## TD-C-A-BROKEN-PATTERN-COUNTED-EVERY-LINE-AND-LOOKED-EXACTLY-LIKE-THE-BUG -- METHOD 2026-09-16
 
@@ -157018,3 +157194,53 @@ had died, from a two-minute silence in its log plus `ps | grep -c cargo`
 returning 0 -- during the release build, which is legitimately silent for
 ~10 minutes. It wrote again after I stopped it. A quiet log is not a dead
 process, and on this project the quietest phase is also among the longest.
+## TD-C-A-PURE-FUNCTIONS-TESTS-SAY-NOTHING-ABOUT-ITS-CALLER -- METHOD 2026-09-17
+
+**In short:** the desktop wallpaper offered six ways to fit a picture to the
+screen -- letterbox it, crop it, tile it, centre it -- and for as long as the
+setting existed all six drew exactly the same thing. The maths was right and
+had six passing tests. Its only real caller handed it the *screen's*
+dimensions where it wanted the *picture's*, and under that one wrong argument
+every mode collapses to the same answer.
+
+**Date:** 2026-09-17. **Lane:** C.
+
+**What happened.** `compute_image_rect(display_w, display_h, image_w, image_h,
+fit)` in `gui/desktop/src/wallpaper.rs` is correct, and six unit tests call it
+with sizes like 1920x1080 against 3000x1000 and check the letterboxing
+arithmetic. The one production call site was:
+
+    compute_image_rect(width, height, width, height, self.config.fit)
+
+-- the display size passed twice. With `image_w == display_w` and
+`image_h == display_h`, `Fill` and `Fit` both scale by a ratio of exactly 1,
+`Center` and `Tile` both return the rectangle they were handed, and `Stretch`
+and `Span` return it directly. All six produce `(0, 0, display_w, display_h)`.
+
+The manager had no field for a picture's size and no way to learn one: it
+allocates image ids and never opens a file. The decode happens in `session.rs`,
+which had the width and height in hand and dropped them on the floor.
+
+**Why every signal was green.** The six tests exercise the function, which was
+never the broken part. Nothing tested the path from the setting to the screen,
+so nothing could see the caller. The Settings page offered the six modes, the
+YAML stored the choice, `ImageFit` had been deliberately consolidated into
+`appearance` so there was "one model" -- and the roadmap recorded the feature
+`[x]` done on 2026-09-14 on the strength of all that.
+
+**The rule.** *A unit test of a pure function proves the function. It says
+nothing whatever about whether anybody calls it correctly, and a function whose
+arguments are all the same type will accept them in the wrong order in
+silence.* When a setting is meant to change what appears on screen, the test
+that earns the `[x]` is the one that sets it two different ways through the
+real entry point and asserts the results differ. Here that is
+`a_letterboxed_picture_and_a_cropped_one_are_not_the_same_picture`, which
+compares `Fit` against `Fill` through `get_render_commands`; sabotaged back to
+the old line, it reports `Fit must leave a bar above and below: (0.0, 0.0,
+1920.0, 1080.0)`, which is the original defect stated exactly.
+
+**Related.** design-decisions §856 -- *a settings page is built when something
+obeys it, not when something stores it.* This is that rule met from a new
+direction: a consumer did exist, and was reached, and still made the displayed
+claim false, because it was fed an argument that erased the difference.
+

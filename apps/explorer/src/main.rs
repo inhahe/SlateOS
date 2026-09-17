@@ -10561,6 +10561,65 @@ mod tests {
         });
     }
 
+    /// The side survives a restart.
+    ///
+    /// The commit that added this said the choice "is remembered" and nothing
+    /// checked it. A preference applied on screen and not written down looks
+    /// identical to one that was saved, right up until the next start -- which
+    /// is the failure `persist_view_prefs` exists to report and no test had
+    /// yet pinned for this setting.
+    #[test]
+    fn the_panel_side_survives_a_restart() {
+        settingsfile::testing::with_scratch_config("preview-side-persist", |_root| {
+            let scratch = temp_dir("preview_side_persist");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            {
+                let mut state = state_at(&root);
+                state.preview_open = true;
+                // Bottom, because it is neither the default nor adjacent to it
+                // in `ALL` -- a test that picks the default proves nothing.
+                let bottom = columnprefs::PreviewSide::ALL
+                    .iter()
+                    .position(|s| *s == columnprefs::PreviewSide::Bottom)
+                    .expect("Bottom is one of the sides");
+                assert!(
+                    state.column_menu_action(MENU_PREVIEW_SIDE_BASE.saturating_add(bottom as u64))
+                );
+                assert_eq!(state.preview_side, columnprefs::PreviewSide::Bottom);
+            }
+
+            // A second explorer, reading the same settings file.
+            let restarted = state_at(&root);
+            assert_eq!(
+                restarted.preview_side,
+                columnprefs::PreviewSide::Bottom,
+                "the side was applied but not written down"
+            );
+        });
+    }
+
+    /// A side nobody recognises leaves the panel where it was.
+    ///
+    /// The settings file is meant to be hand-editable, so `side: rihgt` is a
+    /// thing that will happen. Falling back to the default would move a
+    /// panel the user never asked to move; `from_yaml_name` answers `None` and
+    /// lets the caller keep what it had.
+    #[test]
+    fn an_unrecognised_side_is_not_a_silent_move() {
+        assert_eq!(columnprefs::PreviewSide::from_yaml_name("rihgt"), None);
+        assert_eq!(
+            columnprefs::PreviewSide::from_yaml_name("bottom"),
+            Some(columnprefs::PreviewSide::Bottom)
+        );
+        // Whitespace is forgiven, since a person typed it.
+        assert_eq!(
+            columnprefs::PreviewSide::from_yaml_name("  top  "),
+            Some(columnprefs::PreviewSide::Top)
+        );
+    }
+
     /// Moving the panel does not resize the listing.
     ///
     /// `preview_split` is the listing's share whichever side the panel is on,

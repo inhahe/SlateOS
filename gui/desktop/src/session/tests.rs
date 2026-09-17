@@ -2903,11 +2903,12 @@ fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
     // wallpaper would refuse every slide after the first.
     let (mut session, desktop, _turn) = session();
     let background = session.background().window();
-    session.wallpaper_mut().set_slideshow("/pics", 60, false);
-    session.wallpaper_mut().populate_slideshow_paths(vec![
-        fixture("rgb8").display().to_string(),
-        fixture("gray8").display().to_string(),
-    ]);
+    session
+        .wallpaper_mut()
+        .set_slideshow(std::path::Path::new("/pics"), 60, false);
+    session
+        .wallpaper_mut()
+        .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
     let first = session.wallpaper_mut().current_image_id();
     session.paint_background().expect("the harness refused");
 
@@ -3730,6 +3731,144 @@ fn a_press_beside_the_box_closes_it_without_starting_anything() {
     assert!(session.take_launches().is_empty());
 }
 
+// ---- the greeter's background ----
+//
+// `design.txt` line 1247: "login screen background image - easy way to make
+// the two the same". The easy way is `SameAsDesktop`, and what makes it easy
+// is that it names no file: it asks the wallpaper what is up at the moment it
+// paints, so it keeps step with a rotation folder for free.
+//
+// Images belong to the window that uploaded them, so this is a second upload
+// of the same picture rather than one picture shown twice. That is why these
+// tests watch the greeter's own id rather than the desktop's.
+
+/// **The greeter shows the picture the desktop is showing.**
+///
+/// The claim the setting makes, asserted where it can be seen: an id on the
+/// greeter, and an `Image` command in what the greeter draws. `LoginBackground`
+/// could name a picture from the day the greeter was written; nothing ever
+/// read a file for it, so every choice but a colour drew the bare theme.
+#[test]
+fn the_greeter_shows_the_picture_the_desktop_is_showing() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+    assert!(session.login().is_some(), "the fixture has no greeter");
+
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
+    session.sync_wallpaper();
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+
+    let screen = session.login().expect("the greeter went away");
+    assert_ne!(
+        screen.background_image(),
+        0,
+        "the greeter is following the desktop and has no picture: {:?}",
+        session.login_background_error()
+    );
+    assert_eq!(session.login_background_error(), None);
+}
+
+/// A picture the desktop changes to is the picture the greeter changes to.
+///
+/// This is what `SameAsDesktop` carrying no path buys. A rotation folder
+/// advances the wallpaper every `wallpaper.interval_secs`; a background that
+/// had recorded the file chosen at the time would show that one for ever while
+/// still calling itself "same as desktop".
+#[test]
+fn the_greeter_follows_the_desktop_when_the_desktop_changes() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
+    session.sync_wallpaper();
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+    let first = session.login().expect("greeter").background_image();
+    assert_ne!(first, 0, "no picture to begin with");
+
+    // What a rotation does, without waiting for one.
+    session.shell_mut().appearance.wallpaper = Some(fixture("gray8"));
+    session.sync_wallpaper();
+    session.repaint().expect("repaint");
+
+    let second = session.login().expect("greeter").background_image();
+    assert_ne!(
+        second, 0,
+        "the greeter lost its picture when the desktop moved"
+    );
+    assert_ne!(
+        first, second,
+        "the greeter is still showing the first picture; `SameAsDesktop` is \
+         following a snapshot rather than the desktop"
+    );
+}
+
+/// A picture that cannot be read costs the picture, not the machine.
+///
+/// The greeter is the one screen where failing closed locks the user out of
+/// their own computer. A deleted wallpaper must leave a plain, usable login
+/// screen -- and must still say why, rather than swallowing it.
+#[test]
+fn a_greeter_picture_that_cannot_be_read_still_leaves_a_usable_greeter() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::CustomImage(
+        std::path::PathBuf::from("/no/such/picture/at/all.png"),
+    );
+    session.sync_login_background();
+    session
+        .repaint()
+        .expect("a missing picture must not cost the repaint");
+
+    let screen = session
+        .login()
+        .expect("the greeter went away over a missing file");
+    assert_eq!(
+        screen.background_image(),
+        0,
+        "a file that does not exist got an id"
+    );
+    assert!(
+        session.login_background_error().is_some(),
+        "the reason was swallowed"
+    );
+    // And the greeter is still a greeter: it draws, and what it draws is more
+    // than the one background rectangle.
+    let palette = appearance::Palette::for_mode(false);
+    assert!(
+        screen.render(&palette).len() > 1,
+        "the greeter stopped drawing because a picture was missing"
+    );
+}
+
+/// A background that wants no picture holds no picture.
+///
+/// Switching back to the theme has to give the id back: an upload nothing will
+/// ever draw still costs the link's image budget, which is the same argument
+/// `refresh_wallpaper_image` makes for releasing before it re-reads.
+#[test]
+fn going_back_to_the_theme_gives_the_picture_back() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
+    session.sync_wallpaper();
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+    assert_ne!(session.login().expect("greeter").background_image(), 0);
+
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::Theme;
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+
+    assert_eq!(
+        session.login().expect("greeter").background_image(),
+        0,
+        "the greeter kept a picture it no longer draws"
+    );
+}
+
 // ---- the login screen ----
 
 /// A session over an account database of our own, with one account whose
@@ -4104,4 +4243,36 @@ fn a_power_choice_is_reported_rather_than_acted_on() {
         Some(crate::login_screen::LoginPowerAction::Shutdown)
     );
     assert_eq!(session.take_login_power(), None, "draining it empties it");
+}
+
+/// An exclusion pattern keeps a picture out of the rotation.
+///
+/// Matched against the file name, which is what a user writing `*.gif` into
+/// the settings file means.
+#[test]
+fn an_exclusion_pattern_removes_a_picture_from_the_rotation() {
+    let dir = scratch_dir().join("rotation-exclude");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for name in ["keep.png", "skip.gif", "draft-one.png", "final.png"] {
+        std::fs::write(dir.join(name), b"x").expect("write");
+    }
+
+    let all = Session::pictures_in(&dir, &[]);
+    assert_eq!(
+        all.len(),
+        4,
+        "the folder should hold four pictures: {all:?}"
+    );
+
+    let filtered = Session::pictures_in(&dir, &["*.gif".to_string(), "draft-*".to_string()]);
+    let names: Vec<String> = filtered
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        names,
+        ["final.png", "keep.png"],
+        "the wrong pictures survived the filter"
+    );
 }

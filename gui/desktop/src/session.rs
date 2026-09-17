@@ -105,6 +105,20 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// Deliberately not a `Window`: [`oswindow::Window`] is what the compositor
 /// last said about a window, and this is what the *shell* needs to know about
 /// one, which is only its id and its origin.
+/// What became of an attempt to put a picture on a surface.
+///
+/// Distinguishes the two kinds of failure that must not be confused: one
+/// costs a picture, the other costs the connection. See
+/// [`Session::upload_picture`].
+enum PictureUpload {
+    /// The compositor holds the pixels. Carries the picture's own size, which
+    /// is known nowhere else in the tree and which every fit mode needs.
+    Loaded { width: u32, height: u32 },
+    /// No picture, and why, in words fit to show somebody. The surface keeps
+    /// whatever it was drawing underneath.
+    Failed(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Surface {
     window: u64,
@@ -269,6 +283,14 @@ pub struct ShellSession<T: Transport> {
     /// clock here is a delta. This accumulates the one into the other, and is
     /// the session's only absolute clock.
     clock_ms: u64,
+    /// The rotation folder whose contents are currently loaded.
+    ///
+    /// Kept so `sync_wallpaper` can tell "the user changed the folder" from
+    /// "the settings were re-read and nothing about the wallpaper moved". The
+    /// difference is a directory scan, and `sync_wallpaper` runs on every
+    /// settings change -- scanning each time would read a folder of photographs
+    /// off the disk because the user adjusted the taskbar's opacity.
+    rotation_loaded: Option<PathBuf>,
     /// The picture the background surface was last *asked* to hold, as the
     /// wallpaper's image id and the path it was read from.
     ///
@@ -319,6 +341,22 @@ pub struct ShellSession<T: Transport> {
     /// was corrupt would be a worse outcome than a plain background. See
     /// [`wallpaper_error`](Self::wallpaper_error).
     wallpaper_error: Option<String>,
+    /// The picture uploaded to the greeter's surface, and which file it is.
+    ///
+    /// Separate from `wallpaper_image` even when they name the same file,
+    /// because an image belongs to the window that uploaded it: the greeter
+    /// has its own surface, so `SameAsDesktop` is two uploads of one picture
+    /// rather than one upload shown twice.
+    login_image: Option<(u64, PathBuf)>,
+    /// Next id to hand the greeter's surface. Never zero, which means "none".
+    login_image_next: u64,
+    /// Why the greeter has no picture, when it wanted one.
+    ///
+    /// Recorded rather than discarded — the rule against swallowing errors
+    /// applies no less because the consequence is cosmetic. Nothing blocks on
+    /// it: a greeter that refused to appear because a wallpaper had been
+    /// deleted would be a machine nobody could log in to.
+    login_background_error: Option<String>,
 }
 
 impl<T: Transport> ShellSession<T> {
@@ -548,8 +586,12 @@ impl<T: Transport> ShellSession<T> {
                 ..AutoHideConfig::default()
             }),
             clock_ms: 0,
+            rotation_loaded: None,
             wallpaper_image: None,
             wallpaper_error: None,
+            login_image: None,
+            login_image_next: 1,
+            login_background_error: None,
             // A login screen exactly when there is somebody to log in as. On a
             // machine whose account database cannot be read there is nobody to
             // authenticate — `authlib` would answer `Unusable` to every name —
@@ -678,6 +720,9 @@ impl<T: Transport> ShellSession<T> {
             }
             self.login_shown = up;
         }
+        // Before the picture, the pixels the picture refers to — exactly as
+        // `paint_background` does, and for the same reason.
+        self.refresh_login_image()?;
         let Some(screen) = &self.login else {
             return Ok(());
         };
@@ -1025,7 +1070,47 @@ impl<T: Transport> ShellSession<T> {
         self.release_wallpaper_image()?;
         self.wallpaper_image = Some((id, path.clone()));
 
-        let decoded = std::fs::read(&path)
+        match self.upload_picture(self.background.window, id, &path)? {
+            PictureUpload::Loaded { width, height } => {
+                // The only moment in the tree at which a wallpaper's pixel size
+                // is known. The manager allocates ids and picks fits but never
+                // opens a file, so without this it has to assume the picture is
+                // exactly the size of the screen -- an assumption under which
+                // all six fit modes produce the same full-screen rectangle,
+                // which is what the setting did until this existed.
+                self.wallpaper
+                    .note_image_size(id, width as f32, height as f32);
+                self.set_wallpaper_error(None);
+            }
+            PictureUpload::Failed(why) => self.set_wallpaper_error(Some(why)),
+        }
+        Ok(())
+    }
+
+    /// Read `path`, decode it, and upload it to `window` under `id`.
+    ///
+    /// The half of "put a picture on a surface" that is the same for every
+    /// surface. Two of them want it -- the desktop's background and the
+    /// greeter's -- and the difference between them is entirely in what to do
+    /// afterwards: where to record the size, and where to put the reason when
+    /// it does not work. So that part is the caller's and this is shared,
+    /// rather than the whole thing being written twice and drifting, which is
+    /// what happened to the path encoder in `apps/` and cost a day.
+    ///
+    /// Failures that cost a *picture* come back as [`PictureUpload::Failed`]
+    /// with a reason fit to show a user: an unreadable file, an undecodable
+    /// one, a surface the compositor has lost, and a refusal (the picture is
+    /// over the link's image budget). None of those should cost the desktop or
+    /// lock anybody out of the machine. Failures that cost the *connection*
+    /// propagate, because the `submit` that follows would fail the same way and
+    /// swallowing them here would only delay it.
+    fn upload_picture(
+        &mut self,
+        window: u64,
+        id: u64,
+        path: &Path,
+    ) -> Result<PictureUpload, Error<T>> {
+        let decoded = std::fs::read(path)
             .map_err(|e| format!("{}: {e}", path.display()))
             .and_then(|bytes| {
                 // The default limit is the compositor's own buffer ceiling, so
@@ -1037,10 +1122,7 @@ impl<T: Transport> ShellSession<T> {
             });
         let image = match decoded {
             Ok(image) => image,
-            Err(why) => {
-                self.set_wallpaper_error(Some(why));
-                return Ok(());
-            }
+            Err(why) => return Ok(PictureUpload::Failed(why)),
         };
 
         let (width, height, stride) = (image.width, image.height, image.stride());
@@ -1048,35 +1130,130 @@ impl<T: Transport> ShellSession<T> {
         // a bare `Vec<u8>`: the upload takes the typed form so that the other
         // ARGB byte order cannot arrive here. Same expansion, same cost.
         let bytes = guitk::canvas::WireBytes::from_le_argb(&image.pixels);
-        let Some(mut handle) = self.events.window_mut(self.background.window) else {
-            // Unreachable in a live session: the background surface is created
-            // in `start` and never closed. Handled rather than unwrapped
-            // because "the compositor cannot lose my window" is an assumption
-            // about the other end of a socket, and this crate does not get to
-            // make those.
-            self.set_wallpaper_error(Some(format!(
-                "{}: the background surface is gone",
+        let Some(mut handle) = self.events.window_mut(window) else {
+            // Unreachable in a live session: both surfaces are created in
+            // `start` and never closed. Handled rather than unwrapped because
+            // "the compositor cannot lose my window" is an assumption about the
+            // other end of a socket, and this crate does not get to make those.
+            return Ok(PictureUpload::Failed(format!(
+                "{}: the surface is gone",
                 path.display()
             )));
-            return Ok(());
         };
         match handle.upload_image(id, width, height, stride, PixelFormat::Argb8888, bytes) {
-            Ok(()) => {
-                self.set_wallpaper_error(None);
-                Ok(())
-            }
-            // A refusal is the compositor saying "not this picture" — too big
-            // for the link's image budget, most likely — and is exactly as
-            // survivable as a corrupt file: the colour underlay still paints.
-            // Every other error says the connection itself is unusable, and
-            // those propagate, because the `submit` two lines later would fail
-            // the same way and swallowing them here would only delay it.
+            Ok(()) => Ok(PictureUpload::Loaded { width, height }),
             Err(ConnectionError::Refused(why)) => {
-                self.set_wallpaper_error(Some(format!("{}: {why}", path.display())));
-                Ok(())
+                Ok(PictureUpload::Failed(format!("{}: {why}", path.display())))
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// Why the greeter is not showing the picture it was asked to, if so.
+    #[must_use]
+    pub fn login_background_error(&self) -> Option<&str> {
+        self.login_background_error.as_deref()
+    }
+
+    /// Put the greeter's background picture on the greeter's own surface.
+    ///
+    /// Called from `paint_login` for the same reason `refresh_wallpaper_image`
+    /// is called from `paint_background`: the render tree names an id, and the
+    /// compositor draws nothing, silently, for an id it has no bytes for.
+    ///
+    /// Re-reads only when the wanted file changes, which is what makes it
+    /// affordable every paint — and what makes `SameAsDesktop` keep up with a
+    /// rotation for free. The desktop's picture changes every
+    /// `wallpaper.interval_secs`; this notices on the next paint, because what
+    /// it compares is the path the wallpaper is showing *now* rather than one
+    /// recorded when the mode was chosen.
+    fn refresh_login_image(&mut self) -> Result<(), Error<T>> {
+        // Decided before anything is borrowed mutably.
+        let want: Option<PathBuf> = match self.login.as_ref().map(|s| &s.config.background) {
+            // The live answer, deliberately: see `LoginBackground::SameAsDesktop`.
+            Some(crate::login_screen::LoginBackground::SameAsDesktop) => {
+                self.wallpaper.current_image_path().map(Path::to_path_buf)
+            }
+            Some(crate::login_screen::LoginBackground::CustomImage(path)) => Some(path.clone()),
+            _ => None,
+        };
+        // The desktop's fit, including for a picture only the greeter shows:
+        // there is one fit setting, and a second one that only applied here
+        // would be a setting with nowhere to set it.
+        let fit = self.wallpaper.config.fit;
+
+        let Some(path) = want else {
+            self.release_login_image()?;
+            self.clear_login_picture(fit);
+            self.login_background_error = None;
+            return Ok(());
+        };
+
+        // Already up, and still drawing.
+        if self
+            .login_image
+            .as_ref()
+            .is_some_and(|(id, from)| *from == path && self.login_shows(*id))
+        {
+            return Ok(());
+        }
+
+        // Released before the read, as the wallpaper's is: holding the old
+        // picture across a decode charges the link's image budget for two
+        // full-screen pictures at once.
+        self.release_login_image()?;
+        let id = self.alloc_login_image_id();
+        self.login_image = Some((id, path.clone()));
+
+        match self.upload_picture(self.login_surface.window, id, &path)? {
+            PictureUpload::Loaded { width, height } => {
+                if let Some(screen) = self.login.as_mut() {
+                    screen.set_background_image(id, width as f32, height as f32, fit);
+                }
+                self.login_background_error = None;
+            }
+            PictureUpload::Failed(why) => {
+                // The theme colour underneath is a perfectly usable greeter.
+                self.clear_login_picture(fit);
+                self.login_background_error = Some(why);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the greeter is currently drawing `id`.
+    fn login_shows(&self, id: u64) -> bool {
+        self.login
+            .as_ref()
+            .is_some_and(|screen| screen.background_image() == id)
+    }
+
+    /// Tell the greeter it has no picture, leaving the colour underneath.
+    fn clear_login_picture(&mut self, fit: appearance::ImageFit) {
+        if let Some(screen) = self.login.as_mut() {
+            screen.set_background_image(0, 0.0, 0.0, fit);
+        }
+    }
+
+    /// Allocate an id for the greeter's surface. Never zero.
+    fn alloc_login_image_id(&mut self) -> u64 {
+        let id = self.login_image_next;
+        self.login_image_next = self.login_image_next.wrapping_add(1);
+        if self.login_image_next == 0 {
+            self.login_image_next = 1;
+        }
+        id
+    }
+
+    /// Give back whatever the greeter's surface is holding, if anything.
+    fn release_login_image(&mut self) -> Result<(), Error<T>> {
+        let Some((id, _)) = self.login_image.take() else {
+            return Ok(());
+        };
+        if let Some(mut handle) = self.events.window_mut(self.login_surface.window) {
+            handle.drop_image(id)?;
+        }
+        Ok(())
     }
 
     /// Give back whatever the background surface is holding, if anything.
@@ -1445,6 +1622,7 @@ impl<T: Transport> ShellSession<T> {
     pub fn load_appearance(&mut self) {
         self.shell.load_appearance();
         self.sync_wallpaper();
+        self.sync_login_background();
         self.sync_animation_speed();
         self.sync_autohide();
         // The widget layout comes in on the same call. It is not an appearance
@@ -1600,7 +1778,48 @@ impl<T: Transport> ShellSession<T> {
     /// the two draw the same pixels today and diverge the moment the user
     /// switches between light and dark, and only one of them is a decision the
     /// user made.
+    /// Adopt the greeter's background from the appearance settings.
+    ///
+    /// Assigning the style is the whole of it: the picture itself is fetched by
+    /// `refresh_login_image` on the next paint, which is also what keeps
+    /// `SameAsDesktop` current as a rotation advances. Doing it here as well
+    /// would read the file twice for one change.
+    ///
+    /// Runs even when no greeter is up. The screen is built once, in `start`,
+    /// and only when the machine has accounts to offer; a session that adopted
+    /// the setting only while the greeter existed would show the default the
+    /// first time the machine locked.
+    fn sync_login_background(&mut self) {
+        let want = self.shell.appearance.login_background.clone();
+        if let Some(screen) = self.login.as_mut() {
+            if screen.config.background != want {
+                screen.config.background = want;
+                // The old picture is for the old style. Dropped here rather
+                // than left for `refresh_login_image` to notice, because the
+                // style may now be one that wants no picture at all, and an
+                // upload nothing will ever draw still costs the link's budget.
+                screen.set_background_image(0, 0.0, 0.0, self.wallpaper.config.fit);
+                self.dirty = true;
+            }
+        }
+    }
+
     fn sync_wallpaper(&mut self) {
+        // A rotation folder wins over a fixed picture: a rotation *is* the
+        // wallpaper, and honouring both would leave the fixed picture visible
+        // in the settings file and never on the screen.
+        if let Some(folder) = self.shell.appearance.wallpaper_folder.clone() {
+            self.sync_rotation(&folder);
+            return;
+        }
+        if self.rotation_loaded.take().is_some() {
+            // Rotation was switched off. Fall through to the fixed picture,
+            // which the branch below applies -- but the slideshow has to go
+            // first or `tick` would keep advancing it underneath.
+            self.wallpaper.follow_desktop_base();
+            self.dirty = true;
+        }
+
         let wanted = self.shell.appearance.wallpaper.clone();
         match wanted.as_deref() {
             Some(path) => {
@@ -1625,6 +1844,74 @@ impl<T: Transport> ShellSession<T> {
                 }
             }
         }
+    }
+
+    /// Point the wallpaper at a folder, scanning it only when it changes.
+    ///
+    /// The scan lives here and not in `WallpaperManager` because that type
+    /// does no filesystem I/O by design -- `populate_slideshow_paths` exists
+    /// precisely so the shell can hand it what it found.
+    fn sync_rotation(&mut self, folder: &Path) {
+        if self.rotation_loaded.as_deref() == Some(folder) {
+            // Already showing this folder. The interval and shuffle can still
+            // have changed, and both are cheap to re-apply; the pictures are
+            // what would cost a directory read.
+            let interval = self.shell.appearance.wallpaper_interval_secs;
+            if self.wallpaper.config.slideshow_interval_secs != interval.max(1) {
+                self.wallpaper.config.slideshow_interval_secs = interval.max(1);
+                self.dirty = true;
+            }
+            return;
+        }
+
+        let pictures = Self::pictures_in(folder, &self.shell.appearance.wallpaper_exclusions);
+        self.wallpaper.set_slideshow(
+            folder,
+            self.shell.appearance.wallpaper_interval_secs,
+            self.shell.appearance.wallpaper_shuffle,
+        );
+        self.wallpaper.populate_slideshow_paths(pictures);
+        self.rotation_loaded = Some(folder.to_path_buf());
+        self.dirty = true;
+    }
+
+    /// The pictures in `folder`, in a stable order.
+    ///
+    /// Sorted, because a directory read is in whatever order the filesystem
+    /// hands back and an unshuffled rotation that changes order between boots
+    /// is not "directory order", it is a second shuffle nobody asked for.
+    ///
+    /// A folder that cannot be read yields nothing rather than an error: the
+    /// wallpaper is not the place to report a missing directory, and an empty
+    /// slideshow leaves the desktop on its plain background, which is the
+    /// honest picture of "there is nothing to show".
+    fn is_excluded(path: &Path, exclude: &[String]) -> bool {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            // A name with no text form matches no pattern, so it stays in the
+            // rotation. Excluding a picture because its name could not be read
+            // would be the wrong way round.
+            return false;
+        };
+        exclude.iter().any(|p| globmatch::glob_match(p, name))
+    }
+
+    /// The pictures in `folder`, in a stable order, minus the excluded ones.
+    ///
+    /// Patterns are matched against the file NAME, not the whole path: a
+    /// rotation reads one folder, so `*.gif` is what a user would write.
+    fn pictures_in(folder: &Path, exclude: &[String]) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .map(|e| e.path())
+            .filter(|p| crate::wallpaper::is_picture(p))
+            .filter(|p| !Self::is_excluded(p, exclude))
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     fn sync_animation_speed(&mut self) {
@@ -2073,6 +2360,15 @@ impl<T: Transport> ShellSession<T> {
         // the manager's — it lives on the overview so that the overview can be
         // drawn correctly by a caller that has no manager at all.
         self.shell.overview.tick_fade(dt);
+        // The wallpaper keeps its own clock, in whole seconds, and until now
+        // nothing turned it: a slideshow never advanced and the time-of-day
+        // gradient never changed, because `WallpaperManager::tick` had no
+        // caller outside its own tests. The session's accumulated clock is
+        // monotonic, which is what `tick` compares -- it never asks what the
+        // time is, only how much of it has passed.
+        if self.wallpaper.tick(self.clock_ms / 1000) {
+            self.dirty = true;
+        }
         // The pane keeps its own clock too, and in seconds rather than
         // milliseconds: it is a `guitk` widget, whose animation convention is a
         // float of seconds. Converted here rather than changed there, because

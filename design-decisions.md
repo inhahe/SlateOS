@@ -76355,3 +76355,118 @@ goes, under 815's "screens you open move to the Settings app and the shell's
 copies go", on 853's precedent that a shell panel with no consumer is deleted
 rather than finished. Its category *knowledge* survives as the extension table
 this decision defines, which is the part of it that was worth keeping.
+## 858. A wallpaper history records what the user chose, not what a timer did
+
+**Date:** 2026-09-17
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop keeps a short list of recent wallpapers so that a
+"previous wallpaper" command can exist. A running slideshow was adding an entry
+every time it changed picture on its own, which filled the list with pictures
+nobody had chosen and pushed the user's own choices out of it. Only deliberate
+acts are recorded now.
+
+**Context.** `WallpaperHistory` holds twenty entries and exists to support
+`go_back` / `go_forward`, which are implemented and tested and have never had a
+caller. Nine places recorded into it. Seven were user actions -- picking a
+colour, picking a picture, choosing the theme colour, switching to the
+time-of-day gradient, stepping a slideshow forwards or backwards by hand,
+asking for a random wallpaper. Two were not: `tick_slideshow`, the timer, and
+`populate_slideshow_paths`, which is a directory listing arriving.
+
+**What that cost, in numbers rather than in principle.** The default slideshow
+interval is thirty seconds and the buffer is twenty entries, so a slideshow
+left running replaced the entire history in **ten minutes**. A user who chose a
+picture, started a slideshow and came back after lunch would find "previous
+wallpaper" offering slideshow frames and nothing they had picked. That is not a
+history with a bug in it; it is a different feature wearing the name.
+
+**Options.**
+
+1. **Record everything, and let the caller filter.** Honest about what
+   happened, and the navigation could skip non-choices. But every caller would
+   need the same filter, and the twenty-entry budget is still spent on frames
+   -- a user's choice is evicted whether or not anyone skips it.
+2. **Record only user actions** -- the timer and the directory listing stay
+   out. The list means one thing, the budget is spent on choices, and no caller
+   needs to know the difference.
+3. **Two lists**, one of choices and one of everything. Nothing needs the
+   second.
+
+**Decision: (2).** The line is between *the user acting* and *the clock
+acting*, not between kinds of wallpaper: stepping a slideshow by hand is
+recorded, the same slideshow advancing by itself is not.
+
+**Reasoning.**
+
+- *A history is a record of decisions.* The question it answers is "take me
+  back to what I had", and the user never had the frame the timer chose --
+  they had "a slideshow".
+- *The budget is the argument.* Twenty entries is generous for choices and
+  meaningless for frames. Option 1 keeps the pollution and only hides it.
+- *It makes the unbuilt feature buildable.* The navigation could not sensibly
+  be wired while the list was mostly frames, which is a plausible reason nobody
+  ever wired it.
+
+**Cost accepted.** Someone who wants to return to a particular slideshow frame
+cannot, unless they stepped to it by hand. That is the right trade: the
+slideshow itself is the mechanism for moving between frames.
+
+**Pinned by** `a_timed_advance_does_not_enter_the_history` and
+`stepping_by_hand_does_enter_the_history` in `gui/desktop/src/wallpaper.rs`.
+The first was written because removing the timer's push broke **no** test --
+the old behaviour was unpinned, so the obvious "fix" of putting it back would
+have gone unnoticed.
+
+
+## 859. "Same as my desktop" stores no filename
+
+**In short:** the login screen can use the same background picture as the
+desktop. The obvious way to build that is to copy the desktop's current
+picture into the login setting when the user ticks the box. We do not: we store
+only the fact that it should follow, and ask the desktop what it is showing at
+the moment the screen is painted. If we stored the filename, the machine would
+keep showing whichever picture happened to be up when the box was ticked, for
+ever, while still calling itself "same as my desktop".
+
+**Date:** 2026-09-17. **Lane:** C. **Decided by:** Claude (autonomous).
+
+**The setting.** `appearance.yaml` gains `login.background`, one of `theme`,
+`color`, `desktop`, `image`, `gradient`. `desktop` is
+`LoginBackground::SameAsDesktop`, and the variant carries no payload at all.
+
+**Why the payload would be wrong.** The desktop's picture is not a constant.
+A rotation folder (landed the same day) replaces it every
+`wallpaper.interval_secs`; the time-of-day gradient changes it continuously.
+A `SameAsDesktop(PathBuf)` would be a snapshot taken at the instant the user
+chose the mode, and would go stale on the first rotation — a setting whose name
+says "same as" while showing something else. Holding nothing is what makes
+the name true.
+
+**What it costs.** One indirection at paint time: the session asks
+`WallpaperManager::current_image_path()` rather than reading a stored field.
+That is also the mechanism by which a rotation reaches the greeter for free:
+there is no separate code watching for the wallpaper to change, because
+nothing was cached to invalidate.
+
+**A second upload, not a second reference.** Uploaded images belong to the
+window that uploaded them (`Window::images` in the compositor), and the
+greeter has its own surface. So "the same picture" is decoded and uploaded
+twice, once per surface, and the two carry different ids. This is not
+duplication that could be optimised away by sharing an id: an id is only
+meaningful to the window that registered it.
+
+**The alternative considered, and rejected.** Store the resolved path and
+refresh it whenever the wallpaper changes. It needs a notification path from
+the wallpaper to the greeter that does not otherwise exist, and it has a
+failure mode the chosen design cannot have: if the notification is ever
+missed, the greeter shows a stale picture and nothing detects it. Asking at
+paint time cannot be missed, because there is nothing to miss.
+
+**Where it bites.** `gui/appearance/src/lib.rs` (`LoginBackground`, which
+lives there rather than in the greeter so that the setting and the drawing are
+one type — see 857), `gui/desktop/src/session.rs`
+(`refresh_login_image`, `sync_login_background`), and
+`gui/desktop/src/login_screen.rs` (`render_background`).
+

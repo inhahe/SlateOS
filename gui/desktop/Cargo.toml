@@ -32,6 +32,12 @@ path = "src/bin/demo.rs"
 
 [dependencies]
 
+# The FLAT glob matcher, for wallpaper exclusion patterns. Flat and not
+# the path-aware one in apps/backup because a rotation reads one folder,
+# so a pattern that could cross directories would have nothing to cross.
+# See known-issues.md TD-C-THE-TWO-GLOB-MATCHERS-ARE-NOT-DUPLICATES.
+globmatch = { path = "../globmatch" }
+
 # design-decisions 426's path escape, for the wallpaper's own config format.
 pathcodec = { path = "../pathcodec" }
 # The session group, for the screen-lock delay. One integer with two

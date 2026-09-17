@@ -1944,14 +1944,15 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 - [ ] Copy/paste: Ctrl+C/V and right-click context menu
 
 #### Dockable Panel / Splitter Layout Widget
-- [ ] Container widget that holds named panels separated by draggable splitters
+*Started 2026-09-17: `gui/toolkit/src/splitter.rs` holds the geometry — pure functions, the same shape as `scrollbar`, so the caller keeps the layout and every case is testable headless. A layout is fractions summing to one rather than pixels, so a saved arrangement survives a window resize; per-pane minimums are what stop them collapsing. **Not yet reachable from any application** — the preview panel is the intended first consumer, and until one exists this is a container nothing uses, which design-decisions 856 is exactly about.*
+- [-] Container widget that holds named panels separated by draggable splitters *Geometry done: `panes`, `dividers`. Nesting is composition — a pane's rectangle is an area another split can divide — so arbitrary nesting needs no extra machinery, only a caller that does it.*
 - [ ] User can drag panels to rearrange (reorder, move to different split)
-- [ ] User can drag splitters to resize
+- [x] User can drag splitters to resize *`divider_at` finds the divider under the pointer, `resize` moves it. A drag past a neighbour's minimum stops there rather than being refused, because a drag that does nothing reads as broken; but a pair that cannot satisfy both minimums is left alone entirely, since any split would be a lie.*
 - [ ] Add/remove panels from a menu or context menu
-- [ ] Horizontal and vertical splits, arbitrarily nested
+- [-] Horizontal and vertical splits, arbitrarily nested *Both axes done; nesting is available by composition and untested until something nests.*
 - [ ] Layout serialization (save/restore user's arrangement)
 - [ ] Panel tabs when multiple panels share a region
-- [ ] Minimum size constraints per panel
+- [x] Minimum size constraints per panel *Per-pane, in pixels, honoured by `resize` from both sides.*
 - [ ] Apps define available panel types; user arranges them
 
 #### Code-Aware TextEdit Widget

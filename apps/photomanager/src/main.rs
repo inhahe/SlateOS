@@ -3972,7 +3972,7 @@ impl PhotoApp {
             y: bar_y + 6.0,
             text: status_text,
             color: if self.library_note.is_some() {
-                self.palette.red
+                self.palette.ink(self.palette.red)
             } else {
                 self.palette.subtext0
             },

@@ -81,6 +81,37 @@ genuinely new. The lane C trees have 74 sites and have never been audited. A
 hard failure would block every push on a pre-existing backlog, and a gate that
 has to be bypassed to get work done stops being read at all.
 
+WHAT THIS RATCHET CANNOT SEE, measured rather than argued, because lane B
+asked the right question about a gate of their own on 2026-09-15: the test of a
+ratchet is not "is the number going down" but "IS THERE AN EDIT THAT MOVES THE
+NUMBER WITHOUT MOVING THE THING". There is one here, and it is worth stating
+plainly rather than discovering later:
+
+    // three sites                     // one site, same three conversions
+    fn a(p: &Path) -> String {         fn lossy(p: &Path) -> String {
+        p.to_string_lossy().into()         p.to_string_lossy().into()
+    }                                  }
+    fn b(p: &Path) -> String { ... }   fn a(p: &Path) -> String { lossy(p) }
+    fn c(p: &Path) -> String { ... }   fn b(p: &Path) -> String { lossy(p) }
+                                       fn c(p: &Path) -> String { lossy(p) }
+
+Run against both, this checker reports 3 and then 1. Every call site still
+performs exactly the same lossy conversion; only the count moved. The detector
+is line-based and has no call graph, so routing conversions through one helper
+is indistinguishable, to it, from removing two of them.
+
+This is NOT an argument against centralising. Doing precisely that is often the
+right fix -- `gui/toolkit/src/osbytes.rs` was hoisted on 2026-09-16 to give a
+crate one `unsafe` proof instead of two, and its count went down for a good
+reason. The point is that the NUMBER cannot tell the two apart, so a fall in it
+is evidence and not proof, and a large fall deserves a look at the diff rather
+than a note that the backlog is shrinking.
+
+The second such edit is adding an IGNORE entry, which is by design -- but it is
+the same shape, so the entry has to carry a reason a reader can check. An
+exemption whose reason is "display" and nothing more is the no-op wearing the
+uniform of an audit.
+
 AND THE BACKLOG IS NOT A LIST TO ADD TO. A site that is genuinely safe belongs
 in the IGNORE table below, which records WHY. The baseline records only THAT,
 and a long list of `that` is precisely what stops anyone reading it. Of the

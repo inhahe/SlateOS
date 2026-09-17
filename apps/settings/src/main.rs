@@ -488,6 +488,8 @@ pub struct SettingsState {
     /// do share is the rule at the top of `dispatch_event` DASH a modal answers
     /// first, because on this window every stray keystroke is a setting.
     pub color_dialog: Option<ColorPickerDialog>,
+    /// Where the colour picker's answer goes.
+    color_is_for: ColorPurpose,
     /// What the open picker is being used for.
     ///
     /// `DialogAction::Selected` arrives with a path and nothing else, so the
@@ -976,8 +978,16 @@ impl SettingsState {
         };
         match outcome {
             Some(ColorPickerEvent::Confirmed(color)) => {
-                self.appearance.settings.custom_accent = color;
-                self.appearance.settings.accent_color = AccentColor::Custom;
+                match self.color_is_for {
+                    ColorPurpose::Accent => {
+                        self.appearance.settings.custom_accent = color;
+                        self.appearance.settings.accent_color = AccentColor::Custom;
+                    }
+                    ColorPurpose::LoginBackground => {
+                        self.appearance.settings.login_background =
+                            appearance::LoginBackground::SolidColor(color);
+                    }
+                }
                 self.color_dialog = None;
             }
             Some(ColorPickerEvent::Cancelled) => self.color_dialog = None,
@@ -1228,6 +1238,7 @@ impl SettingsState {
             window_height: 800.0,
             dialog: None,
             color_dialog: None,
+            color_is_for: ColorPurpose::Accent,
             picker_is_for: PickerPurpose::Wallpaper,
 
             // Display defaults
@@ -2274,14 +2285,22 @@ enum ButtonId {
 /// other things the reader would then have to refuse.
 /// The greeter backgrounds this page can set up from start to finish.
 ///
-/// Three, not five. `LoginBackground` also has a solid colour and a gradient,
-/// and both are honoured by the login screen and readable from
-/// `appearance.yaml` — but there is nowhere in this app yet to pick a colour,
-/// so offering them here would be a choice that leads nowhere. They are shown
-/// when already in force and are never silently overwritten. design-decisions
-/// 856: a settings page is built when something obeys it, not when something
-/// stores it, and the same rule refuses a control that cannot finish the job.
-const LOGIN_BACKGROUNDS: [&str; 3] = ["Theme colour", "Same as my desktop", "A picture"];
+/// Four, not five. The fifth is a gradient, which needs *two* colours, and
+/// `ColorPickerDialog` has no title — so asking for them in sequence would put
+/// up two identical dialogs with nothing to say which was the top and which
+/// the bottom. A gradient stays hand-written until the picker can name what it
+/// is asking for; it is listed when in force and never silently overwritten.
+///
+/// A solid colour joined the list on 2026-09-17, when the accent picker gave
+/// this app somewhere to pick one. design-decisions 856: a settings page is
+/// built when something obeys it, not when something stores it, and the same
+/// rule refuses a control that cannot finish the job.
+const LOGIN_BACKGROUNDS: [&str; 4] = [
+    "Theme colour",
+    "A colour",
+    "Same as my desktop",
+    "A picture",
+];
 
 /// What to call a greeter background in the interface.
 fn login_background_label(bg: &appearance::LoginBackground) -> &'static str {
@@ -2289,7 +2308,7 @@ fn login_background_label(bg: &appearance::LoginBackground) -> &'static str {
         appearance::LoginBackground::Theme => "Theme colour",
         appearance::LoginBackground::SameAsDesktop => "Same as my desktop",
         appearance::LoginBackground::CustomImage(_) => "A picture",
-        appearance::LoginBackground::SolidColor(_) => "A colour (set by hand)",
+        appearance::LoginBackground::SolidColor(_) => "A colour",
         appearance::LoginBackground::Gradient { .. } => "A gradient (set by hand)",
     }
 }
@@ -2306,6 +2325,21 @@ fn rotation_interval_label(secs: u64) -> &'static str {
         1_801..=3_600 => "Every hour",
         _ => "Every day",
     }
+}
+
+/// What the *colour* picker is being used for, so its answer lands in the
+/// right place.
+///
+/// Separate from [`PickerPurpose`], which is the file picker's: the two
+/// modals answer different questions and share no state. One enum covering
+/// both would have variants that are errors for half its readers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ColorPurpose {
+    /// The desktop's accent colour.
+    #[default]
+    Accent,
+    /// The plain colour behind the login screen.
+    LoginBackground,
 }
 
 /// What the file picker is being used for, so its answer lands in the right
@@ -4788,18 +4822,17 @@ impl SettingsState {
                     LOGIN_BACKGROUNDS.iter().map(|b| (*b).to_string()).collect();
                 let current = match &self.appearance.settings.login_background {
                     appearance::LoginBackground::Theme => 0,
-                    appearance::LoginBackground::SameAsDesktop => 1,
-                    appearance::LoginBackground::CustomImage(_) => 2,
-                    // A colour or a gradient can be written into
-                    // `appearance.yaml` by hand but not built here, because
-                    // there is nowhere yet to pick the colours. Shown as a
-                    // fourth entry so the list says what is actually in force:
-                    // a dropdown that displayed "Theme colour" over a
-                    // hand-written gradient would be reporting a setting the
-                    // machine is not using.
-                    other => {
+                    appearance::LoginBackground::SolidColor(_) => 1,
+                    appearance::LoginBackground::SameAsDesktop => 2,
+                    appearance::LoginBackground::CustomImage(_) => 3,
+                    // A gradient can be written into `appearance.yaml` by
+                    // hand but not built here. Shown as a fifth entry so the
+                    // list says what is actually in force: a dropdown that
+                    // displayed "Theme colour" over a hand-written gradient
+                    // would be reporting a setting the machine is not using.
+                    other @ appearance::LoginBackground::Gradient { .. } => {
                         items.push(login_background_label(other).to_string());
-                        3
+                        4
                     }
                 };
                 (items, current)
@@ -5400,6 +5433,7 @@ impl SettingsState {
                     // Opened on the colour in force, so the picker starts
                     // where the user is rather than at an arbitrary hue, and
                     // cancelling visibly changes nothing.
+                    self.color_is_for = ColorPurpose::Accent;
                     self.color_dialog = Some(ColorPickerDialog::new(
                         self.appearance.settings.effective_accent(),
                     ));
@@ -5694,12 +5728,27 @@ impl SettingsState {
             }
             DropdownId::LoginBackground => match index {
                 0 => self.appearance.settings.login_background = appearance::LoginBackground::Theme,
+                // Straight to the picker, as "A picture" is, and for the same
+                // reason: the style becomes a colour when there is a colour,
+                // so cancelling leaves the greeter as it was.
                 1 => {
+                    self.color_is_for = ColorPurpose::LoginBackground;
+                    self.color_dialog = Some(ColorPickerDialog::new(
+                        match self.appearance.settings.login_background {
+                            appearance::LoginBackground::SolidColor(c) => c,
+                            // Open on the theme's deepest surface, which is
+                            // what the greeter is showing now, so the picker
+                            // starts where the user is looking.
+                            _ => self.palette().crust,
+                        },
+                    ));
+                }
+                2 => {
                     self.appearance.settings.login_background =
                         appearance::LoginBackground::SameAsDesktop;
                 }
                 // Straight to the picker: see `PickerPurpose::LoginImage`.
-                2 => self.open_login_image_dialog(),
+                3 => self.open_login_image_dialog(),
                 // The hand-written entry. Choosing it means "leave it alone",
                 // which is what doing nothing achieves.
                 _ => {}
@@ -7028,11 +7077,10 @@ mod tests {
     /// Three controls of which two govern nothing read as broken rather than
     /// as inapplicable -- the judgement the fit dropdown already makes, and
     /// the one design-decisions 856 is about.
-    /// The dropdown offers the three styles it can set up from start to finish.
+    /// The dropdown offers the styles it can set up from start to finish.
     ///
-    /// Not five. A colour and a gradient are drawn by the login screen and can
-    /// be written into `appearance.yaml`, but this app has nowhere to pick a
-    /// colour, so an entry for them would lead nowhere. design-decisions 856.
+    /// Four of the five. The missing one is the gradient, which needs two
+    /// colours and a picker that can say which is which. design-decisions 856.
     #[test]
     fn the_login_background_dropdown_offers_only_what_it_can_finish() {
         let mut state = SettingsState::new();
@@ -7042,7 +7090,7 @@ mod tests {
         let layout = state.dropdown_layout().expect("the dropdown did not open");
         assert_eq!(
             layout.items.len(),
-            3,
+            4,
             "offered a style it cannot finish setting up: {:?}",
             layout.items
         );
@@ -7066,15 +7114,15 @@ mod tests {
         state.show_dropdown(DropdownId::LoginBackground);
 
         let layout = state.dropdown_layout().expect("the dropdown did not open");
-        assert_eq!(layout.items.len(), 4, "the gradient was not listed");
+        assert_eq!(layout.items.len(), 5, "the gradient was not listed");
         assert_eq!(
-            layout.selected, 3,
+            layout.selected, 4,
             "the list pointed at a style the machine is not using"
         );
         assert!(
-            layout.items[3].contains("gradient"),
+            layout.items[4].contains("gradient"),
             "the entry does not say what it is: {:?}",
-            layout.items[3]
+            layout.items[4]
         );
     }
 
@@ -7084,7 +7132,7 @@ mod tests {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Wallpaper;
         state.show_dropdown(DropdownId::LoginBackground);
-        state.apply_dropdown_selection(1);
+        state.apply_dropdown_selection(2);
 
         assert_eq!(
             state.appearance.settings.login_background,
@@ -7102,7 +7150,7 @@ mod tests {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Wallpaper;
         state.show_dropdown(DropdownId::LoginBackground);
-        state.apply_dropdown_selection(2);
+        state.apply_dropdown_selection(3);
 
         assert!(state.dialog.is_some(), "no picker appeared");
         assert_eq!(
@@ -7118,7 +7166,7 @@ mod tests {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Wallpaper;
         state.show_dropdown(DropdownId::LoginBackground);
-        state.apply_dropdown_selection(2);
+        state.apply_dropdown_selection(3);
 
         let chosen = std::path::PathBuf::from("/home/u/Pictures/greeter.png");
         state.apply_dialog_answer(DialogAction::Selected(chosen.clone()));
@@ -7129,6 +7177,79 @@ mod tests {
             "the picture the user picked is not the one that was saved"
         );
         assert!(state.dialog.is_none(), "the picker stayed up");
+    }
+
+    /// Choosing "A colour" asks which colour, and settles when told.
+    ///
+    /// Through the picker rather than by assigning the field, because the
+    /// claim is that a *user* can reach it: this style was drawn by the
+    /// greeter and readable from `appearance.yaml` from the start, and until
+    /// the accent picker existed there was no way in this app to choose one.
+    #[test]
+    fn a_colour_for_the_greeter_is_chosen_with_the_picker() {
+        with_scratch_config("settings-greeter-colour", |_root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            state.show_dropdown(DropdownId::LoginBackground);
+            state.apply_dropdown_selection(1);
+
+            assert!(state.color_dialog.is_some(), "no colour picker appeared");
+            assert_eq!(
+                state.appearance.settings.login_background,
+                appearance::LoginBackground::Theme,
+                "the style changed before a colour had been chosen"
+            );
+
+            let chosen = Color::from_hex(0x2E1F4A);
+            state
+                .color_dialog
+                .as_mut()
+                .expect("picker")
+                .picker_mut()
+                .set_color(chosen);
+            state.handle_event(&key_press(Key::Enter));
+
+            assert_eq!(
+                state.appearance.settings.login_background,
+                appearance::LoginBackground::SolidColor(chosen),
+                "the greeter did not take the colour that was picked"
+            );
+        });
+    }
+
+    /// The accent and the greeter do not take each other's colours.
+    ///
+    /// One picker serves both, so the only thing keeping them apart is
+    /// `color_is_for`. Without it the last thing to open the picker would win,
+    /// and choosing a greeter colour would silently repaint every button on
+    /// the desktop.
+    #[test]
+    fn the_two_colour_choices_do_not_cross() {
+        with_scratch_config("settings-colour-purpose", |_root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            let accent_before = state.appearance.settings.accent_color;
+
+            state.show_dropdown(DropdownId::LoginBackground);
+            state.apply_dropdown_selection(1);
+            let chosen = Color::from_hex(0x0B6E4F);
+            state
+                .color_dialog
+                .as_mut()
+                .expect("picker")
+                .picker_mut()
+                .set_color(chosen);
+            state.handle_event(&key_press(Key::Enter));
+
+            assert_eq!(
+                state.appearance.settings.login_background,
+                appearance::LoginBackground::SolidColor(chosen)
+            );
+            assert_eq!(
+                state.appearance.settings.accent_color, accent_before,
+                "picking a colour for the greeter changed the desktop's accent"
+            );
+        });
     }
 
     /// The Choose button appears with a picture to choose, and not otherwise.

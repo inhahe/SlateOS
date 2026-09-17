@@ -153228,6 +153228,72 @@ round 3 could not name a terminal** — the information was never there. The
 caller already holds `id`, so the probe moved rather than a signature
 changing to carry instrumentation.
 
+### 2026-09-16 RESOLVED: the child is never scheduled; nothing is wrong with the pty
+
+With both write paths and all three read paths instrumented, the whole rung
+window reads:
+
+```
+3323  [cow] Cloned address space: parent=0x3ad000 -> child=0x7e226000
+3325  [thread] Spawned thread (task 174) in process 205
+3326  [pty] master_TRY_write handle=PtyHandle(14): VINTR (0x03) entering the input ring
+3327  [sched] Anti-starvation: cur=173 boosted 1 task to priority 0: [174(p16)]
+3328  [sched] Anti-starvation: cur=173 boosted 1 task to priority 0: [174(p16)]
+3329  [thread] Process 204 has no threads left — now zombie
+3330  [pty] master closed: SIGHUP+SIGCONT to group 205
+```
+
+**The parent writes the `^C` immediately after forking, before the child has
+ever been scheduled.** `cur=173` is the parent; the scheduler boosts the
+starved child (task 174) twice, and the parent still exhausts its 2,000,000
+iteration `waitpid` spin first, returns 45 and exits. The child then dies of
+the `SIGHUP` the master's close sends — which is the trampoline round 7 saw
+and I misread as the SIGINT handler.
+
+**The byte sits in the ring the whole time and is never read, because the
+child never reaches its read.** Nothing is wrong with the pty: the kernel's
+own self-test drives `master_write` → `slave_read` → `discipline decided
+signal 2` end to end in the same boot, on tty 9.
+
+`main.rs` already carried the prediction, from an earlier investigation of
+the mirror image: *"the child waits in a pure userspace spin … so it never
+yields, while the parent needs three syscalls to reach its write; QEMU boots
+single-CPU under TCG, so that busy-wait starves the one process that could
+end it."* Same mechanism, roles reversed.
+
+#### What it took
+
+Eleven rounds, and every wrong turn was one of two errors. They are worth
+separating because the fixes differ:
+
+| error | instances |
+|---|---|
+| **subset coverage** — probed some paths, read the silence as absence | `sig_for` 2 of 4 sites; `linux_exec_common` wrapped below the failure; `master_write` 1 of 2; `slave_read` 1 of 3 |
+| **no identity** — fired, but for another subject | round 3's VINTR hits were the kernel's own self-tests, 43,000 lines away |
+
+Identity and coverage are independent and each was paid for separately. A
+probe that names its subject can still miss the path the subject takes; a
+probe on every path can still be attributed to the wrong subject.
+
+**What finally worked was enumeration, not reasoning.** `grep -n
+"input.read_byte()"` found three callers in one command, after three rounds
+of deciding which path *should* be used. The same command earlier would have
+found two `master_*write` paths and four `ConsoleRead::Signal` sites.
+
+**And the answer was written down twice already.** `main.rs` carried both the
+`O_NONBLOCK` → 1065 routing round 10 needed and the starvation mechanism that
+resolves it, left by whoever investigated this before. Second time today an
+unread artifact in this tree held what I was rediscovering; the first was
+lane B's notice naming `/mnt`.
+
+#### Where the fix belongs
+
+Not in the kernel. The fixture writes its `^C` before the child can possibly
+be ready, then bounds its wait by iteration count on a single-CPU TCG guest.
+Filed for lane B, whose `services/ctest-pty` it is: the child should signal
+readiness before the parent writes, rather than the two racing.
+
+
 
 
 

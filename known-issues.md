@@ -155183,8 +155183,16 @@ corrected here after checking rather than asserting twice in a row:
 
 * `IconAction::OpenPath` really is one field: hold a `PathBuf`, derive the
   label. The saved layout's `path:{…}` key needs a byte-safe form with it.
-* The run dialog's two comparisons are one change each: compare `OsStr` to
-  `OsStr` instead of flattening both.
+* **The run dialog is not a defect at all** -- corrected after reading around
+  the line rather than at it. `RunDialog` already holds `command_exact:
+  Option<PathBuf>`, which is the kept-bytes half of the pattern. The lossy
+  comparison is not an attempt at identity; it asks *whether the user left the
+  displayed text alone*, and only then does it act on the exact path. Its own
+  comment says so: "exact glyphs on screen gets the file those glyphs came
+  from, which is the only file they could have meant." Changing it to compare
+  `OsStr` to `OsStr` would have broken a correct design -- the comparison must
+  be against what is *shown*, because that is what the user either edited or
+  did not.
 * **`guitk::pathbar` is more than a field.** It holds `path: String` and
   `edit_text: String` and touches them in sixty-four places; breadcrumb mode
   *splits the path into clickable segments*, and edit mode is a text field the

@@ -156641,10 +156641,31 @@ not one seen from two angles: replacing ours with theirs is catastrophic, and
 adding theirs on top makes 30 runs worse that were right before. Whatever
 `early_at` selects, it includes runs that must not be shifted.
 
-The next attempt should not start from the gate. It should print, for one
-failing run, HarfBuzz's `x_offset` and `x_advance` at each stage against
-ours -- the likely difference is *when* the advance is read, since HarfBuzz
-subtracts the advance it has before `GPOS` and ours is read after.
+**Then the run was printed, and the entry above was wrong about what
+differs.** Javanese `U+A98F U+A9C0` on Hack-Bold, both glyphs `.notdef`:
+
+    ours       advances [1233, 1233]   offsets [0, 0]
+    harfbuzz   advances [1233, 0]      offsets [0, -1233]
+
+**We do not zero the mark's advance at all here**, so this was never only
+about the offset -- the run is twice as wide as HarfBuzz makes it. The offset
+difference is the *consequence* of the zeroing that did not happen, since
+HarfBuzz's shift is by the advance it is about to discard.
+
+`marks[i]` is `zeroed_at[i] && if by_gdef { is_mark(gid) } else { glyph.mark }`.
+The glyph is `.notdef`, which a face's `GDEF` does not classify as a mark, so
+on any face that classifies its glyphs at all we ask about the glyph and get
+`false`. HarfBuzz zeroes it regardless.
+
+A fourth hypothesis, also refuted: `is_mark(gid) || glyph.mark`, so that the
+character's category answers when `GDEF` declines. Default `misplaced` 1 ->
+16, USE 40 -> 50. `GDEF` saying "not a mark" is evidently authoritative on a
+face that classifies, and the difference is somewhere in *how HarfBuzz
+decides mark-ness for a glyph its `GDEF` has no class for* -- which is not
+the same question as "does this face classify".
+
+Start there, with `_hb_ot_layout_set_glyph_props` and what it does for a
+codepoint that maps to `.notdef`.
 
 **Why it is not urgent.** It arises only on a face with no glyphs for the
 script, so every glyph in the run is already a box. The reason to fix it is

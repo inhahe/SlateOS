@@ -233,7 +233,9 @@ impl CappedBytes {
 pub fn read_capped(path: &Path, max: usize) -> io::Result<CappedBytes> {
     let mut file = fs::File::open(path)?;
     let mut bytes = Vec::new();
-    Read::by_ref(&mut file).take(ceiling(max)).read_to_end(&mut bytes)?;
+    Read::by_ref(&mut file)
+        .take(ceiling(max))
+        .read_to_end(&mut bytes)?;
     if bytes.len() <= max {
         // The read stopped short of its own limit, so the file is exhausted
         // and this is all of it.
@@ -317,7 +319,9 @@ fn whole_len(file: &fs::File, max: usize) -> usize {
 pub fn read_to_string_capped(path: &Path, max: usize) -> io::Result<CappedRead> {
     let mut file = fs::File::open(path)?;
     let mut bytes = Vec::new();
-    Read::by_ref(&mut file).take(ceiling(max)).read_to_end(&mut bytes)?;
+    Read::by_ref(&mut file)
+        .take(ceiling(max))
+        .read_to_end(&mut bytes)?;
     if bytes.len() <= max {
         let text = into_text(bytes)?;
         let whole = text.len();
@@ -581,7 +585,11 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("accented.txt");
         let contents = format!("{}{}", "a".repeat(10), "\u{e9}".repeat(5));
-        assert_eq!(contents.len(), 20, "ten ASCII bytes and five two-byte characters");
+        assert_eq!(
+            contents.len(),
+            20,
+            "ten ASCII bytes and five two-byte characters"
+        );
         std::fs::write(&path, &contents).expect("write");
 
         let got = read_to_string_capped(&path, 11).expect("read");

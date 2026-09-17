@@ -1202,6 +1202,7 @@ dependencies = [
  "guitk",
  "imagecodec",
  "oswindow",
+ "safeio",
  "scratchdir",
 ]
 
@@ -2134,9 +2135,11 @@ name = "pdfviewer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "deflate",
  "guitk",
  "oswindow",
  "printjob",
+ "safeio",
 ]
 
 [[package]]
@@ -2162,7 +2165,9 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "imagecodec",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]

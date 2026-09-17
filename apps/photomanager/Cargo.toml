@@ -9,5 +9,15 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# Decoding a photograph, which is the one thing a photo manager has to do with
+# one. Until this arrived the library could import a file, read its EXIF and
+# list it, and then drew a card with its name on it.
+imagecodec = { path = "../../gui/imagecodec" }
+
+# Read through a cap rather than `std::fs::read`: `imagecodec::Limits` is
+# checked against a file's header, and a file already held whole in memory has
+# nothing left to be protected from.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

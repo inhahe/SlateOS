@@ -3,9 +3,11 @@
 //! A photo library management application with:
 //! - Photo library with albums, collections, and smart albums
 //! - EXIF metadata parsing and display (camera, exposure, GPS, etc.)
-//! - Thumbnail grid view with multiple zoom levels
-//! - Single-photo view with zoom/pan
-//! - Basic image adjustments: brightness, contrast, saturation, exposure, temperature
+//! - Thumbnail grid view
+//! - Single-photo view: the photograph itself, decoded through `imagecodec`
+//!   and drawn at its own proportions
+//! - Per-photograph adjustment values: brightness, contrast, saturation,
+//!   exposure, temperature
 //! - Star ratings (0-5) and color labels
 //! - Tagging and keyword system
 //! - Face region detection placeholders
@@ -13,10 +15,29 @@
 //! - Slideshow mode with configurable interval and transitions
 //! - Import from directory with date-based organization
 //! - Export with format/quality selection
-//! - Re-import detection by path and size (NOT by image content:
-//!   nothing here decodes a picture)
+//! - Re-import detection by path and size, not by image content
 //! - Batch operations: tag, rate, move, delete
 //! - Multi-panel UI: sidebar, thumbnail grid, info panel
+//!
+//! # What it does not do yet
+//!
+//! Three claims in the list above used to say more than the code did, and they
+//! failed for one shared reason: until the single-photo view was given
+//! `imagecodec`, nothing in this application had ever held a pixel. It could
+//! read a photograph -- `import_from_disk` has done that since the repair
+//! noted on it -- and then drew a card with the file's name on it.
+//!
+//! - **The grid still draws placeholder cards.** Only the selected photograph
+//!   is decoded. Thumbnails need an image id per visible card and something to
+//!   release the ids of cards that have scrolled away; the single-photo view's
+//!   one fixed id deliberately buys none of that.
+//! - **The adjustments are recorded, not applied.** They are stored per
+//!   photograph and listed in the info panel, and no pixel has ever been
+//!   changed by one. A settings page is built when something obeys it, not
+//!   when something stores it.
+//! - **There is no zoom or pan.** The list claimed both, in two separate
+//!   entries. The only `Zoom` in this file is the name of a slideshow
+//!   transition.
 //!
 //! Uses the guitk library for UI rendering.
 
@@ -1559,6 +1580,54 @@ pub enum SidebarItem {
 // ============================================================================
 
 /// The photo manager application.
+/// The image id the single-photo view draws under.
+///
+/// One fixed number rather than one per photograph, because exactly one
+/// picture is on screen here. A second id would buy nothing and cost a
+/// lifecycle: something would have to release the ids of photographs that
+/// have scrolled out of view, and nothing in this application is watching for
+/// that. The grid's thumbnails will need such a pool; this view does not, and
+/// borrowing the complexity early would be paying for it twice.
+const PHOTO_IMAGE_ID: u64 = 1;
+
+/// What the compositor is currently holding under [`PHOTO_IMAGE_ID`].
+///
+/// The pixels are deliberately not here. They are moved into the upload queue
+/// and thence to the compositor, which is the only thing that draws them; a
+/// retained copy would double this application's memory for a 24-megapixel
+/// photograph -- about 96 MB in this form -- to serve a reader that does not
+/// exist. What is kept is the pair of numbers the layout actually needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShownPicture {
+    /// The photograph it was decoded from, so a stale upload is never drawn
+    /// under a new selection.
+    photo: PhotoId,
+    width: u32,
+    height: u32,
+}
+
+/// The largest box with `w`:`h` proportions that fits within `max_w`/`max_h`.
+///
+/// Never enlarges. A small picture stretched to fill the pane is blurred in a
+/// way that reads as a fault in the decoder rather than as a small file, and
+/// the photograph's real size is information this view should not destroy.
+/// Photographs are almost always larger than the pane, so the clamp bites
+/// rarely and only where it helps.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a pixel dimension is exact in f32 far beyond any real sensor"
+)]
+fn fit_within(w: u32, h: u32, max_w: f32, max_h: f32) -> (f32, f32) {
+    if w == 0 || h == 0 {
+        // Not reachable through `imagecodec`, which refuses a zero dimension,
+        // but the alternative to saying so is a division by zero.
+        return (max_w, max_h);
+    }
+    let (w, h) = (w as f32, h as f32);
+    let scale = (max_w / w).min(max_h / h).min(1.0);
+    (w * scale, h * scale)
+}
+
 pub struct PhotoApp {
     pub photos: Vec<Photo>,
     pub albums: Vec<Album>,
@@ -1601,6 +1670,23 @@ pub struct PhotoApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Pictures waiting to go to the compositor, drained by `App::take_images`.
+    pending_images: Vec<app::ImageChange>,
+    /// The photograph whose pixels are uploaded, once it has been decoded.
+    shown_picture: Option<ShownPicture>,
+    /// The photograph the two fields above were computed for, whether that
+    /// ended in a picture or in a reason.
+    ///
+    /// Separate from `shown_picture` because a failed decode has to be
+    /// remembered too. Without it, a photograph that cannot be decoded would
+    /// be retried on every single frame -- reading and failing to decode the
+    /// file sixty times a second for as long as it stayed selected.
+    picture_for: Option<PhotoId>,
+    /// Why the selected photograph is not on screen, when it is not.
+    ///
+    /// Shown in place of its dimensions. A failure that left the card blank
+    /// would be indistinguishable from one that had not been attempted yet.
+    picture_error: Option<String>,
 }
 
 impl Default for PhotoApp {
@@ -1614,6 +1700,10 @@ impl PhotoApp {
     pub fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            pending_images: Vec::new(),
+            shown_picture: None,
+            picture_for: None,
+            picture_error: None,
             photos: Vec::new(),
             albums: Vec::new(),
             smart_albums: Vec::new(),
@@ -1718,6 +1808,86 @@ impl PhotoApp {
     }
 
     /// Find a photo by ID.
+    /// The most bytes of picture file to read.
+    ///
+    /// Generous -- a lossless photograph from a full-frame sensor runs to tens
+    /// of megabytes -- and the point is not the number but that there is one.
+    const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
+
+    /// Decode the selected photograph, unless that is already what is uploaded.
+    ///
+    /// **Called from `render`, and it has to be.** `App::take_images` is
+    /// drained *between* the render and the submit, so a picture queued here
+    /// reaches the compositor in time for the very frame that names it.
+    /// Queued from an event handler it would also work, but every one of the
+    /// five places that move the selection would have to remember to do it.
+    /// Queued from `take_images` itself it would be uploaded after the frame
+    /// that wanted it and would not appear until something unrelated asked for
+    /// another -- the photograph would show up when the mouse next moved.
+    ///
+    /// Cheap when nothing has changed: one `Option<PhotoId>` comparison.
+    fn sync_picture(&mut self) {
+        if self.picture_for == self.selected_photo {
+            return;
+        }
+        self.picture_for = self.selected_photo;
+        self.shown_picture = None;
+        self.picture_error = None;
+
+        let Some(pid) = self.selected_photo else {
+            return;
+        };
+        // Copied out so the borrow of `self.photos` ends here; everything
+        // below writes back to `self`.
+        let Some(path) = self.find_photo(pid).map(|p| p.file_path.clone()) else {
+            return;
+        };
+
+        let read = match safeio::read_capped(std::path::Path::new(&path), Self::MAX_PICTURE_BYTES) {
+            Ok(read) => read,
+            Err(e) => {
+                self.picture_error = Some(format!("could not be read: {e}"));
+                return;
+            }
+        };
+        if read.truncated {
+            // Refused rather than decoded. A picture's tail is not optional --
+            // a JPEG's scan runs to the last byte of the file -- so a cut file
+            // decodes to something that is not the photograph, and would then
+            // be shown without a word about it.
+            self.picture_error = Some(format!(
+                "is larger than {} MiB",
+                Self::MAX_PICTURE_BYTES / (1024 * 1024)
+            ));
+            return;
+        }
+        let image = match imagecodec::decode(&read.bytes, imagecodec::Limits::default()) {
+            Ok(image) => image,
+            Err(e) => {
+                self.picture_error = Some(format!("could not be decoded: {e}"));
+                return;
+            }
+        };
+
+        self.shown_picture = Some(ShownPicture {
+            photo: pid,
+            width: image.width,
+            height: image.height,
+        });
+        // One id for whatever is on screen, so this replaces the last upload
+        // rather than queueing behind it. Anything still waiting here has been
+        // overtaken by this selection and has no frame left to appear in.
+        self.pending_images.clear();
+        self.pending_images.push(app::ImageChange::Upload {
+            id: PHOTO_IMAGE_ID,
+            width: image.width,
+            height: image.height,
+            stride: image.stride(),
+            format: oswindow::PixelFormat::Argb8888,
+            bytes: guitk::canvas::WireBytes::from_le_argb(&image.pixels),
+        });
+    }
+
     pub fn find_photo(&self, id: PhotoId) -> Option<&Photo> {
         self.photos.iter().find(|p| p.id == id)
     }
@@ -3594,55 +3764,90 @@ impl PhotoApp {
             return;
         };
 
-        // Large photo placeholder
-        let photo_w = width - 40.0;
-        let photo_h = height - 60.0;
-        let ratio = (photo_w / photo_h).min(4.0 / 3.0);
-        let display_w = photo_h * ratio;
-        let display_h = photo_h;
+        // The room a picture has, before its own shape is taken into account.
+        let area_w = width - 40.0;
+        let area_h = height - 60.0;
+
+        // Only the picture decoded for *this* photograph may be drawn: the
+        // upload outlives a change of selection by the frame it takes to
+        // replace it, and drawing it under the new name would put the wrong
+        // photograph on screen.
+        let shown = self.shown_picture.filter(|s| s.photo == pid);
+
+        // A real picture is drawn at its own proportions. The 4:3 this used to
+        // assume was a guess -- one that every portrait photograph falsified,
+        // and that nothing could correct because nothing here had opened the
+        // file.
+        let (display_w, display_h) = match shown {
+            Some(picture) => fit_within(picture.width, picture.height, area_w, area_h),
+            None => {
+                let ratio = (area_w / area_h).min(4.0 / 3.0);
+                (area_h * ratio, area_h)
+            }
+        };
         let display_x = x + (width - display_w) / 2.0;
         let display_y = y + 10.0;
 
-        self.palette.push_surface(
-            cmds,
-            display_x,
-            display_y,
-            display_w,
-            display_h,
-            CORNER_RADIUS,
-            Surface::Card,
-        );
-        cmds.push(RenderCommand::StrokeRect {
-            x: display_x,
-            y: display_y,
-            width: display_w,
-            height: display_h,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        if shown.is_some() {
+            cmds.push(RenderCommand::Image {
+                x: display_x,
+                y: display_y,
+                width: display_w,
+                height: display_h,
+                image_id: PHOTO_IMAGE_ID,
+            });
+        } else {
+            self.palette.push_surface(
+                cmds,
+                display_x,
+                display_y,
+                display_w,
+                display_h,
+                CORNER_RADIUS,
+                Surface::Card,
+            );
+            cmds.push(RenderCommand::StrokeRect {
+                x: display_x,
+                y: display_y,
+                width: display_w,
+                height: display_h,
+                color: self.palette.surface1,
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(CORNER_RADIUS),
+            });
 
-        // Photo name and format
-        cmds.push(RenderCommand::Text {
-            x: display_x + display_w / 2.0 - 60.0,
-            y: display_y + display_h / 2.0 - 10.0,
-            text: photo.file_name.clone(),
-            color: self.palette.text,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(display_w - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::Text {
-            x: display_x + display_w / 2.0 - 50.0,
-            y: display_y + display_h / 2.0 + 10.0,
-            text: format!("{} — {}", photo.exif.resolution_str(), photo.human_size()),
-            color: self.palette.subtext0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(display_w - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            cmds.push(RenderCommand::Text {
+                x: display_x + display_w / 2.0 - 60.0,
+                y: display_y + display_h / 2.0 - 10.0,
+                text: photo.file_name.clone(),
+                color: self.palette.text,
+                font_size: 14.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(display_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            // The reason takes the place of the dimensions, and takes the
+            // colour that says it is one: a card that simply stayed blank
+            // could not be told from one whose photograph had not been
+            // reached yet.
+            let (detail, color) = match self.picture_error.as_ref() {
+                Some(reason) => (reason.clone(), self.palette.red),
+                None => (
+                    format!("{} — {}", photo.exif.resolution_str(), photo.human_size()),
+                    self.palette.subtext0,
+                ),
+            };
+            cmds.push(RenderCommand::Text {
+                x: display_x + display_w / 2.0 - 50.0,
+                y: display_y + display_h / 2.0 + 10.0,
+                text: detail,
+                color,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(display_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Bottom bar with nav hint
         cmds.push(RenderCommand::Text {
@@ -3914,12 +4119,19 @@ impl App for PhotoApp {
         }
     }
 
+    fn take_images(&mut self) -> Vec<app::ImageChange> {
+        std::mem::take(&mut self.pending_images)
+    }
+
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         // The handed size wins over the recorded one: the first frame is drawn
         // before any `Event::Resize` arrives, so a window opened at another
         // size would be laid out for the size that was asked for, and every
         // hit box in it would name the wrong rectangle.
         self.set_window_size(width, height);
+        // Before the commands are built, so the frame that names the picture
+        // is the frame it is uploaded for. See `sync_picture`.
+        self.sync_picture();
         RenderTree {
             commands: self.render_commands(width, height),
         }
@@ -5410,6 +5622,182 @@ mod tests {
         }
         assert_eq!(app.photos.len(), 2, "the fixture did not import its photos");
         app
+    }
+
+    /// A fixture whose files are real pictures, not merely real files.
+    ///
+    /// `app_with_photos` above writes "a real file, if not a real png", which
+    /// was sufficient while nothing ever opened one. It is exactly what these
+    /// tests must not use: every one of them would pass on the placeholder.
+    fn app_with_pictures(tag: &str) -> PhotoApp {
+        let mut app = PhotoApp::new();
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for i in 0..2 {
+            let path = dir.join(format!("{tag}-{i}.png"));
+            std::fs::write(&path, imagecodec::testing::png_gradient(6, 4)).expect("write");
+            app.import_from_disk(&path);
+        }
+        assert_eq!(app.photos.len(), 2, "the fixture did not import its photos");
+        app.view_mode = ViewMode::Single;
+        app
+    }
+
+    /// Selecting a photograph decodes it and queues its pixels.
+    #[test]
+    fn the_selected_photograph_is_decoded_and_queued_for_upload() {
+        let mut app = app_with_pictures("upload");
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let _ = app.render(900.0, 700.0);
+
+        let queued = app.take_images();
+        assert_eq!(queued.len(), 1, "one photograph, one upload");
+        match queued.first().expect("the upload") {
+            oswindow::app::ImageChange::Upload {
+                id, width, height, ..
+            } => {
+                assert_eq!(*id, PHOTO_IMAGE_ID);
+                assert_eq!(
+                    (*width, *height),
+                    (6, 4),
+                    "the picture's own size, read from the file"
+                );
+            }
+            oswindow::app::ImageChange::Drop(id) => {
+                panic!("expected an upload, got a drop of {id}")
+            }
+        }
+    }
+
+    /// The single-photo view draws the photograph instead of a card.
+    ///
+    /// This is the whole increment. Until it passed, every view in this
+    /// application drew a rectangle with a file name in it over a file it had
+    /// genuinely read.
+    #[test]
+    fn the_single_view_draws_the_picture_rather_than_a_card() {
+        let mut app = app_with_pictures("drawn");
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let tree = app.render(900.0, 700.0);
+
+        let drawn = tree.commands.iter().any(
+            |c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == PHOTO_IMAGE_ID),
+        );
+        assert!(
+            drawn,
+            "a decoded photograph was still drawn as a placeholder"
+        );
+    }
+
+    /// A file that is not a picture says why, rather than looking unloaded.
+    #[test]
+    fn a_file_that_is_not_a_picture_says_why_instead_of_staying_blank() {
+        let mut app = PhotoApp::new();
+        app.view_mode = ViewMode::Single;
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("not-really-a-picture.png");
+        std::fs::write(&path, b"this file is named .png and is not one").expect("write");
+        app.import_from_disk(&path);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let tree = app.render(900.0, 700.0);
+
+        assert!(app.picture_error.is_some(), "no reason was recorded");
+        assert!(
+            app.take_images().is_empty(),
+            "nothing decodable, nothing uploaded"
+        );
+        let said = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::Text { text, .. } if text.contains("could not be decoded"))
+        });
+        assert!(said, "the reason was recorded but never put on screen");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A photograph that cannot be decoded is attempted once, not every frame.
+    ///
+    /// Proved by deleting the file between the two frames: a retry would have
+    /// to open it again, and would report that it was missing rather than that
+    /// it was not a picture. Without `picture_for` this application would read
+    /// and fail to decode the same file for as long as it stayed selected --
+    /// sixty times a second.
+    #[test]
+    fn a_photograph_that_cannot_be_decoded_is_not_read_again_every_frame() {
+        let mut app = PhotoApp::new();
+        app.view_mode = ViewMode::Single;
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("attempted-once.png");
+        std::fs::write(&path, b"not a picture either").expect("write");
+        app.import_from_disk(&path);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let _ = app.render(900.0, 700.0);
+        let first = app.picture_error.clone();
+        assert!(
+            first.as_ref().is_some_and(|r| r.contains("decoded")),
+            "the control failed: {first:?}"
+        );
+
+        std::fs::remove_file(&path).expect("remove");
+        let _ = app.render(900.0, 700.0);
+
+        assert_eq!(
+            app.picture_error, first,
+            "the file was opened a second time, so every frame re-reads it"
+        );
+    }
+
+    /// A second selection replaces the upload rather than queueing behind it.
+    ///
+    /// The queue is deliberately not drained between the two frames, which is
+    /// what a click arriving before the compositor has taken the last picture
+    /// looks like. Both uploads carry the same id, so a queue holding both
+    /// would send pixels that are already stale.
+    #[test]
+    fn a_new_selection_replaces_the_upload_rather_than_queueing_behind_it() {
+        let mut app = app_with_pictures("replace");
+        let ids: Vec<PhotoId> = app.photos.iter().map(|p| p.id).collect();
+
+        app.selected_photo = ids.first().copied();
+        let _ = app.render(900.0, 700.0);
+        app.selected_photo = ids.get(1).copied();
+        let _ = app.render(900.0, 700.0);
+
+        assert_eq!(
+            app.take_images().len(),
+            1,
+            "the overtaken upload was still in the queue"
+        );
+    }
+
+    /// Fitting never enlarges a picture past its own size.
+    #[test]
+    fn fitting_a_small_picture_leaves_it_at_its_own_size() {
+        assert_eq!(fit_within(10, 10, 900.0, 700.0), (10.0, 10.0));
+    }
+
+    /// A portrait photograph is bounded by the height, not the width.
+    ///
+    /// The case the discarded 4:3 assumption got wrong: it gave every
+    /// photograph a landscape box regardless of which way the camera was held.
+    #[test]
+    fn a_portrait_picture_is_bounded_by_the_height() {
+        let (w, h) = fit_within(2000, 4000, 900.0, 700.0);
+        assert!((h - 700.0).abs() < 0.01, "height fills the pane: {h}");
+        assert!((w - 350.0).abs() < 0.01, "width follows the shape: {w}");
+    }
+
+    /// A landscape photograph is bounded by the width.
+    #[test]
+    fn a_landscape_picture_is_bounded_by_the_width() {
+        let (w, h) = fit_within(4000, 2000, 900.0, 700.0);
+        assert!((w - 900.0).abs() < 0.01, "width fills the pane: {w}");
+        assert!((h - 450.0).abs() < 0.01, "height follows the shape: {h}");
     }
 
     /// The slideshow keeps running while the picker is open.

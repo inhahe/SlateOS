@@ -156755,8 +156755,25 @@ fields for a thumbnail grid that was never built, deleted with the enum that
 existed only to fill a chooser nothing has. The probe now reports zero for
 that crate.
 
+**The probe reads documentation as well as it reads code, which was not what
+it was for.** Twice now a dead field has been the thread that led to a
+feature list claiming something nothing backs:
+
+* `apps/explorer` opened its feature list with "Directory tree sidebar" and
+  carried `tree_expanded`. The sidebar is five fixed rows.
+* `apps/archivemanager` claimed "Create new archives from file lists",
+  "Compression level selection", "Split archive support" and
+  "Password/encryption", and carried a dead field behind each. Its backend
+  takes a path and no options, and recognises encrypted members without being
+  able to encrypt or decrypt. All four corrected 2026-09-17.
+
+A field nobody reads is often a sentence in a feature list nobody can
+honour, and the sentence is the more expensive of the two: state misleads
+whoever edits the file, a feature list misleads everybody.
+
 **Proper fix.** Work the list down in batches, per crate, deciding for each
-field whether it is a feature to finish or state to delete. When it is small
+field whether it is a feature to finish or state to delete. Read the module's
+own doc comment alongside, and correct it in the same pass. When it is small
 enough to enumerate, add the "declared and never read" arm to the gate with
 the survivors baselined. Deleting is usually right: a field nobody reads has
 never worked, so nothing can depend on it.

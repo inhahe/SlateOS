@@ -12,8 +12,17 @@
 //! file automatically invalidates.  An optional disk cache under
 //! `~/.cache/thumbs/` persists thumbnails across sessions.
 //!
-//! Background generation is supported via a request queue that can be polled
-//! for completed thumbnails, keeping the UI thread non-blocking.
+//! Generation is **deferred, not backgrounded**, and the difference is the
+//! whole of what a caller needs to know. Requests go on a queue, and
+//! [`ThumbnailGenerator::process_batch`] retires up to `batch_size` of them
+//! *synchronously, on the calling thread*. There is no worker thread in this
+//! module and nothing here is asynchronous.
+//!
+//! So the cost of a thumbnail is moved and capped, never removed: a frame pays
+//! for the thumbnails it retires, and `batch_size` is the size of that
+//! payment. Choosing it is a real decision -- a large batch over a directory
+//! of full-size photographs buys a shorter queue with a longer frame. The
+//! honest version of "non-blocking" here is "bounded".
 
 use guitk::canvas::Canvas;
 use guitk::color::Color;

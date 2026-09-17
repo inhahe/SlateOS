@@ -158586,6 +158586,33 @@ channel in it: a decode that takes 669 ms does not need to be noticed within
 call that asynchronous. A poll that runs the decode itself on the UI thread
 has moved the stall, not removed it, and it would then be hidden inside a
 handler nobody associates with pictures.
+
+**There is already a precedent in the tree, and it had made exactly that
+mistake in its documentation.** `apps/explorer/src/thumbs.rs` is a 3,241-line
+thumbnail cache -- LRU keyed on `(path, mtime, size)`, an optional disk cache,
+box-filter downscale -- and it retires work through
+`ThumbnailGenerator::process_batch(batch_size)`, which is *synchronous on the
+calling thread* and bounded per call. That is the cheap mitigation recommended
+above, built and working: the stall is capped per frame rather than removed.
+
+Its module doc nevertheless described the queue as "keeping the UI thread
+non-blocking", which is the sentence this entry was written to warn against.
+`process_batch`'s own doc, sixty lines below, was accurate throughout --
+it says "synchronously" and reasons about the caller "budgeting a frame". The
+module doc has been corrected to say *bounded*. Another instance for
+`TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS`, and a pointed one: the
+false claim was not careless, it was a summary written at the moment the
+design was still intended.
+
+**Consequences for photomanager's grid.** It should reach for this module
+rather than grow a second pool -- which makes the question whether `thumbs`
+becomes a shared crate, since nothing about it is explorer-specific (its only
+imports are `guitk` and `std`; it is a module rather than a crate purely by
+where it was first needed). The drop-before-upload ordering it already
+encodes is the part that would be got wrong by anyone rebuilding it: the
+compositor checks its image budget against `held - freed + incoming`, so
+uploading before dropping is refused at exactly the moment a cache is working
+as designed.
 ### [A] Module docs that link a subsystem the file never calls: 8 of 807 kernel modules, and one real new claim -- 2026-09-17
 
 Lane C's `TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS` says a `//!`

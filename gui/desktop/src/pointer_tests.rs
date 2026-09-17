@@ -1550,7 +1550,7 @@ fn double_clicking_an_icon_launches_what_it_points_at() {
         let id = shell.icons.add_icon(
             "Somewhere",
             icons::IconType::Folder,
-            icons::IconAction::OpenPath("/somewhere".to_string()),
+            icons::IconAction::OpenPath(std::path::PathBuf::from("/somewhere")),
             40,
             40,
         );

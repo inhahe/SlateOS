@@ -69,8 +69,11 @@ WHAT IT CANNOT SEE, stated plainly:
     `std::net` to parse an address, which is not network access -- the same
     blind spot `find-stale-admissions` documents, and for the same reason.
 
-THE FOUR IT STILL REPORTS, so nobody investigates them twice. All four are
-correct code, read against the source on 2026-09-15:
+THE SIX IT STILL REPORTS, so nobody investigates them twice. All six are
+correct code: the first four read against the source on 2026-09-15, the last
+two on 2026-09-17 -- and those two were investigated from scratch that day
+precisely because this list still said four. A list like this is only worth
+having if it is added to when the scanner's output grows.
 
   * `apps/terminal` [process] -- "terminated by {s:?}". A `Display` impl for an
     exit-status enum. It describes how a child process ended; it does not claim
@@ -83,6 +86,16 @@ correct code, read against the source on 2026-09-15:
     text handed to `report()` beside a `connect()` that can only fail on this
     system. Unreachable rather than false, and it is the sentence that becomes
     correct the day a tunnel exists.
+  * `apps/procexplorer` [network] -- "Sent {verb} to {name} (PID {pid})", and
+    `apps/sysmonitor` [network], the same sentence. Both really do send the
+    signal: each calls `libcall::kill(pid, sig)` and builds this string only
+    on `Ok(())`. Two separate reasons they land here. The kind is wrong --
+    "Sent X to Y" reads as a network send to the `network` vocabulary, and the
+    object is a process. And the wording is deliberately narrow: procexplorer's
+    own comment says "Not `Killed X`. The signal was accepted; whether the
+    process..." -- it claims delivery, which happened, and not death, which it
+    cannot know. Both are the vocabulary failing to tell a signal from a
+    packet, not a program claiming an act it cannot perform.
 
 Narrowing the vocabulary to silence any of these was considered and rejected,
 for the reason `find-stale-admissions` gives about its own three: **narrowing

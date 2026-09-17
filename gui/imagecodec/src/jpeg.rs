@@ -795,6 +795,7 @@ fn decode_scan(
     // One plane per component, padded out to whole MCUs so a block never has
     // to be clipped while it is being written.
     let mut planes: Vec<(usize, usize, Vec<u8>)> = Vec::with_capacity(components.len());
+    let mut plane_bytes = 0usize;
     for component in &components {
         let plane_w = mcus_x
             .saturating_mul(component.h)
@@ -810,6 +811,20 @@ fn decode_scan(
             return Err(ImageError::TooLarge {
                 pixels: size as u64,
                 limit: limits.max_pixels,
+            });
+        }
+        // And against the caller's byte budget, which bounds a different thing
+        // -- `max_pixels` is about the picture's declared size, this about how
+        // much memory reconstructing it takes. JPEG cannot expand without end
+        // the way a zlib stream can, since its output size follows from the
+        // frame header rather than from a compressor; but a caller that states
+        // a budget has stated something, and one sample per byte makes the
+        // comparison exact rather than approximate.
+        plane_bytes = plane_bytes.saturating_add(size);
+        if plane_bytes > limits.max_decompressed_bytes {
+            return Err(ImageError::TooLarge {
+                pixels: plane_bytes as u64,
+                limit: limits.max_decompressed_bytes as u64,
             });
         }
         planes.push((plane_w, plane_h, vec![0u8; size]));
@@ -1413,6 +1428,45 @@ mod tests {
                 .map(|p| p & 0xFF)
                 .collect::<alloc::vec::Vec<_>>()
         );
+    }
+
+    /// Every entry point on the crate dispatches to JPEG, not just `decode`.
+    ///
+    /// Three of them exist -- `decode`, `decode_scaled` and `dimensions` --
+    /// and a format wired into one is a format the callers of the other two
+    /// still cannot use. `apps/explorer` reaches this crate through
+    /// `decode_scaled` and `apps/imageviewer` through `dimensions`, so each
+    /// omission is a whole application left where it started. Both were
+    /// omissions here, found by following the callers rather than by reading
+    /// this file.
+    #[test]
+    fn every_entry_point_knows_about_jpeg() {
+        let limits = Limits::default();
+        assert_eq!(
+            crate::dimensions(FIXTURE).expect("dimensions dispatches"),
+            (24, 16)
+        );
+        let whole = crate::decode(FIXTURE, limits).expect("decode dispatches");
+        assert_eq!((whole.width, whole.height), (24, 16));
+        let small = crate::decode_scaled(FIXTURE, limits, 8, 8).expect("decode_scaled dispatches");
+        assert!(small.width <= 8 && small.height <= 8);
+    }
+
+    /// The caller's byte budget is honoured, not only its pixel budget.
+    ///
+    /// `Limits` has two fields because they bound different things, and a
+    /// decoder that reads one and ignores the other supports half a contract
+    /// while appearing to support all of it.
+    #[test]
+    fn a_tight_byte_budget_is_refused() {
+        let limits = Limits {
+            max_decompressed_bytes: 8,
+            ..Limits::default()
+        };
+        match decode(FIXTURE, limits) {
+            Err(ImageError::TooLarge { limit, .. }) => assert_eq!(limit, 8),
+            other => panic!("the byte budget was ignored: {other:?}"),
+        }
     }
 
     /// A progressive JPEG is refused by name, not half-decoded.

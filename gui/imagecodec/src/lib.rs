@@ -333,6 +333,9 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     if png::is_png(bytes) {
         return png::dimensions(bytes);
     }
+    if jpeg::is_jpeg(bytes) {
+        return jpeg::dimensions(bytes);
+    }
     Err(ImageError::UnknownFormat)
 }
 

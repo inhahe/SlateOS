@@ -29,8 +29,12 @@ apps/imageviewer/src/video.rs:VALUE:2
 apps/indexer/src/main.rs:VALUE:3
 apps/installer/src/grub.rs:VALUE:3
 apps/markdowneditor/src/main.rs:VALUE:2
+apps/photomanager/src/main.rs:VALUE:3
+apps/renamer/src/main.rs:VALUE:1
 apps/rssreader/src/main.rs:VALUE:1
 apps/safeio/src/lib.rs:VALUE:1
+apps/screenrecorder/src/main.rs:VALUE:2
+apps/settings/src/main.rs:VALUE:1
 apps/sysmonitor/src/main.rs:VALUE:4
 apps/worldclock/src/main.rs:VALUE:1
 gui/compositor/src/present/drm/sys.rs:VALUE:1

@@ -358,10 +358,35 @@ def production_part(text, rel=None):
 
     `rel` is the file's path, needed because a file can be test code without
     containing the attribute that says so -- see [`is_test_file`].
+
+    **The cut is the module-level attribute, not the first one in the file.**
+    It used to be `text.find("#[cfg(test)]")`, which finds an *item*-level one
+    too -- `#[cfg(test)]` indented inside an `impl`, marking one test-only
+    helper -- and then treated the whole rest of the file as test code. In
+    `apps/photomanager/src/main.rs` that attribute is on line 392 and the test
+    module is on line 4640, so 4,251 lines of a 6,100-line application were
+    invisible to this checker, which nonetheless reported a confident number
+    about the file. Fifty-seven files under `gui/` and `apps/` were cut early
+    that way, hiding seven lossy calls.
+
+    A test module is written at column 0; an item-level attribute inside an
+    `impl` is indented. That is the whole distinction, and it is a convention
+    rather than a rule -- so when no unindented one exists, nothing is cut and
+    the file is read whole. The cost of that choice is that a lossy call
+    inside an indented `#[cfg(test)]` helper is now reported; it belongs in
+    the IGNORE table with "test-only item" as its reason, which is a sentence
+    somebody has to write rather than a silence nobody can see.
     """
     if rel is not None and is_test_file(rel):
         return "", 1
-    at = text.find("#[cfg(test)]")
+    # Column 0, i.e. at the very start or immediately after a newline.
+    at = -1
+    if text.startswith("#[cfg(test)]"):
+        at = 0
+    else:
+        found = text.find(NL + "#[cfg(test)]")
+        if found >= 0:
+            at = found + len(NL)
     if at < 0:
         return text, None
     return text[:at], text[:at].count(NL) + 1

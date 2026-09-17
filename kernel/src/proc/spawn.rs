@@ -8730,6 +8730,28 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
             Some(5) => "waitpid() failed or returned the wrong pid -- plumbing",
             Some(6) => "the interpreter exited non-zero after being asked to quit",
             Some(7) => "writing the quit command failed",
+            Some(8) => {
+                // Lane B added 8 because 2 was standing for it: the child
+                // execs /bin/python3 and _exit(127)s, and the parent then
+                // wrote to a master whose slave was already closed, so a
+                // failed exec surfaced as a failed write.
+                //
+                // Its wording says "missing from the image or not
+                // executable" and BOTH halves are false here: debugfs
+                // reports inode 80, mode 0755, 10,468,016 bytes. So this is
+                // the same defect as ctest-coreutils-runs' exit 11 --
+                // libc's execl passes a NULL path to execve and the kernel
+                // correctly returns EFAULT. Two independent fixtures, both
+                // files present, both execs failing.
+                concat!(
+                    "8: /bin/python3 could not be EXEC'd -- but it IS on the ",
+                    "image (inode 80, mode 0755). Do not go looking at the ",
+                    "image: this is libc's execl passing a NULL path to ",
+                    "execve, the same defect as ctest-coreutils-runs' exit ",
+                    "11. See requests/a-b-libc-execl-passes-a-null-path-to-",
+                    "execve.md"
+                )
+            }
             _ => "an unexpected code; see services/ctest-python-repl/main.c",
         };
         serial_println!(
@@ -29970,7 +29992,7 @@ pub fn self_test_linux_slateos_make() -> KernelResult<()> {
     match out {
         Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
             serial_println!(
-                "[spawn]   REAL GNU make (ring 3: ld.so loaded make+libc, make parsed the \
+                "[spawn]   REAL GNU make (ring 3: ld.so loaded /bin/sh+libc, make itself is \
                  Makefile and dispatched its recipe via /bin/sh, which fork/exec'd /bin/emit with \
                  a `>` redirect; read back {} bytes == expected, exit {}): OK",
                 bytes.len(),

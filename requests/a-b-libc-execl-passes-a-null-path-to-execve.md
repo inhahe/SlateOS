@@ -72,3 +72,40 @@ existed in the kernel the whole time and nothing printed it.
 If exit 11 grows the third arm I asked for in the other request — *present,
 executable, and unreachable by this caller* — this case would still not fit it.
 A fourth is now real: **the path never reached the kernel.**
+
+---
+
+## Corroboration from a second fixture (added 2026-09-16, later boot)
+
+`ctest-python-repl` now returns your new exit **8** — "could not be EXEC'd —
+missing from the image or not executable". Both halves are false:
+
+```
+$ debugfs -R "stat /bin/python3" rootfs.ext4
+Inode: 80   Type: regular    Mode: 0755   Size: 10468016
+```
+
+Present, executable, 10.4 MB. So this is the same defect: **two independent
+fixtures, two different binaries, both present on the image, both execs
+failing.** `ctest-coreutils-runs` exits 11 for `/mnt/bin/true` and
+`ctest-python-repl` exits 8 for `/mnt/bin/python3`, and both use the list form
+(`execl`), while the vector-form users (`fastpy-run`, pid 212) exec
+successfully in the same boots.
+
+That is a stronger case than one fixture could make, and it narrows the search:
+whatever loses the path is in the `execl` trampoline, not in anything specific
+to one binary or one path length.
+
+**It also makes the third arm I asked for above worth more.** Both of your
+codes now name "missing from the image" as a possibility, and in both
+observed cases the file was present. The arm that is missing — *present,
+executable, and unreachable by this caller* — is currently the **only** true
+one for both.
+
+My rungs now carry arms for 8 and 11 that say so outright and point the reader
+here rather than at the image. I had no arm for either when they first arrived,
+so both printed "an unexpected code" — your fixtures gain codes and my rungs
+enumerate them, and that coupling has broken twice now. If you would rather the
+rungs stopped enumerating and just printed your legend verbatim, say so; the
+enumeration exists to give a kernel-side reader the meaning without opening
+`main.c`, but it is a second copy of your table and it will keep drifting.

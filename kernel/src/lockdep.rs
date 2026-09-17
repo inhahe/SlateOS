@@ -472,6 +472,16 @@ static CLASS_HARDIRQ_ON: [AtomicBool; MAX_CLASSES] =
 /// any of the others dangerous.
 static CLASS_TASK_IRQS_ON: [AtomicBool; MAX_CLASSES] =
     [const { AtomicBool::new(false) }; MAX_CLASSES];
+/// Classes whose interrupt-context observation came from [`self_test`].
+///
+/// Excluded from [`context_irq_class_count`], because a corpus that counts
+/// the controls is not a corpus. On boot 894c9b0b8 this was the difference
+/// between `over 2 class(es) -- clean` and the truth, which was that the
+/// check had seen nothing real all boot. The verdict counters were already
+/// split this way; leaving the population unsplit made the split look done.
+static CLASS_CTX_SELFTEST: [AtomicBool; MAX_CLASSES] =
+    [const { AtomicBool::new(false) }; MAX_CLASSES];
+
 /// One report per class, not per acquisition: these fire on hot paths.
 static CLASS_CTX_REPORTED: [AtomicBool; MAX_CLASSES] =
     [const { AtomicBool::new(false) }; MAX_CLASSES];
@@ -1336,6 +1346,15 @@ fn note_lock_context(class_idx: u16, how: Acquire) {
     };
     slot.store(true, Ordering::Relaxed);
 
+    // Mark the class if this observation is the self-test's own. Set rather
+    // than skipped: the controls NEED the buckets to work, so they cannot be
+    // excluded at the point of recording -- only at the point of counting.
+    if IN_SELF_TEST.load(Ordering::Relaxed) {
+        if let Some(f) = CLASS_CTX_SELFTEST.get(idx) {
+            f.store(true, Ordering::Relaxed);
+        }
+    }
+
     let seen = |b: &[AtomicBool; MAX_CLASSES]| {
         b.get(idx).is_some_and(|f| f.load(Ordering::Relaxed))
     };
@@ -1446,7 +1465,11 @@ pub fn report_lock_context() {
         verdict
     );
 }
-/// How many classes have been acquired in interrupt context at all.
+/// How many *real* classes have been acquired in interrupt context.
+///
+/// Excludes the classes [`self_test`] touches. It counted them once, and the
+/// resulting line read `over 2 class(es) -- clean` on a boot whose real
+/// corpus was zero.
 ///
 /// The corpus behind the two counters above, and the reason it is published
 /// next to them: a verdict of zero violations means nothing without it. If
@@ -1462,7 +1485,10 @@ pub fn context_irq_class_count() -> u32 {
         let on = CLASS_HARDIRQ_ON
             .get(idx)
             .is_some_and(|f| f.load(Ordering::Relaxed));
-        if off || on {
+        let synthetic = CLASS_CTX_SELFTEST
+            .get(idx)
+            .is_some_and(|f| f.load(Ordering::Relaxed));
+        if (off || on) && !synthetic {
             n = n.saturating_add(1);
         }
     }

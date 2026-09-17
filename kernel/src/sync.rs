@@ -42,7 +42,7 @@
 
 use crate::lockdep;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Spinlock stall detector (software hard-lockup diagnostic)
@@ -443,6 +443,11 @@ impl<T> Mutex<T> {
         // `MutexGuard::drop`.  Done before spinning so the holder can't be
         // preempted while contended either.
         crate::sched::preempt_disable();
+        // Before lockdep, because lockdep cannot see this: a
+        // `PreemptSpinMutex` does not register, so an ordering edge from it
+        // to this lock does not exist in the graph. That opt-out is dd-70's
+        // and is right for ordering; it is why this check is separate.
+        note_leaf_nesting(self.name);
         lockdep::lock_acquire(addr, self.name, lockdep::Acquire::Blocking);
 
         if tracking_enabled() {
@@ -558,6 +563,10 @@ impl<T> Mutex<T> {
         // still pushed onto the held stack, because a blocking acquire nested
         // inside this critical section can deadlock in the ordinary way.
         lockdep::lock_acquire(addr, self.name, lockdep::Acquire::Try);
+        // Success only: a `try_lock` that returned `None` acquired nothing
+        // and so nested nothing. The comment above says the same thing
+        // about ordering edges.
+        note_leaf_nesting(self.name);
         if tracking_enabled() {
             self.stats.record_uncontended();
         }
@@ -1068,6 +1077,132 @@ fn spin_with_stall_threshold<G>(
 // PreemptSpinMutex — preempt-aware spinlock without lockdep/contention tracking
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Leaf-claim check: nothing may be acquired inside a PreemptSpinMutex
+// ---------------------------------------------------------------------------
+
+/// Per-CPU count of [`PreemptSpinMutex`] guards currently held.
+///
+/// Non-zero means this CPU is inside a critical section whose lock type
+/// *claims* to be a leaf. Acquiring anything else there falsifies the claim
+/// that justified opting out of lockdep (dd-70), which is why this exists:
+/// dd-944, a control has to be executable, not asserted per call site across
+/// 489 instances.
+static LEAF_DEPTH: [AtomicU64; crate::smp::MAX_CPUS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; crate::smp::MAX_CPUS]
+};
+
+/// Name of the outermost leaf lock this CPU holds, as pointer and length.
+///
+/// Stored only on the 0 -> 1 transition. Two words rather than a formatted
+/// string because this runs on the hottest acquire path in the kernel -- and
+/// carried at all because a report naming only the INNER lock is not
+/// actionable. `?` taught that lesson this morning: 563 locks share the
+/// default name, so a report has to say which critical section it was in.
+static LEAF_NAME_PTR: [AtomicUsize; crate::smp::MAX_CPUS] = {
+    const ZERO: AtomicUsize = AtomicUsize::new(0);
+    [ZERO; crate::smp::MAX_CPUS]
+};
+static LEAF_NAME_LEN: [AtomicUsize; crate::smp::MAX_CPUS] = {
+    const ZERO: AtomicUsize = AtomicUsize::new(0);
+    [ZERO; crate::smp::MAX_CPUS]
+};
+
+/// Total nestings observed inside a leaf critical section.
+static LEAF_NESTINGS: AtomicU64 = AtomicU64::new(0);
+
+/// Cap on reports so a hot offender cannot flood serial. The count above
+/// keeps rising after the reports stop, so the number stays honest.
+const MAX_LEAF_REPORTS: u64 = 8;
+
+/// Is this CPU inside a lock that claims to be a leaf?
+fn leaf_held() -> Option<&'static [u8]> {
+    let cpu = crate::smp::current_cpu_index();
+    if LEAF_DEPTH.get(cpu)?.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let ptr = LEAF_NAME_PTR.get(cpu)?.load(Ordering::Relaxed);
+    let len = LEAF_NAME_LEN.get(cpu)?.load(Ordering::Relaxed);
+    if ptr == 0 || len == 0 {
+        return Some(b"<unnamed>");
+    }
+    // SAFETY: `ptr`/`len` were stored from a `&'static [u8]` held by a
+    // `PreemptSpinMutex` that is still locked on this CPU, so the slice is
+    // live and immutable for `'static`. Only this CPU writes these slots,
+    // and only on the 0 -> 1 transition, so they cannot change underneath.
+    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) })
+}
+
+/// Note that this CPU has entered a leaf critical section.
+fn leaf_enter(name: &'static [u8]) {
+    let cpu = crate::smp::current_cpu_index();
+    let Some(slot) = LEAF_DEPTH.get(cpu) else { return };
+    if slot.fetch_add(1, Ordering::Relaxed) == 0 {
+        if let Some(p) = LEAF_NAME_PTR.get(cpu) {
+            p.store(name.as_ptr() as usize, Ordering::Relaxed);
+        }
+        if let Some(l) = LEAF_NAME_LEN.get(cpu) {
+            l.store(name.len(), Ordering::Relaxed);
+        }
+    }
+}
+
+/// Note that this CPU has left a leaf critical section.
+fn leaf_exit() {
+    let cpu = crate::smp::current_cpu_index();
+    let Some(slot) = LEAF_DEPTH.get(cpu) else { return };
+    // Saturating: an unbalanced exit must not wrap to u64::MAX and pin this
+    // CPU as permanently inside a leaf, which would turn the check into a
+    // flood and then into noise nobody reads.
+    let _ = slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| {
+        Some(d.saturating_sub(1))
+    });
+}
+
+/// Report a lock acquired inside a critical section that claims to be a leaf.
+#[track_caller]
+fn note_leaf_nesting(inner: &'static [u8]) {
+    // An interrupt handler did not nest inside the lock its victim was
+    // holding. `PreemptSpinMutex` disables preemption but not interrupts, so
+    // a task can hold leaf A when an IRQ lands; leaf B taken by that handler
+    // shares only a CPU with A, not a critical section.
+    //
+    // Gap, stated rather than left to be discovered: `in_hardirq()` is set in
+    // `dispatch_vector`, which sees the IRQ vectors. CPU *exceptions* reach
+    // `isr_stub_*` -> `handle_*` without passing through it, so a fault
+    // handler taking one of these while a task holds one still reports.
+    // `proc/exception.rs` uses the type, so that is reachable -- and demand
+    // paging inside a critical section is ordinary, not a defect. Read any
+    // report whose site is a fault path with that in mind.
+    if crate::idt::in_hardirq() {
+        return;
+    }
+    let Some(outer) = leaf_held() else { return };
+    let n = LEAF_NESTINGS.fetch_add(1, Ordering::Relaxed);
+    if n >= MAX_LEAF_REPORTS {
+        return;
+    }
+    crate::serial_println!(
+        concat!(
+            "[sync] LEAF CLAIM BROKEN: {:?} acquired while {:?} is held, at ",
+            "{}. {:?} is a PreemptSpinMutex, whose whole justification for ",
+            "skipping lockdep is that nothing nests inside it (dd-70). ",
+            "Either it is not a leaf and should be crate::sync::Mutex, or ",
+            "this acquire does not belong in its critical section."
+        ),
+        core::str::from_utf8(inner).unwrap_or("<utf8>"),
+        core::str::from_utf8(outer).unwrap_or("<utf8>"),
+        core::panic::Location::caller(),
+        core::str::from_utf8(outer).unwrap_or("<utf8>")
+    );
+}
+
+/// Total lock acquisitions seen inside a leaf critical section.
+#[allow(dead_code)]
+pub fn leaf_nesting_count() -> u64 {
+    LEAF_NESTINGS.load(Ordering::Relaxed)
+}
 /// A preempt-disabling spinlock for **hot leaf locks**.
 ///
 /// This is the lightweight sibling of [`Mutex`]. Like `Mutex`, it disables
@@ -1146,11 +1281,21 @@ impl<T> PreemptSpinMutex<T> {
     /// guard's `Drop`.
     #[inline]
     #[allow(dead_code)]
+    // `#[track_caller]` for the reason [`Mutex::lock`] gives at its own: the
+    // leaf report records `Location::caller()`, and without this every
+    // report would name this line in `sync.rs` -- the same place for every
+    // lock, which is precisely the answer the site recording exists to avoid.
+    #[track_caller]
     pub fn lock(&self) -> PreemptSpinGuard<'_, T> {
         // Disable involuntary preemption for the whole hold. Paired with
         // `preempt_enable()` in `PreemptSpinGuard::drop`. Done before spinning
         // so the holder can't be preempted while contended either.
         crate::sched::preempt_disable();
+        // Report BEFORE entering, or this lock would see itself as the leaf
+        // it is nested inside. A leaf inside a leaf is still a broken claim:
+        // dd-70's definition is that nothing nests inside one.
+        note_leaf_nesting(self.name);
+        leaf_enter(self.name);
         let guard = match self.inner.try_lock() {
             Some(g) => g,
             None => spin_with_stall(self.name, self.addr(), &self.owner, || {
@@ -1169,10 +1314,13 @@ impl<T> PreemptSpinMutex<T> {
     /// preemption) if the lock is already held.
     #[inline]
     #[allow(dead_code)]
+    #[track_caller]
     pub fn try_lock(&self) -> Option<PreemptSpinGuard<'_, T>> {
         crate::sched::preempt_disable();
         match self.inner.try_lock() {
             Some(guard) => {
+                note_leaf_nesting(self.name);
+                leaf_enter(self.name);
                 self.owner
                     .store(crate::sched::current_task_id(), Ordering::Relaxed);
                 Some(PreemptSpinGuard {
@@ -1244,6 +1392,10 @@ impl<T> DerefMut for PreemptSpinGuard<'_, T> {
 impl<T> Drop for PreemptSpinGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
+        // The single release path for all three acquisition paths:
+        // `lock_irqsave` delegates to `lock()`, and `PreemptSpinIrqGuard`
+        // holds this guard in `ManuallyDrop`, so it releases through here.
+        leaf_exit();
         // Clear the diagnostic owner stamp before the physical unlock so a
         // stall reporter can never observe a freed lock still naming us.
         self.owner.store(OWNER_NONE, Ordering::Relaxed);

@@ -7163,9 +7163,9 @@ mod tests {
         // which is what let this ship with nothing displaying it. Assert the
         // words reach the screen.
         let tree = app.render(900.0, 700.0);
-        let told = tree.commands.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("could not be read"))
-        });
+        let told = tree.commands.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("could not be read")),
+        );
         assert!(told, "the reason was recorded but never put on screen");
 
         // Change something, then try to save.

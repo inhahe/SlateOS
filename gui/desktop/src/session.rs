@@ -283,7 +283,7 @@ pub struct ShellSession<T: Transport> {
     /// is deliberate: `paint_background` runs on every repaint, so a pair that
     /// was *not* remembered on failure would re-read and re-inflate a corrupt
     /// full-screen `.png` on every mouse click.
-    wallpaper_image: Option<(u64, String)>,
+    wallpaper_image: Option<(u64, PathBuf)>,
     /// The login screen, while the machine has not let anyone in yet.
     ///
     /// `None` is a session in use. It is *not* "login is disabled": a machine
@@ -998,7 +998,7 @@ impl<T: Transport> ShellSession<T> {
 
     fn refresh_wallpaper_image(&mut self) -> Result<(), Error<T>> {
         let id = self.wallpaper.current_image_id();
-        let want = self.wallpaper.current_image_path().map(str::to_owned);
+        let want = self.wallpaper.current_image_path().map(Path::to_path_buf);
 
         // An id of zero means "no picture": `render_image` emits no `Image`
         // command at all, so anything still uploaded is unreachable and costs
@@ -1026,14 +1026,14 @@ impl<T: Transport> ShellSession<T> {
         self.wallpaper_image = Some((id, path.clone()));
 
         let decoded = std::fs::read(&path)
-            .map_err(|e| format!("{path}: {e}"))
+            .map_err(|e| format!("{}: {e}", path.display()))
             .and_then(|bytes| {
                 // The default limit is the compositor's own buffer ceiling, so
                 // a picture refused here is one the compositor would have
                 // refused anyway — and refusing it from the header costs a
                 // header rather than a decompressed framebuffer.
                 imagecodec::decode(&bytes, imagecodec::Limits::default())
-                    .map_err(|e| format!("{path}: {e}"))
+                    .map_err(|e| format!("{}: {e}", path.display()))
             });
         let image = match decoded {
             Ok(image) => image,
@@ -1054,7 +1054,10 @@ impl<T: Transport> ShellSession<T> {
             // because "the compositor cannot lose my window" is an assumption
             // about the other end of a socket, and this crate does not get to
             // make those.
-            self.set_wallpaper_error(Some(format!("{path}: the background surface is gone")));
+            self.set_wallpaper_error(Some(format!(
+                "{}: the background surface is gone",
+                path.display()
+            )));
             return Ok(());
         };
         match handle.upload_image(id, width, height, stride, PixelFormat::Argb8888, bytes) {
@@ -1069,7 +1072,7 @@ impl<T: Transport> ShellSession<T> {
             // those propagate, because the `submit` two lines later would fail
             // the same way and swallowing them here would only delay it.
             Err(ConnectionError::Refused(why)) => {
-                self.set_wallpaper_error(Some(format!("{path}: {why}")));
+                self.set_wallpaper_error(Some(format!("{}: {why}", path.display())));
                 Ok(())
             }
             Err(other) => Err(other),

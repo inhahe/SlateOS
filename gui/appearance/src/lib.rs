@@ -64,6 +64,7 @@ pub use settingsfile as config;
 
 use core::num::NonZeroU32;
 use guitk::color::Color;
+use std::path::PathBuf;
 use yamldoc::Document;
 
 // ============================================================================
@@ -223,6 +224,14 @@ impl PaletteSource for AppearanceSettings {
 // ============================================================================
 // Image fit
 // ============================================================================
+
+/// Marks the wallpaper path in a settings file as percent-encoded.
+///
+/// design-decisions §426's version marker, in the shape a YAML document can
+/// carry: a sibling key rather than a first line. Its absence means the file
+/// predates the encoding and its path is raw -- which matters for exactly one
+/// kind of path, the kind containing a literal `%`.
+const WALLPAPER_ENCODING: &str = "percent";
 
 /// How a wallpaper is scaled and positioned in the space it is drawn in.
 ///
@@ -1327,7 +1336,7 @@ pub struct AppearanceSettings {
     /// `None` rather than an empty string, because "no wallpaper" and "a file
     /// called nothing" are different answers and only one of them is a
     /// mistake.
-    pub wallpaper: Option<String>,
+    pub wallpaper: Option<PathBuf>,
     /// How that picture is placed in the screen it is drawn on.
     ///
     /// Meaningless without [`wallpaper`](Self::wallpaper) and harmless with it
@@ -1893,11 +1902,22 @@ impl AppearanceSettings {
         );
 
         if let Some(path) = doc.get_str(&["wallpaper", "image"]) {
-            let trimmed = path.trim().to_string();
+            let trimmed = path.trim();
+            // A filename may hold any byte but `/` and NUL, so it cannot
+            // always be written into YAML as itself. design-decisions §426
+            // percent-encodes it; the marker beside it is what tells an
+            // encoded file from one written before this existed, because a
+            // path containing a literal `%` would otherwise decode to a
+            // different path. Absence of the marker means version 1: raw.
+            let encoded = doc
+                .get_str(&["wallpaper", "image_encoding"])
+                .is_some_and(|v| v.trim() == WALLPAPER_ENCODING);
             s.wallpaper = if trimmed.is_empty() {
                 None
+            } else if encoded {
+                Some(pathcodec::decode_path(trimmed))
             } else {
-                Some(trimmed)
+                Some(PathBuf::from(trimmed))
             };
         }
 
@@ -2044,8 +2064,16 @@ impl AppearanceSettings {
         // is a key you can edit; an absent one has to be guessed at.
         doc.set_str(
             &["wallpaper", "image"],
-            self.wallpaper.as_deref().unwrap_or_default(),
+            &self
+                .wallpaper
+                .as_deref()
+                .map(pathcodec::encode_path)
+                .unwrap_or_default(),
         );
+        // Written whenever the file is written, so a file this version has
+        // touched is always self-describing. See the read side for why its
+        // absence has to mean "raw" rather than "assume encoded".
+        doc.set_str(&["wallpaper", "image_encoding"], WALLPAPER_ENCODING);
         doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
         doc.set_str(
@@ -2507,7 +2535,7 @@ mod tests {
             // filesystem the user named, and a tidy ASCII fixture would pass
             // through a codec that mangled either.
             wallpaper_fit: ImageFit::Tile,
-            wallpaper: Some("/home/u/Pictures/maíz del alba.png".to_string()),
+            wallpaper: Some(PathBuf::from("/home/u/Pictures/maíz del alba.png")),
             theme_mode: ThemeMode::Light,
             caret_width_scale: 2.5,
             focus_ring_scale: 3.0,
@@ -3522,6 +3550,133 @@ mod tests {
     /// module off its constants sees a label colour, reaches for `p.text`, and
     /// a Light desktop gets dark labels under a black shadow — which is
     /// illegible against every wallpaper rather than merely some of them. The
+    /// A picture whose filename is not text survives being saved and reloaded.
+    ///
+    /// The defect this encoding exists for: the path used to be stored with
+    /// `to_string_lossy`, so choosing such a file saved a setting naming a
+    /// *different* one. The wallpaper then silently did not appear, and the
+    /// settings page showed a path nobody had picked.
+    #[cfg(windows)]
+    #[test]
+    fn a_wallpaper_whose_name_is_not_text_round_trips() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        // `/pictures/z<D800>.png` -- a real filename with no text form.
+        let odd = PathBuf::from(OsString::from_wide(&[
+            u16::from(b'/'),
+            u16::from(b'z'),
+            0xD800,
+            u16::from(b'.'),
+            u16::from(b'p'),
+            u16::from(b'n'),
+            u16::from(b'g'),
+        ]));
+
+        let mut s = AppearanceSettings::default();
+        s.wallpaper = Some(odd.clone());
+
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+
+        // Asserted on BYTES, not by round-tripping through `PathBuf`, and the
+        // difference matters on this host. A Windows `OsString` is WTF-8 and
+        // cannot hold an unpaired surrogate as bytes, so reading the setting
+        // back into a `PathBuf` here would test the host's limitation rather
+        // than the format -- and would fail against code that is correct on
+        // the target. `gui/pathcodec` says so in as many words, and the test
+        // `apps/backup` used to carry said it too.
+        //
+        // The bytes are the level the settings file is written at, and they
+        // are exact: that is the property the fix has to have.
+        let stored = doc
+            .get_str(&["wallpaper", "image"])
+            .expect("the key is always written");
+        assert_eq!(
+            pathcodec::decode_bytes(&stored),
+            odd.as_os_str().as_encoded_bytes(),
+            "the saved setting names a different file than the one chosen"
+        );
+    }
+
+    /// The stored form is printable text, because the file is YAML.
+    #[cfg(windows)]
+    #[test]
+    fn the_stored_wallpaper_is_printable_ascii() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let odd = PathBuf::from(OsString::from_wide(&[u16::from(b'/'), 0xD800]));
+        let mut s = AppearanceSettings::default();
+        s.wallpaper = Some(odd);
+
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+
+        let stored = doc
+            .get_str(&["wallpaper", "image"])
+            .expect("the key is always written");
+        assert!(
+            stored.is_ascii(),
+            "a YAML scalar has to be text: {stored:?}"
+        );
+        assert_eq!(
+            doc.get_str(&["wallpaper", "image_encoding"]).as_deref(),
+            Some("percent"),
+            "a file written by this version must say how it is encoded"
+        );
+    }
+
+    /// An ordinary path is stored unchanged, which is the point of §426's
+    /// choice over base64: only the rare path pays.
+    #[test]
+    fn an_ordinary_wallpaper_path_is_stored_as_itself() {
+        let mut s = AppearanceSettings::default();
+        s.wallpaper = Some(PathBuf::from("/home/u/Pictures/sunset.png"));
+
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+
+        assert_eq!(
+            doc.get_str(&["wallpaper", "image"]).as_deref(),
+            Some("/home/u/Pictures/sunset.png")
+        );
+    }
+
+    /// A file written before the encoding existed is still read correctly.
+    ///
+    /// The whole reason for the marker. Without it, a path from an older file
+    /// containing a literal `%` would be decoded as an escape and name a
+    /// different picture -- a fix that breaks the case it was meant to protect.
+    #[test]
+    fn a_file_without_the_marker_is_read_raw() {
+        let mut doc = Document::new();
+        doc.set_str(&["wallpaper", "image"], "/home/u/100%25 done.png");
+        // No `image_encoding` key: this is what version 1 looks like.
+
+        let s = AppearanceSettings::read_from(&doc);
+        assert_eq!(
+            s.wallpaper,
+            Some(PathBuf::from("/home/u/100%25 done.png")),
+            "an old file's path was decoded as though it were escaped"
+        );
+    }
+
+    /// And the same text, once marked, decodes.
+    #[test]
+    fn the_same_text_with_the_marker_decodes() {
+        let mut doc = Document::new();
+        doc.set_str(&["wallpaper", "image"], "/home/u/100%25 done.png");
+        doc.set_str(&["wallpaper", "image_encoding"], "percent");
+
+        let s = AppearanceSettings::read_from(&doc);
+        assert_eq!(
+            s.wallpaper,
+            Some(PathBuf::from("/home/u/100% done.png")),
+            "a marked file should decode its escapes"
+        );
+    }
+
     /// first assertion is what makes `on_wallpaper` different from `text`; the
     /// second is why it has to be.
     #[test]

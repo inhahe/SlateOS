@@ -274,6 +274,22 @@ impl DropZoneManager {
         });
     }
 
+    /// The rectangle of one file row, as the last frame drew it.
+    ///
+    /// For the insertion indicator: a drag has to be drawn where the row
+    /// *is*, and the row's position is a fact about the frame rather than
+    /// something to recompute -- the same reason hit-testing goes through
+    /// these zones. Recomputing it would be a second copy of the layout
+    /// arithmetic, and the first time the two disagreed the line would point
+    /// between two rows the user is not looking at.
+    #[must_use]
+    pub fn file_row_rect(&self, index: usize) -> Option<Rect> {
+        self.zones
+            .iter()
+            .find(|z| z.kind == ZoneKind::FileRow && z.index == Some(index))
+            .map(|z| z.rect)
+    }
+
     /// Register a sidebar item.
     pub fn register_sidebar_item(&mut self, path: &Path, rect: Rect) {
         self.zones.push(RegisteredZone {

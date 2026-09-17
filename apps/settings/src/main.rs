@@ -909,7 +909,7 @@ impl SettingsState {
         match action {
             DialogAction::Selected(path) => {
                 self.dialog = None;
-                self.appearance.settings.wallpaper = Some(path.to_string_lossy().into_owned());
+                self.appearance.settings.wallpaper = Some(path);
             }
             DialogAction::Cancelled => self.dialog = None,
             DialogAction::NavigatedTo(path) => {
@@ -3157,7 +3157,10 @@ impl SettingsState {
 
         match self.appearance.settings.wallpaper.as_deref() {
             Some(path) => {
-                s.note(path, 28.0);
+                // `display()` because this is the line of text under the
+                // heading, and a label is text by definition. The path itself
+                // is held exactly; nothing is rebuilt from this string.
+                s.note(&path.display().to_string(), 28.0);
             }
             None => {
                 s.note(
@@ -6686,7 +6689,7 @@ mod tests {
         with_scratch_config("settings-wallpaper-remove", |root| {
             let mut state = SettingsState::new();
             state.current_page = SettingsPage::Wallpaper;
-            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+            state.appearance.settings.wallpaper = Some(std::path::PathBuf::from("/pictures/a.png"));
 
             let (cx, cy) = center_of(&state, RowHit::Press(ButtonId::ClearWallpaper))
                 .expect("the page draws no Remove button");
@@ -6721,7 +6724,7 @@ mod tests {
         with_scratch_config("settings-wallpaper-fit", |root| {
             let mut state = SettingsState::new();
             state.current_page = SettingsPage::Wallpaper;
-            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+            state.appearance.settings.wallpaper = Some(std::path::PathBuf::from("/pictures/a.png"));
             assert_eq!(
                 state.appearance.settings.wallpaper_fit,
                 appearance::ImageFit::Fill,
@@ -6778,7 +6781,7 @@ mod tests {
             "a fit chooser with nothing to place"
         );
 
-        state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+        state.appearance.settings.wallpaper = Some(std::path::PathBuf::from("/pictures/a.png"));
         assert!(
             center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_some(),
             "no way to say how the picture is placed"
@@ -6798,7 +6801,7 @@ mod tests {
             "Remove is offered with no picture to remove"
         );
 
-        state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+        state.appearance.settings.wallpaper = Some(std::path::PathBuf::from("/pictures/a.png"));
         assert!(
             center_of(&state, RowHit::Press(ButtonId::ClearWallpaper)).is_some(),
             "Remove is missing when there is a picture"
@@ -6975,7 +6978,8 @@ mod tests {
         // tempting fix and the wrong one: the sweep exists to catch a dropdown
         // nothing can open, and a dropdown excluded for being hard to reach is
         // exactly the one it should be checking.
-        state.appearance.settings.wallpaper = Some("/pictures/example.png".to_string());
+        state.appearance.settings.wallpaper =
+            Some(std::path::PathBuf::from("/pictures/example.png"));
         // Turning one switch on can reveal another, so repeat until the set
         // stops growing. Bounded because nothing here turns a switch back off.
         for _ in 0..8 {

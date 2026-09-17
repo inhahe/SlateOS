@@ -41,6 +41,7 @@ name = "appearance"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "pathcodec",
  "settingsfile",
  "yamldoc",
 ]
@@ -137,6 +138,7 @@ dependencies = [
 name = "backup-app"
 version = "0.1.0"
 dependencies = [
+ "pathcodec",
  "safeio",
  "scratchdir",
  "sha2",
@@ -576,6 +578,7 @@ dependencies = [
  "loginusers",
  "notifsettings",
  "oswindow",
+ "pathcodec",
  "posix",
  "procinfo",
  "scratchdir",
@@ -799,6 +802,7 @@ dependencies = [
  "guitk",
  "imagecodec",
  "oswindow",
+ "pathcodec",
  "scratchdir",
  "settingsfile",
  "textfind",
@@ -2119,6 +2123,10 @@ dependencies = [
  "safeio",
  "scratchdir",
 ]
+
+[[package]]
+name = "pathcodec"
+version = "0.1.0"
 
 [[package]]
 name = "pdfviewer"

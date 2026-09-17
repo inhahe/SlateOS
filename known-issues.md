@@ -155127,6 +155127,85 @@ look at whether the record is serialised anywhere first, and because the fix is
 a deletion whose value is in being done deliberately rather than as a
 by-product of a byte-safety sweep.
 
+## TD-C-THE-WALLPAPER-SUBSYSTEM-CARRIES-PATHS-AS-TEXT-THROUGHOUT -- 2026-09-16
+
+**In short:** choose a wallpaper whose filename is not text and the setting
+that gets saved names a different file: the wallpaper silently does not appear
+and the settings page shows a path nobody picked. The fix is not one line at
+the point of saving -- the whole wallpaper subsystem, including the slideshow
+playlist and the recent-picture history, holds paths as text.
+
+**Date:** 2026-09-16. **Lane:** C.
+
+**This is the one real defect** out of the 74 sites the lossy-decode checker
+reports for `gui/` and `apps/` -- see
+`TD-C-THE-LOSSY-DECODE-CHECKER-NEVER-LOOKED-AT-TWO-THIRDS-OF-THE-TREE`, where
+six of the seven worst-looking turned out to be correct as written.
+
+**How it is stored is no longer an open question.** It was raised as C-Q24 and
+withdrawn the same evening: design-decisions §426 decided it in August --
+percent-encode the bytes, behind a version marker -- and `gui/pathcodec` now
+holds that encoding where every crate involved can reach it. What is left is
+work, not a decision.
+
+**Measured scope, so the next session does not have to guess and does not have
+to state it twice:**
+
+| Where | Sites | What changes |
+|---|---|---|
+| `gui/appearance/src/lib.rs` | 2 | `Settings.wallpaper: Option<String>` becomes `Option<PathBuf>`; encode on write, decode on read |
+| `gui/desktop/src/session.rs` | 11 | passes a `&Path` to the widget instead of a `&str` |
+| `gui/desktop/src/session/tests.rs` | 7 | fixtures |
+| `apps/settings/src/main.rs` | 15 | **the actual bug**: line 912 stores `path.to_string_lossy()`; it should store the path |
+| `gui/desktop/src/wallpaper.rs` | **3 items**: `WallpaperConfig.image_path`, `set_image`, `current_image_path` | the live chain, and only it -- see below |
+
+**The last row is one third of what this entry first claimed, and the
+correction is the point.** An hour after filing it I wrote: *"27 typed sites
+across 41 public functions, 2,823 lines, 92 tests ... the fifth is a subsystem
+whose playlist and history are lists of paths held as text, and converting it
+is the actual work."* That measured the **file**. The work is the part of the
+file something calls, and most of this one is not called at all:
+
+| Mechanism | Writers | Readers |
+|---|---|---|
+| `WallpaperHistory` | **9 production sites** push to it | **none.** Its doc says "tracks recent wallpapers for back-navigation" and there is no `back` or `forward` method in the type. `current()` exists and every caller is a test. |
+| `SlideshowState` / `set_slideshow` | — | already recorded in `roadmap-detailed.md` §3.4: *"exists, takes a directory, an interval and a shuffle flag, and nothing outside the shell's tests calls it"* |
+| `save_config` / `load_config` | — | a whole `key=value` persistence format whose only callers are its own tests. The real persistence is `appearance.yaml`, through `gui/appearance`. |
+
+So converting the playlist and the history would be making **dead code
+byte-correct**, which is worse than leaving it: a careful-looking conversion is
+exactly what persuades the next reader that a thing is load-bearing. It is the
+same trap as the two dead installer fields in
+`TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS`, met from the other
+direction -- there the byte question was unanswerable because there was no
+consumer; here it is answerable and *not worth answering*.
+
+**The live chain, which is the whole task:** `appearance.yaml` ->
+`Settings.wallpaper` -> `session.rs` -> `set_image()` -> `config.image_path`,
+and back out through `current_image_path()`. Four files, and in `wallpaper.rs`
+three items rather than a subsystem.
+
+**A separate finding, not to be folded into the fix:** a 2,823-line module
+whose live surface is three functions is worth a look in its own right. The
+history is the sharpest case -- nine production sites faithfully recording into
+a structure nothing can read, with a doc comment describing the navigation
+feature that was never built. Recording without replaying is not a half-built
+feature, it is a cost with no benefit: every wallpaper change pays for an entry
+nobody will ever see.
+
+**A version marker is required, not optional.** Existing files hold the path
+raw under `["wallpaper", "image"]`. Writing encoded text into the same key
+would misread any existing path containing a literal `%` -- §426 met exactly
+this and answered it with a marker whose absence means version 1. The same
+shape fits here: write `["wallpaper", "image_encoding"] = "percent"` alongside,
+and treat its absence as a raw path.
+
+**Do not start at the producer.** The one-line change at
+`apps/settings/src/main.rs:912` is the tempting entry point and it is the wrong
+one: it would hand a correct `PathBuf` to a chain that flattens it two layers
+down, so the bug would survive with its cause moved somewhere less obvious.
+Start at `wallpaper.rs`, which is where the model actually lives.
+
 ## TD-C-ONE-DECISION-ABOUT-PATHS-IS-IMPLEMENTED-TWICE-BYTE-FOR-BYTE -- FIXED 2026-09-16
 
 **In short:** design-decisions §426 chose one way to write a filename into a

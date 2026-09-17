@@ -29,6 +29,7 @@ mod columns;
 mod drives;
 mod dropzone;
 mod fileops;
+mod search;
 mod thumbs;
 
 use appearance::Palette;
@@ -473,6 +474,8 @@ enum Modal {
     /// answer the same dialog and do opposite things with it, and a target
     /// that means "no file" is a `None` somebody will forget to check.
     NewFolder { dialog: InputDialog },
+    /// A search awaiting the text to look for.
+    Search { dialog: InputDialog },
     /// A rename in progress, awaiting the new name.
     Rename {
         dialog: InputDialog,
@@ -673,6 +676,19 @@ pub struct ExplorerState {
     /// listing: a confirmation that also let Delete move the selection would
     /// act on a different file than the one it named.
     modal: Option<Modal>,
+    /// The query whose results are being shown, if the listing is a search.
+    ///
+    /// `Some` is the whole difference between "this folder" and "matches from
+    /// this folder downwards", and it has to be held rather than inferred: the
+    /// entries of a search look exactly like the entries of a directory, so
+    /// nothing else on screen can tell Escape which one to undo.
+    search_showing: Option<String>,
+    /// The folder a search started from, to go back to when it is dismissed.
+    ///
+    /// Kept separately from `current_path` because opening a result navigates,
+    /// and a user who then presses Escape means "stop searching", not "go back
+    /// to wherever I last clicked".
+    search_origin: Option<PathBuf>,
     /// The detail view's column set: which columns are shown, in what order,
     /// at what widths, and which one carries the sort arrow.
     ///
@@ -767,6 +783,8 @@ impl ExplorerState {
             undo: UndoStack::new(),
             recycle: RecycleBin::default_location(),
             modal: None,
+            search_showing: None,
+            search_origin: None,
             columns: ColumnManager::with_defaults(),
             column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
@@ -894,6 +912,97 @@ impl ExplorerState {
         associations::program_for(&doc, ext)
     }
 
+    /// Describe one path as a row.
+    ///
+    /// Extracted rather than written twice: search and the folder listing both
+    /// need it, and two copies would be two answers to "what is a row" that
+    /// could drift -- the type column deriving an extension one way here and
+    /// another there. `None` when the path has no final component, which is
+    /// the root, and the root is never a row in its own listing.
+    fn entry_for(path: PathBuf) -> Option<FileEntry> {
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let meta = fs::metadata(&path).ok();
+        let is_dir = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
+        let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+
+        let file_type = if is_dir {
+            FileType::Directory
+        } else {
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
+            FileType::from_extension(&ext)
+        };
+
+        Some(FileEntry {
+            name,
+            path,
+            is_dir,
+            size,
+            modified,
+            file_type,
+            selected: false,
+            icon_id: 0,
+        })
+    }
+
+    // ======================================================================
+    // Search
+    // ======================================================================
+
+    /// Ask what to look for.
+    fn open_search(&mut self) {
+        // Pre-filled with the query in force, so refining a search is an edit
+        // rather than a retype. Empty when this is a fresh one.
+        let initial = self.search_showing.clone().unwrap_or_default();
+        let dialog = InputDialog::prompt("Find", "Name contains:", &initial);
+        self.modal = Some(Modal::Search { dialog });
+    }
+
+    /// Replace the listing with everything under this folder matching `query`.
+    fn run_search(&mut self, query: &str) {
+        // Remembered before the first search, not on every one: refining a
+        // query must not move the origin to wherever the previous search left
+        // the view.
+        if self.search_origin.is_none() {
+            self.search_origin = Some(self.current_path.clone());
+        }
+        let root = self
+            .search_origin
+            .clone()
+            .unwrap_or_else(|| self.current_path.clone());
+
+        let found = search::find(&root, query, self.show_hidden);
+        self.status_message = search::describe(&found, query);
+
+        self.entries.clear();
+        for path in found.paths {
+            if let Some(entry) = Self::entry_for(path) {
+                self.entries.push(entry);
+            }
+        }
+        self.selected_indices.clear();
+        self.viewport.scroll_to(0, self.entries.len());
+        self.search_showing = Some(query.to_string());
+        self.sort_entries();
+    }
+
+    /// Put the folder listing back.
+    fn leave_search(&mut self) {
+        let Some(origin) = self.search_origin.take() else {
+            return;
+        };
+        self.search_showing = None;
+        // Through `navigate_to` rather than by reloading in place: the search
+        // may have been left from a different folder, and every other thing
+        // that has to stay in step with the current directory -- the address
+        // bar, the drop target, the history -- is kept in step there.
+        self.navigate_to(&origin);
+        self.status_message = "Search cleared".to_string();
+    }
+
     // ======================================================================
     // Directory loading
     // ======================================================================
@@ -916,39 +1025,19 @@ impl ExplorerState {
                         Err(_) => continue,
                     };
 
-                    let name = entry.file_name().to_string_lossy().to_string();
-
-                    // Skip hidden files if not showing them
-                    if !self.show_hidden && name.starts_with('.') {
+                    // Hidden-ness from the bytes, so a name with no text
+                    // form is judged by the same rule as every other. The
+                    // leading dot is ASCII, so this agrees with the text test
+                    // for every name that has one.
+                    if !self.show_hidden
+                        && entry.file_name().as_encoded_bytes().first() == Some(&b'.')
+                    {
                         continue;
                     }
 
-                    let path = entry.path();
-                    let meta = fs::metadata(&path).ok();
-                    let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
-                    let size = meta.as_ref().map_or(0, |m| m.len());
-                    let modified = meta.as_ref().and_then(|m| m.modified().ok());
-
-                    let file_type = if is_dir {
-                        FileType::Directory
-                    } else {
-                        let ext = path
-                            .extension()
-                            .map(|e| e.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        FileType::from_extension(&ext)
-                    };
-
-                    self.entries.push(FileEntry {
-                        name,
-                        path,
-                        is_dir,
-                        size,
-                        modified,
-                        file_type,
-                        selected: false,
-                        icon_id: 0,
-                    });
+                    if let Some(file_entry) = Self::entry_for(entry.path()) {
+                        self.entries.push(file_entry);
+                    }
                 }
             }
             Err(e) => {
@@ -2847,7 +2936,11 @@ impl ExplorerState {
             Some(Modal::Confirm { dialog, .. } | Modal::Notice { dialog }) => {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
-            Some(Modal::Rename { dialog, .. } | Modal::NewFolder { dialog }) => {
+            Some(
+                Modal::Rename { dialog, .. }
+                | Modal::NewFolder { dialog }
+                | Modal::Search { dialog },
+            ) => {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
             None => {}
@@ -4396,6 +4489,10 @@ impl ExplorerState {
                 self.select_all();
                 true
             }
+            Key::F if ctrl => {
+                self.open_search();
+                true
+            }
             Key::Backspace => self.go_up_if_possible(),
             Key::Left if k.modifiers.alt => self.go_back_if_possible(),
             Key::Right if k.modifiers.alt => self.go_forward_if_possible(),
@@ -4419,6 +4516,14 @@ impl ExplorerState {
             // trying to stop a copy.
             Key::Escape if self.work_in_flight() => {
                 self.cancel_all_operations();
+                true
+            }
+            // Ordered after cancelling work and before clearing a selection,
+            // on the same reasoning the comment above gives: the more
+            // surprising state to be left in is the one Escape should undo
+            // first, and a listing that is secretly a search is exactly that.
+            Key::Escape if self.search_showing.is_some() => {
+                self.leave_search();
                 true
             }
             Key::Escape => {
@@ -4562,14 +4667,16 @@ impl ExplorerState {
 
         let consumed = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.handle_event(event),
-            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => {
-                dialog.handle_event(event)
-            }
+            Modal::Rename { dialog, .. }
+            | Modal::NewFolder { dialog }
+            | Modal::Search { dialog } => dialog.handle_event(event),
         } == EventResult::Consumed;
 
         let answer = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.result().cloned(),
-            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => dialog.result().cloned(),
+            Modal::Rename { dialog, .. }
+            | Modal::NewFolder { dialog }
+            | Modal::Search { dialog } => dialog.result().cloned(),
         };
 
         let Some(answer) = answer else {
@@ -4596,6 +4703,17 @@ impl ExplorerState {
                     self.status_message = "Delete cancelled".to_string();
                 }
             }
+            Some(Modal::Search { .. }) => match answer {
+                // An empty query is a dismissal that happens to have been
+                // typed, the same judgement `NewFolder` makes below: running
+                // it would replace the listing with nothing and report no
+                // matches for an empty string as though a question had
+                // been asked.
+                DialogResult::Text(query) if !query.trim().is_empty() => {
+                    self.run_search(query.trim());
+                }
+                _ => self.status_message = "Search cancelled".to_string(),
+            },
             Some(Modal::Rename { target, .. }) => match answer {
                 DialogResult::Text(name) => self.rename_path(&target, &name),
                 _ => self.status_message = "Rename cancelled".to_string(),
@@ -9572,5 +9690,130 @@ mod tests {
             "got {:?}",
             state.status_message
         );
+    }
+
+    // ======================================================================
+    // Search
+    // ======================================================================
+
+    /// A search replaces the listing with matches from below the folder.
+    #[test]
+    fn a_search_shows_matches_from_the_whole_subtree() {
+        let scratch = temp_dir("search_subtree");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        write(&root.join("alpha-report.txt"), "x");
+        write(&root.join("sub/beta-report.txt"), "x");
+        write(&root.join("unrelated.dat"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("report");
+
+        assert_eq!(state.entries.len(), 2, "{:?}", state.entries);
+        assert!(state.search_showing.is_some(), "the view is a search");
+    }
+
+    /// Escape puts the folder back.
+    #[test]
+    fn escape_leaves_a_search_and_restores_the_listing() {
+        let scratch = temp_dir("search_escape");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        write(&root.join("only-match.txt"), "x");
+        write(&root.join("sub/also-match.txt"), "x");
+
+        let mut state = state_at(&root);
+        let before = state.entries.len();
+        state.run_search("match");
+        assert_eq!(state.entries.len(), 2);
+
+        state.leave_search();
+        assert!(state.search_showing.is_none(), "still in search mode");
+        assert_eq!(state.current_path, root, "did not return to the folder");
+        assert_eq!(
+            state.entries.len(),
+            before,
+            "the folder listing was not restored"
+        );
+    }
+
+    /// Leaving a search returns to where it started, not to a result's folder.
+    ///
+    /// The reason `search_origin` exists at all. Opening a result navigates
+    /// away; Escape after that means "stop searching", and a user who is
+    /// returned to the subfolder they happened to open has lost the place they
+    /// were searching from.
+    #[test]
+    fn leaving_a_search_returns_to_where_it_started() {
+        let scratch = temp_dir("search_origin");
+        let root = scratch.dir().to_path_buf();
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("mkdir");
+        write(&sub.join("deep-match.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("match");
+        // Simulate opening a result, which navigates into the subfolder.
+        state.navigate_to(&sub);
+        assert_eq!(state.current_path, sub);
+
+        state.leave_search();
+        assert_eq!(
+            state.current_path, root,
+            "Escape should return to the folder the search began in"
+        );
+    }
+
+    /// Refining a search keeps the original starting folder.
+    #[test]
+    fn refining_a_search_does_not_move_its_origin() {
+        let scratch = temp_dir("search_refine");
+        let root = scratch.dir().to_path_buf();
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("mkdir");
+        write(&sub.join("aaa-bbb.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("aaa");
+        state.navigate_to(&sub);
+        state.run_search("bbb");
+
+        state.leave_search();
+        assert_eq!(state.current_path, root, "the origin moved on refinement");
+    }
+
+    /// A search that finds nothing says so, and does not look like an empty
+    /// folder.
+    #[test]
+    fn a_search_with_no_matches_says_so() {
+        let scratch = temp_dir("search_none");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("nothing-like-this");
+
+        assert!(state.entries.is_empty());
+        assert!(
+            state.status_message.contains("No matches"),
+            "{}",
+            state.status_message
+        );
+    }
+
+    /// Leaving a search that was never started does nothing.
+    ///
+    /// Escape in an ordinary listing must not navigate anywhere.
+    #[test]
+    fn leaving_when_not_searching_is_a_no_op() {
+        let scratch = temp_dir("search_noop");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        let before = state.current_path.clone();
+        state.leave_search();
+        assert_eq!(state.current_path, before);
+        assert!(state.search_showing.is_none());
     }
 }

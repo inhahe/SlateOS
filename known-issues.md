@@ -158606,9 +158606,17 @@ design was still intended.
 
 **Consequences for photomanager's grid.** It should reach for this module
 rather than grow a second pool -- which makes the question whether `thumbs`
-becomes a shared crate, since nothing about it is explorer-specific (its only
-imports are `guitk` and `std`; it is a module rather than a crate purely by
-where it was first needed). The drop-before-upload ordering it already
+becomes a shared crate, since nothing about it is explorer-specific. It uses
+`guitk`, `byteread`, `imagecodec` and `scratchdir`, every one of them already
+shared, and is a module rather than a crate purely by where it was first
+needed.
+
+*(An earlier revision of this paragraph said its only imports were `guitk` and
+`std`. That came from reading the `use` block, which is not the dependency
+set: the file reaches `imagecodec` and `byteread` through fully-qualified
+paths, ten and fourteen times respectively. Checked properly by testing every
+dependency in explorer's manifest against the file. The same shape as the
+other measurement errors in this file -- a cheap proxy read as the answer.)* The drop-before-upload ordering it already
 encodes is the part that would be got wrong by anyone rebuilding it: the
 compositor checks its image budget against `held - freed + incoming`, so
 uploading before dropping is refused at exactly the moment a cache is working

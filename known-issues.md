@@ -156791,7 +156791,21 @@ whoever edits the file, a feature list misleads everybody.
 
 **Proper fix.** Work the list down in batches, per crate, deciding for each
 field whether it is a feature to finish or state to delete. Read the module's
-own doc comment alongside, and correct it in the same pass. When it is small
+own doc comment alongside, and correct it in the same pass.
+
+**"Delete it" is not always the answer, and the difference is legible.**
+`apps/camera`'s three were a bare `usize`, a bare enum value and a 64-byte
+zero buffer: nothing was lost by deleting them, because nothing had ever been
+decided. `apps/archivemanager`'s `CreateArchiveSettings` is the other kind --
+nine fields, a `Default`, and a `validate()` that returns "Output path", "No
+source", and refusals for encryption and splitting on formats that do not
+support them, with four tests over it. It is constructed only by those tests,
+so it is as dead as the rest of this list, but it is *reasoned* dead code: a
+model somebody thought through for a create-archive dialog that was never
+built. Deleting that is a decision about whether the dialog is coming, which
+is the question `open-questions.md` **C-Q17** already puts to the operator
+about five larger cases. Left in place and named here rather than removed on
+a triage pass's own authority. When it is small
 enough to enumerate, add the "declared and never read" arm to the gate with
 the survivors baselined. Deleting is usually right: a field nobody reads has
 never worked, so nothing can depend on it.

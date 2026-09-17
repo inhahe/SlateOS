@@ -61,8 +61,8 @@ WHAT IT CANNOT SEE, stated plainly:
     with the error messages and not printed. "Cannot open {path}: this program
     has no file access" would be missed.
 
-THE THREE IT STILL REPORTS, so nobody investigates them twice. All three are
-correct code, and two of them are the documented blind spot above -- a crate
+THE FOUR IT STILL REPORTS, so nobody investigates them twice. All four are
+correct code, and three of them are the documented blind spot above -- a crate
 holding one capability and truthfully denying another:
 
   * `apps/dbviewer` [file] -- "a .db or .sqlite file cannot be read; one CSV
@@ -73,6 +73,22 @@ holding one capability and truthfully denying another:
   * `gui/compositor` [network] -- "the mode-set the kernel would have refused
     was never sent". A display mode-set, not a packet; "never sent" is network
     vocabulary and this sentence is not about the network.
+  * `apps/torrent` [file] -- "It has no network access and no way to write a
+    file, so no tracker or peer has been contacted." Both halves hold. The
+    crate depends on `safeio`, which is the mention that lands it here, and
+    uses exactly one call from it: `read_capped`, for the `.torrent` a user
+    opens with Ctrl+O. Reading is not writing, and the sentence claims only
+    that it cannot write.
+
+On 2026-09-17 this list said three and the scan reported eight. The five it
+did not cover were not exceptions; three were real, and the scanner was right
+about all of them. `whiteboard` told people "your work is gone when the window
+closes" while Ctrl+S wrote an SVG, `filediff` said it had no filesystem access
+while Ctrl+O filled the left pane, and `musicplayer` denied the filesystem it
+reads and writes M3U through. Each had been true when written and was made
+false by a door built afterwards. **The gap between this list's count and the
+scan's is itself the finding** -- the same lesson `find-claimed-acts` learned
+the same day, where a list of four sat beside a scan of six.
 
 Tightening the vocabulary to silence any of them was rejected. These are three
 readable lines, and **narrowing to silence a true-by-the-rules entry is how a

@@ -801,15 +801,27 @@ pub struct WhiteboardApp {
     palette: Palette,
 }
 
-/// What the window says about what it cannot do.
+/// What the window says about what it can and cannot do.
 ///
-/// Nothing in this crate is invented, which is why the fixture scanner
-/// never looked at it. This is the other half of the same discipline,
-/// found by `scripts/find-silent-incapacity.py`: a program that reaches
-/// nothing outside its own process and never says so.
-const NOTHING_KEPT_LINES: [&str; 2] = [
-    "Whiteboards cannot be saved or opened.",
-    "Nothing is saved -- this app has no filesystem access, so your work is gone when the window closes.",
+/// Added by `scripts/find-silent-incapacity.py` when the answer was "neither":
+/// a program that reached nothing outside its own process and never said so.
+/// A save door was built afterwards and this text was not revisited, so for a
+/// while the window told people "your work is gone when the window closes"
+/// while Ctrl+S was writing an SVG — found by
+/// `scripts/find-stale-admissions.py`, which looks for exactly that, a
+/// standing sentence denying a capability the crate holds.
+///
+/// It is the worse direction of the two to get wrong. A program that
+/// overstates itself is caught the first time someone tries the feature; one
+/// that understates itself is believed, and nobody tries. Anyone who read the
+/// old text closed the window and lost a drawing they could have kept.
+///
+/// Both halves are stated because only one changed: writing works, reading
+/// does not exist, and a picture you cannot reopen is a different thing from
+/// a document.
+const SAVE_IS_ONE_WAY_LINES: [&str; 2] = [
+    "Ctrl+S saves this board as an SVG picture.",
+    "Nothing here opens one back, so a saved board can be viewed elsewhere but never returned to and edited.",
 ];
 
 impl WhiteboardApp {
@@ -2258,7 +2270,7 @@ impl WhiteboardApp {
         );
 
         // After the background, or it would be painted over.
-        for (i, line) in NOTHING_KEPT_LINES.iter().enumerate() {
+        for (i, line) in SAVE_IS_ONE_WAY_LINES.iter().enumerate() {
             #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
             let ty = 1.0 + i as f32 * 11.0;
             let avail = (self.win_width - 16.0).max(0.0);
@@ -3452,16 +3464,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in NOTHING_KEPT_LINES {
+        for line in SAVE_IS_ONE_WAY_LINES {
             assert!(
                 texts.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
         assert!(
-            NOTHING_KEPT_LINES
+            SAVE_IS_ONE_WAY_LINES
                 .iter()
-                .any(|l| l.contains("gone when the window closes")),
+                .any(|l| l.contains("never returned to and edited")),
             "the message states a mechanism but not its consequence",
         );
     }

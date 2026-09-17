@@ -85,17 +85,27 @@ pub mod colors {
 // ============================================================================
 
 /// Font size for diff content display.
-/// What the window says instead of a comparison.
+/// What the window says before anything has been opened.
 ///
-/// Three lines. The second is the one that separates this from a reader that
-/// ships with a sample document: the old fixture named its two sides
-/// `left.rs` and `right.rs`. **A filename is a claim that a file exists.**
-/// `apps/ebook` ships three books with titles and authors and keeps them,
-/// because a title claims nothing about a disk; a path does.
-const CANNOT_COMPARE_LINES: [&str; 3] = [
-    "This program cannot open files to compare.",
-    "It has no filesystem access, so nothing has been read -- there is no left file and no right file.",
-    "The diff engine itself is real and tested; what is missing is any way to give it two files.",
+/// Three lines, and the third is load-bearing: two empty panes look exactly
+/// like two identical empty files, and a diff tool showing "no differences"
+/// about files it never read is the worst thing this program could say. The
+/// line forecloses that reading, which is why a test pins it rather than the
+/// wording around it.
+///
+/// **This text used to say the opposite and was false.** It read "This
+/// program cannot open files to compare -- it has no filesystem access", and
+/// it was accurate when written; a picker and a capped reader were built
+/// afterwards and the message was not revisited. `Ctrl+O` had been filling
+/// the left pane for some time while the window insisted nothing could be
+/// read. Found by `scripts/find-stale-admissions.py`, which looks for a
+/// standing sentence denying a capability the crate holds — the direction
+/// of error that gets believed, because nobody tries a thing they have been
+/// told is impossible.
+const NOTHING_OPEN_YET_LINES: [&str; 3] = [
+    "No files are open yet.",
+    "Ctrl+O opens the left side, Ctrl+Shift+O the right.",
+    "These panes are empty because nothing has been read, not because two files matched.",
 ];
 
 const CONTENT_FONT_SIZE: f32 = 13.0;
@@ -1467,7 +1477,7 @@ impl FileDiffApp {
         // After the background, or it would be painted over. Keyed on there
         // being nothing loaded, so it retires itself when a picker lands.
         if self.diff.is_none() {
-            for (i, line) in CANNOT_COMPARE_LINES.iter().enumerate() {
+            for (i, line) in NOTHING_OPEN_YET_LINES.iter().enumerate() {
                 tree.push(RenderCommand::Text {
                     x: 10.0,
                     #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
@@ -3000,16 +3010,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in CANNOT_COMPARE_LINES {
+        for line in NOTHING_OPEN_YET_LINES {
             assert!(
                 texts.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
         assert!(
-            CANNOT_COMPARE_LINES
+            NOTHING_OPEN_YET_LINES
                 .iter()
-                .any(|l| l.contains("no left file and no right file")),
+                .any(|l| l.contains("not because two files matched")),
             "nothing forecloses reading the empty panes as two empty files",
         );
     }

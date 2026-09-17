@@ -155703,6 +155703,177 @@ maintained for a long time without anyone asking whether the spec wanted it**,
 because maintenance asks "is this correct?" and only a reader of the design
 asks "should this be here?"
 
+## TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS -- 2026-09-16
+
+**In short:** the installer builds a record of the boot loader's configuration
+and puts the path of its config file in it. Nothing anywhere reads that field.
+It is written, stored, and never consulted.
+
+**Date:** 2026-09-16. **Lane:** C.
+
+**Where.** `apps/installer/src/grub.rs` -- `pub grub_cfg_path: String` declared
+at line 108, assigned at line 480 from
+`install.config_path.to_string_lossy().into_owned()`. Those two lines are the
+*only* mentions of the name in `apps/` and `gui/` combined.
+
+**How it was found, which is the interesting part.** Not by looking for dead
+code. The lossy-decode checker flagged line 480 as a path being flattened to
+text, and the triage question -- *does anything downstream use this as a
+path?* -- has the answer "nothing downstream uses it at all". The byte-safety
+question was unanswerable because the field has no consumer to ask about.
+
+That makes it design-decisions 856 again, from an unexpected direction: *a
+settings page is built when something obeys it, not when something stores it.*
+Here a struct field stores a value nothing obeys, and the only reason anyone
+looked is that it stored it **wrongly**. A correct-looking dead field would
+still be sitting there.
+
+**The proper fix** is to delete the field, not to make its conversion
+byte-correct -- fixing the conversion would make a dead field *defensibly*
+dead, which is worse, because the next reader would find a careful-looking line
+and assume it mattered. If a consumer is intended (an installer that later
+edits the config it wrote), the field should be a `PathBuf` and arrive with
+that consumer.
+
+**`custom_dir`, on the next line, is dead the same way -- and proving it takes
+care.** A grep for the name returns thirteen hits, which reads as "thoroughly
+used". They belong to three different things: a local variable, this dead
+`String` field, and a `custom_dir: PathBuf` field on a *different* struct at
+line 553. All three real reads (`self.custom_dir.join(...)`,
+`.is_dir()`) are that third one. `GrubConfig`'s own field has none, exactly
+like `grub_cfg_path`.
+
+**Which makes the file more interesting than a dead-code entry.** The correct
+model is already in it, eleven lines below the wrong one: the same concept held
+as a `PathBuf` and used as a path, beside a `String` flattened out of a path
+and used for nothing. Nobody has to decide what the right shape is here -- it
+has already been written, once, and the surviving copy is the one with a
+consumer. That is the rule from design-decisions 857 in its natural habitat:
+**when one of two models has a consumer and the other does not, the one with
+the consumer is the real one.**
+
+The other three `GrubConfig` fields -- `timeout`, `default_entry`,
+`os_prober_enabled` -- each have one or two readers, so the struct as a whole
+is consumed. These two are the odd ones out, not a wholly unused type.
+
+**Not done now** because deleting two `pub` fields from the installer wants a
+look at whether the record is serialised anywhere first, and because the fix is
+a deletion whose value is in being done deliberately rather than as a
+by-product of a byte-safety sweep.
+
+## TD-C-DRAGGED-FILE-PATHS-CANNOT-CARRY-A-NAME-THAT-IS-NOT-TEXT -- 2026-09-16
+
+**In short:** the format used to carry files between applications during a
+drag holds each path as text. A file whose name is not text cannot be dragged
+at all -- and worse, one such file in a selection makes the receiving
+application see *nothing*, not even the other nine files that were fine.
+
+**Date:** 2026-09-16. **Lane:** C.
+
+**Where.** `gui/toolkit/src/dnd.rs` -- `DataObject::with_files(paths: &[&str])`
+and `DataObject::get_file_paths(&self) -> Option<Vec<&str>>`.
+
+**The all-or-nothing part is the sharp edge.** `get_file_paths` runs
+`core::str::from_utf8` over the *whole* blob and returns `None` if it fails. So
+the failure is not "the odd file is missing"; it is "the drop did nothing",
+with no indication which file was responsible. A user dragging a folder's worth
+of files would see the drop silently do nothing and have no way to find out
+why.
+
+**Why it is not urgent.** Nothing uses this format yet. The only callers are
+the file's own tests -- explorer's internal drag carries `Vec<PathBuf>` through
+`DropZoneManager` and is byte-correct already. This is the *cross-application*
+format, and it bites the first program that reaches for it.
+
+**The separator half is already fixed (2026-09-16).** Paths were joined with a
+newline, and a newline is legal in a SlateOS name, so a file called
+`notes<LF>draft.txt` arrived as two paths that do not exist. Now NUL, the one
+byte a name cannot hold -- the same reasoning behind `find -print0`. Pinned by
+`a_name_containing_a_newline_is_one_path_not_two`, and sabotage-checked:
+restoring the newline splits that name into `["/home/user/notes",
+"draft.txt"]`.
+
+**Why the encoding half was not fixed with it.** It needs a decision this entry
+cannot make on its own, and the decision is about the host rather than about
+the target:
+
+* On SlateOS, and on any unix, an `OsStr` **is** bytes, so the fix is
+  `OsStrExt::from_bytes` and it is safe.
+* On the Windows machine the tests run on, `OsStr` is WTF-8, and arbitrary
+  incoming bytes are **not** necessarily valid. `OsStr::from_encoded_bytes_unchecked`
+  requires bytes that came from `as_encoded_bytes`, which bytes arriving from
+  another process have not. So the conversion that is safe on the target is
+  unsound on the host, and the tests run on the host.
+
+That is the same host-versus-target split `gui/toolkit/src/osbytes.rs`,
+`dialog::parent_path` and `apps/explorer/src/search.rs` all navigate, but with
+the sign flipped: those control where the bytes came from, and this one does
+not.
+
+**The proper fix,** for whoever wires the first consumer: keep the wire format
+as NUL-separated raw bytes, which is already true, and split the *accessor* the
+way `quoting::os_bytes` splits -- `#[cfg(unix)]` returning `PathBuf` via
+`OsStrExt::from_bytes`, and a `#[cfg(not(unix))]` host arm that validates as
+UTF-8 and is honest that it is the host arm. `scripts/lossy-decode.py` already
+recognises that shape and classifies it `HOST` rather than `VALUE`, which is
+the evidence that it is the house pattern rather than an excuse.
+
+**Do not "fix" this by making `get_file_paths` lossy.** Returning
+`to_string_lossy` for the undecodable names would turn a visible nothing-happens
+into an invisible wrong-file -- a drop that silently operates on a path the
+user never selected.
+
+## TD-C-A-BROKEN-PATTERN-COUNTED-EVERY-LINE-AND-LOOKED-EXACTLY-LIKE-THE-BUG -- METHOD 2026-09-16
+
+**In short:** I checked whether some files I had written had Windows line
+endings, the check said every single line did, and I was about to repair three
+files that were already correct. The files had none. The pattern I searched for
+had been mangled into an empty one, which matches every line, so the number it
+returned was the file's length.
+
+**Date:** 2026-09-16. **Lane:** C.
+
+**What it looked like.**
+
+    apps/explorer/src/search.rs: 516 CR line(s)
+    gui/toolkit/src/osbytes.rs:   68 CR line(s)
+
+Both numbers are exactly the line count of the file. That is what a wholly
+CRLF file looks like -- *every* line ends CRLF -- so the reading "these files
+are entirely Windows-ended" fits the evidence perfectly. It was also
+corroborating: three files, all written by the same tool, all reporting the
+same defect. A consistent wrong answer is more convincing than an
+inconsistent right one.
+
+**Why the pattern broke.** The shell form `$'\r'` passes through a layer that
+collapses backslash escapes before the shell sees it, so what ran was an empty
+pattern. `grep -c ''` matches every line. This is the same collapse that has
+produced a silent `str.replace` no-op, a Python `SyntaxWarning`, a literal TAB
+inside a comment and a `git commit -m` that executed a backtick this session --
+but every previous instance corrupted *an edit*, and this one corrupted *a
+measurement*, which is worse: an edit that goes wrong usually fails to compile,
+while a measurement that goes wrong just tells you something false in a
+confident tone.
+
+**The discriminator, and it is cheap.** A second measurement by a different
+mechanism. Python read the bytes and counted `13`s directly: zero in all three
+files. One line, no shell quoting involved, and it settled the question that
+two `grep` invocations had agreed on incorrectly.
+
+**The rule worth keeping: when a count comes back exactly equal to the size of
+the thing being counted -- every line, every file, every entry -- suspect the
+pattern before the data.** A defect that is present in literally 100% of cases
+is possible but rare; a pattern that matches everything is the commonest way to
+produce that number. The same tell would have caught this in a second: 516 CRs
+in a 516-line file is not evidence of CRLF, it is evidence of a predicate that
+is always true.
+
+**What it nearly cost.** Rewriting three correct source files and committing
+the result, with a commit message explaining a problem that did not exist --
+which is the shape already recorded in `TD-C-FOUR-CLAIMS-WALKED-BACK-IN-ONE-SESSION`
+and in the `safeio` fix that fixed nothing. The cost is not the wasted edit; it
+is that the false explanation gets written down and believed later.
+
 ## TD-C-A-SPLICE-WITH-TWO-SEARCHED-BOUNDS-DUPLICATED-52000-LINES -- METHOD 2026-09-16
 
 **In short:** I edit these documents with small Python scripts. One of them

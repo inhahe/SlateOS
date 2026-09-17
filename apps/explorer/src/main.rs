@@ -29,6 +29,8 @@ mod columns;
 mod drives;
 mod dropzone;
 mod fileops;
+mod manualorder;
+mod search;
 mod thumbs;
 
 use appearance::Palette;
@@ -292,6 +294,15 @@ pub enum SortBy {
     Size,
     Modified,
     Type,
+    /// The user's own arrangement, saved per folder.
+    ///
+    /// Not a column: there is nothing to put in a header, and clicking one
+    /// leaves this mode. `roadmap-detailed.md` §4.1 calls it "Custom" /
+    /// "Manual" and requires that a column sort override it *temporarily* --
+    /// which is why the arrangement lives on disk against the folder and not
+    /// in the order of `entries`. Sorting by Name writes nothing, so the
+    /// arrangement is still there when Custom comes back.
+    Custom,
 }
 
 /// Sort direction.
@@ -401,6 +412,33 @@ impl Outcome {
     }
 }
 
+/// A press on a row that may become a drag to a new position.
+///
+/// Held from the press rather than created on the first move, because the
+/// press is the only event that knows *which* row is under the pointer -- a
+/// move carries a position and nothing else. `active` is what separates a
+/// click from a drag, so that selecting a file does not rearrange the folder.
+#[derive(Clone, Debug, PartialEq)]
+struct RowDrag {
+    /// Where the press landed, to measure the threshold against.
+    start_x: f32,
+    start_y: f32,
+    /// The rows being moved, as indices into `entries`.
+    rows: Vec<usize>,
+    /// Whether the pointer has travelled far enough to mean a drag.
+    active: bool,
+    /// Where the rows would land: before this index, or at the end.
+    insert_at: usize,
+}
+
+/// How far the pointer must travel before a press becomes a rearrangement.
+///
+/// A file manager where a slightly unsteady click reorders the folder is worse
+/// than one with no manual order at all: the damage is silent, persistent and
+/// attributed to the wrong cause. Matches the threshold `guitk::dnd` uses for
+/// starting a file drag, so the two feel the same.
+const ROW_DRAG_THRESHOLD: f32 = 4.0;
+
 /// A modal the file manager is waiting on, and what to do when it answers.
 ///
 /// One field rather than one `Option` per dialog kind: only one modal can be
@@ -473,6 +511,8 @@ enum Modal {
     /// answer the same dialog and do opposite things with it, and a target
     /// that means "no file" is a `None` somebody will forget to check.
     NewFolder { dialog: InputDialog },
+    /// A search awaiting the text to look for.
+    Search { dialog: InputDialog },
     /// A rename in progress, awaiting the new name.
     Rename {
         dialog: InputDialog,
@@ -673,6 +713,27 @@ pub struct ExplorerState {
     /// listing: a confirmation that also let Delete move the selection would
     /// act on a different file than the one it named.
     modal: Option<Modal>,
+    /// The query whose results are being shown, if the listing is a search.
+    ///
+    /// `Some` is the whole difference between "this folder" and "matches from
+    /// this folder downwards", and it has to be held rather than inferred: the
+    /// entries of a search look exactly like the entries of a directory, so
+    /// nothing else on screen can tell Escape which one to undo.
+    /// The arrangement in force for the folder on screen, if any.
+    ///
+    /// Cached from the settings document on navigation rather than read per
+    /// comparison: `sort_by` runs this against every pair, and a YAML lookup
+    /// per comparison would turn a sort into a parse.
+    manual_order: Vec<String>,
+    /// A row press that may be turning into a rearrangement.
+    row_drag: Option<RowDrag>,
+    search_showing: Option<String>,
+    /// The folder a search started from, to go back to when it is dismissed.
+    ///
+    /// Kept separately from `current_path` because opening a result navigates,
+    /// and a user who then presses Escape means "stop searching", not "go back
+    /// to wherever I last clicked".
+    search_origin: Option<PathBuf>,
     /// The detail view's column set: which columns are shown, in what order,
     /// at what widths, and which one carries the sort arrow.
     ///
@@ -767,6 +828,10 @@ impl ExplorerState {
             undo: UndoStack::new(),
             recycle: RecycleBin::default_location(),
             modal: None,
+            manual_order: Vec::new(),
+            row_drag: None,
+            search_showing: None,
+            search_origin: None,
             columns: ColumnManager::with_defaults(),
             column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
@@ -894,9 +959,255 @@ impl ExplorerState {
         associations::program_for(&doc, ext)
     }
 
+    /// Describe one path as a row.
+    ///
+    /// Extracted rather than written twice: search and the folder listing both
+    /// need it, and two copies would be two answers to "what is a row" that
+    /// could drift -- the type column deriving an extension one way here and
+    /// another there. `None` when the path has no final component, which is
+    /// the root, and the root is never a row in its own listing.
+    fn entry_for(path: PathBuf) -> Option<FileEntry> {
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let meta = fs::metadata(&path).ok();
+        let is_dir = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
+        let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+
+        let file_type = if is_dir {
+            FileType::Directory
+        } else {
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
+            FileType::from_extension(&ext)
+        };
+
+        Some(FileEntry {
+            name,
+            path,
+            is_dir,
+            size,
+            modified,
+            file_type,
+            selected: false,
+            icon_id: 0,
+        })
+    }
+
+    // ======================================================================
+    // Search
+    // ======================================================================
+
+    /// How a search result names itself: its path below the search root.
+    ///
+    /// Falls back to the whole path when the result is not under `root`, which
+    /// should not happen but is not worth a panic if it ever does -- an
+    /// over-long label is a worse-looking row, while an unwrap here would be a
+    /// crash in a file manager for a cosmetic reason.
+    fn relative_label(path: &Path, root: &Path) -> String {
+        let shown = path.strip_prefix(root).unwrap_or(path);
+        // Lossy on purpose and safe here: this is the text a row is drawn
+        // with, and `FileEntry::path` beside it is what opening the row uses.
+        // Named rather than chained so the exemption in `lossy-decode.py` has
+        // something specific to anchor on -- a bare `.to_string_lossy()` would
+        // match every future lossy call in this file too.
+        shown.to_string_lossy().into_owned()
+    }
+
+    /// Ask what to look for.
+    fn open_search(&mut self) {
+        // Pre-filled with the query in force, so refining a search is an edit
+        // rather than a retype. Empty when this is a fresh one.
+        let initial = self.search_showing.clone().unwrap_or_default();
+        let dialog = InputDialog::prompt("Find", "Name contains:", &initial);
+        self.modal = Some(Modal::Search { dialog });
+    }
+
+    /// Replace the listing with everything under this folder matching `query`.
+    fn run_search(&mut self, query: &str) {
+        // Remembered before the first search, not on every one: refining a
+        // query must not move the origin to wherever the previous search left
+        // the view.
+        if self.search_origin.is_none() {
+            self.search_origin = Some(self.current_path.clone());
+        }
+        let root = self
+            .search_origin
+            .clone()
+            .unwrap_or_else(|| self.current_path.clone());
+
+        let found = search::find(&root, query, self.show_hidden);
+        self.status_message = search::describe(&found, query);
+
+        self.entries.clear();
+        for path in found.paths {
+            if let Some(mut entry) = Self::entry_for(path) {
+                // A search row says where it is, not only what it is. Every
+                // row in a folder listing shares one parent, so the bare name
+                // is enough there; results come from all over the subtree, and
+                // two files called `notes.txt` in different folders are the
+                // same row twice to anyone reading the screen.
+                //
+                // Qualifying the Name column rather than adding a Location
+                // one, because a column that appears and disappears is the
+                // view changing shape -- the thing roadmap-detailed.md §4.1
+                // objects to -- and this needs no new column machinery to
+                // answer the same question.
+                entry.name = Self::relative_label(&entry.path, &root);
+                self.entries.push(entry);
+            }
+        }
+        self.selected_indices.clear();
+        self.viewport.scroll_to(0, self.entries.len());
+        self.search_showing = Some(query.to_string());
+        self.sort_entries();
+    }
+
+    /// Put the folder listing back.
+    fn leave_search(&mut self) {
+        let Some(origin) = self.search_origin.take() else {
+            return;
+        };
+        self.search_showing = None;
+        // Through `navigate_to` rather than by reloading in place: the search
+        // may have been left from a different folder, and every other thing
+        // that has to stay in step with the current directory -- the address
+        // bar, the drop target, the history -- is kept in step there.
+        self.navigate_to(&origin);
+        self.status_message = "Search cleared".to_string();
+    }
+
     // ======================================================================
     // Directory loading
     // ======================================================================
+
+    /// Track a press that is turning into a rearrangement.
+    fn drag_row(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = self.row_drag.as_mut() else {
+            return false;
+        };
+        if !drag.active {
+            let dx = x - drag.start_x;
+            let dy = y - drag.start_y;
+            if dx.mul_add(dx, dy * dy) < ROW_DRAG_THRESHOLD * ROW_DRAG_THRESHOLD {
+                return false;
+            }
+            drag.active = true;
+        }
+        // Before the row under the pointer; past the last row, at the end.
+        // Simple enough for a user to predict without being shown an
+        // insertion bar, which is the alternative and needs the row
+        // rectangles this deliberately does not recompute.
+        let target = self.dropzone.find_file_row(x, y);
+        let len = self.entries.len();
+        if let Some(drag) = self.row_drag.as_mut() {
+            drag.insert_at = target.unwrap_or(len);
+        }
+        true
+    }
+
+    /// Finish a row drag, rearranging if it ever became one.
+    fn drop_row(&mut self) -> bool {
+        let Some(drag) = self.row_drag.take() else {
+            return false;
+        };
+        if !drag.active {
+            return false;
+        }
+        self.reorder_rows(drag.rows, drag.insert_at)
+    }
+
+    /// Read the folder's arrangement, and fall out of Custom if it has none.
+    ///
+    /// The fall-back matters: Custom with no arrangement is name order wearing
+    /// a different label, and a user who navigates from an arranged folder to
+    /// an unarranged one should see a mode that describes what they are
+    /// looking at. `sort_by` is view state, so this is the one place that can
+    /// keep it honest as the view moves.
+    fn load_manual_order(&mut self) {
+        self.manual_order =
+            manualorder::for_folder(&self.column_prefs, &self.current_path).unwrap_or_default();
+        if self.sort_by == SortBy::Custom && self.manual_order.is_empty() {
+            self.sort_by = SortBy::Name;
+        }
+    }
+
+    /// Record the listing's present order as this folder's arrangement.
+    ///
+    /// Answers whether it could be written down. `false` for a folder whose
+    /// path is not text, and the caller says so rather than pretending --
+    /// see [`manualorder::set_for_folder`].
+    ///
+    /// Names that are not text are left out of the saved list, because a YAML
+    /// scalar cannot hold them. They keep their place on screen for this
+    /// session and sort with the newcomers next time. That is a real
+    /// limitation and it is C-Q24's; the alternative, writing a lossy
+    /// rendering, would file the position under a name that belongs to a
+    /// different file.
+    fn save_manual_order(&mut self) -> bool {
+        let names: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|e| e.path.file_name().and_then(|n| n.to_str()))
+            .map(ToString::to_string)
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let path = self.current_path.clone();
+        if !manualorder::set_for_folder(&mut self.column_prefs, &path, &refs) {
+            return false;
+        }
+        self.manual_order = names;
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => String::from("Custom order saved for this folder"),
+                // Reported rather than swallowed: the arrangement is on screen
+                // either way, so a silent failure looks like success until the
+                // folder is revisited and the order has gone.
+                Err(e) => format!("Could not save the order: {e}"),
+            };
+        true
+    }
+
+    /// Move the rows at `from` to sit before the row currently at `to`.
+    ///
+    /// Indices into `entries`, which is what the view hands back from a drag.
+    /// Out-of-range indices are ignored rather than clamped: a clamp turns a
+    /// bug in the caller into a file moving somewhere the user did not point
+    /// at, which is worse than nothing happening.
+    fn reorder_rows(&mut self, mut from: Vec<usize>, to: usize) -> bool {
+        if from.is_empty() || to > self.entries.len() {
+            return false;
+        }
+        from.sort_unstable();
+        from.dedup();
+        if from.iter().any(|&i| i >= self.entries.len()) {
+            return false;
+        }
+
+        // How many of the moved rows sit above the insertion point: the target
+        // shifts down by that many once they are lifted out.
+        let above = from.iter().filter(|&&i| i < to).count();
+        let target = to.saturating_sub(above);
+
+        let mut moved = Vec::with_capacity(from.len());
+        for &i in from.iter().rev() {
+            moved.push(self.entries.remove(i));
+        }
+        moved.reverse();
+
+        let at = target.min(self.entries.len());
+        for (offset, entry) in moved.into_iter().enumerate() {
+            self.entries.insert(at.saturating_add(offset), entry);
+        }
+
+        // Arranging is what puts the view into Custom: a user who drags a file
+        // has plainly stopped wanting name order, and leaving the mode alone
+        // would re-sort their arrangement away on the next refresh.
+        self.sort_by = SortBy::Custom;
+        self.sync_sort_indicator();
+        self.save_manual_order()
+    }
 
     /// Load entries from the current directory.
     pub fn load_directory(&mut self) {
@@ -916,39 +1227,19 @@ impl ExplorerState {
                         Err(_) => continue,
                     };
 
-                    let name = entry.file_name().to_string_lossy().to_string();
-
-                    // Skip hidden files if not showing them
-                    if !self.show_hidden && name.starts_with('.') {
+                    // Hidden-ness from the bytes, so a name with no text
+                    // form is judged by the same rule as every other. The
+                    // leading dot is ASCII, so this agrees with the text test
+                    // for every name that has one.
+                    if !self.show_hidden
+                        && entry.file_name().as_encoded_bytes().first() == Some(&b'.')
+                    {
                         continue;
                     }
 
-                    let path = entry.path();
-                    let meta = fs::metadata(&path).ok();
-                    let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
-                    let size = meta.as_ref().map_or(0, |m| m.len());
-                    let modified = meta.as_ref().and_then(|m| m.modified().ok());
-
-                    let file_type = if is_dir {
-                        FileType::Directory
-                    } else {
-                        let ext = path
-                            .extension()
-                            .map(|e| e.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        FileType::from_extension(&ext)
-                    };
-
-                    self.entries.push(FileEntry {
-                        name,
-                        path,
-                        is_dir,
-                        size,
-                        modified,
-                        file_type,
-                        selected: false,
-                        icon_id: 0,
-                    });
+                    if let Some(file_entry) = Self::entry_for(entry.path()) {
+                        self.entries.push(file_entry);
+                    }
                 }
             }
             Err(e) => {
@@ -956,6 +1247,7 @@ impl ExplorerState {
             }
         }
 
+        self.load_manual_order();
         self.sort_entries();
         self.update_status();
         // A folder shows what the user saved for it, the default they saved,
@@ -1145,6 +1437,14 @@ impl ExplorerState {
             SortBy::Size => ColumnId::SIZE,
             SortBy::Modified => ColumnId::DATE_MODIFIED,
             SortBy::Type => ColumnId::TYPE,
+            // A hand arrangement is not a column, so no header carries an
+            // arrow. Pointing one at Name would say the list is in name order
+            // when it is in the user's own -- a header that lies about what it
+            // is showing is worse than a header that says nothing.
+            SortBy::Custom => {
+                self.columns.set_sort(ColumnId::NAME, SortOrder::None);
+                return;
+            }
         };
         let order = match self.sort_dir {
             SortDir::Ascending => SortOrder::Ascending,
@@ -1155,7 +1455,29 @@ impl ExplorerState {
 
     /// Sort entries according to current sort settings.
     fn sort_entries(&mut self) {
-        // Directories always come first
+        // A hand arrangement is applied to a listing that is already in name
+        // order, so that the files the user has *not* placed appear after the
+        // ones they have, in an order that is stable rather than whatever the
+        // filesystem returned. `sort_by` is stable, so the earlier pass shows
+        // through wherever the arrangement ties.
+        if self.sort_by == SortBy::Custom {
+            self.entries.sort_by_key(|e| e.name.to_lowercase());
+            let order = core::mem::take(&mut self.manual_order);
+            self.entries.sort_by(|a, b| {
+                manualorder::compare(
+                    &order,
+                    a.path.file_name().unwrap_or(a.path.as_os_str()),
+                    b.path.file_name().unwrap_or(b.path.as_os_str()),
+                )
+            });
+            self.manual_order = order;
+            return;
+        }
+
+        // Directories always come first -- except in Custom, handled above.
+        // The spec has the user arranging "files/folders" together, so forcing
+        // folders to the top there would fight the arrangement it asks for:
+        // a user who drags a folder below a file would watch it spring back.
         self.entries.sort_by(|a, b| {
             if a.is_dir != b.is_dir {
                 return if a.is_dir {
@@ -1174,6 +1496,11 @@ impl ExplorerState {
                     let ext_b = b.path.extension().map(|e| e.to_string_lossy().to_string());
                     ext_a.cmp(&ext_b)
                 }
+                // Unreachable: handled above, before the folders-first rule
+                // this arm sits inside. Spelled out rather than left to a
+                // wildcard so that adding a mode is a compile error here
+                // rather than a mode that silently sorts by nothing.
+                SortBy::Custom => core::cmp::Ordering::Equal,
             };
 
             match self.sort_dir {
@@ -2847,7 +3174,11 @@ impl ExplorerState {
             Some(Modal::Confirm { dialog, .. } | Modal::Notice { dialog }) => {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
-            Some(Modal::Rename { dialog, .. } | Modal::NewFolder { dialog }) => {
+            Some(
+                Modal::Rename { dialog, .. }
+                | Modal::NewFolder { dialog }
+                | Modal::Search { dialog },
+            ) => {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
             None => {}
@@ -4249,9 +4580,14 @@ impl ExplorerState {
             }
             MouseEventKind::Release(MouseButton::Left) => {
                 let was = self.thumb_grab.take();
-                was.is_some()
+                // A row drag is finished here whether or not it became active,
+                // so an ordinary click cannot leave one armed to fire on the
+                // next stray move.
+                let dropped = self.drop_row();
+                was.is_some() || dropped
             }
             MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
+            MouseEventKind::Move if self.row_drag.is_some() => self.drag_row(m.x, m.y),
             // Motion with nothing grabbed: the only thing the explorer does
             // with it is say why the button under the pointer is greyed.
             MouseEventKind::Move => self.update_hover_hint(m.x, m.y),
@@ -4322,6 +4658,27 @@ impl ExplorerState {
             return self.route_to_pathbar(taken);
         }
         if let Some(index) = self.dropzone.find_file_row(x, y) {
+            // Remembered on every row press, not only in Custom mode: dragging
+            // a file is how a user *enters* Custom, so requiring the mode
+            // first would make it unreachable by the gesture that is supposed
+            // to create it.
+            // Dragging a row that is already part of the selection moves the
+            // whole selection; dragging an unselected row moves just it. Read
+            // *before* the selection handling below runs, because that is
+            // about to replace the selection with this row -- and the question
+            // being asked is what the user had chosen when they grabbed it.
+            let rows = if self.selected_indices.contains(&index) {
+                self.selected_indices.clone()
+            } else {
+                vec![index]
+            };
+            self.row_drag = Some(RowDrag {
+                start_x: x,
+                start_y: y,
+                rows,
+                active: false,
+                insert_at: index,
+            });
             self.select_single(index);
             return true;
         }
@@ -4396,6 +4753,10 @@ impl ExplorerState {
                 self.select_all();
                 true
             }
+            Key::F if ctrl => {
+                self.open_search();
+                true
+            }
             Key::Backspace => self.go_up_if_possible(),
             Key::Left if k.modifiers.alt => self.go_back_if_possible(),
             Key::Right if k.modifiers.alt => self.go_forward_if_possible(),
@@ -4419,6 +4780,14 @@ impl ExplorerState {
             // trying to stop a copy.
             Key::Escape if self.work_in_flight() => {
                 self.cancel_all_operations();
+                true
+            }
+            // Ordered after cancelling work and before clearing a selection,
+            // on the same reasoning the comment above gives: the more
+            // surprising state to be left in is the one Escape should undo
+            // first, and a listing that is secretly a search is exactly that.
+            Key::Escape if self.search_showing.is_some() => {
+                self.leave_search();
                 true
             }
             Key::Escape => {
@@ -4562,14 +4931,16 @@ impl ExplorerState {
 
         let consumed = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.handle_event(event),
-            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => {
-                dialog.handle_event(event)
-            }
+            Modal::Rename { dialog, .. }
+            | Modal::NewFolder { dialog }
+            | Modal::Search { dialog } => dialog.handle_event(event),
         } == EventResult::Consumed;
 
         let answer = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.result().cloned(),
-            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => dialog.result().cloned(),
+            Modal::Rename { dialog, .. }
+            | Modal::NewFolder { dialog }
+            | Modal::Search { dialog } => dialog.result().cloned(),
         };
 
         let Some(answer) = answer else {
@@ -4596,6 +4967,17 @@ impl ExplorerState {
                     self.status_message = "Delete cancelled".to_string();
                 }
             }
+            Some(Modal::Search { .. }) => match answer {
+                // An empty query is a dismissal that happens to have been
+                // typed, the same judgement `NewFolder` makes below: running
+                // it would replace the listing with nothing and report no
+                // matches for an empty string as though a question had
+                // been asked.
+                DialogResult::Text(query) if !query.trim().is_empty() => {
+                    self.run_search(query.trim());
+                }
+                _ => self.status_message = "Search cancelled".to_string(),
+            },
             Some(Modal::Rename { target, .. }) => match answer {
                 DialogResult::Text(name) => self.rename_path(&target, &name),
                 _ => self.status_message = "Rename cancelled".to_string(),
@@ -9572,5 +9954,408 @@ mod tests {
             "got {:?}",
             state.status_message
         );
+    }
+
+    // ======================================================================
+    // Manual order
+    // ======================================================================
+
+    /// Dragging a row to the top puts it there and keeps it there.
+    #[test]
+    fn a_rearranged_folder_stays_rearranged() {
+        settingsfile::testing::with_scratch_config("manual-basic", |_root| {
+            let scratch = temp_dir("manual_basic");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            assert_eq!(state.entries[0].name, "a.txt");
+
+            // Move the third row (c.txt) to the front.
+            assert!(state.reorder_rows(vec![2], 0));
+            assert_eq!(state.entries[0].name, "c.txt");
+            assert_eq!(state.sort_by, SortBy::Custom);
+
+            // Re-listing the folder must not undo it.
+            state.load_directory();
+            assert_eq!(
+                state.entries[0].name, "c.txt",
+                "the arrangement did not survive a refresh"
+            );
+        });
+    }
+
+    /// A column sort overrides the arrangement without discarding it.
+    ///
+    /// The precedence rule `roadmap-detailed.md` §4.1 states outright, and the
+    /// one an implementation that reorders `entries` in place gets wrong: it
+    /// looks correct until the user sorts by a column and comes back.
+    #[test]
+    fn a_column_sort_overrides_the_arrangement_without_losing_it() {
+        settingsfile::testing::with_scratch_config("manual-prec", |_root| {
+            let scratch = temp_dir("manual_precedence");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            assert!(state.reorder_rows(vec![2], 0));
+            assert_eq!(state.entries[0].name, "c.txt");
+
+            // Sort by name: the view changes...
+            state.sort_by = SortBy::Name;
+            state.sort_entries();
+            assert_eq!(state.entries[0].name, "a.txt");
+
+            // ...and switching back restores the arrangement intact.
+            state.sort_by = SortBy::Custom;
+            state.sort_entries();
+            assert_eq!(
+                state.entries[0].name, "c.txt",
+                "the hand arrangement was discarded by a column sort"
+            );
+        });
+    }
+
+    /// A file that appears later lands at the end, not in the middle.
+    #[test]
+    fn a_new_file_joins_the_end_of_the_arrangement() {
+        settingsfile::testing::with_scratch_config("manual-new", |_root| {
+            let scratch = temp_dir("manual_newcomer");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            assert!(state.reorder_rows(vec![1], 0));
+            assert_eq!(state.entries[0].name, "b.txt");
+
+            write(&root.join("aaa-new.txt"), "x");
+            state.load_directory();
+
+            assert_eq!(state.entries[0].name, "b.txt", "the arrangement moved");
+            assert_eq!(
+                state.entries.last().expect("entries").name,
+                "aaa-new.txt",
+                "a newcomer jumped the arrangement despite sorting first by name"
+            );
+        });
+    }
+
+    /// Arrangements do not leak between folders.
+    #[test]
+    fn each_folder_keeps_its_own_arrangement() {
+        settingsfile::testing::with_scratch_config("manual-perfolder", |_root| {
+            let scratch = temp_dir("manual_perfolder");
+            let root = scratch.dir().to_path_buf();
+            let other = root.join("other");
+            fs::create_dir_all(&other).expect("mkdir");
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+                write(&other.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            // `other/` is a row too, and folders sort first, so the files are at
+            // 1 and 2 rather than 0 and 1. Naming the index by what is in it
+            // rather than by counting: a fixture that silently means a different
+            // row than the test says is how a green test proves nothing.
+            let last = state.entries.len().saturating_sub(1);
+            assert_eq!(state.entries[last].name, "b.txt");
+            assert!(state.reorder_rows(vec![last], 0));
+            assert_eq!(state.entries[0].name, "b.txt");
+
+            state.navigate_to(&other);
+            assert_eq!(
+                state.entries[0].name, "a.txt",
+                "one folder's arrangement was applied to another"
+            );
+            assert_eq!(
+                state.sort_by,
+                SortBy::Name,
+                "Custom stuck on a folder with no arrangement, where it means nothing"
+            );
+        });
+    }
+
+    /// A press that does not move is a click, not a rearrangement.
+    ///
+    /// The whole reason for the threshold. A file manager where an unsteady
+    /// click reorders the folder does silent, persistent damage that gets
+    /// blamed on something else.
+    #[test]
+    fn a_press_without_movement_does_not_rearrange() {
+        settingsfile::testing::with_scratch_config("manual-thresh", |_root| {
+            let scratch = temp_dir("manual_threshold");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            state.row_drag = Some(RowDrag {
+                start_x: 10.0,
+                start_y: 10.0,
+                rows: vec![1],
+                active: false,
+                insert_at: 0,
+            });
+            // A jitter of one pixel, well inside the threshold.
+            let _ = state.drag_row(11.0, 10.0);
+            assert!(!state.drop_row(), "a click rearranged the folder");
+            assert_eq!(state.entries[0].name, "a.txt");
+            assert_eq!(state.sort_by, SortBy::Name);
+        });
+    }
+
+    /// Past the threshold, the same gesture rearranges.
+    ///
+    /// Dropped below every row -- which is what an empty hit-test means, and
+    /// is the only thing a headless test can express, since the drop zones
+    /// hold the rectangles the last *frame* drew and no frame has been drawn.
+    /// So this pins the append case: a file dragged past the end goes last.
+    #[test]
+    fn a_press_that_travels_far_enough_rearranges() {
+        settingsfile::testing::with_scratch_config("manual-thresh-pass", |_root| {
+            let scratch = temp_dir("manual_threshold_pass");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            assert_eq!(state.entries[0].name, "a.txt");
+            state.row_drag = Some(RowDrag {
+                start_x: 10.0,
+                start_y: 10.0,
+                rows: vec![0],
+                active: false,
+                insert_at: 0,
+            });
+            let _ = state.drag_row(10.0, 60.0);
+            assert!(state.drop_row(), "a real drag did nothing");
+            assert_eq!(
+                state.entries.last().expect("entries").name,
+                "a.txt",
+                "a row dropped past the end did not go last"
+            );
+            assert_eq!(state.sort_by, SortBy::Custom);
+        });
+    }
+
+    /// Several rows move together and keep their relative order.
+    #[test]
+    fn a_multi_row_drag_moves_them_all_in_order() {
+        settingsfile::testing::with_scratch_config("manual-multi", |_root| {
+            let scratch = temp_dir("manual_multi");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            // Move b and c (rows 1 and 2) to the front, together.
+            assert!(state.reorder_rows(vec![1, 2], 0));
+            let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["b.txt", "c.txt", "a.txt", "d.txt"],
+                "the moved rows lost their order relative to each other"
+            );
+        });
+    }
+
+    /// Moving rows downward accounts for the gap they leave behind.
+    ///
+    /// The off-by-one this arithmetic exists for: lifting two rows out from
+    /// above the target shifts the target up by two, and not adjusting drops
+    /// them two places further down than the user pointed.
+    #[test]
+    fn rows_moved_downward_land_where_they_were_dropped() {
+        settingsfile::testing::with_scratch_config("manual-down", |_root| {
+            let scratch = temp_dir("manual_down");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            // Drop a.txt (row 0) before d.txt (row 3).
+            assert!(state.reorder_rows(vec![0], 3));
+            let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(names, vec!["b.txt", "c.txt", "a.txt", "d.txt"]);
+        });
+    }
+
+    /// An out-of-range target is refused rather than clamped.
+    #[test]
+    fn an_impossible_move_is_refused() {
+        settingsfile::testing::with_scratch_config("manual-range", |_root| {
+            let scratch = temp_dir("manual_range");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            assert!(
+                !state.reorder_rows(vec![9], 0),
+                "moved a row that is not there"
+            );
+            assert!(!state.reorder_rows(vec![0], 99), "moved a row past the end");
+            assert!(!state.reorder_rows(Vec::new(), 0), "moved nothing, loudly");
+        });
+    }
+
+    // ======================================================================
+    // Search
+    // ======================================================================
+
+    /// A search replaces the listing with matches from below the folder.
+    #[test]
+    fn a_search_shows_matches_from_the_whole_subtree() {
+        let scratch = temp_dir("search_subtree");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        write(&root.join("alpha-report.txt"), "x");
+        write(&root.join("sub/beta-report.txt"), "x");
+        write(&root.join("unrelated.dat"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("report");
+
+        assert_eq!(state.entries.len(), 2, "{:?}", state.entries);
+        assert!(state.search_showing.is_some(), "the view is a search");
+    }
+
+    /// A result in a subfolder says which subfolder.
+    ///
+    /// Without this, two files called `notes.txt` in different folders are the
+    /// same row twice to anyone reading the screen.
+    #[test]
+    fn a_nested_result_is_labelled_with_its_folder() {
+        let scratch = temp_dir("search_label");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        write(&root.join("notes.txt"), "x");
+        write(&root.join("sub/notes.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("notes");
+
+        let mut labels: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+        labels.sort_unstable();
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert!(
+            labels.iter().any(|l| l.contains("sub")),
+            "the nested result does not say where it is: {labels:?}"
+        );
+        assert_ne!(labels[0], labels[1], "two rows are indistinguishable");
+    }
+
+    /// Escape puts the folder back.
+    #[test]
+    fn escape_leaves_a_search_and_restores_the_listing() {
+        let scratch = temp_dir("search_escape");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        write(&root.join("only-match.txt"), "x");
+        write(&root.join("sub/also-match.txt"), "x");
+
+        let mut state = state_at(&root);
+        let before = state.entries.len();
+        state.run_search("match");
+        assert_eq!(state.entries.len(), 2);
+
+        state.leave_search();
+        assert!(state.search_showing.is_none(), "still in search mode");
+        assert_eq!(state.current_path, root, "did not return to the folder");
+        assert_eq!(
+            state.entries.len(),
+            before,
+            "the folder listing was not restored"
+        );
+    }
+
+    /// Leaving a search returns to where it started, not to a result's folder.
+    ///
+    /// The reason `search_origin` exists at all. Opening a result navigates
+    /// away; Escape after that means "stop searching", and a user who is
+    /// returned to the subfolder they happened to open has lost the place they
+    /// were searching from.
+    #[test]
+    fn leaving_a_search_returns_to_where_it_started() {
+        let scratch = temp_dir("search_origin");
+        let root = scratch.dir().to_path_buf();
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("mkdir");
+        write(&sub.join("deep-match.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("match");
+        // Simulate opening a result, which navigates into the subfolder.
+        state.navigate_to(&sub);
+        assert_eq!(state.current_path, sub);
+
+        state.leave_search();
+        assert_eq!(
+            state.current_path, root,
+            "Escape should return to the folder the search began in"
+        );
+    }
+
+    /// Refining a search keeps the original starting folder.
+    #[test]
+    fn refining_a_search_does_not_move_its_origin() {
+        let scratch = temp_dir("search_refine");
+        let root = scratch.dir().to_path_buf();
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("mkdir");
+        write(&sub.join("aaa-bbb.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("aaa");
+        state.navigate_to(&sub);
+        state.run_search("bbb");
+
+        state.leave_search();
+        assert_eq!(state.current_path, root, "the origin moved on refinement");
+    }
+
+    /// A search that finds nothing says so, and does not look like an empty
+    /// folder.
+    #[test]
+    fn a_search_with_no_matches_says_so() {
+        let scratch = temp_dir("search_none");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("nothing-like-this");
+
+        assert!(state.entries.is_empty());
+        assert!(
+            state.status_message.contains("No matches"),
+            "{}",
+            state.status_message
+        );
+    }
+
+    /// Leaving a search that was never started does nothing.
+    ///
+    /// Escape in an ordinary listing must not navigate anywhere.
+    #[test]
+    fn leaving_when_not_searching_is_a_no_op() {
+        let scratch = temp_dir("search_noop");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        let before = state.current_path.clone();
+        state.leave_search();
+        assert_eq!(state.current_path, before);
+        assert!(state.search_showing.is_none());
     }
 }

@@ -1649,6 +1649,20 @@ same pattern holds the launcher's program location, the screenshot output path
 and the input device's bus path. The storage layer underneath (`yamldoc`) has
 only `get_str`/`set_str`; it cannot hold anything but text.
 
+**It is not one page. Added 2026-09-16 after auditing the rest of the tree.**
+The wallpaper was simply the first one found. The same conversion persists a
+*backup's* source directory into its metadata
+(`apps/backup/src/main.rs:2019`), where it is later used to display which
+folder a backup came from and to filter backups by source. Back up a folder
+whose name is not text and the record of where it came from names somewhere
+else -- and the filter that finds it again will not.
+
+That is the more useful way to read this question: it is not "should the
+wallpaper picker reject some files", it is **"what does a settings or metadata
+file do with a name it cannot spell"**, and the answer applies everywhere at
+once. Choosing per-place would be worse than either option below, because two
+programs would then disagree about the same filename.
+
 **Why this is not just a bug to fix.** The three parts are each individually
 reasonable and only contradict in combination: names may be any bytes
 (`design.txt`); configuration is YAML (`CLAUDE.md`); YAML scalars are text.

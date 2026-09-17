@@ -217,6 +217,10 @@ IGNORE = (
     ("gui/desktop/src/run_dialog.rs",
      "let shown = cmd.to_string_lossy()",
      "named for what it is: the shown form"),
+    ("apps/explorer/src/main.rs",
+     "shown.to_string_lossy().into_owned()",
+     "the label a search row is drawn with, qualified by its folder; "
+     "`FileEntry::path` beside it is what opening the row uses"),
     ("apps/filesearch/src/main.rs",
      "&root.to_string_lossy(),",
      "reaches `describe_index_pass`, whose result is `self.status_message`; "

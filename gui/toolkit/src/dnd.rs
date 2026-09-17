@@ -91,10 +91,36 @@ impl DataObject {
 
     /// Creates a data object containing file paths.
     ///
-    /// Paths are stored as newline-separated UTF-8 strings.
+    /// Paths are separated by a NUL byte.
+    ///
+    /// # Why NUL and not a newline
+    ///
+    /// This used to join on `\n`, and a newline is a **legal character in a
+    /// SlateOS filename**: `design.txt` allows every byte in a name except `/`
+    /// and NUL. So a file genuinely called `notes<LF>draft.txt` was carried
+    /// across a drag as *two* paths, neither of which exists. NUL is the only
+    /// byte that cannot occur in a name, which is exactly what makes it the
+    /// only safe separator -- the same reasoning that makes `find -print0` the
+    /// form worth using.
+    ///
+    /// Nothing outside this file's own tests used this format yet, so the
+    /// change breaks no caller. It is being fixed now rather than when the
+    /// first one arrives, because the failure is silent and rare enough to be
+    /// mistaken for a filesystem error by whoever meets it.
+    ///
+    /// # What is still wrong here
+    ///
+    /// The `&str` in this signature. A path is bytes, so a name that is not
+    /// valid UTF-8 cannot be put into a drag at all -- and worse,
+    /// [`Self::get_file_paths`] returns `None` for the *whole* object if any
+    /// single path fails to decode, so one awkward filename loses the other
+    /// nine. Fixing that needs a decision about how a cross-process format
+    /// carries bytes on a host whose `OsStr` is not bytes; see
+    /// `known-issues.md`
+    /// `TD-C-DRAGGED-FILE-PATHS-CANNOT-CARRY-A-NAME-THAT-IS-NOT-TEXT`.
     pub fn with_files(paths: &[&str]) -> Self {
         let mut obj = Self::new();
-        let joined = paths.join("\n");
+        let joined = paths.join("\0");
         obj.set_data(DataFormat::FilePaths, joined.into_bytes());
         obj
     }
@@ -139,11 +165,14 @@ impl DataObject {
     /// Convenience: retrieves file paths as a vector of string slices.
     ///
     /// Returns `None` if no `FilePaths` data is set or if the bytes are not
-    /// valid UTF-8. Individual paths are split on newlines.
+    /// valid UTF-8. Individual paths are split on NUL, which is the one byte a
+    /// SlateOS filename cannot contain -- see [`Self::with_files`] for why the
+    /// newline this used to split on was the wrong choice, and for what is
+    /// still wrong with the `&str`.
     pub fn get_file_paths(&self) -> Option<Vec<&str>> {
         self.get_data(&DataFormat::FilePaths)
             .and_then(|bytes| core::str::from_utf8(bytes).ok())
-            .map(|s| s.split('\n').filter(|p| !p.is_empty()).collect())
+            .map(|s| s.split('\0').filter(|p| !p.is_empty()).collect())
     }
 
     /// Convenience: retrieves the URL content as a string slice.
@@ -676,6 +705,20 @@ mod tests {
         assert!(obj.has_format(&DataFormat::PlainText));
         assert_eq!(obj.get_text(), Some("hello world"));
         assert!(!obj.has_format(&DataFormat::Html));
+    }
+
+    /// A filename containing a newline survives the round trip.
+    ///
+    /// The bug this separator change fixes. A newline is legal in a name here,
+    /// so joining on one split a single real file into two paths that do not
+    /// exist -- and the failure would have surfaced as "no such file" for a
+    /// file plainly visible on screen.
+    #[test]
+    fn a_name_containing_a_newline_is_one_path_not_two() {
+        let obj = DataObject::with_files(&["/home/user/notes\ndraft.txt"]);
+        let paths = obj.get_file_paths().expect("file paths");
+        assert_eq!(paths.len(), 1, "a legal filename was split: {paths:?}");
+        assert_eq!(paths[0], "/home/user/notes\ndraft.txt");
     }
 
     #[test]

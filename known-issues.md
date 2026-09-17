@@ -155128,6 +155128,23 @@ So the rate in this file was one in eight, and the seven were not near misses �
 each had a reason on the spot. Recorded so the next reader spends the minute on
 the other thirty-seven sites in `apps/explorer` and `gui/desktop`, not these.
 
+**Triaged 2026-09-16: `apps/explorer/src/main.rs`, the eight sites there.**
+Four are a real but bounded defect and four are fine.
+
+The defect: `PathBar::new` and `set_path` take a `&str`, so the address bar is
+handed `current_path.to_string_lossy()`. For a directory whose path is not
+UTF-8 the bar therefore *shows* a path that does not exist, and pressing Enter
+on what it shows navigates nowhere — the same shape as the completion defect
+fixed the same day, one layer up. Not fixed here because the honest repair is
+for the widget to hold bytes, which is a change to `guitk::pathbar`'s API and
+to every caller, not a call-site swap. The user can still reach such a folder
+by clicking; only the typed route is broken.
+
+The four that are fine: a listing entry's `name` is display text while
+`entry.path` carries identity — the same split that makes `make_id` safe — and
+the extension sites feed sorting and type lookup, where a name with no text
+form sorts oddly and classifies as unknown, which is what it is.
+
 **Do not sweep this blindly.** Two `env::var` calls in this lane are correct
 and must stay: `gui/compositor`'s `SLATE_DRM_CARD` parses to a `u32`, so a
 non-UTF-8 value is invalid input and is already refused with a message, and

@@ -155181,7 +155181,7 @@ dialog applied a second time.
 That settles the scope for two of the three, and **not** for the pathbar --
 corrected here after checking rather than asserting twice in a row:
 
-* `IconAction::OpenPath` is a real defect, measured 2026-09-16. Half the
+* `IconAction::OpenPath` -- **FIXED 2026-09-16**, and the measurement is what made it safe to do: the variant holds a `PathBuf`, `storage_key` answers `Option<String>` and skips a path with no text form, and an existing layout is untouched because a representable path yields the key it always did. Was a real defect, measured first: Half the
   byte-safety is already there -- `icons.rs` reads `HOME` with `var_os` and
   builds a `PathBuf` -- and the `String`-typed variant throws the bytes away,
   after which activation does `PathBuf::from(path)` on the flattened text. So a

@@ -22,7 +22,7 @@ use guitk::style::CornerRadii;
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::{BufRead, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -1813,14 +1813,35 @@ fn read_file_header(path: &Path, n: usize) -> Option<Vec<u8>> {
 }
 
 /// Read the first `max_lines` lines of a text file.
-fn read_text_lines(path: &Path, max_lines: usize) -> Option<Vec<String>> {
-    let file = fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file.take(TEXT_PREVIEW_MAX_BYTES as u64));
-    let lines: Vec<String> = reader
-        .lines()
-        .take(max_lines)
-        .filter_map(|l| l.ok())
-        .collect();
+///
+/// `pub(crate)` for the preview pane, which shows the same lines this reads
+/// for a thumbnail — at a readable size instead of a 96-pixel minimap. One
+/// reader, so the panel and the icon cannot disagree about what is in a file.
+///
+/// **A line that is not UTF-8 is dropped**, because `BufRead::lines` yields an
+/// error for it and this filters errors out. That is tolerable in a minimap,
+/// where a missing line among twenty is invisible; in a readable preview it
+/// means a Latin-1 log quietly shows the wrong lines rather than showing
+/// something marked as undecodable. Replacement characters would be the
+/// honest rendering, and `String::from_utf8_lossy` is what draws them, which
+/// `scripts/lossy-decode.py` governs — so it is a change with a gate to
+/// answer to and not one to slip in here.
+pub(crate) fn read_text_lines(path: &Path, max_lines: usize) -> Option<Vec<String>> {
+    let bytes = read_file_header(path, TEXT_PREVIEW_MAX_BYTES)?;
+    // Lossy on purpose, and this is the audited kind. A preview draws file
+    // *contents* as text; a byte that is not text cannot be drawn as itself,
+    // so the choice is between a replacement character and nothing. What makes
+    // it safe is the same thing that makes the path bar's rendering safe: the
+    // rendering is never written anywhere. It is drawn and dropped, and the
+    // path beside it is the untouched bytes.
+    //
+    // This used to be `BufRead::lines().filter_map(|l| l.ok())`, which
+    // *dropped* a line that was not UTF-8. In a 96-pixel minimap one missing
+    // line among twenty is invisible. In the preview pane it meant a Latin-1
+    // log showed the wrong lines with nothing to say so -- the silent kind of
+    // wrong, where the reader has no reason to doubt what they are looking at.
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<String> = text.lines().take(max_lines).map(str::to_owned).collect();
     Some(lines)
 }
 
@@ -2190,6 +2211,40 @@ mod tests {
     }
 
     // -- Text preview truncation --------------------------------------------
+
+    /// **A line that is not UTF-8 is shown, not dropped.**
+    ///
+    /// The reader used to be `BufRead::lines().filter_map(|l| l.ok())`, which
+    /// discarded any line that failed to decode. A Latin-1 log then previewed
+    /// as its *decodable* lines only, with nothing to say the others were
+    /// missing -- plausible text that is not what the file says. A
+    /// replacement character is the honest answer: it marks where the bytes
+    /// stopped being text.
+    #[test]
+    fn a_line_that_is_not_utf8_is_shown_rather_than_dropped() {
+        let dir = std::env::temp_dir().join(format!("thumbs_lossy_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("latin1.log");
+        // `caf` + 0xE9 + ` ok`, which is `café ok` in Latin-1 and not UTF-8.
+        let mut bytes = b"first line\n".to_vec();
+        bytes.extend_from_slice(b"caf\xe9 ok\n");
+        bytes.extend_from_slice(b"last line\n");
+        fs::write(&path, &bytes).expect("write");
+
+        let lines = read_text_lines(&path, 10).expect("read");
+        assert_eq!(
+            lines.len(),
+            3,
+            "a line went missing instead of being rendered: {lines:?}"
+        );
+        assert!(
+            lines[1].contains('\u{fffd}'),
+            "the undecodable byte was not marked: {:?}",
+            lines[1]
+        );
+        assert_eq!(lines[2], "last line", "the lines after it shifted up");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn text_preview_truncates_to_max_lines() {

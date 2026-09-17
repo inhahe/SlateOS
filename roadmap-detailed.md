@@ -1892,17 +1892,17 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 - [ ] Signal/slot mechanism (maps to Rust channels or callback registration)
 
 #### Core Widgets
-- [ ] Buttons (text, graphic)
-- [ ] Labels
-- [ ] Menus
-- [ ] Checkboxes
-- [ ] Tristate checkboxes (yes/no/default — useful for cascading option overrides)
-- [ ] Radio buttons (grouped, only one selected)
-- [ ] Treeview
+- [x] Buttons (text, graphic)
+- [x] Labels
+- [x] Menus — *`menu.rs` and `menubar.rs`.*
+- [x] Checkboxes
+- [x] Tristate checkboxes (yes/no/default — useful for cascading option overrides) — *`CheckState::{Unchecked, Checked, Indeterminate}`.*
+- [x] Radio buttons (grouped, only one selected)
+- [-] Treeview — *not in `gui/toolkit`. The first four rows of this section are widgets; this one is a gap, and the bullet below it (a tristate-checkbox treeview populated from a directory) rests on it.*
 - [ ] Tristate checkbox treeview (with function to populate from directory)
-- [ ] Tabs view
-- [ ] Grid view
-- [ ] Color picker (like qtpyrc's)
+- [x] Tabs view — *`gui/toolkit/src/tabs.rs`.*
+- [x] Grid view — *`gui/toolkit/src/grid.rs`.*
+- [x] Color picker (like qtpyrc's) — *`gui/toolkit/src/colorpicker.rs`: HSV square and hue bar, RGB/HSV sliders, hex entry, alpha, presets, eyedropper and a recent-colours history, as `ColorPicker` (inline) and `ColorPickerDialog`. Consumers: `apps/paint`, `apps/colorpicker`, and `apps/settings` since 2026-09-17.*
 - [ ] **Font picker dialog** (family, style/weight, size, and other font attributes).
   - [ ] **Live "tentative selection" events.** The picker fires an event *whenever
     the user tentatively/temporarily changes any font attribute* (hovers or
@@ -1929,7 +1929,7 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 _Click selected radio button to deselect (returns group to no-selection state)._
 
 #### Text Views
-- [x] Simple text view: plain text, single font, ANSI colors (for terminals/logs) — *`guitk::textview::SimpleTextView`: ANSI colour, vertical scrolling, selection, copy and search. **Nothing consumes it.** *(Corrected later the same day: the obvious candidate is not one. `apps/logviewer` does hand-roll scrolling, wrapping, selection and search, and does lack ANSI colour — but it is not a text view. It parses structured entries, reads a `level`/`lvl`/`severity` field into a `LogLevel`, and filters by a severity floor; `SimpleTextView` models lines of ANSI-styled text and has no entry, level or filter. The overlap is in the mechanics, not the model, so this is unlike `TextInput`, where the app-side code was a strictly worse copy of the same thing. A first consumer for these widgets is still wanted; logviewer is not it.)*
+- [x] Simple text view: plain text, single font, ANSI colors (for terminals/logs) — *`guitk::textview::SimpleTextView`: ANSI colour, vertical scrolling, selection, copy and search. **Nothing consumes it.** *(Corrected later the same day: the obvious candidate is not one. `apps/logviewer` does hand-roll scrolling, wrapping, selection and search, and does lack ANSI colour — but it is not a text view. It parses structured entries, reads a `level`/`lvl`/`severity` field into a `LogLevel`, and filters by a severity floor; `SimpleTextView` models lines of ANSI-styled text and has no entry, level or filter. The overlap is in the mechanics, not the model, so this is unlike `TextInput`, where the app-side code was a strictly worse copy of the same thing. A first consumer for these widgets is still wanted; logviewer is not it.)* **`SimpleTextView` got one on 2026-09-17**: `apps/explorer`'s preview pane draws a selected text file's first 200 lines as readable text. It previously showed either the thumbnailer's 96-pixel minimap of the same lines — a picture *of* writing, since the pane never enlarges a thumbnail past its own pixels — or "No preview for this file" when the thumbnail had not been uploaded yet.
 - [x] Rich text view: fonts, sizes, colors, inline images (NOT HTML, simpler markup) — *`guitk::textview::RichTextView`: headings, lists, links and styling. No consumer either.*
 - [ ] Web view: embedded browser engine (after Chromium port)
 - [x] Word wrap option (if off, horizontal scroll) — *in `textview.rs`; `textedit::horizontal_scroll` is the single-line counterpart.*

@@ -157655,11 +157655,70 @@ to_zero_it`. HarfBuzz's `zero_mark_widths_by_gdef` adjusts the offset by
 `scaled.rs` (`let back = ...`) is gated on `synth_at`, which is
 `!applies_gpos` — we placed it ourselves — and so does not fire here.
 
-**One hypothesis, refuted.** Gating that shift on `zeroed_at` instead made it
-worse: `agree` 32203 -> 32178, `misplaced` 40 -> 65. So it is not simply
-"shift whenever the advance was zeroed", and the next attempt should start by
-finding which of HarfBuzz's three zeroing modes (`BY_GDEF_EARLY`,
-`BY_GDEF_LATE`, `NONE`) each of these runs takes.
+**Three hypotheses, all refuted, and the mechanism is now known.** HarfBuzz's
+two GDEF zeroing modes differ in exactly this: `BY_GDEF_EARLY` calls
+`zero_mark_widths_by_gdef(buffer, true)`, whose `true` means
+`x_offset -= x_advance` *before* the advance is zeroed; `BY_GDEF_LATE` passes
+`false` and does not move it. This crate already models the three modes, as
+`fallback::Zeroing::{Never, BeforeGpos, AfterGpos}`, and already asks the
+question, as `ScaledFont::zeroes_marks_first`. So the obvious fix is to gate
+the back-shift on that instead of on `synth_at`. Measured, on both corpora:
+
+| gate for the shift | default `misplaced` | USE `misplaced` |
+|---|---|---|
+| `synth_at` (*current*) | **1** | **40** |
+| `zeroed_at` | -- | 65 |
+| `early_at` (`zeroes_marks_first`) | 1315 | 105 |
+| `synth_at \|\| early_at` | 31 | 65 |
+
+So our `back` and HarfBuzz's `adjust_offsets` are **two different shifts**,
+not one seen from two angles: replacing ours with theirs is catastrophic, and
+adding theirs on top makes 30 runs worse that were right before. Whatever
+`early_at` selects, it includes runs that must not be shifted.
+
+**Then the run was printed, and the entry above was wrong about what
+differs.** Javanese `U+A98F U+A9C0` on Hack-Bold, both glyphs `.notdef`:
+
+    ours       advances [1233, 1233]   offsets [0, 0]
+    harfbuzz   advances [1233, 0]      offsets [0, -1233]
+
+**We do not zero the mark's advance at all here**, so this was never only
+about the offset -- the run is twice as wide as HarfBuzz makes it. The offset
+difference is the *consequence* of the zeroing that did not happen, since
+HarfBuzz's shift is by the advance it is about to discard.
+
+`marks[i]` is `zeroed_at[i] && if by_gdef { is_mark(gid) } else { glyph.mark }`.
+The glyph is `.notdef`, which a face's `GDEF` does not classify as a mark, so
+on any face that classifies its glyphs at all we ask about the glyph and get
+`false`. HarfBuzz zeroes it regardless.
+
+A fourth hypothesis, also refuted: `is_mark(gid) || glyph.mark`, so that the
+character's category answers when `GDEF` declines. Default `misplaced` 1 ->
+16, USE 40 -> 50. `GDEF` saying "not a mark" is evidently authoritative on a
+face that classifies, and the difference is somewhere in *how HarfBuzz
+decides mark-ness for a glyph its `GDEF` has no class for* -- which is not
+the same question as "does this face classify".
+
+**A fifth hypothesis, refuted, and it closes off a whole direction.** The
+obvious reading of "how HarfBuzz decides mark-ness for a glyph its `GDEF` has
+no class for" is a *per-glyph* fallback: consult the class, and where there is
+none, use the character's general category. Implemented that way it changes
+nothing at all, because `otl::glyph_class` returns `Some(0)` for any glyph
+outside the table's ranges and the first attempt read that as an answer.
+Correcting it to treat class 0 as "no class" -- which is what OpenType means
+by it -- then gives default `misplaced` 1 -> 16 and USE 40 -> 50: *exactly*
+the numbers the blunt `is_mark(gid) || glyph.mark` produced.
+
+That is the useful part. Class 0 is not a small set; it is every glyph the
+face did not explicitly list, so a category fallback over it is the same
+thing as the OR, and a per-glyph rule of that shape cannot be the answer
+however it is phrased. Whatever zeroes that mark in HarfBuzz is not a
+mark-ness fallback at all.
+
+Five hypotheses are now spent on the gate and the mark-ness test. The next
+attempt should leave both alone and instrument the other end: print what our
+zeroing pass *does* for this run -- `zeroed_at`, `marks`, the advance before
+and after -- rather than guessing which predicate ought to select it.
 
 **Why it is not urgent.** It arises only on a face with no glyphs for the
 script, so every glyph in the run is already a box. The reason to fix it is
@@ -157727,3 +157786,109 @@ enough to find the file, and reading the call paths did the rest. A report
 that localises the problem to four lines is already most of the value even
 when its identity half is broken -- which is an argument for shipping the
 site, not an excuse for the `?`.
+
+## TD-C-A-FIELD-ONLY-EVER-INITIALISED-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE -- METHOD 2026-09-17
+
+**In short:** a struct field that is set once when the struct is built and
+never read again is dead state, and it usually means a half-built feature
+that a reader will believe in. Neither of the two things that should catch it
+does: our gate needs an *assignment* to notice a field, and the compiler's
+own check is silenced by `pub`. A crude scan of `gui/` and `apps/` finds 347
+candidates.
+
+**Date:** 2026-09-17. **Lane:** C.
+
+**How it was found.** `apps/explorer` carried
+`pub tree_expanded: Vec<PathBuf>`, doc-commented "Tree sidebar expanded
+paths" and initialised to `vec!["/"]`. It occurred exactly twice in the
+crate: that line and the initialiser. The module's own feature list opened
+with "Directory tree sidebar"; the sidebar is five fixed quick-access rows.
+Removed, along with the claim.
+
+**Why nothing caught it.**
+
+| check | why it is silent |
+|---|---|
+| `scripts/check-fields-written-never-read.py` | it looks for a field that is *assigned* and never read. A field only ever initialised in a struct literal has no assignment. |
+| `dead_code` | the field is `pub`. On a binary crate `pub` buys nothing and costs this. |
+
+**The measurement.** `build/never_read_probe.py` asks the cruder question --
+is `.name` ever written anywhere in the crate -- over `gui/` and `apps/`:
+**347** fields. The regex is rough and some of those will be read through
+destructuring or a derive, so that is an upper bound. Two picked at random
+were both real:
+
+* `apps/dbviewer` `pub expanded: bool` — set in three struct literals, read
+  nowhere.
+* `apps/camera` `pub view_mode: GalleryViewMode` — initialised to `Grid`,
+  read nowhere, so the gallery cannot switch view. There *is* a test,
+  `test_gallery_view_modes`, and it asserts `GalleryViewMode::Grid.label()`
+  and that `all()` has three entries: it proves the enum exists and says
+  nothing about whether anything uses it.
+
+**Why the gate was not simply extended.** It runs over every lane's crates,
+and a gate that turns red on a false positive blocks lane A's and lane B's
+pushes as well as ours. At an upper bound of 347 it would not be a gate, it
+would be a wall. The order has to be triage first, then a baseline of what
+survives, then the check — which is how
+`fields-written-never-read-baseline.txt` itself describes its own 46: "a
+triage queue, not an amnesty".
+
+**Most of the count is one known cause, and that makes the triage far
+cheaper than 347 suggests.** Per crate: `gui/desktop` 84, `gui/compositor`
+23, `apps/torrent` 23, `apps/email` 21, then a long tail. The 84 are very
+largely the fields of panels nothing can display -- `ink_level`, `stapling`,
+`collation` and `submitted_at` all belong to `print_manager.rs`, which is
+1961 lines and 44 tests whose only mention anywhere in the tree is `pub mod
+print_manager;`. That is not a new finding; it is
+`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`, which counted about
+fifty such modules and named this one. **Do not triage those field by field.**
+They are dead because their module is unreachable, and they stop being dead
+the moment it is reached, so they follow that entry's decision and not this
+one's.
+
+**A second known cause takes most of the `apps/` tail.**
+`TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES` already names that
+pattern -- a complete, correct-looking screen over a source that does not
+exist -- and says it had been found sixteen times by 2026-09-04. `apps/email`
+is 21 of the 347 and is that entry's sharpest case by its own account.
+`apps/torrent` is 23 and is the same shape though the entry does not name it:
+`download_limit` and `upload_limit` are never read, and a bandwidth throttle
+*does* exist beside them (`set_limit`, `is_unlimited`, tested), so the setting
+and the mechanism are both built and nothing joins them. Wiring them would be
+theatre while the app has no socket at all -- its "Tracker announce/scrape
+(HTTP)" is a `TrackerProtocol::Http` enum variant and a `Display` impl.
+
+So the count decomposes, roughly: 84 unreachable shell modules, ~60 or more
+across the apps that display what nothing produces, and a genuinely-new
+remainder in the long tail. **Triage the remainder; leave the other two to the
+entries that own them**, or the same fields get argued about twice.
+
+`apps/camera` was the first of the remainder and is done (2026-09-17): three
+fields for a thumbnail grid that was never built, deleted with the enum that
+existed only to fill a chooser nothing has. The probe now reports zero for
+that crate.
+
+**The probe reads documentation as well as it reads code, which was not what
+it was for.** Twice now a dead field has been the thread that led to a
+feature list claiming something nothing backs:
+
+* `apps/explorer` opened its feature list with "Directory tree sidebar" and
+  carried `tree_expanded`. The sidebar is five fixed rows.
+* `apps/archivemanager` claimed "Create new archives from file lists",
+  "Compression level selection", "Split archive support" and
+  "Password/encryption", and carried a dead field behind each. Its backend
+  takes a path and no options, and recognises encrypted members without being
+  able to encrypt or decrypt. All four corrected 2026-09-17.
+
+A field nobody reads is often a sentence in a feature list nobody can
+honour, and the sentence is the more expensive of the two: state misleads
+whoever edits the file, a feature list misleads everybody.
+
+**Proper fix.** Work the list down in batches, per crate, deciding for each
+field whether it is a feature to finish or state to delete. Read the module's
+own doc comment alongside, and correct it in the same pass. When it is small
+enough to enumerate, add the "declared and never read" arm to the gate with
+the survivors baselined. Deleting is usually right: a field nobody reads has
+never worked, so nothing can depend on it.
+

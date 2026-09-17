@@ -844,7 +844,6 @@ pub struct CapturedPhoto {
     pub filter: ImageFilter,
     pub filename: String,
     /// Thumbnail pixel data (small preview).
-    pub thumbnail: Vec<u8>,
     pub favorite: bool,
 }
 
@@ -880,29 +879,6 @@ pub struct PhotoGallery {
     pub photos: Vec<CapturedPhoto>,
     pub selected_idx: Option<usize>,
     pub next_id: u32,
-    pub scroll_offset: usize,
-    pub view_mode: GalleryViewMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GalleryViewMode {
-    Grid,
-    List,
-    Filmstrip,
-}
-
-impl GalleryViewMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Grid => "Grid",
-            Self::List => "List",
-            Self::Filmstrip => "Filmstrip",
-        }
-    }
-
-    pub fn all() -> &'static [GalleryViewMode] {
-        &[Self::Grid, Self::List, Self::Filmstrip]
-    }
 }
 
 impl Default for PhotoGallery {
@@ -917,8 +893,6 @@ impl PhotoGallery {
             photos: Vec::new(),
             selected_idx: None,
             next_id: 1,
-            scroll_offset: 0,
-            view_mode: GalleryViewMode::Grid,
         }
     }
 
@@ -939,7 +913,6 @@ impl PhotoGallery {
             data_size,
             filter,
             filename,
-            thumbnail: vec![0u8; 64], // placeholder thumbnail
             favorite: false,
         });
         self.selected_idx = Some(self.photos.len().saturating_sub(1));
@@ -4000,12 +3973,6 @@ mod tests {
         assert_eq!(g.total_size(), 3000);
     }
 
-    #[test]
-    fn test_gallery_view_modes() {
-        assert_eq!(GalleryViewMode::Grid.label(), "Grid");
-        assert_eq!(GalleryViewMode::all().len(), 3);
-    }
-
     // --- RecordingSession tests ---
 
     #[test]
@@ -4189,7 +4156,6 @@ mod tests {
             data_size: 4096,
             filter: ImageFilter::None,
             filename: "photo_0001.png".to_string(),
-            thumbnail: vec![0; 64],
             favorite: false,
         };
         assert_eq!(photo.display_name(), "photo_0001.png");
@@ -4204,7 +4170,6 @@ mod tests {
             data_size: 1024,
             filter: ImageFilter::None,
             filename: "test.png".to_string(),
-            thumbnail: vec![],
             favorite: false,
         };
         let label = photo.time_label();
@@ -4220,7 +4185,6 @@ mod tests {
             data_size: 1024,
             filter: ImageFilter::None,
             filename: "test.png".to_string(),
-            thumbnail: vec![],
             favorite: false,
         };
         assert!(!photo.favorite);

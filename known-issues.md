@@ -158199,11 +158199,19 @@ it over a photograph the application had genuinely loaded and parsed the EXIF
 out of.
 
 The single-photo view now decodes the selected photograph and draws it, at
-the picture's own proportions rather than the 4:3 it used to assume. **The
-grid still draws cards.** Thumbnails need an image id per visible card and
-something to release the ids of cards that have scrolled away; the
-single-photo view deliberately uses one fixed id and buys none of that
-machinery. That is the next increment, and it is the larger half.
+the picture's own proportions rather than the 4:3 it used to assume, and
+**the grid draws thumbnails** -- generated a few per frame through the
+`thumbs` crate, which was extracted from `apps/explorer` for the purpose
+rather than reimplemented. Both halves are done.
+
+The id lifecycle I expected to have to build turned out not to exist as a
+problem: `thumbs::image_id` derives an id by hashing the file's path,
+modification time and size, so there is no pool and no allocator to get
+wrong. What the cache does own is *eviction*, and the rule worth having
+inherited is that drops are announced before uploads -- the compositor
+checks its budget against `held - freed + incoming`, so a batch evicting as
+many thumbnails as it generates is refused precisely when the cache is
+working as designed.
 
 Two further claims in that crate's feature list failed for the same root
 reason -- nothing in the application had ever held a pixel. The adjustments

@@ -219,6 +219,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/mutate-gate.py` | Break one piece of a Python gate at a time and demand its `--selftest` notice. |
 | `scripts/mutation_harness.py` | The mutation-sweep harness shared by every app's `mutate.py`. |
 | `scripts/mv-diff.sh` | Differential test: our `mv` against GNU coreutils'. |
+| `scripts/never-read-probe.py` | How many fields are declared, initialised, and never read? |
 | `scripts/nice-diff.sh` | Differential test: our `nice` against GNU coreutils'. |
 | `scripts/nl-diff.sh` | Differential test: our nl against GNU nl. |
 | `scripts/nohup-diff.sh` | Differential test: our `nohup` against GNU coreutils'. |
@@ -390,4 +391,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_380 scripts._
+_381 scripts._

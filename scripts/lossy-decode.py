@@ -125,6 +125,87 @@ NL = chr(10)
 #
 # Audited 2026-09-14, when the image's raw count of 131 came down to these six.
 IGNORE = (
+    # --- lane C, audited 2026-09-16, one file at a time ---
+    #
+    # Two shapes account for all of these, and both are cases where a lossy
+    # rendering is the CORRECT thing rather than a tolerated one.
+    #
+    # The first is the drawn half of the keep-exact-bytes pattern. A text
+    # field, a breadcrumb pill and a list row are all *text*; bytes that are
+    # not text cannot be drawn, so the rendering has to be lossy. What makes it
+    # safe is that the bytes are kept beside it -- `PathBar::edit_exact`,
+    # `FileDialog::filename_exact`, `RunDialog::command_exact` -- and it is the
+    # kept bytes, never the rendering, that reach the filesystem. Deleting the
+    # lossy call in these places does not fix anything; it makes the widget
+    # undrawable.
+    #
+    # The second is a comparison against what is currently DISPLAYED, used to
+    # decide whether the user edited the field. The question being asked is
+    # literally "does this text still read as the rendering of those bytes",
+    # so rendering is what it must compare, and comparing the bytes instead
+    # would answer a different question and always say "edited".
+    #
+    # A site is exempted here only when its line is distinctive enough to
+    # anchor on. `ignored()` is a substring match scoped to one file, so a
+    # generic anchor like a bare `.to_string_lossy()` would silently cover
+    # every future lossy call in that file as well. Those stay in
+    # `lossy-decode-baseline.txt`, where the per-file COUNT still notices a new
+    # one -- a weaker claim, and the honest one.
+    ("gui/toolkit/src/pathbar.rs",
+     "self.edit_text = self.path.as_os_str().to_string_lossy()",
+     "the address bar is a text field with a caret, so its contents must be "
+     "text; `edit_exact` holds the bytes and is what a confirm navigates to"),
+    ("gui/toolkit/src/pathbar.rs",
+     "Some(exact) if exact.as_os_str().to_string_lossy() == self.edit_text",
+     "asks whether the field still reads as the rendering of those bytes, "
+     "i.e. whether the user typed; comparing bytes would always say yes"),
+    ("gui/toolkit/src/pathbar.rs",
+     "label: exact.to_string_lossy().into_owned()",
+     "the drawn breadcrumb pill; `Segment::exact` beside it is the click "
+     "target and is never derived from this"),
+    ("gui/toolkit/src/dialog.rs",
+     "self.filename_input = name.to_string_lossy().into_owned()",
+     "the filename text field; `filename_exact` holds the bytes"),
+    ("gui/toolkit/src/dialog.rs",
+     "text: self.current_path.to_string_lossy().into_owned()",
+     "a rendered label in a `RenderCommand`; reaches the screen only"),
+    ("gui/toolkit/src/dialog.rs",
+     "text: entry.name.to_string_lossy().into_owned()",
+     "a rendered list row; the entry's own path is what opening it uses"),
+    ("gui/desktop/src/run_dialog.rs",
+     "self.input.set_text(&exact.to_string_lossy())",
+     "fills the visible field from the kept bytes; `command_exact` remains "
+     "the thing that is run"),
+    ("gui/desktop/src/run_dialog.rs",
+     "to_string_lossy().trim() == text",
+     "matches a candidate against what is on screen, which is the question "
+     "being asked"),
+    ("gui/desktop/src/run_dialog.rs",
+     "to_string_lossy().trim() == command",
+     "likewise, against the command as displayed"),
+    ("gui/desktop/src/run_dialog.rs",
+     "let shown = cmd.to_string_lossy()",
+     "named for what it is: the shown form"),
+    ("apps/filesearch/src/main.rs",
+     "&root.to_string_lossy(),",
+     "reaches `describe_index_pass`, whose result is `self.status_message`; "
+     "the crate already tracks unrepresentable names separately"),
+    ("apps/jsonviewer/src/main.rs",
+     ".map_or_else(|| shown.clone(), |n| n.to_string_lossy().into_owned())",
+     "the tab's label; the document's path is held separately"),
+    ("apps/procexplorer/src/main.rs",
+     ".map(|a| String::from_utf8_lossy(a).into_owned())",
+     "a process's argv rendered for a table cell, already joined with spaces "
+     "-- a flattening no encoding would undo"),
+    ("apps/procexplorer/src/main.rs",
+     "name: String::from_utf8_lossy(&stat.comm)",
+     "the process name column"),
+    ("apps/editor/src/highlight.rs",
+     "Language::from_extension(&ext.to_string_lossy())",
+     "decoded only to MATCH an extension against a table of ASCII names, the "
+     "same shape as `od`'s long-option lookup below; a name that does not "
+     "decode matches nothing either way, which is the Plain it would get"),
+
     ("stat", "from_utf8_lossy(TERSE_FILE)",
      "TERSE_FILE is a const format string in this file; ASCII by construction"),
     ("stat", "from_utf8_lossy(TERSE_FS)",
@@ -192,8 +273,36 @@ def strip_comments(text):
     return NL.join(out)
 
 
-def production_part(text):
-    """`text` up to its test module, and the line it was cut at."""
+def is_test_file(rel):
+    """Whether this whole file is test code by virtue of where it sits.
+
+    A test module does not have to be `#[cfg(test)] mod tests { ... }` inside
+    the file it tests. It can equally be `#[cfg(test)] mod tests;` beside a
+    `tests.rs`, and then the attribute is in the PARENT -- the test file itself
+    contains no `#[cfg(test)]` at all, so a scanner that looks only inside it
+    reads the entire module as production code.
+
+    That is not hypothetical: `gui/desktop/src/session/tests.rs` is declared
+    exactly that way, and every lossy decode in it was being reported as a
+    live defect.
+
+    The rule is the same one `scripts/check-config-turn-guards.py` already
+    uses, and it is deliberately the same rule rather than a second opinion --
+    two checkers disagreeing about what counts as test code is how one of them
+    ends up trusted for an answer the other would have given differently.
+    """
+    parts = rel.replace(os.sep, "/").split("/")
+    return parts[-1] == "tests.rs" or "tests" in parts[:-1]
+
+
+def production_part(text, rel=None):
+    """`text` up to its test module, and the line it was cut at.
+
+    `rel` is the file's path, needed because a file can be test code without
+    containing the attribute that says so -- see [`is_test_file`].
+    """
+    if rel is not None and is_test_file(rel):
+        return "", 1
     at = text.find("#[cfg(test)]")
     if at < 0:
         return text, None
@@ -319,7 +428,7 @@ def scan(path, name=None):
     back as a VALUE.
     """
     raw = io.open(path, encoding="utf-8", errors="replace").read()
-    prod, _ = production_part(raw)
+    prod, _ = production_part(raw, name)
     prod = strip_comments(prod)
     lines = prod.split(NL)
     found = []
@@ -373,7 +482,23 @@ def all_sources(roots=("userspace",)):
             for f in filenames:
                 if f.endswith(".rs"):
                     full = os.path.join(dirpath, f)
-                    rel = os.path.relpath(full, ROOT)
+                    # Forward slashes always, whatever the host separator
+                    # happens to be. The IGNORE table and the baseline are
+                    # both checked into git and read on three machines, so
+                    # a key spelled with the host's separator matches on
+                    # that host and silently nowhere else.
+                    #
+                    # This is not theoretical: the first fifteen
+                    # exemptions written for these trees had no effect at
+                    # all. They were spelled with forward slashes, the
+                    # scan produced the Windows form, the comparison was
+                    # equality, and nothing anywhere reported a mismatch
+                    # -- the run simply came back with the same count it
+                    # started with. An exemption that matches nothing and
+                    # an exemption that was never written look identical
+                    # from the outside, which is why the count was checked
+                    # rather than assumed.
+                    rel = os.path.relpath(full, ROOT).replace(os.sep, "/")
                     if rel in seen:
                         continue
                     seen.add(rel)
@@ -397,6 +522,23 @@ def selftest():
         lines = src.split(NL)
         return [classify(lines, i) for i, l in enumerate(lines)
                 if any(c in l for c in CALLS)]
+
+    # A file that is test code by where it sits, not by what it contains.
+    # The rule has to be tested through `production_part` rather than through
+    # `is_test_file` alone, because the bug it fixes was that the caller never
+    # asked -- a correct predicate nothing consults reads exactly like no
+    # predicate at all.
+    body = "fn f() {" + NL + "    let p = x.to_string_lossy();" + NL + "}"
+    ck(production_part(body, "gui/desktop/src/session/tests.rs")[0] == "",
+       "a `tests.rs` is entirely test code, whatever it contains")
+    ck(production_part(body, "apps/x/tests/helper.rs")[0] == "",
+       "a file under a `tests/` directory likewise")
+    ck(production_part(body, "apps/x/src/main.rs")[0] == body,
+       "an ordinary source file is still production")
+    ck(production_part(body, "apps/x/src/attestations.rs")[0] == body,
+       "a name merely CONTAINING `tests` is not a test file")
+    ck(is_test_file("a/tests.rs") and not is_test_file("a/tests.rs.bak"),
+       "the rule matches the file name, not a prefix of it")
 
     # A plain value conversion is the thing this exists to find.
     ck(kinds("fn f() {" + NL + "    let p = x.to_string_lossy();" + NL + "}") == ["VALUE"],

@@ -1630,6 +1630,55 @@ makes B converge instead of repeating.
 work continues to be picked from it, and occasionally someone rebuilds
 something that exists — which happened twice tonight and cost an hour each
 time. It does not get worse on its own, but it does not improve either.
+## C-Q24 — [C] A settings file cannot hold a filename that is not text. Refuse such files, or teach the file to carry them? — Status: OPEN (raised 2026-09-16)
+
+**In short:** this system deliberately lets a file be named with almost any
+character — that is a decision already made, written down in `design.txt`. But
+the small files that remember your preferences are written in a plain-text
+format, and plain text cannot represent some of those names. So if you pick
+such a file as your desktop wallpaper, the setting that gets saved names a
+*different file*: the wallpaper silently fails to appear, and the settings page
+shows you a path you never chose. The question is whether the right answer is
+to tell you plainly that the file cannot be used, or to teach the settings file
+how to carry those names.
+
+**Where it bites.** `apps/settings/src/main.rs:912` stores the chosen wallpaper
+with `path.to_string_lossy()` — a conversion that replaces any byte it cannot
+read with a placeholder character and returns it as if nothing happened. The
+same pattern holds the launcher's program location, the screenshot output path
+and the input device's bus path. The storage layer underneath (`yamldoc`) has
+only `get_str`/`set_str`; it cannot hold anything but text.
+
+**Why this is not just a bug to fix.** The three parts are each individually
+reasonable and only contradict in combination: names may be any bytes
+(`design.txt`); configuration is YAML (`CLAUDE.md`); YAML scalars are text.
+Something has to give, and which one gives is a policy choice, not a
+refactor. It also needs a change in `yamldoc/`, which lane C does not own.
+
+| Option | What changes | Cost |
+|---|---|---|
+| **A. Refuse, and say so** (recommended) | Picking such a file shows "This file's name can't be saved in settings" instead of silently doing nothing. Every other file behaves as now. | Small, entirely inside lane C. Such files cannot be used as wallpapers at all. |
+| **B. Teach the file to carry them** | Everything works, including these files. The settings file gains an occasional odd-looking encoded line where such a name appears. | Needs a new value type in `yamldoc` (lane B's tree) and a decision about the encoding; every reader must learn it. |
+| **C. Leave it** | No change: the wallpaper silently does not appear and the page shows a path nobody picked. | None now; it stays a bug that looks like a rendering fault, so it will be diagnosed as the wrong thing. |
+
+*What changes, stated as the user sees it:* **A** — an error message appears
+where nothing happened before. **B** — the wallpaper appears. **C** — the
+wallpaper silently does not appear.
+
+**Recommendation: A**, and not because B is wrong. B is the better end state,
+but it changes a file format three lanes read, and A is the part of B that has
+to exist anyway: even with B, some day some value will fail to encode, and
+"tell the user plainly" is the fallback. A is also the only one of the three
+that can be done without touching another lane's crate. If B is wanted, A first
+is not wasted work.
+
+**If it is never answered:** the current behaviour is C — a silent wrong value
+written to disk. It does not get worse with time and nothing is blocked by it,
+but it is the kind of defect that gets diagnosed as "the wallpaper renderer is
+broken", because the evidence points at the wrong subsystem. Note that it is
+*not* limited to wallpapers: the same conversion is how the launcher remembers
+where a program lives.
+
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS

@@ -1929,19 +1929,19 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 _Click selected radio button to deselect (returns group to no-selection state)._
 
 #### Text Views
-- [ ] Simple text view: plain text, single font, ANSI colors (for terminals/logs)
-- [ ] Rich text view: fonts, sizes, colors, inline images (NOT HTML, simpler markup)
+- [x] Simple text view: plain text, single font, ANSI colors (for terminals/logs) — *`guitk::textview::SimpleTextView`: ANSI colour, vertical scrolling, selection, copy and search. **Nothing consumes it.** *(Corrected later the same day: the obvious candidate is not one. `apps/logviewer` does hand-roll scrolling, wrapping, selection and search, and does lack ANSI colour — but it is not a text view. It parses structured entries, reads a `level`/`lvl`/`severity` field into a `LogLevel`, and filters by a severity floor; `SimpleTextView` models lines of ANSI-styled text and has no entry, level or filter. The overlap is in the mechanics, not the model, so this is unlike `TextInput`, where the app-side code was a strictly worse copy of the same thing. A first consumer for these widgets is still wanted; logviewer is not it.)*
+- [x] Rich text view: fonts, sizes, colors, inline images (NOT HTML, simpler markup) — *`guitk::textview::RichTextView`: headings, lists, links and styling. No consumer either.*
 - [ ] Web view: embedded browser engine (after Chromium port)
-- [ ] Word wrap option (if off, horizontal scroll)
-- [ ] Scroll-to-bottom / stay-at-bottom when new text added
+- [x] Word wrap option (if off, horizontal scroll) — *in `textview.rs`; `textedit::horizontal_scroll` is the single-line counterpart.*
+- [x] Scroll-to-bottom / stay-at-bottom when new text added — *in `textview.rs`.*
 - [ ] Emoji display without oversizing or resizing the line (unlike Qt)
 
 #### Input Fields
-- [ ] Single-line and multiline
+- [-] Single-line and multiline — *single-line is done and shared: `guitk::textinput::TextInput` (state) over `guitk::textedit` (the editing primitives and the `SingleLine` renderer, which draws caret, selection and the horizontal scroll that keeps a long string's caret visible). Multiline is not — `WidgetKind::TextArea` holds a value and a placeholder and has none of this. Twenty-two files still hand-roll typing against `KeyEvent::types_text`; `apps/settings` was the first converted, on 2026-09-17.*
 - [ ] Word wrap option
-- [ ] Placeholder text ("ghost text" showing field purpose)
+- [x] Placeholder text ("ghost text" showing field purpose) — *drawn wherever a field is: `WidgetKind::TextInput` and `TextArea` carry one and `widget.rs` draws it when the value is empty, `modal.rs`'s input dialog carries one, and `apps/settings`'s `text_field_row` shows one until the field has either text or focus. Verified drawn, not merely stored.*
 - [ ] Rich input with formatting and image paste (optional formatting toolbar)
-- [ ] Copy/paste: Ctrl+C/V and right-click context menu
+- [-] Copy/paste: Ctrl+C/V and right-click context menu — *the operations exist and are shared: `guitk::textinput::TextInput` has `cut`, `copy`, `paste` and `select_all` over one internal clipboard. **Reaching them from a keyboard is wired in exactly one place** — `apps/settings`'s exclusion field, 2026-09-17 — so every other field in the tree can hold a selection it has no way to copy. No right-click context menu anywhere, and no clipboard *service*: text cut in one program cannot be pasted into another, which is the larger half of this bullet and needs an IPC owner.*
 
 #### Dockable Panel / Splitter Layout Widget
 *Started 2026-09-17: `gui/toolkit/src/splitter.rs` holds the geometry — pure functions, the same shape as `scrollbar`, so the caller keeps the layout and every case is testable headless. A layout is fractions summing to one rather than pixels, so a saved arrangement survives a window resize; per-pane minimums are what stop them collapsing. **Its first consumer landed the same day**: `apps/explorer`'s preview panel splits the file pane with it and drags its divider, so this is a widget in use rather than a container nothing reaches.*

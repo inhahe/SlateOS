@@ -32,6 +32,8 @@ use guitk::scroll_window;
 #[allow(unused_imports)]
 use guitk::style::{CornerRadii, Edges};
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use inputsettings::{InputFile, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS};
 use oswindow::app::{Reloads, Response};
@@ -496,7 +498,13 @@ pub struct SettingsState {
     /// the settings: a draft that wrote itself into `wallpaper.exclude` on
     /// every keystroke would leave `holiday`, `holiday-`, `holiday-2` and the
     /// rest behind in the file, each of them a pattern the user never meant.
-    pub exclusion_draft: String,
+    /// A [`TextInput`] and not a `String`. The first version of this row was
+    /// a `String` with `push` and `pop` against it, so a typo in the middle of
+    /// `holiday-2019-*.jpg` could only be fixed by deleting back to it: no
+    /// arrow keys, no selection, no paste. The toolkit already had a field
+    /// that does all of that, and does it correctly for right-to-left text,
+    /// which a hand-rolled one was never going to.
+    pub exclusion_draft: TextInput,
     /// Which place on the page typing goes to, if any.
     focused_field: Option<FieldId>,
     /// What the open picker is being used for.
@@ -974,7 +982,7 @@ impl SettingsState {
     /// a list holding one pattern twice excludes nothing extra and gives the
     /// user two rows to remove before the picture comes back.
     fn add_exclusion(&mut self) {
-        let pattern = self.exclusion_draft.trim().to_string();
+        let pattern = self.exclusion_draft.text().trim().to_string();
         if pattern.is_empty() {
             return;
         }
@@ -1274,7 +1282,7 @@ impl SettingsState {
             dialog: None,
             color_dialog: None,
             color_is_for: ColorPurpose::Accent,
-            exclusion_draft: String::new(),
+            exclusion_draft: TextInput::new(),
             focused_field: None,
             picker_is_for: PickerPurpose::Wallpaper,
 
@@ -2004,6 +2012,14 @@ const BUTTON_HEIGHT: f32 = 32.0;
 /// mistake the user is about to make.
 const FIELD_WIDTH: f32 = 260.0;
 
+/// The size text in a field is drawn at.
+///
+/// Named because two places need the *same* answer: the row that draws the
+/// text, and the arrow keys, which move the caret by screen position and so
+/// must measure at the size it was drawn at. A constant rather than two
+/// literals is what keeps them from drifting apart.
+const FIELD_FONT_SIZE: f32 = 13.0;
+
 /// How far below a row's top edge a button inside that row is drawn.
 const BUTTON_ROW_INSET_Y: f32 = 6.0;
 
@@ -2672,7 +2688,7 @@ trait PageSink {
         &mut self,
         label: &str,
         id: FieldId,
-        value: &str,
+        field: &TextInput,
         placeholder: &str,
         focused: bool,
     ) {
@@ -2688,17 +2704,21 @@ trait PageSink {
             BUTTON_HEIGHT,
             RowHit::Focus(id),
         );
-        let text = value.to_string();
+        // Owned, because the closure outlives this call and `SingleLine`
+        // borrows what it draws.
+        let text = field.text().to_string();
+        let cursor = field.cursor();
+        let anchor = field.selection_anchor();
         let hint = placeholder.to_string();
         self.draw(move |tree, x, y| {
             let fx = x + CONTROL_COLUMN_DX;
             let fy = y + BUTTON_ROW_INSET_Y;
             fill_rounded(tree, fx, fy, FIELD_WIDTH, BUTTON_HEIGHT, pal.surface0, 6.0);
             if focused {
-                // An underline and a caret rather than a different fill, so the
-                // text reads identically whether or not the field has the
-                // keyboard -- a field that changes colour when focused makes
-                // the *text* look like it changed.
+                // An underline rather than a different fill, so the text reads
+                // identically whether or not the field has the keyboard: a
+                // field that changes colour when focused makes the *text* look
+                // like it changed.
                 fill_rounded(
                     tree,
                     fx,
@@ -2708,20 +2728,8 @@ trait PageSink {
                     pal.accent,
                     1.0,
                 );
-                // Clamped to the field: a caret past the right edge would sit
-                // on the page beside a field whose text is being clipped.
-                let caret = (fx + 8.0 + text::width(&text, 13.0)).min(fx + FIELD_WIDTH - 10.0);
-                fill_rounded(
-                    tree,
-                    caret,
-                    fy + 6.0,
-                    1.5,
-                    BUTTON_HEIGHT - 12.0,
-                    pal.accent,
-                    0.5,
-                );
             }
-            if text.is_empty() {
+            if text.is_empty() && !focused {
                 text_clipped(
                     tree,
                     fx + 8.0,
@@ -2731,17 +2739,32 @@ trait PageSink {
                     13.0,
                     FIELD_WIDTH - 16.0,
                 );
-            } else {
-                text_clipped(
-                    tree,
-                    fx + 8.0,
-                    fy + 7.0,
-                    &text,
-                    pal.text,
-                    13.0,
-                    FIELD_WIDTH - 16.0,
-                );
+                return;
             }
+            // The toolkit's own field: caret, selection, and the horizontal
+            // scroll that keeps the caret visible in a string wider than the
+            // box. This row drew its own caret from `text::width` until
+            // 2026-09-17, which put it at the end of the string rather than at
+            // the caret and could not show a selection at all.
+            textedit::draw(
+                tree,
+                &textedit::SingleLine {
+                    text: &text,
+                    cursor,
+                    selection_anchor: anchor,
+                    focused,
+                    x: fx + 8.0,
+                    y: fy + 7.0,
+                    width: FIELD_WIDTH - 16.0,
+                    line_height: 18.0,
+                    font_size: FIELD_FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: pal.text,
+                    selection_bg: pal.accent,
+                    selection_fg: pal.crust,
+                    caret_width: 1.5,
+                },
+            );
         });
         self.advance(ITEM_HEIGHT);
     }
@@ -3596,7 +3619,7 @@ impl SettingsState {
             );
             // Offered only with something to add: a button that does nothing
             // for an empty field is one a user reads as broken.
-            if !self.exclusion_draft.trim().is_empty() {
+            if !self.exclusion_draft.text().trim().is_empty() {
                 s.button_row(
                     "",
                     "Add",
@@ -5380,9 +5403,58 @@ impl SettingsState {
         // is reached with Ctrl+F, which still works — `types_text` is false
         // for a chord.
         if self.focused_field == Some(FieldId::ExclusionDraft) {
+            let shift = evt.modifiers.shift;
             match evt.key {
                 Key::Backspace => {
-                    self.exclusion_draft.pop();
+                    self.exclusion_draft.backspace();
+                    return EventResult::Consumed;
+                }
+                Key::Delete => {
+                    self.exclusion_draft.delete();
+                    return EventResult::Consumed;
+                }
+                // The caret moves, and moves *visually*: `move_cursor_left`
+                // takes the font it is drawn at because on a line that mixes
+                // directions "one place left" is not "one character back".
+                // None of this existed while the draft was a `String`.
+                Key::Left => {
+                    self.exclusion_draft.move_cursor_left(
+                        shift,
+                        FIELD_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    );
+                    return EventResult::Consumed;
+                }
+                Key::Right => {
+                    self.exclusion_draft.move_cursor_right(
+                        shift,
+                        FIELD_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    );
+                    return EventResult::Consumed;
+                }
+                Key::Home => {
+                    self.exclusion_draft.move_home(shift);
+                    return EventResult::Consumed;
+                }
+                Key::End => {
+                    self.exclusion_draft.move_end(shift);
+                    return EventResult::Consumed;
+                }
+                Key::A if evt.modifiers.ctrl => {
+                    self.exclusion_draft.select_all();
+                    return EventResult::Consumed;
+                }
+                Key::C if evt.modifiers.ctrl => {
+                    self.exclusion_draft.copy();
+                    return EventResult::Consumed;
+                }
+                Key::X if evt.modifiers.ctrl => {
+                    self.exclusion_draft.cut();
+                    return EventResult::Consumed;
+                }
+                Key::V if evt.modifiers.ctrl => {
+                    self.exclusion_draft.paste();
                     return EventResult::Consumed;
                 }
                 Key::Escape => {
@@ -5399,7 +5471,9 @@ impl SettingsState {
                 }
                 _ => {
                     if evt.types_text() {
-                        self.exclusion_draft.extend(evt.typed());
+                        for ch in evt.typed() {
+                            self.exclusion_draft.insert_char(ch);
+                        }
                         return EventResult::Consumed;
                     }
                 }
@@ -7535,7 +7609,7 @@ mod tests {
                 "the pattern never reached the setting the shell reads"
             );
             assert!(
-                state.exclusion_draft.is_empty(),
+                state.exclusion_draft.text().is_empty(),
                 "the field still holds the pattern it just added"
             );
         });
@@ -7549,9 +7623,9 @@ mod tests {
     fn adding_a_pattern_twice_adds_it_once() {
         with_scratch_config("settings-exclusion-dup", |_root| {
             let mut state = rotation_page();
-            state.exclusion_draft = "*.gif".to_string();
+            state.exclusion_draft.set_text("*.gif");
             state.add_exclusion();
-            state.exclusion_draft = "  *.gif  ".to_string();
+            state.exclusion_draft.set_text("  *.gif  ");
             state.add_exclusion();
 
             assert_eq!(
@@ -7572,7 +7646,7 @@ mod tests {
                 "an Add button was drawn with nothing to add"
             );
 
-            state.exclusion_draft = "   ".to_string();
+            state.exclusion_draft.set_text("   ");
             state.add_exclusion();
             assert!(
                 state.appearance.settings.wallpaper_exclusions.is_empty(),
@@ -7623,7 +7697,11 @@ mod tests {
                 kind: MouseEventKind::Press(MouseButton::Left),
             }));
             type_text(&mut state, "ab");
-            assert_eq!(state.exclusion_draft, "ab", "the field did not take typing");
+            assert_eq!(
+                state.exclusion_draft.text(),
+                "ab",
+                "the field did not take typing"
+            );
 
             let (tx, ty) = center_of(&state, RowHit::Toggle(ToggleId::RotationShuffle))
                 .expect("no shuffle switch to click");
@@ -7635,9 +7713,46 @@ mod tests {
 
             type_text(&mut state, "cd");
             assert_eq!(
-                state.exclusion_draft, "ab",
+                state.exclusion_draft.text(),
+                "ab",
                 "typing went on landing in a field the user had clicked away from"
             );
+        });
+    }
+
+    /// **A typo in the middle of a pattern can be fixed in the middle.**
+    ///
+    /// The point of the field being a `TextInput` rather than a `String`. The
+    /// first version of this row supported typing and backspace and nothing
+    /// else, so `holiday-2109-*.jpg` could only be corrected by deleting back
+    /// to the mistake and retyping the rest. Asserted through the key handler,
+    /// because the claim is about what the *keyboard* can do.
+    #[test]
+    fn the_caret_can_be_moved_back_into_a_pattern() {
+        with_scratch_config("settings-exclusion-caret", |_root| {
+            let mut state = rotation_page();
+            let (x, y) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            type_text(&mut state, "*.gf");
+            // Back one, and put the missing letter where it belongs.
+            state.handle_event(&key_press(Key::Left));
+            type_text(&mut state, "i");
+
+            assert_eq!(
+                state.exclusion_draft.text(),
+                "*.gif",
+                "the caret did not move back into the pattern"
+            );
+
+            // And Home reaches the front, which backspace never could.
+            state.handle_event(&key_press(Key::Home));
+            type_text(&mut state, "x");
+            assert_eq!(state.exclusion_draft.text(), "x*.gif");
         });
     }
 

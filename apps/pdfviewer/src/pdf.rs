@@ -33,8 +33,24 @@
 //!    text and 19% narrow on another's display type, which is the box a
 //!    search highlight is drawn in.
 //!
-//! **What is deliberately not here yet.** A simple font's `/Encoding` is not
-//! read, so `WinAnsiEncoding` is assumed. A composite font *without* a
+//! 9. **`/Encoding` differences**, the codes a font remaps. Eleven fonts in
+//!    one measured document use them; 500 of its runs carry a ligature and 92
+//!    a curly quote that previously decoded as whatever `WinAnsi` had at that
+//!    code.
+//!
+//! **What is deliberately not here yet.** A named base encoding other than
+//! `WinAnsiEncoding` -- `MacRomanEncoding`, `StandardEncoding` -- is treated
+//! as WinAnsi, so a font declaring one has the wrong characters where the two
+//! differ.
+//!
+//! **And a run holds no spaces it was not given.** A PDF separates words by
+//! *moving the pen*, not by drawing a space, so a line may arrive as
+//! "Definingandassigningmaterials". The text is exactly what the file draws
+//! and a search for two words with a space between them will not match it.
+//! Inferring the breaks means deciding a kerning gap is wide enough to be a
+//! space, which is a threshold and therefore a guess; it is not made here
+//! yet, and the absence is written down because a search that silently fails
+//! to match looks like a document that does not contain the words. A composite font *without* a
 //! `/ToUnicode` map still yields nothing -- its codes are glyph indices into a
 //! subset font and relate to no character -- and such a page is counted in
 //! [`Document::unreadable_pages`], so "no results" from a search can be told
@@ -992,6 +1008,168 @@ fn page_text(
     (runs, readable && !blocked)
 }
 
+/// What a glyph name stands for, where this can say.
+///
+/// Two forms are algorithmic and exact: `uniXXXX` and `uXXXX` name a codepoint
+/// outright. The rest is a table of the names that actually turn up -- 28
+/// distinct ones across the eleven `/Differences` arrays in one measured
+/// document, and they are the usual suspects: the `ff`/`fi`/`fl` ligatures,
+/// curly quotes, dashes, bullets.
+///
+/// **A name this does not know decodes to nothing**, which is the same rule
+/// the CID decoder follows. Guessing at an unknown glyph name puts a character
+/// on the page that the document does not contain, and into every search over
+/// it.
+fn glyph_name_char(name: &str) -> Option<char> {
+    // `uniXXXX`, and `uXXXX` with four to six digits.
+    if let Some(hex) = name.strip_prefix("uni").filter(|h| h.len() == 4) {
+        return u32::from_str_radix(hex, 16).ok().and_then(char::from_u32);
+    }
+    if let Some(hex) = name
+        .strip_prefix('u')
+        .filter(|h| (4..=6).contains(&h.len()))
+    {
+        if hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return u32::from_str_radix(hex, 16).ok().and_then(char::from_u32);
+        }
+    }
+    let found = match name {
+        // Ligatures, which is what most `/Differences` arrays are for.
+        "ff" => '\u{fb00}',
+        "fi" => '\u{fb01}',
+        "fl" => '\u{fb02}',
+        "ffi" => '\u{fb03}',
+        "ffl" => '\u{fb04}',
+        // Quotes and dashes, the other common reason.
+        "quoteright" => '\u{2019}',
+        "quoteleft" => '\u{2018}',
+        "quotedblleft" => '\u{201c}',
+        "quotedblright" => '\u{201d}',
+        "quotesinglbase" => '\u{201a}',
+        "quotedblbase" => '\u{201e}',
+        "quotesingle" => '\'',
+        "quotedbl" => '"',
+        "endash" => '\u{2013}',
+        "emdash" => '\u{2014}',
+        "minus" => '\u{2212}',
+        "hyphen" => '-',
+        "bullet" => '\u{2022}',
+        "openbullet" => '\u{25e6}',
+        "ellipsis" => '\u{2026}',
+        "dagger" => '\u{2020}',
+        "daggerdbl" => '\u{2021}',
+        "perthousand" => '\u{2030}',
+        "trademark" => '\u{2122}',
+        "copyright" => '\u{a9}',
+        "registered" => '\u{ae}',
+        "degree" => '\u{b0}',
+        "section" => '\u{a7}',
+        "paragraph" => '\u{b6}',
+        "periodcentered" => '\u{b7}',
+        "fraction" => '\u{2044}',
+        "guilsinglleft" => '\u{2039}',
+        "guilsinglright" => '\u{203a}',
+        "guillemotleft" => '\u{ab}',
+        "guillemotright" => '\u{bb}',
+        // Named punctuation that a `/Differences` array may restate.
+        "space" => ' ',
+        "period" => '.',
+        "comma" => ',',
+        "colon" => ':',
+        "semicolon" => ';',
+        "exclam" => '!',
+        "question" => '?',
+        "bar" => '|',
+        "slash" => '/',
+        "backslash" => '\\',
+        "asterisk" => '*',
+        "numbersign" => '#',
+        "percent" => '%',
+        "ampersand" => '&',
+        "at" => '@',
+        "underscore" => '_',
+        "parenleft" => '(',
+        "parenright" => ')',
+        "braceleft" => '{',
+        "braceright" => '}',
+        "bracketleft" => '[',
+        "bracketright" => ']',
+        // TeX builds a tall bracket out of pieces. The top, bottom and `Big`
+        // forms are brackets and read as one; the `ex` *extension* segment is
+        // the middle of a drawn shape and is no character at all, so it is
+        // deliberately absent -- mapping it would insert a bracket per row of
+        // height.
+        "bracketlefttp" | "bracketleftbt" | "bracketleftBig" | "bracketleftbig" => '[',
+        "bracketrighttp" | "bracketrightbt" | "bracketrightBig" | "bracketrightbig" => ']',
+        // A few accented names that turn up in re-encoded text fonts.
+        "adieresis" => '\u{e4}',
+        "odieresis" => '\u{f6}',
+        "udieresis" => '\u{fc}',
+        "germandbls" => '\u{df}',
+        "eacute" => '\u{e9}',
+        "egrave" => '\u{e8}',
+        "agrave" => '\u{e0}',
+        "ccedilla" => '\u{e7}',
+        "ntilde" => '\u{f1}',
+        _ => return None,
+    };
+    Some(found)
+}
+
+/// A font's `/Encoding`, as the codes it moves.
+///
+/// A plain name -- `/WinAnsiEncoding` -- moves nothing, because WinAnsi is
+/// what this assumes anyway. A dictionary may carry `/Differences`, which is
+/// the part that matters: an array where a number sets the next code and each
+/// name that follows takes the next one along.
+fn encoding_overrides(
+    data: &[u8],
+    offsets: &Xref,
+    dict: &BTreeMap<String, Object>,
+) -> BTreeMap<u32, char> {
+    let mut out = BTreeMap::new();
+    let Some(encoding) = dict.get("Encoding") else {
+        return out;
+    };
+    let Ok(encoding) = resolve(data, offsets, encoding, 0) else {
+        return out;
+    };
+    let Some(encoding) = encoding.as_dict() else {
+        return out;
+    };
+    let Some(differences) = encoding.get("Differences") else {
+        return out;
+    };
+    let Ok(Object::Array(items)) = resolve(data, offsets, differences, 0) else {
+        return out;
+    };
+    let mut code = 0u32;
+    for item in &items {
+        match item {
+            Object::Int(_) | Object::Real(_) => {
+                let Some(value) = item.as_f64().filter(|v| *v >= 0.0 && *v < 65_536.0) else {
+                    continue;
+                };
+                #[allow(clippy::cast_possible_truncation, reason = "bounded above")]
+                #[allow(clippy::cast_sign_loss, reason = "filtered non-negative")]
+                {
+                    code = value as u32;
+                }
+            }
+            Object::Name(name) => {
+                if let Some(ch) = glyph_name_char(name) {
+                    out.insert(code, ch);
+                }
+                // The counter advances whether or not the name was known, or
+                // every name after an unknown one would land on the wrong code.
+                code = code.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// A simple font's `/FirstChar` + `/Widths`, into a code-to-width map.
 fn simple_widths(
     data: &[u8],
@@ -1127,6 +1305,7 @@ fn font_map(data: &[u8], offsets: &Xref, resources: Option<&Object>) -> FontMap 
         if !composite {
             let mut simple = Font::simple();
             if let Some(dict) = dict {
+                simple.overrides = encoding_overrides(data, offsets, dict);
                 simple.widths = simple_widths(data, offsets, dict);
                 // `/MissingWidth` lives in the descriptor, not the font.
                 simple.default_width = dict
@@ -1715,6 +1894,13 @@ pub enum FontKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Font {
     pub kind: FontKind,
+    /// Codes this font remaps, from its `/Encoding`'s `/Differences`.
+    ///
+    /// Applied over the base encoding rather than replacing it: a
+    /// `/Differences` array names the handful of codes that move and says
+    /// nothing about the rest, so a font that remaps three codes still reads
+    /// its other 250 the ordinary way.
+    pub overrides: BTreeMap<u32, char>,
     /// Glyph widths in thousandths of an em, by character code.
     ///
     /// From `/FirstChar` + `/Widths` for a simple font, and from the
@@ -1743,6 +1929,7 @@ impl Font {
     pub fn simple() -> Self {
         Self {
             kind: FontKind::Simple,
+            overrides: BTreeMap::new(),
             widths: BTreeMap::new(),
             default_width: 0.0,
             to_unicode: None,
@@ -1754,6 +1941,7 @@ impl Font {
     pub fn composite(to_unicode: Option<CMap>) -> Self {
         Self {
             kind: FontKind::Composite,
+            overrides: BTreeMap::new(),
             widths: BTreeMap::new(),
             default_width: 0.0,
             to_unicode,
@@ -1976,7 +2164,16 @@ fn push_run(
             to_unicode: None,
             ..
         }) => return,
-        _ => bytes.iter().filter_map(|b| win_ansi(*b)).collect(),
+        Some(font) => bytes
+            .iter()
+            .filter_map(|b| {
+                font.overrides
+                    .get(&u32::from(*b))
+                    .copied()
+                    .or_else(|| win_ansi(*b))
+            })
+            .collect(),
+        None => bytes.iter().filter_map(|b| win_ansi(*b)).collect(),
     };
     if text.trim().is_empty() {
         return;
@@ -3120,6 +3317,85 @@ begincmap\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
             _ => panic!("not a dictionary"),
         };
         assert!(composite_widths(b"", &Xref::default(), &dict).is_empty());
+    }
+
+    /// A `/Differences` array remaps the codes it names, and only those.
+    #[test]
+    fn differences_remap_the_codes_they_name() {
+        let mut font = Font::simple();
+        font.overrides.insert(1, '\u{fb01}');
+        font.overrides.insert(2, '\u{2019}');
+        let mut fonts = FontMap::new();
+        fonts.insert("F1".to_owned(), font);
+
+        // Codes 1 and 2 are remapped; 'A' is not and reads the ordinary way.
+        let runs = extract_text(b"BT /F1 10 Tf 1 0 0 1 0 0 Tm (\x01A\x02) Tj ET", &fonts);
+        assert_eq!(runs.first().expect("a run").text, "\u{fb01}A\u{2019}");
+    }
+
+    /// The `/Differences` walk: a number sets the code, names take the next.
+    #[test]
+    fn a_differences_array_counts_from_each_number() {
+        let dict = match Lexer::new(b"<< /Encoding << /Differences [1 /fi /fl 10 /bullet] >> >>")
+            .object()
+            .expect("parses")
+        {
+            Object::Dict(d) => d,
+            _ => panic!("not a dictionary"),
+        };
+        let map = encoding_overrides(b"", &Xref::default(), &dict);
+        assert_eq!(map.get(&1), Some(&'\u{fb01}'));
+        assert_eq!(map.get(&2), Some(&'\u{fb02}'), "the second name follows on");
+        assert_eq!(
+            map.get(&10),
+            Some(&'\u{2022}'),
+            "and the number restarts it"
+        );
+        assert_eq!(map.get(&11), None);
+    }
+
+    /// An unknown glyph name advances the counter without inventing a letter.
+    ///
+    /// Both halves matter. Skipping the advance would land every name after it
+    /// on the wrong code; inventing a character would put one on the page that
+    /// the document does not contain.
+    #[test]
+    fn an_unknown_glyph_name_is_skipped_but_still_counted() {
+        let dict = match Lexer::new(b"<< /Encoding << /Differences [5 /nosuchglyph /fi] >> >>")
+            .object()
+            .expect("parses")
+        {
+            Object::Dict(d) => d,
+            _ => panic!("not a dictionary"),
+        };
+        let map = encoding_overrides(b"", &Xref::default(), &dict);
+        assert_eq!(map.get(&5), None, "nothing invented for the unknown name");
+        assert_eq!(
+            map.get(&6),
+            Some(&'\u{fb01}'),
+            "and the next name is not shifted"
+        );
+    }
+
+    /// `uniXXXX` names a codepoint outright.
+    #[test]
+    fn a_uni_name_is_its_codepoint() {
+        assert_eq!(glyph_name_char("uni00E9"), Some('\u{e9}'));
+        assert_eq!(glyph_name_char("u20AC"), Some('\u{20ac}'));
+        assert_eq!(glyph_name_char("uniZZZZ"), None);
+    }
+
+    /// A bracket piece that is a bracket reads as one; an extension does not.
+    ///
+    /// TeX draws a tall bracket from stacked pieces. The top, bottom and `Big`
+    /// forms each stand for the bracket; the `ex` segment is the middle of a
+    /// drawn shape and is no character, so mapping it would insert one bracket
+    /// per row of height.
+    #[test]
+    fn a_bracket_extension_is_not_a_bracket() {
+        assert_eq!(glyph_name_char("bracketleftBig"), Some('['));
+        assert_eq!(glyph_name_char("bracketlefttp"), Some('['));
+        assert_eq!(glyph_name_char("bracketleftex"), None);
     }
 
     fn obj(src: &[u8]) -> Object {

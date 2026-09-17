@@ -152917,6 +152917,640 @@ exposed defect 3 needs no new fixture at all -- it is already attached on every
 boot. What it needs is I/O pressure, which is a load question, not a fixture
 one.
 
+## A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED (lane A, 2026-09-16) — **Status: OPEN**, instrumented, hypothesis not yet confirmed
+
+**In short:** a `^C` typed at a terminal that has no registered foreground process group is thrown away, and the reader that consumed it is then told to *restart*. The byte is gone, no signal was sent, and nothing will ever arrive -- so the read spins forever. Until 2026-09-16 that left no trace anywhere: the drop was a bare `return`.
+
+**Where.** `syscall/handlers.rs::signal_foreground_group`:
+
+```rust
+let pgid = crate::tty::foreground_pgid(tty);
+if pgid == 0 {
+    return;          // <- no diagnostic, and the caller restarts
+}
+```
+
+The caller is `deliver_console_signal`, whose very next statement is `restart_result(ERESTARTSYS)`. So the sequence is: line discipline reads `0x03`, sees `ISIG` and `VINTR == 3`, correctly decides a `SIGINT` is due, returns `ConsoleRead::Signal(2)` -- and the delivery step finds nobody to deliver to, says nothing, and restarts the reader.
+
+`foreground_pgid(id)` is `pcb::ctty_fg_pgrp(id).unwrap_or(0)`. That `unwrap_or(0)` is where the information is lost: *no session holds this terminal* becomes the same value a caller would read as *nothing to do*.
+
+**How it surfaced.** `ctest-pty`'s first real run, 2026-09-16, after the rung had been switched off across four disable cycles (see design-decisions 944). It exited **45**, not the historical blanket 44 -- 45 means the parent's `waitpid(WNOHANG)` spin of 2,000,000 iterations never saw the child become reapable. The serial then shows `[pty] master closed: SIGHUP+SIGCONT to group 203`, i.e. the parent gave up and exited, which closed the master. **The child never returned from its read.** An unbounded restart loop explains that exactly.
+
+**This is a hypothesis and is labelled as one.** Everything above is a reading of the code plus one exit code; nothing has yet observed the `pgid == 0` branch being taken. So the change committed today is *only instrumentation*: the branch now prints which signal and which tty it dropped. That print is the discriminator, and the two outcomes say different things:
+
+| next boot shows | means |
+|---|---|
+| the line, naming the pty's id | the fault is in **acquiring the terminal** -- `login_tty`'s TIOCSCTTY/tcsetpgrp did not take effect -- and the line discipline is exonerated, having decided correctly |
+| nothing | the hypothesis is **wrong**; the child is blocked somewhere else and this branch is not on the path |
+
+**Why behaviour was not changed in the same commit.** Two candidate fixes exist and picking between them needs the measurement above. Returning an error instead of a restart stops the spin but changes semantics for a console that legitimately has no session during early boot; fixing `login_tty` instead leaves the restart loop in place for the next caller to fall into. Changing behaviour now would also destroy the evidence -- a boot that no longer loops cannot tell me whether it was looping for this reason.
+
+**The shape, for the record.** A silent early return that makes "nobody is listening" indistinguishable from "delivered", feeding a caller that retries on the assumption something happened. Same family as 942's rows: the verdict -- here, the restart -- survived the disappearance of its own evidence.
+
+### 2026-09-16 round 1: THE HYPOTHESIS ABOVE IS REFUTED
+
+The print fired **zero times**. `ctest-pty` returned 45 again, reproducibly, and `signal_foreground_group`'s `pgid == 0` branch was never taken. The table above committed in advance to what that means, so it is settled rather than argued: **the terminal signal is not being dropped for want of a foreground group.**
+
+Recording it here rather than deleting the section, because the reasoning was sound and the conclusion was wrong, and those are different things. It is also the reason only a print was committed: a fix would have changed behaviour on a guess and destroyed the evidence that the guess was wrong.
+
+**What round 1 narrowed, which is the useful part.** Two facts now bracket the fault:
+
+1. **The byte reaches the input ring.** `ctest-pty` returns 44 when the master write fails, and it returned 45 -- so `write(fm, "\003", 1)` returned 1.
+2. **Nothing ever decided a signal was due.** `signal_foreground_group` was not reached at all, which is upstream of delivery, not inside it.
+
+So the question is whether the line discipline SEES the byte, and with `ISIG` on when it does.
+
+**Round 2 instruments `sig_for`**, which already computes `isig` and `vintr` and is therefore the cheapest place to ask. It exists **twice** -- in `raw_try_read` (non-blocking) and `raw_read` (blocking) -- which an assertion caught before anything was written, so both are instrumented and labelled. Three outcomes, the third being the absence of any line:
+
+| next boot shows | means |
+|---|---|
+| `saw VINTR ... isig=true` | a signal WAS decided; the loss is downstream of `sig_for` |
+| `saw VINTR ... isig=false` | the slave's termios has `ISIG` off |
+| nothing | the byte never reached the discipline; the fault is the master-to-slave input path |
+
+A fourth outcome is possible and worth naming: the line appearing under
+`raw_read` rather than `raw_try_read` would mean the fixture is not
+reading the way its own header says it does.
+
+### 2026-09-16 round 2: ZERO HITS, AND THE ZERO PROVED NOTHING
+
+The probes reported **no VINTR sightings**, and by the table above that
+reads as *the byte never reached the discipline*. **It does not, and the
+table was wrong to offer it.** Verified the instrument first -- the probe
+string is present twice in the staged kernel `build/esp/boot/kernel`,
+matching the built binary, with a positive control -- so the probes did
+run. The problem is that they do not cover the subject.
+
+`ConsoleRead::Signal` is returned from **four** sites. `sig_for`, which
+round 2 instrumented, serves `raw_try_read` and `raw_read` only. The other
+two come via `LineStep::Signal`, produced by `step()` -- a separate
+classifier with its own `ISIG`/`vintr` logic. **A pty slave in canonical
+mode (the `sane_default`) reads through `step()` and never touches
+`sig_for` at all**, so silence from the raw probes is exactly what a
+correctly working canonical path looks like.
+
+Round 3 instruments `step()` as well, labelled `canonical`. With all three
+sites covered, silence from all three finally means what round 2's table
+claimed silence from two meant.
+
+**Third instance in one investigation of reading a subset's silence as
+absence** -- after `nm` returning 0 from a binary that was never opened,
+and five true procfs checks about the wrong subject. The common step is
+not carelessness about the result; it is not asking what the instrument's
+coverage was before interpreting its quiet.
+
+### 2026-09-16 round 3: THE BYTE ARRIVES AND A SIGNAL IS DECIDED
+
+The canonical probe fired **three times**:
+
+```
+[tty] canonical: line discipline saw VINTR (0x03) isig=true
+```
+
+Instrument verified before the result was read -- three probe strings in
+the staged kernel `build/esp/boot/kernel`, one canonical-specific, with a
+positive control. So this is a real positive, and the first in the
+investigation.
+
+It also confirms round 2's zero was a **coverage gap and not a null
+result**: every hit is on the canonical path, the site `sig_for` does not
+serve. Without round 3, that zero would have been recorded as "the byte
+never reached the discipline" and sent the search to the master-to-slave
+path, which is empty.
+
+**Five links are now settled, and the child still never returns from its
+read:**
+
+| link | settled by |
+|---|---|
+| the master write reaches the input ring | ctest-pty returning 45, not 44 |
+| the discipline sees the byte | round 3 |
+| `ISIG` is on | round 3 |
+| a `SIGINT` is decided | round 3 |
+| the foreground group is non-empty | round 1's silence at `pgid == 0` |
+
+**Round 4 probes the next link: do the sends to the group members actually
+succeed?** Nothing could tell, because the loop discarded every result:
+
+```rust
+// Best-effort: a member that exited between the membership snapshot
+// and delivery just fails its own send; the rest still receive it.
+let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
+```
+
+That justification is correct **per member** and the wrong shape for the
+whole. One member exiting is benign; *not one* send succeeding is the bug,
+and a discarded `Result` reports both as silence -- a tolerated per-item
+failure hiding a total failure.
+
+Round 4 counts, and prints only when a non-empty group received nothing:
+quiet on a healthy system, quiet on the benign case the comment describes,
+loud on exactly the case that would explain exit 45. Printing every failure
+would have buried the distinction in noise and told a reader nothing the
+discarded result did not.
+
+(`SyscallResult` is not a `Result` and has no `is_err`; it carries an `i64`
+`value` whose negative range is the error code. Assuming the API from the
+name cost one compile, which is the cheapest place to be wrong.)
+
+## A-CTEST-COREUTILS-RUNS-EXIT-3-WAS-A-MISSING-BINARY-NOT-A-BROKEN-ONE (lane A, 2026-09-16) — **Status: NOT A KERNEL DEFECT**
+
+**`ctest-coreutils-runs` exited 3 on its first run and it is not a finding about the kernel.** `/bin/true` is not on the image. `create-ext4-rootfs.sh` reported this during the rebuild, in plain words, and I did not read its output:
+
+```
+NOTE: none of the binaries named in scripts/rootfs-bin-manifest.txt have been
+      built, so /bin gets none of this project's own utilities. They
+      build for the HOST by default; the slateos target is separate
+NOTE: 72 name(s) in the manifest have no built binary and were skipped: ...
+```
+
+I ran the rebuild, checked `ROOTFS_RC=0` and that the *fixtures* staged, then booted a test whose entire subject is `/bin`. The information was present, timestamped, and addressed to me.
+
+**Two real defects sit underneath the mistake, though.**
+
+**The fixture cannot say which it is.** Its check is `rc != 0`, and a failed exec makes the child `_exit(127)`, so 127 arrives as 3: *could not exec* and *ran and failed* are the same code. That is the collapse lane B themselves fixed in `ctest-pty`, where 47 had stood for four causes -- their note there reads "ONE CODE PER CHILD STATUS". Reported to them; the fixture is theirs.
+
+**My diagnostic asserted the wrong subsystem.** It read *"our own ELFs do not exec, run or exit cleanly, which would explain every other ring-3 rung"* -- confident, specific, and pointing at the loader. The serial showed the fork succeeding and **no `ELF validated` line at all**, i.e. nothing was loaded. Rewritten to say it cannot distinguish the two cases and to send the reader to the rootfs log first: *a missing `/bin/true` looks exactly like a broken one.*
+
+**RESOLVED 2026-09-16: the path was wrong. The rootfs mounts at `/mnt`.**
+
+With all five producing crates built and 72 utilities staged with zero
+skipped names, the rung still failed -- as lane B's new exit **11**, with
+the serial saying `COULD NOT EXEC /bin/true -- it is not on the image, or
+is not executable.` That claim is checkable, so I stopped trusting the
+staging log and inspected the image:
+
+```
+$ debugfs -R "stat /bin/true" rootfs.ext4
+Inode: 108   Type: regular    Mode: 0755   Size: 796064
+```
+
+Present, executable, byte-size-identical to the built binary -- which left
+the path. And the serial says `[vfs] Mounted ext4 filesystem at '/mnt'`.
+`create-ext4-rootfs.sh` stages into `$STAGE/bin`, i.e. `/bin` *inside the
+image*, and the image mounts at `/mnt`, so the runtime path is
+`/mnt/bin/true`. Five fixtures shared the fault; lane B fixed all five
+behind a `BIN "/mnt/bin/"` macro and made the staging log name both forms.
+
+**`/bin` means two different things depending on which side of the mount
+you are on.** `rootfs-bin-manifest`, "staged into /bin", and
+`execl("/bin/true")` are all true sentences about different sides of it.
+The day's recurring shape, with the ambiguity in a **name** rather than in
+an instrument.
+
+**Exit 11 found this in four minutes where exit 3 would have sent me to
+the loader**, and lane B's generalisation is the keeper: *diagnostic
+precision is about falsifiability, not correctness.* Exit 11's claim was
+**wrong**, and being wrong in a checkable way is what made it the fastest
+route to the truth. A diagnosis narrow enough to disprove in one command
+beats a broad one that happens to be true.
+
+**Two retractions from resolving it.** I twice offered the absence of an
+`ELF validated` line as evidence nothing was loaded; that line comes from
+kernel-side `spawn_process`, not the `execl` syscall path, so it was never
+evidence about exec -- and lane B repeated it back as settled, which is two
+witnesses agreeing because one was quoting the other. And I chased a
+capability theory first, because this rung passes `capabilities: &[]`
+exactly as the keylayout one did: exec has no `(File, EXECUTE)` gate and
+both matches are inside capability self-tests. A recent real cause distorts
+the search order.
+
+### 2026-09-16, second run: the path was fixed and it returned 11 again
+
+With `/mnt/bin/true` asked for correctly, the rung still returned **11**,
+now naming the right path. **Two independent faults had to be fixed before
+this rung could answer its question**, which is why it took two rounds:
+a wrong path, and a missing capability.
+
+The second was settled by a control in the same boot rather than by
+theory. `ctest-keylayout` holds `(File, READ)` and opened and read
+`/proc/keylayout` from ring 3 successfully. `ctest-coreutils-runs` holds
+`capabilities: &[]` and could not open `/mnt/bin/true` to exec it. Two
+arms, one boot, one difference.
+
+**This is the capability theory I reached for and dropped, and dropping it
+was still correct.** What I checked for -- a `(File, EXECUTE)` gate on
+exec -- genuinely does not exist; both matches are inside capability
+self-tests. What I missed is that **exec must OPEN the file to read its
+ELF**, and the open is what a process holding nothing cannot do. The theory
+was right, the reason for rejecting it was right, and they were about
+different steps. Granted `READ | EXECUTE` now, with the comparison written
+at the site rather than the inference.
+
+**A third case exists that the fixture's wording does not cover.** Exit 11
+says "missing from the image or not executable". Both were false here: the
+file is present at mode 0755 and the caller simply could not reach it. The
+honest third arm is *present, executable, and unreachable by this caller* --
+filed for the owning lane.
+
+### 2026-09-16 RESOLVED: libc's `execl` passes a NULL path
+
+Six rounds, and the answer came from the first thing I should have done:
+asking the kernel what errno it returned.
+
+```
+[exec] linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14
+```
+
+`frame.arg0` is `execve`'s filename pointer and it is **0x0**; errno 14 is
+`EFAULT`. The kernel is correct -- `read_user_cstr(0)` must fail -- and it
+fails *before* `linux_exec_common`, which is why round 5's probe wrapped
+around that function never fired at all. That silence was the clue: it
+meant the failure was upstream, not that nothing failed.
+
+**The discriminator is in the same boot.** `fastpy-run` (pid 212) and pid
+214 exec'd successfully -- `ELF validated for exec`, entry `0x29c1cc` --
+using the vector form. `ctest-coreutils-runs` uses `execl`, the list form,
+and lost its first argument. Same kernel, same boot, same image. `cat` (pid
+211) is created fine through the kernel spawn path, so the binaries are
+sound.
+
+So **"staged is not run" was never a question about the Rust userland.** The
+image is right, the binaries are right at mode 0755, the kernel execs
+correctly. No C program on this system can exec by the list form --
+`execl("/bin/sh", "sh", "-c", cmd, NULL)`, which is what most real code
+writes. Filed for lane B, whose `posix/` owns it.
+
+**The three theories that were wrong, and why they were expensive.**
+
+| theory | disproved by | cost |
+|---|---|---|
+| not staged in the image | `debugfs`: inode 108, mode 0755 | one boot |
+| wrong path | real, and fixed to `/mnt/bin` -- still failed | one boot |
+| caller holds no capability | granted `(File, READ\|EXECUTE)` -- still failed | one boot |
+
+Each was plausible and each was a guess wearing a diagnosis. The fixture
+could only ever report *that* exec failed; **the errno existed in the kernel
+the whole time and nothing printed it.** The lesson is not that the theories
+were bad -- the second was even true, and had to be fixed -- but that a
+measurement available from round one was deferred behind three rounds of
+inference.
+
+**Two probe-design points worth keeping.** Wrapping a function beats
+instrumenting its error sites: `linux_exec_common` has eight or more
+`return -i64::from(..)` paths, and a probe per site is eight chances to miss
+the one that fires -- the same way `sig_for` covered two of four
+classification sites and produced a zero I nearly called decisive. And a
+probe that reports *entry* as well as failure is what turned round 5's
+silence from ambiguous into informative.
+
+### 2026-09-16 round 7: the trampoline IS set up — and I over-read it
+
+The probe fired **56 times**, including once for pid 205, which is
+`ctest-pty`'s forkpty child. I read that as *the child got the signal, ran
+its handler, and exited*, and said so. **That was wrong, and two more lines
+of context showed it:**
+
+```
+3328  [thread] Process 204 has no threads left — now zombie   <- THE PARENT, FIRST
+3329  [pty] master closed: SIGHUP+SIGCONT to group 205
+3330  [signal] Process 205 continued
+3332  [sig] trampoline SET UP for pid Some(205)
+3333  [thread] Process 205 has no threads left — now zombie
+```
+
+The **parent gives up and exits first**. The master fd then closes *because*
+the parent died, which sends `SIGHUP+SIGCONT` to group 205 — so the
+trampoline is **SIGHUP's, post-mortem**. The child never received the `^C`.
+
+The mistake is the one this whole investigation is about: I had a line that
+fitted the hypothesis and stopped, instead of asking what *else* produces
+that line. The answer was three lines above it. A probe that fires for any
+signal cannot tell you *which* signal fired it, and I did not make it say.
+
+**What rounds 3 and 4 actually established, restated.** Neither was wrong;
+both were weaker than I read them.
+
+| round | what it proved | what I read it as |
+|---|---|---|
+| 3 | a `SIGINT` was **decided** by the discipline | (correct) |
+| 4 | **somebody** received a delivery | the child received it |
+| 7 | a trampoline was set up for pid 205 | the SIGINT handler ran |
+
+`delivered > 0` says a send succeeded, not that the **right group** got it.
+The pty child is its own group leader (`login_tty`/`setsid`), so its group is
+205 — and a terminal signal delivered to a stale or otherwise wrong
+foreground pgid succeeds, counts as success, and reaches nobody who cares.
+**A count told me the send worked and could not tell me who it reached.**
+That is the corpus problem in 942 applied to a destination rather than to a
+population.
+
+**Round 8 prints the target instead of counting it**: the foreground pgid,
+the member count, and the member pids, on every terminal-signal delivery.
+Terminal signals are rare, so it stays quiet. If the pgid is not 205, that is
+the bug and it has been hiding behind three successful-looking measurements.
+
+### 2026-09-16 round 8: it never fires — and that retracts rounds 1, 3 and 4
+
+Round 8 printed the target group unconditionally on entry and fired **zero**
+times. `signal_foreground_group` is never called for `ctest-pty` at all.
+
+Rounds 1 and 4 both lived inside that function, so their silence never meant
+what I read it as. And round 3's three VINTR sightings are at serial lines
+**46834-46842** while the pty rung runs at **3316-3337** — they belong to
+`[tty] Running self-test...` and `[pty] Running self-test...`, the kernel's
+own line-discipline suites, 43,000 lines later.
+
+| round | what I claimed | what was true |
+|---|---|---|
+| 1 | `pgid != 0`, so delivery proceeded | the function is never called |
+| 3 | the discipline saw the `^C` | a *different* terminal did, much later |
+| 4 | deliveries succeeded | the function is never called |
+| 7 | the SIGINT handler ran | it was SIGHUP, after the parent died |
+| 8 | — | confirms: never called |
+
+**Every positive in this investigation was the same error: I correlated by
+existence instead of by identity.** The probes answered *did this fire* and I
+read them as answering *did this fire for the subject under test*. A probe
+with no subject in its output cannot distinguish the two, and three of them
+did not carry one.
+
+That is worse than the silence problems recorded above it, and differently
+shaped. A silent probe at least announces nothing; a probe that fires for the
+wrong subject **manufactures a positive**, and a positive ends an
+investigation where a silence only stalls it. Rounds 1, 4 and 8 cost me
+boots. Round 3 cost me a conclusion.
+
+**The rule, which is cheap and I was not following it:** a probe must print
+the identity of the thing it is about — tty id, pid, handle, path — and a
+reading must be correlated by position in the log, not by count. `grep -c`
+answers *how many*, never *whose*. Both checks are one command.
+
+**Where the trail actually stands.** For `ctest-pty`, nothing downstream of
+the input ring has been observed at all: the discipline never classifies the
+byte, so no signal is decided, so no group is looked up. The master write
+succeeds (the fixture returns 45, not 44), so the byte reaches the ring.
+Between those two facts is the whole remaining search space, and the most
+likely occupant is that the child never performs the read that would drain
+it.
+
+**Round 9 instruments all three steps at once, each carrying an identity:**
+`master_write` (which pty received the `0x03`), the slave read (did that
+pty's child consume it), and the discipline's decision (on which tty). All
+three gate on VINTR, so ordinary traffic stays silent, and together they
+cannot produce an ambiguous quiet — whichever speaks last names the step that
+failed.
+
+The identity probe sits at `canonical_try_read`'s `LineStep::Signal` arm
+rather than inside `step()`, and the compiler is why: `step()` takes
+`(line, raw, t)` and has no tty id in scope. **That is the mechanical reason
+round 3 could not name a terminal** — the information was never there. The
+caller already holds `id`, so the probe moved rather than a signature
+changing to carry instrumentation.
+
+### 2026-09-16 RESOLVED: the child is never scheduled; nothing is wrong with the pty
+
+With both write paths and all three read paths instrumented, the whole rung
+window reads:
+
+```
+3323  [cow] Cloned address space: parent=0x3ad000 -> child=0x7e226000
+3325  [thread] Spawned thread (task 174) in process 205
+3326  [pty] master_TRY_write handle=PtyHandle(14): VINTR (0x03) entering the input ring
+3327  [sched] Anti-starvation: cur=173 boosted 1 task to priority 0: [174(p16)]
+3328  [sched] Anti-starvation: cur=173 boosted 1 task to priority 0: [174(p16)]
+3329  [thread] Process 204 has no threads left — now zombie
+3330  [pty] master closed: SIGHUP+SIGCONT to group 205
+```
+
+**The parent writes the `^C` immediately after forking, before the child has
+ever been scheduled.** `cur=173` is the parent; the scheduler boosts the
+starved child (task 174) twice, and the parent still exhausts its 2,000,000
+iteration `waitpid` spin first, returns 45 and exits. The child then dies of
+the `SIGHUP` the master's close sends — which is the trampoline round 7 saw
+and I misread as the SIGINT handler.
+
+**The byte sits in the ring the whole time and is never read, because the
+child never reaches its read.** Nothing is wrong with the pty: the kernel's
+own self-test drives `master_write` → `slave_read` → `discipline decided
+signal 2` end to end in the same boot, on tty 9.
+
+`main.rs` already carried the prediction, from an earlier investigation of
+the mirror image: *"the child waits in a pure userspace spin … so it never
+yields, while the parent needs three syscalls to reach its write; QEMU boots
+single-CPU under TCG, so that busy-wait starves the one process that could
+end it."* Same mechanism, roles reversed.
+
+#### What it took
+
+Eleven rounds, and every wrong turn was one of two errors. They are worth
+separating because the fixes differ:
+
+| error | instances |
+|---|---|
+| **subset coverage** — probed some paths, read the silence as absence | `sig_for` 2 of 4 sites; `linux_exec_common` wrapped below the failure; `master_write` 1 of 2; `slave_read` 1 of 3 |
+| **no identity** — fired, but for another subject | round 3's VINTR hits were the kernel's own self-tests, 43,000 lines away |
+
+Identity and coverage are independent and each was paid for separately. A
+probe that names its subject can still miss the path the subject takes; a
+probe on every path can still be attributed to the wrong subject.
+
+**What finally worked was enumeration, not reasoning.** `grep -n
+"input.read_byte()"` found three callers in one command, after three rounds
+of deciding which path *should* be used. The same command earlier would have
+found two `master_*write` paths and four `ConsoleRead::Signal` sites.
+
+**And the answer was written down twice already.** `main.rs` carried both the
+`O_NONBLOCK` → 1065 routing round 10 needed and the starvation mechanism that
+resolves it, left by whoever investigated this before. Second time today an
+unread artifact in this tree held what I was rediscovering; the first was
+lane B's notice naming `/mnt`.
+
+#### Where the fix belongs
+
+Not in the kernel. The fixture writes its `^C` before the child can possibly
+be ready, then bounds its wait by iteration count on a single-CPU TCG guest.
+Filed for lane B, whose `services/ctest-pty` it is: the child should signal
+readiness before the parent writes, rather than the two racing.
+
+
+
+
+
+## A-CTEST-KEYLAYOUT-PASSES-THE-GRANTED-ARM-OF-1074-EXISTS (lane A, 2026-09-16) — **Status: PASSED**
+
+First time this has ever run:
+
+```
+[spawn]   keyboard layout set from ring 3, confirmed through /proc/keylayout,
+          an unregistered name refused without moving the active layout, and
+          the original restored: OK
+```
+
+`SYS_KEYLAYOUT_SET` works end to end from userspace with the capability
+held. **The granted arm of the gate now exists**, which is what
+design-decisions 946 and the dispatch probe's own caveat said was missing:
+a probe that only ever gets refused cannot tell "the gate refuses
+everyone" from "the gate works". It works.
+
+Three properties the fixture proves that a weaker one would not:
+
+* it confirms through **`/proc/keylayout`**, the publisher, not through a
+  getter -- which is only possible because 1074 deliberately has none. A
+  getter would have made this the `vconsole.conf` round trip in a fixture's
+  clothes: asking the setter whether the setter worked.
+* an unregistered name is refused **and the active layout does not move**.
+  A refusal that still changed something is worse than an acceptance,
+  because nothing downstream expects it.
+* the original layout is restored and confirmed, so the rung leaves no
+  residue in state that `/proc` publishes.
+
+It also retires the withdrawn entry above by demonstration rather than by
+argument: `/proc/keylayout` is openable from ring 3, by a process that
+holds `(File, READ)`.
+
+## A-PROC-KEYLAYOUT-CANNOT-BE-OPENED-FROM-RING-3 (lane A, 2026-09-16) — **Status: WITHDRAWN**, the fault was in my rung
+
+`ctest-keylayout` exited **1**: cannot open `/proc/keylayout`. Checked rather than assumed -- `keylayout` IS in `procfs::ROOT_FILES` (top-level `/proc`), `generate()` serves it, `/proc` is mounted rw, and kernel-side self-tests read `/proc/version` and `/proc/sys/kernel/*` successfully in the same boot. So the failure is specific to a **ring-3 open**, not to the node's existence or the mount.
+
+**WITHDRAWN. `/proc/keylayout` is fine; my rung spawned the fixture
+holding nothing.** `self_test_ctest_keylayout` passed
+`capabilities: &[]` with `parent: 0`, so the process is not a fork of
+init and holds no capability at all. Without `(File, READ)` it cannot
+open anything, which is precisely exit 1. Fixed by granting
+`(File, 0, READ)` and `(Process, 0, SET_KEYLAYOUT)`, modelled on
+`self_test_ctest_hostname` -- a rung three hundred lines away whose
+docstring says it exists to make a grant exist, for the identical reason.
+
+**Why this entry is corrected rather than deleted.** The paragraph above
+listed five verifications and described them as "checked rather than
+assumed". All five were true: `keylayout` is in `ROOT_FILES`, the parser
+maps it to `RootFile`, `generate()` serves it, `/proc` is mounted rw, and
+kernel-side self-tests read `/proc/version` and `/proc/sys/kernel/*` in
+the same boot. **None of them was about the thing that failed.** Every one
+was about procfs; the failure was about the caller.
+
+Lane B's framing of the distinction is the part worth keeping, because it
+says what to do: their `awk` near-miss was four confirmations sharing one
+blind *spot*, and a blind spot is a gap you can go looking for -- the
+defence is more checks. This was five confirmations sharing one *subject*,
+and **there is no number of procfs checks that finds a capability bug**. A
+wrong subject does not look like a gap; it looks like thoroughness. So the
+question when several checks agree is not "is there another one" but **are
+they all about the same subject, and is that the subject that failed.**
+
+It also refutes a guess of lane B's that I declined to act on -- that this
+shared a cause with `ctest-pty`'s 45, a path working inside the kernel and
+not outside. The resemblance was genuine and described both symptoms
+exactly. The cause was unrelated. That is a better argument for waiting on
+a measurement than any case where the resemblance was weak, because a weak
+resemblance is easy to resist.
+
+## A-WRITING-TO-A-PTY-MASTER-FAILS-FOR-THE-PYTHON-REPL-FIXTURE (lane A, 2026-09-16) — **Status: OPEN**, one observation
+
+`ctest-python-repl` exited **2**: writing the expression to the master failed. **This was predicted to be 3** ("no output at all", i.e. the same forkpty fault as `ctest-pty`) and the prediction was wrong -- which is the useful part, because 2 means `forkpty` SUCCEEDED and the master write failed. `ctest-pty`'s own master write returned 1 in the same boot, so two fixtures disagree about whether a master write works and the difference between them is what to look at next.
+
+### Also from that boot, recorded here so neither is lost
+
+**`ctest-zombiewait` PASSED, exit 42, both orderings reaped.** All seven `[zw]` markers appeared, ending `ok (both orderings reaped)`. This is the first evidence on `B-FORKEXEC-BOOT-HANG` in either direction and it is a *negative*: **the hang is not reachable through plain fork-and-reap.** Both the already-a-corpse ordering and the waiter-blocked-first ordering work. That exonerates reap and wakeup and moves the search to exec, the loader, or the shell. Note the marker order differs from the rung's docstring -- `B wait` precedes `B child released` -- which is correct for waiter-first and not a defect: the docstring listed an idealised sequence, and two processes do not interleave deterministically.
+
+**`[bench] scatter scale check: FAILED`** -- 16.7 cycles/scattered store at N=64 against 22.7 at N=128, 35% apart on a 25% tolerance, with the check's own verdict being that *a physical per-access cost cannot depend on how many pages the loop walks, so this run's budget calibration is not a physical quantity*. Release profile, so it had not run in 101 commits. Not investigated tonight; it is a timing check and therefore squarely lane C's 855 territory (prefer a count; if you cannot count it, the bound must catch a catastrophe rather than a fluctuation).
+
+## A-THE-KERNEL-DESCRIBES-ITS-OWN-PLACEHOLDERS-AND-NOBODY-READS-THE-DESCRIPTIONS (lane A, 2026-09-15) — **Status: OPEN**, one fixed, population triaged
+
+**The search, which is lane C's and is the useful part.** Grep for code that *describes itself* as a placeholder:
+
+```
+in the real os | for now, we | simulated state | placeholder for
+in a real system | in a real kernel | for simulation | is simulated | (simulated)
+```
+
+It works because **this class is almost always documented**. Whoever wrote it knew, wrote it down, and the note then aged into furniture. `dmevent`'s seeded devices were labelled; so was `fwupdate::apply_update`; so was lane C's `ChildProcess`. **41 hits in `kernel/**`.**
+
+**Triaged by 945's ordering** -- first the claims that a protective action is already under way, then the claims that demand an action, then the ones that merely describe. That ordering matters here: sorting by subsystem stakes would have buried a credential store under a partition manager.
+
+| site | claims | verified |
+|---|---|---|
+| `credentials.rs:211` | `unlock()` "requires user authentication" | **read; fixed** |
+| `diskencrypt.rs:362` | generates a recovery key | comment only |
+| `fscache.rs:204` | flushed a device's cache | comment only |
+| `memdiag.rs:219` | ran a memory test | comment only |
+| `startuprepair.rs:238` | ran all standard checks | comment only |
+| `osreset.rs:573,599` | scanned and repaired system files | comment only |
+| `partmgr.rs:537` | formatted a partition | comment only |
+| `powerwake.rs:232` | sent a Wake-on-LAN packet | comment only |
+| `logrotate.rs:275` | rotated the logs | comment only |
+| `kmod.rs:1` | loads kernel modules | comment only |
+
+**"comment only" means exactly that**, and is the honest label: those rows are what the *comment* says, not what the code does. Only the first was read. A comment claiming simulation can be as stale as any other comment -- 944's whole subject -- and some of these may since have grown real implementations. Each needs reading before it is believed in either direction.
+
+**The one that was read.** `credentials::unlock()` was documented as requiring user authentication and as verifying a master password "in a real system". It takes no argument, so it never could, and `kshell`'s `cred unlock` asks for nothing either. `retrieve` genuinely refuses while the flag is false, so this is a real access control with a free unlock.
+
+Survivable today only because **nothing under `kernel/src/syscall` reaches this module** -- checked by reading, after a first measurement said four files did. That count was `grep` for the word, which matches `SET_CREDENTIALS`, the capability bit. A name counted as a caller.
+
+So the live defect is documentation, and it is **944 inverted**: a false sentence holding a gate *open* rather than a stale one holding it shut. The danger is in the future tense -- the next person to expose this as a syscall would read "requires user authentication" and believe the boundary already existed. The doc now says it authenticates nothing, that the flag is load-bearing anyway, and that adding the check is a feature rather than a line, because no master secret is stored anywhere to compare against.
+
+**Why the rest are open rather than fixed.** Ten sites, each needing its own reading and its own decision between lane C's three outcomes: covered by an existing disclaimer, real-but-unreachable (record the reason), or not inert but wrong (correct it). Batching that would produce ten guesses rather than ten findings. Working down the table in order.
+
+## A-FWUPDATE-INVENTED-THREE-FIRMWARE-DEVICES-AND-REPORTED-FLASHES-THAT-NEVER-HAPPENED (lane A, 2026-09-15) — **Status: FIXED**, pending a boot
+
+**What it was, in two halves.** The second is the serious one.
+
+**Half one -- invented devices.** `fs::fwupdate::init_defaults()` seeded three `FirmwareDevice` entries, and `cmd_fwupdate` calls it before listing, so an operator asking what firmware was present caused three devices to exist and was shown them:
+
+| name | version | available | vendor |
+|---|---|---|---|
+| System UEFI | 1.20 | **1.22** | SystemVendor |
+| TPM 2.0 | 7.85 | — | TPMVendor |
+| **Intel I225-V** | 1.68 | **1.70** | Intel |
+
+The third names a **real product** -- an actual 2.5GbE controller -- so this was not a placeholder but a specific claim about the machine. A claimed TPM 2.0 is worse still, being a security device software gates on. The kernel enumerates no firmware whatsoever.
+
+**Half two -- reported flashes that never happened.** `apply_update` was documented `(simulated)`. It writes no firmware: it moves the reported version, sets `PendingReboot`, and pushes an `UpdateRecord { success: true }`. `kshell` then printed **"Firmware update applied for device N. Reboot required."** So the operator was told a flash completed and that they must power-cycle to finish it.
+
+That is a fabricated **action**, not a fabricated fact, and it is the only one of the four found today in that category. `PendingReboot` is an instruction rather than a description; a wrong fact misinforms, a wrong instruction recruits the reader into acting on it. See design-decisions 945.
+
+**The near-miss worth recording.** The call site already carried a careful comment about the danger of applying to the *wrong* device (`fwupdate apply 1O` once parsed as device 0), ending "firmware is also the one thing here that a reboot does not undo." Someone reasoned correctly about the stakes and fixed the argument parsing. Nobody asked whether it wrote firmware at all.
+
+**What changed.** The seeds are gone. `apply_update`'s doc now says it writes no firmware and that `success` means the record was written. `kshell` prints "RECORDED ... NO FIRMWARE WAS WRITTEN" and says not to reboot expecting a flash, following the operator's Q21 precedent for `nft`/`iptables`. Because the module had **no registration path at all** -- devices could only ever come from the seeds -- it gained `register_device` and `unregister_device`, which is the API real firmware enumeration will need anyway, and which lets the self-test build its own fixture instead of asserting against invented constants.
+
+**Note on residue, which differs from the driverupdate case.** `fwupdate::self_test` already wrapped itself in `selftest::with_pristine`, so its fixture never reached `/proc`; `driverupdate::self_test` did not, and its did. The new step 9 here is therefore not what keeps the fixture out of `/proc` -- it is what proves `unregister_device` works, which nothing else would.
+
+**How it was found.** A one-off scan of `kernel/**` for functions that seed named entities into module state, run with the two already-fixed cases as positive controls (neither appeared, as required). 82 candidates, of which nearly all are legitimate definition tables -- a keybinding label, a colour-blindness preset -- and this was the one with the shape. The scan is not a gate and cannot become one: telling an invented device from a defined constant needs prose understanding.
+
+## A-THE-DRIVER-REGISTRY-SHIPPED-THREE-DRIVERS-AND-ITS-SELF-TEST-PUBLISHED-THEM (lane A, 2026-09-15) — **Status: FIXED**, pending a boot
+
+**What it was.** `kernel/src/fs/driverupdate.rs::init_defaults()` seeded three `InstalledDriver` entries and `procfs::gen_driverupdate` published the count at `/proc/driverupdate` as `driver_count`. Nothing had installed anything.
+
+| name | version | previous | status | provider |
+|---|---|---|---|---|
+| Virtual Display Driver | 1.2.0 | 1.1.0 | UpToDate | MintOS |
+| HD Audio Driver | 2.0.1 | 2.0.0 | UpToDate | MintOS |
+| Virtio Network Driver | 1.0.0 | — | **UpdateAvailable 1.1.0** | MintOS |
+
+**Three things made it worse than `A-PROC-REPORTED-THREE-DEVICES-NOBODY-HAD-DETECTED`.**
+
+1. **Asking created the answer.** `kshell`'s `cmd_driverupdate` list arm calls `init_defaults()` and *then* lists. An operator typing `driverupdate` to find out what was installed caused three drivers to come into existence and was shown them. The honest branch directly beneath, `if drivers.is_empty() { "No drivers registered." }`, could never run.
+2. **The self-test published it on every boot.** `self_test()` is dispatched from `main.rs:7163` and calls `init_defaults()`, so the test was what populated the registry, and `/proc` then stated `driver_count: 3` for the rest of the run. The test created the claim and `/proc` repeated it.
+3. **It was a narrative, not a number.** dmevent claimed three devices exist. This claimed software was installed, upgraded from a named previous version, and that an update was pending from a provider that publishes nothing. Lane C's distinction, from finding a fabricated IRC session the same day: an invented filename claims a file exists; an invented history claims events happened.
+
+**Why the self-test was load-bearing.** It asserted `list_drivers().len() == 3` and drove install/rollback against seeded id 3, so the seeds looked required. They were not: a test that needs three drivers can register three. It now builds its own fixture with `register_driver`, named `Test Display` / `Test Audio` / `Test Network`.
+
+**Removing the seeds was not sufficient**, because the test's own fixture lands in the same global registry `/proc` reads -- it would have reported `driver_count: 4` instead of 3, which is not an improvement. The registry had no removal path at all, a defect on its own terms: an uninstalled driver had no way to stop being reported. It gained `unregister_driver`, and the self-test now ends by removing everything it registered and asserting the count is zero, the way `fs::reclock`'s does. Zero is the honest answer to what is installed on this machine.
+
+**How it was found.** Following lane C's triage of the same shape across ten apps. Not by a gate -- there is none for this, and `A-PROC-REPORTED-THREE-DEVICES-NOBODY-HAD-DETECTED` did not generalise into one. Both were found by reading a file that emits facts and asking where each value comes from. Third instance in one day, which is enough to make the read worth repeating even though it cannot be automated: *a plausible integer draws no reaction, which is exactly why it survives*.
+
+## A-SYSINFO-REPORTS-AN-OS-IDENTITY-NOBODY-MEASURED (lane A, 2026-09-15) — **Status: the website is FIXED; four fields remain open**
+
+**What it is.** `kernel/src/fs/sysinfo.rs::init_defaults` fills `OsInfo` with six values, none of which the kernel measures, and `kshell`'s `sysinfo` and `sysinfo os` commands print them to the operator as facts.
+
+| field | value | verdict |
+|---|---|---|
+| `website` | `https://mintos.dev` | **fixed** -- names the project's former name and no such site is published |
+| `build_date` | `2026-05-06` | **open, and false** -- the kernel running today was not built in May |
+| `build_number` | `1` | open -- inert, has never been incremented |
+| `version` / `kernel_version` | `1.0.0` | open -- arguably a policy placeholder rather than a measurement |
+| `codename` | `Mint` | open -- same |
+| `name` | `MintOS` | tracked separately; see the `/sys/kernel/ostype` entry above |
+
+**Why the website was the one to fix first.** Lane C's test, from triaging the same shape across ten apps today: an inert setting gets a notice, a false statement gets corrected -- and separately, a value that claims an *external* resource exists is worse than one that is merely unset. A URL asserts that somebody is hosting something. The reader has no instrument that distinguishes an invented URL from a real one, which is exactly why it survived: a plausible string draws no reaction.
+
+**The fix was already half-built in the file.** Both other `OsInfo` constructors leave `website` empty, and the `sysinfo` printer already omits the line when it is. So emit-or-omit was implemented and `init_defaults` was the single site violating it. The `sysinfo os` printer did *not* guard, so fixing the first half alone would have printed a label with nothing after it -- both were changed together rather than leaving the second to surface later as a regression.
+
+**What the remaining fix looks like.** `build_date` and `build_number` want a build-time stamp (a `build.rs` emitting the date and a counter, read through `env!`), which makes them measurements instead of placeholders. Until that exists they should be empty and omitted, not invented: an absent build date is honest, and `2026-05-06` is not. `version`/`codename` are genuinely a naming decision and are left alone pending one.
+
+**How it was found.** Not by a gate. A scan of the 495 `gen_*` functions in `procfs.rs`/`sysfs.rs` for any that emit without consulting a source -- prompted by lane C reporting the identical shape in `apps/`. The scan itself returned one hit (`gen_filesystems`), which turned out to be *correct*: all seven filesystems it lists have a module and live registrations. The real finding came from reading the file next to it.
+
 ## A-PROC-REPORTED-THREE-DEVICES-NOBODY-HAD-DETECTED (lane A, 2026-09-15) — **Status: FIXED**
 
 **What it was.** `kernel/src/fs/dmevent.rs`'s `init_defaults()` seeded three
@@ -156432,6 +157066,232 @@ module does is a claim about *every* item on the list. Three of today's
 corrections were to such lists, and in each case the list was right about most
 of its entries and wrong about one, which is the hardest shape to notice.
 
+### [A] The rule that an IRQ-reachable lock must never be taken with a plain `lock()` is load-bearing prose, and this bug has now happened three times in five weeks -- 2026-09-17
+
+**In short:** if a lock can be grabbed by an interrupt handler, then every
+*other* place that grabs it has to switch interrupts off first. Otherwise an
+interrupt can arrive while an ordinary task is holding the lock, and the
+handler spins forever waiting for a task that cannot run until the handler
+finishes. The machine stops dead with no message. Nothing in the build
+checks this rule -- it is written in comments, and the comments have been
+right; the code has drifted three times anyway.
+
+The occurrences, in three unrelated subsystems:
+
+| date | path | outcome |
+|---|---|---|
+| 2026-08-14 | keyboard ISR echoes through `CONSOLE.lock()` | fixed, `a18ea83a9` (B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK, now in `known-issues-resolved.md`) |
+| 2026-09-15 | buffer-cache writeback softirq re-enters blkdev's registry lock | fixed with `try_with_device`; prompted the deferred gate in `todo.txt` |
+| 2026-09-17 | `keyboard::scancode_to_ascii` reaching `keylayout::translate` from IRQ 1 | avoided at design time, by `translate_try`/`try_lock` (dd-946) |
+
+The third is the one that matters for this entry. It was avoided only because
+I happened to read `keyboard.rs`'s own docs and remember dd-940. That is not
+a control; that is luck with a good memory. The 2026-09-15 deferral said a
+comment would not hold the line and cited lane B's evidence for it -- a
+header saying FIVE OUT OF FIVE RECENT ADDITIONS had a fault, read by someone
+while committing the sixth. Its stated trigger was *a second deadlock of this
+shape*. There have now been two more.
+
+### The audit, and what it found
+
+**`console` is the positive control, and it is clean.** Its module docs say
+every acquisition uses `lock_irqsave`, *never* plain `lock()`, and call that
+load-bearing. Verified rather than assumed: 45 acquisitions across `CONSOLE`,
+`SCROLLBACK` and `COLOR_SCHEME`, all 45 `lock_irqsave`, zero plain `lock()`.
+Any gate that flags `console` is a wrong gate.
+
+**The interrupt-context marker covers 2 of 5 dispatch arms.**
+`cputime::enter_irq`/`exit_irq` are called only from `handle_timer_irq`
+(vector 32) and `handle_device_irq` (33-56). Vectors 251 (TLB shootdown), 252
+(reschedule IPI) and 255 (spurious) never bump `irq_depth`, nor does the
+`_ => {}` arm. Those three handlers are lock-free today -- atomics, `invlpg`,
+EOI -- so this is latent rather than live.
+
+**Corrected the same day, because the first version of this entry overstated
+it.** I wrote that `irq_depth`'s gap also breaks nested-IRQ detection at
+`apic.rs:1006`, where `irq_depth() > 1` caps timer-on-timer nesting to stop
+the 16 KiB IRQ stack overflowing -- a real safety mechanism, not accounting.
+It does not. A nest can only form inside a handler that re-enables
+interrupts, and all three of these return with IF still clear: checked, not
+assumed -- none contains an `sti`, a `without_interrupts`, or a
+`softirq::process_pending`. The only handlers that do re-enable are the timer
+and the device path, and both bump `irq_depth`. So the cap keeps its
+coverage.
+
+What is actually left is CPU-time *attribution*: cycles spent in those three
+vectors are charged to whatever task they interrupted rather than to IRQ
+time. That is worth fixing and is not urgent. The latent part is the one to
+watch: the day any of the three grows a softirq tail or re-enables
+interrupts, the nesting cap silently loses coverage, and nothing would say
+so.
+
+`dispatch_vector` already carries
+the argument for fixing this, written for `count_vector` right above the same
+`match`: *the five-call-site version is correct exactly as long as everyone
+remembers it, which is the property that failed for 33-56 already.* The file
+learned the lesson for counting and did not apply it to context.
+
+**`PreemptSpinMutex`'s leaf premise is unenforced.** 489 instances across
+~370 files, none visible to lockdep. That is deliberate and documented (dd-70,
+`sync.rs:1079`): the type is for *true leaf* locks, ones that never nest
+another lock, so ordering checks add nothing. The decision is sound; the
+premise is asserted per call site and checked by no one. It is a dd-944
+control -- it is what justifies skipping the check -- and controls have to be
+executable.
+
+**A dangling cross-reference.** `console.rs:51` points at `known-issues.md`
+for an entry that moved to `known-issues-resolved.md` when it was fixed.
+
+### Why the gate is smaller than the deferral assumed
+
+The deferral proposed a static call-graph walker and said the baseline was the
+hard part: 5954 blocking `lock()` sites, most of them legitimate. Checking the
+*runtime* property instead removes the baseline problem entirely, because the
+honest expected count is zero.
+
+The invariant to check is not "no blocking lock in interrupt context" -- that
+would flag `console`, which is correct code. It is:
+
+> for any lock class ever acquired in hard-IRQ context, **every** acquisition
+> of that class must have interrupts disabled.
+
+Two per-class bits, set in `lockdep::lock_acquire`, which already runs on
+every acquisition of `crate::sync::Mutex` and already has a re-entrancy guard
+so that reporting cannot recurse through the serial lock. A class with both
+bits is deadlock-prone by construction.
+
+The hard-IRQ bit genuinely needs the `dispatch_vector` marker above and cannot
+be derived from the interrupt flag: an IDT interrupt gate clears IF on entry,
+so *inside* an ISR `cpu::interrupts_enabled()` is false -- indistinguishable
+from a `lock_irqsave` caller in task context. That is a reason the marker is
+necessary, not merely tidier.
+
+### First real run, 2026-09-17: 4 violations, 1 suspect, 8 classes -- and 3 of the 4 were one bug in the check
+
+Boot `b1ebbda65`, release, BOOT_OK after 581s. The control fired correctly
+(`fires once on a real overlap, silent on the irqsave pattern: OK`), and the
+banner read:
+
+```
+[bench]   lock-context check: 4 violation(s), 1 suspect(s), over 8 class(es) seen in interrupt context
+```
+
+**I had predicted zero violations, and written the prediction down first.**
+It was wrong, and the way it was wrong is the argument for the whole
+approach. I reasoned from `grep lock_irqsave` (3 files) plus dd-70's
+ISR-reachable list, concluded the corpus was console + sysctl + accounting +
+rtl8139, and checked that each was correct. The runtime check found **8**
+classes acquired in interrupt context, including locks I had no idea were
+reachable from one. Static reasoning over the call sites I could think to
+grep for is exactly what dd-947 calls a coverage failure.
+
+### The false positive, three independent instances of it
+
+`sysctl-reg`, `SWAP` and `CGROUP` were all reported as violations, and none
+is one. `lockdep::lock_acquire` is called for a **successful `try_lock`**
+too, with `Acquire::Try`, and `note_lock_context` ignored the kind. A
+try_lock in interrupt context cannot be the hazard: the caller walks away if
+the lock is held, so it can never spin on a holder it preempted.
+
+What makes this worse than an ordinary bug is *which* locks it hit. In every
+one of the three, the try_lock path exists **specifically because** a
+blocking acquire from interrupt context was a known hazard, and somebody
+wrote the non-blocking path and documented it:
+
+| lock | the documented ISR path |
+|---|---|
+| `sysctl-reg` | `sysctl::try_get` -- added after B-SYSCTL-IRQ-DEADLOCK, a real boot wedge: the timer IRQ's `sched::check_starvation` blocked on `REGISTRY` behind a task in `sysctl::set()` holding it across a slow `serial_println!` |
+| `SWAP` | `swap.rs:1153`, "Non-blocking variant of `summary()` for interrupt/softirq context" |
+| `CGROUP` | `cgroup.rs:598`, "try_lock: called from scheduler timer tick (interrupt context)"; also 1037 for the I/O scheduler |
+
+So the check's first act was to report three deliberate fixes as the defect
+they fix. My own commit message had said "a check that reports the fix as the
+defect is worse than no check" -- written about `sysctl` while the same bug
+was live for the other two, because I found `sysctl` by reading and never
+asked whether anything else had the same shape.
+
+Fixed: the interrupt-side buckets now require `matches!(how,
+Acquire::Blocking)`. The task-side bucket deliberately still records both
+kinds -- the hazard there is *holding* the lock with interrupts enabled, and
+how the holder acquired it makes no difference to an interrupt landing
+mid-hold. A third control covers exactly this shape, which is the bit pattern
+of a real violation minus the blocking acquire.
+
+### Still open after the fix
+
+Two reports had no name to give: class 47 (`0xffffffff81720b38`, the
+suspect) and class 50 (`0xffffffff81727538`, a violation).
+
+**My first explanation for that was wrong, and checking took one minute.** I
+wrote that `class_name` had refused a slot reserved but not yet published.
+It had not. `sync::Mutex::new` sets `name: b"?"` as its *default* --
+`Mutex::named` is the one that takes a diagnostic name -- and there are
+**563** `Mutex::new(` instances in `kernel/src`. So those two locks are not
+unnameable; they were simply never named, along with 561 others.
+
+Worth keeping because it is a diagnostic ambiguity, not just my error: `?`
+in a lockdep report has **two** independent causes -- an unnamed lock, and
+`class_name` declining a half-written slot -- and nothing in the output
+distinguishes them. A reader who assumes either one is right half the time.
+
+It also raises the value of printing the acquisition site from what I
+thought it was. I added it as a convenience for a rare unnameable class. It
+is in fact the *only* way to identify an unnamed lock at all, because 563 of
+them answer to the same name.
+
+Both reports now print the acquisition site from `CLASS_SITE`, which
+`lock_acquire` already records via `Location::caller()`, so an unnamed class
+still yields a file and a line.
+
+### Resolved on the next boot (`e8a2c179c`): all five were the one bug
+
+With `Acquire::Try` excluded from the interrupt side, the real tree reports
+**nothing**. `sysctl-reg`, `SWAP`, `CGROUP`, class 47 and class 50 are all
+silent; the only surviving report is the self-test's own deliberate
+`ctx-control`, and it now carries its site
+(`First acquired at kernel/src/lockdep.rs:1493`). So every one of the four
+violations and the single suspect was the same omission -- counting a
+successful `try_lock` as the interrupt-side hazard.
+
+That is the good outcome and it is also the uncomfortable one. A check whose
+first run produces five findings, all false, is a check that would have been
+believed: three of the five named locks whose try_lock path is the
+*documented fix* for this exact hazard. The thing that caught it was reading
+`sysctl.rs`'s prose before acting on the report, not the report itself.
+
+### [A] Operational, for all three lanes: stopping a backgrounded shell script does not stop the script -- 2026-09-17
+
+**In short:** if you background a shell script that runs long jobs and then
+stop it, the tool reports success and the job keeps running. Start a
+replacement and you now have two, racing each other in the same worktree.
+This cost a boot cycle today, and the first symptom looked like a flaky test.
+
+What happened: `TaskStop` returned `Successfully stopped task`, the harness
+stopped tracking the job, and the script's descendants ran to completion
+anyway. The replacement run overlapped it. Both wrote the same two log
+files, which is how it eventually became visible -- a log that is truncated
+at every start (`: > "$L"`) contained **two** `BOOT done` lines, and the
+boot log two `BOOT_REAL_EXIT=1` lines.
+
+The damage was not subtle once understood: two concurrent `boot-test.sh`
+pre-flights ran the git-heavy `scripts/test-*.py` suites against the same
+worktree and failed *each other*. `test-checkers-honour-head.py` and
+`test-selftests-are-repo-safe.py` both reported failures that do not
+reproduce standalone. I read the first as a flake.
+
+**The fix is the tool the project already has.** Run anything long under
+`scripts/run-timeout.py`, which puts the child in a Windows Job Object with
+`KILL_ON_JOB_CLOSE` (POSIX: a process group it SIGKILLs), so a stop tears
+down the whole tree, grandchildren included. `CLAUDE.md` says this about
+orphans and coreutils `timeout`; it is equally true of a stopped background
+task. Pick the bound from the whole run, not the inner step: a release boot
+on 2026-09-17 took 4417s end to end, of which only 581s was QEMU.
+
+**A second, smaller one from the same hour.** I also concluded a healthy run
+had died, from a two-minute silence in its log plus `ps | grep -c cargo`
+returning 0 -- during the release build, which is legitimately silent for
+~10 minutes. It wrote again after I stopped it. A quiet log is not a dead
+process, and on this project the quietest phase is also among the longest.
 ## TD-C-A-PURE-FUNCTIONS-TESTS-SAY-NOTHING-ABOUT-ITS-CALLER -- METHOD 2026-09-17
 
 **In short:** the desktop wallpaper offered six ways to fit a picture to the
@@ -156532,6 +157392,181 @@ arguments so they honestly read `/usr/bin/settings` — is deliberately not
 taken, because three rows that all open the same front page is a *worse* lie
 than three rows that do not work: the first looks like a feature that works.
 
+### [A] The line that exists to prevent a vacuous verdict was counting its own controls -- 2026-09-17
+
+**In short:** a check prints how many things it examined, so that finding
+nothing wrong cannot be confused with looking at nothing. On its first
+honest boot it printed `over 2 class(es) -- clean`. Both of those two were
+its own test fixtures. It had examined nothing real, and said `clean`.
+
+Boot `894c9b0b8`:
+
+```
+[lockdep] lock-context: 0 violation(s), 0 suspect(s), over 2 class(es) seen in interrupt context -- clean
+```
+
+`ctx-control` is acquired by the negative control in simulated interrupt
+context with interrupts clear and a *blocking* acquire, so it sets
+`CLASS_HARDIRQ_OFF`. `ctx-safe`, the irqsave-pattern control, sets it too.
+`ctx-try` correctly does not, since `Acquire::Try` stopped being the
+interrupt-side hazard earlier the same day. Two classes, both synthetic, and
+a real corpus of **zero**.
+
+**The cause is a half-applied rule, which is the transferable part.** The
+*verdict* counters were split between real and deliberate the moment the
+controls were written -- that is what `CTX_SELF_TEST_VIOLATIONS` is for, and
+the reasoning is in its doc comment. The *population* was not split. One of
+two places got the rule, and a rule applied in one of the two places it
+belongs reads exactly like a rule that has been applied.
+
+Fixed by flagging the classes touched while `IN_SELF_TEST` and excluding
+them from the count. Excluded at the point of *counting* only: the controls
+need the buckets to function, so they cannot be skipped at the point of
+recording.
+
+**What it says about the method.** This is 942 landing on the instrument
+built to enforce 942, and it was not found by a boot failing -- the boot
+said `clean` and the tree was in fact clean. It was found by asking what the
+number was made of, which is the same question 942 is about, pointed at my
+own output instead of somebody else's.
+
+### [A] Why that corpus is near-empty, and what it makes the check worth -- 2026-09-17
+
+Having found that the lock-context check's population was two synthetic
+classes, the next question is whether the *real* number can be anything but
+zero. Mostly it cannot, and the reason is that the hazard has been designed
+out rather than guarded. That changes what the check is for, so it is worth
+writing down instead of leaving the zero to look like a defect.
+
+**My first explanation was wrong.** I assumed an automated QEMU boot presses
+no keys, so `console`'s interrupt path never runs. The log says otherwise --
+`Live IRQ lines: 1 seen via the ISR path [1]` -- IRQ 1 is the keyboard and it
+fired.
+
+The actual reason is better. `push_char` no longer calls `putchar`; it calls
+`queue_echo`, whose doc says *"Called from hard-IRQ context, so it must not
+render: see `drain_echo` for why the rendering moved to a worker task."* The
+chain `console.rs`'s module doc still describes -- IRQ 1 ->
+`handle_device_irq` -> `handle_scancode` -> `push_char` -> `putchar` -- is
+now taken only in a pre-`workqueue::init` window, and `queue_echo`'s comment
+explains why rendering from an ISR is harmless in that one stretch: no
+userspace, no scheduler-visible latency budget, nothing else contending for
+the console lock. That window is ~700 lines of boot wide and needs a
+keystroke to land inside it.
+
+So the two reasons the real corpus is ~0 are both deliberate engineering:
+
+| reason | whose decision |
+|---|---|
+| interrupt-context locks are raw `spin::Mutex` or `PreemptSpinMutex`, and the check hooks `crate::sync::Mutex` | dd-70's conversion sweep, which kept the ISR-reached locks raw on purpose |
+| the one `sync::Mutex` that was IRQ-reachable had its hot path moved to a worker | whoever wrote `queue_echo`/`drain_echo` |
+
+**What that makes the check worth.** It is a **tripwire for regressions, not
+an audit of the present.** It cannot tell me the kernel is currently correct,
+because it can barely see the kernel; it can tell me the day somebody makes
+an ISR take a `crate::sync::Mutex` with a blocking acquire. That is a real
+thing to want -- `console` and `sysctl` were both *converted* from raw to
+`sync::Mutex`, which is exactly the migration that would trip it -- but it is
+a much narrower claim than `clean` sounds.
+
+This is the whole reason the line prints `VACUOUS` rather than `clean` when
+the population is zero. Without that word the output would read as a clean
+bill of health for a kernel the instrument never examined.
+
+**What would give it a real corpus.** Extend it to `PreemptSpinMutex`, which
+is where interrupt-context locking actually lives now. The obstacle is that
+the type deliberately has no lockdep class (dd-70), so there is no class
+index to key the two bits on -- but they do not need a class table: two
+`AtomicBool`s in the lock struct itself is 489 x 2 bits, needs no
+registration, and is already the pattern the leaf check uses for its name.
+Not done yet; recorded so the zero is not mistaken for completeness.
+
+### [A] Confirmed on boot `4e9595a63`: the lock-context check has been reporting nothing about nothing -- 2026-09-17
+
+With the controls excluded from the population, the line reads:
+
+```
+[lockdep] lock-context: 0 violation(s), 0 suspect(s), over 0 class(es) seen in interrupt context -- VACUOUS: no interrupt-context acquisition was seen all boot
+```
+
+So the earlier `over 2 class(es) -- clean` was entirely synthetic, as
+predicted, and **every `clean` this check printed before today carried no
+information about the kernel.** It was not wrong; it was empty, and those are
+indistinguishable without the population number. The entry above explains
+why the real corpus is legitimately ~0 -- the hazard is designed out, not
+guarded -- so the honest reading is that this is a tripwire armed for a
+future regression, and the `VACUOUS` word is what stops it reading as a
+clean bill of health in the meantime.
+
+### [A] The leaf-claim check's first real boot: four sites in `fs/notify.rs`, and a report I cannot act on yet -- 2026-09-17
+
+It fired 8 times (its cap) across **four distinct sites**, all in one file:
+`fs/notify.rs` lines 330, 394, 440, 481.
+
+The inner lock is identifiable from the site alone: `notify.rs:46` is `use
+crate::sync::Mutex`, so those are acquisitions of `NOTIFY_WAITERS` /
+`WATCHES`, both tracked `Mutex`es. Something holding a `PreemptSpinMutex` is
+therefore calling into `notify` and taking a tracked lock inside that
+critical section. Four sites in one file suggests `notify` is routinely
+reached from inside other subsystems' critical sections, which is exactly the
+class dd-70's premise forbids and which no existing detector could see:
+lockdep cannot see the outer type at all, and `fail_if_recursive` compares a
+lock against itself.
+
+**Not yet actionable, because I rebuilt this morning's defect.** Every report
+reads:
+
+```
+"?" acquired while "?" is held, at kernel/src/fs/notify.rs:330:10
+```
+
+I carried the outer lock's *name* specifically so the report would not be
+one-sided -- and the name is the half that cannot identify anything, because
+`PreemptSpinMutex::new` defaults it to `b"?"` and 563 locks in this kernel
+answer to that. The entry two above records exactly this about lockdep's
+reports, hours earlier, and I built it straight into the replacement. What
+identifies a lock is where it was acquired.
+
+`leaf_enter` now also stores `Location::caller()` -- one pointer per CPU, on
+the 0 -> 1 transition only, which is what the `#[track_caller]` added to the
+`PreemptSpinMutex` paths was for in the first place. The name is kept
+alongside it, because a *named* lock is the more readable half; it just
+cannot be the only half. Whether these four are real is unknown until the
+next boot names the outer lock -- and on this session's record (five findings,
+five false) they should not be assumed real.
+
+### [A] dd-70 split the lock types on cost, and never benchmarked the type it created -- 2026-09-17
+
+`bench_lock_primitives` has four arms. `RAW` is a bare `spin::Mutex`;
+`TRACKED` and `TRACKED_B` are `crate::sync::Mutex`. There is **no**
+`PreemptSpinMutex` arm -- so the two types measured are the two dd-70 was
+choosing *between*, and never the one the decision produced, despite it now
+holding 489 instances on the hottest paths in the kernel.
+
+This is the same shape as the leaf claim, on the other half of the same
+decision. dd-70's *correctness* premise was "nothing nests inside it" (now
+checked, see dd-949). Its *performance* premise was "where the per-acquire
+tracking cost of `Mutex` would matter" -- and that had no measurement behind
+it either.
+
+A `lock_preempt_spin` arm is added. Fully qualified deliberately: `bench.rs`
+aliases `Mutex` *to* `PreemptSpinMutex` at the top of the file, so an
+unqualified name there reads as the opposite of what it is, which is how one
+would measure the wrong type and believe it.
+
+Two caveats on the existing numbers, so they are not over-read. dd-70 quotes
+"~5ns/acquire" for `Mutex`'s overhead; the measured figure on boot
+`b1ebbda65` was `+549ns = lockdep 254ns + preempt 36ns + rdtsc 56ns +
+unexplained 203ns`, two orders larger. These are QEMU TCG measurements, so
+the absolute nanoseconds are not hardware nanoseconds -- the 21x *ratio*
+between raw and tracked is the part that transfers, not the ns.
+
+**And the leaf check's own cost is still unmeasured.** It adds three atomic
+operations to `PreemptSpinMutex`'s acquire path. The bench runs in the
+deferred bench task, and every boot this session was torn down on lane B's
+three ring-3 failures before that task reached the lock arm -- the same
+teardown that hid the lock-context line. So the arm exists and the number
+does not yet. Stated rather than assumed cheap.
 
 ## TD-FONT-LEGACY-KERNING-DISAGREES-ACROSS-AN-INVISIBLE-CHARACTER -- 2026-09-17
 
@@ -156892,6 +157927,67 @@ outright, taking their roles with them, so it never had this bug. Only the
 blanking path did, which is why it needed a face that *has* a space —
 Hack-Bold — to show up at all.
 
+### [A] RESOLVED -- the leaf check's first real finding: `INOTIFY_TABLE` is not a leaf, and its documented lock order was unenforceable because of it -- 2026-09-17
+
+**In short:** two locks have to be taken in a fixed order or the kernel can
+deadlock. A comment says which order, and says no code takes them the other
+way. The automatic checker that exists to verify exactly that could not see
+this pair -- because the outer lock was declared as the kind of lock that
+opts out of the checker. The order was right; nothing was checking it.
+
+The leaf-claim check (dd-949) reported four sites on its first real boot, all
+in `fs/notify.rs`: `take_notify_waiters` (330), `create_watch_owned` (394),
+`read_events` (440), `close_watch` (481). Those are acquisitions of
+`NOTIFY_WAITERS` / `WATCHES`, both `crate::sync::Mutex`. The outer holder,
+found by reading the call paths rather than waiting for the report to name
+it, is `ipc/inotify`'s `INOTIFY_TABLE`.
+
+`inotify.rs`'s own module doc states the arrangement:
+
+> `INOTIFY_TABLE` is held across calls into `crate::fs::notify` (whose
+> `WATCHES` lock is itself a leaf). The ordering is therefore
+> `INOTIFY_TABLE` -> `notify::WATCHES`, and no path takes them in the reverse
+> order, so there is no cycle.
+
+Every clause is accurate, and together they say `INOTIFY_TABLE` is **not a
+leaf** -- held across another lock's acquisition is the definition. Yet it
+was a `PreemptSpinMutex`, the type dd-70 reserves for locks nothing nests
+inside. And `WATCHES`, which that same sentence calls a leaf, is the tracked
+type. **The two lock types were the wrong way round.**
+
+The consequence is not stylistic. *"No path takes them in the reverse order,
+so there is no cycle"* is precisely the claim lockdep exists to verify, and
+lockdep could not see this pair: `PreemptSpinMutex` does not register, so the
+edge was absent from the dependency graph. A real lock order protected by a
+comment, unenforced *because* the lock chose the type that opts out of
+enforcement. dd-944, and `sync.rs`'s own sentence one level up -- "opting out
+of one silently opted out of the other" -- generalised: opting out of
+ordering checks for a lock that turns out not to be a leaf leaves the
+ordering it actually has unchecked.
+
+**The claim is true today, checked before changing anything.** `fs::notify`
+only *mentions* inotify in comments; it never calls into `ipc::inotify`. The
+`emit_*` entry points are invoked from `fs/handle.rs` and `fs/vfs.rs`,
+neither of which holds `INOTIFY_TABLE`. A reverse acquisition would need
+something holding `WATCHES` to take `INOTIFY_TABLE`, and no such path exists.
+
+So this was never a live deadlock, and the fix is not a bug fix. What it
+changes is *who* is responsible for the claim staying true: `INOTIFY_TABLE`
+is now a named `crate::sync::Mutex`, which puts the documented edge into
+lockdep's graph. The order stops depending on nobody adding a reverse path
+later, and the module doc now says the clause is checked rather than
+asserted.
+
+Named rather than left as the default, for the reason recorded above: 563
+locks in this kernel answer to `?`, so an unnamed lock in a violation report
+identifies nothing.
+
+**Worth noting what found it.** Not the instrument's report, which said
+`"?" acquired while "?" is held` and named neither lock. The *site* was
+enough to find the file, and reading the call paths did the rest. A report
+that localises the problem to four lines is already most of the value even
+when its identity half is broken -- which is an argument for shipping the
+site, not an excuse for the `?`.
 
 ## TD-C-A-FIELD-ONLY-EVER-INITIALISED-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE -- METHOD 2026-09-17
 
@@ -157067,6 +158163,267 @@ judgement that settled `archivemanager` applies: bare state deletes, a
 reasoned model gets asked about. Deleting `email`'s IMAP settings would
 delete the specification of the mail client.
 
+### [A] `check-fields-written-never-read.py` has never scanned `kernel/`: 169 fields, 39 of them correct by design -- 2026-09-17
+
+Prompted by lane C's
+`TD-C-A-FIELD-ONLY-EVER-INITIALISED-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE`,
+which found 347 candidates in `gui/` and `apps/`. The obvious next question
+is the corpus one: which tree has this gate actually looked at?
+
+`detect(roots=lanec_scan.LANE_C_ROOTS)`, and `LANE_C_ROOTS` is `apps, gui,
+net, netipc, netproto, netring, net80211, aes, hmac, pkg`. No `kernel`, no
+`posix`, no `userspace`, no `services`. It is wired into `boot-test.sh` at
+line 5908 with no `--roots=`, so **`kernel/`'s 3,962 tracked `.rs` files have
+never been scanned by it, in CI or otherwise.**
+
+**That is deliberate, and I checked before treating it as a hole.** The
+wiring comment in `boot-test.sh` -- lane A's file, lane C's decision -- says
+the scope exists so that "neither can red lane A or lane B". Same shape as
+`PreemptSpinMutex`'s lockdep opt-out: documented, reasoned, and not an
+oversight. So it is not widened here; filed to lane C as
+`requests/a-c-your-field-gate-has-never-seen-kernel-and-would-need-a-repr-c-rule.md`.
+
+**The measurement, since it is worth having either way.**
+`--roots=kernel` reports **169 fields**, classified by whether the enclosing
+struct carries a `repr(C)`/`packed`/`transparent` attribute:
+
+| class | count |
+|---|---|
+| `repr(C)`-family -- layout is an external contract | 39 |
+| ordinary Rust struct -- presumptively dead | 130 |
+
+**The premise does not transfer unqualified, and that is the transferable
+part.** In kernel code *written and never read by Rust* is often the entire
+point, because there are three consumers neither the compiler nor the scanner
+can see: DMA engines, assembly, and userspace across a copy. `nvme.rs`'s
+`prp1`/`cdw10..12` are `NvmeSqe` fields -- `#[repr(C, align(64))]`, an NVMe
+Submission Queue Entry the *controller* reads over DMA.
+`syscall/entry.rs`'s `kernel_rsp` is `PerCpuData`, documented `[gs:0]`, read
+by assembly. A gate written for application code calls both dead.
+
+I expected that exception to explain most of the 169 and it explains under a
+quarter. Worth recording as a corrected guess: 130 remain, and the one I
+sampled was real -- `initproc.rs`'s `shutdown_requested_ns`, declared 233,
+initialised 269, assigned 654, read nowhere.
+
+Triaging those 130 is ordinary lane A work and needs no gate. Recorded here
+so the number is not rediscovered from scratch.
+
+### [A] dd-70's "leaf" premise is not occasionally wrong, it is systematically wrong: 1256 nested acquisitions per boot -- 2026-09-17
+
+Boot `eb764a380`, with the reports deduped by site pair:
+
+```
+[sync] leaf-claim check: 1256 acquisition(s) inside a PreemptSpinMutex, 24 distinct site pair(s) named above (AT THE CAP -- there may be more)
+```
+
+dd-70 chose `PreemptSpinMutex` for "locks that never nest another lock
+inside their critical section, so lockdep ordering checks add no value".
+That sentence is the justification for the type not registering with
+lockdep. It is false **1256 times per boot** across at least 24 distinct
+site pairs, and the count is a floor: the pair table is full, which is why
+the summary says so rather than going quiet.
+
+The pairs split into two kinds.
+
+**Cross-module, which are the ones worth reading:**
+
+| outer | inner |
+|---|---|
+| `sockact.rs:202`, `:265`, `:419` | `eventlog.rs:746` |
+| `fs/startmenu.rs:340`, `:414` | `fs/appregistry.rs:336` |
+| `ipc/completion.rs:312`, `:364` | `ipc/io_ring.rs:744` |
+| `ipc/completion.rs:312`, `:364` | `proc/thread.rs:853` (`THRDOWN`) |
+| `fs/cgroupfs.rs:122` | `cgroup.rs:421`, `:676` (`CGROUP`) |
+
+**Same-module**, dominated by one idiom: a one-time-init guard held across
+the store it initialises -- `bookmarks.rs` (`INITIALIZED` -> `BOOKMARKS`),
+`templates.rs`, `columnview.rs` (`INITIALIZED` -> `COLUMN_DEFS`) -- plus
+adjacent-line pairs in `filetype.rs`, `openwith.rs`, `clipboard.rs`
+(`CURRENT` -> `HISTORY`), `dragdrop.rs` (`ACTIVE_SESSION` -> `DROP_ZONES`)
+and `findex.rs` (`INDEX` -> `FIELD_NAMES`).
+
+**What this does and does not mean.** It is not a deadlock report. Nothing
+here has been shown to form a cycle, and the ones inspected (`bookmarks`,
+`templates`) are init-only with a single order. What it means is narrower and
+worse: **the reason dd-70 gives for these locks being safe to leave out of
+the validator is not the reason they are safe.** They are safe because no
+pair happens to be taken in both orders -- which is precisely the property
+lockdep exists to check, and which nothing checks for any of them.
+
+That is `INOTIFY_TABLE` (fixed earlier today) at ~24x the scale, and it is
+the same sentence `sync.rs` already wrote about the recursion case: "opting
+out of one silently opted out of the other".
+
+**A refinement the data exposes.** The dedup keys on (outer site, inner
+site), but the interesting unit is the *lock* pair. `eventlog.rs:746` appears
+with three different `sockact` outer sites: one lock pair, three site pairs.
+So 24 site pairs is perhaps 12-15 distinct lock pairs, and the site view
+inflates the apparent spread while being the more actionable one for a fix.
+Keying on lock addresses as well would separate "how many orderings exist"
+from "how many places create them"; not done.
+
+**Why this goes to the operator rather than being fixed here.** Converting
+the non-leaf ones to `crate::sync::Mutex` is the mechanical fix and it costs
+per-acquire tracking on paths dd-70 specifically chose the cheap type for --
+on measurements that, as recorded above, were never taken for this type until
+today. 489 instances, a cost/correctness trade, and a decision that is
+already written down: that is `open-questions.md`, not a unilateral sweep.
+
+### [A] `devpower` reports device power states it never applies, and `/proc` published them undisclosed -- 2026-09-17
+
+**In short:** a kernel module says it manages the power state of PCI
+devices. It keeps a table of which device is in which power state, shows
+that table in `/proc`, and never writes a single power register. So a reader
+is told a device is asleep while it is awake and drawing full power. Nothing
+said the numbers were make-believe.
+
+**How it was found: one dead field.** `target_state` (devpower.rs:187) is
+assigned at 397 and 479 and read nowhere -- one of the 130 flagged when lane
+C's field gate was pointed at `kernel/` for the first time (entry above).
+The field turned out to be the least of it.
+
+**The measurement.** `devpower.rs` contains **zero** hardware accesses: no
+`outl`/`outb`/`inl`/`inb`, no `write_volatile`/`read_volatile`, no `pci::`.
+Its module doc describes a working subsystem, and all four of its stated
+integrations are absent:
+
+| the doc claims | the tree says |
+|---|---|
+| `crate::power` coordinates system sleep/wake | `power.rs` never calls `devpower::` at all |
+| `crate::udriver` notified to save/restore state | only `DeviceAddr` is imported, as a type |
+| `crate::devhotplug` emits power-change events | never called |
+| PCI config space PM capability drives hardware | no PCI, MMIO or port access anywhere |
+
+The entire caller set is `fs/procfs.rs` (`procfs_content`), `kshell.rs`
+(`procfs_content`, `stats`, `all_devices`, `system_suspend`,
+`system_resume`, `self_test`) and `main.rs` (`self_test`). So
+`system_suspend`/`system_resume` are reachable only from an interactive
+debug shell, never from the real system power path.
+
+**The author knew, and nothing tracked it.** `set_state` carries "For now,
+record the state transition immediately" above an inline comment listing the
+PMCSR write-and-settle sequence that is not implemented. `devpower` appeared
+in neither `todo.txt` nor `known-issues.md` -- a knowingly incomplete
+subsystem with no tracking entry, which `CLAUDE.md` asks for explicitly.
+
+**Why this is dd-945 and not merely unfinished.** `procfs_content` is wired
+into `/proc`. dd-945's rule is that a simulated action must be disclosed
+*where its result is read*, not where the code is written -- and the read is
+a `/proc` file that disclosed nothing. A fabricated action, per dd-945's own
+distinction, cannot be un-said by deleting the fabrication later; what it
+needs is the disclosure at the point of consumption.
+
+**Fixed.** The `/proc` header now says the states are modelled and no power
+register is written, so the file cannot be mistaken for a working power
+manager. The module doc's "Integration" list is replaced by an
+intended-vs-today table, because a doc listing integrations reads as a claim
+that they exist, and it is the first thing anyone extending the module sees.
+
+**Deliberately NOT done: `target_state` stays.** It is scaffolding for the
+asynchronous transition the PMCSR sequence needs, where `current != target`
+while a transition is in flight. Removing it would delete the shape of the
+real fix, which is the opposite of useful. The field was the thread, not the
+defect -- worth recording as a correction to "130 presumptively dead": some
+of that 130 is scaffolding whose real problem is untracked incompleteness,
+not dead state.
+
+### [A] The power-management family: four modules that claim to act, actuate nothing, and publish it through `/proc` -- 2026-09-17
+
+**In short:** the kernel has four modules for saving power -- device power
+states, power profiles, an energy saver and a game mode. Between them they
+promise to set the CPU governor, dim the display, throttle apps and suppress
+notifications. None of them does any of it. They store the setting, show it
+in `/proc`, and stop there, so the system reports itself in power-saver mode
+while running exactly as before.
+
+**Found by dd-950's own prescription**, on the day it was written: instead of
+triaging `kernel/`'s 130 unread fields one at a time, group them and ask what
+single absent consumer would read a cluster. Grouping by file put 12 of the
+130 in four power modules.
+
+| module | dead fields | hardware accesses | callers outside `/proc`, `kshell`, own self-test |
+|---|---|---|---|
+| `devpower` | 1 (`target_state`) | 0 | 0 |
+| `fs/power` | 5 | 0 | 2 |
+| `fs/energysaver` | 3 | 0 | **0** |
+| `fs/powerprofile` | 3 | 0 | **0** |
+| `fs/gamemode` | (3, counted separately) | 0 | **0** |
+
+**The claims, against the call graph.** Each module doc describes active
+control; none of them calls the subsystem it names, and those subsystems
+exist in this tree:
+
+| module says | calls |
+|---|---|
+| `powerprofile`: "control CPU governor, display brightness, suspend timing" | `cpufreq::` 0, `brightness::` 0 |
+| `energysaver`: "app throttling, display dimming schedules" | `sched::` 0, `brightness::` 0 |
+| `gamemode`: "suppresses notifications, blocks background tasks" | `sched::` 0 |
+| `devpower`: "PCI config space PM capability for hardware control" | no PCI/MMIO/port access anywhere |
+
+`cpufreq.rs` and `brightness.rs` are both present. So this is lane C's
+phrasing exactly -- **unwired, not unimplementable.** The dead fields are the
+shape of the policy application that was never connected, which is why
+deleting them would be the wrong move (dd-950).
+
+**Why it is one entry and not twelve.** Twelve unread fields across four
+files reads as twelve oversights. It is one gap: nothing in this kernel
+applies power policy. The count is a symptom whose magnitude carries no
+information, which is the whole of dd-950.
+
+**The dd-945 exposure is the part that actively misleads.** All four publish
+through `/proc`, so a reader is told a profile is active, a device is asleep,
+or energy saving is on, and none of it is true. `devpower`'s `/proc` header
+now discloses that its states are modelled; the other three do not yet, and
+that is the next bounded piece of work here. A disclosure at the point of
+reading is what dd-945 requires, and it is cheap; wiring the actuation is a
+real feature and is not claimed to be in scope.
+
+### [A] DRM plane geometry is write-only: an atomic commit can move or scale a plane and nothing happens -- 2026-09-17
+
+**In short:** a graphics "plane" is a layer the display hardware can place
+and scale on screen -- how a cursor or a video overlay gets positioned. The
+kernel accepts the rectangle a compositor asks for, stores it, reports
+success, and never uses it. Moving or scaling a plane does nothing.
+
+The second dd-950 cluster, found the same way as the power family: group
+`kernel/`'s 130 unread fields by file and ask what one absent consumer would
+read a cluster. `drm/plane.rs` held 6 of them, and they are a single
+coherent set -- `src_w`, `src_h`, `dst_x`, `dst_y`, `dst_w`, `dst_h`: the
+source rectangle in framebuffer coordinates and the destination rectangle in
+CRTC coordinates.
+
+**Every occurrence, enumerated.** For `dst_w`:
+
+| site | kind |
+|---|---|
+| `drm/plane.rs:51` | the declaration |
+| `drm/atomic.rs:423` | `plane.dst_w = dst.w` -- the atomic commit path |
+| `drm/mod.rs:616` | `p.dst_w = kernel_mode.hdisplay` |
+| `drm/driver.rs:195`, `:487` | struct initialisers |
+| `drm/ati/backend.rs:232` | struct initialiser |
+
+Five writes, one declaration, **zero reads** -- confirmed tree-wide, not just
+within `drm/`: `grep` for `.dst_w` across `kernel/src` returns 2 occurrences,
+both assignments, and 0 that are not.
+
+**Why the atomic path makes this worse than dead state.** `atomic.rs:423` is
+the commit handler storing the rectangle a client requested. So the
+userspace-visible sequence is: set a plane's position or scale via the atomic
+API, receive success, observe no change. That is dd-945's shape again -- the
+result is read by a compositor that believes the commit took effect -- and it
+is reached through an API rather than a `/proc` file, so there is no header
+to put a disclosure in. The honest fix is either to honour the rectangle in
+the scanout path or to refuse a commit that sets one, and refusing is the
+smaller change.
+
+**Not fixed here.** Unlike the power family, where a `/proc` disclosure is
+cheap and correct, this needs a decision about the atomic API's contract:
+silently accepting a no-op is wrong, but returning an error for a field
+compositors routinely set may break callers that currently "work". Recorded
+with the evidence; the fields stay, per dd-950 -- they are the shape of the
+plane composition that was never wired, and `src_*`/`dst_*` is exactly what
+that code would read.
 
 ## TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS -- METHOD 2026-09-17
 
@@ -157124,3 +158481,82 @@ gives a crate a capability, re-read its module doc in the *same* change. Every
 one of these was introduced by an edit that added something and left the
 header alone.
 
+### [A] Module docs that link a subsystem the file never calls: 8 of 807 kernel modules, and one real new claim -- 2026-09-17
+
+Lane C's `TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS` says a `//!`
+feature list is the one claim in the tree with no instrument, because both
+existing scanners read strings the program *draws*. True, and I had already
+hit it twice from the kernel side: `devpower`'s four absent integrations and
+the power family's claims to set the CPU governor and dim the display.
+
+So: is a narrow instrument viable? Measured, over all 807 `kernel/src`
+`.rs` files -- module docs that contain a rustdoc link `[`crate::X`]` where
+the file never references `X::` at all:
+
+| module | links, never calls |
+|---|---|
+| `devpower.rs` | `devhotplug`, `power` |
+| `syshealth.rs` | `eventlog` |
+| `alternatives.rs` | `idt` |
+| `hardlockup.rs` | `watchdog` |
+| `audio_alsa_ctl.rs` | `audio_alsa` |
+| `drm/uapi.rs` | `audio_alsa`, `drm` |
+| `drm/ati/backend.rs` | `drm` |
+| `net/raw.rs` | `syscall` |
+
+**8 of 807 is tractable**, which is the useful part -- a rule that produced
+300 hits would be unusable. And it independently rediscovered `devpower`,
+which I had found by hand, so it is not merely plausible.
+
+**The discriminator is the verb, and it still needs a human.** Sampled:
+
+| line | reading |
+|---|---|
+| `syshealth.rs:18` "**Emits events via** [`crate::eventlog`] when thresholds are crossed" | a claimed act. `eventlog` occurs once in the file: in that sentence. **Real.** |
+| `hardlockup.rs:5` "see [`crate::watchdog`]" | a cross-reference. Not a claim. |
+| `alternatives.rs:26` "see the ISR stubs in [`crate::idt`]" | a cross-reference. Not a claim. |
+
+That is exactly the distinction lane C's `find-claimed-acts` draws for drawn
+text, and it is why this cannot be a gate as it stands: "emits ... via X"
+and "see X" are indistinguishable to a link scanner.
+
+**The limitation matters more than the finding.** The probe sees rustdoc
+*intra-doc links* only. `devpower`'s worst claim -- "PCI config space Power
+Management Capability (PM cap) for hardware control" -- is unlinked prose and
+is **invisible** to it, as is `powerprofile`'s "control CPU governor, display
+brightness" and `energysaver`'s "app throttling, display dimming". Every one
+of those was found by reading, not by scanning. So this narrows lane C's
+"no instrument at all" to "no instrument for the unlinked majority, and a
+cheap one for the linked minority" -- it does not solve it.
+
+**Fixed:** `syshealth.rs:18` now states the gap instead of the capability.
+Kept as a stated gap rather than deleted, per dd-950: the line is the shape
+of the missing wiring, and `syshealth` genuinely should emit there.
+
+**All eight triaged, so this list is closed rather than pending** -- dd-951's
+warning applies to a list like this too, and an untriaged eight left alone
+becomes a description of a tree that moved on.
+
+| module | verdict |
+|---|---|
+| `devpower.rs` | **real** (2 claims; fixed earlier today) |
+| `syshealth.rs` | **real** (1 claim; fixed here) |
+| `hardlockup.rs` | reference -- "see [`crate::watchdog`]" |
+| `alternatives.rs` | reference -- "see the ISR stubs in [`crate::idt`]" |
+| `audio_alsa_ctl.rs` | reference -- "the **pure ABI layer**, mirroring [`crate::audio_alsa`]" |
+| `drm/uapi.rs` | reference -- describes what *clients* drive through it |
+| `drm/ati/backend.rs` | reference -- "[`crate::drm`]'s backend enum", naming a type's owner |
+| `net/raw.rs` | reference -- "syscall handler ([`crate::syscall`]); this module is the mechanism" |
+
+**Precision: 2 of 8 files.** Too low for a gate, fine for a lead generator,
+and 8 hits cost about ten minutes to read.
+
+**And the false positives have a shape, which is the refinement worth
+keeping.** They describe *inbound* or *parallel* relationships -- `net/raw`
+says the syscall layer calls INTO it, `audio_alsa_ctl` says it mirrors a
+sibling, `backend.rs` names a type's owner. The true positives describe
+*outbound acts*: "emits events via", "coordinates", "notified to save
+state". So it is not only the verb -- it is the direction of the call the
+sentence implies, and a link scanner cannot see direction at all. Anyone
+tempted to gate this should filter on outbound verbs first and expect the
+remaining false positives to be sentences about architecture.

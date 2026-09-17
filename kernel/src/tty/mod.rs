@@ -821,6 +821,20 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
             (LineStep::Signal(sig), render(ch))
         };
         if ch == vintr {
+            // ROUND-3 DISCRIMINATOR for ctest-pty exit 45. The round-2 probes
+            // went into `sig_for`, which serves the RAW paths only; this is
+            // the canonical classifier and is a separate implementation of
+            // the same decision. A pty slave in canonical mode -- the
+            // `sane_default` -- arrives here and never touches `sig_for`, so
+            // the raw probes' silence was consistent with a perfectly
+            // working canonical path and proved nothing.
+            //
+            // With all three labelled, silence from all three is the real
+            // negative: the byte never reached the discipline at all.
+            // ROUND 9: no probe here. `step()` takes (line, raw, t) and has no
+            // tty id, and threading one through for a probe would change a
+            // signature for instrumentation. The identity-carrying probe sits
+            // at the CALLER instead, which already holds `id`.
             return signal(2); // SIGINT
         }
         if ch == vquit {
@@ -1261,7 +1275,20 @@ fn canonical_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) 
         match step {
             LineStep::Pending => {}
             LineStep::Line | LineStep::Eof => return deliver_line(id, out),
-            LineStep::Signal(sig) => return ConsoleRead::Signal(sig),
+            LineStep::Signal(sig) => {
+                // ROUND-9 identity probe. Round 3 printed a VINTR sighting with
+                // no tty id; its three hits turned out to be the kernel's own
+                // tty/pty self-tests 43,000 serial lines after ctest-pty had
+                // finished, and I read them as ctest-pty's. Correlating by
+                // existence rather than identity is what made a real
+                // measurement mean nothing.
+                crate::serial_println!(
+                    "[tty] tty={:?}: line discipline decided signal {}",
+                    id,
+                    sig
+                );
+                return ConsoleRead::Signal(sig);
+            }
         }
     }
 }
@@ -1281,6 +1308,36 @@ fn raw_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> Con
     let vquit = g(cc::VQUIT, 28);
     let vsusp = g(cc::VSUSP, 26);
     let sig_for = |ch: u8| -> Option<u8> {
+        // ROUND-2 DISCRIMINATOR for ctest-pty exit 45, reproducible across
+        // two boots. Round 1 instrumented the DELIVERY side
+        // (`signal_foreground_group`'s pgid==0 branch) and the print never
+        // fired, refuting the hypothesis that the signal was dropped for
+        // want of a foreground group.
+        //
+        // The byte is known to reach the input ring: ctest-pty returns 44
+        // when the master write fails and it returned 45. So the open
+        // question is whether the discipline sees it, and with ISIG on.
+        // Three answers, and the third is the absence of any line:
+        //
+        //   saw VINTR, isig=true   -> a signal WAS decided; loss is downstream
+        //   saw VINTR, isig=false  -> the slave's termios has ISIG off
+        //   no line at all         -> the byte never got here; the fault is
+        //                             the master-to-slave input path
+        //
+        // Fires only on the interrupt character, so a hot path stays quiet.
+        if ch == vintr {
+            crate::serial_println!(
+                concat!(
+                    "[tty] 
+raw_try_read
+: line discipline saw VINTR ",
+                    "(0x{:02x}) isig={} -- known-issues ",
+                    "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
+                ),
+                ch,
+                isig
+            );
+        }
         if !isig {
             return None;
         }
@@ -1360,7 +1417,20 @@ fn canonical_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> C
             // A signal char (^C/^\) flushed the in-progress line: abandon the
             // read and let the syscall layer deliver the signal to the
             // foreground process group, returning EINTR/ERESTARTSYS to us.
-            LineStep::Signal(sig) => return ConsoleRead::Signal(sig),
+            LineStep::Signal(sig) => {
+                // ROUND-9 identity probe. Round 3 printed a VINTR sighting with
+                // no tty id; its three hits turned out to be the kernel's own
+                // tty/pty self-tests 43,000 serial lines after ctest-pty had
+                // finished, and I read them as ctest-pty's. Correlating by
+                // existence rather than identity is what made a real
+                // measurement mean nothing.
+                crate::serial_println!(
+                    "[tty] tty={:?}: line discipline decided signal {}",
+                    id,
+                    sig
+                );
+                return ConsoleRead::Signal(sig);
+            }
         }
     }
 }
@@ -1425,6 +1495,36 @@ fn raw_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> Console
     let vquit = g(cc::VQUIT, 28);
     let vsusp = g(cc::VSUSP, 26);
     let sig_for = |ch: u8| -> Option<u8> {
+        // ROUND-2 DISCRIMINATOR for ctest-pty exit 45, reproducible across
+        // two boots. Round 1 instrumented the DELIVERY side
+        // (`signal_foreground_group`'s pgid==0 branch) and the print never
+        // fired, refuting the hypothesis that the signal was dropped for
+        // want of a foreground group.
+        //
+        // The byte is known to reach the input ring: ctest-pty returns 44
+        // when the master write fails and it returned 45. So the open
+        // question is whether the discipline sees it, and with ISIG on.
+        // Three answers, and the third is the absence of any line:
+        //
+        //   saw VINTR, isig=true   -> a signal WAS decided; loss is downstream
+        //   saw VINTR, isig=false  -> the slave's termios has ISIG off
+        //   no line at all         -> the byte never got here; the fault is
+        //                             the master-to-slave input path
+        //
+        // Fires only on the interrupt character, so a hot path stays quiet.
+        if ch == vintr {
+            crate::serial_println!(
+                concat!(
+                    "[tty] 
+raw_read
+: line discipline saw VINTR ",
+                    "(0x{:02x}) isig={} -- known-issues ",
+                    "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
+                ),
+                ch,
+                isig
+            );
+        }
         if !isig {
             return None;
         }

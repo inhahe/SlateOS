@@ -2005,6 +2005,18 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Integrity,
         apic::self_test(),
     );
+
+    // The lock-context check's controls, here rather than in
+    // `lockdep::self_test()` (Step ~19) for the same reason the timerfd
+    // blocking control below is here: they need IF=1 to exist. That battery
+    // runs before `cpu::sti()` above, so its task-context half -- a lock taken
+    // with interrupts ENABLED, which is the dangerous side the check exists to
+    // catch -- cannot be produced there at all.
+    selftest::dispatch(
+        "Lockdep lock-context",
+        selftest::Severity::Integrity,
+        lockdep::self_test_lock_context(),
+    );
     console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
     {
@@ -2463,6 +2475,26 @@ extern "C" fn kernel_main() -> ! {
     // connected. The fixture forks, moves the child into a new group, and
     // checks that the *parent* can see it: the seam the whole bug lived in.
     // Bounded yield loop; can never hang the boot.
+    // FIRST of the ring-3 rungs, and the ordering is a property of the tests
+    // rather than a ranking of their subjects: a rung that can invalidate its
+    // siblings runs before them. If /bin/true cannot exec, none of the rungs
+    // below is testing what its name says -- they would all be exercising the
+    // same broken loader from further away, and passing would be worse than
+    // failing because it would look like evidence.
+    selftest::dispatch_debug(
+        "our own userland runs at all (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_coreutils_runs(),
+    );
+
+    // The smallest reachable form of B-FORKEXEC-BOOT-HANG: two
+    // fork-and-reap cycles, no exec and no loader. Placed before the
+    // pgroup rung so the cheaper fixture reaches the state first.
+    selftest::dispatch_debug(
+        "zombie with a waiter (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_zombiewait(),
+    );
     selftest::dispatch_debug(
         "process groups (ring 3)",
         selftest::Severity::Diagnostic,
@@ -2686,32 +2718,51 @@ extern "C" fn kernel_main() -> ! {
     // child is genuinely alive. Read in services/ctest-pty/main.c rather than
     // inferred from a run.
     //
-    // What blocks it now is the STAGED BINARY, which is not the same question.
-    // services/ctest-pty/ctest-pty.elf is dated 2026-09-10 07:43 and the fix is 13
-    // hours later, so the ELF this rung would load cannot contain the new logic --
-    // re-enabling collects 44 from the old fixture and reddens every lane for a bug
-    // that is already fixed. Restaging means rebuilding the sysroot (libc.a is
-    // behind lane B's posix/src/unistd.rs and utsname.rs) and relinking under
-    // services/**, which boot-test.sh calls "a repair lane A must not make".
+    // RE-ENABLED 2026-09-15. Both halves measured in THIS worktree rather than
+    // taken from lane B's, because the second half is not a property of the repo:
     //
-    // RE-ENABLE when `scripts/ctest-fixtures.py sysroot-check` passes AND
-    // services/ctest-pty/ctest-pty.elf is newer than 6e19f88a1 -- both checkable in
-    // one command. Check rather than assume: the re-enable condition written here
-    // has now been satisfied twice while the rung stayed off for another reason.
-    // Asked of lane B in
-    // `requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md`.
+    //   * `scripts/ctest-fixtures.py sysroot-check` -> rc 0, reporting that
+    //     libc.a matches the sources it is built from.
+    //   * ctest-pty.elf carries the `child_verdict` symbol -- two byte offsets,
+    //     binary not stripped -- so the ELF that loads here contains 6e19f88a1's
+    //     reap-first logic and cannot report the old blanket 44.
     //
-    // {
-    //     #[inline(never)]
-    //     fn case() {
-    //         selftest::dispatch_debug(
-    //             "pty ^C signal delivery (ring 3)",
-    //             selftest::Severity::Diagnostic,
-    //             proc::spawn::self_test_ctest_pty(),
-    //         );
-    //     }
-    //     case();
-    // }
+    // The condition this replaces asked whether the ELF was NEWER than 6e19f88a1.
+    // Lane B declined to settle it that way and was right twice over. The ELF is
+    // gitignored, so it is a per-worktree build artifact with no canonical
+    // instance -- their timestamp said nothing about mine. And a rebuild refreshes
+    // a timestamp whether or not the source changed, which is precisely how the
+    // stale binary came to look staged in the first place. A condition phrased
+    // over provenance can pass for the wrong reason; phrase it over content.
+    // See design-decisions.md 944.
+    {
+        #[inline(never)]
+        fn case() {
+            selftest::dispatch_debug(
+                "pty ^C signal delivery (ring 3)",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_ctest_pty(),
+            );
+        }
+        case();
+    }
+
+    // The granted arm of SYS_KEYLAYOUT_SET. The kernel-side dispatch probe
+    // only ever gets refused, so it cannot tell "the gate refuses everyone"
+    // from "the gate works"; this is the other arm.
+    selftest::dispatch_debug(
+        "keyboard layout set from ring 3 (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_ctest_keylayout(),
+    );
+
+    // AFTER the pty rung on purpose: this forkpty()s, so while ctest-pty is
+    // red this will be red for the same reason and is one finding, not two.
+    selftest::dispatch_debug(
+        "CPython interactive REPL over a pty (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_ctest_python_repl(),
+    );
 
     {
         #[inline(never)]
@@ -3936,7 +3987,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z real GNU make",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_make(),
+                proc::spawn::self_test_linux_slateos_make(),
             );
 
             // Path Z Part 35: run an unmodified prebuilt C compiler (TinyCC) that
@@ -3987,7 +4038,7 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug(
                 "Path-Z make-drives-tcc build",
                 selftest::Severity::Diagnostic,
-                proc::spawn::self_test_linux_real_glibc_make_cc(),
+                proc::spawn::self_test_linux_slateos_make_cc(),
             );
 
             // Path Z Part 40: a multi-TU C project that #includes its own project header
@@ -9520,6 +9571,23 @@ extern "C" fn kernel_main() -> ! {
             // It reports rather than gates: a deep stack is a condition the operator
             // needs to see, not a reason to refuse to boot.
             sched::report_stack_census();
+
+            // The lock-context check's verdict AND the corpus it was computed
+            // over, here rather than in `bench_lock_primitives` where it
+            // started. That runs in the deferred bench task, and a boot that
+            // fails a self-test is torn down before the task gets there -- so
+            // the number went missing on exactly the runs that most needed it.
+            // This site is synchronous, is past the whole ring-3 battery, and
+            // is reached by every boot that reaches BOOT_OK at all.
+            //
+            // Both numbers, never just the verdict: with no reports and no
+            // count, `nothing violated the rule` and `the check saw nothing`
+            // are the same silence. See design-decisions 942 and 948.
+            lockdep::report_lock_context();
+            // Beside it, and for the same reason: the leaf-claim check's
+            // reports fire as they happen, so without this its totals
+            // accumulate where nothing reads them.
+            sync::report_leaf_claims();
 
             // Boot success marker — the boot test script greps for this.
             // Printed synchronously so it appears within seconds of power-on,

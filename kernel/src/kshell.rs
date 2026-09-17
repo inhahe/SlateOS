@@ -22055,6 +22055,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "a bare `hexdump -n' errors");
 
         // Firmware: the guess flashed device 0 and said "Reboot required".
+        //
+        // The sentinel below is RECORDED, not "Reboot required", and the
+        // change is the interesting part. `cmd_fwupdate`'s success message
+        // used to end "Reboot required." -- a claim that a flash had happened
+        // and the machine must be power-cycled -- and was rewritten when it
+        // turned out `apply_update` writes no firmware at all. That rewrite
+        // silently disarmed this guard: the text it watched for no longer
+        // existed anywhere, so the assertion could never fire and the
+        // regression it was written to catch stopped being guarded.
+        //
+        // `check-selftest-wording` caught it and refused the build, which is
+        // exactly its job. The coupling is real and one-directional: an
+        // assertion that quotes a message depends on that message, and the
+        // message does not know. If the success wording changes again, this
+        // sentinel moves with it.
         let out = capture_command("fwupdate apply 1O");
         assert_output_contains(
             "an unreadable device id does not flash device 0",
@@ -22062,7 +22077,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"`1O' is not a device id",
         );
         assert_eq!(last_exit(), 1, "`fwupdate apply 1O` errors");
-        assert_output_lacks("and nothing was applied", &out, b"Reboot required");
+        assert_output_lacks("and nothing was applied", &out, b"RECORDED");
 
         // A group is actuated as a unit later, so a member dropped here is a
         // device that never responds and never explains why.
@@ -56133,7 +56148,12 @@ fn cmd_sysinfo(args: &str) {
             shell_println!("Codename:   {}", os.codename);
             shell_println!("Arch:       {}", os.arch);
             shell_println!("Kernel:     {}", os.kernel_version);
-            shell_println!("Website:    {}", os.website);
+            // Guarded like the `sysinfo` site above. Unguarded, this
+            // prints a label with nothing after it, which reads as a
+            // blank fact rather than an absent one.
+            if !os.website.is_empty() {
+                shell_println!("Website:    {}", os.website);
+            }
             shell_println!("Uptime:     {} s", os.uptime_secs);
         }
         "cpu" => {
@@ -75843,6 +75863,35 @@ fn cmd_driverupdate(args: &str) {
                         shell_println!("Error: {:?}", e);
                         set_exit(1);
                     }
+                }
+            }
+        }
+        // The registry could be grown from here and never shrunk, which is
+        // the one-way counter `check-unreachable-mutators` exists to catch:
+        // a count that can only rise stops looking like a gap and starts
+        // looking like data. `dupdate register` has been here for a while;
+        // this is its other half.
+        "unregister" | "remove" => {
+            let Some(id) = required_num::<u32>(&parts, 1, "dupdate", sub, "driver id") else {
+                return;
+            };
+            // Read the name before removing it: afterwards there is nothing
+            // to look it up in, and "Removed driver 3" tells the operator
+            // less than the name they typed the id for.
+            let name = driverupdate::get_driver(id)
+                .map(|d| d.name)
+                .unwrap_or_default();
+            match driverupdate::unregister_driver(id) {
+                Ok(()) => {
+                    if name.is_empty() {
+                        shell_println!("Unregistered driver {}", id);
+                    } else {
+                        shell_println!("Unregistered driver '{}' (id={})", name, id);
+                    }
+                }
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -99144,10 +99193,24 @@ fn cmd_fwupdate(args: &str) {
                 return;
             };
             match fwupdate::apply_update(id) {
-                Ok(()) => shell_println!(
-                    "Firmware update applied for device {}. Reboot required.",
-                    id
-                ),
+                // It used to say "applied ... Reboot required." -- a claim
+                // that a flash completed and that the machine must be
+                // power-cycled to finish it. `apply_update` writes no
+                // firmware; there is no firmware writer in this kernel. The
+                // comment above worried about applying to the WRONG device
+                // and never asked whether it wrote anything at all.
+                Ok(()) => {
+                    shell_println!(
+                        "Firmware update RECORDED for device {} -- NO FIRMWARE \
+                         WAS WRITTEN.",
+                        id
+                    );
+                    shell_println!(
+                        "This kernel has no firmware writer. The version it \
+                         reports for the device changed and nothing else did, \
+                         so do not reboot expecting a flash to complete."
+                    );
+                }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);

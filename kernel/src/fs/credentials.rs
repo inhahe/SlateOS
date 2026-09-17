@@ -207,8 +207,29 @@ static RETRIEVE_OPS: AtomicU64 = AtomicU64::new(0);
 // Lock/unlock
 // ---------------------------------------------------------------------------
 
-/// Unlock the credential store (requires user authentication).
-/// In a real system this would verify the user's master password.
+/// Set the store's unlocked flag. **Authenticates nothing.**
+///
+/// This used to be documented as "requires user authentication" and as
+/// verifying a master password "in a real system". It takes no argument,
+/// so it never could, and its only caller -- `kshell`'s `cred unlock` --
+/// asks for nothing either. The sentence described an intention and read
+/// as a guarantee.
+///
+/// The flag is **not** decorative: [`retrieve`] refuses while it is false,
+/// so this is a real access control with a free unlock. That is survivable
+/// only because nothing under `kernel/src/syscall` reaches this module --
+/// the store is kernel-internal and driven by the shell.
+///
+/// # Before wiring this to a syscall
+///
+/// Add the authentication first, in the same change. There is no master
+/// secret stored anywhere in this module to verify against, so "add a
+/// password check" means designing where that secret lives and how it is
+/// compared -- it is a feature, not a line. Exposing `unlock` as it stands
+/// would hand every process the whole store, and the doc comment that used
+/// to be here would have told the implementer the boundary already
+/// existed. See `known-issues.md` ->
+/// `A-THE-KERNEL-DESCRIBES-ITS-OWN-PLACEHOLDERS-AND-NOBODY-READS-THE-DESCRIPTIONS`.
 pub fn unlock() {
     STORE.lock().unlocked = true;
 }

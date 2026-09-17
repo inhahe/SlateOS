@@ -2134,9 +2134,11 @@ name = "pdfviewer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "deflate",
  "guitk",
  "oswindow",
  "printjob",
+ "safeio",
 ]
 
 [[package]]

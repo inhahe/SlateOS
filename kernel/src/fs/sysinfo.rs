@@ -609,7 +609,14 @@ pub fn init_defaults() {
         codename: String::from("Mint"),
         arch: String::from("x86_64"),
         kernel_version: String::from("1.0.0"),
-        website: String::from("https://mintos.dev"),
+        // Empty, not a URL. This field used to carry
+        // "https://mintos.dev" -- the project's former name, and a site
+        // nobody publishes. A reader has no way to tell an invented URL
+        // from a real one, and `kshell` printed it to the operator as a
+        // fact. The two other `OsInfo` constructors already leave this
+        // empty and the printers omit the line when it is; this was the
+        // one place that emitted an unknown instead of omitting it.
+        website: String::new(),
         uptime_secs: crate::hpet::elapsed_ns() / 1_000_000_000,
         boot_ns: crate::hpet::elapsed_ns(),
     };

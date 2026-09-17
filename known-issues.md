@@ -157094,6 +157094,30 @@ judgement that settled `archivemanager` applies: bare state deletes, a
 reasoned model gets asked about. Deleting `email`'s IMAP settings would
 delete the specification of the mail client.
 
+**FOLLOW-UP 2026-09-17: the real gap was decoding, and it is now half
+closed.** The row's underlying complaint was right about the symptom and
+wrong about the cause. `photomanager` reads files perfectly well; what it
+could not do was *decode* one. It had no `imagecodec` dependency at all, so
+every view drew a rounded card with the file's name printed in the middle of
+it over a photograph the application had genuinely loaded and parsed the EXIF
+out of.
+
+The single-photo view now decodes the selected photograph and draws it, at
+the picture's own proportions rather than the 4:3 it used to assume. **The
+grid still draws cards.** Thumbnails need an image id per visible card and
+something to release the ids of cards that have scrolled away; the
+single-photo view deliberately uses one fixed id and buys none of that
+machinery. That is the next increment, and it is the larger half.
+
+Two further claims in that crate's feature list failed for the same root
+reason -- nothing in the application had ever held a pixel. The adjustments
+(brightness, contrast, saturation, exposure, temperature) are stored per
+photograph and listed in the info panel, and no pixel has ever been changed
+by one. Zoom and pan were claimed in two separate entries; the only `Zoom` in
+the file is the name of a slideshow transition. Both now appear under a "What
+it does not do yet" heading in the module doc instead of in the feature
+list.
+
 
 ## TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS -- METHOD 2026-09-17
 
@@ -157151,3 +157175,57 @@ gives a crate a capability, re-read its module doc in the *same* change. Every
 one of these was introduced by an edit that added something and left the
 header alone.
 
+## `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` (lane C, 2026-09-17)
+
+**In short:** click a photograph and the window stops responding until the
+picture has been decoded -- about two thirds of a second for a photograph from
+a 21-megapixel camera. Nothing is lost and the result is correct; the window
+simply will not redraw, resize or take a click while it works. Fixing it means
+decoding somewhere other than the thread that draws, and the missing piece is
+not the worker -- it is a way for a finished decode to wake the event loop.
+
+**Where it lives.**
+
+| Crate | Call site | Runs on |
+|---|---|---|
+| `apps/photomanager` | `sync_picture`, called from `render` | the frame it is drawing |
+| `apps/imageviewer` | `display_image`, called from the event handler | the event being handled |
+
+Both call `imagecodec::decode` and wait. The two differ only in *which* part
+of the loop they stall, and photomanager's placement is deliberate for a
+separate reason (see design-decisions 861 and the doc on `sync_picture`):
+`App::take_images` is drained between the render and the submit, so a picture
+queued during a render reaches the compositor in time for the frame that names
+it. Moving the decode earlier would not make it asynchronous, only earlier.
+
+**Measured.** 669 ms in release for a 4000x5333 JPEG; 7.6 s for the same file
+in a debug build. The release figure is the one to quote -- the 11x gap
+between them is large enough to mislead anyone optimising against the wrong
+one, which is why the decoder's own benchmarks state the profile.
+
+**Why it has not bitten yet.** In both applications the decode is driven by a
+human moving a selection, so it happens at the speed of clicks rather than of
+frames, and `picture_for` in photomanager makes sure a photograph that fails
+to decode is attempted once rather than once per frame. A stall of this length
+is felt as sluggishness, not as a hang. It will bite properly when the grid
+decodes thumbnails, because that multiplies one stall by the number of visible
+cards -- see `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE`, whose other half is
+still open, and note that `imagecodec::decode_scaled` already exists and does
+the DCT-domain work that makes a thumbnail cheap. The grid should reach for
+that before it reaches for a thread.
+
+**What the proper fix looks like.** A worker thread that decodes and hands
+back finished pixels. Two thirds of the shape is already present: the pixels
+have a place to arrive (`App::take_images` is a per-frame queue, not a
+callback), and the decoder takes plain bytes and returns a plain `Image` with
+no borrow of the application state. What is missing is the wake -- an
+application cannot currently tell the event loop "something finished, draw
+again" from off-thread. `App::tick_interval` can be used to poll for it, which
+is the cheap version and worth measuring before building anything with a
+channel in it: a decode that takes 669 ms does not need to be noticed within
+16 ms.
+
+**What not to do.** Do not decode on a tick *instead* of fixing the wake, and
+call that asynchronous. A poll that runs the decode itself on the UI thread
+has moved the stall, not removed it, and it would then be hidden inside a
+handler nobody associates with pictures.

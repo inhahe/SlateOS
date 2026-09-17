@@ -146,6 +146,12 @@
 #      catches has been diagnosed from scratch twice, eight days apart,
 #      because the first cure sits behind `gui/window`'s own `#[cfg(test)]`
 #      and cannot reach a dependent's test binary.
+#  48. Refuse text drawn in an accent-family colour without `ink()`, which
+#      decides a readable foreground for the surface the text is on. The
+#      checker already ran at boot; it runs here too because a boot-only gate
+#      is paid for by whoever boots next, and that is never the person who
+#      broke it -- two commits went out green and cost lane A two dead
+#      pre-flights before anyone knew.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -5421,6 +5427,78 @@ n_ran=0
 n_skipped=0
 for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
 for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
+
+# ---------------------------------------------------------------------------
+# Gate 48 -- accent-family text drawn without `ink()`.
+#
+# check-text-ink.py, which boot-test.sh already runs.  This adds it here for
+# the reason gate 43b was added: a check that only runs at boot is a check
+# whose failures are paid for by whoever boots next, and that is never the
+# person who wrote them.
+#
+# On 2026-09-17 two commits of mine reached origin/main green -- the gate is
+# not a pre-push one -- and lane A's next two release boots died in pre-flight
+# on them, at ~658s and ~2022s.  Every lane merging main was blocked until it
+# was fixed, and the fix was two lines in a file only this lane may write.  The
+# asymmetry is the argument: the cost of catching it here is nine seconds on a
+# push that already takes minutes, and the cost of not catching it is a
+# half-hour boot, for someone else, twice.
+#
+# `touches gui/ apps/` keeps it off pushes that cannot have broken it, so a
+# lane pushing kernel code never waits on it.
+# ---------------------------------------------------------------------------
+
+inktext="${repo_root:-.}/scripts/check-text-ink.py"
+skip_inktext=0
+# Bypass: ALLOW_TEXT_INK_DRIFT=1 git push origin <branch>
+if [ "${ALLOW_TEXT_INK_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_TEXT_INK_DRIFT=1 set - skipping the text-ink gate." >&2
+    skip_inktext=1
+fi
+[ -n "$py" ] || skip_inktext=1
+[ -f "$inktext" ] || skip_inktext=1
+touches gui/ apps/ scripts/check-text-ink.py || skip_inktext=1
+# No `pushed_shas` guard: this runs once over the worktree, as gates 35, 43b
+# and 47 do, and a redundant guard would make `test-pre-push-gates.py`'s
+# guards-match-loops count disagree.
+note_gate text-ink "$skip_inktext"
+
+inktext_failed=0
+if [ "$skip_inktext" != "1" ]; then
+    # The self-test first, as gates 3-5, 35 and 47 do.  This checker's silent
+    # failure is the bad shape: one that matched no text sites would report a
+    # clean sweep over nothing.
+    if ! run_checker text-ink-selftest "$py" "$inktext" --self-test; then
+        echo "pre-push: check-text-ink.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        inktext_failed=1
+    elif ! run_checker text-ink "$py" "$inktext"; then
+        inktext_failed=1
+    fi
+fi
+if [ "$inktext_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - text is drawn in an accent-family colour without
+going through \`ink()\`.
+
+The site is named above.  An accent hue drawn straight has whatever contrast
+that colour happens to have on whatever ground it lands on, which differs per
+theme; \`ink()\` is what decides a readable foreground for the surface the text
+is actually on.
+
+The tree's own fixer does it, and its diff is small enough to read:
+
+    python gui/appearance/ink-text.py --apply
+
+Note that the fixer and this gate are two different scripts with similar
+names.  Running \`ink-text.py\` with no \`--apply\` reports what it *would*
+change and exits 0, which reads like a clean tree and is not one.
+
+To push anyway:
+    ALLOW_TEXT_INK_DRIFT=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
 
 echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
 [ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2

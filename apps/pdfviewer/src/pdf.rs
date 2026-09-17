@@ -16,9 +16,16 @@
 //! 4. **The page tree**, a tree of `/Pages` nodes with `/Kids`, whose leaves
 //!    are `/Page` objects carrying a `/MediaBox`.
 //!
-//! **What is deliberately not here yet.** Content streams -- the drawing
-//! instructions inside a page -- are not interpreted, so this reports a
-//! document's shape and not its text. Cross-reference *streams* (PDF 1.5's
+//! 5. **Content streams**, whose text operators give each page its words and
+//!    where they sit. [`extract_text`].
+//!
+//! **What is deliberately not here yet.** A font's `/Encoding` is not read, so
+//! `WinAnsiEncoding` is assumed; and a *composite* font's text is not decoded
+//! at all, because its codes are multi-byte and mean nothing without the
+//! font's `/ToUnicode` map. A page drawn entirely in composite fonts
+//! therefore yields no text -- and is counted in
+//! [`Document::unreadable_pages`], so that "no results" from a search can be
+//! told apart from "nothing to find". Cross-reference *streams* (PDF 1.5's
 //! compressed replacement for the table) are not read either, so a file using
 //! them is refused by name rather than half-read; [`Error::XrefStream`] says
 //! so. Refusing is the point: a viewer that opened such a file and showed
@@ -34,6 +41,17 @@
 //! rotation. That run is not a test here, because it depends on files that
 //! happen to be on one machine, and a test that passes by skipping is worse
 //! than no test.
+//!
+//! **It found two defects no assembled fixture had.** The manual's content
+//! streams all declare an indirect `/Length`, which the lexer cannot resolve
+//! while it is still building the table resolution needs -- so all 122 pages
+//! read as unreadable until [`stream_bytes_resolved`] went in. And the guide
+//! is composite throughout, so its pages produced no text while reporting
+//! themselves perfectly readable, which is the silence `unreadable_pages`
+//! exists to break. Both now have tests; neither would have been written
+//! without the files. Text runs measured afterwards: 451 from the
+//! quick-start, 4372 from the manual, 0 from the guide with all 47 pages
+//! counted unread.
 //!
 //! **Hostile input is the normal case.** A PDF is a file from elsewhere, and
 //! every length in it is a claim. Nothing here allocates on the strength of a
@@ -535,7 +553,7 @@ fn parse_number(token: &[u8]) -> Option<Object> {
 const MAX_PAGES: usize = 100_000;
 
 /// One page's geometry, as the file declares it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PageInfo {
     /// Width in points, after `/Rotate` has been applied.
     pub width: f32,
@@ -543,6 +561,13 @@ pub struct PageInfo {
     pub height: f32,
     /// The page's rotation, normalised to 0, 90, 180 or 270.
     pub rotation: i32,
+    /// The text this page draws, in the order the content stream draws it.
+    ///
+    /// Empty for a page whose fonts are all composite, and for one whose
+    /// content stream uses a filter this does not undo -- both are "nothing
+    /// could be read here", which is a different thing from "there is nothing
+    /// here" and is why [`Document::unreadable_pages`] counts them.
+    pub text: Vec<TextRun>,
 }
 
 /// What a PDF file says it contains.
@@ -552,6 +577,12 @@ pub struct Document {
     pub version: String,
     /// One entry per page, in reading order.
     pub pages: Vec<PageInfo>,
+    /// How many pages had content this reader could not turn into text.
+    ///
+    /// Not the same as a page with no text on it. A window that says "no
+    /// results" after searching a document it could not read has told the
+    /// reader something false about their document.
+    pub unreadable_pages: usize,
 }
 
 /// The default page box when a file declares none anywhere.
@@ -562,10 +593,13 @@ pub struct Document {
 const DEFAULT_BOX: (f32, f32) = (612.0, 792.0);
 
 /// Values a page inherits from its ancestors in the tree.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Inherited {
     box_pt: (f32, f32),
     rotation: i32,
+    /// `/Resources`, unresolved: it is usually a reference, and resolving it
+    /// at every node would re-read the same object once per page.
+    resources: Option<Object>,
 }
 
 /// Read `bytes` as a PDF document.
@@ -607,10 +641,12 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
         .clone();
 
     let mut pages = Vec::new();
+    let mut unreadable = 0usize;
     let mut seen_nodes = BTreeSet::new();
     let inherited = Inherited {
         box_pt: DEFAULT_BOX,
         rotation: 0,
+        resources: None,
     };
     walk_pages(
         bytes,
@@ -620,11 +656,16 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
         0,
         &mut seen_nodes,
         &mut pages,
+        &mut unreadable,
     )?;
     if pages.is_empty() {
         return Err(Error::NoPages);
     }
-    Ok(Document { version, pages })
+    Ok(Document {
+        version,
+        pages,
+        unreadable_pages: unreadable,
+    })
 }
 
 /// The version in the `%PDF-` header.
@@ -792,6 +833,7 @@ fn walk_pages(
     depth: usize,
     seen: &mut BTreeSet<u32>,
     out: &mut Vec<PageInfo>,
+    unreadable: &mut usize,
 ) -> Result<(), Error> {
     if depth > MAX_TREE_DEPTH || out.len() >= MAX_PAGES {
         return Ok(());
@@ -817,6 +859,9 @@ fn walk_pages(
     if let Some(rotation) = dict.get("Rotate").and_then(Object::as_f64) {
         here.rotation = normalise_rotation(rotation);
     }
+    if let Some(resources) = dict.get("Resources") {
+        here.resources = Some(resources.clone());
+    }
 
     let is_leaf = matches!(dict.get("Type"), Some(Object::Name(t)) if t == "Page");
     if is_leaf {
@@ -824,10 +869,15 @@ fn walk_pages(
         if here.rotation == 90 || here.rotation == 270 {
             core::mem::swap(&mut width, &mut height);
         }
+        let (text, readable) = page_text(data, offsets, dict, here.resources.as_ref());
+        if !readable {
+            *unreadable = unreadable.saturating_add(1);
+        }
         out.push(PageInfo {
             width,
             height,
             rotation: here.rotation,
+            text,
         });
         return Ok(());
     }
@@ -838,9 +888,108 @@ fn walk_pages(
         return Ok(());
     };
     for kid in &kids {
-        walk_pages(data, offsets, kid, here, depth.saturating_add(1), seen, out)?;
+        walk_pages(
+            data,
+            offsets,
+            kid,
+            here.clone(),
+            depth.saturating_add(1),
+            seen,
+            out,
+            unreadable,
+        )?;
     }
     Ok(())
+}
+
+/// The text on one page, and whether everything on it could be read.
+///
+/// The second half of the answer is the point. A page whose content stream
+/// uses a filter this does not undo comes back with no text, and so does a
+/// blank page; reporting them the same way would let a search say "no results"
+/// about a document it never read.
+fn page_text(
+    data: &[u8],
+    offsets: &BTreeMap<u32, usize>,
+    page: &BTreeMap<String, Object>,
+    resources: Option<&Object>,
+) -> (Vec<TextRun>, bool) {
+    let fonts = font_map(data, offsets, resources);
+    let Some(contents) = page.get("Contents") else {
+        // No content stream at all is an empty page, not an unreadable one.
+        return (Vec::new(), true);
+    };
+    let Ok(contents) = resolve(data, offsets, contents, 0) else {
+        return (Vec::new(), false);
+    };
+    // `/Contents` is one stream or an array of them, and an array is a single
+    // stream split at arbitrary points -- including, legally, inside an
+    // operator. So they are concatenated before being read, not read one by
+    // one.
+    let parts = match contents {
+        Object::Array(items) => items,
+        single => vec![single],
+    };
+    let mut joined: Vec<u8> = Vec::new();
+    let mut readable = true;
+    for part in &parts {
+        let Ok(part) = resolve(data, offsets, part, 0) else {
+            readable = false;
+            continue;
+        };
+        match stream_bytes_resolved(data, offsets, &part) {
+            Ok(bytes) => {
+                joined.extend_from_slice(&bytes);
+                joined.push(b'\n');
+            }
+            Err(StreamError::NotAStream) => {}
+            Err(_) => readable = false,
+        }
+    }
+    let runs = extract_text(&joined, &fonts);
+    // A page that drew nothing this could decode is unreadable, not empty.
+    // Composite fonts are the case that matters: one of the three documents
+    // this was measured against uses them throughout, so every page came back
+    // with no text and nothing said why -- and a search over it would have
+    // answered "no results" about a document that is full of words.
+    let blocked = runs.is_empty() && fonts.values().any(|kind| *kind == FontKind::Composite);
+    (runs, readable && !blocked)
+}
+
+/// Which of a page's fonts are composite.
+///
+/// A font this cannot resolve is treated as composite, which is the cautious
+/// direction: an unknown font's codes are decoded as nothing rather than as
+/// bytes that may not be bytes.
+fn font_map(data: &[u8], offsets: &BTreeMap<u32, usize>, resources: Option<&Object>) -> FontMap {
+    let mut map = FontMap::new();
+    let Some(resources) = resources else {
+        return map;
+    };
+    let Ok(resources) = resolve(data, offsets, resources, 0) else {
+        return map;
+    };
+    let Some(fonts) = resources.as_dict().and_then(|d| d.get("Font")) else {
+        return map;
+    };
+    let Ok(fonts) = resolve(data, offsets, fonts, 0) else {
+        return map;
+    };
+    let Some(fonts) = fonts.as_dict() else {
+        return map;
+    };
+    for (name, entry) in fonts {
+        let kind = match resolve(data, offsets, entry, 0) {
+            Ok(font) => match font.as_dict().and_then(|d| d.get("Subtype")) {
+                Some(Object::Name(subtype)) if subtype == "Type0" => FontKind::Composite,
+                Some(_) => FontKind::Simple,
+                None => FontKind::Composite,
+            },
+            Err(_) => FontKind::Composite,
+        };
+        map.insert(name.clone(), kind);
+    }
+    map
 }
 
 /// A `/MediaBox` as width and height in points.
@@ -903,6 +1052,407 @@ fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=hay.len().saturating_sub(needle.len()))
         .rev()
         .find(|&i| hay.get(i..i.saturating_add(needle.len())) == Some(needle))
+}
+
+/// The most a single stream may expand to.
+///
+/// A compressed stream is a claim about its own decompressed size, and zlib
+/// can turn a few hundred bytes into gigabytes. `zlib_inflate_limited` stops
+/// at this and reports it, which is why the cap is passed rather than the
+/// output being trusted and measured afterwards.
+const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
+
+/// What a stream's filter chain did, or why nothing could be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamError {
+    /// The object is not a stream.
+    NotAStream,
+    /// The bytes named are not inside the file.
+    Truncated,
+    /// A filter this does not implement, named so the caller can say which.
+    ///
+    /// `/DCTDecode` is the common one and is not a defect: it is a JPEG image,
+    /// and a text extractor has no business unpacking it.
+    UnsupportedFilter(String),
+    /// The stream said it was deflated and was not.
+    Corrupt,
+}
+
+impl core::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotAStream => f.write_str("not a stream"),
+            Self::Truncated => f.write_str("the stream runs past the end of the file"),
+            Self::UnsupportedFilter(name) => write!(f, "unsupported stream filter /{name}"),
+            Self::Corrupt => f.write_str("the stream is not valid zlib data"),
+        }
+    }
+}
+
+/// The names in a `/Filter`, which may be one name or an array of them.
+fn filter_names(dict: &BTreeMap<String, Object>) -> Vec<String> {
+    match dict.get("Filter") {
+        Some(Object::Name(name)) => vec![name.clone()],
+        Some(Object::Array(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                Object::Name(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A stream's bytes, resolving an indirect `/Length` first.
+///
+/// The lexer cannot resolve one: it is reading the file to build the
+/// cross-reference table that resolution needs, so a stream whose `/Length` is
+/// `12 0 R` comes back with a length of zero. Every content stream in a
+/// 122-page manual this was measured against is written that way, and before
+/// this the whole document read as 122 unreadable pages.
+fn stream_bytes_resolved(
+    data: &[u8],
+    offsets: &BTreeMap<u32, usize>,
+    object: &Object,
+) -> Result<Vec<u8>, StreamError> {
+    let Object::Stream { dict, start, len } = object else {
+        return Err(StreamError::NotAStream);
+    };
+    if *len > 0 {
+        return stream_bytes(data, object);
+    }
+    let Some(reference @ Object::Ref(..)) = dict.get("Length") else {
+        // A genuinely empty stream, which is legal and not an error.
+        return stream_bytes(data, object);
+    };
+    let Ok(resolved) = resolve(data, offsets, reference, 0) else {
+        return Err(StreamError::Truncated);
+    };
+    let Some(length) = resolved.as_f64().filter(|n| *n >= 0.0) else {
+        return Err(StreamError::Truncated);
+    };
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "checked against the file below"
+    )]
+    #[allow(clippy::cast_sign_loss, reason = "filtered non-negative")]
+    let length = length as usize;
+    if start.saturating_add(length) > data.len() {
+        return Err(StreamError::Truncated);
+    }
+    stream_bytes(
+        data,
+        &Object::Stream {
+            dict: dict.clone(),
+            start: *start,
+            len: length,
+        },
+    )
+}
+
+/// A stream's bytes, with its filters undone.
+///
+/// # Errors
+///
+/// [`StreamError`] saying which step could not be taken. An unsupported filter
+/// is named rather than folded into a general failure, because the caller's
+/// response differs: a `/DCTDecode` stream is an image and skipping it is
+/// correct, while a filter nobody implemented is work left to do.
+pub fn stream_bytes(data: &[u8], object: &Object) -> Result<Vec<u8>, StreamError> {
+    let Object::Stream { dict, start, len } = object else {
+        return Err(StreamError::NotAStream);
+    };
+    let raw = data
+        .get(*start..start.saturating_add(*len))
+        .ok_or(StreamError::Truncated)?;
+
+    let mut bytes = raw.to_vec();
+    for name in filter_names(dict) {
+        match name.as_str() {
+            // Both spellings of the same filter; `/Fl` is the abbreviation
+            // PDF allows in inline images and some writers use throughout.
+            "FlateDecode" | "Fl" => {
+                bytes = deflate::zlib_inflate_limited(&bytes, MAX_STREAM_BYTES)
+                    .map_err(|_| StreamError::Corrupt)?;
+            }
+            other => return Err(StreamError::UnsupportedFilter(other.to_owned())),
+        }
+    }
+    Ok(bytes)
+}
+
+/// A run of text drawn by one show operator.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextRun {
+    pub text: String,
+    /// Origin in PDF user space: points from the page's bottom-left corner.
+    pub x: f32,
+    pub y: f32,
+    /// The size the glyphs are actually drawn at.
+    ///
+    /// **Not** the operand of `Tf`. A content stream may say `/T1_0 1 Tf` and
+    /// then `19 0 0 19 ... Tm`, and the text is 19 points: the size is the
+    /// `Tf` operand multiplied by the text matrix's vertical scale. Taking
+    /// `Tf` at face value reports every run in such a document as 1pt, and
+    /// nothing about the result looks wrong.
+    pub size: f32,
+}
+
+/// What kind of font a `Tf` name refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontKind {
+    /// One byte per character: `/Type1`, `/TrueType`, `/MMType1`.
+    Simple,
+    /// `/Type0`, whose codes are multi-byte and mean nothing without the
+    /// font's `/ToUnicode` map.
+    Composite,
+}
+
+/// The fonts a page's `/Resources` declares, by the name `Tf` uses.
+pub type FontMap = BTreeMap<String, FontKind>;
+
+/// The identity matrix, which `BT` resets both text matrices to.
+const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// `translate(tx, ty) * m`, which is what `Td` and `Tm` compose.
+fn translate(tx: f32, ty: f32, m: [f32; 6]) -> [f32; 6] {
+    [
+        m[0],
+        m[1],
+        m[2],
+        m[3],
+        tx.mul_add(m[0], ty.mul_add(m[2], m[4])),
+        tx.mul_add(m[1], ty.mul_add(m[3], m[5])),
+    ]
+}
+
+/// Decode one byte of a simple font's string.
+///
+/// **`/Encoding` is not read yet**, and `WinAnsiEncoding` is assumed, which is
+/// what the overwhelming majority of simple fonts in real documents declare.
+/// It agrees with Latin-1 everywhere except `0x80..=0x9F`, which is the table
+/// below; a font using `StandardEncoding` or a `/Differences` array will have
+/// the wrong characters in that range and the right ones elsewhere.
+fn win_ansi(byte: u8) -> Option<char> {
+    // The range where WinAnsi and Latin-1 disagree. `None` entries are
+    // undefined in WinAnsi, and an undefined code draws nothing.
+    const HIGH: [char; 32] = [
+        '\u{20ac}', '\u{fffd}', '\u{201a}', '\u{0192}', '\u{201e}', '\u{2026}', '\u{2020}',
+        '\u{2021}', '\u{02c6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{fffd}',
+        '\u{017d}', '\u{fffd}', '\u{fffd}', '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}',
+        '\u{2022}', '\u{2013}', '\u{2014}', '\u{02dc}', '\u{2122}', '\u{0161}', '\u{203a}',
+        '\u{0153}', '\u{fffd}', '\u{017e}', '\u{0178}',
+    ];
+    match byte {
+        0..=31 => None,
+        128..=159 => {
+            let index = usize::from(byte).checked_sub(128)?;
+            match HIGH.get(index) {
+                Some('\u{fffd}') | None => None,
+                Some(c) => Some(*c),
+            }
+        }
+        other => Some(char::from(other)),
+    }
+}
+
+/// The text a content stream draws, with where and how big.
+///
+/// `fonts` says which `Tf` names are composite. A show operator under a
+/// composite font contributes **nothing**: its codes are two bytes wide and
+/// mean nothing without the font's `/ToUnicode` map, so decoding them
+/// byte-wise would produce plausible-looking rubbish -- and rubbish in a
+/// search index is worse than an empty one, because the reader cannot see it
+/// is there.
+#[must_use]
+pub fn extract_text(content: &[u8], fonts: &FontMap) -> Vec<TextRun> {
+    let mut lexer = Lexer::new(content);
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut operands: Vec<Object> = Vec::new();
+
+    let mut text_matrix = IDENTITY;
+    let mut line_matrix = IDENTITY;
+    let mut font_size = 0.0f32;
+    let mut leading = 0.0f32;
+    let mut composite = false;
+
+    while let Some(piece) = lexer.content_piece() {
+        let op = match piece {
+            Piece::Value(value) => {
+                // Bounded: a stream can otherwise stack operands forever
+                // between operators and make this grow without limit.
+                if operands.len() < 64 {
+                    operands.push(value);
+                }
+                continue;
+            }
+            Piece::Op(op) => op,
+        };
+        match op.as_slice() {
+            b"BT" => {
+                text_matrix = IDENTITY;
+                line_matrix = IDENTITY;
+            }
+            b"Tf" => {
+                if let Some(size) = operands.last().and_then(Object::as_f64) {
+                    font_size = size as f32;
+                }
+                composite = match operands.iter().rev().nth(1) {
+                    Some(Object::Name(name)) => {
+                        matches!(fonts.get(name), Some(FontKind::Composite))
+                    }
+                    _ => false,
+                };
+            }
+            b"TL" => {
+                if let Some(value) = operands.last().and_then(Object::as_f64) {
+                    leading = value as f32;
+                }
+            }
+            b"Td" | b"TD" => {
+                let ty = numeric(&operands, 0);
+                let tx = numeric(&operands, 1);
+                if op.as_slice() == b"TD" {
+                    leading = -ty;
+                }
+                line_matrix = translate(tx, ty, line_matrix);
+                text_matrix = line_matrix;
+            }
+            b"Tm" => {
+                if operands.len() >= 6 {
+                    let mut m = IDENTITY;
+                    for (slot, index) in m.iter_mut().zip(0..6usize) {
+                        *slot = numeric(&operands, 5usize.saturating_sub(index));
+                    }
+                    line_matrix = m;
+                    text_matrix = m;
+                }
+            }
+            b"T*" => {
+                line_matrix = translate(0.0, -leading, line_matrix);
+                text_matrix = line_matrix;
+            }
+            b"Tj" | b"'" | b"\"" => {
+                if op.as_slice() != b"Tj" {
+                    line_matrix = translate(0.0, -leading, line_matrix);
+                    text_matrix = line_matrix;
+                }
+                if let Some(Object::Str(bytes)) = operands.last() {
+                    push_run(&mut runs, bytes, text_matrix, font_size, composite);
+                }
+            }
+            b"TJ" => {
+                if let Some(Object::Array(items)) = operands.last() {
+                    // The numbers between the strings are kerning, in
+                    // thousandths of an em. They move the pen; they are not
+                    // text. Concatenating them would put "-3" inside a word.
+                    let mut joined: Vec<u8> = Vec::new();
+                    for item in items {
+                        if let Object::Str(bytes) = item {
+                            joined.extend_from_slice(bytes);
+                        }
+                    }
+                    push_run(&mut runs, &joined, text_matrix, font_size, composite);
+                }
+            }
+            _ => {}
+        }
+        operands.clear();
+    }
+    runs
+}
+
+/// The `n`th operand counting back from the last, as a number.
+fn numeric(operands: &[Object], back: usize) -> f32 {
+    operands
+        .iter()
+        .rev()
+        .nth(back)
+        .and_then(Object::as_f64)
+        .map_or(0.0, |v| v as f32)
+}
+
+/// Turn one show operator's bytes into a run, if it says anything.
+fn push_run(
+    runs: &mut Vec<TextRun>,
+    bytes: &[u8],
+    matrix: [f32; 6],
+    font_size: f32,
+    composite: bool,
+) {
+    if composite || bytes.is_empty() {
+        return;
+    }
+    let text: String = bytes.iter().filter_map(|b| win_ansi(*b)).collect();
+    if text.trim().is_empty() {
+        return;
+    }
+    // The text matrix's vertical scale, which is what turns `Tf`'s operand
+    // into the size on the page.
+    let scale = matrix[2].hypot(matrix[3]);
+    let size = font_size * scale;
+    if !size.is_finite() || size <= 0.0 {
+        return;
+    }
+    runs.push(TextRun {
+        text,
+        x: matrix[4],
+        y: matrix[5],
+        size,
+    });
+}
+
+/// One item from a content stream: an operand, or the operator using them.
+enum Piece {
+    Value(Object),
+    Op(Vec<u8>),
+}
+
+impl Lexer<'_> {
+    /// The next operand or operator, or `None` at the end of the stream.
+    ///
+    /// A content stream is postfix -- operands, then the operator that
+    /// consumes them -- so this cannot be [`Lexer::object`], which fails on a
+    /// bare keyword. The two are told apart by the first byte, exactly as the
+    /// object parser does.
+    fn content_piece(&mut self) -> Option<Piece> {
+        self.skip_space();
+        let first = self.peek()?;
+        match first {
+            b'/' | b'(' | b'[' | b'<' | b'+' | b'-' | b'.' | b'0'..=b'9' => {
+                match self.object() {
+                    Ok(value) => Some(Piece::Value(value)),
+                    // A malformed operand ends the stream rather than looping:
+                    // the position has not moved, so continuing would spin.
+                    Err(_) => None,
+                }
+            }
+            b']' | b')' | b'>' | b'}' | b'{' => {
+                // Stray closers a malformed stream can leave behind.
+                self.bump();
+                Some(Piece::Op(Vec::new()))
+            }
+            _ => {
+                let word = self.token().to_vec();
+                if word.is_empty() {
+                    self.bump();
+                    return Some(Piece::Op(Vec::new()));
+                }
+                match word.as_slice() {
+                    b"true" => Some(Piece::Value(Object::Bool(true))),
+                    b"false" => Some(Piece::Value(Object::Bool(false))),
+                    b"null" => Some(Piece::Value(Object::Null)),
+                    _ => Some(Piece::Op(word)),
+                }
+            }
+        }
+    }
+
+    /// Step over one byte, for the cases that would otherwise not advance.
+    fn bump(&mut self) {
+        self.pos = self.pos.saturating_add(1);
+    }
 }
 
 #[cfg(test)]
@@ -1066,6 +1616,298 @@ mod tests {
         // The offsets are now wrong by construction, so this asserts only that
         // a mangled file is refused rather than guessed at.
         assert!(read(patched.as_bytes()).is_err());
+    }
+
+    /// A `/FlateDecode` stream comes back as its original bytes.
+    ///
+    /// The fixture is deflated by the same crate that inflates it, which
+    /// proves the wiring and not the codec -- `deflate` has its own tests for
+    /// that. What is being tested here is that the filter name is read, the
+    /// range is taken from the file, and the two are put together.
+    #[test]
+    fn a_deflated_stream_is_inflated() {
+        let plain = b"BT /F1 12 Tf (hello) Tj ET";
+        let squeezed = deflate::zlib_deflate(plain);
+        let mut file = Vec::new();
+        file.extend_from_slice(
+            format!(
+                "<< /Length {} /Filter /FlateDecode >>\nstream\n",
+                squeezed.len()
+            )
+            .as_bytes(),
+        );
+        file.extend_from_slice(&squeezed);
+        file.extend_from_slice(b"\nendstream");
+
+        let object = Lexer::new(&file).object().expect("parses");
+        let out = stream_bytes(&file, &object).expect("inflates");
+        assert_eq!(out, plain);
+    }
+
+    /// An unfiltered stream is handed back untouched.
+    #[test]
+    fn a_plain_stream_needs_no_filter() {
+        let file = b"<< /Length 5 >>\nstream\nHELLO\nendstream";
+        let object = Lexer::new(file).object().expect("parses");
+        assert_eq!(stream_bytes(file, &object).expect("reads"), b"HELLO");
+    }
+
+    /// A filter this does not implement is named, not swallowed.
+    ///
+    /// `/DCTDecode` is a JPEG, and the caller's right response is to skip it.
+    /// Reporting it as a general failure would make "this is an image" and
+    /// "this reader is incomplete" the same answer.
+    #[test]
+    fn an_unsupported_filter_is_named() {
+        let file = b"<< /Length 2 /Filter /DCTDecode >>\nstream\nhi\nendstream";
+        let object = Lexer::new(file).object().expect("parses");
+        assert_eq!(
+            stream_bytes(file, &object),
+            Err(StreamError::UnsupportedFilter("DCTDecode".to_owned()))
+        );
+    }
+
+    /// A stream that claims deflate and is not is refused.
+    #[test]
+    fn a_stream_that_lies_about_being_deflated_is_refused() {
+        let file = b"<< /Length 5 /Filter /FlateDecode >>\nstream\nplain\nendstream";
+        let object = Lexer::new(file).object().expect("parses");
+        assert_eq!(stream_bytes(file, &object), Err(StreamError::Corrupt));
+    }
+
+    fn simple_fonts() -> FontMap {
+        let mut map = FontMap::new();
+        map.insert("T1_0".to_owned(), FontKind::Simple);
+        map
+    }
+
+    /// The size comes from the text matrix, not from `Tf`.
+    ///
+    /// Taken verbatim from a real document: `/T1_0 1 Tf` with `19 0 0 19` in
+    /// the matrix means 19-point text. A reader that believed `Tf` would call
+    /// it 1pt, and every span in the document would be wrong in a way that
+    /// still renders.
+    #[test]
+    fn the_size_is_the_font_size_times_the_matrix_scale() {
+        let content = b"BT /T1_0 1 Tf 19 0 0 19 14.1732 120.9732 Tm (Guide) Tj ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.len(), 1);
+        let run = runs.first().expect("a run");
+        assert_eq!(run.text, "Guide");
+        assert!((run.size - 19.0).abs() < 0.01, "got {}", run.size);
+        assert!((run.x - 14.1732).abs() < 0.01);
+        assert!((run.y - 120.9732).abs() < 0.01);
+    }
+
+    /// Kerning numbers inside a `TJ` array move the pen; they are not text.
+    ///
+    /// The array is the one a real document uses for the words "Quick Start".
+    /// Concatenating its numbers gives "Q-3uick S3tar-24t ", which is exactly
+    /// the kind of output that looks like it is working.
+    #[test]
+    fn a_kerned_array_does_not_put_its_numbers_in_the_words() {
+        let content = b"BT /T1_0 19 Tf [(Q)-3(uick S)3(tar)-24(t )]TJ ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs.first().expect("a run").text, "Quick Start ");
+    }
+
+    /// A composite font contributes nothing rather than rubbish.
+    ///
+    /// Its codes are two bytes wide and mean nothing without `/ToUnicode`.
+    /// One of the three documents this reader was measured against is
+    /// composite throughout, so this is the difference between an empty search
+    /// index and one full of text that was never on the page.
+    #[test]
+    fn a_composite_font_yields_no_text() {
+        let mut fonts = FontMap::new();
+        fonts.insert("C2_0".to_owned(), FontKind::Composite);
+        let content = b"BT /C2_0 12 Tf 1 0 0 1 10 10 Tm (\x00H\x00i) Tj ET";
+        assert!(extract_text(content, &fonts).is_empty());
+
+        // And the same bytes under a simple font do produce something, so the
+        // test above is about the font and not about the string.
+        let mut simple = FontMap::new();
+        simple.insert("C2_0".to_owned(), FontKind::Simple);
+        assert!(!extract_text(content, &simple).is_empty());
+    }
+
+    /// `Td` moves relative to the line, and `T*` uses the leading.
+    #[test]
+    fn the_line_moves_by_td_and_by_the_leading() {
+        let content =
+            b"BT /T1_0 10 Tf 1 0 0 1 100 700 Tm (one) Tj 0 -12 Td (two) Tj 14 TL T* (three) Tj ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.len(), 3);
+        let ys: Vec<f32> = runs.iter().map(|r| r.y).collect();
+        assert!((ys[0] - 700.0).abs() < 0.01, "got {ys:?}");
+        assert!((ys[1] - 688.0).abs() < 0.01, "Td moved down 12");
+        assert!((ys[2] - 674.0).abs() < 0.01, "T* moved down the 14 leading");
+    }
+
+    /// Text drawn at a nonsense size is dropped rather than recorded.
+    #[test]
+    fn a_zero_sized_run_is_not_recorded() {
+        let content = b"BT /T1_0 0 Tf 1 0 0 1 10 10 Tm (invisible) Tj ET";
+        assert!(extract_text(content, &simple_fonts()).is_empty());
+    }
+
+    /// Whitespace-only shows are not runs.
+    #[test]
+    fn a_run_of_spaces_is_not_text() {
+        let content = b"BT /T1_0 12 Tf 1 0 0 1 10 10 Tm (   ) Tj ET";
+        assert!(extract_text(content, &simple_fonts()).is_empty());
+    }
+
+    /// A stream that ends mid-object stops rather than spinning.
+    #[test]
+    fn a_truncated_content_stream_terminates() {
+        let content = b"BT /T1_0 12 Tf (unterminated";
+        let _ = extract_text(content, &simple_fonts());
+    }
+
+    /// WinAnsi's high range is decoded, not passed through as Latin-1.
+    #[test]
+    fn a_curly_quote_is_not_a_control_character() {
+        // 0x92 is a right single quote in WinAnsi and a control code in
+        // Latin-1. Passing the byte straight through would put an unprintable
+        // character in the middle of a word.
+        let content = b"BT /T1_0 12 Tf 1 0 0 1 0 0 Tm (it\x92s) Tj ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.first().expect("a run").text, "it\u{2019}s");
+    }
+
+    /// A one-page PDF whose content stream is built by `content`.
+    ///
+    /// `indirect_length` writes `/Length 9 0 R` and puts the number in its own
+    /// object, which is how every content stream in one of the real documents
+    /// this was measured against is written.
+    fn pdf_with_content(content: &[u8], indirect_length: bool) -> Vec<u8> {
+        const NL: u8 = 10;
+        let mut out: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        out.extend_from_slice(b"%PDF-1.4");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"2 0 obj << /Type /Pages /Count 1 /Kids [3 0 R] >> endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >> endobj",
+        );
+        out.push(NL);
+
+        offsets.push(out.len());
+        let length = if indirect_length {
+            "6 0 R".to_owned()
+        } else {
+            content.len().to_string()
+        };
+        out.extend_from_slice(format!("4 0 obj << /Length {length} >>").as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"stream");
+        out.push(NL);
+        out.extend_from_slice(content);
+        out.push(NL);
+        out.extend_from_slice(b"endstream endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
+        );
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(format!("6 0 obj {} endobj", content.len()).as_bytes());
+        out.push(NL);
+
+        let xref_at = out.len();
+        out.extend_from_slice(b"xref");
+        out.push(NL);
+        out.extend_from_slice(format!("0 {}", offsets.len() + 1).as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"0000000000 65535 f");
+        out.push(NL);
+        for off in &offsets {
+            out.extend_from_slice(format!("{off:010} 00000 n").as_bytes());
+            out.push(NL);
+        }
+        out.extend_from_slice(
+            format!("trailer << /Size {} /Root 1 0 R >>", offsets.len() + 1).as_bytes(),
+        );
+        out.push(NL);
+        out.extend_from_slice(b"startxref");
+        out.push(NL);
+        out.extend_from_slice(format!("{xref_at}").as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"%%EOF");
+        out
+    }
+
+    /// A page's text is read.
+    #[test]
+    fn a_pages_text_comes_back_with_the_page() {
+        let content = b"BT /F1 12 Tf 1 0 0 1 72 720 Tm (Hello there) Tj ET";
+        let doc = read(&pdf_with_content(content, false)).expect("reads");
+        let page = doc.pages.first().expect("a page");
+        assert_eq!(page.text.len(), 1);
+        let run = page.text.first().expect("a run");
+        assert_eq!(run.text, "Hello there");
+        assert!((run.size - 12.0).abs() < 0.01);
+        assert_eq!(doc.unreadable_pages, 0);
+    }
+
+    /// A `/Length` that is an indirect reference is resolved.
+    ///
+    /// The lexer cannot resolve one -- it is building the table that
+    /// resolution needs -- so the stream arrives with a length of zero. Every
+    /// content stream in a 122-page manual this was measured against is
+    /// written this way, and before the fix the whole document came back as
+    /// 122 unreadable pages with no text at all. Assembled fixtures did not
+    /// catch it because they all wrote the length inline.
+    #[test]
+    fn an_indirect_stream_length_is_resolved() {
+        let content = b"BT /F1 12 Tf 1 0 0 1 72 720 Tm (Indirect) Tj ET";
+        let doc = read(&pdf_with_content(content, true)).expect("reads");
+        let page = doc.pages.first().expect("a page");
+        assert_eq!(
+            page.text.first().map(|r| r.text.as_str()),
+            Some("Indirect"),
+            "the stream length was left at zero, so nothing was read"
+        );
+        assert_eq!(doc.unreadable_pages, 0);
+    }
+
+    /// A page drawn entirely in a composite font counts as unread.
+    ///
+    /// Its text cannot be decoded without the font's `/ToUnicode` map, so no
+    /// runs come out -- and a page with no runs is indistinguishable from a
+    /// blank one unless it is counted. One of the three real documents is
+    /// composite throughout: a search over it would otherwise answer "no
+    /// results" about 47 pages of words.
+    #[test]
+    fn a_composite_only_page_is_counted_as_unread() {
+        let content = b"BT /F1 12 Tf 1 0 0 1 72 720 Tm (\x00H\x00i) Tj ET";
+        let mut file = pdf_with_content(content, false);
+        // Make the font composite. Same length, so every offset still holds.
+        let patched =
+            String::from_utf8_lossy(&file).replace("/Subtype /Type1 ", "/Subtype /Type0 ");
+        file = patched.into_bytes();
+
+        let doc = read(&file).expect("reads");
+        assert!(doc.pages.first().expect("a page").text.is_empty());
+        assert_eq!(
+            doc.unreadable_pages, 1,
+            "a page nobody could read must not look like an empty one"
+        );
     }
 
     fn obj(src: &[u8]) -> Object {

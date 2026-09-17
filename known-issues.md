@@ -155475,6 +155475,20 @@ of today's fifteen had working code behind no caller, no menu row and no key.
 `[x]` on those would be the fabrication design-decisions 856 is about, moved
 into the planning file.
 
+**A third failure of the checkbox, found later the same evening: the compound
+bullet.** `roadmap-detailed.md` §4.3 has "Pause, resume, kill, change priority,
+restart" on one line. That is five requirements in three states — kill is real
+and reachable, pause and resume are present, changing priority is not
+implemented anywhere reachable, and restart does not exist. A checkbox can only
+report the weakest of the five, so the bullet sat unticked while most of it was
+built, and a reader learned nothing about the four that work.
+
+The same shape appears in §4.1's metadata labels (three toggles, a date-field
+choice, a per-folder scope and a line-count setting — one box) and §4.4's whole
+applications (a program of five thousand lines behind a single line of spec).
+**Where a bullet lists capabilities, the honest state is a sentence, not a
+mark** — which is why several items now carry one.
+
 **Recommendation for the next sweep:** record "checked and absent" explicitly,
 because after this the empty box no longer implies it. Five of the fifteen now
 say so, and that is the only way the next reader can tell a searched shelf from

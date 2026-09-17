@@ -18,6 +18,7 @@ use appearance::{
 };
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::colorpicker::{ColorPickerDialog, ColorPickerEvent};
 use guitk::dialog::{DialogAction, FileDialog};
 #[allow(unused_imports)]
 use guitk::event::{
@@ -480,6 +481,13 @@ pub struct SettingsState {
     /// questions -- a switch, a value from a list -- and a wallpaper is the one
     /// answer that comes from the filesystem.
     pub dialog: Option<FileDialog>,
+    /// The colour picker, while it is up.
+    ///
+    /// A second modal rather than a variant of the first: the two share no
+    /// state, answer different events and are never open together. What they
+    /// do share is the rule at the top of `dispatch_event` DASH a modal answers
+    /// first, because on this window every stray keystroke is a setting.
+    pub color_dialog: Option<ColorPickerDialog>,
     /// What the open picker is being used for.
     ///
     /// `DialogAction::Selected` arrives with a path and nothing else, so the
@@ -947,6 +955,40 @@ impl SettingsState {
     }
 
     /// Give the picker an event; `None` when there is no picker up.
+    /// Give the colour picker an event, and act on what comes back.
+    ///
+    /// A confirmed colour is two settings, not one: the colour itself, and
+    /// `accent_color = Custom` to say that it is the one to use. Writing only
+    /// the colour would store a value nothing reads, since
+    /// `effective_accent` consults `custom_accent` only for `Custom` -- the
+    /// picker would appear to work and the desktop would not change.
+    fn color_dialog_event(&mut self, event: &Event) {
+        let (width, height) = (self.window_width, self.window_height);
+        let outcome = {
+            let Some(dialog) = self.color_dialog.as_mut() else {
+                return;
+            };
+            match event {
+                Event::Key(key) if key.pressed => dialog.handle_key(key),
+                Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
+                _ => None,
+            }
+        };
+        match outcome {
+            Some(ColorPickerEvent::Confirmed(color)) => {
+                self.appearance.settings.custom_accent = color;
+                self.appearance.settings.accent_color = AccentColor::Custom;
+                self.color_dialog = None;
+            }
+            Some(ColorPickerEvent::Cancelled) => self.color_dialog = None,
+            // `Changed` is the live preview inside the picker, which the
+            // picker draws for itself. Adopting it here would repaint the
+            // whole desktop on every pixel of a drag, and would leave the
+            // last-dragged colour in force if the user then cancelled.
+            _ => {}
+        }
+    }
+
     fn dialog_event(&mut self, event: &Event) -> Option<bool> {
         let (width, height) = (self.window_width, self.window_height);
         let action = {
@@ -1185,6 +1227,7 @@ impl SettingsState {
             window_width: 1200.0,
             window_height: 800.0,
             dialog: None,
+            color_dialog: None,
             picker_is_for: PickerPurpose::Wallpaper,
 
             // Display defaults
@@ -2690,12 +2733,17 @@ impl SettingsState {
             self.render_open_dropdown(&mut tree);
         }
 
-        // And the file picker over even that: it is the only modal thing in
-        // this window, and a dropdown drawn over it would be a list the user
-        // could not dismiss.
+        // And a modal over even that: a dropdown drawn over one would be a
+        // list the user could not dismiss. Two of them now, the file picker
+        // and the colour picker; they are never open at once, because each is
+        // opened from a page that the other one covers.
         if let Some(dialog) = &self.dialog {
             tree.commands
                 .extend(dialog.render(pal, self.window_width, self.window_height));
+        }
+        if let Some(picker) = self.color_dialog.as_ref() {
+            tree.commands
+                .extend(picker.render(pal, self.window_width, self.window_height));
         }
 
         tree
@@ -3601,8 +3649,42 @@ impl SettingsState {
             });
         }
 
+        // And one more, for a colour that is not in the row. It sits in the
+        // grid rather than beside it because it is the same kind of choice:
+        // `AccentColor::Custom` is a fourteenth accent, not a mode.
+        //
+        // The swatch shows the colour actually stored, so a user who picked
+        // one recognises it here; `AppearanceSettings::custom_accent` has a
+        // sensible default, so it is never blank.
+        let custom_idx = presets.len();
+        let (dx, dy) = swatch_offset(custom_idx);
+        let (x, y) = (s.x(), s.y());
+        s.hit_rect(
+            x + dx,
+            y + dy,
+            SWATCH_SIZE,
+            SWATCH_SIZE,
+            RowHit::Select(SelectId::AccentColor, custom_idx),
+        );
+        let custom_color = self.appearance.settings.custom_accent;
+        let custom_selected = chosen == AccentColor::Custom;
+        s.draw(move |tree, x, y| {
+            render_swatch(tree, pal, x + dx, y + dy, custom_color, custom_selected);
+            // A mark to say this one asks a question rather than answering
+            // one. `readable_on` rather than `pal.on_accent()`: that role is
+            // chosen for the *theme's* accent, and this swatch is whatever
+            // colour the user picked -- which may be white.
+            tree.text(
+                x + dx + SWATCH_SIZE / 2.0 - 4.0,
+                y + dy + SWATCH_SIZE / 2.0 - 7.0,
+                "+",
+                guitk::palette::readable_on(custom_color),
+                15.0,
+            );
+        });
+
         #[allow(clippy::cast_precision_loss)]
-        let grid_rows = presets.len().div_ceil(SWATCH_COLS) as f32;
+        let grid_rows = presets.len().saturating_add(1).div_ceil(SWATCH_COLS) as f32;
         s.advance(grid_rows * (SWATCH_SIZE + SWATCH_SPACING));
         s.gap();
 
@@ -5055,6 +5137,14 @@ impl SettingsState {
             self.dialog_event(event);
             return EventResult::Consumed;
         }
+        // The colour picker is modal for the same reason and on the same
+        // terms. Inside the same snapshot bracket, so the colour it returns is
+        // saved by the whole-struct comparison rather than by a write of its
+        // own -- a second way to persist is a second way to forget.
+        if !matches!(event, Event::Resize { .. }) && self.color_dialog.is_some() {
+            self.color_dialog_event(event);
+            return EventResult::Consumed;
+        }
         match event {
             Event::Key(key_evt) => self.handle_key(key_evt),
             Event::Mouse(mouse_evt) => self.handle_mouse(mouse_evt),
@@ -5305,6 +5395,14 @@ impl SettingsState {
             RowHit::Select(SelectId::AccentColor, idx) => {
                 if let Some(accent) = AccentColor::presets().get(idx) {
                     self.appearance.settings.accent_color = *accent;
+                } else {
+                    // The swatch past the end of the presets: pick your own.
+                    // Opened on the colour in force, so the picker starts
+                    // where the user is rather than at an arbitrary hue, and
+                    // cancelling visibly changes nothing.
+                    self.color_dialog = Some(ColorPickerDialog::new(
+                        self.appearance.settings.effective_accent(),
+                    ));
                 }
             }
             RowHit::Select(SelectId::Account, idx) => {
@@ -7051,6 +7149,140 @@ mod tests {
             center_of(&state, RowHit::Press(ButtonId::ChooseLoginImage)).is_some(),
             "no way to change the greeter's picture"
         );
+    }
+
+    /// Return a key event for `key`, pressed.
+    fn key_press(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// Open the colour picker the way a user does, and answer where it is.
+    fn open_accent_picker() -> SettingsState {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Colors;
+        let custom = AccentColor::presets().len();
+        let (x, y) = center_of(&state, RowHit::Select(SelectId::AccentColor, custom))
+            .expect("no swatch for a colour of your own");
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        state
+    }
+
+    /// There is a swatch for a colour that is not one of the presets.
+    ///
+    /// The palette has honoured `AccentColor::Custom` since it was written --
+    /// `effective_accent` returns `custom_accent` for it, and `accent_on` has
+    /// a branch saying the user's choice is not to be second-guessed -- but
+    /// `AccentColor::presets()` lists the thirteen named accents and not that
+    /// one, so there was no way to reach it. This is the control catching up
+    /// with the consumer, which is the direction that leaves nothing lying.
+    #[test]
+    fn the_accent_grid_offers_a_colour_of_your_own() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Colors;
+        assert!(
+            center_of(
+                &state,
+                RowHit::Select(SelectId::AccentColor, AccentColor::presets().len())
+            )
+            .is_some(),
+            "the accent grid ends at the presets"
+        );
+    }
+
+    /// Pressing it asks which colour, and changes nothing until told.
+    #[test]
+    fn choosing_your_own_colour_asks_which_colour() {
+        let state = open_accent_picker();
+        assert!(state.color_dialog.is_some(), "no colour picker appeared");
+        assert_eq!(
+            state.appearance.settings.accent_color,
+            AccentColor::Blue,
+            "the accent changed before a colour had been chosen"
+        );
+    }
+
+    /// **A confirmed colour is the accent, and the desktop is told to use it.**
+    ///
+    /// Two settings, not one. `effective_accent` consults `custom_accent` only
+    /// when `accent_color` is `Custom`, so writing the colour alone would
+    /// store a value nothing reads: the picker would appear to have worked and
+    /// the desktop would not change. That is the same shape as the wallpaper
+    /// fit defect -- stored, and nothing obeying it.
+    #[test]
+    fn a_confirmed_colour_becomes_the_accent() {
+        let mut state = open_accent_picker();
+        let chosen = Color::from_hex(0x1D7A3F);
+        state
+            .color_dialog
+            .as_mut()
+            .expect("picker")
+            .picker_mut()
+            .set_color(chosen);
+
+        state.handle_event(&key_press(Key::Enter));
+
+        assert!(state.color_dialog.is_none(), "the picker stayed up");
+        assert_eq!(state.appearance.settings.custom_accent, chosen);
+        assert_eq!(
+            state.appearance.settings.accent_color,
+            AccentColor::Custom,
+            "the colour was saved but nothing was told to use it"
+        );
+        // The claim that matters to a user: the desktop's accent is now theirs.
+        assert_eq!(
+            state.appearance.settings.effective_accent(),
+            chosen,
+            "the accent the desktop will draw is not the colour that was picked"
+        );
+    }
+
+    /// Cancelling leaves the accent exactly as it was.
+    #[test]
+    fn cancelling_the_colour_picker_changes_nothing() {
+        let mut state = open_accent_picker();
+        let before = state.appearance.settings.effective_accent();
+        state
+            .color_dialog
+            .as_mut()
+            .expect("picker")
+            .picker_mut()
+            .set_color(Color::from_hex(0xFF00FF));
+
+        state.handle_event(&key_press(Key::Escape));
+
+        assert!(state.color_dialog.is_none(), "the picker stayed up");
+        assert_eq!(
+            state.appearance.settings.effective_accent(),
+            before,
+            "a cancelled colour was adopted anyway"
+        );
+        assert_ne!(state.appearance.settings.accent_color, AccentColor::Custom);
+    }
+
+    /// While the picker is up, a keystroke does not reach the page behind it.
+    ///
+    /// On this window every key is a setting, so a modal that leaks is a modal
+    /// that changes something the user could not see they were changing. The
+    /// file picker is guarded this way already; this is the same guard.
+    #[test]
+    fn the_colour_picker_answers_before_the_page() {
+        let mut state = open_accent_picker();
+        let page = state.current_page;
+
+        // Down would move the sidebar selection on an unguarded page.
+        state.handle_event(&key_press(Key::Down));
+
+        assert_eq!(state.current_page, page, "a keystroke reached the page");
+        assert!(state.color_dialog.is_some(), "the picker went away");
     }
 
     #[test]

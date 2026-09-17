@@ -95,7 +95,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub mod jpeg;
-mod png;
+pub mod png;
 pub mod testing;
 
 /// A decoded picture: densely packed `0xAARRGGBB`, row-major, no padding.

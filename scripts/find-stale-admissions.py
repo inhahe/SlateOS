@@ -107,6 +107,58 @@ import re
 import sys
 
 from rustlex import live_code, string_literals, strip_noise
+# The count this file's "IT STILL REPORTS" note claims, so the scan can say
+# when the two have drifted apart.
+#
+# Twice on 2026-09-17 a note like that sat beside a larger scan and nobody
+# noticed: `find-claimed-acts` listed four while reporting six, and
+# `find-stale-admissions` listed three while reporting eight -- and three of
+# that eight were real, windows denying capabilities they had gained. The note
+# exists so nobody investigates a known-good finding twice, and it can only do
+# that if it covers everything reported. The gap is the finding, so the tool
+# says so rather than leaving it to be spotted.
+_COUNT_WORDS = {
+    "ZERO": 0, "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
+    "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10, "ELEVEN": 11,
+    "TWELVE": 12,
+}
+
+
+def documented_count():
+    """How many findings this file's own note says it covers, or None."""
+    match = re.search(r"THE ([A-Z]+) IT STILL REPORTS", __doc__ or "")
+    if match is None:
+        return None
+    return _COUNT_WORDS.get(match.group(1))
+
+
+def report_drift(found, out=sys.stdout):
+    """Say so when the scan reports more than this file's note covers.
+
+    One direction only. Finding *fewer* than the note lists is usually not
+    staleness: a documented entry can sit outside the roots this run scanned,
+    and warning on that would cry wolf on every default run. A checker nobody
+    believes is worse than no checker. The dangerous direction is the other
+    one, where something is reported that nobody has ever read.
+    """
+    documented = documented_count()
+    if documented is None or found <= documented:
+        return False
+    missing = found - documented
+    print("", file=out)
+    print(
+        "  NOTE OUT OF DATE: this file documents {} known-good finding(s) and"
+        " the scan reports {}.".format(documented, found),
+        file=out,
+    )
+    print(
+        "  The {} not covered have never been read. Read them, and either fix"
+        " what they".format(missing),
+        file=out,
+    )
+    print("  found or add them to the note with the reason.", file=out)
+    return True
+
 
 PAIRS = {
     "file": (
@@ -207,6 +259,7 @@ def main():
         f"({len(reported)} more carry a format placeholder, so they report one "
         f"failed attempt rather than claim a standing incapacity)\n"
     )
+    report_drift(len(findings))
     print("  READ THE SENTENCE AGAINST THE CODE. A crate can hold a capability")
     print("  in one place and truthfully deny it in another -- pdfviewer can")
     print("  open a file and still cannot render one.\n")

@@ -2359,7 +2359,7 @@ impl ExplorerState {
         // Converted at the boundary: this crate has its own `Rect` with
         // `width`/`height` where the toolkit's has `w`/`h`. Two identical
         // rectangles under different field names, filed as
-        // `TD-C-TWO-RECTANGLE-TYPES`; adapting here is two lines, and
+        // `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`; adapting here is two lines, and
         // converting the explorer is not this change's job.
         let panes = splitter::panes(
             guitk::frame::Rect::new(area.x, area.y, area.width, area.height),

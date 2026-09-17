@@ -15,7 +15,6 @@
 
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
@@ -26,7 +25,7 @@ use std::path::{Component, Path, PathBuf};
 // implementations of these four functions until 2026-09-16 -- each under its
 // own doc comment explaining its own format, which is how two copies of one
 // decision stayed comfortable.
-use pathcodec::{decode_bytes, decode_path, encode_bytes, encode_path, os_string_from_bytes};
+use pathcodec::{decode_path, encode_path, os_string_from_bytes};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1026,9 +1025,6 @@ impl FileEntry {
         })
     }
 }
-
-/// Escape a path into printable ASCII, losslessly.
-///
 
 /// Manifest for a single backup — lists all files included.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4061,43 +4057,6 @@ mod tests {
                 Path::new("plain.txt")
             ]
         );
-    }
-
-    /// The write side. Fixing the manifest *parser* was not enough: the entry
-    /// handed to the writer had already been through `to_string_lossy` in
-    /// `relative_path`, so a byte the filesystem allowed was destroyed before
-    /// the manifest ever saw it, and restore recreated the file under a
-    /// different name.
-    ///
-    /// Asserted on bytes because that is what the manifest stores; on the
-    /// Windows test host an `OsString` cannot hold a non-WTF-8 byte string at
-    /// all, so routing through `PathBuf` would test the host, not the format.
-    #[test]
-    fn a_path_byte_the_filesystem_allows_survives_the_manifest() {
-        let raw = b"photos/caf\xE9.jpg";
-        let encoded = encode_bytes(raw);
-        assert_eq!(encoded, "photos/caf%E9.jpg");
-        assert_eq!(
-            decode_bytes(&encoded),
-            raw,
-            "a lone 0xE9 must come back as 0xE9, not as U+FFFD"
-        );
-    }
-
-    #[test]
-    fn every_byte_value_round_trips_through_the_path_encoding() {
-        let all: Vec<u8> = (0u8..=255).collect();
-        assert_eq!(decode_bytes(&encode_bytes(&all)), all);
-    }
-
-    #[test]
-    fn a_percent_in_a_filename_is_not_mistaken_for_an_escape() {
-        // "100% done.txt" is a legal filename. Round-tripping it must not eat
-        // the "20", and a `%` that is not a valid escape is kept verbatim.
-        let raw = b"100% done.txt";
-        assert_eq!(encode_bytes(raw), "100%25 done.txt");
-        assert_eq!(decode_bytes(&encode_bytes(raw)), raw);
-        assert_eq!(decode_bytes("a%zz"), b"a%zz");
     }
 
     /// `relative_path` produces every `FileEntry.path`, so its output is what

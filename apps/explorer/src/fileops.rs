@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 // stay human-readable. Shared rather than copied: §426 picked ONE escape
 // precisely so two formats could not drift, and this file and
 // `apps/backup` held byte-identical copies of it until 2026-09-16.
-use pathcodec::{decode_bytes, decode_path, encode_bytes, encode_path};
+use pathcodec::{decode_path, encode_path};
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -3280,44 +3280,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_path_that_is_not_utf8_survives_the_metadata() {
-        // Paths on this OS allow every byte but `/` and NUL, so the metadata
-        // must carry bytes, not characters. Writing the path with `Display`
-        // replaced undecodable bytes with U+FFFD and the original name was
-        // then unrecoverable.
-        //
-        // Asserted at the byte level, which is the level `meta.txt` is written
-        // at: `OsString` on the Windows test host cannot hold a non-WTF-8 byte
-        // string at all, so going through `PathBuf` here would be testing the
-        // host's limitation rather than our encoding.
-        let encoded = "/home/u/caf%E9.txt";
-        let decoded = decode_bytes(encoded);
-        assert_eq!(
-            decoded, b"/home/u/caf\xE9.txt",
-            "a lone 0xE9 must come back as 0xE9, not as U+FFFD"
-        );
-        assert_eq!(
-            encode_bytes(&decoded),
-            encoded,
-            "and must re-encode to the same text"
-        );
-    }
-
-    /// Every byte value must survive, not just the one a bug happened to hit.
-    #[test]
-    fn every_byte_value_round_trips_through_the_encoding() {
-        let all: Vec<u8> = (0u8..=255).collect();
-        assert_eq!(decode_bytes(&encode_bytes(&all)), all);
-    }
-
-    #[test]
-    fn a_percent_that_is_not_an_escape_is_kept_verbatim() {
-        // A hand-edited file may contain a bare `%`. Dropping it would silently
-        // rename the entry; the decoder passes it through instead.
-        assert_eq!(decode_bytes("100%"), b"100%");
-        assert_eq!(decode_bytes("a%zz"), b"a%zz");
-    }
+    // The pure encode/decode cases that used to sit here now live in
+    // `apps/pathcodec`, which owns the encoding and tests every byte value.
+    // What remains in this file exercises the encoding through `meta.txt`,
+    // which is this crate's own use of it.
 
     #[test]
     fn a_recycled_non_ascii_name_restores_to_its_original_path() {

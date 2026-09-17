@@ -9584,6 +9584,10 @@ extern "C" fn kernel_main() -> ! {
             // count, `nothing violated the rule` and `the check saw nothing`
             // are the same silence. See design-decisions 942 and 948.
             lockdep::report_lock_context();
+            // Beside it, and for the same reason: the leaf-claim check's
+            // reports fire as they happen, so without this its totals
+            // accumulate where nothing reads them.
+            sync::report_leaf_claims();
 
 
             // Boot success marker — the boot test script greps for this.

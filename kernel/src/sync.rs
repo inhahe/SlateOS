@@ -1124,9 +1124,47 @@ static LEAF_NAME_LEN: [AtomicUsize; crate::smp::MAX_CPUS] = {
 /// Total nestings observed inside a leaf critical section.
 static LEAF_NESTINGS: AtomicU64 = AtomicU64::new(0);
 
-/// Cap on reports so a hot offender cannot flood serial. The count above
-/// keeps rising after the reports stop, so the number stays honest.
-const MAX_LEAF_REPORTS: u64 = 8;
+/// Cap on *distinct* reports. The count above keeps rising after the
+/// reports stop, so the number stays honest.
+const MAX_LEAF_REPORTS: usize = 24;
+
+/// Site pairs already reported, so each distinct nesting is named once.
+///
+/// The first version capped raw occurrences instead, and the second real
+/// boot showed why that is wrong: `bookmarks::init` and `templates::init`
+/// both hold an `INITIALIZED` guard across the store they initialise, which
+/// is a common idiom, benign here, and repeats. Eight occurrences of two
+/// idioms crowded out everything else, so the cap was spending itself on
+/// the least interesting finding.
+///
+/// The lock-context check already reports once per class
+/// (`CLASS_CTX_REPORTED`) for exactly this reason. Not carrying that across
+/// was the same rule applied in one of the two places it belongs.
+static LEAF_SEEN: [(AtomicUsize, AtomicUsize); MAX_LEAF_REPORTS] = {
+    const ZERO: (AtomicUsize, AtomicUsize) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    [ZERO; MAX_LEAF_REPORTS]
+};
+
+/// Claim a slot for this (outer, inner) site pair, or report it as already
+/// seen. Linear over 24 entries, and only ever reached on a violation.
+fn leaf_pair_is_new(outer: usize, inner: usize) -> bool {
+    for slot in &LEAF_SEEN {
+        let o = slot.0.load(Ordering::Relaxed);
+        if o == outer && slot.1.load(Ordering::Relaxed) == inner {
+            return false;
+        }
+        if o == 0
+            && slot
+                .0
+                .compare_exchange(0, outer, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            slot.1.store(inner, Ordering::Release);
+            return true;
+        }
+    }
+    false
+}
 
 /// Where this CPU's outermost leaf lock was acquired, if any.
 fn leaf_site() -> Option<&'static core::panic::Location<'static>> {
@@ -1218,8 +1256,12 @@ fn note_leaf_nesting(inner: &'static [u8]) {
         return;
     }
     let Some(outer) = leaf_held() else { return };
-    let n = LEAF_NESTINGS.fetch_add(1, Ordering::Relaxed);
-    if n >= MAX_LEAF_REPORTS {
+    LEAF_NESTINGS.fetch_add(1, Ordering::Relaxed);
+    // Once per distinct site pair. `Location::caller()` returns a pointer
+    // into read-only data, so its address identifies the site.
+    let inner_site = core::ptr::from_ref(core::panic::Location::caller()) as usize;
+    let outer_site = leaf_site().map_or(0, |l| core::ptr::from_ref(l) as usize);
+    if !leaf_pair_is_new(outer_site, inner_site) {
         return;
     }
     crate::serial_println!(
@@ -1244,9 +1286,44 @@ fn note_leaf_nesting(inner: &'static [u8]) {
 }
 
 /// Total lock acquisitions seen inside a leaf critical section.
-#[allow(dead_code)]
 pub fn leaf_nesting_count() -> u64 {
     LEAF_NESTINGS.load(Ordering::Relaxed)
+}
+
+/// Print the leaf-claim check's total and how many distinct pairs it named.
+///
+/// It had no caller at all until this was written, which is dd-946 in the
+/// same file as the check it belongs to: the reports fire on their own, so
+/// the *total* was accumulating where nothing would ever read it. The two
+/// numbers differ for a reason worth seeing -- the reports are deduped by
+/// site pair, so a large total against a small pair count means one idiom
+/// repeating, not many distinct defects.
+pub fn report_leaf_claims() {
+    let total = LEAF_NESTINGS.load(Ordering::Relaxed);
+    let named = LEAF_SEEN
+        .iter()
+        .filter(|s| s.0.load(Ordering::Relaxed) != 0)
+        .count();
+    if total == 0 {
+        crate::serial_println!(
+            "[sync] leaf-claim check: no lock was acquired inside a PreemptSpinMutex"
+        );
+        return;
+    }
+    crate::serial_println!(
+        concat!(
+            "[sync] leaf-claim check: {} acquisition(s) inside a ",
+            "PreemptSpinMutex, {} distinct site pair(s) named above",
+            "{}"
+        ),
+        total,
+        named,
+        if named >= MAX_LEAF_REPORTS {
+            " (AT THE CAP -- there may be more)"
+        } else {
+            ""
+        }
+    );
 }
 /// A preempt-disabling spinlock for **hot leaf locks**.
 ///

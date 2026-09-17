@@ -719,11 +719,10 @@ impl WallpaperManager {
         self.config.fit = fit;
         self.slideshow = None;
         self.current_image_id = self.alloc_image_id();
-        // `display()` and not an exact spelling, because this entry is only
-        // ever written: `WallpaperHistory` has no `back` or `forward`, so
-        // nothing can navigate to what it records. See `known-issues.md`
-        // `TD-C-THE-WALLPAPER-SUBSYSTEM-CARRIES-PATHS-AS-TEXT-THROUGHOUT`;
-        // spelling a write-only log exactly would be making dead code correct.
+        // An earlier version of this comment said the history could never be
+        // navigated because the type had no `back` or `forward`. That was
+        // false -- written from a grep for `pub fn back` against methods named
+        // `go_back` and `go_forward`, both of which exist and are tested.
         self.history
             .push(WallpaperChoice::Image(path.to_path_buf()));
     }
@@ -788,10 +787,10 @@ impl WallpaperManager {
             let seed = self.rng.next_u64();
             state.shuffle_with_seed(seed);
         }
-        if let Some(path) = state.current_path() {
+        if state.current_path().is_some() {
             self.current_image_id = self.alloc_image_id();
-            self.history
-                .push(WallpaperChoice::Slideshow(path.to_path_buf()));
+            // Not recorded either: listing a directory is not choosing a
+            // wallpaper. §858.
         }
         self.slideshow = Some(state);
     }
@@ -862,10 +861,13 @@ impl WallpaperManager {
 
         if advanced {
             self.current_image_id = self.alloc_image_id();
-            if let Some(path) = self.slideshow.as_ref().and_then(|s| s.current_path()) {
-                self.history
-                    .push(WallpaperChoice::Slideshow(path.to_path_buf()));
-            }
+            // Deliberately NOT recorded: `WallpaperHistory` answers "what did
+            // the user choose", and a timer firing is not a choice. Recording
+            // it filled the history with pictures nobody picked -- at a
+            // thirty-second interval a twenty-entry buffer turns over in ten
+            // minutes, so a wallpaper the user actually chose was evicted by
+            // the slideshow they left running, and "previous wallpaper" would
+            // have walked backwards through slideshow frames. §858.
         }
 
         advanced
@@ -2057,6 +2059,64 @@ mod tests {
     // ------------------------------------------------------------------
     // Slideshow tick / advance
     // ------------------------------------------------------------------
+
+    /// A slideshow running by itself does not fill the history.
+    ///
+    /// design-decisions 858: the history answers "what did the user choose",
+    /// and a timer firing is not a choice. This was untested when the timer
+    /// DID record -- removing that push broke nothing, which is why it needs
+    /// pinning now: the next person to read `tick_slideshow` will see an
+    /// advance that updates the image id and not the history, and the obvious
+    /// "fix" is to add the push back.
+    #[test]
+    fn a_timed_advance_does_not_enter_the_history() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_solid_color(Color::from_hex(0x102030));
+        let after_choice = mgr.history.len();
+
+        mgr.set_slideshow("/wp", 10, false);
+        mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
+        assert_eq!(
+            mgr.history.len(),
+            after_choice,
+            "setting up a slideshow recorded something"
+        );
+
+        assert!(!mgr.tick(100));
+        assert!(mgr.tick(111));
+        assert!(mgr.tick(200));
+        assert!(mgr.tick(300));
+
+        assert_eq!(
+            mgr.history.len(),
+            after_choice,
+            "the timer added {} entries the user never chose",
+            mgr.history.len().saturating_sub(after_choice)
+        );
+        assert_eq!(
+            mgr.history.current(),
+            Some(&WallpaperChoice::Solid(Color::from_hex(0x102030))),
+            "the user's own choice was pushed out of the history by the timer"
+        );
+    }
+
+    /// Stepping through a slideshow by hand IS a choice, and is recorded.
+    ///
+    /// The other side of 858: the line is between the user acting and the
+    /// clock acting, not between kinds of wallpaper.
+    #[test]
+    fn stepping_by_hand_does_enter_the_history() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_slideshow("/wp", 10, false);
+        mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into()]);
+        let before = mgr.history.len();
+
+        mgr.next_wallpaper();
+        assert!(
+            mgr.history.len() > before,
+            "a deliberate step was not recorded"
+        );
+    }
 
     #[test]
     fn tick_slideshow_advances_on_interval() {

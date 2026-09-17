@@ -269,6 +269,14 @@ pub struct ShellSession<T: Transport> {
     /// clock here is a delta. This accumulates the one into the other, and is
     /// the session's only absolute clock.
     clock_ms: u64,
+    /// The rotation folder whose contents are currently loaded.
+    ///
+    /// Kept so `sync_wallpaper` can tell "the user changed the folder" from
+    /// "the settings were re-read and nothing about the wallpaper moved". The
+    /// difference is a directory scan, and `sync_wallpaper` runs on every
+    /// settings change -- scanning each time would read a folder of photographs
+    /// off the disk because the user adjusted the taskbar's opacity.
+    rotation_loaded: Option<PathBuf>,
     /// The picture the background surface was last *asked* to hold, as the
     /// wallpaper's image id and the path it was read from.
     ///
@@ -548,6 +556,7 @@ impl<T: Transport> ShellSession<T> {
                 ..AutoHideConfig::default()
             }),
             clock_ms: 0,
+            rotation_loaded: None,
             wallpaper_image: None,
             wallpaper_error: None,
             // A login screen exactly when there is somebody to log in as. On a
@@ -1601,6 +1610,21 @@ impl<T: Transport> ShellSession<T> {
     /// switches between light and dark, and only one of them is a decision the
     /// user made.
     fn sync_wallpaper(&mut self) {
+        // A rotation folder wins over a fixed picture: a rotation *is* the
+        // wallpaper, and honouring both would leave the fixed picture visible
+        // in the settings file and never on the screen.
+        if let Some(folder) = self.shell.appearance.wallpaper_folder.clone() {
+            self.sync_rotation(&folder);
+            return;
+        }
+        if self.rotation_loaded.take().is_some() {
+            // Rotation was switched off. Fall through to the fixed picture,
+            // which the branch below applies -- but the slideshow has to go
+            // first or `tick` would keep advancing it underneath.
+            self.wallpaper.follow_desktop_base();
+            self.dirty = true;
+        }
+
         let wanted = self.shell.appearance.wallpaper.clone();
         match wanted.as_deref() {
             Some(path) => {
@@ -1625,6 +1649,60 @@ impl<T: Transport> ShellSession<T> {
                 }
             }
         }
+    }
+
+    /// Point the wallpaper at a folder, scanning it only when it changes.
+    ///
+    /// The scan lives here and not in `WallpaperManager` because that type
+    /// does no filesystem I/O by design -- `populate_slideshow_paths` exists
+    /// precisely so the shell can hand it what it found.
+    fn sync_rotation(&mut self, folder: &Path) {
+        if self.rotation_loaded.as_deref() == Some(folder) {
+            // Already showing this folder. The interval and shuffle can still
+            // have changed, and both are cheap to re-apply; the pictures are
+            // what would cost a directory read.
+            let interval = self.shell.appearance.wallpaper_interval_secs;
+            if self.wallpaper.config.slideshow_interval_secs != interval.max(1) {
+                self.wallpaper.config.slideshow_interval_secs = interval.max(1);
+                self.dirty = true;
+            }
+            return;
+        }
+
+        let pictures = Self::pictures_in(folder);
+        self.wallpaper.set_slideshow(
+            &folder.to_string_lossy(),
+            self.shell.appearance.wallpaper_interval_secs,
+            self.shell.appearance.wallpaper_shuffle,
+        );
+        self.wallpaper.populate_slideshow_paths(pictures);
+        self.rotation_loaded = Some(folder.to_path_buf());
+        self.dirty = true;
+    }
+
+    /// The pictures in `folder`, in a stable order.
+    ///
+    /// Sorted, because a directory read is in whatever order the filesystem
+    /// hands back and an unshuffled rotation that changes order between boots
+    /// is not "directory order", it is a second shuffle nobody asked for.
+    ///
+    /// A folder that cannot be read yields nothing rather than an error: the
+    /// wallpaper is not the place to report a missing directory, and an empty
+    /// slideshow leaves the desktop on its plain background, which is the
+    /// honest picture of "there is nothing to show".
+    fn pictures_in(folder: &Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .map(|e| e.path())
+            .filter(|p| crate::wallpaper::is_picture(p))
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     fn sync_animation_speed(&mut self) {
@@ -2073,6 +2151,15 @@ impl<T: Transport> ShellSession<T> {
         // the manager's — it lives on the overview so that the overview can be
         // drawn correctly by a caller that has no manager at all.
         self.shell.overview.tick_fade(dt);
+        // The wallpaper keeps its own clock, in whole seconds, and until now
+        // nothing turned it: a slideshow never advanced and the time-of-day
+        // gradient never changed, because `WallpaperManager::tick` had no
+        // caller outside its own tests. The session's accumulated clock is
+        // monotonic, which is what `tick` compares -- it never asks what the
+        // time is, only how much of it has passed.
+        if self.wallpaper.tick(self.clock_ms / 1000) {
+            self.dirty = true;
+        }
         // The pane keeps its own clock too, and in seconds rather than
         // milliseconds: it is a `guitk` widget, whose animation convention is a
         // float of seconds. Converted here rather than changed there, because

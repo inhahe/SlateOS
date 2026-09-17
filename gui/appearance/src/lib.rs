@@ -225,7 +225,11 @@ impl PaletteSource for AppearanceSettings {
 // Image fit
 // ============================================================================
 
-/// Marks the wallpaper path in a settings file as percent-encoded.
+/// Marks the wallpaper **paths** in a settings file as percent-encoded.
+///
+/// One marker for the whole group rather than one per key, which is what §426
+/// does: it versions the *record*, not each field. The picture and the
+/// rotation folder are both paths and are both encoded when this is present.
 ///
 /// design-decisions §426's version marker, in the shape a YAML document can
 /// carry: a sibling key rather than a first line. Its absence means the file
@@ -1346,6 +1350,29 @@ pub struct AppearanceSettings {
     /// expects. The same argument `night_light`/`night_light_strength` makes
     /// one field along.
     pub wallpaper_fit: ImageFit,
+
+    /// A folder to rotate wallpapers from, instead of one fixed picture.
+    ///
+    /// `roadmap-detailed.md` §3.4 asks for "random background on boot or daily
+    /// rotation". The machinery has existed in `WallpaperManager` for a while
+    /// -- `set_slideshow`, `populate_slideshow_paths`, shuffle, a per-image
+    /// timer -- and had no key here, which is the whole reason nothing outside
+    /// the shell's own tests ever called it.
+    ///
+    /// Takes precedence over [`wallpaper`](Self::wallpaper) when set, because
+    /// a rotation *is* a wallpaper: having both would make the fixed picture a
+    /// thing the user can see in the settings file and never on the screen.
+    pub wallpaper_folder: Option<PathBuf>,
+
+    /// How long each picture stays up, in seconds.
+    ///
+    /// Clamped to at least one second on the way into `set_slideshow`: zero
+    /// would mean a new picture every tick, which is a slideshow nobody asked
+    /// for and a decode storm.
+    pub wallpaper_interval_secs: u64,
+
+    /// Whether the rotation is shuffled or goes in directory order.
+    pub wallpaper_shuffle: bool,
     /// The high-contrast scheme in force, or `None` for an ordinary theme.
     ///
     /// When set it *replaces* [`theme_mode`](Self::theme_mode) rather than
@@ -1427,6 +1454,12 @@ impl Default for AppearanceSettings {
             // different shape usually wants, and it is what the shell did
             // unconditionally before this was settable.
             wallpaper_fit: ImageFit::Fill,
+            wallpaper_folder: None,
+            // Ten minutes. Long enough that a picture is a background rather
+            // than a distraction, short enough that a user who turns rotation
+            // on sees it work without waiting for the next day.
+            wallpaper_interval_secs: 600,
+            wallpaper_shuffle: true,
             theme_mode: ThemeMode::Dark,
             // Borders, per §829. The `Default` impl is what a machine with no
             // configuration file gets, so this is where "the default theme" is
@@ -1921,6 +1954,29 @@ impl AppearanceSettings {
             };
         }
 
+        if let Some(folder) = doc.get_str(&["wallpaper", "folder"]) {
+            let trimmed = folder.trim();
+            let encoded = doc
+                .get_str(&["wallpaper", "image_encoding"])
+                .is_some_and(|v| v.trim() == WALLPAPER_ENCODING);
+            s.wallpaper_folder = if trimmed.is_empty() {
+                None
+            } else if encoded {
+                Some(pathcodec::decode_path(trimmed))
+            } else {
+                Some(PathBuf::from(trimmed))
+            };
+        }
+        if let Some(secs) = doc.get_i64(&["wallpaper", "interval_secs"]) {
+            // Clamped on read as well as on write: this file is meant to be
+            // hand-editable, and `interval_secs: 0` typed into it should give
+            // a slow rotation rather than a new decode every frame.
+            s.wallpaper_interval_secs = u64::try_from(secs).unwrap_or(600).max(1);
+        }
+        if let Some(shuffle) = doc.get_i64(&["wallpaper", "shuffle"]) {
+            s.wallpaper_shuffle = shuffle != 0;
+        }
+
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -2074,6 +2130,21 @@ impl AppearanceSettings {
         // touched is always self-describing. See the read side for why its
         // absence has to mean "raw" rather than "assume encoded".
         doc.set_str(&["wallpaper", "image_encoding"], WALLPAPER_ENCODING);
+        doc.set_str(
+            &["wallpaper", "folder"],
+            &self
+                .wallpaper_folder
+                .as_deref()
+                .map(pathcodec::encode_path)
+                .unwrap_or_default(),
+        );
+        // `as` after a value this crate chose: an interval is seconds and
+        // cannot exceed what an `i64` holds.
+        doc.set_i64(
+            &["wallpaper", "interval_secs"],
+            i64::try_from(self.wallpaper_interval_secs).unwrap_or(600),
+        );
+        doc.set_i64(&["wallpaper", "shuffle"], i64::from(self.wallpaper_shuffle));
         doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
         doc.set_str(
@@ -2530,6 +2601,11 @@ mod tests {
     /// round-trip test cannot pass by accident on a field it forgot.
     fn all_non_default() -> AppearanceSettings {
         AppearanceSettings {
+            // Every one of these differs from the default, which is what the
+            // fixture is for: the defaults are `None`, 600 and `true`.
+            wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
+            wallpaper_interval_secs: 45,
+            wallpaper_shuffle: false,
             // A path with a space and a non-ASCII character in it, because a
             // wallpaper is the one appearance setting whose value comes from a
             // filesystem the user named, and a tidy ASCII fixture would pass

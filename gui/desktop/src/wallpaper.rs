@@ -443,6 +443,29 @@ impl SlideshowState {
 // WallpaperHistory
 // ============================================================================
 
+/// Whether a path names a picture the wallpaper can show.
+///
+/// By extension, ASCII-case-insensitively. Reading each file's header would be
+/// the thorough answer and would mean opening every file in a folder to draw
+/// one of them.
+///
+/// Here rather than in the shell that scans the folder, so that the test and
+/// the caller use the same predicate. The first version of the test carried
+/// its own copy of this list and would have gone on passing if the real one
+/// changed -- the "asking the wrong function" shape recorded in
+/// `known-issues.md` `TD-C-THREE-TESTS-AND-TWO-CHECKS-THAT-PROVED-NOTHING-IN-ONE-DAY`.
+#[must_use]
+pub fn is_picture(path: &Path) -> bool {
+    let Some(ext) = path.extension() else {
+        return false;
+    };
+    let ext = ext.as_encoded_bytes().to_ascii_lowercase();
+    matches!(
+        ext.as_slice(),
+        b"png" | b"jpg" | b"jpeg" | b"bmp" | b"gif" | b"webp"
+    )
+}
+
 /// One wallpaper the user chose, recorded so it can be chosen again.
 ///
 /// # Why an enum and not a tagged string
@@ -2059,6 +2082,79 @@ mod tests {
     // ------------------------------------------------------------------
     // Slideshow tick / advance
     // ------------------------------------------------------------------
+
+    /// Only pictures are offered to the slideshow.
+    ///
+    /// Selected by extension rather than by opening every file: drawing one
+    /// picture should not mean reading the header of every document in the
+    /// folder.
+    #[test]
+    fn a_rotation_folder_offers_only_pictures() {
+        let names = [
+            "a.png",
+            "B.JPG",
+            "c.jpeg",
+            "d.bmp",
+            "e.gif",
+            "f.webp", // pictures
+            "notes.txt",
+            "archive.zip",
+            "noextension",
+            ".hidden", // not
+        ];
+        let pictures: Vec<&str> = names
+            .into_iter()
+            .filter(|n| is_picture(Path::new(n)))
+            .collect();
+        assert_eq!(
+            pictures,
+            ["a.png", "B.JPG", "c.jpeg", "d.bmp", "e.gif", "f.webp"],
+            "the extension test let something through or held something back"
+        );
+    }
+
+    /// A slideshow advances on its own once something turns the clock.
+    ///
+    /// The point of this one is the clock, not the slideshow: `tick` had no
+    /// caller outside these tests until 2026-09-17, so a configured rotation
+    /// would have sat on its first picture for ever. This pins the behaviour
+    /// the shell now depends on.
+    #[test]
+    fn a_rotation_advances_when_time_passes() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_slideshow("/pics", 30, false);
+        mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
+
+        let first = mgr.current_image_path().map(Path::to_path_buf);
+        assert!(first.is_some(), "a populated slideshow shows something");
+
+        // The first tick only starts the clock.
+        assert!(!mgr.tick(1_000));
+        assert_eq!(mgr.current_image_path().map(Path::to_path_buf), first);
+
+        // Short of the interval, nothing moves.
+        assert!(!mgr.tick(1_020));
+        assert_eq!(mgr.current_image_path().map(Path::to_path_buf), first);
+
+        // Past it, the picture changes.
+        assert!(mgr.tick(1_031));
+        assert_ne!(
+            mgr.current_image_path().map(Path::to_path_buf),
+            first,
+            "the interval passed and the picture did not change"
+        );
+    }
+
+    /// An interval of zero is read as one second, not as "every frame".
+    #[test]
+    fn a_zero_interval_is_clamped() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_slideshow("/pics", 0, false);
+        assert!(
+            mgr.config.slideshow_interval_secs >= 1,
+            "a zero interval would decode a new picture every frame"
+        );
+    }
 
     /// A slideshow running by itself does not fill the history.
     ///

@@ -6380,8 +6380,7 @@ fn bench_lock_primitives() {
     // Fully qualified on purpose: `Mutex` is aliased to `PreemptSpinMutex` at
     // the top of this file, so an unqualified name here would read as the
     // opposite of what it is.
-    static LEAF: crate::sync::PreemptSpinMutex<u64> =
-        crate::sync::PreemptSpinMutex::new(0);
+    static LEAF: crate::sync::PreemptSpinMutex<u64> = crate::sync::PreemptSpinMutex::new(0);
     let leaf = run_diagnostic("lock_preempt_spin", 2000, || {
         let mut g = LEAF.lock();
         *g = core::hint::black_box(*g).wrapping_add(1);

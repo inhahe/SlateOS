@@ -1206,11 +1206,12 @@ fn leaf_held() -> Option<&'static [u8]> {
 #[track_caller]
 fn leaf_enter(name: &'static [u8]) {
     let cpu = crate::smp::current_cpu_index();
-    let Some(slot) = LEAF_DEPTH.get(cpu) else { return };
+    let Some(slot) = LEAF_DEPTH.get(cpu) else {
+        return;
+    };
     if slot.fetch_add(1, Ordering::Relaxed) == 0 {
         if let Some(p) = LEAF_SITE.get(cpu) {
-            let site: &'static core::panic::Location<'static> =
-                core::panic::Location::caller();
+            let site: &'static core::panic::Location<'static> = core::panic::Location::caller();
             p.store(
                 core::ptr::from_ref::<core::panic::Location<'static>>(site).cast_mut(),
                 Ordering::Relaxed,
@@ -1228,7 +1229,9 @@ fn leaf_enter(name: &'static [u8]) {
 /// Note that this CPU has left a leaf critical section.
 fn leaf_exit() {
     let cpu = crate::smp::current_cpu_index();
-    let Some(slot) = LEAF_DEPTH.get(cpu) else { return };
+    let Some(slot) = LEAF_DEPTH.get(cpu) else {
+        return;
+    };
     // Saturating: an unbalanced exit must not wrap to u64::MAX and pin this
     // CPU as permanently inside a leaf, which would turn the check into a
     // flood and then into noise nobody reads.

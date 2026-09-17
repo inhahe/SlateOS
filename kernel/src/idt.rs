@@ -557,7 +557,9 @@ pub(crate) fn enter_hardirq_for_test() -> HardIrqGuard {
 impl Drop for HardIrqGuard {
     fn drop(&mut self) {
         let Some(cpu) = self.0 else { return };
-        let Some(slot) = HARDIRQ_DEPTH.get(cpu) else { return };
+        let Some(slot) = HARDIRQ_DEPTH.get(cpu) else {
+            return;
+        };
         // `saturating_sub` so an unbalanced decrement can never wrap to
         // u64::MAX and pin this CPU in interrupt context forever. The
         // closure never returns None, so `fetch_update` cannot report Err;

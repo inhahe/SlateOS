@@ -1885,8 +1885,7 @@ fn layout_consumer_self_test() -> Result<(), &'static str> {
 
     keylayout::create_layout(LAYOUT, "946 consumer regression guard")
         .map_err(|_| "keylayout: create_layout failed")?;
-    keylayout::remap(LAYOUT, keys::KEY_A, keys::KEY_B)
-        .map_err(|_| "keylayout: remap failed")?;
+    keylayout::remap(LAYOUT, keys::KEY_A, keys::KEY_B).map_err(|_| "keylayout: remap failed")?;
     keylayout::set_active(LAYOUT).map_err(|_| "keylayout: set_active failed")?;
 
     // The assertion that fails if the consumer goes away. Stated as a
@@ -1903,8 +1902,7 @@ fn layout_consumer_self_test() -> Result<(), &'static str> {
 
     // And the disable path, which is the other outcome the consumer routes:
     // `TranslateTry::Disabled` must produce no character at all.
-    keylayout::disable_key(LAYOUT, keys::KEY_A)
-        .map_err(|_| "keylayout: disable_key failed")?;
+    keylayout::disable_key(LAYOUT, keys::KEY_A).map_err(|_| "keylayout: disable_key failed")?;
     if scancode_to_ascii(SC_A).is_some() {
         return Err("a disabled key still typed a character");
     }
@@ -1913,12 +1911,10 @@ fn layout_consumer_self_test() -> Result<(), &'static str> {
     keylayout::set_active(&saved).map_err(|_| "keylayout: could not restore")?;
     keylayout::remove_layout(LAYOUT).map_err(|_| "keylayout: cleanup failed")?;
 
-    crate::serial_println!(
-        concat!(
-            "[keyboard]   an active layout changes what a key types, ",
-            "and a disabled key types nothing: OK"
-        )
-    );
+    crate::serial_println!(concat!(
+        "[keyboard]   an active layout changes what a key types, ",
+        "and a disabled key types nothing: OK"
+    ));
     Ok(())
 }
 pub fn self_test() -> Result<(), &'static str> {

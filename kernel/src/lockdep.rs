@@ -1355,9 +1355,8 @@ fn note_lock_context(class_idx: u16, how: Acquire) {
         }
     }
 
-    let seen = |b: &[AtomicBool; MAX_CLASSES]| {
-        b.get(idx).is_some_and(|f| f.load(Ordering::Relaxed))
-    };
+    let seen =
+        |b: &[AtomicBool; MAX_CLASSES]| b.get(idx).is_some_and(|f| f.load(Ordering::Relaxed));
     let task_on = seen(&CLASS_TASK_IRQS_ON);
     let hard_off = seen(&CLASS_HARDIRQ_OFF);
     let hard_on = seen(&CLASS_HARDIRQ_ON);

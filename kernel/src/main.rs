@@ -9589,7 +9589,6 @@ extern "C" fn kernel_main() -> ! {
             // accumulate where nothing reads them.
             sync::report_leaf_claims();
 
-
             // Boot success marker — the boot test script greps for this.
             // Printed synchronously so it appears within seconds of power-on,
             // regardless of how long deferred benchmarks take.

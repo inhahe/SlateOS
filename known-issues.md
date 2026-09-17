@@ -155145,6 +155145,29 @@ The four that are fine: a listing entry's `name` is display text while
 the extension sites feed sorting and type lookup, where a name with no text
 form sorts oddly and classifies as unknown, which is what it is.
 
+**Triaged 2026-09-16: `gui/desktop`, the ten sites outside tests.** Three are
+identifier-shaped and are recorded here rather than fixed, because each needs a
+type to change rather than a call:
+
+* `icons.rs` builds `IconAction::OpenPath(String)` from the Documents and home
+  paths. The variant holds a `String`, and `storage_key` writes it into the
+  saved icon layout as `path:{path}` — so for a home directory that is not
+  UTF-8 the desktop icon both opens the wrong place and is *saved* under a
+  mangled key. The fix is `OpenPath(PathBuf)` and a byte-safe storage key, not
+  a call-site change.
+* `run_dialog.rs` compares a candidate path to typed text through
+  `to_string_lossy().trim()` in two places, so a command whose path is not
+  UTF-8 can fail to match itself, or match the wrong entry.
+
+The rest are display: a program's file name for a label, and test helpers.
+
+**A note on `icons.rs`' own reasoning, which is right and worth borrowing.**
+`storage_key`'s doc explains that an icon stores the *path* and looks its label
+up when drawn, "for the same reason the taskbar's pinned apps already follow --
+storing the label too would be a second copy of it, stale the first time the
+thing is renamed". That is the correct instinct about identity; the flaw is
+only that the identity is held as text that cannot represent every path.
+
 **Do not sweep this blindly.** Two `env::var` calls in this lane are correct
 and must stay: `gui/compositor`'s `SLATE_DRM_CARD` parses to a `u32`, so a
 non-UTF-8 value is invalid input and is already refused with a message, and
